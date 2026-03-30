@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* App theme tokens - modern dark slate + blue accent */
+:root {
+  --bg: #0b1220;          /* page background */
+  --bg-2: #111827;        /* secondary panels */
+  --panel: #0f172a;       /* main content surface */
+  --panel-2: #1f2937;     /* raised surface */
+  --text: #e5e7eb;        /* primary text */
+  --text-dim: #9ca3af;    /* secondary text */
+  --accent: #3b82f6;      /* blue-500 */
+  --border: #293241;      /* subtle border color */
+  --radius: 0px;          /* global corner radius for sharp UI */
+  --radius-card: 0px;
+  --radius-input: 0px;
+  --radius-button: 0px;
+}
+
+/* Light theme overrides */
+[data-theme="light"] {
+  --bg: #f8fafc;          /* slate-50 */
+  --bg-2: #e5e7eb;        /* gray-200 */
+  --panel: #ffffff;       /* white */
+  --panel-2: #f1f5f9;     /* slate-100 */
+  --text: #0f172a;        /* slate-900 */
+  --text-dim: #334155;    /* slate-700 */
+  --accent: #2563eb;      /* blue-600 */
+  --border: #d1d5db;      /* gray-300 */
+  --radius: 0px;
+  --radius-card: 0px;
+  --radius-input: 0px;
+  --radius-button: 0px;
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* Reusable UI primitives for consistent styling */
+.card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 1rem; /* p-4 */
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 0.25rem 0.75rem; /* py-1 px-3 */
+  border-radius: var(--radius-button);
+  cursor: pointer;
+  font-size: 0.875rem; /* text-sm */
+}
+.btn:hover { background: var(--panel-2); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.btn-primary:hover { filter: brightness(0.95); }
+.btn-primary:disabled { opacity: 0.6; }
+
+.btn-outline {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.input, .select, .textarea {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem; /* py-1 px-2 */
+  border-radius: var(--radius-input);
+}
+.input:focus, .select:focus, .textarea:focus, .btn:focus, .btn-primary:focus, .btn-outline:focus {
+  outline: 2px solid color-mix(in oklab, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+
+/* Sidebar scrollbars: hidden by default, visible on hover or while scrolling */
+.sidebar-scroll {
+  scrollbar-width: none; /* Firefox */
+}
+.sidebar-scroll::-webkit-scrollbar {
+  width: 0px; /* Chrome/Safari hide */
+  height: 0px;
+}
+.sidebar-scroll:hover::-webkit-scrollbar,
+.sidebar-scroll.is-scrolling::-webkit-scrollbar {
+  width: 8px;
+}
+.sidebar-scroll:hover::-webkit-scrollbar-thumb,
+.sidebar-scroll.is-scrolling::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.4); /* slate-400/40 */
+  border-radius: 4px;
+}
+.sidebar-scroll:hover { scrollbar-width: thin; }
+
+/* Snackbar slide-in animation */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.animate-slide-in-right {
+  animation: slide-in-right 0.3s ease-out;
+}

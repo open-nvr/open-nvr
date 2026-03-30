@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenNVR API (FastAPI)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# Replace 'opennvr' with your Linux username
+User=opennvr
+Group=opennvr
+WorkingDirectory=/path/to/open-nvr/server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/path/to/open-nvr/server/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+
+

@@ -1,0 +1,210 @@
+﻿# Root-level ignores
+
+# ============================================
+# SENSITIVE DATA - NEVER COMMIT
+# ============================================
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.docker  # Default Docker environment template
+!env.example
+
+# Cryptographic keys and certificates
+server/keys/*.pem
+server/keys/*.key
+server/keys/*.crt
+server/keys/*.cert
+server/keys/*.p12
+server/keys/*.pfx
+server/keys/*.jks
+!server/keys/.gitkeep
+byok-test-certs/
+
+# Secrets and credentials
+secrets/
+*.secret
+*_secret.txt
+credentials.json
+token.json
+
+# ============================================
+# GENERATED BUILD ARTIFACTS
+# ============================================
+# Generated recordings output
+Recordings/
+recordings/
+*.mp4
+*.mkv
+*.avi
+*.webm
+
+# Python compiled
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv/
+server/venv/
+
+# Frontend builds
+app/dist/
+app/dist-ssr/
+app/dev-dist/
+app/node_modules/
+app/.cache/
+
+# ============================================
+# LOGS AND DEBUG FILES
+# ============================================
+# Application logs
+logs/
+*.log
+*.log.*
+server/logs/*.log
+server/logs/*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Debug files
+debug_*.py
+debug_*.txt
+*_debug.txt
+server/debug_*.py
+server/debug_*.txt
+
+# ============================================
+# TEMPORARY AND TEST FILES
+# ============================================
+# Test files
+test_*.py
+*_test.py
+server/test_*.py
+server/scripts/check_*.py
+server/scripts/get_*.py
+server/scripts/delete_*.py
+server/scripts/update_*.py
+server/scripts/debug_*.py
+server/scripts/setup_venv.py
+server/scripts/logging_summary.py
+server/scripts/inspect_schema.py
+server/check_*.py
+server/get_*.py
+server/delete_*.py
+server/update_*.py
+*.dat
+*.tmp
+*.temp
+*.cache
+
+# Database dumps and backups
+*.sql
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# ============================================
+# CONFIGURATION FILES (LOCAL OVERRIDES)
+# ============================================
+# MediaMTX configs (should use default from repo)
+server/mediamtx*.yml
+!mediamtx.yml
+
+# Local configs
+*.local
+*.local.*
+!mediamtx.local.yml  # Template for local development
+config.local.*
+
+# ============================================
+# OS GENERATED FILES
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*~
+
+# ============================================
+# IDE AND EDITOR FILES
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+.metadata
+
+# ============================================
+# THIRD-PARTY EXECUTABLES
+# ============================================
+# MediaMTX binary
+mediamtx/
+mediamtx.exe
+mediamtx
+
+# ============================================
+# DOCUMENTATION (ANALYSIS/DESIGN DOCS)
+# ============================================
+# These are analysis docs, not part of codebase
+CURRENT_PLAYBACK_ARCHITECTURE.md
+KEYS_DIRECTORY_ANALYSIS.md
+VOD_PLAYBACK_POSSIBILITIES.md
+CLOUD_AI_IMPLEMENTATION.txt
+RECORDING_RETENTION_IMPLEMENTATION.md
+ENDPOINT_SECURITY_ANALYSIS.md
+IMPLEMENTATION_COMPLETE.md
+KAVACH_COMPLIANCE_REPORT.md
+
+# ============================================
+# LOCAL NESTED REPOS (DEV ONLY)
+# ============================================
+# AI-adapters is a separate repo
+AI-adapters/
+
+# ============================================
+
+# Temporary text files (analysis/debug)
+*_analysis.txt
+# supervisord config built into image
+supervisord.conf

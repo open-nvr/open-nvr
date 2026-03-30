@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaMTX (RTSP/RTMP/WebRTC server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace with appropriate user if needed
+User=mediamtx
+Group=mediamtx
+WorkingDirectory=/path/to/mediamtx/folder
+ExecStart=/path/to/mediamtx/executable /path/to/mediamtx.yml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+

@@ -1,0 +1,24 @@
+# Version Control
+.git
+.gitignore
+
+# Python / Virtual Environments (CRITICAL to ignore these)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Data & Models
+model_weights/
+logs/
+test/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Temporary files
+*.log
+*.tmp

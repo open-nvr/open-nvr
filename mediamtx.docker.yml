@@ -1,0 +1,391 @@
+###############################################
+# Global settings
+#
+# SECURITY HARDENED CONFIGURATION
+# All services bound to localhost only
+# JWT authentication enforced
+# No anonymous access
+###############################################
+
+###############################################
+# Global settings -> General
+
+logLevel: info
+logDestinations: [stdout]
+logFile: mediamtx.log
+sysLogPrefix: mediamtx
+
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+udpMaxPayloadSize: 1472
+
+runOnConnect:
+runOnConnectRestart: no
+runOnDisconnect:
+
+###############################################
+# Global settings -> Authentication
+#
+# SECURITY: JWT-based authentication ONLY
+# All access requires valid JWT from backend
+###############################################
+
+# JWT authentication - backend is the sole authority
+authMethod: jwt
+
+# Internal authentication DISABLED - no anonymous users
+authInternalUsers: []
+
+# HTTP-based authentication DISABLED
+authHTTPAddress:
+authHTTPExclude: []
+
+# JWT-based authentication configuration
+# Backend JWKS endpoint provides public keys for JWT validation
+# Uses 127.0.0.1 for host network mode (all services on localhost)
+authJWTJWKS: http://127.0.0.1:8000/.well-known/jwks.json
+authJWTJWKSFingerprint:
+# Claim containing MediaMTX permissions
+authJWTClaimKey: mediamtx_permissions
+# Exclude Admin API and Playback from JWT (already protected by localhost binding)
+authJWTExclude:
+  - action: api
+  - action: playback
+# Allow JWT in query params for HLS compatibility (HLS.js can't send headers for all segment requests)
+# Token will be passed as: index.m3u8?jwt=<token>
+authJWTInHTTPQuery: true
+
+###############################################
+# Global settings -> Control API
+#
+# SECURITY: Bound to localhost only
+# Accessible only by backend application
+###############################################
+
+api: yes
+# Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
+apiAddress: 0.0.0.0:9997
+apiEncryption: no
+apiServerKey: server.key
+apiServerCert: server.crt
+# SECURITY: Restrict CORS (allow frontend dev server and backend)
+apiAllowOrigins: ['*']
+apiTrustedProxies: []
+
+###############################################
+# Global settings -> Metrics
+#
+# SECURITY: Disabled in production
+###############################################
+
+metrics: no
+metricsAddress: 127.0.0.1:9998
+metricsEncryption: no
+metricsServerKey: server.key
+metricsServerCert: server.crt
+metricsAllowOrigins: []
+metricsTrustedProxies: []
+
+###############################################
+# Global settings -> PPROF
+#
+# SECURITY: Disabled in production
+###############################################
+
+pprof: no
+pprofAddress: 127.0.0.1:9999
+pprofEncryption: no
+pprofServerKey: server.key
+pprofServerCert: server.crt
+pprofAllowOrigins: []
+pprofTrustedProxies: []
+
+###############################################
+# Global settings -> Playback server
+#
+# SECURITY: Localhost only - recordings accessed via backend proxy
+###############################################
+
+playback: yes
+# Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
+playbackAddress: 0.0.0.0:9996
+playbackEncryption: no
+playbackServerKey: server.key
+playbackServerCert: server.crt
+# SECURITY: Restrict CORS (allow frontend dev server and backend)
+playbackAllowOrigins: ['http://127.0.0.1:8000', 'http://localhost:5173', 'http://localhost:8000']
+playbackTrustedProxies: []
+
+###############################################
+# Global settings -> RTSP server
+#
+# SECURITY: Localhost only - cameras connect internally
+###############################################
+
+rtsp: yes
+# TCP only for localhost - UDP disabled to prevent external access
+rtspTransports: [tcp]
+rtspEncryption: "no"
+# SECURITY: Localhost only
+rtspAddress: :8554
+rtspsAddress: 127.0.0.1:8322
+# SECURITY: Disable UDP listeners (localhost TCP only)
+rtpAddress: 127.0.0.1:8000
+rtcpAddress: 127.0.0.1:8001
+multicastIPRange: 224.1.0.0/16
+multicastRTPPort: 8002
+multicastRTCPPort: 8003
+srtpAddress: 127.0.0.1:8004
+srtcpAddress: 127.0.0.1:8005
+multicastSRTPPort: 8006
+multicastSRTCPPort: 8007
+rtspServerKey: server.key
+rtspServerCert: server.crt
+rtspAuthMethods: [basic]
+rtspUDPReadBufferSize: 0
+
+###############################################
+# Global settings -> RTMP server
+#
+# SECURITY: DISABLED - not needed, reduces attack surface
+###############################################
+
+rtmp: no
+rtmpAddress: 127.0.0.1:1935
+rtmpEncryption: "no"
+rtmpsAddress: 127.0.0.1:1936
+rtmpServerKey: server.key
+rtmpServerCert: server.crt
+
+###############################################
+# Global settings -> HLS server
+#
+# SECURITY: Localhost only - accessed via backend proxy
+###############################################
+
+hls: yes
+# SECURITY: Localhost only
+hlsAddress: :8888
+hlsEncryption: no
+hlsServerKey: server.key
+hlsServerCert: server.crt
+# SECURITY: Restrict CORS (allow frontend dev server and backend)
+hlsAllowOrigins: ['*']
+hlsTrustedProxies: []
+hlsAlwaysRemux: no
+hlsVariant: fmp4
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsDirectory: ''
+hlsMuxerCloseAfter: 60s
+
+###############################################
+# Global settings -> WebRTC server
+#
+# SECURITY: Localhost only with IP leakage prevention
+###############################################
+
+webrtc: yes
+# SECURITY: Localhost only
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcServerKey: server.key
+webrtcServerCert: server.crt
+# SECURITY: Restrict CORS (allow frontend dev server and backend)
+webrtcAllowOrigins: ['*']
+webrtcTrustedProxies: []
+# Listen on all interfaces for WebRTC ICE
+webrtcLocalTCPAddress: :8189
+webrtcLocalUDPAddress: :8189
+# HOST MODE: Allow WebRTC to discover and advertise host's network interfaces
+# This is required for WHEP streaming to work from other machines on the LAN
+webrtcIPsFromInterfaces: yes
+webrtcIPsFromInterfacesList: []
+# Additional hosts to advertise (localhost always included)
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+webrtcHandshakeTimeout: 10s
+webrtcTrackGatherTimeout: 2s
+webrtcSTUNGatherTimeout: 5s
+
+###############################################
+# Global settings -> SRT server
+#
+# SECURITY: DISABLED - not needed, reduces attack surface
+###############################################
+
+srt: no
+srtAddress: 127.0.0.1:8890
+
+###############################################
+# Default path settings
+#
+# SECURITY: Deny-by-default, no publisher hijacking
+###############################################
+pathDefaults:
+
+  ###############################################
+  # Default path settings -> General
+
+  source: publisher
+  sourceFingerprint:
+  sourceOnDemand: no
+  sourceOnDemandStartTimeout: 10s
+  sourceOnDemandCloseAfter: 10s
+  # SECURITY: Limit concurrent readers per stream
+  maxReaders: 10
+  srtReadPassphrase:
+  fallback:
+  useAbsoluteTimestamp: false
+
+  ###############################################
+  # Default path settings -> Record
+  #
+  # Recording enabled but only accessible via backend
+
+  record: yes
+  recordPath: ./app/recordings/%path/%Y/%m/%d/%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordMaxPartSize: 50M
+  recordSegmentDuration: 1h
+  recordDeleteAfter: 0s
+
+  ###############################################
+  # Default path settings -> Publisher source
+  #
+  # SECURITY: Prevent publisher hijacking
+
+  # SECURITY: Do NOT allow publisher override - prevents stream hijacking
+  overridePublisher: no
+  srtPublishPassphrase:
+
+  ###############################################
+  # Default path settings -> RTSP source
+
+  rtspTransport: tcp
+  rtspAnyPort: no
+  rtspRangeType:
+  rtspRangeStart:
+  rtspUDPReadBufferSize: 0
+
+  ###############################################
+  # Default path settings -> MPEG-TS source
+
+  mpegtsUDPReadBufferSize: 0
+
+  ###############################################
+  # Default path settings -> RTP source
+
+  rtpSDP:
+  rtpUDPReadBufferSize: 0
+
+  ###############################################
+  # Default path settings -> Redirect source
+
+  sourceRedirect:
+
+  ###############################################
+  # Default path settings -> Raspberry Pi Camera source
+
+  rpiCameraCamID: 0
+  rpiCameraSecondary: false
+  rpiCameraWidth: 1920
+  rpiCameraHeight: 1080
+  rpiCameraHFlip: false
+  rpiCameraVFlip: false
+  rpiCameraBrightness: 0
+  rpiCameraContrast: 1
+  rpiCameraSaturation: 1
+  rpiCameraSharpness: 1
+  rpiCameraExposure: normal
+  rpiCameraAWB: auto
+  rpiCameraAWBGains: [0, 0]
+  rpiCameraDenoise: "off"
+  rpiCameraShutter: 0
+  rpiCameraMetering: centre
+  rpiCameraGain: 0
+  rpiCameraEV: 0
+  rpiCameraROI:
+  rpiCameraHDR: false
+  rpiCameraTuningFile:
+  rpiCameraMode:
+  rpiCameraFPS: 30
+  rpiCameraAfMode: continuous
+  rpiCameraAfRange: normal
+  rpiCameraAfSpeed: normal
+  rpiCameraLensPosition: 0.0
+  rpiCameraAfWindow:
+  rpiCameraFlickerPeriod: 0
+  rpiCameraTextOverlayEnable: false
+  rpiCameraTextOverlay: '%Y-%m-%d %H:%M:%S - MediaMTX'
+  rpiCameraCodec: auto
+  rpiCameraIDRPeriod: 60
+  rpiCameraBitrate: 5000000
+  rpiCameraHardwareH264Profile: main
+  rpiCameraHardwareH264Level: '4.1'
+  rpiCameraSoftwareH264Profile: baseline
+  rpiCameraSoftwareH264Level: '4.1'
+  rpiCameraMJPEGQuality: 60
+
+  ###############################################
+  # Default path settings -> Hooks
+  #
+  # SECURITY: All hooks call backend with secret header for authentication
+  # 
+  # Environment variables (set before starting MediaMTX):
+  #   - MEDIAMTX_SECRET: Webhook authentication secret (REQUIRED - must match server/.env)
+  #   - BACKEND_HOST: Backend hostname (default: 127.0.0.1 for host network mode)
+  #   - BACKEND_PORT: Backend port (default: 8000)
+  #
+  # The secret is passed via environment variable and automatically substituted.
+  # No manual editing required - just set MEDIAMTX_SECRET in server/.env!
+  ###############################################
+
+  # ⚠️ WARNING: Official bluenviron/mediamtx:1.15.4 image doesn't include curl or wget
+  # These hooks are DISABLED to prevent startup errors
+  # If you need webhooks, use a custom MediaMTX image with curl installed
+  # See: https://github.com/bluenviron/mediamtx/issues/examples
+  
+  # Startup hook - DISABLED (curl not available in official image)
+  # runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-127.0.0.1}:${BACKEND_PORT:-8000}/api/v1/mediamtx/startup/hook?delay=5"'
+  runOnInit:
+  runOnInitRestart: no
+
+  runOnDemand:
+  runOnDemandRestart: no
+  runOnDemandStartTimeout: 10s
+  runOnDemandCloseAfter: 10s
+  runOnUnDemand:
+
+  runOnReady:
+  runOnReadyRestart: no
+  runOnNotReady:
+
+  runOnRead:
+  runOnReadRestart: no
+  runOnUnread:
+
+  runOnRecordSegmentCreate:
+
+  # Recording webhook - notifies backend when a recording segment completes
+  # Uses custom opennvr-mediamtx image with curl installed
+  runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://127.0.0.1:8000/api/v1/mediamtx/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION"'
+
+
+###############################################
+# Path settings
+#
+# Paths are dynamically provisioned by backend
+# Only __startup__ path is static to trigger runOnInit hook
+###############################################
+paths:
+  # Dummy path to trigger startup hook - provisions cameras from database
+  # This path initializes on MediaMTX start, calling runOnInit which
+  # provisions all cameras from the backend database
+  __startup__:
+    source: publisher
+    record: no

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <style>
+      .icon-text { fill: #ffffff; font-family: Arial, sans-serif; font-weight: bold; }
+    </style>
+  </defs>
+  <rect width="64" height="64" fill="#1e3a5f" rx="8"/>
+  <text x="32" y="45" class="icon-text" font-size="28" text-anchor="middle">
+    <tspan fill="#5eb3f6">O</tspan>N
+  </text>
+</svg>

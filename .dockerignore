@@ -1,0 +1,71 @@
+# IGNORE EVERYTHING BY DEFAULT (Allow-list pattern is safer)
+# But here we use a standard Block-list pattern for simplicity
+
+# Version Control (block from ALL subdirectories)
+.git
+.gitignore
+.github
+**/.git
+**/.gitignore
+
+# Environment Variables & Secrets (CRITICAL - block from ALL subdirectories)
+.env
+.env*
+*.env
+env.example
+.env.example
+server/.env
+server/.env*
+server/env.example
+server/keys/
+AI-adapters/**/.env
+AI-adapters/**/.env*
+kai-c/.env
+kai-c/.env*
+**/.env
+**/.env*
+**/env.example
+*.pem
+*.key
+*.crt
+
+# Dependencies (We install them FRESH inside docker)
+node_modules/
+app/node_modules/
+venv/
+.venv/
+server/venv/
+kai-c/venv/
+AI-adapters/AIAdapters/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large Data & Media
+Recordings/
+recordings/
+*.mp4
+*.mkv
+*.avi
+logs/
+server/logs/
+
+# Build Artifacts
+build/
+dist/
+app/dist/
+.vscode/
+.idea/
+
+# AI Models (We mount these as volumes, don't bake them in!)
+AI-adapters/AIAdapters/model_weights/
+server/model_weights/
+weights/
+models/
+
+# Docker itself
+docker-compose.yml
+Dockerfile
+.dockerignore
+

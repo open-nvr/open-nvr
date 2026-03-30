@@ -1,0 +1,16 @@
+annotated-types==0.7.0
+anyio==4.12.1
+certifi==2026.1.4
+charset-normalizer==3.4.4
+click==8.3.1
+colorama==0.4.6
+fastapi==0.109.0
+h11==0.16.0
+idna==3.11
+pydantic==2.5.3
+pydantic_core==2.14.6
+requests==2.31.0
+starlette==0.35.1
+typing_extensions==4.15.0
+urllib3==2.6.3
+uvicorn==0.27.0

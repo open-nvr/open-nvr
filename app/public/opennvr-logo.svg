@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60">
+  <defs>
+    <style>
+      .text { fill: #ffffff; font-family: Arial, sans-serif; font-weight: bold; }
+    </style>
+  </defs>
+  <text x="20" y="40" class="text" font-size="28">Open<tspan fill="#5eb3f6">NVR</tspan></text>
+</svg>

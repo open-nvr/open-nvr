@@ -1,0 +1,257 @@
+version: '3.8'
+
+# ==========================================
+# OpenNVR - Docker Compose Configuration
+# ==========================================
+# 
+# SETUP INSTRUCTIONS:
+# 1. Copy .env.example to .env
+# 2. Generate secrets: ./scripts/generate-secrets.ps1 (or .sh)
+# 3. Update .env with generated secrets
+# 4. Run: docker compose up -d
+#
+# IMPORTANT:
+# - All secrets are loaded from .env file (NOT hardcoded)
+# - Never commit .env to version control!
+#
+# 🚨 CHOOSE YOUR NETWORK MODE BASED ON YOUR OS 🚨
+# Choose ONE mode below and comment/uncomment sections labeled as such in this file.
+#
+# 👉 OPTION 1: BRIDGE MODE (Default for Windows / Mac)
+#    - Best for development on Windows and Mac.
+#    - Look for `# [WINDOWS/MAC] BRIDGE MODE:` lines in this file.
+#    - UNCOMMENT the lines under those sections (ports, networks, bridge env vars).
+#
+# 👉 OPTION 2: HOST MODE (Required for Linux / ONVIF Discovery)
+#    - Required for ONVIF camera discovery via UDP broadcast cache on Linux.
+#    - Look for `# [LINUX] HOST MODE:` lines in this file.
+#    - UNCOMMENT the lines under those sections (network_mode: host, linux env vars).
+#    - COMMENT OUT all BRIDGE MODE lines.
+# ==========================================
+
+services:
+  # ==========================================
+  # 1. DATABASE (PostgreSQL)
+  # ==========================================
+  db:
+    image: postgres:15-alpine
+    container_name: opennvr_db
+    restart: unless-stopped
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # [LINUX] HOST MODE: PostgreSQL binds to port 5432 on host
+      # PGPORT: 5432
+    volumes:
+      - opennvr_db_data:/var/lib/postgresql/data
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    networks:
+      - sentinel_internal
+    # ----------------------------------------------------
+    healthcheck:
+      # [LINUX] HOST MODE: Uncomment line below
+      # test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1"]
+      # [WINDOWS/MAC] BRIDGE MODE: Uncomment line below
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # 2. MEDIAMTX (Streaming Server)
+  # ==========================================
+  mediamtx:
+    # Use custom MediaMTX image with curl/wget for webhooks and health checks
+    image: abhishekch1112/opennvr-mediamtx:latest
+    container_name: opennvr_mediamtx
+    restart: unless-stopped
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    depends_on:
+      db:
+        condition: service_healthy
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    ports:
+      - "127.0.0.1:8554:8554" # RTSP
+      - "127.0.0.1:8888:8888" # HLS
+      - "127.0.0.1:8889:8889" # WebRTC Signaling
+      - "127.0.0.1:8189:8189/tcp" # WebRTC ICE TCP
+      - "127.0.0.1:8189:8189/udp" # WebRTC ICE UDP
+      - "127.0.0.1:9997:9997" # API/Metrics
+      - "127.0.0.1:9996:9996" # Playback API
+    # ----------------------------------------------------
+    volumes:
+      # Mount Docker-specific mediamtx configuration
+      - ./mediamtx.docker.yml:/mediamtx.yml:ro
+      # Mount recordings directory (configurable via .env file)
+      - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
+    environment:
+      # MediaMTX webhook configuration
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      # ----------------------------------------------------
+      # [LINUX] HOST MODE: Uncomment ONE line below
+      # - BACKEND_HOST=127.0.0.1
+      # ----------------------------------------------------
+      # [WINDOWS/MAC] BRIDGE MODE: Uncomment ONE line below
+      - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
+      # ----------------------------------------------------
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    networks:
+      - sentinel_internal
+    # ----------------------------------------------------
+    # Health check using curl (available in custom opennvr-mediamtx image)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ==========================================
+  # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
+  # ==========================================
+  opennvr-core:
+    # Use pre-built image from Docker Hub (Production)
+    # image: abhishekch1112/opennvr-core:latest
+    
+    # OR build locally (Development)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    container_name: opennvr_core
+    restart: unless-stopped
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    depends_on:
+      db:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    ports:
+      - "127.0.0.1:8000:8000" # API
+    # ----------------------------------------------------
+    volumes:
+      - shared_frames:/app/AI-adapters/AIAdapters/frames
+      # Mount project root for configuration access
+      - .:/app/host-root
+      # Mount recordings directory (configurable via .env file)
+      - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
+    environment:
+      # ----------------------------------------------------
+      # [LINUX] HOST MODE: Uncomment lines below
+      # - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}
+      # - MEDIAMTX_BASE_URL=http://127.0.0.1:8889
+      # - MEDIAMTX_ADMIN_API=http://127.0.0.1:9997/v3
+      # - MEDIAMTX_HLS_URL=http://127.0.0.1:8888
+      # - MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554
+      # - MEDIAMTX_PLAYBACK_URL=http://127.0.0.1:9996
+      # - KAI_C_URL=http://127.0.0.1:8100
+      # ----------------------------------------------------
+      
+      # ----------------------------------------------------
+      # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - MEDIAMTX_BASE_URL=http://mediamtx:8889
+      - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
+      - MEDIAMTX_HLS_URL=http://mediamtx:8888
+      - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
+      - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
+      - KAI_C_URL=http://127.0.0.1:8100
+      # ----------------------------------------------------
+      
+      # External URLs for browser access
+      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
+      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+      
+      # Path mapping configuration for volume mounts
+      - RECORDINGS_HOST_BASE=${RECORDINGS_PATH}
+      - RECORDINGS_CONTAINER_BASE=/app/recordings
+      - RECORDINGS_BASE_PATH=/app/recordings
+      
+      # Security secrets - loaded from .env file
+      - SECRET_KEY=${SECRET_KEY}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      
+      # Application settings
+      - HOST=${HOST:-0.0.0.0}
+      - DEBUG=${DEBUG:-False}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+    networks:
+      - sentinel_internal
+    # ----------------------------------------------------
+
+  # ==========================================
+  # 4. OPTIONAL: AI WORKER (Adapters)
+  # ==========================================
+  # AI detection is completely decoupled and optional.
+  # 
+  # -> IF YOU WANT CORE FEATURES ONLY (No AI):
+  #    Leave this entire block commented out. No extra steps needed.
+  #
+  # -> IF YOU WANT AI DETECTION ENABLED:
+  #    1. Clone the AIAdapters codebase alongside this repository:
+  #       git clone https://github.com/cryptovoip/AIAdapters.git ../AIAdapters
+  #    2. Uncomment the full ai-adapters block below.
+  #    3. Run docker compose build again.
+  #
+  # ai-adapters:
+  #   build:
+  #     context: ../AIAdapters
+  #     dockerfile: Dockerfile
+  #   container_name: opennvr_ai
+  #   restart: unless-stopped
+  #   # ----------------------------------------------------
+  #   # [LINUX] HOST MODE: Uncomment ONE line below
+  #   # network_mode: host
+  #   # ----------------------------------------------------
+  #   depends_on:
+  #     - opennvr-core
+  #   volumes:
+  #     - ../AIAdapters/model_weights:/app/model_weights
+  #     - shared_frames:/app/frames
+  #   # ----------------------------------------------------
+  #   # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+  #   # networks:
+  #   #   - sentinel_internal
+  #   #   - public_uplink
+  #   # ----------------------------------------------------
+
+# ==========================================
+# NETWORKS
+# ==========================================
+# ----------------------------------------------------
+# [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
+networks:
+  sentinel_internal:
+    driver: bridge
+  public_uplink:
+    driver: bridge
+# ----------------------------------------------------
+
+# ==========================================
+# VOLUMES
+# ==========================================
+volumes:
+  opennvr_db_data:
+  shared_frames:
