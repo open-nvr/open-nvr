@@ -44,7 +44,7 @@ Complete guide for setting up OpenNVR for local development without Docker.
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/cryptovoip/opennvr.git
+git clone https://github.com/open-nvr/open-nvr.git
 cd opennvr
 ```
 
@@ -616,7 +616,7 @@ tail -f server/logs/server.log
 ## Getting Help
 
 - **Documentation**: See other files in `docs/` directory
-- **Issues**: https://github.com/cryptovoip/opennvr/issues
+- **Issues**: https://github.com/open-nvr/open-nvr/issues
 - **API Reference**: http://localhost:8000/docs (when running)
 
 ---

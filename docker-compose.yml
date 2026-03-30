@@ -211,7 +211,7 @@ services:
   #
   # -> IF YOU WANT AI DETECTION ENABLED:
   #    1. Clone the AIAdapters codebase alongside this repository:
-  #       git clone https://github.com/cryptovoip/AIAdapters.git ../AIAdapters
+  #       git clone https://github.com/open-nvr/ai-adapter.git ../AIAdapters
   #    2. Uncomment the full ai-adapters block below.
   #    3. Run docker compose build again.
   #

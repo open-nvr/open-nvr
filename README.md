@@ -15,14 +15,14 @@ This is the recommended approach for both **Linux** and **Windows** users to get
 ### Step-by-Step Build
 1. **Clone the main OpenNVR repository**
    ```bash
-   git clone https://github.com/cryptovoip/open-nvr.git
+   git clone https://github.com/open-nvr/open-nvr.git
    cd open-nvr
    ```
 
 2. **Clone the AI Adapters directly inside**
    Because the OpenNVR Docker environment is preconfigured to tie into the local AI Adapter, you must clone it into the root directory:
    ```bash
-   git clone https://github.com/cryptovoip/AIAdapters.git
+   git clone https://github.com/open-nvr/ai-adapter.git
    ```
 
 3. **Generate Security Secrets**
@@ -65,8 +65,8 @@ For developers looking to run OpenNVR purely locally in an IDE utilizing local v
 ### Preparation
 1. **Clone Both Repositories side-by-side**
    ```bash
-   git clone https://github.com/cryptovoip/open-nvr.git
-   git clone https://github.com/cryptovoip/AIAdapters.git
+   git clone https://github.com/open-nvr/open-nvr.git
+   git clone https://github.com/open-nvr/ai-adapter.git
    ```
 2. **Setup your environment variables**
    ```bash

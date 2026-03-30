@@ -43,7 +43,7 @@ This switches the internal routing from Docker's virtual DNS back to raw W.0.0.1
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/cryptovoip/opennvr.git
+git clone https://github.com/open-nvr/open-nvr.git
 cd opennvr
 ```
 
@@ -514,7 +514,7 @@ healthcheck:
 
 ## Getting Help
 
-- **Issues**: https://github.com/cryptovoip/opennvr/issues
+- **Issues**: https://github.com/open-nvr/open-nvr/issues
 - **Logs**: Always include output of `docker compose logs` when reporting issues
 - **System Info**: Include OS, Docker version (`docker --version`), and compose version
 
