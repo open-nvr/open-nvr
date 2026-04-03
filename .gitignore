@@ -7,8 +7,7 @@
 .env
 .env.*
 !.env.example
-!.env.docker
-# Default Docker environment template
+!.env.docker  # Default Docker environment template
 !env.example
 
 # Cryptographic keys and certificates
@@ -208,4 +207,4 @@ AI-adapters/
 # Temporary text files (analysis/debug)
 *_analysis.txt
 # supervisord config built into image
-supervisord.conf
+# supervisord.conf
