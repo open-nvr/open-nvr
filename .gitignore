@@ -35,6 +35,7 @@ token.json
 # Generated recordings output
 Recordings/
 recordings/
+!app/src/views/settings/recordings/
 *.mp4
 *.mkv
 *.avi
@@ -55,6 +56,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!app/src/lib/
 lib64/
 parts/
 sdist/
@@ -144,7 +146,7 @@ server/mediamtx*.yml
 # Local configs
 *.local
 *.local.*
-!mediamtx.local.yml  # Template for local development
+!mediamtx.local.yml
 config.local.*
 
 # ============================================
@@ -208,4 +210,4 @@ AI-adapters/
 # Temporary text files (analysis/debug)
 *_analysis.txt
 # supervisord config built into image
-supervisord.conf
+!supervisord.conf
