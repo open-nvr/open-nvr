@@ -1,0 +1,144 @@
+version: '3.8'
+
+# ==========================================
+# OpenNVR - Docker Compose (LINUX / UBUNTU)
+# ==========================================
+#
+# SETUP INSTRUCTIONS:
+# 1. Copy .env.docker to .env:   cp .env.docker .env
+# 2. Start all services:         docker compose -f docker-compose.linux.yml up -d
+# 3. Check status:               docker compose -f docker-compose.linux.yml ps
+#
+# Uses host network mode - required for ONVIF camera discovery on Linux.
+# All services share the host network stack (no port mappings needed).
+#
+# 💡 TIP: Use the smart launcher instead:
+#    ./start.sh build   ← auto-detects Linux and uses this file
+# ==========================================
+
+services:
+  # ==========================================
+  # 1. DATABASE (PostgreSQL)
+  # ==========================================
+  db:
+    image: postgres:15-alpine
+    container_name: opennvr_db
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - opennvr_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # 2. MEDIAMTX (Streaming Server)
+  # ==========================================
+  mediamtx:
+    image: abhishekch1112/opennvr-mediamtx:latest
+    container_name: opennvr_mediamtx
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./mediamtx.docker.yml:/mediamtx.yml:ro
+      - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
+    environment:
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      - BACKEND_HOST=127.0.0.1
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ==========================================
+  # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
+  # ==========================================
+  opennvr-core:
+    # Use pre-built image from Docker Hub (Production)
+    # image: abhishekch1112/opennvr-core:latest
+
+    # OR build locally (Development)
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: opennvr_core
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+    volumes:
+      - shared_frames:/app/AI-adapters/AIAdapters/frames
+      - .:/app/host-root
+      - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
+    environment:
+      # Host mode: all services reachable via 127.0.0.1
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}
+      - MEDIAMTX_BASE_URL=http://127.0.0.1:8889
+      - MEDIAMTX_ADMIN_API=http://127.0.0.1:9997/v3
+      - MEDIAMTX_HLS_URL=http://127.0.0.1:8888
+      - MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554
+      - MEDIAMTX_PLAYBACK_URL=http://127.0.0.1:9996
+      - KAI_C_URL=http://127.0.0.1:8100
+
+      # External URLs for browser access
+      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
+      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+
+      # Path mapping configuration for volume mounts
+      - RECORDINGS_HOST_BASE=${RECORDINGS_PATH}
+      - RECORDINGS_CONTAINER_BASE=/app/recordings
+      - RECORDINGS_BASE_PATH=/app/recordings
+
+      # Security secrets - loaded from .env file
+      - SECRET_KEY=${SECRET_KEY}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+
+      # AI Adapter URL (for Kai-C → ai-adapters routing via supervisord)
+      - ADAPTER_URL=http://127.0.0.1:9100
+
+      # Application settings
+      - HOST=${HOST:-0.0.0.0}
+      - DEBUG=${DEBUG:-False}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+  # ==========================================
+  # 4. AI WORKER (Adapters)
+  # ==========================================
+  ai-adapters:
+    build:
+      context: ../ai-adapter
+      dockerfile: Dockerfile
+    container_name: opennvr_ai
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - opennvr-core
+    volumes:
+      - ../ai-adapter/model_weights:/app/model_weights
+      - shared_frames:/app/frames
+
+# ==========================================
+# VOLUMES
+# ==========================================
+volumes:
+  opennvr_db_data:
+  shared_frames:
