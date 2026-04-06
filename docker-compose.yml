@@ -27,6 +27,10 @@ version: '3.8'
 #    - Look for `# [LINUX] HOST MODE:` lines in this file.
 #    - UNCOMMENT the lines under those sections (network_mode: host, linux env vars).
 #    - COMMENT OUT all BRIDGE MODE lines.
+#
+# 💡 TIP: Use the smart launcher scripts instead of this file directly:
+#    - Linux/macOS: ./start.sh build
+#    - Windows:     .\start.ps1 build
 # ==========================================
 
 services:
@@ -191,6 +195,9 @@ services:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
       
+      # AI Adapter URL (for Kai-C → ai-adapters routing via supervisord)
+      - ADAPTER_URL=http://opennvr_ai:9100
+
       # Application settings
       - HOST=${HOST:-0.0.0.0}
       - DEBUG=${DEBUG:-False}
@@ -211,31 +218,31 @@ services:
   #
   # -> IF YOU WANT AI DETECTION ENABLED:
   #    1. Clone the AIAdapters codebase alongside this repository:
-  #       git clone https://github.com/open-nvr/ai-adapter.git ../AIAdapters
+  #       git clone https://github.com/open-nvr/ai-adapter.git ../ai-adapter
   #    2. Uncomment the full ai-adapters block below.
   #    3. Run docker compose build again.
   #
-  # ai-adapters:
-  #   build:
-  #     context: ../AIAdapters
-  #     dockerfile: Dockerfile
-  #   container_name: opennvr_ai
-  #   restart: unless-stopped
-  #   # ----------------------------------------------------
-  #   # [LINUX] HOST MODE: Uncomment ONE line below
-  #   # network_mode: host
-  #   # ----------------------------------------------------
-  #   depends_on:
-  #     - opennvr-core
-  #   volumes:
-  #     - ../AIAdapters/model_weights:/app/model_weights
-  #     - shared_frames:/app/frames
-  #   # ----------------------------------------------------
-  #   # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
-  #   # networks:
-  #   #   - sentinel_internal
-  #   #   - public_uplink
-  #   # ----------------------------------------------------
+  ai-adapters:
+    build:
+      context: ../ai-adapter
+      dockerfile: Dockerfile
+    container_name: opennvr_ai
+    restart: unless-stopped
+    # ----------------------------------------------------
+    # [LINUX] HOST MODE: Uncomment ONE line below
+    # network_mode: host
+    # ----------------------------------------------------
+    depends_on:
+      - opennvr-core
+    volumes:
+      - ../ai-adapter/model_weights:/app/model_weights
+      - shared_frames:/app/frames
+    # ----------------------------------------------------
+    # [WINDOWS/MAC] BRIDGE MODE:
+    networks:
+      - sentinel_internal
+      - public_uplink
+    # ----------------------------------------------------
 
 # ==========================================
 # NETWORKS
