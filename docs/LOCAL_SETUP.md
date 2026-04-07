@@ -26,6 +26,7 @@ Complete guide for setting up OpenNVR for local development without Docker.
 ### Required Software
 
 - **Python 3.11+** ([python.org](https://www.python.org/downloads/))
+- **uv** (Python package manager) ([docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/))
 - **Node.js 18+** and npm ([nodejs.org](https://nodejs.org/))
 - **PostgreSQL 13+** ([postgresql.org](https://www.postgresql.org/download/))
 - **MediaMTX v1.15.4+** ([github.com/bluenviron/mediamtx](https://github.com/bluenviron/mediamtx/releases))
@@ -89,7 +90,7 @@ source .venv/bin/activate
 **Install dependencies:**
 ```bash
 
-uv pip install -r requirements.txt
+uv sync
 ```
 
 **Create environment file:**
@@ -262,7 +263,7 @@ source .venv/bin/activate  # Linux/Mac
 
 **Install dependencies:**
 ```bash
-uv pip install -r requirements.txt
+uv sync
 ```
 
 **Create frames directory:**
@@ -483,7 +484,7 @@ source .venv/bin/activate  # Linux/Mac
 .\.venv\Scripts\Activate.ps1  # Windows
 
 # Reinstall dependencies
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ### Migration Errors
@@ -517,7 +518,7 @@ curl http://127.0.0.1:9997/v3/config/paths/get/cam-1
 ```bash
 cd AI-adapters/AIAdapters
 which python  # Should point to .venv
-pip list | grep opencv
+uv tree | grep opencv
 ```
 
 **Check frames directory:**

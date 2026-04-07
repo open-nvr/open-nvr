@@ -58,6 +58,7 @@ For developers looking to run OpenNVR purely locally in an IDE utilizing local v
 
 ### Prerequisites
 - **Python 3.11+**
+- **uv** (Python package manager - [install guide](https://docs.astral.sh/uv/getting-started/installation/))
 - **Node.js 18+**
 - **PostgreSQL 13+** (Running locally on your OS)
 - **MediaMTX** (Download the binary for your OS from their GitHub releases)
@@ -84,7 +85,7 @@ cd open-nvr/server
 uv venv venv
 
 # Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv pip install -r requirements.txt
+uv sync
 
 # Migrate DB and Start
 alembic upgrade head
@@ -97,7 +98,7 @@ cd open-nvr/kai-c
 uv venv venv
 
 # Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv pip install -r requirements.txt
+uv sync
 
 # Start Connector
 python start.py
@@ -123,7 +124,7 @@ cd AIAdapters
 uv venv venv
 
 # Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv pip install -r requirements.txt
+uv sync
 
 # Start Adapter
 uvicorn adapter.main:app --reload --port 9100

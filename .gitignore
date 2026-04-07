@@ -62,7 +62,6 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -75,6 +74,10 @@ env/
 ENV/
 .venv/
 server/venv/
+
+# uv lockfiles (tracked in git for reproducibility)
+# Uncomment if you don't want to track lockfiles:
+# uv.lock
 
 # Frontend builds
 app/dist/

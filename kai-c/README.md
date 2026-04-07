@@ -27,7 +27,7 @@ kai-c/
 │   └── test.py          # Demo script: webcam -> KAI-C -> AI Adapter
 ├── start.py             # Development server launcher (with reload)
 ├── start_no_reload.py   # Production server launcher
-├── requirements.txt     # Python dependencies
+├── pyproject.toml       # Python dependencies (uv)
 ├── Dockerfile           # Container build
 ├── .env.example         # Example environment variables
 └── START_INSTRUCTIONS.md
@@ -37,7 +37,7 @@ kai-c/
 
 ```bash
 # 1. Install dependencies
-uv pip install -r requirements.txt
+uv sync
 
 # 2. Make sure AIAdapters is running on port 9100
 

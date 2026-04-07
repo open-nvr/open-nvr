@@ -32,7 +32,7 @@ uv venv venv
 ### Step 2: Install Dependencies
 
 ```powershell
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ### Step 3: Start KAI-C Service
@@ -77,7 +77,7 @@ The request will flow: Frontend → Backend → **KAI-C** → AI Adapter
 
 ### KAI-C won't start
 - Make sure port 8100 is not already in use
-- Check that requirements are installed: `pip list`
+- Check that dependencies are installed: `uv tree`
 - Ensure you're in the correct directory
 
 ### Backend can't connect to KAI-C

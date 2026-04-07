@@ -63,7 +63,7 @@ if [ "$PYTHON_AVAILABLE" = true ]; then
         echo "# Credential Encryption Key"
         echo "CREDENTIAL_ENCRYPTION_KEY=$CREDENTIAL_KEY"
     else
-        echo "# Credential Encryption Key (FAILED - install cryptography: uv pip install cryptography)"
+        echo "# Credential Encryption Key (FAILED - install cryptography: uv add cryptography)"
         echo "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
     fi
 else
