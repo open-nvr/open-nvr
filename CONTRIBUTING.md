@@ -54,8 +54,7 @@ git remote add upstream https://github.com/[your-org]/opennvr.git
 cd server
 uv venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-uv sync
-uv sync --group dev  # Testing & linting tools
+uv sync  # Installs dependencies including dev group
 
 # Install pre-commit hooks (optional but recommended)
 pre-commit install
