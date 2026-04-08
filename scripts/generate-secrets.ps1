@@ -75,11 +75,11 @@ if ($pythonAvailable) {
             Write-Host "# Credential Encryption Key" -ForegroundColor Gray
             Write-Host "CREDENTIAL_ENCRYPTION_KEY=$credentialKey"
         } else {
-            Write-Host "# Credential Encryption Key (FAILED - install cryptography: uv pip install cryptography)" -ForegroundColor Yellow
+            Write-Host "# Credential Encryption Key (FAILED - install cryptography: uv add cryptography)" -ForegroundColor Yellow
             Write-Host "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
         }
     } catch {
-        Write-Host "# Credential Encryption Key (Error generating - install: uv pip install cryptography)" -ForegroundColor Yellow
+        Write-Host "# Credential Encryption Key (Error generating - install: uv add cryptography)" -ForegroundColor Yellow
         Write-Host "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
     }
 } else {

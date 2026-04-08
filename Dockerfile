@@ -34,24 +34,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements files
-COPY server/requirements.txt requirements-core.txt
-COPY kai-c/requirements.txt requirements-kai-c.txt
-
-# Build wheels for all dependencies separately to avoid file encoding issues
-# Using --no-cache-dir to avoid caching in this layer
+# Copy uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
-RUN uv pip install --system --no-cache-dir --upgrade pip wheel \
-        --index-url https://pypi.org/simple && \
-    pip wheel --no-cache-dir --wheel-dir /build/wheels \
-        --index-url https://pypi.org/simple \
-        -r requirements-core.txt && \
-    pip wheel --no-cache-dir --wheel-dir /build/wheels \
-        --index-url https://pypi.org/simple \
-        -r requirements-kai-c.txt && \
-    pip wheel --no-cache-dir --wheel-dir /build/wheels \
-        --index-url https://pypi.org/simple \
-        opencv-python-headless
+
+# Copy project files for dependency resolution
+COPY server/pyproject.toml /build/server/pyproject.toml
+COPY kai-c/pyproject.toml /build/kai-c/pyproject.toml
+
+# Create virtual environments and sync dependencies (--no-install-project skips building the project itself)
+# Server dependencies
+RUN cd /build/server && uv venv /build/server-venv && \
+    uv sync --frozen --no-dev --no-install-project --directory /build/server || \
+    uv sync --no-dev --no-install-project --directory /build/server
+
+# Kai-C dependencies  
+RUN cd /build/kai-c && uv venv /build/kai-c-venv && \
+    uv sync --frozen --no-dev --no-install-project --directory /build/kai-c || \
+    uv sync --no-dev --no-install-project --directory /build/kai-c
+
+# Install opencv-python-headless separately (not in pyproject.toml)
+RUN uv pip install --python /build/server-venv/bin/python --no-cache-dir opencv-python-headless
 
 
 # ==========================================
@@ -83,22 +85,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /tmp/* /var/tmp/*
 
-# Copy pre-built wheels from builder stage
-COPY --from=python-builder /build/wheels /tmp/wheels
-COPY --from=python-builder /build/requirements-core.txt /tmp/requirements-core.txt
-COPY --from=python-builder /build/requirements-kai-c.txt /tmp/requirements-kai-c.txt
+# Copy pre-built virtual environments from builder stage
+COPY --from=python-builder /build/server-venv /app/server-venv
+COPY --from=python-builder /build/kai-c-venv /app/kai-c-venv
 
-# Install Python packages from pre-built wheels (MUCH faster, no compilation needed)
-# Install separately to avoid dependency conflicts, pip will resolve them
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
-RUN uv pip install --system --no-cache-dir --upgrade pip && \
-    uv pip install --system --no-cache-dir --find-links=/tmp/wheels \
-        --no-index -r /tmp/requirements-core.txt && \
-    uv pip install --system --no-cache-dir --find-links=/tmp/wheels \
-        --no-index -r /tmp/requirements-kai-c.txt && \
-    uv pip install --system --no-cache-dir --find-links=/tmp/wheels \
-        --no-index opencv-python-headless  && \
-    rm -rf /tmp/wheels /tmp/requirements-*.txt /root/.cache/pip
+# Set up Python path to use virtual environments
+ENV PATH="/app/server-venv/bin:$PATH"
+ENV VIRTUAL_ENV="/app/server-venv"
 
 # ==========================================
 # Copy Application Code

@@ -12,10 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
-COPY requirements.txt .
+# Copy uv binary and project files
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
-RUN uv pip install --system --no-cache-dir -r requirements.txt
+COPY pyproject.toml .
+
+# Create virtual environment and sync dependencies
+RUN uv venv .venv && \
+    uv sync --frozen --no-dev --no-install-project || uv sync --no-dev --no-install-project
+
+# Set up Python path to use virtual environment
+ENV PATH="/app/.venv/bin:$PATH"
+ENV VIRTUAL_ENV="/app/.venv"
 
 # Copy source code
 COPY . .

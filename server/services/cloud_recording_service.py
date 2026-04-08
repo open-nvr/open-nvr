@@ -387,7 +387,7 @@ class CloudRecordingService:
             except ImportError:
                 return {
                     "status": "error",
-                    "message": "boto3 not installed. Run: uv pip install boto3",
+                    "message": "boto3 not installed. Run: uv add boto3",
                 }
                 
         except Exception as e:

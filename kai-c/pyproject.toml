@@ -1,0 +1,16 @@
+[project]
+name = "kai-c"
+version = "1.0.0"
+description = "KAI-C (Kavach AI Connector) - Middleware between OpenNVR backend and AI Adapters"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5.3",
+    "click>=8.3.1",
+    "fastapi>=0.109.0",
+    "requests>=2.31.0",
+    "uvicorn>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

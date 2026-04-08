@@ -54,8 +54,7 @@ git remote add upstream https://github.com/[your-org]/opennvr.git
 cd server
 uv venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-uv pip install -r requirements.txt
-uv pip install -r requirements-dev.txt  # Testing & linting tools
+uv sync  # Installs dependencies including dev group
 
 # Install pre-commit hooks (optional but recommended)
 pre-commit install
@@ -70,7 +69,7 @@ npm install
 #### AI Adapters
 ```bash
 cd AI-adapters/AIAdapters
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ### 3. Create a Feature Branch
