@@ -58,19 +58,19 @@ echo ""
 # ── Pre-flight checks ──────────────────────────────────────
 # 1. Docker running?
 if ! docker info > /dev/null 2>&1; then
-  echo -e "${RED}✗ Docker is not running. Please start Docker and try again.${NC}"
+  echo -e "${RED} Docker is not running. Please start Docker and try again.${NC}"
   exit 1
 fi
 
 # 2. Compose file exists?
 if [ ! -f "$COMPOSE_FILE" ]; then
-  echo -e "${RED}✗ Compose file not found: $COMPOSE_FILE${NC}"
+  echo -e "${RED} Compose file not found: $COMPOSE_FILE${NC}"
   exit 1
 fi
 
 # 3. .env file exists?
 if [ ! -f ".env" ]; then
-  echo -e "${YELLOW}⚠ No .env file found. Copying from .env.docker ...${NC}"
+  echo -e "${YELLOW} No .env file found. Copying from .env.docker ...${NC}"
   cp .env.docker .env
   echo -e "${GREEN}✓ .env created. Edit it to customise settings.${NC}"
 fi
@@ -78,7 +78,7 @@ fi
 # ── Run command ────────────────────────────────────────────
 case "$COMMAND" in
   up)
-    echo -e "${GREEN}▶ Starting all services ...${NC}"
+    echo -e "${GREEN} Starting all services ...${NC}"
     docker compose -f "$COMPOSE_FILE" up -d
     echo ""
     echo -e "${GREEN}✓ OpenNVR is running!${NC}"
@@ -87,7 +87,7 @@ case "$COMMAND" in
     ;;
 
   build)
-    echo -e "${GREEN}▶ Building images and starting all services ...${NC}"
+    echo -e "${GREEN} Building images and starting all services ...${NC}"
     docker compose -f "$COMPOSE_FILE" build
     docker compose -f "$COMPOSE_FILE" up -d
     echo ""
@@ -97,13 +97,13 @@ case "$COMMAND" in
     ;;
 
   down)
-    echo -e "${YELLOW}▶ Stopping all services ...${NC}"
+    echo -e "${YELLOW} Stopping all services ...${NC}"
     docker compose -f "$COMPOSE_FILE" down
     echo -e "${GREEN}✓ All services stopped.${NC}"
     ;;
 
   logs)
-    echo -e "${GREEN}▶ Tailing logs (Ctrl+C to exit) ...${NC}"
+    echo -e "${GREEN} Tailing logs (Ctrl+C to exit) ...${NC}"
     docker compose -f "$COMPOSE_FILE" logs -f
     ;;
 
@@ -117,3 +117,4 @@ case "$COMMAND" in
     exit 1
     ;;
 esac
+

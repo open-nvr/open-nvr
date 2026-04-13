@@ -345,7 +345,7 @@ pathDefaults:
   # No manual editing required - just set MEDIAMTX_SECRET in server/.env!
   ###############################################
 
-  # ⚠️ WARNING: Official bluenviron/mediamtx:1.15.4 image doesn't include curl or wget
+  # ️ WARNING: Official bluenviron/mediamtx:1.15.4 image doesn't include curl or wget
   # These hooks are DISABLED to prevent startup errors
   # If you need webhooks, use a custom MediaMTX image with curl installed
   # See: https://github.com/bluenviron/mediamtx/issues/examples
@@ -389,3 +389,4 @@ paths:
   __startup__:
     source: publisher
     record: no
+

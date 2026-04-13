@@ -71,8 +71,16 @@ services:
   # 2. MEDIAMTX (Streaming Server)
   # ==========================================
   mediamtx:
-    # Use custom MediaMTX image with curl/wget for webhooks and health checks
-    image: abhishekch1112/opennvr-mediamtx:latest
+    # Official MediaMTX 1.15.4 + curl for webhooks (runOnInit, runOnRecordSegmentComplete).
+    # Multi-stage: mediamtx binary is on scratch so we copy it into Alpine where apk works.
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM bluenviron/mediamtx:1.15.4 AS base
+        FROM alpine:3.20
+        RUN apk add --no-cache curl
+        COPY --from=base /mediamtx /mediamtx
+        ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
     # ----------------------------------------------------
@@ -114,7 +122,6 @@ services:
     networks:
       - sentinel_internal
     # ----------------------------------------------------
-    # Health check using curl (available in custom opennvr-mediamtx image)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 30s
@@ -126,10 +133,8 @@ services:
   # 3. CORE APPLICATION (Backend + Frontend + Kai-C)
   # ==========================================
   opennvr-core:
-    # Use pre-built image from Docker Hub (Production)
-    # image: abhishekch1112/opennvr-core:latest
-    
-    # OR build locally (Development)
+    # Build locally
+
     build:
       context: .
       dockerfile: Dockerfile
@@ -262,3 +267,4 @@ networks:
 volumes:
   opennvr_db_data:
   shared_frames:
+

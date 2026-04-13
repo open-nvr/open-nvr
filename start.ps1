@@ -40,52 +40,52 @@ Write-Color ""
 # 1. Docker running?
 $dockerInfo = docker info 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Color "✗ Docker is not running. Please start Docker Desktop and try again." Red
+    Write-Color "Docker is not running. Please start Docker Desktop and try again." Red
     exit 1
 }
 
 # 2. Compose file exists?
 if (-not (Test-Path $ComposeFile)) {
-    Write-Color "✗ Compose file not found: $ComposeFile" Red
+    Write-Color "Compose file not found: $ComposeFile" Red
     exit 1
 }
 
 # 3. .env file exists?
 if (-not (Test-Path ".env")) {
-    Write-Color "⚠ No .env file found. Copying from .env.docker ..." Yellow
+    Write-Color "No .env file found. Copying from .env.docker ..." Yellow
     Copy-Item ".env.docker" ".env"
-    Write-Color "✓ .env created. Edit it to customise settings." Green
+    Write-Color ".env created. Edit it to customise settings." Green
 }
 
 # ── Run command ────────────────────────────────────────────
 switch ($Command) {
     "up" {
-        Write-Color "▶ Starting all services ..." Green
+        Write-Color "Starting all services ..." Green
         docker compose -f $ComposeFile up -d
         Write-Color ""
-        Write-Color "✓ OpenNVR is running!" Green
+        Write-Color "OpenNVR is running!" Green
         Write-Color "  Web UI   → http://localhost:8000  (admin / SecurePass123!)" Cyan
         Write-Color "  API Docs → http://localhost:8000/docs" Cyan
     }
 
     "build" {
-        Write-Color "▶ Building images and starting all services ..." Green
+        Write-Color "Building images and starting all services ..." Green
         docker compose -f $ComposeFile build
         docker compose -f $ComposeFile up -d
         Write-Color ""
-        Write-Color "✓ OpenNVR is running!" Green
+        Write-Color "OpenNVR is running!" Green
         Write-Color "  Web UI   → http://localhost:8000  (admin / SecurePass123!)" Cyan
         Write-Color "  API Docs → http://localhost:8000/docs" Cyan
     }
 
     "down" {
-        Write-Color "▶ Stopping all services ..." Yellow
+        Write-Color "Stopping all services ..." Yellow
         docker compose -f $ComposeFile down
-        Write-Color "✓ All services stopped." Green
+        Write-Color "All services stopped." Green
     }
 
     "logs" {
-        Write-Color "▶ Tailing logs (Ctrl+C to exit) ..." Green
+        Write-Color "Tailing logs (Ctrl+C to exit) ..." Green
         docker compose -f $ComposeFile logs -f
     }
 
@@ -99,3 +99,4 @@ switch ($Command) {
         exit 1
     }
 }
+

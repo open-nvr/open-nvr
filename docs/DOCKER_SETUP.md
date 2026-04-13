@@ -126,14 +126,14 @@ Open browser to: **http://localhost:8000**
 
 ## Container Architecture
 
-The Docker Compose stack pulls 4 pre-built images from Docker Hub:
+The Docker Compose stack builds or pulls the following images:
 
 | Service | Image | Purpose |
-|---------|-------|---------|  
-| **opennvr_core** | `abhishekch1112/opennvr-core:latest` | FastAPI backend + React frontend + Kai-C AI |
+|---------|-------|---------|
+| **opennvr_core** | Built locally from `Dockerfile` | FastAPI backend + React frontend + Kai-C AI |
 | **opennvr_db** | `postgres:15-alpine` | PostgreSQL database |
-| **opennvr_mediamtx** | `abhishekch1112/opennvr-mediamtx:latest` | Streaming server (RTSP/HLS/WebRTC) |
-| **opennvr_ai** | `abhishekch1112/opennvr-ai:latest` | AI inference engine with model adapters |
+| **opennvr_mediamtx** | Built from `bluenviron/mediamtx:1.15.4` + curl | Streaming server (RTSP/HLS/WebRTC) |
+| **opennvr_ai** | Built locally from `../ai-adapter/Dockerfile` | AI inference engine with model adapters |
 
 **Networks:**
 - `sentinel_internal` - Internal communication between services
@@ -155,8 +155,7 @@ The Docker Compose stack pulls 4 pre-built images from Docker Hub:
 
 **Security Architecture:**
 - ✅ **No hardcoded secrets** - All secrets loaded from `.env` file
-- ✅ **Pre-built images** - No build tools required, instant deployment
-- ✅ **Official MediaMTX image** - Uses trusted `bluenviron/mediamtx:1.15.4`
+- ✅ **Official MediaMTX base** - Pinned to `bluenviron/mediamtx:1.15.4`, curl added via Alpine package manager
 - ✅ **Configuration via environment variables** - `mediamtx.docker.yml` uses `${MEDIAMTX_SECRET}`, `${BACKEND_HOST}`, etc.
 - ✅ **Single source of truth** - All configuration in `.env` file
 
@@ -172,11 +171,11 @@ docker compose ps
 
 Expected output:
 ```
-NAME              IMAGE                                   STATUS
-opennvr_core      abhishekch1112/opennvr-core:latest     Up
-opennvr_db        postgres:15-alpine                      Up (healthy)
-opennvr_mediamtx  abhishekch1112/opennvr-mediamtx:latest Up
-opennvr_ai        abhishekch1112/opennvr-ai:latest       Up
+NAME              IMAGE                          STATUS
+opennvr_core      opennvr-opennvr-core           Up
+opennvr_db        postgres:15-alpine             Up (healthy)
+opennvr_mediamtx  opennvr-mediamtx               Up (healthy)
+opennvr_ai        opennvr-ai-adapters            Up
 ```
 
 ### View Logs
@@ -444,8 +443,9 @@ docker compose down -v
 docker compose down -v
 
 # Remove images
-docker rmi abhishekch1112/opennvr-core:latest
-docker rmi abhishekch1112/opennvr-ai:latest
+docker rmi opennvr-opennvr-core
+docker rmi opennvr-mediamtx
+docker rmi opennvr-ai-adapters
 docker rmi bluenviron/mediamtx:1.15.4
 docker rmi postgres:15-alpine
 

@@ -11,3 +11,4 @@ fi
 
 # Switch to opennvr user and run supervisord
 exec gosu opennvr /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+
