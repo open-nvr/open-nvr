@@ -44,13 +44,13 @@ COPY kai-c/pyproject.toml /build/kai-c/pyproject.toml
 # Create virtual environments and sync dependencies (--no-install-project skips building the project itself)
 # Server dependencies
 RUN cd /build/server && uv venv /build/server-venv && \
-    uv sync --frozen --no-dev --no-install-project --directory /build/server || \
-    uv sync --no-dev --no-install-project --directory /build/server
+    VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active || \
+    VIRTUAL_ENV=/build/server-venv uv sync --no-dev --no-install-project --directory /build/server --active
 
 # Kai-C dependencies  
 RUN cd /build/kai-c && uv venv /build/kai-c-venv && \
-    uv sync --frozen --no-dev --no-install-project --directory /build/kai-c || \
-    uv sync --no-dev --no-install-project --directory /build/kai-c
+    VIRTUAL_ENV=/build/kai-c-venv uv sync --frozen --no-dev --no-install-project --directory /build/kai-c --active || \
+    VIRTUAL_ENV=/build/kai-c-venv uv sync --no-dev --no-install-project --directory /build/kai-c --active
 
 # Install opencv-python-headless separately (not in pyproject.toml)
 RUN uv pip install --python /build/server-venv/bin/python --no-cache-dir opencv-python-headless
@@ -141,4 +141,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Use entrypoint script to fix permissions before starting services
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
 

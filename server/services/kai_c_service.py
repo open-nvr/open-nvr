@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
-﻿"""
+"""
 KAI-C Service - Backend service to communicate with KAI-C connector
 
 This service handles communication between the backend and KAI-C connector,
@@ -53,9 +53,9 @@ class KaiCService:
         """
         self.kai_c_url = kai_c_url.rstrip("/")
         # Use the same frames directory as AI Adapter expects
-        # AI Adapter expects frames at: D:\opennvr\AI-adapters\AIAdapters\frames\
-        workspace_root = Path(__file__).parent.parent.parent
-        self.frames_dir = workspace_root / "AI-adapters" / "AIAdapters" / "frames"
+        # AI Adapter expects frames at: D:\testing repos\ai-adapter\frames
+        workspace_root = Path(__file__).parent.parent.parent.parent
+        self.frames_dir = workspace_root / "ai-adapter" / "frames"
         self.frames_dir.mkdir(exist_ok=True, parents=True)
 
         # Thread pool for blocking operations (RTSP capture)

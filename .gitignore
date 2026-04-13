@@ -1,4 +1,4 @@
-﻿# Root-level ignores
+# Root-level ignores
 
 # ============================================
 # SENSITIVE DATA - NEVER COMMIT
@@ -214,3 +214,4 @@ AI-adapters/
 *_analysis.txt
 # supervisord config built into image
 !supervisord.conf
+
