@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # OpenNVR - Smart Start Script (Windows PowerShell)
 # ============================================================
 # Automatically detects your environment and picks the correct
