@@ -44,10 +44,8 @@ authHTTPExclude: []
 # JWT-based authentication configuration
 # Backend JWKS endpoint provides public keys for JWT validation
 # Uses 127.0.0.1 for host network mode (all services on localhost)
-# [WINDOWS/MAC] BRIDGE MODE: Use Docker service name
-authJWTJWKS: http://opennvr_core:8000/.well-known/jwks.json
-# [LINUX] HOST MODE: Use localhost (comment out line above and uncomment below)
-# authJWTJWKS: http://127.0.0.1:8000/.well-known/jwks.json
+# Automatically uses BACKEND_HOST from .env (opennvr_core for Windows/Mac, 127.0.0.1 for Linux)
+authJWTJWKS: http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/.well-known/jwks.json
 authJWTJWKSFingerprint:
 # Claim containing MediaMTX permissions
 authJWTClaimKey: mediamtx_permissions
