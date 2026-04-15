@@ -64,6 +64,7 @@ services:
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
       - BACKEND_HOST=127.0.0.1
       - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - MTX_AUTHJWTJWKS=http://127.0.0.1:${BACKEND_PORT:-8000}/.well-known/jwks.json
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 30s
