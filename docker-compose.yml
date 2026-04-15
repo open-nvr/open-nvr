@@ -112,9 +112,11 @@ services:
       # ----------------------------------------------------
       # [LINUX] HOST MODE: Uncomment ONE line below
       # - BACKEND_HOST=127.0.0.1
+      # - MTX_AUTHJWTJWKS=http://127.0.0.1:8000/.well-known/jwks.json
       # ----------------------------------------------------
       # [WINDOWS/MAC] BRIDGE MODE: Uncomment ONE line below
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
+      - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
       # ----------------------------------------------------
       - BACKEND_PORT=${BACKEND_PORT:-8000}
     # ----------------------------------------------------

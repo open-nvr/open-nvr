@@ -44,6 +44,10 @@ authHTTPExclude: []
 # JWT-based authentication configuration
 # Backend JWKS endpoint provides public keys for JWT validation
 # Uses 127.0.0.1 for host network mode (all services on localhost)
+# Overridden at runtime by MTX_AUTHJWTJWKS env var injected from docker-compose:
+#   Windows/Mac (bridge): MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
+#   Linux (host mode):    MTX_AUTHJWTJWKS=http://127.0.0.1:8000/.well-known/jwks.json
+# This hardcoded value is a never-used fallback — MTX_AUTHJWTJWKS always takes precedence.
 authJWTJWKS: http://127.0.0.1:8000/.well-known/jwks.json
 authJWTJWKSFingerprint:
 # Claim containing MediaMTX permissions
@@ -345,14 +349,8 @@ pathDefaults:
   # No manual editing required - just set MEDIAMTX_SECRET in server/.env!
   ###############################################
 
-  # ️ WARNING: Official bluenviron/mediamtx:1.15.4 image doesn't include curl or wget
-  # These hooks are DISABLED to prevent startup errors
-  # If you need webhooks, use a custom MediaMTX image with curl installed
-  # See: https://github.com/bluenviron/mediamtx/issues/examples
-  
-  # Startup hook - DISABLED (curl not available in official image)
-  # runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-127.0.0.1}:${BACKEND_PORT:-8000}/api/v1/mediamtx/startup/hook?delay=5"'
-  runOnInit:
+  # Startup hook - provisions cameras from backend database on MediaMTX start
+  runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/startup/hook?delay=5"'
   runOnInitRestart: no
 
   runOnDemand:
@@ -373,7 +371,7 @@ pathDefaults:
 
   # Recording webhook - notifies backend when a recording segment completes
   # Uses custom opennvr-mediamtx image with curl installed
-  runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://127.0.0.1:8000/api/v1/mediamtx/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION"'
+  runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION"'
 
 
 ###############################################
