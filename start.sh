@@ -75,6 +75,16 @@ if [ ! -f ".env" ]; then
   echo -e "${GREEN}✓ .env created. Edit it to customise settings.${NC}"
 fi
 
+# 4. AI model_weights directory — must be writable by aiuser (uid 1000) inside the container.
+#    On a fresh git clone the directory is owned by root, so we always fix it here.
+MODEL_WEIGHTS_DIR="../ai-adapter/model_weights"
+mkdir -p "$MODEL_WEIGHTS_DIR"
+if [ "$(stat -c '%u' "$MODEL_WEIGHTS_DIR")" != "1000" ]; then
+  echo -e "${YELLOW} Fixing model_weights ownership for container user (uid 1000) ...${NC}"
+  chown -R 1000:1000 "$MODEL_WEIGHTS_DIR"
+  echo -e "${GREEN}✓ model_weights ownership fixed.${NC}"
+fi
+
 # ── Run command ────────────────────────────────────────────
 case "$COMMAND" in
   up)
