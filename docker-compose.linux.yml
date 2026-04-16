@@ -122,6 +122,9 @@ services:
       # AI Adapter URL (for Kai-C → ai-adapters routing via supervisord)
       - ADAPTER_URL=http://127.0.0.1:9100
 
+      # Frames directory — must match the shared_frames volume mount path in this container
+      - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
+
       # Application settings
       - HOST=${HOST:-0.0.0.0}
       - DEBUG=${DEBUG:-False}
