@@ -36,7 +36,8 @@ function New-RandomString {
         [switch]$Base64
     )
     $bytes = New-Object byte[] $(if ($Hex) { [int]($Length / 2) } else { $Length })
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     if ($Hex)    { return ($bytes | ForEach-Object { $_.ToString('x2') }) -join '' }
     if ($Base64) { return [Convert]::ToBase64String($bytes) }
     return [Convert]::ToBase64String($bytes).Substring(0, $Length)
@@ -116,7 +117,8 @@ function Set-EnvVar {
         else                    { $_ }
     }
     if (-not $found) { $updated += $newLine }
-    $updated | Set-Content $File -Encoding UTF8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllLines($File, [string[]]$updated, $utf8NoBom)
 }
 
 Write-Color "Writing secrets to .env ..." Green

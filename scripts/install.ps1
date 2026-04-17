@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # OpenNVR - Interactive Installation Wizard (Windows)
 # ============================================================
 # Called automatically by start.ps1 on first run.
@@ -30,11 +30,11 @@ $MediamtxSecret            = ""
 function WC($Text, $Color = "White") { Write-Host $Text -ForegroundColor $Color }
 function WCN($Text, $Color = "White") { Write-Host $Text -ForegroundColor $Color -NoNewline }
 
-function OK($msg)   { WC "  `u{2713}  $msg" Green  }
-function WARN($msg) { WC "  `u{26A0}  $msg" Yellow }
-function FAIL($msg) { WC "  `u{2717}  $msg" Red    }
-function INFO($msg) { WC "  `u{00B7}  $msg" DarkGray }
-function STEP($msg) { WC "  `u{2192}  $msg" Cyan   }
+function OK($msg)   { WC "  $([char]0x2713)  $msg" Green  }
+function WARN($msg) { WC "  $([char]0x26A0)  $msg" Yellow }
+function FAIL($msg) { WC "  $([char]0x2717)  $msg" Red    }
+function INFO($msg) { WC "  $([char]0x00B7)  $msg" DarkGray }
+function STEP($msg) { WC "  $([char]0x2192)  $msg" Cyan   }
 
 # ── Logo ───────────────────────────────────────────────────
 function Show-Logo {
@@ -114,7 +114,8 @@ function AskChoice($prompt, $default = "1") {
 # ── Random string generator ────────────────────────────────
 function New-RandString([int]$Len = 32, [switch]$Hex) {
     $bytes = New-Object byte[] $(if ($Hex) { [int]($Len / 2) } else { $Len + 8 })
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     if ($Hex) { return ($bytes | ForEach-Object { $_.ToString('x2') }) -join '' }
     $encoded = [Convert]::ToBase64String($bytes)
     return $encoded.Replace('+','').Replace('/','').Replace('=','').Substring(0, $Len)
@@ -403,7 +404,8 @@ LOG_CONSOLE_ENABLED=True
 LOG_JSON_FORMAT=False
 "@
 
-    $content | Set-Content ".env" -Encoding UTF8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText((Join-Path (Get-Location) ".env"), $content, $utf8NoBom)
     OK ".env written successfully"
 }
 
