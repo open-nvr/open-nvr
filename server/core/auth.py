@@ -62,7 +62,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     else:
         expire = now + timedelta(minutes=settings.access_token_expire_minutes)
 
-    to_encode.update({"exp": expire, "iat": now, "nbf": now, "jti": str(uuid.uuid4())})
+    to_encode.update({"exp": expire, "iat": now, "nbf": now, "jti": str(uuid.uuid4()), "type": "access"})
 
     encoded_jwt = jwt.encode(
         to_encode, settings.secret_key, algorithm=settings.algorithm
@@ -79,6 +79,15 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     )
 
     return encoded_jwt
+
+
+def create_refresh_token(data: dict) -> str:
+    """Create a long-lived JWT refresh token used to obtain new access tokens."""
+    to_encode = data.copy()
+    now = datetime.now(UTC)
+    expire = now + timedelta(days=settings.refresh_token_expire_days)
+    to_encode.update({"exp": expire, "iat": now, "jti": str(uuid.uuid4()), "type": "refresh"})
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
 def verify_token(token: str) -> TokenData | None:

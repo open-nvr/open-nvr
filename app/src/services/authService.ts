@@ -45,4 +45,5 @@ export const authService = {
   mfaVerify: (code: string) => api.post('/api/v1/auth/mfa/verify', { code }),
   mfaDisable: () => api.post('/api/v1/auth/mfa/disable', ''),
   logout: () => api.post('/api/v1/auth/logout', ''),
+  refreshToken: (refresh_token: string) => api.post('/api/v1/auth/refresh', { refresh_token }),
 }

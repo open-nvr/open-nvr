@@ -21,13 +21,15 @@ Handles user authentication and JWT token generation.
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from core.auth import (
     authenticate_user,
     create_access_token,
+    create_refresh_token,
     generate_mfa_secret,
     get_current_active_user,
     get_mfa_provisioning_uri,
@@ -267,6 +269,7 @@ async def login_for_access_token(
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
+    refresh_token = create_refresh_token(data={"sub": user.username})
 
     auth_logger.log_action(
         "auth.login_success",
@@ -297,7 +300,7 @@ async def login_for_access_token(
     except Exception as e:
         auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @router.post("/login-json", response_model=Token)
@@ -372,6 +375,7 @@ async def login_with_json(
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
+    refresh_token = create_refresh_token(data={"sub": user.username})
     try:
         write_audit_log(
             db,
@@ -389,7 +393,7 @@ async def login_with_json(
         )
     except Exception:
         pass
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
@@ -461,6 +465,42 @@ async def mfa_disable(
     except Exception:
         pass
     return {"message": "MFA disabled"}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_access_token(
+    refresh_token: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Exchange a valid refresh token for a new access token and refresh token pair."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            refresh_token, settings.secret_key, algorithms=[settings.algorithm]
+        )
+        if payload.get("type") != "refresh":
+            raise credentials_exception
+        username: str = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.username == username, User.is_active == True).first()
+    if not user:
+        raise credentials_exception
+
+    new_access_token = create_access_token(data={"sub": user.username})
+    new_refresh_token = create_refresh_token(data={"sub": user.username})
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")

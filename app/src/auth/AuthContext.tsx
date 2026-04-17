@@ -48,6 +48,7 @@ type AuthContextType = AuthState & {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 const TOKEN_KEY = 'opennvr.token'
+const REFRESH_KEY = 'opennvr.refresh_token'
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>({ user: null, token: null, loading: true, error: null, setupRequired: false })
@@ -70,7 +71,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (saved) {
         apiSetToken(saved)
         setState((s) => ({ ...s, token: saved }))
-        apiService.me().then(({ data }) => setState((s) => ({ ...s, user: data, loading: false }))).catch(() => setState((s) => ({ ...s, loading: false })))
+        apiService.me()
+          .then(({ data }) => setState((s) => ({ ...s, user: data, loading: false })))
+          .catch(() => setState((s) => ({ ...s, loading: false })))
       } else {
         setState((s) => ({ ...s, loading: false }))
       }
@@ -78,10 +81,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     checkSetup()
   }, [])
 
-  const setToken = useCallback((token: string | null) => {
+  const setToken = useCallback((token: string | null, refreshToken?: string | null) => {
     apiSetToken(token)
     if (token) localStorage.setItem(TOKEN_KEY, token)
     else localStorage.removeItem(TOKEN_KEY)
+    if (refreshToken !== undefined) {
+      if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken)
+      else localStorage.removeItem(REFRESH_KEY)
+    }
     setState((s) => ({ ...s, token }))
   }, [])
 
@@ -91,7 +98,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Prefer JSON login to support MFA
       const { data } = await apiService.loginJson(username, password, code)
       const token = data.access_token
-      setToken(token)
+      const refreshToken = data.refresh_token
+      setToken(token, refreshToken)
       const me = await apiService.me()
       setState({ user: me.data, token, loading: false, error: null, setupRequired: false })
     } catch (e: any) {
@@ -131,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [login])
 
   const logout = useCallback(() => {
-    setToken(null)
+    setToken(null, null)
     setState({ user: null, token: null, loading: false, error: null, setupRequired: false })
   }, [setToken])
 
