@@ -217,48 +217,45 @@ class InferenceManager:
                             try:
                                 response_data = result.get("response", {})
 
-                                detection_result = AIDetectionResult(
-                                    model_id=model_id,
-                                    camera_id=camera_id,
-                                    task=task,
-                                    label=response_data.get("label"),
-                                    confidence=response_data.get("confidence"),
-                                    bbox_x=response_data.get("bbox", [None])[0]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 0
-                                    else None,
-                                    bbox_y=response_data.get("bbox", [None, None])[1]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 1
-                                    else None,
-                                    bbox_width=response_data.get(
-                                        "bbox", [None, None, None]
-                                    )[2]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 2
-                                    else None,
-                                    bbox_height=response_data.get(
-                                        "bbox", [None, None, None, None]
-                                    )[3]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 3
-                                    else None,
-                                    count=response_data.get("count"),
-                                    caption=response_data.get("caption")
-                                    or response_data.get("description"),
-                                    latency_ms=response_data.get("latency_ms"),
-                                    annotated_image_uri=response_data.get(
-                                        "annotated_image_uri"
-                                    ),
-                                    executed_at=datetime.fromtimestamp(
-                                        response_data.get("executed_at") / 1000.0
+                                # Skip saving detection results when nothing was detected
+                                # (adapter returns confidence=0.0 as a placeholder)
+                                if (
+                                    response_data.get("confidence") is not None
+                                    and response_data.get("confidence") == 0.0
+                                    and response_data.get("count") is None
+                                ):
+                                    main_logger.debug(
+                                        f"Skipping zero-confidence result for model {model_id} (no detection)"
                                     )
-                                    if response_data.get("executed_at")
-                                    else None,
-                                )
+                                else:
+                                    bbox = response_data.get("bbox") or []
 
-                                db.add(detection_result)
-                                db.commit()
+                                    detection_result = AIDetectionResult(
+                                        model_id=model_id,
+                                        camera_id=camera_id,
+                                        task=task,
+                                        label=response_data.get("label"),
+                                        confidence=response_data.get("confidence"),
+                                        bbox_x=bbox[0] if len(bbox) > 0 else None,
+                                        bbox_y=bbox[1] if len(bbox) > 1 else None,
+                                        bbox_width=bbox[2] if len(bbox) > 2 else None,
+                                        bbox_height=bbox[3] if len(bbox) > 3 else None,
+                                        count=response_data.get("count"),
+                                        caption=response_data.get("caption")
+                                        or response_data.get("description"),
+                                        latency_ms=response_data.get("latency_ms"),
+                                        annotated_image_uri=response_data.get(
+                                            "annotated_image_uri"
+                                        ),
+                                        executed_at=datetime.fromtimestamp(
+                                            response_data.get("executed_at") / 1000.0
+                                        )
+                                        if response_data.get("executed_at")
+                                        else None,
+                                    )
+
+                                    db.add(detection_result)
+                                    db.commit()
                             finally:
                                 db.close()
                         except Exception as e:
@@ -439,46 +436,43 @@ class InferenceManager:
                             try:
                                 response_data = result.get("response", {})
 
-                                detection_result = AIDetectionResult(
-                                    model_id=model_id,
-                                    camera_id=camera_id,
-                                    task=task,
-                                    label=response_data.get("label"),
-                                    confidence=response_data.get("confidence"),
-                                    bbox_x=response_data.get("bbox", [None])[0]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 0
-                                    else None,
-                                    bbox_y=response_data.get("bbox", [None, None])[1]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 1
-                                    else None,
-                                    bbox_width=response_data.get(
-                                        "bbox", [None, None, None]
-                                    )[2]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 2
-                                    else None,
-                                    bbox_height=response_data.get(
-                                        "bbox", [None, None, None, None]
-                                    )[3]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 3
-                                    else None,
-                                    count=response_data.get("count"),
-                                    caption=response_data.get("caption")
-                                    or response_data.get("description"),
-                                    latency_ms=response_data.get("latency_ms"),
-                                    executed_at=datetime.now(),
-                                )
+                                # Skip saving detection results when nothing was detected
+                                # (adapter returns confidence=0.0 as a placeholder)
+                                if (
+                                    response_data.get("confidence") is not None
+                                    and response_data.get("confidence") == 0.0
+                                    and response_data.get("count") is None
+                                ):
+                                    main_logger.debug(
+                                        f"Skipping zero-confidence result for frame {frame_num} (no detection)"
+                                    )
+                                else:
+                                    bbox = response_data.get("bbox") or []
 
-                                db.add(detection_result)
-                                db.commit()
-                                saved_count += 1
+                                    detection_result = AIDetectionResult(
+                                        model_id=model_id,
+                                        camera_id=camera_id,
+                                        task=task,
+                                        label=response_data.get("label"),
+                                        confidence=response_data.get("confidence"),
+                                        bbox_x=bbox[0] if len(bbox) > 0 else None,
+                                        bbox_y=bbox[1] if len(bbox) > 1 else None,
+                                        bbox_width=bbox[2] if len(bbox) > 2 else None,
+                                        bbox_height=bbox[3] if len(bbox) > 3 else None,
+                                        count=response_data.get("count"),
+                                        caption=response_data.get("caption")
+                                        or response_data.get("description"),
+                                        latency_ms=response_data.get("latency_ms"),
+                                        executed_at=datetime.now(),
+                                    )
 
-                                main_logger.info(
-                                    f"✓ Saved detection result for frame {frame_num} ({saved_count} total results saved)"
-                                )
+                                    db.add(detection_result)
+                                    db.commit()
+                                    saved_count += 1
+
+                                    main_logger.info(
+                                        f"✓ Saved detection result for frame {frame_num} ({saved_count} total results saved)"
+                                    )
                             except Exception as e:
                                 main_logger.error(
                                     f"Failed to save detection result for frame {frame_num}: {e}",
