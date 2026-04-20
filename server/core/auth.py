@@ -42,6 +42,40 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 
+def get_lockout_policy(db: Session) -> tuple[int, int]:
+    """Return `(max_attempts, lockout_minutes)` with safe defaults."""
+    policy = db.query(PasswordPolicy).first()
+    if not policy:
+        return 5, 15
+
+    max_attempts = policy.max_failed_attempts if policy.max_failed_attempts is not None else 5
+    lockout_mins = policy.lockout_minutes if policy.lockout_minutes is not None else 15
+    return max_attempts, lockout_mins
+
+
+def build_account_locked_detail(locked_until: datetime) -> dict:
+    """Build a consistent account lock response body."""
+    retry_after_seconds = max(0, int((locked_until - datetime.now(UTC)).total_seconds()))
+    return {
+        "error": "account_locked",
+        "message": "Too many failed login attempts. Please try again later.",
+        "retry_after_seconds": retry_after_seconds,
+    }
+
+
+def build_invalid_credentials_detail(
+    message: str = "Incorrect username or password", remaining_attempts: int | None = None
+) -> dict:
+    """Build a consistent 401 invalid-credentials response body."""
+    detail = {
+        "error": "invalid_credentials",
+        "message": message,
+    }
+    if remaining_attempts is not None:
+        detail["remaining_attempts"] = max(0, remaining_attempts)
+    return detail
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against its hash."""
     return pwd_context.verify(plain_password, hashed_password)
@@ -193,7 +227,7 @@ def get_current_superuser(current_user: User = Depends(get_current_user)) -> Use
     return current_user
 
 
-def authenticate_user(db: Session, username: str, password: str) -> User | None:
+def authenticate_user(db: Session, username: str, password: str) -> tuple[User | None, dict | None]:
     """
     Authenticate user with username and password.
     Mitigates timing attacks by always performing password verification.
@@ -206,7 +240,11 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
         # Always verify against a dummy hash so the response time is identical
         # to when a user exists. This prevents username enumeration.
         verify_password(password, settings.dummy_password_hash)
-        return None
+        return None, {
+            "status_code": status.HTTP_401_UNAUTHORIZED,
+            "reason": "invalid_credentials",
+            "detail": build_invalid_credentials_detail(),
+        }
 
     # Check for account lockout
     if user.locked_until:
@@ -214,7 +252,11 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
             # Account is locked.
             # To prevent enumeration via timing analysis, we perform a dummy check
             verify_password(password, settings.dummy_password_hash)
-            return None
+            return None, {
+                "status_code": status.HTTP_423_LOCKED,
+                "reason": "account_locked",
+                "detail": build_account_locked_detail(user.locked_until),
+            }
         else:
             # Lock expired, reset
             user.locked_until = None
@@ -226,34 +268,46 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
         # Handle failed attempt
         user.failed_login_attempts += 1
 
-        # Get policy for lockout rules
-        policy = db.query(PasswordPolicy).first()
-        if not policy:
-            policy = PasswordPolicy()  # Use defaults if not set
-
-        max_attempts = (
-            policy.max_failed_attempts if policy.max_failed_attempts is not None else 5
-        )
-        lockout_mins = (
-            policy.lockout_minutes if policy.lockout_minutes is not None else 15
-        )
+        max_attempts, lockout_mins = get_lockout_policy(db)
 
         if user.failed_login_attempts >= max_attempts:
             user.locked_until = datetime.now(UTC) + timedelta(minutes=lockout_mins)
-            user.failed_login_attempts = 0  # Reset counter after locking? Or keep it?
-            # Usually we can keep it or reset. Let's reset so they start fresh after lockout expires.
-            # Or keep it to show they were locked? The lockout mechanism relies on locked_until.
-            # Resetting attempts ensures that after lock expires, they have full attempts again.
+            user.failed_login_attempts = 0
+            auth_logger.log_action(
+                "auth.account_locked",
+                user_id=user.id,
+                message=f"Account locked after failed login attempts: {user.username}",
+                extra_data={
+                    "username": user.username,
+                    "lockout_minutes": lockout_mins,
+                    "max_attempts": max_attempts,
+                },
+            )
 
         db.add(user)
         db.commit()
-        return None
+
+        if user.locked_until and user.locked_until > datetime.now(UTC):
+            return None, {
+                "status_code": status.HTTP_423_LOCKED,
+                "reason": "account_locked",
+                "detail": build_account_locked_detail(user.locked_until),
+            }
+
+        remaining_attempts = max(0, max_attempts - user.failed_login_attempts)
+        return None, {
+            "status_code": status.HTTP_401_UNAUTHORIZED,
+            "reason": "invalid_credentials",
+            "detail": build_invalid_credentials_detail(
+                remaining_attempts=remaining_attempts
+            ),
+        }
 
     # Authentication successful (Password Verified)
     # Note: We do NOT reset failed_login_attempts here immediately if MFA is enabled.
     # The caller (router) is responsible for resetting the counter upon full successful login.
 
-    return user
+    return user, None
 
 
 # MFA helpers

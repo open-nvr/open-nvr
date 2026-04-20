@@ -132,6 +132,20 @@ async function doFetch(method: string, fullUrl: string, headers: Record<string, 
   return { resp, payload }
 }
 
+function extractErrorMessage(payload: any, statusCode: number): string {
+  if (!payload || typeof payload !== 'object') return `HTTP ${statusCode}`
+
+  const detail = payload.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message
+    if (typeof detail.detail === 'string' && detail.detail.trim()) return detail.detail
+  }
+
+  if (typeof payload.message === 'string' && payload.message.trim()) return payload.message
+  return `HTTP ${statusCode}`
+}
+
 async function request(method: string, url: string, data?: any, options: RequestOptions = {}, config: ApiConfig = {}) {
   const baseURL = config.baseURL ?? defaultBaseURL
   const fullUrl = buildUrl(baseURL, url, options.params)
@@ -188,7 +202,7 @@ async function request(method: string, url: string, data?: any, options: Request
   }
 
   if (!resp.ok) {
-    const err: any = new Error((payload && (payload.detail || payload.message)) || `HTTP ${resp.status}`)
+    const err: any = new Error(extractErrorMessage(payload, resp.status))
     err.status = resp.status
     err.data = payload
     // Expose response headers on auth errors so callers can inspect x-setup-required etc.

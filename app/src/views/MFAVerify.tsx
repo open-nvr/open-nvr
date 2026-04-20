@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 
@@ -32,15 +32,35 @@ export function MFAVerify() {
   const { username, password } = (state || {}) as LocationState
 
   const [code, setCode] = useState('')
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
+
+  const formatRetryTime = (seconds: number) => {
+    if (seconds <= 0) return '0s'
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    if (mins > 0 && secs > 0) return `${mins}m ${secs}s`
+    if (mins > 0) return `${mins}m`
+    return `${secs}s`
+  }
+
+  useEffect(() => {
+    if (retryAfterSeconds <= 0) return
+    const timer = window.setInterval(() => {
+      setRetryAfterSeconds((prev) => (prev > 0 ? prev - 1 : 0))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [retryAfterSeconds])
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!username || !password) return
+    if (!username || !password || retryAfterSeconds > 0) return
     try {
       await login(username, password, code)
       navigate('/')
-    } catch (_) {
-      // errors handled in context
+    } catch (e: any) {
+      if (e?.accountLocked) {
+        setRetryAfterSeconds(Math.max(0, Number(e?.retryAfterSeconds || 0)))
+      }
     }
   }
 
@@ -71,13 +91,18 @@ export function MFAVerify() {
         <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
         <h1 className="text-lg font-semibold tracking-wide text-gray-100">Two‑factor verification</h1>
         <div className="text-xs text-gray-400">Enter the 6‑digit code from your authenticator app.</div>
+        {retryAfterSeconds > 0 && (
+          <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">
+            Too many failed attempts. Try again in {formatRetryTime(retryAfterSeconds)}.
+          </div>
+        )}
         {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-2">{error}</div>}
         <label className="block text-sm text-gray-200">
           <span className="block mb-2 text-gray-400 font-medium">MFA Code</span>
           <input className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500 text-center tracking-widest text-lg" value={code} onChange={(e) => setCode(e.target.value)} minLength={6} maxLength={8} placeholder="000000" required />
         </label>
-        <button disabled={loading} className="w-full px-4 py-3 rounded-lg bg-[#5eb3f6] text-white font-semibold disabled:opacity-60 shadow-lg hover:bg-[#4a9de5] transition-colors">
-          {loading ? 'Verifying…' : 'Verify'}
+        <button disabled={loading || retryAfterSeconds > 0} className="w-full px-4 py-3 rounded-lg bg-[#5eb3f6] text-white font-semibold disabled:opacity-60 shadow-lg hover:bg-[#4a9de5] transition-colors">
+          {loading ? 'Verifying…' : retryAfterSeconds > 0 ? `Try again in ${formatRetryTime(retryAfterSeconds)}` : 'Verify'}
         </button>
         <div className="text-xs text-gray-400 text-center">
           <Link to="/login" className="text-[#5eb3f6] hover:text-[#4a9de5] underline">Use a different account</Link>

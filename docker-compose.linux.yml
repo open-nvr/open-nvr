@@ -103,9 +103,10 @@ services:
       - KAI_C_URL=http://127.0.0.1:8100
 
       # External URLs for browser access
-      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
-      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
-      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+      - APPLICATION_URL=http://100.95.117.40:8000
+      - MEDIAMTX_EXTERNAL_BASE_URL=http://100.95.117.40:8889
+      - MEDIAMTX_EXTERNAL_HLS_URL=http://100.95.117.40:8888
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://100.95.117.40:9996
 
       # Path mapping configuration for volume mounts
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH}

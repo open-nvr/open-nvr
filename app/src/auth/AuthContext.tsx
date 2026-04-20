@@ -50,6 +50,22 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 const TOKEN_KEY = 'opennvr.token'
 const REFRESH_KEY = 'opennvr.refresh_token'
 
+function getErrorPayload(err: any): any {
+  const detail = err?.data?.detail
+  if (detail && typeof detail === 'object') return detail
+  if (err?.data && typeof err.data === 'object') return err.data
+  return null
+}
+
+function buildErrorMessage(payload: any, fallback: string): string {
+  if (payload?.error === 'invalid_credentials' && Number.isInteger(payload?.remaining_attempts)) {
+    const remaining = Number(payload.remaining_attempts)
+    const noun = remaining === 1 ? 'attempt' : 'attempts'
+    return `${payload.message || fallback}. ${remaining} ${noun} remaining.`
+  }
+  return payload?.message || fallback
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>({ user: null, token: null, loading: true, error: null, setupRequired: false })
 
@@ -103,7 +119,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const me = await apiService.me()
       setState({ user: me.data, token, loading: false, error: null, setupRequired: false })
     } catch (e: any) {
-      const detail = e?.data?.detail || ''
+      const payload = getErrorPayload(e)
+      const detail = payload?.message || e?.data?.detail || ''
       
       // Check if first-time setup is required
       if (e?.status === 403 && e?.headers?.['x-setup-required'] === 'true') {
@@ -111,6 +128,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const setupErr: any = new Error('First-time setup required')
         setupErr.setupRequired = true
         throw setupErr
+      }
+
+      if (e?.status === 423 && payload?.error === 'account_locked') {
+        const retryAfterSeconds = Math.max(0, Number(payload.retry_after_seconds || 0))
+        const lockMessage = payload?.message || 'Too many failed login attempts. Please try again later.'
+        setState((s) => ({ ...s, loading: false, error: lockMessage }))
+
+        const lockErr: any = new Error(lockMessage)
+        lockErr.accountLocked = true
+        lockErr.retryAfterSeconds = retryAfterSeconds
+        throw lockErr
       }
       
       // If the backend indicates MFA is required/missing, surface a structured error
@@ -120,7 +148,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         mfaErr.mfaRequired = true
         throw mfaErr
       }
-      const message = detail || e?.message || 'Login failed'
+
+      const message = buildErrorMessage(payload, detail || e?.message || 'Login failed')
       setState((s) => ({ ...s, loading: false, error: message }))
       throw e
     }
