@@ -184,6 +184,7 @@ class InferenceManager:
 
         from core.database import SessionLocal
         from models import AIDetectionResult
+        from services.event_bus_service import publish_inference_result
         from services.kai_c_service import get_kai_c_service
 
         main_logger.info(f"Inference loop started for model {model_id}")
@@ -212,11 +213,28 @@ class InferenceManager:
 
                     # Save result to database
                     if result.get("status") == "success":
+                        response_data = result.get("response", {})
+
+                        # Publish to the live event bus BEFORE the DB gate so
+                        # agent subscribers (pipecat, vision-agents) see the
+                        # same data the dashboard would — including
+                        # zero-confidence heartbeats, which they may need for
+                        # presence tracking even though we don't store them.
+                        try:
+                            await publish_inference_result(
+                                camera_id=camera_id,
+                                model_id=model_id,
+                                task=task,
+                                payload=response_data,
+                            )
+                        except Exception as pub_err:
+                            main_logger.warning(
+                                f"Event bus publish failed for model {model_id}: {pub_err}"
+                            )
+
                         try:
                             db = SessionLocal()
                             try:
-                                response_data = result.get("response", {})
-
                                 # Skip saving detection results when nothing was detected
                                 # (adapter returns confidence=0.0 as a placeholder)
                                 if (
@@ -301,6 +319,7 @@ class InferenceManager:
 
         from core.database import SessionLocal
         from models import AIDetectionResult
+        from services.event_bus_service import publish_inference_result
         from services.kai_c_service import get_kai_c_service
         from services.storage_service import get_effective_recordings_base_path
 
@@ -432,10 +451,25 @@ class InferenceManager:
 
                         # Save result immediately to database
                         if result.get("status") == "success":
+                            response_data = result.get("response", {})
+
+                            # Publish to live event bus before DB gate so agent
+                            # subscribers see every frame result (including
+                            # no-detection heartbeats).
+                            try:
+                                await publish_inference_result(
+                                    camera_id=camera_id,
+                                    model_id=model_id,
+                                    task=task,
+                                    payload=response_data,
+                                )
+                            except Exception as pub_err:
+                                main_logger.warning(
+                                    f"Event bus publish failed for model {model_id}: {pub_err}"
+                                )
+
                             db = SessionLocal()
                             try:
-                                response_data = result.get("response", {})
-
                                 # Skip saving detection results when nothing was detected
                                 # (adapter returns confidence=0.0 as a placeholder)
                                 if (
@@ -530,6 +564,7 @@ class InferenceManager:
         from core.database import SessionLocal
         from models import AIDetectionResult, CloudProviderModel
         from services.credential_vault_service import CredentialVaultService
+        from services.event_bus_service import publish_inference_result
 
         main_logger.info(f"Cloud inference loop started for model {model_id}")
         settings = get_settings()
@@ -608,6 +643,27 @@ class InferenceManager:
 
                             # Parse HF API response based on task
                             hf_result = result.get("result", [])
+
+                            # Publish to live event bus so agent subscribers
+                            # (pipecat, vision-agents) can react to cloud
+                            # results in the same shape as local ones. We send
+                            # the raw HF payload — consumers branch on task.
+                            try:
+                                await publish_inference_result(
+                                    camera_id=camera_id,
+                                    model_id=model_id,
+                                    task=cloud_model.task,
+                                    payload={
+                                        "result": hf_result,
+                                        "latency_ms": result.get("latency_ms"),
+                                        "executed_at": result.get("executed_at"),
+                                        "annotated_image_uri": frame_uri,
+                                    },
+                                )
+                            except Exception as pub_err:
+                                main_logger.warning(
+                                    f"Event bus publish failed for cloud model {model_id}: {pub_err}"
+                                )
 
                             # Store result(s) in database
                             if cloud_model.task == "object-detection":

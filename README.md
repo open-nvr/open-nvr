@@ -3,53 +3,59 @@
 
 Bring AI to the Edge. Own Your Security. Deploy Anywhere.
 
+## What you get
+
+- **Live multi-camera NVR** — ONVIF / RTSP ingest, HLS playback, event recording via MediaMTX.
+- **Pluggable AI pipeline** — person detection, face recognition, scene captioning out of the box; add your own via the [AI Adapter SDK](https://github.com/open-nvr/ai-adapter).
+- **Self-hosted, privacy-first** — your footage never leaves your hardware unless *you* wire it up.
+- **Cross-platform** — Windows, macOS, Linux (bridge or host networking).
+- **One-command install** — interactive wizard generates secrets, clones optional components, and starts everything.
+
 ---
 
 ## 🐳 1. Docker Build & Deployment (Recommended)
-This is the recommended approach for both **Linux** and **Windows** users to get the entire ecosystem talking to each other automatically. 
+This is the recommended approach for **Linux**, **macOS**, and **Windows** users. The install wizard wires the entire ecosystem together automatically.
 
 ### Prerequisites
 - Git
-- Docker & Docker Compose
+- Docker Desktop (Windows/macOS) or Docker Engine + Compose v2 (Linux)
 
 ### Step-by-Step Build
-1. **Clone the main OpenNVR repository**
+
+1. **Clone OpenNVR**
    ```bash
    git clone https://github.com/open-nvr/open-nvr.git
    cd open-nvr
    ```
 
-2. **Clone the AI Adapters directly inside**
-   Because the OpenNVR Docker environment is preconfigured to tie into the local AI Adapter, you must clone it into the root directory:
+2. **Run the install wizard**
+
+   **Linux / macOS:**
    ```bash
-   git clone https://github.com/open-nvr/ai-adapter.git
+   ./start.sh
    ```
 
-3. **Generate Security Secrets**
-   ```bash
-   # Copy the example format
-   cp .env.docker .env 
-
-   # Linux:
-   ./scripts/generate-secrets.sh
-   # Windows (PowerShell):
-   .\scripts\generate-secrets.ps1
-   ```
-   *Take the outputted values from the script and paste them into your `.env` file.*
-
-4. **Build and Run**
-   ```bash
-   # Build the container images across both repositories
-   docker compose build
-   
-   # Start the environment in the background
-   docker compose up -d
+   **Windows (PowerShell):**
+   ```powershell
+   .\start.ps1
    ```
 
-🎉 **Access the Platform:** 
+   On first run the wizard will:
+   - check prerequisites (Docker, Compose, Git)
+   - ask for recording storage path and admin user
+   - offer to clone the [ai-adapter](https://github.com/open-nvr/ai-adapter) repo as a sibling directory (required only if you enable AI detection)
+   - generate strong secrets and write `.env`
+   - build images and start the stack
+
+   Subsequent runs of `start.sh` / `start.ps1` just validate and start — no re-install.
+
+   > Prefer doing it by hand? Copy `.env.example` → `.env`, fill in secrets (or run `./scripts/generate-secrets.sh -Write` / `.\scripts\generate-secrets.ps1 -Write`), then `docker compose up -d --build`.
+
+🎉 **Access the Platform:**
+- OpenNVR Web UI: `http://localhost:8000`
 - OpenNVR API Docs: `http://localhost:8000/docs`
 - MediaMTX: `http://localhost:8889`
-- AI Adapter API: `http://localhost:9100`
+- AI Adapter API (if enabled): `http://localhost:9100`
 
 ---
 
@@ -118,16 +124,24 @@ npm run dev
 ./mediamtx open-nvr/mediamtx.local.yml
 ```
 
-**Terminal 5: AI Adapters**
+**Terminal 5: AI Adapter (optional — only if you want AI detection)**
 ```bash
-cd AIAdapters
-uv venv venv
+# Clone ai-adapter as a sibling directory to open-nvr:
+#   parent/
+#   ├── open-nvr/
+#   └── ai-adapter/
+git clone https://github.com/open-nvr/ai-adapter.git ../ai-adapter
+cd ../ai-adapter
+uv venv
 
-# Activate venv (Linux: source venv/bin/activate | Windows: .\venv\Scripts\activate)
-uv sync
+# Activate venv (Linux/macOS: source .venv/bin/activate | Windows: .\.venv\Scripts\activate)
+uv sync --extra all --extra cpu
+
+# Download model weights
+uv run python download_models.py
 
 # Start Adapter
-uvicorn adapter.main:app --reload --port 9100
+uv run uvicorn app.main:app --reload --port 9100
 ```
 
 ---

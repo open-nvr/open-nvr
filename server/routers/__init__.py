@@ -17,6 +17,7 @@
 # Routers package for API endpoints
 
 
+from .events import router as events
 from .suricata_logs import router as suricata_logs
 from .suricata_stream import router as suricata_stream
 from .system import router as system
