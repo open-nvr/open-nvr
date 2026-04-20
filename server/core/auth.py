@@ -46,10 +46,10 @@ def get_lockout_policy(db: Session) -> tuple[int, int]:
     """Return `(max_attempts, lockout_minutes)` with safe defaults."""
     policy = db.query(PasswordPolicy).first()
     if not policy:
-        return 5, 15
+        return 5, 3
 
     max_attempts = policy.max_failed_attempts if policy.max_failed_attempts is not None else 5
-    lockout_mins = policy.lockout_minutes if policy.lockout_minutes is not None else 15
+    lockout_mins = policy.lockout_minutes if policy.lockout_minutes is not None else 3
     return max_attempts, lockout_mins
 
 

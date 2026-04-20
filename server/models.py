@@ -352,7 +352,7 @@ class PasswordPolicy(Base):
     expiration_days = Column(Integer, nullable=True)  # null or 0 to disable
     # Lockout / reset
     max_failed_attempts = Column(Integer, nullable=False, default=5)
-    lockout_minutes = Column(Integer, nullable=False, default=15)
+    lockout_minutes = Column(Integer, nullable=False, default=3)
     reset_token_ttl_minutes = Column(Integer, nullable=False, default=15)
     # Privileged
     require_mfa_for_privileged = Column(Boolean, nullable=False, default=True)
