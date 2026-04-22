@@ -22,16 +22,29 @@ This is the recommended approach for **Linux**, **macOS**, and **Windows** users
 
 ### Step-by-Step Build
 
-1. **Clone OpenNVR**
+1. **Clone the core OpenNVR repository**
    ```bash
    git clone https://github.com/open-nvr/open-nvr.git
+   ```
+   ![Cloning OpenNVR Repo](docs/screenshots/cloning_nvr_repo.png)
+
+2. **Clone the AI Adapter repository as a sibling**
+   ```bash
+   git clone https://github.com/open-nvr/ai-adapter.git
+   ```
+   ![Cloning AI Adapter Repo](docs/screenshots/cloning_ai_adapter_repo.png)
+
+3. **Enter the NVR root directory**
+   ```bash
    cd open-nvr
    ```
+   ![Changing Directory](docs/screenshots/changing_directory.png)
 
-2. **Run the install wizard**
+4. **Run the smart start script**
 
    **Linux / macOS:**
    ```bash
+   chmod +x start.sh
    ./start.sh
    ```
 
@@ -39,11 +52,16 @@ This is the recommended approach for **Linux**, **macOS**, and **Windows** users
    ```powershell
    .\start.ps1
    ```
+   ![Running setup via powershell](docs/screenshots/start_ps.png)
+
+   > **Initial Setup:** If it is your first time bringing the containers up, the interactive setup will block the sequence and engage with you in the terminal.
+
+   ![Interactive prompt beginning](docs/screenshots/installation_begin.png)
 
    On first run the wizard will:
    - check prerequisites (Docker, Compose, Git)
-   - ask for recording storage path and admin user
-   - offer to clone the [ai-adapter](https://github.com/open-nvr/ai-adapter) repo as a sibling directory (required only if you enable AI detection)
+   - ask for recording storage path and initialization configs
+   - check if the [ai-adapter](https://github.com/open-nvr/ai-adapter) repo is present
    - generate strong secrets and write `.env`
    - build images and start the stack
 
@@ -51,7 +69,13 @@ This is the recommended approach for **Linux**, **macOS**, and **Windows** users
 
    > Prefer doing it by hand? Copy `.env.example` → `.env`, fill in secrets (or run `./scripts/generate-secrets.sh -Write` / `.\scripts\generate-secrets.ps1 -Write`), then `docker compose up -d --build`.
 
-🎉 **Access the Platform:**
+## 🌐 2. Access the Web UI
+
+Once the services are healthy, open your browser and navigate to `http://localhost:8000`. You will automatically be redirected to the **First-Time Setup** page to initialize your `admin` password securely before accessing the dashboard:
+
+![First Time Setup](docs/screenshots/first_time_setup.png)
+
+🎉 **Core Endpoints:**
 - OpenNVR Web UI: `http://localhost:8000`
 - OpenNVR API Docs: `http://localhost:8000/docs`
 - MediaMTX: `http://localhost:8889`
