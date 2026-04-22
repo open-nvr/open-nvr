@@ -21,14 +21,19 @@ Handles user authentication and JWT token generation.
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from core.auth import (
     authenticate_user,
+    build_account_locked_detail,
+    build_invalid_credentials_detail,
     create_access_token,
+    create_refresh_token,
     generate_mfa_secret,
+    get_lockout_policy,
     get_current_active_user,
     get_mfa_provisioning_uri,
     get_password_hash,
@@ -201,7 +206,47 @@ async def login_for_access_token(
         user_agent=request.headers.get("user-agent") if request else None,
     )
 
-    user = authenticate_user(db, form_data.username, form_data.password)
+    user, auth_error = authenticate_user(db, form_data.username, form_data.password)
+    if auth_error:
+        failure_reason = auth_error.get("reason", "invalid_credentials")
+        failure_status = int(auth_error.get("status_code", status.HTTP_401_UNAUTHORIZED))
+        failure_detail = auth_error.get("detail", build_invalid_credentials_detail())
+
+        if failure_reason == "account_locked":
+            auth_logger.log_action(
+                "auth.login_blocked_locked",
+                message=f"Login blocked for user: {form_data.username} - account locked",
+                extra_data={
+                    "username": form_data.username,
+                    "reason": "account_locked",
+                    "method": "form",
+                    "retry_after_seconds": failure_detail.get("retry_after_seconds", 0),
+                },
+                ip_address=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None,
+            )
+        else:
+            auth_logger.log_action(
+                "auth.login_failed",
+                message=f"Login failed for user: {form_data.username} - invalid credentials",
+                extra_data={
+                    "username": form_data.username,
+                    "reason": "invalid_credentials",
+                    "method": "form",
+                    "remaining_attempts": failure_detail.get("remaining_attempts"),
+                },
+                ip_address=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None,
+            )
+
+        raise HTTPException(
+            status_code=failure_status,
+            detail=failure_detail,
+            headers={"WWW-Authenticate": "Bearer"}
+            if failure_status == status.HTTP_401_UNAUTHORIZED
+            else None,
+        )
+
     if not user:
         auth_logger.log_action(
             "auth.login_failed",
@@ -216,7 +261,7 @@ async def login_for_access_token(
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail=build_invalid_credentials_detail(),
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -234,9 +279,11 @@ async def login_for_access_token(
             user_agent=request.headers.get("user-agent") if request else None,
         )
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "forbidden",
+                "message": "Account is inactive.",
+            },
         )
 
     if user.mfa_enabled:
@@ -267,6 +314,7 @@ async def login_for_access_token(
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
+    refresh_token = create_refresh_token(data={"sub": user.username})
 
     auth_logger.log_action(
         "auth.login_success",
@@ -297,7 +345,7 @@ async def login_for_access_token(
     except Exception as e:
         auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @router.post("/login-json", response_model=Token)
@@ -319,18 +367,31 @@ async def login_with_json(
             headers={"X-Setup-Required": "true"},
         )
 
-    user = authenticate_user(db, user_credentials.username, user_credentials.password)
+    user, auth_error = authenticate_user(db, user_credentials.username, user_credentials.password)
+    if auth_error:
+        failure_status = int(auth_error.get("status_code", status.HTTP_401_UNAUTHORIZED))
+        failure_detail = auth_error.get("detail", build_invalid_credentials_detail())
+        raise HTTPException(
+            status_code=failure_status,
+            detail=failure_detail,
+            headers={"WWW-Authenticate": "Bearer"}
+            if failure_status == status.HTTP_401_UNAUTHORIZED
+            else None,
+        )
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail=build_invalid_credentials_detail(),
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "forbidden",
+                "message": "Account is inactive.",
+            },
         )
 
     if user.mfa_enabled:
@@ -340,26 +401,43 @@ async def login_with_json(
             # Handle MFA failure as a failed login attempt
             user.failed_login_attempts += 1
 
-            policy = db.query(PasswordPolicy).first()
-            if not policy:
-                policy = PasswordPolicy()
-
-            max_attempts = (
-                policy.max_failed_attempts
-                if policy.max_failed_attempts is not None
-                else 5
-            )
-            lockout_mins = (
-                policy.lockout_minutes if policy.lockout_minutes is not None else 15
-            )
+            max_attempts, lockout_mins = get_lockout_policy(db)
 
             if user.failed_login_attempts >= max_attempts:
                 user.locked_until = datetime.now(UTC) + timedelta(minutes=lockout_mins)
+                user.failed_login_attempts = 0
 
             db.add(user)
             db.commit()
 
-            raise HTTPException(status_code=401, detail="Invalid or missing MFA code")
+            if user.locked_until and user.locked_until > datetime.now(UTC):
+                auth_logger.log_action(
+                    "auth.login_blocked_locked",
+                    user_id=user.id,
+                    message=f"MFA login blocked for user: {user.username} - account locked",
+                    extra_data={
+                        "username": user.username,
+                        "reason": "account_locked",
+                        "method": "json",
+                        "retry_after_seconds": max(0, int((user.locked_until - datetime.now(UTC)).total_seconds())),
+                    },
+                    ip_address=request.client.host if request and request.client else None,
+                    user_agent=request.headers.get("user-agent") if request else None,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail=build_account_locked_detail(user.locked_until),
+                )
+
+            remaining_attempts = max(0, max_attempts - user.failed_login_attempts)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=build_invalid_credentials_detail(
+                    message="Invalid or missing MFA code",
+                    remaining_attempts=remaining_attempts,
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     # Reset failed attempts on successful login
     if user.failed_login_attempts > 0 or user.locked_until:
@@ -372,6 +450,7 @@ async def login_with_json(
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
+    refresh_token = create_refresh_token(data={"sub": user.username})
     try:
         write_audit_log(
             db,
@@ -389,7 +468,7 @@ async def login_with_json(
         )
     except Exception:
         pass
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
@@ -461,6 +540,42 @@ async def mfa_disable(
     except Exception:
         pass
     return {"message": "MFA disabled"}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_access_token(
+    refresh_token: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Exchange a valid refresh token for a new access token and refresh token pair."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            refresh_token, settings.secret_key, algorithms=[settings.algorithm]
+        )
+        if payload.get("type") != "refresh":
+            raise credentials_exception
+        username: str = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.username == username, User.is_active == True).first()
+    if not user:
+        raise credentials_exception
+
+    new_access_token = create_access_token(data={"sub": user.username})
+    new_refresh_token = create_refresh_token(data={"sub": user.username})
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")

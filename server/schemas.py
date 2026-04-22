@@ -421,7 +421,7 @@ class PasswordPolicyBase(BaseModel):
     history_count: int = Field(5, ge=0, le=50)
     expiration_days: int | None = Field(None, ge=0, le=3650)
     max_failed_attempts: int = Field(5, ge=0, le=50)
-    lockout_minutes: int = Field(15, ge=0, le=1440)
+    lockout_minutes: int = Field(3, ge=0, le=1440)
     reset_token_ttl_minutes: int = Field(15, ge=1, le=1440)
     require_mfa_for_privileged: bool = True
 
@@ -499,6 +499,7 @@ class RecordingResponse(RecordingBase):
 # Authentication schemas
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
 

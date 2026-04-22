@@ -184,6 +184,7 @@ class InferenceManager:
 
         from core.database import SessionLocal
         from models import AIDetectionResult
+        from services.event_bus_service import publish_inference_result
         from services.kai_c_service import get_kai_c_service
 
         main_logger.info(f"Inference loop started for model {model_id}")
@@ -212,53 +213,67 @@ class InferenceManager:
 
                     # Save result to database
                     if result.get("status") == "success":
+                        response_data = result.get("response", {})
+
+                        # Publish to the live event bus BEFORE the DB gate so
+                        # agent subscribers (pipecat, vision-agents) see the
+                        # same data the dashboard would — including
+                        # zero-confidence heartbeats, which they may need for
+                        # presence tracking even though we don't store them.
+                        try:
+                            await publish_inference_result(
+                                camera_id=camera_id,
+                                model_id=model_id,
+                                task=task,
+                                payload=response_data,
+                            )
+                        except Exception as pub_err:
+                            main_logger.warning(
+                                f"Event bus publish failed for model {model_id}: {pub_err}"
+                            )
+
                         try:
                             db = SessionLocal()
                             try:
-                                response_data = result.get("response", {})
-
-                                detection_result = AIDetectionResult(
-                                    model_id=model_id,
-                                    camera_id=camera_id,
-                                    task=task,
-                                    label=response_data.get("label"),
-                                    confidence=response_data.get("confidence"),
-                                    bbox_x=response_data.get("bbox", [None])[0]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 0
-                                    else None,
-                                    bbox_y=response_data.get("bbox", [None, None])[1]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 1
-                                    else None,
-                                    bbox_width=response_data.get(
-                                        "bbox", [None, None, None]
-                                    )[2]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 2
-                                    else None,
-                                    bbox_height=response_data.get(
-                                        "bbox", [None, None, None, None]
-                                    )[3]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 3
-                                    else None,
-                                    count=response_data.get("count"),
-                                    caption=response_data.get("caption")
-                                    or response_data.get("description"),
-                                    latency_ms=response_data.get("latency_ms"),
-                                    annotated_image_uri=response_data.get(
-                                        "annotated_image_uri"
-                                    ),
-                                    executed_at=datetime.fromtimestamp(
-                                        response_data.get("executed_at") / 1000.0
+                                # Skip saving detection results when nothing was detected
+                                # (adapter returns confidence=0.0 as a placeholder)
+                                if (
+                                    response_data.get("confidence") is not None
+                                    and response_data.get("confidence") == 0.0
+                                    and response_data.get("count") is None
+                                ):
+                                    main_logger.debug(
+                                        f"Skipping zero-confidence result for model {model_id} (no detection)"
                                     )
-                                    if response_data.get("executed_at")
-                                    else None,
-                                )
+                                else:
+                                    bbox = response_data.get("bbox") or []
 
-                                db.add(detection_result)
-                                db.commit()
+                                    detection_result = AIDetectionResult(
+                                        model_id=model_id,
+                                        camera_id=camera_id,
+                                        task=task,
+                                        label=response_data.get("label"),
+                                        confidence=response_data.get("confidence"),
+                                        bbox_x=bbox[0] if len(bbox) > 0 else None,
+                                        bbox_y=bbox[1] if len(bbox) > 1 else None,
+                                        bbox_width=bbox[2] if len(bbox) > 2 else None,
+                                        bbox_height=bbox[3] if len(bbox) > 3 else None,
+                                        count=response_data.get("count"),
+                                        caption=response_data.get("caption")
+                                        or response_data.get("description"),
+                                        latency_ms=response_data.get("latency_ms"),
+                                        annotated_image_uri=response_data.get(
+                                            "annotated_image_uri"
+                                        ),
+                                        executed_at=datetime.fromtimestamp(
+                                            response_data.get("executed_at") / 1000.0
+                                        )
+                                        if response_data.get("executed_at")
+                                        else None,
+                                    )
+
+                                    db.add(detection_result)
+                                    db.commit()
                             finally:
                                 db.close()
                         except Exception as e:
@@ -304,6 +319,7 @@ class InferenceManager:
 
         from core.database import SessionLocal
         from models import AIDetectionResult
+        from services.event_bus_service import publish_inference_result
         from services.kai_c_service import get_kai_c_service
         from services.storage_service import get_effective_recordings_base_path
 
@@ -435,50 +451,62 @@ class InferenceManager:
 
                         # Save result immediately to database
                         if result.get("status") == "success":
+                            response_data = result.get("response", {})
+
+                            # Publish to live event bus before DB gate so agent
+                            # subscribers see every frame result (including
+                            # no-detection heartbeats).
+                            try:
+                                await publish_inference_result(
+                                    camera_id=camera_id,
+                                    model_id=model_id,
+                                    task=task,
+                                    payload=response_data,
+                                )
+                            except Exception as pub_err:
+                                main_logger.warning(
+                                    f"Event bus publish failed for model {model_id}: {pub_err}"
+                                )
+
                             db = SessionLocal()
                             try:
-                                response_data = result.get("response", {})
+                                # Skip saving detection results when nothing was detected
+                                # (adapter returns confidence=0.0 as a placeholder)
+                                if (
+                                    response_data.get("confidence") is not None
+                                    and response_data.get("confidence") == 0.0
+                                    and response_data.get("count") is None
+                                ):
+                                    main_logger.debug(
+                                        f"Skipping zero-confidence result for frame {frame_num} (no detection)"
+                                    )
+                                else:
+                                    bbox = response_data.get("bbox") or []
 
-                                detection_result = AIDetectionResult(
-                                    model_id=model_id,
-                                    camera_id=camera_id,
-                                    task=task,
-                                    label=response_data.get("label"),
-                                    confidence=response_data.get("confidence"),
-                                    bbox_x=response_data.get("bbox", [None])[0]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 0
-                                    else None,
-                                    bbox_y=response_data.get("bbox", [None, None])[1]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 1
-                                    else None,
-                                    bbox_width=response_data.get(
-                                        "bbox", [None, None, None]
-                                    )[2]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 2
-                                    else None,
-                                    bbox_height=response_data.get(
-                                        "bbox", [None, None, None, None]
-                                    )[3]
-                                    if response_data.get("bbox")
-                                    and len(response_data.get("bbox", [])) > 3
-                                    else None,
-                                    count=response_data.get("count"),
-                                    caption=response_data.get("caption")
-                                    or response_data.get("description"),
-                                    latency_ms=response_data.get("latency_ms"),
-                                    executed_at=datetime.now(),
-                                )
+                                    detection_result = AIDetectionResult(
+                                        model_id=model_id,
+                                        camera_id=camera_id,
+                                        task=task,
+                                        label=response_data.get("label"),
+                                        confidence=response_data.get("confidence"),
+                                        bbox_x=bbox[0] if len(bbox) > 0 else None,
+                                        bbox_y=bbox[1] if len(bbox) > 1 else None,
+                                        bbox_width=bbox[2] if len(bbox) > 2 else None,
+                                        bbox_height=bbox[3] if len(bbox) > 3 else None,
+                                        count=response_data.get("count"),
+                                        caption=response_data.get("caption")
+                                        or response_data.get("description"),
+                                        latency_ms=response_data.get("latency_ms"),
+                                        executed_at=datetime.now(),
+                                    )
 
-                                db.add(detection_result)
-                                db.commit()
-                                saved_count += 1
+                                    db.add(detection_result)
+                                    db.commit()
+                                    saved_count += 1
 
-                                main_logger.info(
-                                    f"✓ Saved detection result for frame {frame_num} ({saved_count} total results saved)"
-                                )
+                                    main_logger.info(
+                                        f"✓ Saved detection result for frame {frame_num} ({saved_count} total results saved)"
+                                    )
                             except Exception as e:
                                 main_logger.error(
                                     f"Failed to save detection result for frame {frame_num}: {e}",
@@ -536,6 +564,7 @@ class InferenceManager:
         from core.database import SessionLocal
         from models import AIDetectionResult, CloudProviderModel
         from services.credential_vault_service import CredentialVaultService
+        from services.event_bus_service import publish_inference_result
 
         main_logger.info(f"Cloud inference loop started for model {model_id}")
         settings = get_settings()
@@ -614,6 +643,27 @@ class InferenceManager:
 
                             # Parse HF API response based on task
                             hf_result = result.get("result", [])
+
+                            # Publish to live event bus so agent subscribers
+                            # (pipecat, vision-agents) can react to cloud
+                            # results in the same shape as local ones. We send
+                            # the raw HF payload — consumers branch on task.
+                            try:
+                                await publish_inference_result(
+                                    camera_id=camera_id,
+                                    model_id=model_id,
+                                    task=cloud_model.task,
+                                    payload={
+                                        "result": hf_result,
+                                        "latency_ms": result.get("latency_ms"),
+                                        "executed_at": result.get("executed_at"),
+                                        "annotated_image_uri": frame_uri,
+                                    },
+                                )
+                            except Exception as pub_err:
+                                main_logger.warning(
+                                    f"Event bus publish failed for cloud model {model_id}: {pub_err}"
+                                )
 
                             # Store result(s) in database
                             if cloud_model.task == "object-detection":

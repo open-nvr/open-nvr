@@ -7,9 +7,6 @@
 .env
 .env.*
 !.env.example
-!.env.docker
-# Default Docker environment template
-!env.example
 
 # Cryptographic keys and certificates
 server/keys/*.pem

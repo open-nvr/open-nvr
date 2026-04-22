@@ -135,8 +135,8 @@ rtspEncryption: "no"
 rtspAddress: :8554
 rtspsAddress: 127.0.0.1:8322
 # SECURITY: Disable UDP listeners (localhost TCP only)
-rtpAddress: 127.0.0.1:8000
-rtcpAddress: 127.0.0.1:8001
+rtpAddress: 127.0.0.1:8010
+rtcpAddress: 127.0.0.1:8011
 multicastIPRange: 224.1.0.0/16
 multicastRTPPort: 8002
 multicastRTCPPort: 8003
@@ -350,8 +350,8 @@ pathDefaults:
   ###############################################
 
   # Startup hook - provisions cameras from backend database on MediaMTX start
-  runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/startup/hook?delay=5"'
-  runOnInitRestart: no
+  runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/startup/hook"'
+  runOnInitRestart: yes
 
   runOnDemand:
   runOnDemandRestart: no

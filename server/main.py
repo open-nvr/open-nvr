@@ -57,6 +57,7 @@ from routers import (
     cloud_providers,
     cloud_streaming,
     compliance,
+    events as events_router,
     firmware as firmware_router,
     general,
     integrations,
@@ -421,6 +422,7 @@ app.include_router(compliance.router, prefix=settings.api_prefix)
 app.include_router(suricata_logs, prefix=settings.api_prefix)
 app.include_router(suricata_stream, prefix=settings.api_prefix)
 app.include_router(system, prefix=settings.api_prefix)
+app.include_router(events_router, prefix=settings.api_prefix)
 
 
 # =============================================================================

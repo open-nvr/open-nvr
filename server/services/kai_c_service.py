@@ -52,10 +52,15 @@ class KaiCService:
             kai_c_url: Base URL of KAI-C HTTP service (default: http://localhost:8100)
         """
         self.kai_c_url = kai_c_url.rstrip("/")
-        # Use the same frames directory as AI Adapter expects
-        # AI Adapter expects frames at: D:\testing repos\ai-adapter\frames
-        workspace_root = Path(__file__).parent.parent.parent.parent
-        self.frames_dir = workspace_root / "ai-adapter" / "frames"
+        # Resolve frames directory: prefer FRAMES_DIR env var (set in Docker),
+        # fall back to dev-layout path (workspace_root/ai-adapter/frames).
+        import os
+        env_frames = os.environ.get("FRAMES_DIR")
+        if env_frames:
+            self.frames_dir = Path(env_frames)
+        else:
+            workspace_root = Path(__file__).parent.parent.parent.parent
+            self.frames_dir = workspace_root / "ai-adapter" / "frames"
         self.frames_dir.mkdir(exist_ok=True, parents=True)
 
         # Thread pool for blocking operations (RTSP capture)

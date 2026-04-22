@@ -1,144 +1,144 @@
-# ============================================
-# OpenNVR NVR - Secrets Generator (PowerShell)
-# ============================================
-# This script generates all required secrets for .env file
-# Run this script and copy the output to your .env file
-# Usage: .\generate-secrets.ps1
-# ============================================
+# ============================================================
+# OpenNVR - Secrets Generator (Windows PowerShell)
+# ============================================================
+# Generates cryptographically secure secrets and writes them
+# directly into the .env file (in the project root).
+#
+# Usage:
+#   .\scripts\generate-secrets.ps1         # dry-run: print only
+#   .\scripts\generate-secrets.ps1 -Write  # generate and write to .env
+# ============================================================
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "OPENNVR NVR - SECURITY SECRETS GENERATOR" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Generating secure random secrets..." -ForegroundColor Yellow
-Write-Host ""
+param(
+    [switch]$Write
+)
 
-# Function to generate random string
-function Get-RandomString {
-    param (
+$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
+$EnvFile     = Join-Path $ProjectRoot ".env"
+$EnvExample  = Join-Path $ProjectRoot ".env.example"
+
+function Write-Color($Text, $Color = "White") {
+    Write-Host $Text -ForegroundColor $Color
+}
+
+Write-Color ""
+Write-Color "╔══════════════════════════════════════════════╗" Cyan
+Write-Color "║       OpenNVR - Secrets Generator            ║" Cyan
+Write-Color "╚══════════════════════════════════════════════╝" Cyan
+Write-Color ""
+
+# ── Helper: generate random string ────────────────────────
+function New-RandomString {
+    param(
         [int]$Length = 32,
-        [switch]$Hex
+        [switch]$Hex,
+        [switch]$Base64
     )
-    
-    if ($Hex) {
-        $bytes = New-Object byte[] ($Length / 2)
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-        return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
-    } else {
-        $bytes = New-Object byte[] $Length
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-        return [Convert]::ToBase64String($bytes).Substring(0, $Length)
+    $bytes = New-Object byte[] $(if ($Hex) { [int]($Length / 2) } else { $Length })
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    if ($Hex)    { return ($bytes | ForEach-Object { $_.ToString('x2') }) -join '' }
+    if ($Base64) { return [Convert]::ToBase64String($bytes) }
+    return [Convert]::ToBase64String($bytes).Substring(0, $Length)
+}
+
+# ── Dependency check: Python for Fernet key ───────────────
+$PythonCmd = $null
+foreach ($cmd in @('python', 'python3')) {
+    if (Get-Command $cmd -ErrorAction SilentlyContinue) {
+        $PythonCmd = $cmd
+        break
     }
 }
-
-# Check if Python is available
-$pythonAvailable = $false
-$pythonCmd = $null
-
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    $pythonCmd = "python"
-    $pythonAvailable = $true
-} elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
-    $pythonCmd = "python3"
-    $pythonAvailable = $true
+if (-not $PythonCmd) {
+    Write-Color "WARNING: Python not found — CREDENTIAL_ENCRYPTION_KEY will not be updated." Yellow
+    Write-Color "         Install Python 3 and run: pip install cryptography" Yellow
+    Write-Color ""
 }
 
-if (-not $pythonAvailable) {
-    Write-Host "WARNING: Python not found! Cannot generate CREDENTIAL_ENCRYPTION_KEY" -ForegroundColor Yellow
-    Write-Host "Please install Python 3 and cryptography package" -ForegroundColor Yellow
-    Write-Host ""
-}
+# ── Generate secrets ───────────────────────────────────────
+Write-Color "Generating secrets..." Green
+Write-Color ""
 
-Write-Host "============================================" -ForegroundColor Green
-Write-Host "COPY THESE VALUES TO YOUR .env FILE" -ForegroundColor Green
-Write-Host "============================================" -ForegroundColor Green
-Write-Host ""
+$PostgresPassword = New-RandomString -Length 32
+$SecretKey        = New-RandomString -Length 64 -Hex
+$InternalApiKey   = New-RandomString -Length 32 -Base64
+$MediamtxSecret   = New-RandomString -Length 64 -Hex
 
-# Generate database password
-$dbPassword = Get-RandomString -Length 32
-Write-Host "# Database Configuration" -ForegroundColor Gray
-Write-Host "POSTGRES_PASSWORD=$dbPassword"
-Write-Host "DATABASE_URL=postgresql://opennvr_user:$dbPassword@db:5432/opennvr_db"
-Write-Host ""
-
-# Generate JWT secret key
-$secretKey = Get-RandomString -Length 64 -Hex
-Write-Host "# JWT Secret Key" -ForegroundColor Gray
-Write-Host "SECRET_KEY=$secretKey"
-Write-Host ""
-
-# Generate credential encryption key
-if ($pythonAvailable) {
+$CredentialKey = $null
+if ($PythonCmd) {
     try {
-        $credentialKey = & $pythonCmd -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $credentialKey) {
-            Write-Host "# Credential Encryption Key" -ForegroundColor Gray
-            Write-Host "CREDENTIAL_ENCRYPTION_KEY=$credentialKey"
-        } else {
-            Write-Host "# Credential Encryption Key (FAILED - install cryptography: uv add cryptography)" -ForegroundColor Yellow
-            Write-Host "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
-        }
-    } catch {
-        Write-Host "# Credential Encryption Key (Error generating - install: uv add cryptography)" -ForegroundColor Yellow
-        Write-Host "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
+        $CredentialKey = & $PythonCmd -c `
+            "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" `
+            2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $CredentialKey) { $CredentialKey = $null }
+    } catch { $CredentialKey = $null }
+}
+
+if (-not $CredentialKey) {
+    Write-Color "WARNING: Could not generate Fernet key. Install: pip install cryptography" Yellow
+    Write-Color "         CREDENTIAL_ENCRYPTION_KEY will not be updated." Yellow
+    Write-Color ""
+}
+
+# ── Display generated values ───────────────────────────────
+Write-Color "  POSTGRES_PASSWORD        = $PostgresPassword"        Gray
+Write-Color "  SECRET_KEY                = $SecretKey"               Gray
+Write-Color "  CREDENTIAL_ENCRYPTION_KEY = $(if ($CredentialKey) { $CredentialKey } else { '<skipped>' })" Gray
+Write-Color "  INTERNAL_API_KEY          = $InternalApiKey"          Gray
+Write-Color "  MEDIAMTX_SECRET           = $MediamtxSecret"          Gray
+Write-Color ""
+
+# ── Write to .env ──────────────────────────────────────────
+if (-not $Write) {
+    Write-Color "Dry-run mode — nothing written." Yellow
+    Write-Color "Run with -Write to apply:  .\scripts\generate-secrets.ps1 -Write" Cyan
+    Write-Color ""
+    exit 0
+}
+
+# Ensure .env exists
+if (-not (Test-Path $EnvFile)) {
+    Write-Color ".env not found — copying from .env.example ..." Yellow
+    Copy-Item $EnvExample $EnvFile
+    Write-Color "✓ .env created from template." Green
+}
+
+# Helper: replace key=value in .env file
+function Set-EnvVar {
+    param([string]$Key, [string]$Value, [string]$File)
+    $lines   = Get-Content $File
+    $pattern = "^${Key}="
+    $newLine = "${Key}=${Value}"
+    $found   = $false
+    $updated = $lines | ForEach-Object {
+        if ($_ -match $pattern) { $found = $true; $newLine }
+        else                    { $_ }
     }
-} else {
-    Write-Host "# Credential Encryption Key (Python not found)" -ForegroundColor Yellow
-    Write-Host "CREDENTIAL_ENCRYPTION_KEY=GENERATE_MANUALLY"
+    if (-not $found) { $updated += $newLine }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllLines($File, [string[]]$updated, $utf8NoBom)
 }
-Write-Host ""
 
-# Generate internal API key
-$internalApiKey = Get-RandomString -Length 32
-Write-Host "# Internal API Key" -ForegroundColor Gray
-Write-Host "INTERNAL_API_KEY=$internalApiKey"
-Write-Host ""
+Write-Color "Writing secrets to .env ..." Green
 
-# Generate MediaMTX secret
-$mediamtxSecret = Get-RandomString -Length 32 -Hex
-Write-Host "# MediaMTX Secret" -ForegroundColor Gray
-Write-Host "MEDIAMTX_SECRET=$mediamtxSecret"
-Write-Host ""
+Set-EnvVar "POSTGRES_PASSWORD" $PostgresPassword $EnvFile
+Set-EnvVar "SECRET_KEY"        $SecretKey        $EnvFile
+Set-EnvVar "INTERNAL_API_KEY"  $InternalApiKey   $EnvFile
+Set-EnvVar "MEDIAMTX_SECRET"   $MediamtxSecret   $EnvFile
 
-Write-Host "============================================" -ForegroundColor Green
-Write-Host "GENERATION COMPLETE" -ForegroundColor Green
-Write-Host "============================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "⚠️  IMPORTANT:" -ForegroundColor Yellow
-Write-Host "  1. Copy ALL the values above to your .env file"
-Write-Host "  2. Keep these secrets SECURE and PRIVATE"
-Write-Host "  3. NEVER commit .env file to version control"
-Write-Host "  4. Store a backup of these secrets in a secure location"
-Write-Host ""
-Write-Host "✅ After copying to .env, you can run:" -ForegroundColor Green
-Write-Host "   docker compose up -d"
-Write-Host ""
-
-# Optional: Save to file
-$saveToFile = Read-Host "Save secrets to secrets.txt? (y/N)"
-if ($saveToFile -eq 'y' -or $saveToFile -eq 'Y') {
-    $outputFile = "secrets-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
-    @"
-# OpenNVR NVR Secrets - Generated $(Get-Date)
-# KEEP THIS FILE SECURE - DO NOT COMMIT TO GIT
-
-# Database Configuration
-POSTGRES_PASSWORD=$dbPassword
-DATABASE_URL=postgresql://opennvr_user:$dbPassword@db:5432/opennvr_db
-
-# JWT Secret Key
-SECRET_KEY=$secretKey
-
-# Credential Encryption Key
-CREDENTIAL_ENCRYPTION_KEY=$credentialKey
-
-# Internal API Key
-INTERNAL_API_KEY=$internalApiKey
-
-# MediaMTX Secret
-MEDIAMTX_SECRET=$mediamtxSecret
-"@ | Out-File -FilePath $outputFile -Encoding UTF8
-    
-    Write-Host "✅ Secrets saved to: $outputFile" -ForegroundColor Green
-    Write-Host "⚠️  Remember to delete this file after copying to .env!" -ForegroundColor Yellow
+if ($CredentialKey) {
+    Set-EnvVar "CREDENTIAL_ENCRYPTION_KEY" $CredentialKey $EnvFile
 }
+
+Write-Color ""
+Write-Color "✓ Secrets written to .env" Green
+Write-Color ""
+Write-Color "IMPORTANT:" Yellow
+Write-Color "  1. Never commit .env to version control"
+Write-Color "  2. Store a secure backup of these secrets"
+Write-Color "  3. CREDENTIAL_ENCRYPTION_KEY cannot be changed after first run"
+Write-Color ""
+Write-Color "Ready to start:  .\start.ps1 build" Green
+Write-Color ""

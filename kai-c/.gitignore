@@ -6,7 +6,11 @@ __pycache__/
 
 # Virtual environments
 venv/
-.env/
+
+# Environment files
+.env
+.env.*
+!.env.example
 
 # OS
 .DS_Store

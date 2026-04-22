@@ -29,10 +29,46 @@ export type RequestOptions = {
   signal?: AbortSignal
 }
 
+const TOKEN_KEY = 'opennvr.token'
+const REFRESH_KEY = 'opennvr.refresh_token'
+
 let authToken: string | null = null
+let isRefreshing = false
+let pendingRequests: Array<(token: string | null) => void> = []
 
 export function setAuthToken(token: string | null) {
   authToken = token
+}
+
+async function tryRefreshToken(): Promise<string | null> {
+  const refreshToken = localStorage.getItem(REFRESH_KEY)
+  if (!refreshToken) return null
+
+  const baseURL = ((import.meta as any)?.env?.VITE_API_BASE_URL && String((import.meta as any).env.VITE_API_BASE_URL).trim()) ||
+    ((import.meta as any)?.env?.PROD
+      ? (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
+      : 'http://localhost:8000')
+
+  const url = buildUrl(baseURL, '/api/v1/auth/refresh')
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+    credentials: 'omit',
+  })
+
+  if (!resp.ok) {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(REFRESH_KEY)
+    authToken = null
+    return null
+  }
+
+  const data = await resp.json()
+  authToken = data.access_token
+  localStorage.setItem(TOKEN_KEY, data.access_token)
+  localStorage.setItem(REFRESH_KEY, data.refresh_token)
+  return data.access_token
 }
 
 // API Base URL configuration
@@ -74,6 +110,42 @@ function buildUrl(base: string, path: string, params?: Record<string, any>) {
   return url.toString()
 }
 
+async function doFetch(method: string, fullUrl: string, headers: Record<string, string>, body: BodyInit | undefined, options: RequestOptions) {
+  const resp = await fetch(fullUrl, {
+    method,
+    headers,
+    body: method === 'GET' ? undefined : body,
+    signal: options.signal,
+    credentials: 'omit',
+  })
+
+  const rtype = options.responseType || 'json'
+  let payload: any = null
+  try {
+    if (rtype === 'text') payload = await resp.text()
+    else if (rtype === 'blob') payload = await resp.blob()
+    else payload = await resp.json()
+  } catch {
+    payload = null
+  }
+
+  return { resp, payload }
+}
+
+function extractErrorMessage(payload: any, statusCode: number): string {
+  if (!payload || typeof payload !== 'object') return `HTTP ${statusCode}`
+
+  const detail = payload.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message
+    if (typeof detail.detail === 'string' && detail.detail.trim()) return detail.detail
+  }
+
+  if (typeof payload.message === 'string' && payload.message.trim()) return payload.message
+  return `HTTP ${statusCode}`
+}
+
 async function request(method: string, url: string, data?: any, options: RequestOptions = {}, config: ApiConfig = {}) {
   const baseURL = config.baseURL ?? defaultBaseURL
   const fullUrl = buildUrl(baseURL, url, options.params)
@@ -97,28 +169,46 @@ async function request(method: string, url: string, data?: any, options: Request
 
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`
 
-  const resp = await fetch(fullUrl, {
-    method,
-    headers,
-    body: method === 'GET' ? undefined : body,
-    signal: options.signal,
-    credentials: 'omit',
-  })
+  let { resp, payload } = await doFetch(method, fullUrl, headers, body, options)
 
-  const rtype = options.responseType || 'json'
-  let payload: any = null
-  try {
-    if (rtype === 'text') payload = await resp.text()
-    else if (rtype === 'blob') payload = await resp.blob()
-    else payload = await resp.json()
-  } catch {
-    payload = null
+  // On 401, attempt a silent token refresh once (skip for the refresh endpoint itself)
+  if (resp.status === 401 && !url.includes('/auth/refresh') && !url.includes('/auth/login')) {
+    let newToken: string | null = null
+
+    if (isRefreshing) {
+      // Queue this request until the in-flight refresh resolves
+      newToken = await new Promise<string | null>((resolve) => {
+        pendingRequests.push(resolve)
+      })
+    } else {
+      isRefreshing = true
+      newToken = await tryRefreshToken()
+      isRefreshing = false
+      pendingRequests.forEach((resolve) => resolve(newToken))
+      pendingRequests = []
+    }
+
+    if (newToken) {
+      headers['Authorization'] = `Bearer ${newToken}`;
+      ({ resp, payload } = await doFetch(method, fullUrl, headers, body, options))
+    } else {
+      // Refresh failed — redirect to login
+      if (typeof window !== 'undefined') window.location.href = '/login'
+      const err: any = new Error('Session expired')
+      err.status = 401
+      err.data = payload
+      throw err
+    }
   }
 
   if (!resp.ok) {
-    const err: any = new Error((payload && (payload.detail || payload.message)) || `HTTP ${resp.status}`)
+    const err: any = new Error(extractErrorMessage(payload, resp.status))
     err.status = resp.status
     err.data = payload
+    // Expose response headers on auth errors so callers can inspect x-setup-required etc.
+    const h: Record<string, string> = {}
+    resp.headers.forEach((v, k) => { h[k.toLowerCase()] = v })
+    err.headers = h
     throw err
   }
 
