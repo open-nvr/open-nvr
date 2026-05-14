@@ -279,7 +279,7 @@ async def _process_huggingface_inference(request: CloudInferenceRequest) -> Dict
     # Prepare payload for AI Adapter's /infer endpoint
     payload = {
         "task": request.task,
-        "input_data": {
+        "input": {
             "model_name": request.model_name,
             "inputs": request.inputs,
             "parameters": request.parameters,
