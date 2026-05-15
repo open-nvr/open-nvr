@@ -635,7 +635,10 @@ class InferenceManager:
                         response = await client.post(
                             f"{kai_c_url}/infer/cloud",
                             json=payload,
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": settings.internal_api_key or "",
+                            },
                         )
 
                         if response.status_code == 200:
