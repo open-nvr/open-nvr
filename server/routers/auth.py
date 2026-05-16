@@ -56,6 +56,9 @@ from schemas import (
     UserResponse,
 )
 from services.audit_service import write_audit_log
+from services.first_time_setup_service import (
+    verify_and_consume as _verify_setup_token,
+)
 from services.user_service import UserService
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -88,6 +91,33 @@ async def first_time_setup(
     request: Request = None,
 ):
     """Complete first-time setup: set password and enable MFA."""
+    # M0 followup C-1: gate on the one-time setup token that was minted at
+    # server startup and printed to stdout + audit log. This closes the
+    # bootstrap-race window where any LAN attacker could claim the admin
+    # account before the operator. The constant-time check + immediate
+    # consume happens inside the service.
+    #
+    # We deliberately do this BEFORE the username lookup so an unauthenticated
+    # caller cannot use this endpoint as a user-existence oracle.
+    if not _verify_setup_token(payload.setup_token):
+        try:
+            auth_logger.log_action(
+                "auth.first_time_setup_token_rejected",
+                message="First-time setup attempted with missing or invalid token",
+                extra_data={"username": payload.username},
+                ip_address=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None,
+            )
+        except Exception:
+            pass
+        # Match the post-success "wrong user" 4xx code surface so an attacker
+        # cannot distinguish "no token armed" from "wrong token" from
+        # "wrong username" — all three look the same.
+        raise HTTPException(
+            status_code=403,
+            detail="First-time setup token missing or invalid.",
+        )
+
     # Find user that needs setup
     user = (
         db.query(User)

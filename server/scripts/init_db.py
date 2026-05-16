@@ -200,27 +200,71 @@ def create_initial_data():
             ],
         )
 
-        # Create admin user if not exists
+        # Create admin user if not exists.
+        #
+        # V-001 (Zenodo 17261761 §3.1 / ETSI EN 303 645 unique-credential):
+        # there is no shipped default password. Two operator-friendly paths
+        # are supported:
+        #
+        #   (a) **Interactive bootstrap (default).** Leave DEFAULT_ADMIN_PASSWORD
+        #       unset; the account is created with ``password_set=False`` and
+        #       must be activated via the /auth/first-time-setup flow. That
+        #       flow is itself gated by a one-time setup token printed below
+        #       (C-1 followup) so an attacker on the management network cannot
+        #       race the operator to claim the account.
+        #   (b) **Provisioned bootstrap.** Set DEFAULT_ADMIN_PASSWORD explicitly
+        #       (e.g. from your secrets manager during automated deployment).
+        #       The account is created with ``password_set=True`` and the
+        #       operator's password is honored on the first login. Without
+        #       this branch the provisioned password is silently unusable —
+        #       see review finding C-2.
+        import secrets as _secrets
         admin_user = (
             db.query(User)
             .filter(User.username == settings.default_admin_username)
             .first()
         )
         if not admin_user:
+            initial_password = settings.default_admin_password
+            if initial_password:
+                hashed = get_password_hash(initial_password)
+                password_set = True
+                bootstrap_msg = (
+                    "Admin user created with the provisioned "
+                    "DEFAULT_ADMIN_PASSWORD. The account is immediately "
+                    "usable — please ensure this value came from a secrets "
+                    "manager and not a checked-in file."
+                )
+            else:
+                # No password provided -> store a hash of a high-entropy
+                # random value so even reading the source code does not
+                # let an attacker authenticate. The account stays gated by
+                # password_set=False; activation goes through the
+                # one-time-token-gated first-time-setup flow.
+                hashed = get_password_hash(_secrets.token_urlsafe(64))
+                password_set = False
+                bootstrap_msg = (
+                    "Admin user created without a password. Complete "
+                    "/auth/first-time-setup using the setup token printed "
+                    "below to enable the account."
+                )
+
             admin_user = User(
                 username=settings.default_admin_username,
                 email=settings.default_admin_email,
-                hashed_password=get_password_hash(settings.default_admin_password),
+                hashed_password=hashed,
                 first_name=settings.default_admin_first_name,
                 last_name=settings.default_admin_last_name,
                 is_active=True,
                 is_superuser=True,
+                password_set=password_set,
+                mfa_enabled=True,  # MFA on by default (paper §4.1, §5)
                 role_id=admin_role.id,
             )
             db.add(admin_user)
             db.commit()
             print(f"Created admin user: {settings.default_admin_username}")
-            print("IMPORTANT: Change the admin password after first login!")
+            print(f"IMPORTANT: {bootstrap_msg}")
         else:
             # Ensure admin role and superuser flag
             admin_user.role_id = admin_role.id

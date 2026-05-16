@@ -457,6 +457,12 @@ class UserResponse(UserBase):
 class FirstTimeSetupRequest(BaseModel):
     username: str
     password: str = Field(..., min_length=8)
+    # M0 followup C-1: the setup token is minted at server startup when a
+    # user with password_set=False exists, and printed to stdout + audit log
+    # exactly once. The endpoint refuses without a matching token so an
+    # attacker on the management network cannot race the operator to claim
+    # the admin account.
+    setup_token: str = Field(..., min_length=8)
 
 
 class FirstTimeSetupResponse(BaseModel):

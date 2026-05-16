@@ -50,7 +50,11 @@ from schemas import (
 )
 from services.mediamtx_admin_service import MediaMtxAdminService
 from services.cloud_recording_service import CloudRecordingService
-from services.storage_service import storage_service
+from services.storage_service import (
+    RecordingPathError,
+    safe_recording_path,
+    storage_service,
+)
 from services.stream_service import _build_stream_name
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
@@ -133,12 +137,39 @@ async def queue_cloud_upload_for_day(
 
     queued = 0
     skipped_missing = 0
-    base_path = settings.recordings_base_path
+    skipped_unsafe = 0
 
     for rec in rows:
         raw_path = rec.file_path or rec.filename or ""
         norm = raw_path.replace("\\", "/")
         lower = norm.lower()
+
+        # H-1 reviewer finding: previously, an absolute DB-poisoned path like
+        # "/etc/passwd" would silently fall through the prefix-stripping
+        # below to a relative lookup "etc/passwd" under the recordings base.
+        # That's not strong enough — if an attacker can ALSO write to the
+        # recordings base (which they can, since MediaMTX writes there), they
+        # win the exfiltration. Refuse outright any absolute path that does
+        # not name our recordings subtree.
+        is_absolute = os.path.isabs(norm) or (
+            len(norm) >= 2 and norm[1] == ":"  # Windows drive letter
+        )
+        recordings_marker_present = (
+            "/recordings/" in lower
+            or lower.startswith("recordings/")
+            or lower.startswith("/app/recordings/")
+        )
+        if is_absolute and not recordings_marker_present:
+            skipped_unsafe += 1
+            recording_logger.warning(
+                "V-005/H-1: refusing to upload recording whose DB-stored "
+                "file_path is absolute and outside the recordings subtree "
+                "(record id=%s camera_id=%s raw=%r)",
+                getattr(rec, "id", None),
+                camera_id,
+                raw_path,
+            )
+            continue
 
         # Keep only recording-relative suffix (strip host/container absolute prefixes)
         rel_suffix = norm
@@ -152,22 +183,38 @@ async def queue_cloud_upload_for_day(
             rel_suffix = norm[len("/app/recordings/"):]
 
         rel_suffix = rel_suffix.lstrip("/")
-        destination_key = f"recordings/{rel_suffix}" if rel_suffix else f"recordings/{os.path.basename(raw_path)}"
+        destination_key = (
+            f"recordings/{rel_suffix}"
+            if rel_suffix
+            else f"recordings/{os.path.basename(raw_path)}"
+        )
 
-        # Resolve absolute path robustly for legacy/container-style paths.
-        if rec.file_path and os.path.isabs(rec.file_path):
-            full_path = rec.file_path
-        elif rec.file_path and rec.file_path.startswith("/app/recordings/"):
-            suffix = rec.file_path.replace("/app/recordings/", "", 1)
-            full_path = os.path.join(base_path, suffix)
-        else:
-            full_path = os.path.join(base_path, rel_suffix or raw_path)
+        # V-005 (Zenodo 17261761 §3.4 / customer-controlled storage):
+        # ``file_path`` is DB-stored and could in principle be poisoned. We
+        # require every recording we read off disk to resolve under the
+        # configured recordings base, with symlinks chased. A poisoned record
+        # pointing at ``/etc/passwd`` was already rejected above by H-1; this
+        # handles the relative-path attack surface (``../`` traversal,
+        # symlink-escape, etc.).
+        try:
+            full_path = safe_recording_path(rel_suffix or raw_path, db)
+        except RecordingPathError as exc:
+            skipped_unsafe += 1
+            recording_logger.warning(
+                "V-005: refusing to upload recording with unsafe path "
+                "(record id=%s camera_id=%s raw=%r): %s",
+                getattr(rec, "id", None),
+                camera_id,
+                raw_path,
+                exc,
+            )
+            continue
 
-        if not os.path.exists(full_path):
+        if not full_path.exists():
             skipped_missing += 1
             continue
 
-        await service.queue_upload(full_path, camera_id, destination_key)
+        await service.queue_upload(str(full_path), camera_id, destination_key)
         queued += 1
 
     return {
@@ -176,6 +223,7 @@ async def queue_cloud_upload_for_day(
         "date": date,
         "queued": queued,
         "skipped_missing": skipped_missing,
+        "skipped_unsafe": skipped_unsafe,
     }
 
 

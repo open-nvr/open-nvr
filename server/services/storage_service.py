@@ -108,6 +108,124 @@ def _effective_root(cfg: StorageConfig) -> Path:
     return root
 
 
+class RecordingPathError(ValueError):
+    """Raised when a recording-relative path escapes its configured base.
+
+    V-005 (Zenodo 17261761 §3.4 data integrity / customer-controlled storage):
+    any path operation that originates from user input (URL ?rel= parameter,
+    DB-stored relpath, etc.) must resolve to a real file inside the configured
+    recordings base. Symlinks that point outside the base are rejected.
+    """
+
+
+def _resolve_strict(path: Path) -> Path:
+    """Resolve symlinks and ``..`` with strict semantics where the file may not
+    yet exist (during write-back of a recording segment).
+
+    We resolve the closest existing ancestor and then re-join the unresolved
+    tail; this still catches symlinks because every ancestor in the chain is
+    realpath-ed.
+    """
+    p = Path(path)
+    try:
+        return p.resolve(strict=True)
+    except FileNotFoundError:
+        # Walk up to the closest ancestor that does exist, resolve it, then
+        # re-attach the unresolved tail.
+        cur = p
+        tail: list[str] = []
+        while True:
+            parent = cur.parent
+            tail.insert(0, cur.name)
+            if parent == cur:
+                # Reached filesystem root without finding an existing ancestor.
+                return p.resolve()
+            try:
+                resolved_parent = parent.resolve(strict=True)
+                return resolved_parent.joinpath(*tail)
+            except FileNotFoundError:
+                cur = parent
+
+
+def resolve_under_root(root: Path, rel: str | Path) -> Path:
+    """V-005: validate that ``rel`` resolves to a file under ``root``.
+
+    Use this everywhere a request-supplied or DB-supplied relative path is
+    about to become a filesystem operation. Rejects:
+
+    * absolute paths in ``rel`` (they would silently override ``root``);
+    * paths containing ``..`` segments that escape the base after resolution;
+    * symlinks whose target lies outside the base.
+
+    Returns the canonical absolute path on success; raises
+    :class:`RecordingPathError` on any rejection.
+    """
+    if rel is None or (isinstance(rel, str) and not rel.strip()):
+        raise RecordingPathError("recording path is empty")
+    rel_path = Path(rel)
+    # An empty Path() stringifies to "." which would otherwise silently resolve
+    # to the base itself — refuse that explicitly so callers never get a
+    # directory handle back when they asked for a file.
+    if not rel_path.parts or str(rel_path) in (".", ""):
+        raise RecordingPathError("recording path is empty")
+    if rel_path.is_absolute() or (
+        # On Windows, drive-relative paths like "C:foo" are also absolute-ish.
+        len(str(rel_path)) >= 2 and str(rel_path)[1] == ":"
+    ):
+        raise RecordingPathError(
+            f"recording path must be relative to the recordings base, got "
+            f"{str(rel_path)!r}"
+        )
+    # Reject "..", ".", and empty components defensively before we join, in
+    # addition to the resolve-based containment check below.
+    for part in rel_path.parts:
+        if part in ("..", "."):
+            raise RecordingPathError(
+                f"recording path contains a forbidden component "
+                f"({part!r}) in {str(rel_path)!r}"
+            )
+
+    base_resolved = _resolve_strict(Path(root).expanduser())
+    candidate = _resolve_strict(base_resolved / rel_path)
+
+    try:
+        # Python 3.9+: Path.is_relative_to. We require the candidate to be at
+        # or below the base after symlink resolution.
+        if not candidate.is_relative_to(base_resolved):
+            raise RecordingPathError(
+                f"recording path resolves outside the configured base: "
+                f"base={base_resolved} candidate={candidate}"
+            )
+    except AttributeError:  # pragma: no cover  (python < 3.9 fallback)
+        try:
+            candidate.relative_to(base_resolved)
+        except ValueError as exc:
+            raise RecordingPathError(
+                f"recording path resolves outside the configured base: "
+                f"base={base_resolved} candidate={candidate}"
+            ) from exc
+    return candidate
+
+
+def safe_recording_path(rel: str | Path, db: Session | None = None) -> Path:
+    """V-005 convenience wrapper: resolve ``rel`` against the effective
+    recordings base configured for the current deployment.
+
+    Caller is responsible for the DB session lifetime when one is passed in.
+    """
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    try:
+        cfg = _load_storage_config(db)
+        root = _effective_root(cfg)
+        return resolve_under_root(root, rel)
+    finally:
+        if close_db:
+            db.close()
+
+
 def is_recording_path_configured(db: Session = None) -> bool:
     """
     Check if recording path is configured (either in database or via default).

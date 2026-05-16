@@ -125,13 +125,18 @@ async def lifespan(app: FastAPI):
                     )
                     admin_role = db.query(_Role).filter(_Role.name == "admin").first()
                     if admin_role:
-                        # Create admin with NO password - requires first-time setup
+                        # Re-seed path: create admin with an unguessable
+                        # placeholder hash (M0 followup M-4 — never the
+                        # literal "__UNSET__") and force first-time-setup.
+                        # The operator activates the account via the
+                        # token-gated /auth/first-time-setup flow.
+                        import secrets as _secrets
                         admin_user = _User(
                             username=settings.default_admin_username,
                             email=settings.default_admin_email,
                             hashed_password=get_password_hash(
-                                "__UNSET__"
-                            ),  # Placeholder - user must set password
+                                _secrets.token_urlsafe(64)
+                            ),
                             first_name=settings.default_admin_first_name,
                             last_name=settings.default_admin_last_name,
                             is_active=True,
@@ -150,6 +155,46 @@ async def lifespan(app: FastAPI):
                             "Admin role not found, running full seed..."
                         )
                         create_initial_data()
+
+            # M0 followup C-1: if any user is still in password_set=False
+            # state after seeding, arm a one-time first-time-setup token and
+            # print it to stdout. The token gates /auth/first-time-setup so
+            # an attacker on the management network cannot race the operator
+            # to claim the admin account. Re-arming happens on every startup
+            # while a pending user exists; restarting the server is the
+            # supported recovery path for an operator who missed the print.
+            try:
+                from services.first_time_setup_service import maybe_arm
+
+                token = maybe_arm(db)
+                if token is not None:
+                    banner = (
+                        "\n"
+                        "================================================================\n"
+                        " OpenNVR first-time setup token (one-time use)\n"
+                        "----------------------------------------------------------------\n"
+                        f"  {token}\n"
+                        "----------------------------------------------------------------\n"
+                        " Pass this token in the `setup_token` field of\n"
+                        " POST /auth/first-time-setup. It is consumed on first\n"
+                        " successful use. Restart the server to mint a new one.\n"
+                        "================================================================\n"
+                    )
+                    # Print first so it lands in container/journald stdout even
+                    # if the structured logger is misconfigured; then log the
+                    # ARMED event (without the token value) for audit.
+                    print(banner, flush=True)
+                    main_logger.info(
+                        "First-time-setup token armed; see stdout for the value."
+                    )
+            except Exception as exc:
+                # The server must still boot even if token arming fails;
+                # without a token, /auth/first-time-setup will refuse all
+                # attempts, which is the fail-closed posture we want.
+                main_logger.error(
+                    f"Failed to arm first-time-setup token: {exc}",
+                    exc_info=True,
+                )
         finally:
             db.close()
     except Exception as e:
