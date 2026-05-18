@@ -46,7 +46,7 @@ export function FirstTimeSetup() {
     // Validation
     if (!setupToken.trim()) {
       setError(
-        'Setup token is required. Find it in the server stdout (Docker: `docker compose logs opennvr-core | grep -A 6 "first-time setup token"`).'
+        'Setup token is required. Find it in the server terminal output.'
       )
       return
     }
@@ -191,10 +191,7 @@ export function FirstTimeSetup() {
             required
           />
           <span className="block text-xs text-gray-500 mt-1">
-            Printed once on server startup. Docker:{' '}
-            <code className="bg-[#0f1720]/80 px-1 py-0.5 rounded">
-              docker compose logs opennvr-core | grep -A 6 "first-time setup token"
-            </code>
+            Printed once on server startup in the terminal where you ran the start script.
           </span>
         </label>
 
