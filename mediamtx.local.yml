@@ -1,7 +1,17 @@
 ###############################################
 # MediaMTX Configuration - LOCAL DEVELOPMENT
 ###############################################
-# 
+#
+# **DO NOT USE THIS FILE IN PRODUCTION.** This config keeps plaintext
+# RTSP enabled (rtspEncryption: "no") and other dev-friendly defaults
+# so an engineer can stream with VLC / ffprobe without provisioning
+# certs. The production-grade equivalents are mediamtx.docker.yml /
+# mediamtx.yml, where rtspEncryption is set to "strict",
+# hlsEncryption=yes and webrtcEncryption=yes per V-019 (Zenodo 17261761
+# §4.2 Tier 2). Production deployments using this local file MUST set
+# MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true on the OpenNVR backend so the
+# boot audit log records the acknowledgement.
+#
 # This configuration is optimized for LOCAL development:
 # - All services bound to 127.0.0.1 (localhost only)
 # - Hardcoded backend URL for local FastAPI instance

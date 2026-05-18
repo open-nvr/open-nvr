@@ -194,6 +194,11 @@ def current_posture() -> dict[str, Any]:
         "deployment_mode": settings.deployment_mode,
         "ai_sovereignty": settings.ai_sovereignty,
         "allow_remote_mediamtx": settings.allow_remote_mediamtx,
+        # V-019 (M1b): operator's acknowledgement of plaintext MediaMTX
+        # outputs (i.e. they are running the permissive `mediamtx.local.yml`
+        # template instead of the hardened `mediamtx.docker.yml`). Default
+        # is False; surfacing it here makes the deviation auditable.
+        "mediamtx_allow_plaintext_outputs": settings.mediamtx_allow_plaintext_outputs,
     }
 
 
@@ -207,7 +212,9 @@ def audit_boot_posture() -> None:
             message=(
                 f"Boot policy: deployment_mode={posture['deployment_mode']} "
                 f"ai_sovereignty={posture['ai_sovereignty']} "
-                f"allow_remote_mediamtx={posture['allow_remote_mediamtx']}"
+                f"allow_remote_mediamtx={posture['allow_remote_mediamtx']} "
+                f"mediamtx_allow_plaintext_outputs="
+                f"{posture['mediamtx_allow_plaintext_outputs']}"
             ),
             extra_data=posture,
         )

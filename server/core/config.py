@@ -161,6 +161,18 @@ class Settings(BaseSettings):
     # MediaMTX service URLs (internal - for backend to MediaMTX communication)
     mediamtx_hls_url: str | None = "http://localhost:8888"  # HLS streaming endpoint
     mediamtx_rtsp_url: str | None = "rtsp://localhost:8554"  # RTSP streaming endpoint
+    # M1b-fixup C-3 / v2 F-1: explicit TLS-required RTSP endpoint. Defaults
+    # to the mediamtx.docker.yml rtspsAddress port (8322). Subject to the
+    # V-015 loopback validator below.
+    #
+    # The "external" companion follows the same convention as
+    # mediamtx_external_hls_url and mediamtx_external_base_url: this is
+    # what the backend hands to *browser/external* clients (resolvable on
+    # their network). The non-external value is for internal probes /
+    # backend-to-MediaMTX connections (where the Docker hostname `mediamtx`
+    # is resolvable). See server/routers/streams.py for the fallback chain.
+    mediamtx_rtsps_url: str | None = "rtsps://localhost:8322"
+    mediamtx_external_rtsps_url: str | None = None
     mediamtx_playback_url: str = (
         "http://localhost:9996"  # Playback server for recordings
     )
@@ -259,6 +271,20 @@ class Settings(BaseSettings):
     ai_sovereignty: Literal[
         "local_only", "federated", "cloud_allowed"
     ] = "local_only"
+
+    # V-019 (M1b): MediaMTX plaintext-output acknowledgement.
+    #
+    # The MediaMTX YAML templates ship with `rtspEncryption: "yes"` so the
+    # operator-facing RTSP server refuses plaintext and only accepts TLS
+    # (RFC 7826). Some development environments cannot provision TLS certs
+    # (no PKI, no domain, devs streaming locally with VLC) and need the
+    # permissive `mediamtx.local.yml`. Set this to True there so the
+    # operator's acknowledgement is recorded in the boot audit log and
+    # surfaced via /system/posture. OpenNVR cannot enforce MediaMTX's
+    # config — MediaMTX is a separate process — so this setting is
+    # *informational only*: it doesn't change MediaMTX's behaviour, but
+    # it makes the deviation from the hardened default auditable.
+    mediamtx_allow_plaintext_outputs: bool = False
 
     # Logging settings
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -388,11 +414,17 @@ class Settings(BaseSettings):
 
         # (env_var_name, value) pairs we need to check. None values are skipped
         # because they mean "use default" which is always localhost.
+        #
+        # MEDIAMTX_EXTERNAL_* URLs are intentionally NOT in this list —
+        # they are the browser-facing endpoints behind your TLS-terminating
+        # reverse proxy and may legitimately resolve to a routable host.
+        # See docs/SECURITY_ARCHITECTURE.md §2.2 (V-015 scope note).
         candidates: list[tuple[str, str | None]] = [
             ("MEDIAMTX_BASE_URL", self.mediamtx_base_url),
             ("MEDIAMTX_ADMIN_API", self.mediamtx_admin_api),
             ("MEDIAMTX_HLS_URL", self.mediamtx_hls_url),
             ("MEDIAMTX_RTSP_URL", self.mediamtx_rtsp_url),
+            ("MEDIAMTX_RTSPS_URL", self.mediamtx_rtsps_url),
             ("MEDIAMTX_PLAYBACK_URL", self.mediamtx_playback_url),
         ]
 

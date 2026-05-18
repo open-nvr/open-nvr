@@ -288,13 +288,29 @@ async def get_stream_info(
         or settings.mediamtx_hls_url
         or "http://127.0.0.1:8888"
     )
-    rtsp_base = settings.mediamtx_rtsp_url or "rtsp://127.0.0.1:8554"
+    # M1b-fixup-v2 F-1: RTSPS URL follows the same external/internal
+    # fallback pattern as HLS/WebRTC/playback so the value handed to
+    # browser clients is resolvable on their network (not the Docker
+    # internal hostname `mediamtx`).
+    rtsps_base = (
+        settings.mediamtx_external_rtsps_url
+        or settings.mediamtx_rtsps_url
+        or "rtsps://127.0.0.1:8322"
+    )
     playback_base = (
         settings.mediamtx_external_playback_url
         or settings.mediamtx_playback_url
         or "http://127.0.0.1:9996"
     )
 
+    # M1b-fixup-v2 F-2 / F-8: under rtspEncryption="strict" MediaMTX does
+    # not bind the plaintext RTSP listener at all (per upstream config
+    # reference). The legacy `urls.rtsp` is therefore unusable — clients
+    # following it get ECONNREFUSED. We emit `None` for backwards
+    # compatibility (existing clients that key into ['urls']['rtsp'] see
+    # an explicit signal rather than a KeyError) and direct them at
+    # `urls.rtsps` instead. `rtsp_disabled_reason` makes the intent
+    # discoverable from the API itself.
     return {
         "camera_id": camera_id,
         "stream_name": stream_name,
@@ -304,7 +320,12 @@ async def get_stream_info(
         "urls": {
             "webrtc": f"{webrtc_base.rstrip('/')}/{stream_name}/whep",
             "hls": f"{hls_base.rstrip('/')}/{stream_name}/index.m3u8",
-            "rtsp": f"{rtsp_base.rstrip('/')}/{stream_name}",
+            "rtsps": f"{rtsps_base.rstrip('/')}/{stream_name}",
+            "rtsp": None,
+            "rtsp_disabled_reason": (
+                "plaintext RTSP disabled by V-019 / rtspEncryption=strict; "
+                "use urls.rtsps"
+            ),
             "playback": f"{playback_base.rstrip('/')}/{stream_name}",
         },
         "camera": {

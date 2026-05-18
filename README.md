@@ -68,6 +68,8 @@ This is the recommended approach for **Linux**, **macOS**, and **Windows** users
    - generate strong secrets and write `.env`
    - build images and start the stack
 
+   The bundled `mediamtx-certs-init` service in `docker-compose.yml` automatically generates a self-signed TLS cert pair for MediaMTX (RTSPS / HLS-over-HTTPS / WebRTC signaling per V-019) on first boot if none exists. The pair lives under `./mediamtx-certs/` on the host. If you want a different SAN (e.g. routable hostname or LAN IP), run `./scripts/generate-mediamtx-certs.sh` once with `EXTRA_SAN="DNS:opennvr.lan,IP:10.0.0.5"` *before* the first `docker compose up`; subsequent runs skip generation when the files already exist.
+
    Subsequent runs of `start.sh` / `start.ps1` just validate and start — no re-install.
 
    > Prefer doing it by hand? Copy `.env.example` → `.env`, fill in secrets (or run `./scripts/generate-secrets.sh -Write` / `.\scripts\generate-secrets.ps1 -Write`), then `docker compose up -d --build`.
@@ -223,6 +225,36 @@ If you are pulling this branch on top of an older OpenNVR `.env`, you may need t
    - `DEPLOYMENT_MODE=offline` — every cloud-touching route returns 403. Use `hybrid` to opt back in to cloud streaming / cloud recording / cloud AI inference (each call is audit-logged), or `cloud` to disable all checks.
    - `AI_SOVEREIGNTY=local_only` — KAI-C refuses non-loopback adapter URLs and `/infer/cloud` returns 403. Set to `federated` or `cloud_allowed` if you have explicitly accepted the sovereignty trade-off. Important: **the same value must be set in KAI-C's environment** (it runs in its own process and reads the env var directly).
 5. **(Re-check) MediaMTX URLs:** must be loopback unless `ALLOW_REMOTE_MEDIAMTX=true` is set.
+6. **MediaMTX now requires TLS certs (V-019).** The hardened templates (`mediamtx.docker.yml`, `mediamtx.yml`) terminate TLS on the RTSPS, HLS, and WebRTC-signaling listeners. MediaMTX refuses to start without `server.crt` and `server.key`. Pick **one** of:
+
+   **Option A — generate a self-signed cert pair (default path).**
+
+   For Docker deployments this happens *automatically* on first `docker compose up` via the bundled `mediamtx-certs-init` service. You only need to invoke the script manually if you want to control the SAN (e.g. add a routable hostname) or for bare-metal installs:
+
+   ```bash
+   # POSIX:
+   ./scripts/generate-mediamtx-certs.sh
+   # With a custom SAN for routable access (browsers reaching by hostname/IP):
+   EXTRA_SAN="DNS:opennvr.lan,IP:10.0.0.5" ./scripts/generate-mediamtx-certs.sh
+   # Windows PowerShell:
+   .\scripts\generate-mediamtx-certs.ps1 -ExtraSan "DNS:opennvr.lan,IP:10.0.0.5"
+   ```
+
+   Writes a 10-year self-signed cert pair to `./mediamtx-certs/` with SAN covering `127.0.0.1`, `::1`, `localhost`, and the docker-compose service name `mediamtx`. Idempotent — won't overwrite existing files unless you pass `--force`. `docker-compose.yml` mounts `./mediamtx-certs/` into `/etc/mediamtx-certs/` inside the container; the YAML templates reference the certs via that absolute path. **Bare-metal installs** must put the certs at `/etc/mediamtx-certs/` on the host (or edit `mediamtx.yml` to point at wherever you put them).
+
+   **Option B — use the permissive dev template AND acknowledge.**
+
+   For local development where you stream with VLC/ffprobe and don't want to deal with certs:
+
+   ```bash
+   # Swap the volume mount in docker-compose.yml from mediamtx.docker.yml to mediamtx.local.yml,
+   # or run MediaMTX bare-metal with the local template directly.
+   echo "MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true" >> server/.env
+   ```
+
+   This is the only supported way to run plaintext in production-shaped deployments — the setting records the deviation in the boot audit log and surfaces it at `/api/v1/system/posture`. The dev template's header has a `DO NOT USE IN PRODUCTION` warning for a reason.
+
+   **Note on bare-metal remote access.** `mediamtx.yml` (the bare-metal template) binds all viewer transports to `127.0.0.1` by design — there's no Docker port-map to provide the loopback boundary. Remote viewers cannot reach MediaMTX directly. Front it with a TLS-terminating reverse proxy (nginx/Caddy/Traefik) on your management NIC, or open the binds manually AND add a host-firewall rule.
 
 Finally, run `make check-secrets` to confirm no placeholder values were left behind, then start the server normally. Once it boots, `GET /api/v1/system/posture` returns the active policy (which is also recorded in the audit log under the `policy.boot_posture` event).
 

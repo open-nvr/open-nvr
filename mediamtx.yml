@@ -5,6 +5,24 @@
 # All services bound to localhost only
 # JWT authentication enforced
 # No anonymous access
+#
+# M1b-fixup-v2 F-6: this is the BARE-METAL template (operator runs
+# MediaMTX directly on the host, no Docker port-map between the
+# listener and the world). All viewer transports therefore bind to
+# 127.0.0.1 by design — remote viewers cannot reach them.
+#
+# If you need remote access from a bare-metal install you have two
+# supported options:
+#   1. Front MediaMTX with a TLS-terminating reverse proxy on the
+#      management NIC (nginx, Caddy, Traefik) — proxy listens on the
+#      routable interface, MediaMTX stays on 127.0.0.1.
+#   2. Open up the binds manually (e.g. webrtcAddress: :8889) AND
+#      add a host firewall rule restricting source IPs. Document the
+#      decision in your deployment notes.
+#
+# The Docker bridge-mode template (mediamtx.docker.yml) takes the
+# opposite trade-off: binds to all container interfaces and relies on
+# the docker-compose port map for the loopback boundary.
 ###############################################
 
 ###############################################
@@ -67,8 +85,8 @@ api: yes
 # Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
 apiAddress: 0.0.0.0:9997
 apiEncryption: no
-apiServerKey: server.key
-apiServerCert: server.crt
+apiServerKey: /etc/mediamtx-certs/server.key
+apiServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 apiAllowOrigins: ['*']
 apiTrustedProxies: []
@@ -82,8 +100,8 @@ apiTrustedProxies: []
 metrics: no
 metricsAddress: 127.0.0.1:9998
 metricsEncryption: no
-metricsServerKey: server.key
-metricsServerCert: server.crt
+metricsServerKey: /etc/mediamtx-certs/server.key
+metricsServerCert: /etc/mediamtx-certs/server.crt
 metricsAllowOrigins: []
 metricsTrustedProxies: []
 
@@ -96,8 +114,8 @@ metricsTrustedProxies: []
 pprof: no
 pprofAddress: 127.0.0.1:9999
 pprofEncryption: no
-pprofServerKey: server.key
-pprofServerCert: server.crt
+pprofServerKey: /etc/mediamtx-certs/server.key
+pprofServerCert: /etc/mediamtx-certs/server.crt
 pprofAllowOrigins: []
 pprofTrustedProxies: []
 
@@ -111,8 +129,8 @@ playback: yes
 # Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
 playbackAddress: 0.0.0.0:9996
 playbackEncryption: no
-playbackServerKey: server.key
-playbackServerCert: server.crt
+playbackServerKey: /etc/mediamtx-certs/server.key
+playbackServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 playbackAllowOrigins: ['http://opennvr_core:8000', 'http://127.0.0.1:8000', 'http://localhost:5173', 'http://localhost:8000']
 playbackTrustedProxies: []
@@ -126,13 +144,25 @@ playbackTrustedProxies: []
 rtsp: yes
 # TCP only for localhost - UDP disabled to prevent external access
 rtspTransports: [tcp]
-rtspEncryption: "no"
+# V-019 (Zenodo 17261761 §4.2 Tier 2 / RFC 7826): RTSPS-only on the
+# operator-facing listener. Plaintext RTSP is refused; clients must use
+# rtsps:// with a valid TLS handshake. The operator MUST provide
+# server.crt + server.key (see rtspServerCert/Key below) for MediaMTX
+# to start. If you cannot provide certs and have explicitly accepted
+# the trade-off, set this back to "no" AND set
+# MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true on the OpenNVR backend so the
+# acknowledgement is recorded in the boot audit log.
+rtspEncryption: "strict"
 # SECURITY: Localhost only
 rtspAddress: :8554
 rtspsAddress: 127.0.0.1:8322
+# M1b-fixup-v2 F-7: bare-metal port collision fix — :8000 belongs to the
+# OpenNVR backend (core/config.py: port=8000). MediaMTX RTP/RTCP moved
+# to :8010 / :8011 to match mediamtx.docker.yml. Multicast and SRTP
+# helpers stay on :8002-:8007 (still distinct from anything else).
 # SECURITY: Disable UDP listeners (localhost TCP only)
-rtpAddress: 127.0.0.1:8000
-rtcpAddress: 127.0.0.1:8001
+rtpAddress: 127.0.0.1:8010
+rtcpAddress: 127.0.0.1:8011
 multicastIPRange: 224.1.0.0/16
 multicastRTPPort: 8002
 multicastRTCPPort: 8003
@@ -140,8 +170,8 @@ srtpAddress: 127.0.0.1:8004
 srtcpAddress: 127.0.0.1:8005
 multicastSRTPPort: 8006
 multicastSRTCPPort: 8007
-rtspServerKey: server.key
-rtspServerCert: server.crt
+rtspServerKey: /etc/mediamtx-certs/server.key
+rtspServerCert: /etc/mediamtx-certs/server.crt
 rtspAuthMethods: [basic]
 rtspUDPReadBufferSize: 0
 
@@ -155,8 +185,8 @@ rtmp: no
 rtmpAddress: 127.0.0.1:1935
 rtmpEncryption: "no"
 rtmpsAddress: 127.0.0.1:1936
-rtmpServerKey: server.key
-rtmpServerCert: server.crt
+rtmpServerKey: /etc/mediamtx-certs/server.key
+rtmpServerCert: /etc/mediamtx-certs/server.crt
 
 ###############################################
 # Global settings -> HLS server
@@ -165,11 +195,15 @@ rtmpServerCert: server.crt
 ###############################################
 
 hls: yes
-# SECURITY: Localhost only
-hlsAddress: :8888
-hlsEncryption: no
-hlsServerKey: server.key
-hlsServerCert: server.crt
+# M1b-fixup H-1: bare-metal install. hlsAddress binds to loopback only
+# (the operator's reverse proxy is responsible for any external TLS
+# termination). HLS-over-HTTPS is enabled directly on MediaMTX as a
+# defence-in-depth layer using the same cert pair as RTSPS — see
+# scripts/generate-mediamtx-certs.sh for provisioning.
+hlsAddress: 127.0.0.1:8888
+hlsEncryption: yes
+hlsServerKey: /etc/mediamtx-certs/server.key
+hlsServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
@@ -189,11 +223,14 @@ hlsMuxerCloseAfter: 60s
 ###############################################
 
 webrtc: yes
-# SECURITY: Localhost only
-webrtcAddress: :8889
-webrtcEncryption: no
-webrtcServerKey: server.key
-webrtcServerCert: server.crt
+# M1b-fixup H-2: bare-metal install. Signaling on loopback only with TLS
+# enforced — WHIP/WHEP query strings carry JWT tokens (authJWTInHTTPQuery
+# = true above) which must not traverse plaintext HTTP. Media remains
+# DTLS-SRTP at the wire.
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: yes
+webrtcServerKey: /etc/mediamtx-certs/server.key
+webrtcServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 webrtcAllowOrigins: ['*']
 webrtcTrustedProxies: []

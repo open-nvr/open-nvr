@@ -67,6 +67,47 @@ services:
       retries: 5
 
   # ==========================================
+  # 2a. MEDIAMTX CERT INIT (one-shot)
+  # ==========================================
+  #
+  # M1b-fixup-v2 F-9: auto-generate a self-signed TLS cert pair if none
+  # exists, so a fresh `docker compose up` doesn't fail on missing
+  # ./mediamtx-certs/server.{crt,key}. The init container exits cleanly
+  # after generation; MediaMTX depends on it via `service_completed_
+  # successfully` so the cert is guaranteed to exist before MediaMTX
+  # starts.
+  #
+  # If the operator already ran scripts/generate-mediamtx-certs.sh
+  # manually, this is a no-op and prints a single line confirming the
+  # certs are present.
+  mediamtx-certs-init:
+    image: alpine:3.20
+    container_name: opennvr_mediamtx_certs_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "MediaMTX certs already present at /certs/server.{crt,key}; skipping generation."
+          exit 0
+        fi
+        echo "Generating self-signed MediaMTX cert pair (V-019)..."
+        apk add --no-cache openssl >/dev/null
+        umask 077
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-mediamtx" \
+          -addext "subjectAltName=DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.crt + /certs/server.key. SAN: localhost, mediamtx, 127.0.0.1, ::1"
+    volumes:
+      - ./mediamtx-certs:/certs
+
+  # ==========================================
   # 2. MEDIAMTX (Streaming Server)
   # ==========================================
   mediamtx:
@@ -89,12 +130,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      mediamtx-certs-init:
+        condition: service_completed_successfully
     # ----------------------------------------------------
     # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
     ports:
-      - "127.0.0.1:8554:8554" # RTSP
-      - "127.0.0.1:8888:8888" # HLS
-      - "127.0.0.1:8889:8889" # WebRTC Signaling
+      # M1b-fixup-v2 F-2: the plaintext RTSP port (:8554) is intentionally
+      # NOT mapped. Under rtspEncryption="strict" MediaMTX does not bind
+      # the plaintext listener, so the port map would have nothing to
+      # forward to. Operators who need plaintext for legacy reasons must
+      # switch to mediamtx.local.yml (and set MEDIAMTX_ALLOW_PLAINTEXT_
+      # OUTPUTS=true) AND add `127.0.0.1:8554:8554` back here.
+      - "127.0.0.1:8322:8322" # RTSPS (V-019 / RFC 7826 — TLS-required RTSP)
+      - "127.0.0.1:8888:8888" # HLS (HTTPS — hlsEncryption=yes)
+      - "127.0.0.1:8889:8889" # WebRTC Signaling (HTTPS — webrtcEncryption=yes)
       - "127.0.0.1:8189:8189/tcp" # WebRTC ICE TCP
       - "127.0.0.1:8189:8189/udp" # WebRTC ICE UDP
       - "127.0.0.1:9997:9997" # API/Metrics
@@ -103,6 +152,16 @@ services:
     volumes:
       # Mount Docker-specific mediamtx configuration
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
+      # M1b-fixup-v2 F-9: directory mount instead of per-file mount.
+      # Per-file mounts cause Docker to silently create an empty
+      # *directory* at the host path when the source doesn't exist —
+      # MediaMTX then fails to start with "is a directory" instead of
+      # "no such file or directory". The directory mount works whether
+      # the certs were generated ahead of time by
+      # scripts/generate-mediamtx-certs.sh or by the
+      # mediamtx-certs-init service above. The YAML references the
+      # certs via absolute path (/etc/mediamtx-certs/...).
+      - ./mediamtx-certs:/etc/mediamtx-certs:ro
       # Mount recordings directory (configurable via .env file)
       - ${RECORDINGS_PATH:-/home/ubuntu/recordings}:/app/recordings
     environment:
@@ -181,6 +240,13 @@ services:
       - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
       - MEDIAMTX_HLS_URL=http://mediamtx:8888
       - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
+      # Internal name `mediamtx` is what backend-to-MediaMTX probes use
+      # (resolvable via Docker DNS). Browser/external clients can't
+      # resolve that name, so MEDIAMTX_EXTERNAL_RTSPS_URL below is what
+      # /streams/.../tokens hands them — see server/routers/streams.py
+      # for the fallback chain (F-1).
+      - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       - KAI_C_URL=http://127.0.0.1:8100
       # ----------------------------------------------------

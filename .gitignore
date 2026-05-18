@@ -19,6 +19,9 @@ server/keys/*.jks
 !server/keys/.gitkeep
 byok-test-certs/
 
+# M1b-fixup H-3: locally-generated MediaMTX self-signed certs
+mediamtx-certs/
+
 # Secrets and credentials
 secrets/
 *.secret
@@ -108,10 +111,15 @@ server/debug_*.txt
 # ============================================
 # TEMPORARY AND TEST FILES
 # ============================================
-# Test files
+# Ad-hoc scratch test scripts at the repo root or in server/ are ignored
+# (they're typically one-off diagnostics that shouldn't ship). Real test
+# suites under server/tests/ ARE tracked — the negation below re-includes
+# them so pytest discovery works in CI.
 test_*.py
 *_test.py
 server/test_*.py
+!server/tests/test_*.py
+!server/tests/**/test_*.py
 server/scripts/check_*.py
 server/scripts/get_*.py
 server/scripts/delete_*.py

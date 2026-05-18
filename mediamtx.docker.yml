@@ -71,8 +71,8 @@ api: yes
 # Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
 apiAddress: 0.0.0.0:9997
 apiEncryption: no
-apiServerKey: server.key
-apiServerCert: server.crt
+apiServerKey: /etc/mediamtx-certs/server.key
+apiServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 apiAllowOrigins: ['*']
 apiTrustedProxies: []
@@ -86,8 +86,8 @@ apiTrustedProxies: []
 metrics: no
 metricsAddress: 127.0.0.1:9998
 metricsEncryption: no
-metricsServerKey: server.key
-metricsServerCert: server.crt
+metricsServerKey: /etc/mediamtx-certs/server.key
+metricsServerCert: /etc/mediamtx-certs/server.crt
 metricsAllowOrigins: []
 metricsTrustedProxies: []
 
@@ -100,8 +100,8 @@ metricsTrustedProxies: []
 pprof: no
 pprofAddress: 127.0.0.1:9999
 pprofEncryption: no
-pprofServerKey: server.key
-pprofServerCert: server.crt
+pprofServerKey: /etc/mediamtx-certs/server.key
+pprofServerCert: /etc/mediamtx-certs/server.crt
 pprofAllowOrigins: []
 pprofTrustedProxies: []
 
@@ -115,8 +115,8 @@ playback: yes
 # Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
 playbackAddress: 0.0.0.0:9996
 playbackEncryption: no
-playbackServerKey: server.key
-playbackServerCert: server.crt
+playbackServerKey: /etc/mediamtx-certs/server.key
+playbackServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 playbackAllowOrigins: ['http://127.0.0.1:8000', 'http://localhost:5173', 'http://localhost:8000']
 playbackTrustedProxies: []
@@ -130,10 +130,27 @@ playbackTrustedProxies: []
 rtsp: yes
 # TCP only for localhost - UDP disabled to prevent external access
 rtspTransports: [tcp]
-rtspEncryption: "no"
-# SECURITY: Localhost only
+# V-019 (Zenodo 17261761 §4.2 Tier 2 / RFC 7826): RTSPS-only on the
+# operator-facing listener. Plaintext RTSP is refused; clients must use
+# rtsps:// with a valid TLS handshake. The operator MUST provide
+# server.crt + server.key (see rtspServerCert/Key below) for MediaMTX
+# to start. If you cannot provide certs and have explicitly accepted
+# the trade-off, set this back to "no" AND set
+# MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true on the OpenNVR backend so the
+# acknowledgement is recorded in the boot audit log.
+rtspEncryption: "strict"
+# M1b-fixup-v2 F-2: rtspAddress is inert under rtspEncryption="strict"
+# — MediaMTX does not bind the plaintext listener at all (per upstream
+# config reference). The line is kept for documentation only: it
+# reminds readers what the plaintext port WOULD be if encryption were
+# loosened, and it does not affect runtime behaviour. rtspsAddress is
+# the real listener — bound to all interfaces inside the container so
+# the docker-compose port map (127.0.0.1:8322:8322) can expose it on
+# the host loopback. Operators using host-network mode should change
+# rtspsAddress to 127.0.0.1:8322 if MediaMTX is bound directly to a
+# routable interface (see docker-compose.linux.yml header comment).
 rtspAddress: :8554
-rtspsAddress: 127.0.0.1:8322
+rtspsAddress: :8322
 # SECURITY: Disable UDP listeners (localhost TCP only)
 rtpAddress: 127.0.0.1:8010
 rtcpAddress: 127.0.0.1:8011
@@ -144,8 +161,8 @@ srtpAddress: 127.0.0.1:8004
 srtcpAddress: 127.0.0.1:8005
 multicastSRTPPort: 8006
 multicastSRTCPPort: 8007
-rtspServerKey: server.key
-rtspServerCert: server.crt
+rtspServerKey: /etc/mediamtx-certs/server.key
+rtspServerCert: /etc/mediamtx-certs/server.crt
 rtspAuthMethods: [basic]
 rtspUDPReadBufferSize: 0
 
@@ -159,8 +176,8 @@ rtmp: no
 rtmpAddress: 127.0.0.1:1935
 rtmpEncryption: "no"
 rtmpsAddress: 127.0.0.1:1936
-rtmpServerKey: server.key
-rtmpServerCert: server.crt
+rtmpServerKey: /etc/mediamtx-certs/server.key
+rtmpServerCert: /etc/mediamtx-certs/server.crt
 
 ###############################################
 # Global settings -> HLS server
@@ -169,11 +186,17 @@ rtmpServerCert: server.crt
 ###############################################
 
 hls: yes
-# SECURITY: Localhost only
+# M1b-fixup H-1 (Zenodo 17261761 §4.2 Tier 2): the HLS server itself
+# terminates TLS so browser clients receive .m3u8 + segment payloads over
+# HTTPS. Same server.crt / server.key as the RTSPS listener (see scripts/
+# generate-mediamtx-certs.sh). hlsAddress stays at :8888 inside the
+# container — the docker-compose port map enforces 127.0.0.1:8888 on
+# the host side. Operators using host-network mode must also lock down
+# the listener (see docker-compose.linux.yml header comment).
 hlsAddress: :8888
-hlsEncryption: no
-hlsServerKey: server.key
-hlsServerCert: server.crt
+hlsEncryption: yes
+hlsServerKey: /etc/mediamtx-certs/server.key
+hlsServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
@@ -193,11 +216,17 @@ hlsMuxerCloseAfter: 60s
 ###############################################
 
 webrtc: yes
-# SECURITY: Localhost only
+# M1b-fixup H-2 (peer review F-5): webrtcEncryption governs the WHIP/WHEP
+# signaling HTTP channel, not the media plane (media is always DTLS-SRTP).
+# Plaintext signaling exposes SDP, ICE candidates, AND ?jwt= query tokens
+# in URLs (authJWTInHTTPQuery: true above) to anyone on the wire — TLS is
+# mandatory. Same cert pair as RTSPS/HLSS. Address pattern matches HLS:
+# bind to :8889 inside the container, rely on the docker-compose port map
+# for the host-side loopback boundary.
 webrtcAddress: :8889
-webrtcEncryption: no
-webrtcServerKey: server.key
-webrtcServerCert: server.crt
+webrtcEncryption: yes
+webrtcServerKey: /etc/mediamtx-certs/server.key
+webrtcServerCert: /etc/mediamtx-certs/server.crt
 # SECURITY: Restrict CORS (allow frontend dev server and backend)
 webrtcAllowOrigins: ['*']
 webrtcTrustedProxies: []

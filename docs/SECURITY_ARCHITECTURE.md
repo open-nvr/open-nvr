@@ -50,7 +50,7 @@ in the issue tracker.
 |---|---|---|
 | RTSPS / SRTP support | Camera-URL schema accepts both `rtsp://` and `rtsps://`; MediaMTX config wires `rtspsAddress` and `srtpAddress`. | `server/schemas.py`; `server/services/mediamtx_admin_service.py`. |
 | Preferring encrypted transport per camera | **Partial — V-003.** Capability probe + `transport_security` per camera not yet enforced; plaintext is currently allowed. Planned: default `rtsps_required`, plaintext only via role-gated override. | — |
-| Eliminating plaintext outbound to viewers | **Gap — V-019.** MediaMTX config template still exposes plaintext `rtsp`, `rtmp`, `srt`. Planned: disable by default; only `rtsps`, `hlss`, WebRTC (DTLS-SRTP) on by default. | `server/services/mediamtx_config_service.py`. |
+| Eliminating plaintext outbound to viewers | **V-019 (M1b + M1b-fixup).** All three operator-facing transports terminate TLS at MediaMTX itself: `rtspEncryption: "strict"` refuses plaintext RTSP clients on the listener (RFC 7826), `hlsEncryption: yes` makes HLS-over-HTTPS the default for the .m3u8 + segments, and `webrtcEncryption: yes` puts the WHIP/WHEP signaling channel (which carries the `?jwt=` token from `authJWTInHTTPQuery: true`) over HTTPS. WebRTC media remains DTLS-SRTP at the wire. `rtmp: no` and `srt: no` are explicit. The hardened RTSPS listener is exposed at `:8322` (loopback-mapped on the host); the backend emits `urls.rtsps` in `/api/v1/streams/.../tokens` so clients have an unambiguous TLS endpoint. The dev template (`mediamtx.local.yml`) remains permissive but carries a "DO NOT USE IN PRODUCTION" header and requires `MEDIAMTX_ALLOW_PLAINTEXT_OUTPUTS=true` on the OpenNVR side so the deviation is audit-logged and visible at `/system/posture`. **Operator dependency:** TLS requires `server.crt` + `server.key` files in MediaMTX's working directory; `scripts/generate-mediamtx-certs.sh` (POSIX) and `scripts/generate-mediamtx-certs.ps1` (Windows) generate a 10-year self-signed pair with SAN `DNS:localhost,DNS:mediamtx,IP:127.0.0.1`. **Known residual:** the JWT-in-URL pattern (`authJWTInHTTPQuery: true`) is now over TLS but tokens still land in browser history / proxy access logs; switching to a header-based JWT is tracked separately under V-007. | `mediamtx.docker.yml`, `mediamtx.yml`, `mediamtx.local.yml`, `docker-compose.yml`, `docker-compose.linux.yml`, `scripts/generate-mediamtx-certs.{sh,ps1}`; `server/core/config.py:mediamtx_rtsps_url`, `mediamtx_allow_plaintext_outputs`; `server/routers/streams.py:tokens` emits `urls.rtsps`; `server/core/policy.py:current_posture`. |
 | Telnet / UPnP detection on cameras | **Gap — V-014/V-021.** Planned: ONVIF probe records active services and flags Telnet/UPnP. | `server/services/onvif_service.py`. |
 
 ### 2.3 Fragmented interoperability (paper §3.3)
@@ -116,7 +116,7 @@ AI, and is the only edge any operator or downstream system touches.
 
 | Paper requirement | OpenNVR component | Status |
 |---|---|---|
-| TLS/SRTP re-streaming on the operator side | MediaMTX configured with `rtspsAddress`/`srtpAddress`. **V-019** still pending: plaintext outputs not disabled by default. | Partial. |
+| TLS/SRTP re-streaming on the operator side | MediaMTX configured with `rtspEncryption: "strict"`, `hlsEncryption: yes`, `webrtcEncryption: yes`. V-019 closed in M1b + M1b-fixup; see §2.2. WebRTC media remains DTLS-SRTP at the wire (always). | Implemented. |
 | Customer-controlled, software-defined gateway | FastAPI server + MediaMTX, both running under `systemd` on Linux LTS. | Implemented. |
 | RBAC | `Role`, `Permission`, `PermissionChecker`. | Implemented. |
 | Certificate-based authentication | **V-018.** Internal mTLS between NVR ↔ kai-c ↔ ai-adapter; optional client certs for high-end cameras; in-house CA bootstrapped at install. | Planned. |
@@ -169,9 +169,9 @@ satisfy or partially satisfy it. The longer-form mapping lives in
   expects.
 * **ETSI EN 303 645.** §5.1 no universal default passwords — V-001 ✓.
   §5.4 secure storage of sensitive parameters — Fernet vault ✓. §5.5
-  communicate securely — MediaMTX RTSPS/SRTP ✓ (V-019 to make it default-on).
-  §5.6 minimise exposed attack surfaces — loopback-only MediaMTX ✓
-  (V-010/V-016/V-017 for camera-LAN side).
+  communicate securely — MediaMTX RTSPS/HLSS/WebRTC-DTLS-SRTP all
+  default-on per V-019 ✓.  §5.6 minimise exposed attack surfaces —
+  loopback-only MediaMTX ✓ (V-010/V-016/V-017 for camera-LAN side).
 * **NIST AI RMF 1.0.** Map → V-022 ai_sovereignty setting; the local_only
   default means no AI processing of footage ever leaves the operator's
   trust boundary unless they opt in.
@@ -212,8 +212,16 @@ Tracked in `SECURITY_FINDINGS.md`. Milestone ordering:
   shipped as paired settings + paired router/service gates + KAI-C
   startup validator + `/system/posture` endpoint + boot audit entry.
   See entries in §2.4 for code paths.
-* **M1b — planned.** V-019 (MediaMTX template hardening: plaintext
-  outputs disabled by default, only RTSPS / HLSS / WebRTC-DTLS-SRTP on).
+* **M1b — done (with M1b-fixup).** V-019: MediaMTX hardened YAML
+  templates default to `rtspEncryption: "strict"` (TLS-required RTSPS),
+  `hlsEncryption: yes`, `webrtcEncryption: yes`, `rtmp: no`, `srt: no`.
+  The backend emits a TLS-explicit `urls.rtsps` field and the
+  docker-compose port map exposes the RTSPS listener at
+  `127.0.0.1:8322`. `scripts/generate-mediamtx-certs.{sh,ps1}` provisions
+  a self-signed cert pair when no PKI is available.
+  `mediamtx_allow_plaintext_outputs` records the operator's deviation
+  when the permissive dev template (`mediamtx.local.yml`) is in use.
+  Known residual: JWT-in-URL (tracked under V-007 follow-up).
 * **M1c — planned.** V-003 (per-camera RTSPS-preferred probe on add).
 * **M2 — network isolation enforcement.** V-010 (`opennvr-netd`), V-016
   (dual-homed validator), V-017 (DNS blackhole template), V-020
