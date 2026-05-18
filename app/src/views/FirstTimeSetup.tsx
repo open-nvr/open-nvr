@@ -26,6 +26,11 @@ export function FirstTimeSetup() {
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  // V-001 / M0 C-1: the setup token is printed once on server startup
+  // (stdout banner). Operator must paste it here to activate the admin
+  // account — closes the bootstrap-race window where any LAN attacker
+  // could claim the admin role between server-up and operator-setup.
+  const [setupToken, setSetupToken] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mfaSecret, setMfaSecret] = useState<string | null>(null)
@@ -39,6 +44,12 @@ export function FirstTimeSetup() {
     setError(null)
 
     // Validation
+    if (!setupToken.trim()) {
+      setError(
+        'Setup token is required. Find it in the server stdout (Docker: `docker compose logs opennvr-core | grep -A 6 "first-time setup token"`).'
+      )
+      return
+    }
     if (password.length < 8) {
       setError('Password must be at least 8 characters long')
       return
@@ -50,7 +61,11 @@ export function FirstTimeSetup() {
 
     setLoading(true)
     try {
-      const { data } = await apiService.firstTimeSetup(username, password)
+      const { data } = await apiService.firstTimeSetup(
+        username,
+        password,
+        setupToken.trim(),
+      )
       
       // Show MFA setup
       setMfaSecret(data.mfa_secret)
@@ -144,7 +159,7 @@ export function FirstTimeSetup() {
         <div className="bg-orange-900/30 border border-orange-500/30 rounded p-3">
           <p className="text-sm text-orange-200 font-semibold">First-time setup required</p>
           <p className="text-xs text-orange-300 mt-1">
-            Please set a secure password for the admin account.
+            Paste the setup token from the server stdout and choose a secure admin password.
           </p>
         </div>
 
@@ -158,6 +173,29 @@ export function FirstTimeSetup() {
             disabled
             readOnly
           />
+        </label>
+
+        <label className="block text-sm text-gray-200">
+          <span className="block mb-2 text-gray-400 font-medium">
+            Setup token
+          </span>
+          <input
+            type="text"
+            className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500 font-mono text-sm"
+            value={setupToken}
+            onChange={(e) => setSetupToken(e.target.value)}
+            placeholder="Paste the one-time token from the server stdout"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            required
+          />
+          <span className="block text-xs text-gray-500 mt-1">
+            Printed once on server startup. Docker:{' '}
+            <code className="bg-[#0f1720]/80 px-1 py-0.5 rounded">
+              docker compose logs opennvr-core | grep -A 6 "first-time setup token"
+            </code>
+          </span>
         </label>
 
         <label className="block text-sm text-gray-200">

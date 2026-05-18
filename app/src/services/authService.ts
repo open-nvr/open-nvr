@@ -20,8 +20,20 @@ import { api } from '../lib/api'
 
 export const authService = {
   checkSetup: () => api.post('/api/v1/auth/check-setup'),
-  firstTimeSetup: (username: string, password: string) =>
-    api.post('/api/v1/auth/first-time-setup', { username, password }),
+  // V-001 / M0 C-1: setup_token is minted at server startup and printed
+  // to stdout exactly once. Without it the backend refuses the request
+  // (HTTP 403) to close the bootstrap-race window where any LAN attacker
+  // could claim the admin account.
+  firstTimeSetup: (
+    username: string,
+    password: string,
+    setup_token: string,
+  ) =>
+    api.post('/api/v1/auth/first-time-setup', {
+      username,
+      password,
+      setup_token,
+    }),
   register: (username: string, email: string, password: string) =>
     api.post('/api/v1/auth/register', { username, email, password }),
   login: (username: string, password: string) => {

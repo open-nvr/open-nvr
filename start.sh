@@ -179,6 +179,61 @@ print_banner() {
     echo ""
 }
 
+# ── First-time setup token surfacer ────────────────────────
+#
+# V-001 / M0 C-1 UX: the OpenNVR server mints a one-time setup token
+# on first boot and prints it to its stdout (so /auth/first-time-setup
+# can refuse anonymous LAN access). With `docker compose up -d` the
+# operator never sees that stdout — they have to grep the logs.
+#
+# This helper polls the server container's logs for the token banner
+# after startup and echoes it back to the terminal where the operator
+# ran `./start.sh build`, so the value is right there to copy-paste
+# into the UI. No-op if no token is found (server already activated
+# or container not running).
+print_first_time_setup_token() {
+    local compose_args="$1"
+    local max_wait_s=30
+    local poll_interval_s=1
+    local elapsed=0
+    local banner=""
+
+    # Best-effort: don't fail the wizard if grep finds nothing.
+    while [ "$elapsed" -lt "$max_wait_s" ]; do
+        # --no-log-prefix strips the per-line "opennvr_core | timestamp"
+        # decoration so the banner is clean to copy-paste. --since 5m
+        # narrows to recent logs so a long-running server's previous
+        # boot banner doesn't fall out of the --tail 1000 window.
+        # -A 6 matches the operator-facing guidance in the React form,
+        # README, and the fallback message below — keep aligned so
+        # operators see the same command surface everywhere.
+        banner=$(docker compose $compose_args logs \
+                --no-color --no-log-prefix --since 5m --tail 1000 opennvr-core 2>/dev/null \
+            | grep -A 6 "first-time setup token" \
+            || true)
+        if [ -n "$banner" ]; then
+            break
+        fi
+        sleep "$poll_interval_s"
+        elapsed=$((elapsed + poll_interval_s))
+    done
+
+    if [ -n "$banner" ]; then
+        echo ""
+        echo -e "  ${YELLOW}🔑 First-time setup token (one-time use — copy into the UI):${NC}"
+        echo ""
+        echo "$banner" | sed 's/^/  /'
+        echo ""
+    else
+        echo ""
+        echo -e "  ${GRAY}(No first-time setup token detected — either the admin is${NC}"
+        echo -e "  ${GRAY}already activated or the server is still starting. To check${NC}"
+        echo -e "  ${GRAY}manually:${NC}"
+        echo -e "  ${GRAY}    docker compose logs opennvr-core | grep -A 6 'first-time setup token'${NC}"
+        echo ""
+    fi
+}
+
 # ── Run command ────────────────────────────────────────────
 case "$COMMAND" in
 
@@ -206,6 +261,7 @@ case "$COMMAND" in
     echo -e "  Web UI   → ${CYAN}http://localhost:8000${NC}  ${GRAY}(login: ${ADMIN_USER})${NC}"
     echo -e "  API Docs → ${CYAN}http://localhost:8000/docs${NC}"
     echo -e "  ${GRAY}First-time setup page opens automatically on first visit.${NC}"
+    print_first_time_setup_token "$ARGS"
     ;;
 
   build)
@@ -228,6 +284,7 @@ case "$COMMAND" in
     echo -e "  Web UI   → ${CYAN}http://localhost:8000${NC}  ${GRAY}(login: ${ADMIN_USER})${NC}"
     echo -e "  API Docs → ${CYAN}http://localhost:8000/docs${NC}"
     echo -e "  ${GRAY}First-time setup page opens automatically on first visit.${NC}"
+    print_first_time_setup_token "$ARGS"
     ;;
 
   down)

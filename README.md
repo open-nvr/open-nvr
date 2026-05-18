@@ -96,7 +96,8 @@ The token is printed to the server's stdout exactly once, inside a clearly delim
 ================================================================
 ```
 
-- **Docker users:** run `docker compose logs server | grep -A 6 "first-time setup token"` to retrieve it.
+- **Docker via `./start.sh` / `.\start.ps1`:** the wizard automatically polls the server's logs after `docker compose up` and prints the banner above the "OpenNVR is running" line — copy from there.
+- **Docker without the wizard:** run `docker compose logs opennvr-core | grep -A 6 "first-time setup token"` to retrieve it.
 - **Local dev:** the token will print in the terminal that runs `python start.py`.
 - **Missed it?** Restart the server — a new token is minted on every boot while a pending user exists.
 

@@ -135,6 +135,62 @@ function Invoke-Validate {
 }
 
 # ── Banner ─────────────────────────────────────────────────
+function Show-FirstTimeSetupToken {
+    param([array]$ComposeArgs)
+    # V-001 / M0 C-1 UX: poll opennvr-core logs for the setup-token
+    # banner after a `docker compose up -d` so the operator can copy
+    # it from the wizard's terminal instead of grepping logs.
+    $maxWaitSeconds = 30
+    $pollIntervalSeconds = 1
+    $elapsed = 0
+    $banner = ""
+    while ($elapsed -lt $maxWaitSeconds) {
+        try {
+            # --no-log-prefix strips per-line container decoration so
+            # the banner is clean. --since 5m narrows the window so a
+            # long-running server's older boot banner doesn't fall
+            # out of view.
+            $raw = & docker compose @ComposeArgs logs `
+                --no-color --no-log-prefix --since 5m --tail 1000 opennvr-core 2>$null
+            if ($raw) {
+                $match = ($raw -split "`n") -match "first-time setup token"
+                if ($match) {
+                    # Capture the matching line plus the next 8 lines (the
+                    # banner is about 7 lines long).
+                    $lines = $raw -split "`n"
+                    for ($i = 0; $i -lt $lines.Length; $i++) {
+                        if ($lines[$i] -match "first-time setup token") {
+                            # +6 to match the -A 6 used in start.sh /
+                            # README / React form guidance.
+                            $end = [Math]::Min($i + 6, $lines.Length - 1)
+                            $banner = ($lines[$i..$end] -join "`n")
+                            break
+                        }
+                    }
+                    if ($banner) { break }
+                }
+            }
+        } catch {
+            # ignore — best effort
+        }
+        Start-Sleep -Seconds $pollIntervalSeconds
+        $elapsed += $pollIntervalSeconds
+    }
+    Write-Color ""
+    if ($banner) {
+        Write-Color "  🔑 First-time setup token (one-time use — copy into the UI):" Yellow
+        Write-Color ""
+        foreach ($line in ($banner -split "`n")) { Write-Color ("  " + $line) White }
+        Write-Color ""
+    } else {
+        Write-Color "  (No first-time setup token detected — either the admin is" DarkGray
+        Write-Color "  already activated or the server is still starting. To check" DarkGray
+        Write-Color "  manually:" DarkGray
+        Write-Color "      docker compose logs opennvr-core | Select-String 'first-time setup token' -Context 0,6" DarkGray
+        Write-Color ""
+    }
+}
+
 function Show-Banner {
     Write-Color ""
     Write-Color "  ╔══════════════════════════════════════════════╗" Cyan
@@ -175,6 +231,7 @@ switch ($Command) {
         Write-Color "  Web UI   → http://localhost:8000  (login: $u)" Cyan
         Write-Color "  API Docs → http://localhost:8000/docs" Cyan
         Write-Color "  First-time setup page opens automatically on first visit." DarkGray
+        Show-FirstTimeSetupToken -ComposeArgs $ca
     }
 
     "build" {
@@ -198,6 +255,7 @@ switch ($Command) {
         Write-Color "  Web UI   → http://localhost:8000  (login: $u)" Cyan
         Write-Color "  API Docs → http://localhost:8000/docs" Cyan
         Write-Color "  First-time setup page opens automatically on first visit." DarkGray
+        Show-FirstTimeSetupToken -ComposeArgs $ca
     }
 
     "down" {
