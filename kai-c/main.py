@@ -27,13 +27,105 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
+import ipaddress
+import socket
 import uvicorn
 import requests
 import os
+from urllib.parse import urlparse
 from fastapi import Header
 
 from kai_c.connector import KaiConnector
 from kai_c.schemas import KAIRequest
+
+
+# ============================================================
+# V-022 (M1a): AI sovereignty policy
+# ============================================================
+# Mirrors the server-side `settings.ai_sovereignty` field. KAI-C cannot
+# import from `core.config` (it is a separate sub-project that runs in its
+# own process and may live on a different host) so the policy is duplicated
+# here via env var. The two SHOULD be set to the same value at deploy time;
+# the architecture doc calls this out as a known operational coupling.
+#
+# Values:
+#   local_only       - default. Every adapter URL in ADAPTER_REGISTRY must
+#                      resolve to loopback (127.0.0.1, ::1, localhost), and
+#                      /infer/cloud (HuggingFace proxy) is refused outright.
+#   federated        - adapters may live off-host but raw frame data is
+#                      refused; only anonymised parameter exchange is okay.
+#                      The federated runtime is responsible for honouring
+#                      that distinction.
+#   cloud_allowed    - no boundary checks; suitable for hosted deployments
+#                      that have explicitly accepted the sovereignty
+#                      trade-off.
+AI_SOVEREIGNTY = os.getenv("AI_SOVEREIGNTY", "local_only").lower()
+if AI_SOVEREIGNTY not in {"local_only", "federated", "cloud_allowed"}:
+    raise RuntimeError(
+        f"AI_SOVEREIGNTY env var must be one of "
+        f"'local_only' / 'federated' / 'cloud_allowed' "
+        f"(got {AI_SOVEREIGNTY!r})."
+    )
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_is_loopback(host: str | None) -> bool:
+    """Mirror of server/core/config.py:_host_is_loopback, kept narrow to
+    avoid pulling the server codebase into KAI-C."""
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        pass
+    saved = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(2.0)
+        try:
+            infos = socket.getaddrinfo(h, None)
+        except (socket.gaierror, socket.timeout, OSError):
+            return False
+    finally:
+        socket.setdefaulttimeout(saved)
+    return bool(infos) and all(
+        ipaddress.ip_address(info[4][0]).is_loopback for info in infos
+    )
+
+
+def _validate_adapters_match_sovereignty() -> None:
+    """Refuse to start if AI_SOVEREIGNTY=local_only but any registered
+    adapter URL is non-loopback. Called immediately after ADAPTER_REGISTRY
+    is defined so a mis-set env var is caught before the server accepts a
+    single request."""
+    if AI_SOVEREIGNTY != "local_only":
+        return
+    offenders: list[str] = []
+    for name, url in ADAPTER_REGISTRY.items():
+        host = urlparse(url).hostname
+        if host is None:
+            offenders.append(f"{name}={url!r} (unparseable host — missing scheme?)")
+        elif host == "0.0.0.0":
+            offenders.append(
+                f"{name}={url!r} (host is 0.0.0.0, the wildcard bind, not loopback)"
+            )
+        elif not _host_is_loopback(host):
+            offenders.append(f"{name}={url!r} (host={host})")
+    if offenders:
+        details = "\n  - ".join(offenders)
+        raise RuntimeError(
+            "V-022: AI_SOVEREIGNTY=local_only requires every adapter URL "
+            "to be loopback. The following adapters violate that policy:\n"
+            f"  - {details}\n"
+            "Either set ADAPTER_URL (and any per-model overrides) to a "
+            "127.0.0.1 / ::1 / localhost URL, or set AI_SOVEREIGNTY="
+            "federated|cloud_allowed if you have explicitly accepted the "
+            "sovereignty trade-off."
+        )
 
 app = FastAPI(
     title="KAI-C (Kavach AI Connector)",
@@ -61,6 +153,13 @@ ADAPTER_REGISTRY = {
     # "blip": "http://localhost:9101",
     # "insightface": "http://localhost:9102",
 }
+
+# V-022 (M1a): fail-closed at import time if any adapter URL violates the
+# sovereignty policy. Cannot run as a startup handler because we want this
+# check to fire even when KAI-C is imported by tests, not just when uvicorn
+# is the entry point.
+_validate_adapters_match_sovereignty()
+
 
 def get_adapter_url(model_name: str = "default") -> str:
     """Get AI Adapter URL from internal registry."""
@@ -232,14 +331,29 @@ async def process_cloud_inference(
 ):
     """
     Process cloud AI inference request.
-    
+
     This endpoint:
     1. Validates internal API key from opennvr
     2. Routes to cloud provider handler (e.g., HuggingFace)
     3. Returns unified response format
-    
+
     Flow: OpenNVR Backend → KAI-C → Cloud Provider API → KAI-C → OpenNVR Backend
     """
+    # V-022 (M1a): refuse the entire cloud-provider proxy path when the
+    # operator has set AI_SOVEREIGNTY=local_only. The server-side router
+    # already 403s its own /cloud-inference/* endpoints, but this is the
+    # defence-in-depth at the KAI-C side: a misconfigured or compromised
+    # caller cannot route to HuggingFace by hitting KAI-C directly.
+    if AI_SOVEREIGNTY == "local_only":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Cloud-provider inference disabled: "
+                "AI_SOVEREIGNTY=local_only. Set AI_SOVEREIGNTY="
+                "federated|cloud_allowed at boot to enable."
+            ),
+        )
+
     # Validate internal API key
     if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
         raise HTTPException(

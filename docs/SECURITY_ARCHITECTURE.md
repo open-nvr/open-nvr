@@ -68,8 +68,8 @@ in the issue tracker.
 | Storage stays customer-controlled | Recordings written to `RECORDINGS_BASE_PATH`; the base is resolved at access time and every file operation is symlink-resolved and containment-checked. The recording-upload sink additionally **refuses any DB-stored `file_path` that is absolute and does not name the recordings subtree**, so a DB-poisoned record pointing at `/etc/passwd` cannot be rewritten into a relative-under-base lookup. **Residual risk:** there is a TOCTOU window between the path check and the upload worker's `open()`; closing it requires `O_NOFOLLOW` at the open site and is tracked as an M2 follow-up. | `server/services/storage_service.py:resolve_under_root`, `safe_recording_path`; absolute-path refusal in `server/routers/recordings.py:queue_cloud_upload_for_day`. |
 | Credential vault Fernet-at-rest | Camera passwords and cloud-provider tokens are encrypted at rest with the Fernet key the operator generated locally. | `server/services/credential_vault_service.py`. |
 | KAI-C never reveals adapter URLs to the UI | The NVR talks to a single internal endpoint (`KAI_C_URL`); adapter routing happens inside KAI-C. | `server/services/kai_c_service.py`; `kai-c/`. |
-| Cloud connectors are not opt-in / off by default | **Gap — V-009.** Cloud routers (`cloud.py`, `cloud_inference.py`, `cloud_providers.py`, `cloud_recording.py`, `cloud_streaming.py`) are first-class. Planned: `settings.deployment_mode: Literal["offline","hybrid","cloud"]` defaulting to `offline`, returning 403 from every cloud route and audited on change. | — |
-| AI sovereignty: refuse to leak frames to vendor inference | **Gap — V-022.** Planned: `settings.ai_sovereignty: Literal["local_only","federated","cloud_allowed"]` defaulting to `local_only`; KAI-C refuses non-local adapters in that mode. | — |
+| Cloud connectors are not opt-in / off by default | **V-009 (M1a).** `settings.deployment_mode: Literal["offline","hybrid","cloud"]` defaults to `offline`. `core.policy.require_outbound_allowed` returns 403 on every cloud-touching route in this mode (`/cloud-inference/infer`, `/cloud-inference/jobs`, `/cloud-streaming/targets`, `/cloud-streaming/targets/{id}/start`, `/recordings/cloud-upload/day`). Defense-in-depth at the service call-sites (`cloud_inference_service._call_kai_c`, `cloud_recording_service.upload_to_nvr`) catches background-task callers that survive a mid-flight policy change. Boot posture audit-logged via `policy.boot_posture` event. Surfaced via `GET /api/v1/system/posture`. | `server/core/policy.py`, `server/routers/cloud_inference.py`, `server/routers/cloud_streaming.py`, `server/routers/recordings.py`, `server/services/cloud_inference_service.py`, `server/services/cloud_recording_service.py`, `server/routers/system.py`. |
+| AI sovereignty: refuse to leak frames to vendor inference | **V-022 (M1a).** `settings.ai_sovereignty: Literal["local_only","federated","cloud_allowed"]` defaults to `local_only`. `core.policy.require_ai_sovereignty_allowed` stacks with the outbound gate on the cloud-inference router. KAI-C imports its own `AI_SOVEREIGNTY` env var and refuses to start if any registered adapter URL is non-loopback in `local_only` mode; `POST /infer/cloud` (HuggingFace proxy) returns 403 outright. Same posture endpoint and audit entry. | `server/core/policy.py`, `kai-c/main.py:_validate_adapters_match_sovereignty`. |
 | Customer-managed encryption keys (KMS / HSM / TPM) | **Gap — V-004.** Today there is a single Fernet key in env. Planned: `KeyProvider` abstraction with `EnvKeyProvider`, `FileKeyProvider`, `VaultProvider`, `KMSProvider`, `TPMProvider`; per-camera DEK for recording-at-rest encryption; `key_id` column on encrypted fields for rotation. | `server/core/keys/` (planned). |
 
 ### 2.5 Supply chain and firmware transparency (paper §3.5)
@@ -208,9 +208,13 @@ Tracked in `SECURITY_FINDINGS.md`. Milestone ordering:
   minimum length for symmetric secrets has been raised from 12 to 32
   characters; existing operators must re-run `make secrets` or extend
   their secrets to ≥32 chars before upgrading.
-* **M1 — offline-first guarantees.** V-009 (deployment_mode), V-022
-  (ai_sovereignty), V-019 (TLS/SRTP default), V-003 (RTSPS-preferred
-  per camera).
+* **M1a — done.** V-009 (`deployment_mode`) and V-022 (`ai_sovereignty`)
+  shipped as paired settings + paired router/service gates + KAI-C
+  startup validator + `/system/posture` endpoint + boot audit entry.
+  See entries in §2.4 for code paths.
+* **M1b — planned.** V-019 (MediaMTX template hardening: plaintext
+  outputs disabled by default, only RTSPS / HLSS / WebRTC-DTLS-SRTP on).
+* **M1c — planned.** V-003 (per-camera RTSPS-preferred probe on add).
 * **M2 — network isolation enforcement.** V-010 (`opennvr-netd`), V-016
   (dual-homed validator), V-017 (DNS blackhole template), V-020
   (Wireguard remote-access helper).

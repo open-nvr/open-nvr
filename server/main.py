@@ -92,6 +92,23 @@ async def lifespan(app: FastAPI):
     setup_logging()
     main_logger.info("Logging system initialized")
 
+    # V-009 + V-022 (M1a): record the active offline-first policy in the
+    # audit log so compliance reports can show which posture was in effect
+    # for any given time window. Done before DB init so the entry lands
+    # even if the database is later unreachable.
+    try:
+        from core.policy import audit_boot_posture, current_posture
+
+        posture = current_posture()
+        main_logger.info(
+            f"Boot policy: deployment_mode={posture['deployment_mode']} "
+            f"ai_sovereignty={posture['ai_sovereignty']} "
+            f"allow_remote_mediamtx={posture['allow_remote_mediamtx']}"
+        )
+        audit_boot_posture()
+    except Exception as exc:
+        main_logger.error(f"Failed to record boot posture: {exc}", exc_info=True)
+
     # Startup
     main_logger.info("Starting up FastAPI application...")
     try:

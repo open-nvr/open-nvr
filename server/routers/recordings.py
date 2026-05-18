@@ -42,6 +42,7 @@ from core.auth import get_current_superuser, get_current_user, verify_token
 from core.config import settings
 from core.database import get_db
 from core.logging_config import recording_logger
+from core.policy import require_outbound_allowed
 from models import Camera, SecuritySetting, User
 from schemas import (
     RecordingRetentionSettings,
@@ -60,7 +61,12 @@ from services.stream_service import _build_stream_name
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
 
-@router.post("/cloud-upload/day")
+@router.post(
+    "/cloud-upload/day",
+    # V-009 (M1a): queueing recordings to the cloud opens an outbound HTTP
+    # path (httpx to a remote NVR or boto3 to S3). Refused in offline mode.
+    dependencies=[Depends(require_outbound_allowed)],
+)
 async def queue_cloud_upload_for_day(
     camera_id: int = Query(..., description="Camera ID"),
     date: str = Query(..., description="Date in YYYY-MM-DD format"),

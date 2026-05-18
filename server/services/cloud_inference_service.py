@@ -368,7 +368,22 @@ class CloudInferenceService:
 
         Raises:
             httpx.HTTPError: If request fails
+            PermissionError: If deployment_mode=offline or
+                ai_sovereignty=local_only refuses the call.
         """
+        # V-009 + V-022 (M1a) defense-in-depth: the router-level gate already
+        # 403s most of these calls, but `/cloud-inference/jobs` schedules
+        # asynchronous work that resumes from a background task, so the
+        # outbound call can survive a mid-flight policy change. Re-check at
+        # the actual httpx call-site so the policy is also enforced on the
+        # async path.
+        from core.policy import (
+            assert_ai_sovereignty_allows_remote,
+            assert_cloud_outbound_allowed,
+        )
+        assert_cloud_outbound_allowed(reason=f"cloud-inference call for {provider}/{model_name}")
+        assert_ai_sovereignty_allows_remote(reason=f"cloud-inference call for {provider}/{model_name}")
+
         url = f"{self.settings.kai_c_url}/infer/cloud"
 
         payload = {

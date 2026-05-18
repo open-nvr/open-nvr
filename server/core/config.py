@@ -24,6 +24,7 @@ import binascii
 import ipaddress
 import os
 import socket
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -225,6 +226,39 @@ class Settings(BaseSettings):
     # only if you know you are intentionally proxying MediaMTX behind a
     # separate TLS-terminating reverse proxy on the management NIC.
     allow_remote_mediamtx: bool = False
+
+    # V-009 (M1a): Deployment-mode policy. The paper (Zenodo 17261761 §3.4 /
+    # §4.1 Principle "Customer Sovereignty") treats vendor-controlled cloud
+    # pipelines as a primary systemic weakness — the offline-first design is
+    # the differentiator. So the default is *offline*, and every router that
+    # initiates an outbound HTTP call to a non-loopback host is gated on
+    # this setting via core.policy.require_outbound_allowed().
+    #
+    #   offline       - default. Cloud-touching routes return 403; cloud
+    #                   service callsites refuse outbound. Operator can still
+    #                   read stored cloud metadata for cleanup.
+    #   hybrid        - opt-in: cloud features available, but each call is
+    #                   audit-logged so the operator can see when the
+    #                   sovereignty boundary is crossed.
+    #   cloud         - everything allowed; suitable for development or for
+    #                   deployments that have explicitly accepted the
+    #                   sovereignty trade-off.
+    #
+    # This is intentionally env-only / non-mutable-at-runtime: changing the
+    # deployment posture is an infrastructure decision, not a UI toggle.
+    deployment_mode: Literal["offline", "hybrid", "cloud"] = "offline"
+
+    # V-022 (M1a): AI sovereignty policy. The paper (§3.4, §4.2 Tier 3,
+    # NIST AI RMF) calls out vendor AI inference pipelines as a sovereignty
+    # risk because they require frame decryption outside customer control.
+    # The default is *local_only*: KAI-C refuses to forward to any adapter
+    # that is not on a loopback URL, and the cloud_inference router returns
+    # 403. Federated mode allows participation in cross-organisation model
+    # training with anonymised parameters only. Cloud_allowed disables both
+    # the boundary check and the federation guard.
+    ai_sovereignty: Literal[
+        "local_only", "federated", "cloud_allowed"
+    ] = "local_only"
 
     # Logging settings
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL

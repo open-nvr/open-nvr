@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.database import get_db
+from core.policy import require_outbound_allowed
 from models import Camera
 from services.audit_service import write_audit_log
 from services.cloud_streaming_service import (
@@ -212,7 +213,14 @@ async def get_stream_target(
     )
 
 
-@router.post("/targets")
+@router.post(
+    "/targets",
+    # V-009 (M1a): cloud streaming pushes recordings to external RTMP/RTMPS/
+    # SRT endpoints. Creating a target spawns an FFmpeg subprocess that
+    # opens an outbound connection, so this is exactly the cloud-egress
+    # surface deployment_mode=offline must refuse.
+    dependencies=[Depends(require_outbound_allowed)],
+)
 async def create_or_update_stream_target(
     payload: CloudStreamTargetCreate,
     db: Session = Depends(get_db),
@@ -327,7 +335,11 @@ async def delete_stream_target(
     return {"status": "deleted", "target_id": target_id, "camera_id": camera_id}
 
 
-@router.post("/targets/{target_id}/start")
+@router.post(
+    "/targets/{target_id}/start",
+    # V-009 (M1a): launching a stream opens an outbound connection.
+    dependencies=[Depends(require_outbound_allowed)],
+)
 async def start_stream(
     target_id: str,
     db: Session = Depends(get_db),

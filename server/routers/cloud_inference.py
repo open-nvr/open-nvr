@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_user
 from core.config import get_settings
 from core.database import get_db
+from core.policy import require_ai_sovereignty_allowed, require_outbound_allowed
 from models import AIInferenceJob, CloudInferenceResult, User
 from schemas import (
     AIInferenceJobCreate,
@@ -53,7 +54,18 @@ def get_inference_service():
     return CloudInferenceService(settings, credential_service, quota_service)
 
 
-@router.post("/infer", response_model=CloudInferenceResponse)
+@router.post(
+    "/infer",
+    response_model=CloudInferenceResponse,
+    # V-009 + V-022 (M1a): refused when deployment_mode=offline or
+    # ai_sovereignty=local_only. Both gates are stacked so an operator who
+    # wants cloud recording but local-only AI can express that as
+    # deployment_mode=hybrid + ai_sovereignty=local_only.
+    dependencies=[
+        Depends(require_outbound_allowed),
+        Depends(require_ai_sovereignty_allowed),
+    ],
+)
 async def run_inference(
     request: CloudInferenceRequest,
     db: Session = Depends(get_db),
@@ -108,7 +120,15 @@ async def run_inference(
 
 
 @router.post(
-    "/jobs", response_model=AIInferenceJobResponse, status_code=status.HTTP_201_CREATED
+    "/jobs",
+    response_model=AIInferenceJobResponse,
+    status_code=status.HTTP_201_CREATED,
+    # V-009 + V-022 (M1a): async cloud inference goes through the same gates
+    # as the sync path above — refused in offline / local_only mode.
+    dependencies=[
+        Depends(require_outbound_allowed),
+        Depends(require_ai_sovereignty_allowed),
+    ],
 )
 async def create_async_job(
     request: AIInferenceJobCreate,

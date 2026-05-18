@@ -219,8 +219,12 @@ If you are pulling this branch on top of an older OpenNVR `.env`, you may need t
 1. **Rotate short secrets to ≥ 32 characters.** Run `make secrets` and paste the four generated values over the existing `SECRET_KEY`, `MEDIAMTX_SECRET`, `INTERNAL_API_KEY`, and `CREDENTIAL_ENCRYPTION_KEY` lines in your `server/.env`. If you rotate `CREDENTIAL_ENCRYPTION_KEY` you must also re-encrypt any stored camera credentials — `make secrets` does not do that for you.
 2. **Confirm MediaMTX URLs are loopback.** `MEDIAMTX_BASE_URL`, `MEDIAMTX_ADMIN_API`, `MEDIAMTX_HLS_URL`, `MEDIAMTX_RTSP_URL`, and `MEDIAMTX_PLAYBACK_URL` must all resolve to `127.0.0.1` / `localhost` / `::1`. If you already had them pointed at a routable host on purpose, set `ALLOW_REMOTE_MEDIAMTX=true` to opt out of the check.
 3. **Remove the old `DEFAULT_ADMIN_PASSWORD=admin123` line** from your `.env`. The admin account is now activated via the one-time setup token described above; see [SECURITY_ARCHITECTURE.md §2.1](docs/SECURITY_ARCHITECTURE.md). If you have automated deployment that *does* need to provision an initial password, leave `DEFAULT_ADMIN_PASSWORD=<your-strong-value>` set — the admin user will be created with `password_set=True` in that case and the setup-token flow is skipped.
+4. **Decide your offline-first posture.** Two new settings now default to the strictest posture:
+   - `DEPLOYMENT_MODE=offline` — every cloud-touching route returns 403. Use `hybrid` to opt back in to cloud streaming / cloud recording / cloud AI inference (each call is audit-logged), or `cloud` to disable all checks.
+   - `AI_SOVEREIGNTY=local_only` — KAI-C refuses non-loopback adapter URLs and `/infer/cloud` returns 403. Set to `federated` or `cloud_allowed` if you have explicitly accepted the sovereignty trade-off. Important: **the same value must be set in KAI-C's environment** (it runs in its own process and reads the env var directly).
+5. **(Re-check) MediaMTX URLs:** must be loopback unless `ALLOW_REMOTE_MEDIAMTX=true` is set.
 
-Finally, run `make check-secrets` to confirm no placeholder values were left behind, then start the server normally.
+Finally, run `make check-secrets` to confirm no placeholder values were left behind, then start the server normally. Once it boots, `GET /api/v1/system/posture` returns the active policy (which is also recorded in the audit log under the `policy.boot_posture` event).
 
 ---
 

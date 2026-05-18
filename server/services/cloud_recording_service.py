@@ -217,13 +217,29 @@ class CloudRecordingService:
         relative_path: str,
     ) -> dict[str, Any]:
         """Upload a recording file to another NVR instance with BYOK certificate support."""
+        # V-009 (M1a) defense-in-depth: the router-level gate already 403s
+        # the /cloud-upload/day endpoint, but background retry-loops and the
+        # queue worker can re-enter this method after a runtime mode flip.
+        # Refuse here too so an in-flight queue cannot leak data after the
+        # operator switches to offline mode.
+        from core.policy import cloud_outbound_allowed
+
+        if not cloud_outbound_allowed():
+            return {
+                "status": "error",
+                "message": (
+                    "Cloud upload refused: deployment_mode=offline. "
+                    "Set deployment_mode=hybrid|cloud to enable."
+                ),
+            }
+
         media_cfg = self._get_media_source_settings(db)
         cloud_cfg = self._get_cloud_settings(db)
         cloud_ip = media_cfg.get("cloud_recording_server_ip")
-        
+
         if not cloud_ip:
             return {"status": "error", "message": "No cloud recording server configured"}
-        
+
         if not os.path.exists(file_path):
             return {"status": "error", "message": f"File not found: {file_path}"}
         

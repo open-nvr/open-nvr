@@ -25,10 +25,24 @@ import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.config import settings
+from core.policy import current_posture
 
 router = APIRouter(prefix="/system", tags=["system"])  # mounted at /api/v1
+
+
+@router.get("/posture")
+async def get_security_posture(current_user=Depends(get_current_active_user)):
+    """V-009 + V-022 (M1a): expose the active offline-first policy so the UI
+    can render a deployment-mode badge and the operator can confirm what
+    sovereignty profile is in effect.
+
+    Read-only and authenticated-user-scope (not just superuser) — operators
+    monitoring the system should be able to see this without admin rights.
+    Mirrors the boot-time audit entry written by core.policy.audit_boot_posture.
+    """
+    return current_posture()
 
 
 def _run_command(cmd: list[str]):
