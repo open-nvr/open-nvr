@@ -422,9 +422,37 @@ class MediaMtxAdminService:
 
     @staticmethod
     async def patch_path(
-        camera_id: int, camera_ip: str, payload: dict[str, Any]
+        camera_id: int,
+        camera_ip: str,
+        payload: dict[str, Any],
+        *,
+        transport_security: str | None = None,
     ) -> dict[str, Any]:
-        """Update specific path configuration (validates that protected fields are not modified)."""
+        """Update specific path configuration (validates that protected fields are not modified).
+
+        V-003 (M1c-followup-selfrev-v2 P-1): the patch surface accepts an
+        arbitrary ``source`` field, which means a superuser hitting
+        ``PATCH /api/v1/mediamtx/admin/paths/{id}`` could re-introduce
+        plaintext rtsp:// on a camera marked rtsps_required and bypass
+        the policy that ``provision_path`` enforces. Run the same gate
+        here when the payload mutates ``source``.
+        """
+        # V-003 enforcement: if the payload would change the camera's
+        # source URL, the per-camera policy applies. We only gate on
+        # payload["source"] (the field MediaMTX uses for ingest);
+        # patches that touch record/hook fields and leave source
+        # untouched are policy-neutral and pass through.
+        if transport_security is not None and isinstance(payload, dict):
+            new_source = payload.get("source")
+            if new_source:
+                from services.transport_probe_service import (
+                    enforce_transport_policy,
+                )
+
+                enforce_transport_policy(
+                    transport_security, new_source, camera_id=camera_id
+                )
+
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
         if not MediaMtxAdminService.is_configured():
             return {
@@ -638,8 +666,15 @@ class MediaMtxAdminService:
         rtsp_transport: str = "tcp",
         recording_segment_seconds: int = 300,
         recording_path: str | None = None,
+        transport_security: str | None = None,
     ) -> dict[str, Any]:
-        """Push RTSP stream to MediaMTX and optionally enable recording."""
+        """Push RTSP stream to MediaMTX and optionally enable recording.
+
+        V-003 (M1c-followup-selfrev): ``transport_security`` is threaded
+        through to ``provision_path`` where the enforcement gate lives.
+        push_rtsp_stream itself is one of four callers — see
+        ``provision_path`` for the gate and the bypass-audit notes.
+        """
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
 
         # First provision the path with RTSP source
@@ -668,7 +703,9 @@ class MediaMtxAdminService:
         else:
             config["recording"] = {"enabled": False}
 
-        result = await MediaMtxAdminService.provision_path(camera_id, camera_ip, config)
+        result = await MediaMtxAdminService.provision_path(
+            camera_id, camera_ip, config, transport_security=transport_security
+        )
 
         # If path already exists, try to unprovision and re-provision
         if (
@@ -683,7 +720,10 @@ class MediaMtxAdminService:
             # Then try to provision again
             if unprovision_result.get("status") == "ok":
                 result = await MediaMtxAdminService.provision_path(
-                    camera_id, camera_ip, config
+                    camera_id,
+                    camera_ip,
+                    config,
+                    transport_security=transport_security,
                 )
                 result["action"] = "rtsp_stream_replaced"
             else:
@@ -704,8 +744,40 @@ class MediaMtxAdminService:
 
     @staticmethod
     async def provision_path(
-        camera_id: int, camera_ip: str, config: dict[str, Any]
+        camera_id: int,
+        camera_ip: str,
+        config: dict[str, Any],
+        *,
+        transport_security: str | None = None,
     ) -> dict[str, Any]:
+        """Provision a MediaMTX path for a camera.
+
+        V-003 (M1c-followup-selfrev): ``provision_path`` is the choke
+        point — every code path that creates / replaces a camera-fed
+        MediaMTX path goes through here. By running the transport-policy
+        gate at this level instead of one layer up, we cover the four
+        callers found by the bypass audit: ``push_rtsp_stream``, the
+        startup auto-provisioner (``MediaMtxStartupService``), the
+        config-driven re-provisioner (``CameraConfigService.provision``),
+        and the admin debug endpoint at ``/admin/streams/push/{id}``.
+        All four pass ``transport_security`` here; ``None`` (the default)
+        means "skip the check" — used during initial camera-create
+        before the probe has set the policy.
+        """
+        # V-003 enforcement gate. Runs BEFORE any MediaMTX HTTP — a
+        # refusal here costs no network and leaves MediaMTX state
+        # untouched. The exception carries enough context for the
+        # caller (router / startup loop / admin endpoint) to surface
+        # a meaningful error or audit-log entry.
+        if transport_security is not None:
+            from services.transport_probe_service import enforce_transport_policy
+
+            enforce_transport_policy(
+                transport_security,
+                config.get("source_url") if isinstance(config, dict) else None,
+                camera_id=camera_id,
+            )
+
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
 
         mediamtx_logger.log_action(
@@ -717,6 +789,7 @@ class MediaMtxAdminService:
                 "camera_ip": camera_ip,
                 "path_name": name,
                 "config": config,
+                "transport_security": transport_security,
             },
         )
 

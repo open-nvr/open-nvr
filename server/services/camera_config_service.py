@@ -25,9 +25,11 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from core.logging_config import camera_logger
 from models import Camera, CameraConfig, CameraPermission, User
 from schemas import CameraConfigCreate, CameraConfigUpdate
 from services.mediamtx_admin_service import MediaMtxAdminService
+from services.transport_probe_service import TransportPolicyViolation
 
 
 class CameraConfigService:
@@ -132,9 +134,42 @@ class CameraConfigService:
             },
             "rtsp_transport": cfg.rtsp_transport,
         }
-        result = await MediaMtxAdminService.provision_path(
-            cam.id, cam.ip_address, payload
-        )
+        # V-003 (M1c-followup-selfrev): respect the per-camera RTSPS
+        # policy. cfg is guaranteed non-None by the early check above.
+        try:
+            result = await MediaMtxAdminService.provision_path(
+                cam.id,
+                cam.ip_address,
+                payload,
+                transport_security=cfg.transport_security,
+            )
+        except TransportPolicyViolation as exc:
+            # M1c-fu-sr-v2 P-5: emit an audit-log entry so this refusal
+            # surface matches the other three entry paths
+            # (camera.transport_policy_refused on the cameras router,
+            # mediamtx.startup.camera_policy_blocked on the startup
+            # service, the admin-debug-push 409). Without this the
+            # config-driven re-provision was the only refusal that
+            # left no audit trace.
+            try:
+                camera_logger.log_action(
+                    "camera_config.transport_policy_refused",
+                    message=(
+                        f"Refused to provision camera {cam.id} via config "
+                        f"service: policy={exc.policy} "
+                        f"url_scheme={exc.scheme}"
+                    ),
+                    user_id=user.id if user is not None else None,
+                    camera_id=cam.id,
+                    extra_data={
+                        "policy": exc.policy,
+                        "url_scheme": exc.scheme,
+                    },
+                )
+            except Exception:
+                # Audit logging never blocks the refusal.
+                pass
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return result
 
     @staticmethod

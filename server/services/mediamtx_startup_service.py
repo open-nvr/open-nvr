@@ -33,6 +33,7 @@ from core.logging_config import mediamtx_logger
 from models import Camera, CameraConfig
 from services.mediamtx_admin_service import MediaMtxAdminService
 from services.storage_service import get_effective_recordings_base_path
+from services.transport_probe_service import TransportPolicyViolation
 
 
 class MediaMtxStartupService:
@@ -125,6 +126,11 @@ class MediaMtxStartupService:
             "provisioned": 0,
             "failed": 0,
             "skipped": 0,
+            # V-003 (M1c-fu-sr-v2 P-4): cameras refused at startup
+            # because of a transport_security policy violation get
+            # their own bucket so "skipped" only means "not eligible"
+            # rather than "refused by policy."
+            "policy_blocked": 0,
             "cameras": [],
         }
 
@@ -154,12 +160,16 @@ class MediaMtxStartupService:
                         results["provisioned"] += 1
                     elif camera_result["status"] == "failed":
                         results["failed"] += 1
+                    elif camera_result["status"] == "blocked_by_policy":
+                        results["policy_blocked"] += 1
                     else:
                         results["skipped"] += 1
 
                 mediamtx_logger.info(
                     f"Auto-provisioning completed: {results['provisioned']} success, "
-                    f"{results['failed']} failed, {results['skipped']} skipped",
+                    f"{results['failed']} failed, "
+                    f"{results['policy_blocked']} policy_blocked, "
+                    f"{results['skipped']} skipped",
                     extra={
                         "action": "mediamtx.startup.auto_provision_complete",
                         "results": results,
@@ -227,9 +237,40 @@ class MediaMtxStartupService:
                     camera, config, db
                 )
 
+                # V-003 (M1c-followup-selfrev): thread the stored
+                # transport_security policy through to provision_path
+                # so a camera marked rtsps_required with a plaintext
+                # URL is refused at startup rather than being silently
+                # re-provisioned. config may be None on a degenerate
+                # row (no CameraConfig yet); in that case pass None
+                # so the gate skips (pre-probe state).
+                if config is None:
+                    # M1c-fu-sr-v2 P-7: a camera with an RTSP URL but
+                    # no CameraConfig is a data anomaly that should
+                    # be surfaced rather than silently provisioned.
+                    # We still proceed (operator may be mid-migration)
+                    # but emit a structured warning so the issue lands
+                    # in the audit log.
+                    mediamtx_logger.warning(
+                        f"Camera {camera.id} ({camera.name}) has no "
+                        f"CameraConfig at auto-provision time — policy "
+                        f"gate will skip. Consider re-probing.",
+                        extra={
+                            "action": "mediamtx.startup.camera_missing_config",
+                            "camera_id": camera.id,
+                            "camera_name": camera.name,
+                        },
+                    )
+                transport_policy = (
+                    config.transport_security if config is not None else None
+                )
+
                 # Attempt provisioning
                 result = await MediaMtxAdminService.provision_path(
-                    camera.id, camera.ip_address, provision_config
+                    camera.id,
+                    camera.ip_address,
+                    provision_config,
+                    transport_security=transport_policy,
                 )
 
                 camera_result["mediamtx_response"] = result
@@ -311,6 +352,33 @@ class MediaMtxStartupService:
                                     "error": camera_result["error"],
                                 },
                             )
+
+            except TransportPolicyViolation as e:
+                # V-003 (M1c-followup-selfrev): a TransportPolicyViolation
+                # is deterministic — retrying won't change the outcome,
+                # the camera's URL is plaintext and the policy says no.
+                # Mark the camera and break out of the retry loop with
+                # a distinct status so the operator can find blocked
+                # cameras in /api/v1/cameras filtered by status.
+                camera_result["error"] = str(e)
+                camera_result["status"] = "blocked_by_policy"
+                camera.status = "policy_blocked"
+                db.commit()
+                mediamtx_logger.log_action(
+                    "mediamtx.startup.camera_policy_blocked",
+                    camera_id=camera.id,
+                    message=(
+                        f"Camera {camera.id} ({camera.name}) refused at "
+                        f"startup: policy={e.policy} url_scheme={e.scheme}"
+                    ),
+                    extra_data={
+                        "camera_id": camera.id,
+                        "camera_name": camera.name,
+                        "policy": e.policy,
+                        "url_scheme": e.scheme,
+                    },
+                )
+                break
 
             except Exception as e:
                 camera_result["error"] = str(e)

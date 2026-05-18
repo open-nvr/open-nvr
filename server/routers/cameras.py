@@ -36,6 +36,7 @@ from schemas import (
     CameraPermissionResponse,
     CameraResponse,
     CameraUpdate,
+    TransportSecurityUpdate,
 )
 from services.audit_service import write_audit_log
 from services.camera_service import CameraService
@@ -822,18 +823,53 @@ async def provision_camera_mediamtx(
                 status_code=400, detail="Camera has no RTSP URL configured"
             )
 
+        # M1c-followup: thread the camera's transport_security policy
+        # through to push_rtsp_stream so rtsps_required cameras refuse
+        # to provision against plaintext URLs at runtime. CameraConfig
+        # may not exist yet on a never-provisioned camera; in that case
+        # we pass None and the policy gate skips (pre-probe state).
+        from models import CameraConfig
+        from services.transport_probe_service import TransportPolicyViolation
+
+        cfg = (
+            db.query(CameraConfig)
+            .filter(CameraConfig.camera_id == camera.id)
+            .first()
+        )
+        policy = cfg.transport_security if cfg is not None else None
+
         # Provision in MediaMTX
         transport = "automatic" if rtsp_transport == "auto" else rtsp_transport
 
-        result = await MediaMtxAdminService.push_rtsp_stream(
-            camera_id=camera.id,
-            camera_ip=camera.ip_address,
-            rtsp_url=camera.rtsp_url,
-            enable_recording=enable_recording,
-            rtsp_transport=transport,
-            recording_segment_seconds=recording_segment_seconds,
-            recording_path=recording_path,
-        )
+        try:
+            result = await MediaMtxAdminService.push_rtsp_stream(
+                camera_id=camera.id,
+                camera_ip=camera.ip_address,
+                rtsp_url=camera.rtsp_url,
+                enable_recording=enable_recording,
+                rtsp_transport=transport,
+                recording_segment_seconds=recording_segment_seconds,
+                recording_path=recording_path,
+                transport_security=policy,
+            )
+        except TransportPolicyViolation as exc:
+            camera_logger.log_action(
+                "camera.transport_policy_refused",
+                message=(
+                    f"Refused to provision camera {camera.id}: "
+                    f"policy={exc.policy} url_scheme={exc.scheme}"
+                ),
+                user_id=current_user.id,
+                camera_id=camera.id,
+                extra_data={
+                    "policy": exc.policy,
+                    "url_scheme": exc.scheme,
+                },
+            )
+            # 409 Conflict: the request is well-formed but conflicts
+            # with the stored policy for this resource. The client
+            # needs to either update the URL or change the policy.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         if result.get("status") == "ok":
             camera.status = "provisioned"
@@ -1091,3 +1127,213 @@ async def ptz_stop(
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)
+
+
+# V-003 (M1c): re-probe a camera's RTSPS support and update its
+# transport_security policy. Lives at the end of the file so it
+# doesn't disrupt the existing route ordering (provision / permissions /
+# PTZ etc. above).
+@router.post("/{camera_id}/probe-transport")
+async def probe_camera_transport(
+    camera_id: int,
+    port: int | None = Query(
+        None,
+        ge=1,
+        le=65535,
+        description=(
+            "Override the RTSPS port for this probe. Useful when the "
+            "camera multiplexes RTSPS onto a non-default port (e.g. 443). "
+            "Omit to use the default port-selection rules."
+        ),
+    ),
+    reset_policy: bool = Query(
+        False,
+        description=(
+            "If True, overwrite any operator-set transport_security policy "
+            "with the probe-driven value. Default False preserves the "
+            "operator's explicit choice."
+        ),
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    request: Request = None,
+):
+    """V-003: re-run the RTSPS reachability probe against the camera
+    and update its ``transport_security`` policy in CameraConfig.
+
+    Useful when the operator has:
+
+    * just connected a camera that wasn't reachable at create time
+      (probe returned INCONCLUSIVE, policy stuck at ``rtsps_preferred``),
+    * upgraded the camera's firmware to add RTSPS support,
+    * swapped the underlying device while keeping the OpenNVR row.
+
+    Honours the operator's existing explicit choice: if
+    ``transport_security_operator_set`` is True (the operator previously
+    set the policy via PUT ``/cameras/{id}/transport-security``), this
+    endpoint refreshes the probe result but leaves the policy intact.
+    Pass ``?reset_policy=true`` to clear the override AND let the probe
+    drive the value.
+    """
+    # M1c: imports inline to keep import-time graph slim (matches the
+    # other endpoints in this router).
+    from datetime import UTC, datetime
+
+    from models import CameraConfig
+    from services.transport_probe_service import (
+        TransportProbeService,
+        policy_for_outcome,
+    )
+
+    camera = CameraService.get_camera_by_id(
+        db=db, camera_id=camera_id, user_id=current_user.id
+    )
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not camera.rtsp_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Camera has no RTSP URL configured; cannot probe",
+        )
+
+    config = (
+        db.query(CameraConfig).filter(CameraConfig.camera_id == camera.id).first()
+    )
+    if not config:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Camera has no CameraConfig row yet — provision it first via "
+                "POST /cameras/{id}/provision-mediamtx"
+            ),
+        )
+
+    # M1c-selfrev H-1: honour the port override so cameras with RTSPS
+    # on a non-default port (some Hikvision firmware uses 443) can be
+    # probed without editing the camera record.
+    outcome = await TransportProbeService.probe(
+        camera.rtsp_url, rtsps_port=port
+    )
+
+    # M1c-selfrev H-2: use the explicit operator_set flag rather than
+    # pattern-matching the value — an operator who deliberately chose
+    # "rtsps_preferred" gets the same protection as one who chose
+    # "rtsps_required".
+    operator_set_explicitly = bool(config.transport_security_operator_set)
+    if reset_policy or not operator_set_explicitly:
+        config.transport_security = policy_for_outcome(outcome)
+        # Reset the flag too — the policy is now probe-driven again.
+        config.transport_security_operator_set = False
+
+    config.transport_security_probe_result = outcome.value
+    config.transport_security_probed_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(config)
+
+    camera_logger.log_action(
+        "camera.transport_probe",
+        message=(
+            f"Camera {camera.id} re-probed: outcome={outcome.value} "
+            f"policy={config.transport_security} "
+            f"port_override={port}"
+        ),
+        user_id=current_user.id,
+        camera_id=camera.id,
+        extra_data={
+            "outcome": outcome.value,
+            "transport_security": config.transport_security,
+            "reset_policy": reset_policy,
+            "port_override": port,
+            "ip": request.client.host if request and request.client else None,
+        },
+    )
+
+    return {
+        "camera_id": camera.id,
+        "transport_security": config.transport_security,
+        "transport_security_operator_set": config.transport_security_operator_set,
+        "transport_security_probe_result": config.transport_security_probe_result,
+        "transport_security_probed_at": (
+            config.transport_security_probed_at.isoformat()
+            if config.transport_security_probed_at
+            else None
+        ),
+        "operator_override_preserved": (
+            operator_set_explicitly and not reset_policy
+        ),
+    }
+
+
+# M1c-selfrev H-2: explicit operator-override endpoint. Setting the
+# policy here flips `transport_security_operator_set` to True so the
+# probe-driven re-probe path doesn't quietly walk it back.
+@router.put("/{camera_id}/transport-security")
+async def set_camera_transport_security(
+    camera_id: int,
+    payload: TransportSecurityUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    request: Request = None,
+):
+    """V-003: explicitly set the camera's transport_security policy.
+
+    Use to:
+
+    * Lock a camera at ``rtsps_required`` so the stream service refuses
+      plaintext fallback even if the camera temporarily fails the
+      probe (V-003 strict mode).
+    * Mark a legacy camera as ``plaintext_allowed`` so the UI stops
+      flagging it as a posture warning.
+    * Restore a custom-port camera to ``rtsps_preferred`` after a
+      misleading probe.
+
+    Sets ``transport_security_operator_set=True`` so subsequent calls
+    to POST ``/probe-transport`` preserve the operator's choice.
+    """
+    from models import CameraConfig
+
+    camera = CameraService.get_camera_by_id(
+        db=db, camera_id=camera_id, user_id=current_user.id
+    )
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    config = (
+        db.query(CameraConfig).filter(CameraConfig.camera_id == camera.id).first()
+    )
+    if not config:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Camera has no CameraConfig row yet — provision it first via "
+                "POST /cameras/{id}/provision-mediamtx"
+            ),
+        )
+
+    previous = config.transport_security
+    config.transport_security = payload.policy
+    config.transport_security_operator_set = True
+    db.commit()
+    db.refresh(config)
+
+    camera_logger.log_action(
+        "camera.transport_security_set",
+        message=(
+            f"Camera {camera.id} transport_security: {previous} -> "
+            f"{payload.policy} (operator override)"
+        ),
+        user_id=current_user.id,
+        camera_id=camera.id,
+        extra_data={
+            "previous": previous,
+            "new": payload.policy,
+            "ip": request.client.host if request and request.client else None,
+        },
+    )
+
+    return {
+        "camera_id": camera.id,
+        "transport_security": config.transport_security,
+        "transport_security_operator_set": config.transport_security_operator_set,
+        "previous": previous,
+    }

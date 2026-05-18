@@ -122,6 +122,30 @@ class CameraService:
 
                         from models import CameraConfig
 
+                        # V-003 (M1c): probe the camera for RTSPS support
+                        # so we can record the outcome at create time and
+                        # default transport_security to a value that
+                        # reflects what the camera actually offers.
+                        #
+                        # The probe is best-effort: if it can't reach
+                        # the camera (DNS / timeout / etc) the outcome
+                        # is INCONCLUSIVE and policy stays at the safe
+                        # "rtsps_preferred" default — the operator can
+                        # re-probe later via the camera router endpoint.
+                        from datetime import UTC, datetime
+
+                        from services.transport_probe_service import (
+                            ProbeOutcome,
+                            TransportProbeService,
+                            policy_for_outcome,
+                        )
+
+                        probe_outcome = await TransportProbeService.probe(
+                            db_camera.rtsp_url
+                        )
+                        transport_security = policy_for_outcome(probe_outcome)
+                        probed_at = datetime.now(UTC)
+
                         # Check if config exists (shouldn't for new camera, but good practice)
                         existing_config = (
                             db.query(CameraConfig)
@@ -137,8 +161,28 @@ class CameraService:
                                 rtsp_transport="tcp",
                                 recording_segment_seconds=300,
                                 last_provisioned_at=func.now(),
+                                transport_security=transport_security,
+                                # M1c-selfrev H-2: probe-driven, not
+                                # operator-set, so a later re-probe can
+                                # update the value without an explicit
+                                # reset_policy=true.
+                                transport_security_operator_set=False,
+                                transport_security_probe_result=probe_outcome.value,
+                                transport_security_probed_at=probed_at,
                             )
                             db.add(new_config)
+                        else:
+                            # Only overwrite the policy if it isn't an
+                            # operator override — same semantics as the
+                            # re-probe endpoint. If create_camera is
+                            # called against a row that an operator
+                            # already touched, preserve their choice.
+                            if not existing_config.transport_security_operator_set:
+                                existing_config.transport_security = transport_security
+                            existing_config.transport_security_probe_result = (
+                                probe_outcome.value
+                            )
+                            existing_config.transport_security_probed_at = probed_at
 
                         db.commit()
                         db.refresh(db_camera)
@@ -148,8 +192,23 @@ class CameraService:
                             message=f"Camera {db_camera.id} auto-provisioned successfully",
                             user_id=owner_id,
                             camera_id=db_camera.id,
-                            extra_data=provision_result,
+                            extra_data={
+                                **provision_result,
+                                "transport_security": transport_security,
+                                "transport_security_probe_result": probe_outcome.value,
+                            },
                         )
+                        if probe_outcome == ProbeOutcome.NOT_SUPPORTED:
+                            camera_logger.log_action(
+                                "camera.transport_security_plaintext",
+                                message=(
+                                    f"Camera {db_camera.id} does not support RTSPS; "
+                                    f"transport_security set to plaintext_allowed"
+                                ),
+                                user_id=owner_id,
+                                camera_id=db_camera.id,
+                                extra_data={"rtsp_url_host": db_camera.ip_address},
+                            )
                     else:
                         camera_logger.log_action(
                             "camera.auto_provision_failed",

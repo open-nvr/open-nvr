@@ -259,6 +259,48 @@ class CameraConfig(Base):
 
     last_provisioned_at = Column(DateTime(timezone=True), nullable=True)
 
+    # V-003: per-camera RTSPS policy (Zenodo 17261761 §3.2 / §4.2 Tier 1).
+    #   rtsps_required    — stream service refuses plaintext fallback.
+    #   rtsps_preferred   — try RTSPS first, fall back to RTSP. Default.
+    #   plaintext_allowed — operator explicitly accepted legacy plaintext
+    #                       camera (paper-consistent on the isolated
+    #                       camera VLAN; middleware-side TLS still applies).
+    # See services/transport_probe_service.py for the probe that informs
+    # this value at camera-add time, and routers/cameras.py for the
+    # re-probe endpoint.
+    transport_security = Column(
+        String(20),
+        nullable=False,
+        default="rtsps_preferred",
+        server_default="rtsps_preferred",
+    )
+    # M1c-selfrev H-2: True iff `transport_security` was set by an
+    # explicit operator action (PUT /cameras/{id}/transport-security or
+    # config update). False means it's probe-driven. The re-probe
+    # endpoint refuses to overwrite an operator-set policy unless the
+    # caller passes ?reset_policy=true (which also clears this flag).
+    transport_security_operator_set = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    # Latest probe outcome. Decoupled from `transport_security` so the
+    # operator's policy choice survives a transient probe failure.
+    #   supported       — TLS handshake completed on the probed port.
+    #   not_supported   — TLS handshake refused / TCP rejected.
+    #   inconclusive    — DNS / timeout / unreachable; informational only.
+    #   not_probed      — never probed (migration default for back-fill).
+    transport_security_probe_result = Column(
+        String(20),
+        nullable=False,
+        default="not_probed",
+        server_default="not_probed",
+    )
+    transport_security_probed_at = Column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # RTSP proxy fields
     proxy_enabled = Column(Boolean, default=False, nullable=False)
     stream_active = Column(Boolean, default=False, nullable=False)

@@ -245,6 +245,14 @@ class CameraConfigBase(BaseModel):
     proxy_enabled: bool = False
     auto_restart: bool = True
     max_restart_attempts: int = 3
+    # V-003: per-camera RTSPS policy. See models.CameraConfig comment
+    # for the enum semantics. Defaults to "rtsps_preferred" — the
+    # probe-driven path overrides this to "plaintext_allowed" only
+    # when the camera is verifiably non-TLS.
+    transport_security: str = Field(
+        "rtsps_preferred",
+        pattern="^(rtsps_required|rtsps_preferred|plaintext_allowed)$",
+    )
 
 
 class CameraConfigCreate(CameraConfigBase):
@@ -264,6 +272,13 @@ class CameraConfigUpdate(BaseModel):
     proxy_enabled: bool | None = None
     auto_restart: bool | None = None
     max_restart_attempts: int | None = None
+    # V-003: operators can opt into rtsps_required or fall back to
+    # plaintext_allowed for legacy cameras. The probe will re-run on
+    # the next /probe-transport call but won't overwrite an explicit
+    # operator choice.
+    transport_security: str | None = Field(
+        None, pattern="^(rtsps_required|rtsps_preferred|plaintext_allowed)$"
+    )
 
 
 class CameraConfigResponse(CameraConfigBase):
@@ -273,9 +288,33 @@ class CameraConfigResponse(CameraConfigBase):
     stream_active: bool = False
     last_stream_start: datetime | None = None
     stream_failures: int = 0
+    # V-003 probe surface — informational so the UI can render a "TLS:
+    # supported / not supported / unknown" badge alongside the
+    # transport_security policy.
+    transport_security_probe_result: str = Field(
+        "not_probed",
+        pattern="^(supported|not_supported|inconclusive|not_probed)$",
+    )
+    transport_security_probed_at: datetime | None = None
+    # M1c-selfrev H-2: whether the policy reflects an explicit operator
+    # choice. The UI can use this to render "policy: operator-set" vs.
+    # "policy: probe-driven" so operators know whether a re-probe will
+    # change anything.
+    transport_security_operator_set: bool = False
 
     class Config:
         from_attributes = True
+
+
+# M1c-selfrev H-2: dedicated request body for the
+# PUT /api/v1/cameras/{id}/transport-security endpoint.
+class TransportSecurityUpdate(BaseModel):
+    """Explicit operator override for a camera's transport policy."""
+
+    policy: str = Field(
+        ...,
+        pattern="^(rtsps_required|rtsps_preferred|plaintext_allowed)$",
+    )
 
 
 class ProvisionResult(BaseModel):

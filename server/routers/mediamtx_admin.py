@@ -126,7 +126,26 @@ async def mtx_paths_patch(
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
-    return await MediaMtxAdminService.patch_path(camera_id, cam.ip_address, payload)
+
+    # V-003 (M1c-fu-sr-v2 P-1): patch_path is the 5th MediaMTX entry
+    # path. If the payload would change the camera's ingest source URL,
+    # the per-camera transport_security policy applies — even for the
+    # superuser using this admin/debug surface. Look up the policy and
+    # thread it through.
+    from models import CameraConfig
+    from services.transport_probe_service import TransportPolicyViolation
+
+    cfg = (
+        db.query(CameraConfig).filter(CameraConfig.camera_id == cam.id).first()
+    )
+    policy = cfg.transport_security if cfg is not None else None
+
+    try:
+        return await MediaMtxAdminService.patch_path(
+            camera_id, cam.ip_address, payload, transport_security=policy
+        )
+    except TransportPolicyViolation as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/admin/paths/list")
@@ -163,9 +182,29 @@ async def push_rtsp_stream(
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    return await MediaMtxAdminService.push_rtsp_stream(
-        camera_id, cam.ip_address, rtsp_url, enable_recording
+    # V-003 (M1c-followup-selfrev): respect the camera's stored
+    # transport_security policy even on this admin/debug surface so
+    # a privileged user can't accidentally re-introduce plaintext for
+    # a camera marked rtsps_required. cfg may be None for an
+    # un-provisioned camera; in that case pass None so the gate skips.
+    from models import CameraConfig
+    from services.transport_probe_service import TransportPolicyViolation
+
+    cfg = (
+        db.query(CameraConfig).filter(CameraConfig.camera_id == cam.id).first()
     )
+    policy = cfg.transport_security if cfg is not None else None
+
+    try:
+        return await MediaMtxAdminService.push_rtsp_stream(
+            camera_id,
+            cam.ip_address,
+            rtsp_url,
+            enable_recording,
+            transport_security=policy,
+        )
+    except TransportPolicyViolation as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/admin/recordings/list")

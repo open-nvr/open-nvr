@@ -256,6 +256,14 @@ If you are pulling this branch on top of an older OpenNVR `.env`, you may need t
 
    **Note on bare-metal remote access.** `mediamtx.yml` (the bare-metal template) binds all viewer transports to `127.0.0.1` by design — there's no Docker port-map to provide the loopback boundary. Remote viewers cannot reach MediaMTX directly. Front it with a TLS-terminating reverse proxy (nginx/Caddy/Traefik) on your management NIC, or open the binds manually AND add a host-firewall rule.
 
+7. **Per-camera RTSPS posture (V-003).** Each camera now carries a `transport_security` policy on its config (`rtsps_required` / `rtsps_preferred` / `plaintext_allowed`). The Alembic migration runs automatically on next deploy (`alembic upgrade head`) and back-fills existing cameras with the safe default `rtsps_preferred`. On camera-add the backend probes the camera's RTSPS reachability and stores the outcome (`supported` / `not_supported` / `inconclusive`) alongside the policy. New API surface:
+
+   - `POST /api/v1/cameras/{id}/probe-transport?port=<n>&reset_policy=<bool>` — re-run the TLS probe. Pass `port` to override the default RTSPS port (useful for cameras that multiplex RTSPS onto :443 or similar). Pass `reset_policy=true` to discard any explicit operator override and let the probe drive.
+   - `PUT /api/v1/cameras/{id}/transport-security` — explicit operator override. Body: `{"policy": "rtsps_required" | "rtsps_preferred" | "plaintext_allowed"}`. Sets `transport_security_operator_set=True` so subsequent re-probes preserve your choice.
+   - `CameraConfigResponse` now includes `transport_security`, `transport_security_operator_set`, `transport_security_probe_result`, and `transport_security_probed_at`. The UI can use these to render a "TLS: supported / not supported / unknown" badge and a "policy: operator-set / probe-driven" indicator alongside each camera.
+
+   Runtime enforcement (stream service refusing plaintext for `rtsps_required` cameras) is a known follow-up — see [SECURITY_ARCHITECTURE.md](docs/SECURITY_ARCHITECTURE.md) V-003 row.
+
 Finally, run `make check-secrets` to confirm no placeholder values were left behind, then start the server normally. Once it boots, `GET /api/v1/system/posture` returns the active policy (which is also recorded in the audit log under the `policy.boot_posture` event).
 
 ---
