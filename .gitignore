@@ -120,6 +120,8 @@ test_*.py
 server/test_*.py
 !server/tests/test_*.py
 !server/tests/**/test_*.py
+# KAI-C's pytest suite (A2.4): same negation pattern as server/tests/.
+!kai-c/test/test_*.py
 server/scripts/check_*.py
 server/scripts/get_*.py
 server/scripts/delete_*.py
