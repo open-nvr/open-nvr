@@ -1,0 +1,114 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Intrusion-detection example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values for your
+# deployment, and run:
+#
+#   python intrusion_detection.py --config config.yml
+
+# ── KAI-C endpoint ──────────────────────────────────────────────────
+#
+# KAI-C's HTTP service. The example calls
+# ``POST {kaic_url}/api/v1/infer/{kaic_adapter_name}`` for every
+# polled frame. Default for a single-host deployment:
+kaic_url: "http://127.0.0.1:8100"
+
+# Name of the registered adapter to use for object detection. Must
+# match a name in KAI-C's adapter registry (POST /api/v1/adapters/register).
+kaic_adapter_name: "yolov8"
+
+# Shared secret between OpenNVR backend and KAI-C (the same
+# INTERNAL_API_KEY env var KAI-C uses). Leave null in dev / single-
+# host loopback deployments where KAI-C is running with the dev-mode
+# auth bypass.
+kaic_api_key: null
+
+# ── Polling cadence ─────────────────────────────────────────────────
+#
+# How often to pull a frame from each camera. 1 fps (1.0) is a sane
+# default for security-camera monitoring; tune up for fast-moving
+# scenes, down to save GPU.
+poll_interval_seconds: 1.0
+
+# How long to wait for KAI-C inference before giving up on a frame.
+# A slow adapter shouldn't block the whole loop indefinitely.
+request_timeout_seconds: 30.0
+
+# ── Detection filter ────────────────────────────────────────────────
+#
+# Only COCO labels in this list trigger zone evaluation. Lower-case;
+# the example case-folds when matching. Common starting points:
+#   "person"   — basic intrusion detection
+#   "car", "truck", "motorcycle" — vehicle intrusion
+#   "person", "dog"   — porch monitoring with pet allowance
+watch_labels:
+  - "person"
+  - "car"
+  - "truck"
+
+# ── Restricted hours ────────────────────────────────────────────────
+#
+# Times in HH:MM (24h, **host-local timezone**). Cross-midnight ranges
+# are supported (start > end). Example: 22:00 - 06:00 means
+# "every day between 10 PM and 6 AM the next morning."
+#
+# Note: DST transitions cause one duplicated or skipped hour per year
+# in TZs that observe daylight saving. If precision matters, pin the
+# container to UTC and translate your restricted-hours window
+# accordingly. See README "Operational notes".
+restricted_hours:
+  start: "22:00"
+  end: "06:00"
+
+# ── Webhook (optional) ──────────────────────────────────────────────
+#
+# Alerts are always logged to stdout. If you set ``webhook_url``,
+# they're also POSTed as JSON to that URL. Works with any service
+# that accepts an incoming-webhook payload (Slack, Discord, Teams,
+# PagerDuty, n8n, a custom listener).
+#
+# webhook_url: "https://hooks.slack.com/services/T000/B000/XXXXXX"
+webhook_url: null
+
+# ── Cameras ─────────────────────────────────────────────────────────
+#
+# One entry per camera you want to watch. Each entry needs:
+#   camera_id     — operator-chosen string; flows through to the
+#                    alert payload and KAI-C's audit log.
+#   frame_url     — where to fetch a JPEG/PNG snapshot:
+#                    file:///abs/path/test.jpg    (testing / demo)
+#                    http://192.168.1.50/jpg/image.jpg  (cheap IP cams)
+#                    https://camera.example.com/snapshot.jpg  (TLS-fronted)
+#                    rtsp://…    — deferred to A2.5b
+#   frame_width / frame_height  — pixel dimensions of the camera's
+#                    output (needed to convert §5.1 normalized [0, 1]
+#                    bboxes back to pixel coords for the zone polygon).
+#   zone_name     — human label that appears in alerts.
+#   zone          — polygon vertices in pixel coords (x, y from
+#                    top-left). Minimum 3 vertices. Convex or concave.
+cameras:
+  - camera_id: "cam-front-gate"
+    frame_url: "https://camera-front-gate.lan/snapshot.jpg"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "front-yard-restricted"
+    zone:
+      # A trapezoid covering the driveway from 200 px in on the
+      # left to 200 px in on the right, between 400 - 900 px down.
+      - [200, 400]
+      - [1720, 400]
+      - [1820, 900]
+      - [100, 900]
+
+  - camera_id: "cam-back-shed"
+    frame_url: "file:///opt/intrusion-detection/sample-back-shed.jpg"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "shed-perimeter"
+    zone:
+      - [600, 300]
+      - [1400, 300]
+      - [1400, 800]
+      - [600, 800]

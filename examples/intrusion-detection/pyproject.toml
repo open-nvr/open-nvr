@@ -1,0 +1,28 @@
+[project]
+name = "opennvr-example-intrusion-detection"
+version = "1.0.0"
+description = "OpenNVR intrusion-detection example app (A2.5)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+# Deps are deliberately minimal — the example is meant to be a clean
+# template for community contributors. httpx for HTTP, PyYAML for the
+# config, and that's it. Image bytes go to KAI-C as base64 so we don't
+# need cv2/PIL locally.
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "PyYAML>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+intrusion-detection = "intrusion_detection:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
