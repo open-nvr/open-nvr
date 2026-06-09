@@ -73,6 +73,7 @@ interface HlsPlaybackSession {
 interface CloudUploadStatus {
   queue_size: number
   worker_running: boolean
+  configured?: boolean
   active_file?: string | null
   stats?: {
     queued_total?: number
@@ -110,6 +111,7 @@ export function PlaybackView() {
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
+  const [cloudUploadConfigured, setCloudUploadConfigured] = useState(true)
   const [queueingDayKey, setQueueingDayKey] = useState<string | null>(null)
   const [queuedDayKey, setQueuedDayKey] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -148,20 +150,31 @@ export function PlaybackView() {
 
   useEffect(() => {
     if (!user?.is_superuser) return
+    // No cloud recording server configured → nothing to poll.
+    if (!cloudUploadConfigured) return
+    // Pause polling while a recording is open in the player so it can't
+    // disturb playback; resumes automatically when the player is closed.
+    if (showPlayer) return
 
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const poll = async () => {
+      let keepGoing = true
       try {
         const { data } = await apiService.getCloudUploadStatus()
         if (!stopped) {
           setCloudUploadStatus(data)
+          if (data?.configured === false) {
+            // Server not set up — stop polling for the rest of the session.
+            setCloudUploadConfigured(false)
+            keepGoing = false
+          }
         }
       } catch {
         // Non-blocking UI: keep playback usable even if status polling fails.
       } finally {
-        if (!stopped) {
+        if (!stopped && keepGoing) {
           timer = setTimeout(poll, 3000)
         }
       }
@@ -172,7 +185,7 @@ export function PlaybackView() {
       stopped = true
       if (timer) clearTimeout(timer)
     }
-  }, [user?.is_superuser])
+  }, [user?.is_superuser, cloudUploadConfigured, showPlayer])
 
   // Toggle camera expansion
   const toggleCamera = (cameraId: number) => {

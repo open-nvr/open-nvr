@@ -527,6 +527,11 @@ class CloudRecordingService:
             
             self._upload_queue.task_done()
     
+    def is_cloud_configured(self, db: Session) -> bool:
+        """Whether a cloud recording server target is configured."""
+        media_cfg = self._get_media_source_settings(db)
+        return bool(media_cfg.get("cloud_recording_server_ip"))
+
     def get_queue_status(self) -> dict[str, Any]:
         """Get current upload queue status."""
         return {

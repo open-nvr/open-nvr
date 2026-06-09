@@ -28,7 +28,7 @@ WORKDIR /app
 # If you bump these, re-run the example's test suite and the demo
 # page locally before committing.
 RUN pip install --no-cache-dir \
-        "pipecat-ai[silero,websocket]>=0.0.55,<1.0" \
+        "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
         "httpx>=0.27,<1.0" \
         "fastapi>=0.110,<1.0" \
         "uvicorn>=0.27,<1.0" \
@@ -43,6 +43,7 @@ COPY examples/camera-agent/context.py         ./context.py
 COPY examples/camera-agent/frame_sources.py   ./frame_sources.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
+COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/config.example.yml ./config.example.yml
 COPY examples/camera-agent/demo               ./demo
 

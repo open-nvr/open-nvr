@@ -152,12 +152,12 @@ detect_os() {
             ;;
         Darwin*)
             OS_NAME="macOS"
-            COMPOSE_FILE="docker-compose.yml"
+            COMPOSE_FILE="docker-compose.tier0.yml"
             ;;
         *)
             OS_NAME="Unknown"
-            COMPOSE_FILE="docker-compose.yml"
-            warn "Unrecognised OS: $OS_TYPE — defaulting to bridge network mode"
+            COMPOSE_FILE="docker-compose.tier0.yml"
+            warn "Unrecognised OS: $OS_TYPE — defaulting to tier0 demo (bridge network mode)"
             ;;
     esac
 }

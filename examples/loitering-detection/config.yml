@@ -1,0 +1,122 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Loitering-detection example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values for your
+# deployment, and run:
+#
+#   python loitering_detection.py --config config.yml
+
+# ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
+#
+# This example subscribes to KAI-C's inference broadcast surface
+# (NATS event bus) instead of driving its own KAI-C calls. It rides the
+# inference stream another app (e.g. intrusion-detection) is already
+# pushing. Net: one adapter inference fans out to N consumers; this
+# app pays zero GPU cost on top of whatever's already running.
+nats_url: "nats://nats:4222"
+# Bare-metal / host-mode deployment:
+# nats_url: "nats://127.0.0.1:4222"
+
+# Token-auth secret. Must match the same INTERNAL_API_KEY value
+# KAI-C uses for its HTTP/WS surface. Leave null only in fully-
+# isolated dev deployments where NATS is configured auth-less.
+nats_token: null
+
+# Subject pattern. The wildcard ``opennvr.inference.>`` catches
+# every adapter's events; narrow to ``opennvr.inference.yolov8.>``
+# if you only care about object detection results, etc.
+subject_pattern: "opennvr.inference.>"
+
+# ── Detection filter ──────────────────────────────────────────────
+#
+# Only detections with one of these COCO labels (case-folded) count
+# toward the dwell timer. Use the same labels you'd use for
+# intrusion-detection, scoped to what "loitering" means for your
+# deployment.
+watch_labels:
+  - "person"
+
+# ── Loitering thresholds ──────────────────────────────────────────
+#
+# threshold_seconds:  fire an alert when a watched-label entity has
+#                     been in the zone continuously for this many
+#                     seconds. Choose based on your scene: 30s for
+#                     a doorway (someone hovering); 5 min for a
+#                     parking lot (a parked car is normal); etc.
+#
+# grace_period_seconds: how long the detection can be ABSENT (no
+#                     in-zone detection frames received) before the
+#                     dwell timer resets. Absorbs brief occlusion /
+#                     false negatives. 5s is typical for 1-fps
+#                     inference; bump higher (15-30s) for very sparse
+#                     inference frequency.
+threshold_seconds: 60
+grace_period_seconds: 5
+
+# ── Webhook (optional) ────────────────────────────────────────────
+#
+# Alerts always go to stdout. If you set ``webhook_url``, they're
+# also POSTed as JSON to that URL — works with Slack, Discord,
+# Teams, PagerDuty incoming webhooks, etc.
+webhook_url: null
+
+# ── NATS alert fan-out (optional) ─────────────────────────────────
+#
+# Distinct from ``nats_url`` above: that's where we SUBSCRIBE for
+# inference events; this is where we PUBLISH our loitering alerts.
+# In a single-host deployment both point at the same broker; in a
+# federated setup they may differ.
+#
+# When set, every fired alert is also published as JSON to:
+#     {nats_alerts_subject_prefix}.app.loitering-detection.{camera_id}
+#     e.g. opennvr.alerts.app.loitering-detection.cam-back-shed
+#
+# Lets the operator-UI alerts inbox or any other subscriber pick up
+# alerts off the bus instead of needing per-app webhooks.
+#
+# nats_alerts_url: "nats://nats:4222"
+# nats_alerts_token: "${INTERNAL_API_KEY}"
+# nats_alerts_subject_prefix: "opennvr.alerts"  # default
+nats_alerts_url: null
+nats_alerts_token: null
+
+# ── Cameras ───────────────────────────────────────────────────────
+#
+# One entry per camera you want to watch. Each entry needs:
+#   camera_id     — must match the camera_id KAI-C uses in event
+#                    subjects (i.e. what the upstream inference
+#                    driver passed in its requests).
+#   frame_width / frame_height — pixel dimensions of the camera
+#                    output (needed to convert §5.1 normalized bboxes
+#                    back to pixel coords for the zone polygon).
+#   zone_name     — human label that appears in alerts.
+#   zone          — polygon vertices in pixel coords (x, y from
+#                    top-left). Minimum 3 vertices.
+#
+# Cameras that aren't listed here are ignored — events still flow
+# through NATS, but no dwell tracking happens for them.
+cameras:
+  - camera_id: "cam-back-shed"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "shed-perimeter"
+    zone:
+      - [600, 300]
+      - [1400, 300]
+      - [1400, 800]
+      - [600, 800]
+
+  - camera_id: "cam-parking-lot"
+    frame_width: 1920
+    frame_height: 1080
+    zone_name: "loading-bay"
+    # Vehicles loitering > 5 min in the loading bay are unusual:
+    # bump threshold_seconds at the app level OR add a config-per-
+    # camera override (deferred to follow-up).
+    zone:
+      - [100, 600]
+      - [1820, 600]
+      - [1820, 1000]
+      - [100, 1000]

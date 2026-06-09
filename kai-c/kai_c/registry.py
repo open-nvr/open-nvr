@@ -185,6 +185,7 @@ class AdapterRegistry:
         audit: AuditStore,
         poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
         http_client: httpx.AsyncClient | None = None,
+        auth_token: str | None = None,
     ) -> None:
         self._sovereignty_mode = sovereignty_mode.lower()
         self._audit = audit
@@ -195,7 +196,13 @@ class AdapterRegistry:
         # adapter probes through some operator-side proxy (same logic
         # as the conformance kit).
         self._owns_client = http_client is None
-        self._client: httpx.AsyncClient = http_client or httpx.AsyncClient(trust_env=False)
+        if http_client is not None:
+            self._client: httpx.AsyncClient = http_client
+        else:
+            headers = (
+                {"Authorization": f"Bearer {auth_token}"} if auth_token else None
+            )
+            self._client = httpx.AsyncClient(trust_env=False, headers=headers)
         self._poll_task: asyncio.Task | None = None
         self._stop_flag = asyncio.Event()
 

@@ -121,35 +121,53 @@ class WhisperClient(_ReusableClientMixin):
         url: str,
         token: str,
         timeout_seconds: float = 30.0,
+        language: str = "en",
     ) -> None:
         self._url = url.rstrip("/") + "/infer"
         self._token = token
         self._timeout = timeout_seconds
+        # Force the language so Whisper doesn't auto-detect (it mis-guessed
+        # e.g. Korean from clipped/noisy English). Set to "" to auto-detect.
+        self._language = language
 
     async def transcribe(self, audio_bytes: bytes) -> str:
         headers = {
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
+        # Diagnostic: how much audio and is it silent? peak_amp near 0
+        # means we're handing Whisper silence (mic/VAD), not speech.
+        import array as _array
+        _n = len(audio_bytes)
+        _a = _array.array("h")
+        _a.frombytes(audio_bytes[: (_n // 2) * 2])
+        _peak = max((abs(x) for x in _a), default=0)
+        logger.info("Whisper STT input: %d bytes (~%.2fs @16k), peak_amp=%d", _n, _n / 32000.0, _peak)
+        # The monolithic ai-adapter's /infer requires the SDK envelope
+        # {"task", "input": {...}} — a flat body 400s ("Missing input").
+        _input = {"audio_b64": base64.b64encode(audio_bytes).decode("ascii")}
+        if self._language:
+            _input["language"] = self._language
         body = {
-            "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
             "task": "audio_transcription",
+            "input": _input,
         }
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        # The contract's §5.3 ASR result names the transcript field
-        # ``transcript``; the legacy Whisper adapter emits ``text``;
-        # some forks use ``transcription``. Accept all three so we
-        # work against whichever shape happens to be deployed.
-        result = payload.get("result") or {}
+        # The adapter returns a FLAT body (``text`` at top level); some
+        # forks wrap it in ``result``. Accept both, and the transcript
+        # field may be transcript / text / transcription.
+        src = payload.get("result") if isinstance(payload.get("result"), dict) else payload
         text = (
-            result.get("transcript")
-            or result.get("text")
-            or result.get("transcription")
+            src.get("transcript")
+            or src.get("text")
+            or src.get("transcription")
             or ""
         )
-        return str(text).strip()
+        out = str(text).strip()
+        logger.info("Whisper STT transcript: %r", out)
+        return out
 
 
 class OllamaClient(_ReusableClientMixin):
@@ -183,21 +201,33 @@ class OllamaClient(_ReusableClientMixin):
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
-        body: dict[str, Any] = {
-            "task": "chat_completion",
+        inp: dict[str, Any] = {
             "messages": messages,
             "model": self._model,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if tools:
-            body["tools"] = tools
+            inp["tools"] = tools
             # Explicit ``auto`` since 3B-class models otherwise
             # sometimes ignore the tools list when uncertain.
-            body["tool_choice"] = "auto"
+            inp["tool_choice"] = "auto"
+        # SDK envelope {"task", "input": {...}} — not a flat body.
+        body: dict[str, Any] = {"task": "chat_completion", "input": inp}
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        payload = resp.json()
+        # Adapter returns a FLAT body with a top-level ``message``;
+        # unwrap a ``result`` envelope too for forward-compat. The
+        # caller (_handle_context) reads ``["message"]``.
+        out = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+        _m = out.get("message") if isinstance(out, dict) else None
+        if isinstance(_m, dict):
+            logger.info(
+                "Ollama reply: content=%r tool_calls=%d",
+                (_m.get("content") or "")[:120], len(_m.get("tool_calls") or []),
+            )
+        return out
 
 
 class PiperClient(_ReusableClientMixin):
@@ -230,19 +260,26 @@ class PiperClient(_ReusableClientMixin):
         # filesystem mount to dereference the opennvr://audio/...
         # URI, so the inline body is the only way we get the audio
         # bytes back over plain HTTP.
-        body = {"task": "text_to_speech", "text": text, "inline": True}
+        # The deployed adapter routes "speech_synthesis" -> piper; the
+        # contract's "text_to_speech" name isn't in its routing map and
+        # would 404. SDK envelope {"task","input":{...}}; inline=true so
+        # the WAV returns base64 in the body (no shared audio mount).
+        body = {"task": "speech_synthesis", "input": {"text": text, "inline": True}}
         client = self._client()
         resp = await client.post(self._url, json=body, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
-        result = payload.get("result") or {}
+        # Adapter returns a FLAT body; accept a ``result`` wrapper too.
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
         # Two response shapes in flight: inline base64 audio for
         # streaming-friendly clients, and a server-side URI for
         # bandwidth-conscious deployments. Prefer inline; fall back
         # to fetching the URI if the adapter only emitted one.
         audio_b64 = result.get("audio_b64") or result.get("audio")
         if audio_b64:
-            return base64.b64decode(audio_b64)
+            _decoded = base64.b64decode(audio_b64)
+            logger.info("Piper TTS produced %d audio bytes", len(_decoded))
+            return _decoded
         audio_uri = result.get("audio_uri") or result.get("uri")
         if audio_uri:
             # Adapter-controlled URI — could point anywhere. Two

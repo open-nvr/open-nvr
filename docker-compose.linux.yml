@@ -117,6 +117,8 @@ services:
       # bridge already isolates :8554 — but host mode shares the
       # host's network stack, so we have to be explicit.
       - MTX_RTSPADDRESS=127.0.0.1:8554
+      # LAN WebRTC: set MTX_WEBRTCADDITIONALHOSTS=<host-ip> in .env (empty = loopback only)
+      - MTX_WEBRTCADDITIONALHOSTS=${MTX_WEBRTCADDITIONALHOSTS:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 30s
@@ -156,11 +158,11 @@ services:
       - MEDIAMTX_PLAYBACK_URL=http://127.0.0.1:9996
       - KAI_C_URL=http://127.0.0.1:8100
 
-      # External URLs for browser access
-      - APPLICATION_URL=http://100.95.117.40:8000
-      - MEDIAMTX_EXTERNAL_BASE_URL=http://100.95.117.40:8889
-      - MEDIAMTX_EXTERNAL_HLS_URL=http://100.95.117.40:8888
-      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://100.95.117.40:9996
+      # External URLs for browser access — default to loopback; set the host IP in .env for LAN access
+      - APPLICATION_URL=${APPLICATION_URL:-http://127.0.0.1:8000}
+      - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_EXTERNAL_BASE_URL:-http://127.0.0.1:8889}
+      - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_EXTERNAL_HLS_URL:-http://127.0.0.1:8888}
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_EXTERNAL_PLAYBACK_URL:-http://127.0.0.1:9996}
 
       # Path mapping configuration for volume mounts
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH}

@@ -1,0 +1,39 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Inference-listener example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values for your
+# deployment, and run:
+#
+#   python inference_listener.py --config config.yml
+
+# ── NATS endpoint ───────────────────────────────────────────────────
+#
+# KAI-C's NATS broker. In a docker-compose deployment, NATS is on
+# the sentinel_internal network at hostname ``nats``; from inside
+# the same compose project the URL is:
+nats_url: "nats://127.0.0.1:4222"
+# For a host-mode / bare-metal deployment use:
+# nats_url: "nats://127.0.0.1:4222"
+
+# Token-auth secret. Must match the same INTERNAL_API_KEY value
+# KAI-C uses for its HTTP/WS surface (the docker-compose service
+# passes it via ``--auth ${INTERNAL_API_KEY}``). Leave null only in
+# fully-isolated dev deployments where NATS is configured auth-less.
+nats_token: "E1JCyWPsCXS7vY1OA0xLEly5Mp81Tn+TkI/iowZZzQU="
+
+# ── Subscription ───────────────────────────────────────────────────
+#
+# NATS subject pattern this listener subscribes to. Wildcards
+# follow the the NATS event bus contract:
+#
+#   "opennvr.inference.>"               → every inference event
+#   "opennvr.inference.yolov8.>"        → YOLOv8 results only
+#   "opennvr.inference.*.cam-front.>"   → every adapter, one camera
+#
+# Subscribers fan out from here — N apps subscribing to the same
+# subject each receive a copy. KAI-C's broker is fire-and-forget;
+# events that fire while no subscriber is listening are lost
+# (replay / durability lands with a separate event-store slice).
+subject_pattern: "opennvr.inference.>"

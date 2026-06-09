@@ -89,6 +89,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=python-builder /build/server-venv /app/server-venv
 COPY --from=python-builder /build/kai-c-venv /app/kai-c-venv
 
+# uvicorn's --ws auto needs a WebSocket impl in the SERVER venv, or /events/ws
+# falls through to the SPA catch-all (200 text/html) and live push breaks.
+# websockets isn't reachable on this box's pypi, but it IS already installed in
+# the kai-c venv (same Python 3.11) - copy it across, fully offline.
+RUN cp -r /app/kai-c-venv/lib/python3.11/site-packages/websockets /app/server-venv/lib/python3.11/site-packages/ && \
+    cp -r /app/kai-c-venv/lib/python3.11/site-packages/websockets-*.dist-info /app/server-venv/lib/python3.11/site-packages/ 2>/dev/null || true
+
 # Set up Python path to use virtual environments
 ENV PATH="/app/server-venv/bin:$PATH"
 ENV VIRTUAL_ENV="/app/server-venv"

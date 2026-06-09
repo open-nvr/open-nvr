@@ -34,8 +34,8 @@ case "$OS" in
     OS_LABEL="Linux (host network mode)"
     ;;
   Darwin*)
-    COMPOSE_FILE="docker-compose.yml"
-    OS_LABEL="macOS (bridge network mode)"
+    COMPOSE_FILE="docker-compose.tier0.yml"
+    OS_LABEL="macOS (tier0 demo / bridge network mode)"
     ;;
   *)
     echo -e "${RED}Unsupported OS: $OS${NC}"

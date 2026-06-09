@@ -48,7 +48,7 @@ try:  # pragma: no cover — import-time only
         TTSStartedFrame,
         TTSStoppedFrame,
     )
-    from pipecat.services.ai_services import LLMService, STTService, TTSService
+    from pipecat.services.ai_services import LLMService, SegmentedSTTService, TTSService
     from pipecat.processors.aggregators.openai_llm_context import (
         OpenAILLMContext,
         OpenAILLMContextFrame,
@@ -68,7 +68,7 @@ except Exception:  # pragma: no cover
     TTSStartedFrame = object  # type: ignore
     TTSStoppedFrame = object  # type: ignore
     LLMService = object  # type: ignore
-    STTService = object  # type: ignore
+    SegmentedSTTService = object  # type: ignore
     TTSService = object  # type: ignore
     OpenAILLMContext = object  # type: ignore
     OpenAILLMContextFrame = object  # type: ignore
@@ -86,14 +86,16 @@ logger = logging.getLogger(__name__)
 # ── STT: Whisper via OpenNVR adapter ───────────────────────────────
 
 
-class OpenNvrWhisperSTT(STTService):
-    """Bridges Pipecat's STTService contract to the Whisper adapter.
+class OpenNvrWhisperSTT(SegmentedSTTService):
+    """Bridges Pipecat's SegmentedSTTService contract to the Whisper adapter.
 
-    Pipecat collects an utterance worth of audio (VAD-driven), passes
-    it as a single ``bytes`` chunk to ``run_stt`` and expects an
-    async iterator of frames. Our adapter is non-streaming so we
-    return one ``TranscriptionFrame`` per utterance — perfectly
-    acceptable for v0.1 latency.
+    SegmentedSTTService is the right base for a NON-streaming model: it
+    uses the pipeline VAD to buffer a whole utterance (between
+    UserStarted/StoppedSpeaking) and calls ``run_stt`` ONCE per utterance
+    with the complete audio as a WAV blob. (The plain ``STTService`` base
+    calls ``run_stt`` on every ~0.26s audio chunk, which Whisper can't
+    transcribe — that produced empty transcripts.) We return one
+    ``TranscriptionFrame`` per utterance.
     """
 
     def __init__(

@@ -116,10 +116,10 @@ services:
     ports:
       - "127.0.0.1:8322:8322" # RTSPS (TLS-required RTSP)
       - "127.0.0.1:8888:8888" # HLS (HTTPS)
-      - "127.0.0.1:8889:8889" # WebRTC signaling (HTTPS)
-      - "127.0.0.1:8189:8189/tcp" # WebRTC ICE
-      - "127.0.0.1:8189:8189/udp" # WebRTC ICE
-      - "127.0.0.1:9997:9997" # API/metrics
+      - "8889:8889" # WebRTC signaling (HTTPS)
+      - "8189:8189/tcp" # WebRTC ICE
+      - "8189:8189/udp" # WebRTC ICE
+      - "9997:9997" # API/metrics
       - "127.0.0.1:9996:9996" # Playback API
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
@@ -130,6 +130,8 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
+      # LAN WebRTC: set MTX_WEBRTCADDITIONALHOSTS=<host-ip> in .env (empty = loopback only)
+      - MTX_WEBRTCADDITIONALHOSTS=${MTX_WEBRTCADDITIONALHOSTS:-}
     networks:
       - opennvr_internal
     healthcheck:
@@ -201,7 +203,7 @@ services:
       # mirror. Default is the upstream Ultralytics ONNX release on
       # Hugging Face — a stable, anonymous-pullable URL that
       # matches the model the yolov8 adapter assumes at boot.
-      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-https://huggingface.co/Ultralytics/YOLOv8/resolve/main/yolov8n.onnx}
+      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-https://huggingface.co/Kalray/yolov8/resolve/main/yolov8n.onnx}
     volumes:
       - opennvr_yolov8_weights:/weights
 
@@ -211,7 +213,7 @@ services:
   # a no-AI install (NVR + recording + viewing only).
   # ──────────────────────────────────────────────────────────────
   yolov8-adapter:
-    image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-main}
     container_name: opennvr_yolov8_adapter
     restart: unless-stopped
     depends_on:
@@ -221,7 +223,7 @@ services:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
       - YOLOV8_WEIGHTS_DIR=/weights
     volumes:
-      - opennvr_yolov8_weights:/weights:ro
+      - opennvr_yolov8_weights:/app/model_weights:ro
     networks:
       - opennvr_internal
     # No port mapping — the adapter is internal-only, reached by
@@ -239,7 +241,7 @@ services:
   # OpenNVR core — backend + frontend + KAI-C.
   # ──────────────────────────────────────────────────────────────
   opennvr-core:
-    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
+    image: opennvr-core-local:latest
     container_name: opennvr_core
     restart: unless-stopped
     depends_on:
@@ -252,7 +254,7 @@ services:
       yolov8-adapter:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     volumes:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
@@ -265,9 +267,10 @@ services:
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
       - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
-      - MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889
-      - MEDIAMTX_EXTERNAL_HLS_URL=http://127.0.0.1:8888
-      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=http://127.0.0.1:9996
+      # External (browser-facing) URLs — default to loopback; set in .env for a LAN demo
+      - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_EXTERNAL_BASE_URL:-http://127.0.0.1:8889}
+      - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_EXTERNAL_HLS_URL:-http://127.0.0.1:8888}
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_EXTERNAL_PLAYBACK_URL:-http://127.0.0.1:9996}
       - KAI_C_URL=http://127.0.0.1:8100
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
@@ -276,12 +279,14 @@ services:
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
+      - ALLOW_REMOTE_MEDIAMTX=${ALLOW_REMOTE_MEDIAMTX:-true}
       # KAI-C points at the yolov8 adapter as "default" — the
       # camera-agent overlay extends this with explicit per-model
       # routes (whisper, piper, ollama). Operators enabling more
       # adapters can extend ADAPTER_URL similarly OR set up a
       # multi-URL ADAPTER_REGISTRY override in a follow-up release.
       - ADAPTER_URL=http://yolov8-adapter:9002
+      - AI_SOVEREIGNTY=federated
       # Inference frame-capture reads from MediaMTX's plaintext
       # loopback path (rtsp://mediamtx:8554/cam-N) rather than
       # opening a second RTSP session directly to the camera. This

@@ -1,0 +1,111 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the package-delivery example app.
+# Copy to config.yml, edit, then start the daemon:
+#
+#   python package_delivery.py --config config.yml
+
+# REQUIRED — KAI-C base URL. KAI-C proxies the YOLOv8 inference
+# call, auditing every frame.
+kaic_url: http://127.0.0.1:8100
+
+# REQUIRED — KAI-C's internal API key.
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# YOLOv8 adapter name as registered with KAI-C. Default assumes you
+# ran the YOLOv8 adapter under name=yolov8.
+detector_adapter: yolov8
+
+# REQUIRED for daemon mode — one entry per camera. The frame_url is
+# the JPEG snapshot endpoint for that camera. Most porch cameras
+# (Reolink, Hikvision, Ring-via-rtsp-bridge, Frigate snapshots) ship
+# something serviceable here.
+cameras:
+  - camera_id: front-porch
+    frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+    # Optional per-camera porch ROI in normalised coordinates [0..1].
+    # Detections whose centroid falls outside the ROI are ignored.
+    # If unset, the whole frame is searched. Define one as a list of
+    # [x, y] points (3+ vertices) or a [x1, y1, x2, y2] axis-aligned
+    # rectangle.
+    # roi: [0.10, 0.40, 0.85, 0.95]
+  # - camera_id: side-porch
+  #   frame_url: http://192.168.1.51/snapshot.jpg
+
+# How often to fetch each camera frame and run inference. Package
+# detection isn't latency-critical (the package isn't going anywhere
+# in <2s) — 2-5s polling is the right ballpark and keeps inference
+# load light.
+poll_interval_seconds: 3.0
+request_timeout_seconds: 30.0
+
+# YOLOv8 COCO classes that count as "package". The default uses the
+# three COCO classes that look most package-like: suitcase covers
+# medium-large boxes, backpack catches soft parcels, handbag picks up
+# small flat envelopes. Tune for your camera angle — drop "handbag"
+# if your front porch sees a lot of guests carrying bags.
+#
+# For a real package detector, swap in a custom YOLOv8 weights file
+# (see the YOLOv8 adapter's OPENNVR_YOLOV8_MODEL env var) trained on
+# your own porch footage; the "package" class label will then show
+# up here directly.
+package_labels:
+  - suitcase
+  - backpack
+  - handbag
+
+# COCO person class — used to distinguish "owner picked up the
+# package" (severity = info) from "stranger took the package"
+# (severity = high). Set to an empty list to disable the heuristic;
+# every disappearance then fires as "info" regardless.
+person_labels:
+  - person
+
+# Confidence floor for detections. YOLOv8's "suitcase" detector tends
+# to fire on cardboard boxes around 0.35 — start there and raise if
+# you get false positives, lower if real packages are being missed.
+detection_confidence: 0.35
+
+# State-machine knobs. The package is considered "arrived" once it's
+# been seen for arrive_consecutive_hits poll cycles in a row; it's
+# considered "gone" once it's been missing for gone_consecutive_misses
+# cycles. Tracks are matched frame-to-frame by IoU >= iou_threshold.
+arrive_consecutive_hits: 2
+gone_consecutive_misses: 3
+iou_threshold: 0.30
+
+# Optional "linger" alert — fires once when a package has been sitting
+# on the porch for longer than linger_alert_after_seconds without
+# being picked up. Useful if you want a nudge to bring the box inside
+# before it disappears overnight. Set to 0 to disable.
+linger_alert_after_seconds: 0
+
+# When a "package gone" event fires, look back this many seconds for
+# a person detection inside the porch ROI. If we saw one, severity is
+# "info" (owner pickup); if not, severity is "high" (porch pirate
+# scenario, or wind / rain knocked the box). Set to 0 to disable the
+# heuristic — every disappearance then fires as "info" so homelab
+# users don't get high-severity alerts every time they bring in their
+# own package.
+pickup_person_lookback_seconds: 8.0
+
+# Embed a base64 JPEG snapshot in alert evidence. A small downstream
+# relay (see alerts-subscriber/) can forward the photo to Telegram /
+# ntfy / Discord. snapshot_max_bytes caps the raw JPEG; default keeps
+# the post-base64 envelope under NATS's 1 MB default max_payload.
+attach_snapshot_on_alerts: true
+snapshot_max_bytes: 716800
+
+# Dedup: don't refire the same alert kind for the same track within
+# this window. Most arrivals fire once per package, so the dedup is
+# really a safety net for state-machine flicker — keep it conservative.
+dedup_window_seconds: 30.0
+
+# Alert delivery channels — webhook + NATS. Both independent of the
+# always-on stdout channel.
+#
+# webhook_url: http://localhost:9999/package-alerts
+# nats_alerts_url: nats://127.0.0.1:4222
+# nats_alerts_token: # leave unset if your NATS allows anonymous publish
+# nats_alerts_subject_prefix: opennvr.alerts

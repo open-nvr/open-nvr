@@ -1,0 +1,86 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the license-plate-recognition example app.
+# Copy to config.yml, edit, then:
+#
+#   python license_plate_recognition.py --config config.yml
+#
+# Required fields are marked `# REQUIRED`. Everything else has a
+# documented default — drop the line to take it.
+
+# REQUIRED — KAI-C base URL on your LAN. KAI-C proxies inference to
+# the YOLOv8 + fast-plate-ocr adapters and audits every call.
+kaic_url: http://127.0.0.1:8100
+
+# REQUIRED — KAI-C's internal API key (the X-Internal-Api-Key value).
+# Generate one with `openssl rand -hex 32` on first boot; re-use the
+# same value across all OpenNVR-side clients.
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# Adapter names as registered with KAI-C. Defaults assume you ran
+# the YOLOv8 adapter under name=yolov8 and the fast-plate-ocr adapter
+# under name=fast_plate_ocr.
+detector_adapter: yolov8
+ocr_adapter: fast_plate_ocr
+
+# REQUIRED — one entry per camera you want to watch. The frame_url is
+# the JPEG-snapshot endpoint for the camera (NVR endpoint, ONVIF
+# snapshot, ipcam HTTP, file://, etc.). The example does HTTP polling;
+# RTSP needs an ffmpeg subprocess and is a planned follow-up.
+cameras:
+  - camera_id: driveway
+    frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+  - camera_id: parking-lot
+    frame_url: http://192.168.1.51/snapshot.jpg
+
+# How often to fetch each camera's frame and run the chain. Lower
+# values trade adapter load for faster detection latency. With 2-4
+# cameras at 2s polling the YOLOv8 adapter peaks at ~2 inferences/s
+# which is fine on a CPU-only deployment.
+poll_interval_seconds: 2.0
+
+# HTTP timeout on each upstream call (KAI-C + the camera).
+request_timeout_seconds: 30.0
+
+# Detection-side filters. YOLOv8 (COCO classes) emits per-frame
+# detections for many object types; only these labels are considered
+# vehicles. Drop / add labels for your use case (e.g. add "bicycle"
+# if you want to OCR bicycle plates).
+vehicle_labels: ["car", "truck", "bus", "motorcycle"]
+detection_confidence: 0.40
+
+# OCR threshold. fast-plate-ocr returns a per-read confidence; below
+# this floor the read is marked accepted=false and the alert is
+# suppressed. Tighten if you're getting false-positive reads.
+ocr_confidence: 0.50
+
+# Where to crop within each vehicle bbox before sending to the OCR
+# adapter:
+#   * "lower_third" — heuristic; works well on rear/front-facing
+#                     cameras where plates sit at the bottom of the car
+#   * "vehicle"     — send the full vehicle bbox. Slower; useful if
+#                     you have a fine-tuned upstream detector OR a
+#                     plate-localising OCR engine
+crop_strategy: lower_third
+
+# Plate-level dedup: don't fire on the same plate twice within this
+# window (per camera). Set to 0 to fire every read.
+dedup_window_seconds: 60.0
+
+# Optional plate watchlists. Reads in `allowlist` fire low-severity
+# "expected vehicle" alerts. Reads in `denylist` fire high-severity
+# "watchlist plate" alerts. Comparison is case-insensitive.
+allowlist:
+  # - "MY-CAR1"
+  # - "FAMILY01"
+denylist:
+  # - "BAD-001"
+
+# Optional alert delivery — webhook + NATS. Both are independent of
+# the always-on stdout channel.
+#
+# webhook_url:   http://localhost:9999/lpr-alerts
+# nats_alerts_url: nats://127.0.0.1:4222
+# nats_alerts_token: # leave unset if your NATS allows anonymous publish
+# nats_alerts_subject_prefix: opennvr.alerts

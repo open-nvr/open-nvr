@@ -149,11 +149,16 @@ export function AIModelsBYOM() {
     console.log('[DEBUG] formData.assigned_camera_id:', formData.assigned_camera_id);
   }, [formData.recording_path, formData.assigned_camera_id]);
   
-  // Poll for running inference status every 5 seconds
+  // Poll for running inference status every 5 seconds, but only while at
+  // least one model is actually running. When nothing is inferencing the
+  // page makes no calls; starting/stopping a model refreshes runningModels
+  // (one-shot load on mount also seeds already-running models), which flips
+  // this polling on and off automatically.
   useEffect(() => {
+    if (runningModels.size === 0) return
     const interval = setInterval(loadRunningInference, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [runningModels.size])
 
   async function loadModels() {
     try {

@@ -1,0 +1,23 @@
+# docker-compose.examples.yml — additive override for running the example apps
+# (examples/*) on the HOST against a running tier0 stack.
+#
+# The example apps connect to NATS (4222) and KAI-C (8100). tier0 keeps both
+# on the internal docker network only. This override re-publishes them on
+# LOOPBACK so host-run examples work, without exposing them to the LAN.
+#
+# Usage (layer it on top of tier0):
+#   docker compose -f docker-compose.tier0.yml -f docker-compose.examples.yml up -d
+# Then run the examples on the host:
+#   scripts/run-examples.sh smoke        # or: run <name>
+#
+# Example configs should use the loopback variants:
+#   nats_url: "nats://127.0.0.1:4222"
+#   kaic_url: "http://127.0.0.1:8100"
+services:
+  nats:
+    ports:
+      - "127.0.0.1:4222:4222"   # NATS client port (loopback only)
+
+  opennvr-core:
+    ports:
+      - "127.0.0.1:8100:8100"   # KAI-C inference orchestrator (loopback only)

@@ -1,0 +1,94 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the camera-agent example app.
+# Copy to config.yml, edit, then start the server:
+#
+#   python camera_agent.py --config config.yml
+#
+# Then visit http://localhost:9100/demo in your browser.
+
+# REQUIRED — KAI-C base URL and key. KAI-C audits every inference
+# the agent makes against your cameras. The agent does NOT bypass
+# KAI-C for the tool calls (camera scene description, object
+# detection, face recognition) — those still flow through the
+# proxy. Only the streaming voice path (Whisper / Ollama / Piper)
+# talks to the adapters directly because KAI-C v0.1 doesn't proxy
+# streaming yet. Documented as such in the README.
+kaic_url: http://127.0.0.1:8100
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# Direct URLs for the streaming adapters (Whisper for STT, Ollama
+# for LLM, Piper for TTS). The agent uses the adapters' /infer
+# endpoints over HTTP with bearer-token auth. These three URLs
+# are bypassing KAI-C for v0.1 — see the note above and the
+# README "audit chain" section.
+whisper_url: http://127.0.0.1:9003
+whisper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
+ollama_url: http://127.0.0.1:9004
+ollama_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
+piper_url: http://127.0.0.1:9001
+piper_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
+
+# Names of the vision adapters used by tool calls. The agent calls
+# these THROUGH KAI-C (auditable, since they're event-driven not
+# streaming).
+detection_adapter: yolov8
+recognition_adapter: insightface
+caption_adapter: blip
+
+# LLM model + sampling. Default llama3.2:3b runs in ~3GB of RAM on
+# CPU at ~5-15 tokens/sec on modern hardware. For better tool-calling
+# quality at the cost of more RAM and slower inference, use
+# llama3.1:8b-instruct (~6GB RAM). The model MUST support tools —
+# see https://ollama.com/blog/tool-support for the current list.
+llm_model: llama3.2:3b
+llm_temperature: 0.4
+llm_max_tokens: 256
+
+# How long to keep a fetched camera frame in cache. The LLM often
+# calls multiple tools on the same camera (describe + detect +
+# recognise faces) inside one turn; caching avoids fetching the
+# frame three times. 2 seconds is short enough that "what's at the
+# door right now?" still gets a fresh frame on each new question.
+frame_cache_ttl_seconds: 2.0
+
+# How many recent inference events to remember per camera. The
+# recent_events tool answers questions like "did anyone come to
+# the door in the last 30 minutes?" against this in-memory ring
+# buffer. Set higher if you want a longer lookback; each event is
+# a few hundred bytes.
+event_ring_size: 256
+
+# NATS connection for inference events. Optional but recommended —
+# without it, the recent_events tool always returns an empty list.
+# nats_inference_url: nats://127.0.0.1:4222
+# nats_inference_token: # leave unset for anonymous
+
+# HTTP listen address for the agent. Public if you put it behind
+# your reverse proxy; localhost only by default.
+host: 127.0.0.1
+port: 9100
+
+# Cameras the agent knows about. Each entry contributes a sentence
+# to the LLM's system prompt ("front-porch is the main entrance...")
+# so the model can pick the right camera_id when the user asks
+# "what's at the front door?" without naming it explicitly.
+cameras:
+  - camera_id: front-porch
+    frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+    role: "The main entrance to the house, faces the street and driveway."
+  # - camera_id: back-door
+  #   frame_url: http://192.168.1.51/snapshot.jpg
+  #   role: "The back door, faces the garden. Rarely used during the day."
+
+# The system prompt sets the agent's voice + behaviour. Keep it
+# short — the model sees it on every turn. Per-camera ``role``
+# fields above are appended automatically.
+system_prompt: |
+  You are a helpful, concise voice assistant for a home with security
+  cameras. The user asks questions about what's happening on those
+  cameras. Always use your tools to ground answers in live camera
+  data — don't guess. Respond in 1-2 short sentences because your
+  reply is spoken aloud. If the user's question can't be answered
+  from the cameras, say so briefly.

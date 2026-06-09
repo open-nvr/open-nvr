@@ -67,7 +67,7 @@ type CameraStats = {
 }
 
 export function AIDetectionResults() {
-  const { user } = useAuth()
+  const { user, token } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -96,14 +96,76 @@ export function AIDetectionResults() {
     loadResults()
   }, [filters, selectedCameraId])
 
-  // Auto-refresh results every 5 seconds for real-time updates
+  // Live push: subscribe to the backend event bus over WebSocket so detections
+  // appear the instant the backend produces them, with zero polling. The
+  // socket reconnects automatically if it drops. Initial history still comes
+  // from the one-time GET in the effect above.
   useEffect(() => {
-    const interval = setInterval(() => {
-      loadResults()
-    }, 5000); // Refresh every 5 seconds
+    if (!token) return
 
-    return () => clearInterval(interval);
-  }, [filters, selectedCameraId])
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let closedByUnmount = false
+
+    const connect = () => {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const url = `${proto}://${window.location.host}/api/v1/events/ws?token=${encodeURIComponent(token)}`
+      ws = new WebSocket(url)
+
+      ws.onmessage = (msg) => {
+        let evt: any
+        try { evt = JSON.parse(msg.data) } catch { return }
+        if (evt.event_type !== 'inference_result') return
+
+        const p = evt.payload || {}
+        // Mirror the backend DB gate: skip zero-confidence "nothing detected"
+        // heartbeats so only real detections land in the table.
+        const hasDetection =
+          (p.count != null && p.count > 0) ||
+          (p.confidence != null && p.confidence > 0) ||
+          !!p.label
+        if (!hasDetection) return
+
+        // Client-side filter to match the current view.
+        if (selectedCameraId && evt.camera_id !== selectedCameraId) return
+        if (filters.model_id && evt.model_id !== parseInt(filters.model_id)) return
+        if (filters.task && evt.task !== filters.task) return
+
+        const bbox = Array.isArray(p.bbox) ? p.bbox : []
+        const ts = evt.timestamp || Date.now()
+        const row: DetectionResult = {
+          id: ts, // synthetic id for a pushed row; a manual Refresh fetches the real DB id
+          model_id: evt.model_id,
+          camera_id: evt.camera_id,
+          task: evt.task,
+          label: p.label,
+          confidence: p.confidence,
+          bbox_x: bbox[0],
+          bbox_y: bbox[1],
+          bbox_width: bbox[2],
+          bbox_height: bbox[3],
+          count: p.count,
+          caption: p.caption || p.description,
+          latency_ms: p.latency_ms,
+          created_at: new Date(ts).toISOString(),
+        }
+        setResults(prev => [row, ...prev].slice(0, filters.limit))
+      }
+
+      ws.onclose = () => {
+        if (closedByUnmount) return
+        reconnectTimer = setTimeout(connect, 3000)
+      }
+    }
+
+    connect()
+
+    return () => {
+      closedByUnmount = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    }
+  }, [token, filters, selectedCameraId])
 
   async function loadModels() {
     try {

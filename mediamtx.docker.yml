@@ -47,7 +47,7 @@ authHTTPExclude: []
 # Overridden at runtime by MTX_AUTHJWTJWKS env var injected from docker-compose:
 #   Windows/Mac (bridge): MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
 #   Linux (host mode):    MTX_AUTHJWTJWKS=http://127.0.0.1:8000/.well-known/jwks.json
-# This hardcoded value is a never-used fallback — MTX_AUTHJWTJWKS always takes precedence.
+# This loopback value is a never-used fallback — MTX_AUTHJWTJWKS always takes precedence.
 authJWTJWKS: http://127.0.0.1:8000/.well-known/jwks.json
 authJWTJWKSFingerprint:
 # Claim containing MediaMTX permissions
@@ -244,9 +244,11 @@ webrtcLocalTCPAddress: :8189
 webrtcLocalUDPAddress: :8189
 # HOST MODE: Allow WebRTC to discover and advertise host's network interfaces
 # This is required for WHEP streaming to work from other machines on the LAN
-webrtcIPsFromInterfaces: yes
+webrtcIPsFromInterfaces: no
 webrtcIPsFromInterfacesList: []
-# Additional hosts to advertise (localhost always included)
+# Additional hosts to advertise (localhost always included).
+# Empty by default; for LAN WebRTC set MTX_WEBRTCADDITIONALHOSTS=<host-ip> in .env
+# (MediaMTX overrides this list from that env var, comma-separated).
 webrtcAdditionalHosts: []
 webrtcICEServers2: []
 webrtcHandshakeTimeout: 10s
@@ -387,10 +389,6 @@ pathDefaults:
   # No manual editing required - just set MEDIAMTX_SECRET in server/.env!
   ###############################################
 
-  # Startup hook - provisions cameras from backend database on MediaMTX start
-  runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/startup/hook"'
-  runOnInitRestart: yes
-
   runOnDemand:
   runOnDemandRestart: no
   runOnDemandStartTimeout: 10s
@@ -407,7 +405,7 @@ pathDefaults:
 
   runOnRecordSegmentCreate:
 
-  # Recording webhook - notifies backend when a recording segment completes
+  # Recording webhook - notifies back
   # Uses custom opennvr-mediamtx image with curl installed
   runOnRecordSegmentComplete: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION"'
 
@@ -425,4 +423,6 @@ paths:
   __startup__:
     source: publisher
     record: no
+    runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/mediamtx/startup/hook"'
+    runOnInitRestart: no
 

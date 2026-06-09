@@ -179,7 +179,7 @@ services:
       opennvr-core:
         condition: service_healthy
     ports:
-      - "127.0.0.1:9100:9100"  # demo UI
+      - "0.0.0.0:9100:9100"  # demo UI
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
     command:

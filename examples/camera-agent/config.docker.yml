@@ -62,7 +62,10 @@ port: 9100
 # stack is up. The demo page still works without cameras (it just
 # can't ground answers in live frames), so this lets the install
 # complete cleanly even before any RTSP source is configured.
-cameras: []
+cameras:
+  - camera_id: demo-camera
+    frame_url: http://mediamtx:9997/v3/paths/cam-1/snapshot
+    role: "The main camera feed used for demonstrations."
 
 system_prompt: |
   You are a helpful, concise voice assistant for a home with security

@@ -21,6 +21,7 @@ dependencies = [
     # (opennvr.inference.* subjects). Best-effort publishing on the
     # /infer + /infer/stream paths; NATS down doesn't break inference.
     "nats-py>=2.6",
+    "httpx>=0.27,<1.0",
 ]
 
 [dependency-groups]

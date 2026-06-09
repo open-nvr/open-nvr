@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 
 from adapter_clients import (
@@ -394,7 +394,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return HTMLResponse(_load_demo_html())
 
     @app.websocket("/ws")
-    async def _ws(websocket) -> None:  # noqa: ANN001 — FastAPI WebSocket type
+    async def _ws(websocket: WebSocket) -> None:  # FastAPI injects the WebSocket by type
         # Lazy-imported so the module loads without Pipecat installed.
         from pipecat.transports.network.fastapi_websocket import (
             FastAPIWebsocketParams,

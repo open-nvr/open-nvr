@@ -502,6 +502,7 @@ class AlertDispatcher:
 def build_dispatcher(
     *,
     webhook_url: str | None,
+    webhook_timeout_seconds: float = 5.0,
     nats_alerts_url: str | None = None,
     nats_alerts_token: str | None = None,
     nats_alerts_subject_prefix: str = DEFAULT_ALERT_SUBJECT_PREFIX,
@@ -517,7 +518,7 @@ def build_dispatcher(
     """
     channels: list[AlertChannel] = [StdoutChannel()]
     if webhook_url:
-        channels.append(WebhookChannel(webhook_url))
+        channels.append(WebhookChannel(webhook_url, timeout_seconds=webhook_timeout_seconds))
     if nats_alerts_url:
         channels.append(
             NatsAlertChannel(

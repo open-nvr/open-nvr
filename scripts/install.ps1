@@ -11,7 +11,7 @@ $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
 Set-Location $ProjectRoot
 
-$ComposeFile = "docker-compose.yml"
+$ComposeFile = "docker-compose.tier0.yml"
 
 # ── Collected settings ─────────────────────────────────────
 $DeployMode    = "quick"

@@ -47,7 +47,7 @@ secrets-env:
 	  echo "Refusing to overwrite server/.env (already exists). Run 'make secrets >> server/.env' to append instead." >&2; \
 	  exit 1; \
 	fi
-	@cp server/env.example server/.env
+	@cp server/.env.example server/.env
 	@$(MAKE) -s secrets >> server/.env
 	@echo "Wrote server/.env with random secrets. Review DATABASE_URL and any other deployment-specific values before starting."
 

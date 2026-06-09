@@ -1,0 +1,51 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Alerts-subscriber example app — config template.
+#
+# Copy this file to ``config.yml``, fill in the values for your
+# deployment, and run:
+#
+#   python alerts_subscriber.py --config config.yml
+
+# ── NATS endpoint (OpenNVR's alert fan-out) ────────────────────────
+#
+# Subscribes to OpenNVR's alert bus (NATS alert fan-out). Monitoring apps
+# (intrusion-detection, loitering-detection, etc.) publish their §11.5
+# Alert envelopes here; this consumer fans them out to wherever you
+# want them (operator UI inbox, SIEM, Slack, audit log).
+nats_url: "nats://nats:4222"
+# Bare-metal / host-mode deployment:
+# nats_url: "nats://127.0.0.1:4222"
+
+# Token-auth secret. Must match the same INTERNAL_API_KEY value used
+# by the publishing apps. Leave null only in fully-isolated dev
+# deployments where NATS runs auth-less.
+nats_token: null
+
+# Subject pattern. The default ``opennvr.alerts.>`` catches every
+# alert from every source on every camera. Narrow it down if you only
+# want a slice:
+#
+#   opennvr.alerts.app.>                  → all app-emitted alerts
+#   opennvr.alerts.*.*.cam-front-door     → all alerts about one camera
+#   opennvr.alerts.app.intrusion-detection.>   → one app's alerts
+#   opennvr.alerts.app.loitering-detection.>   → one app's alerts
+#
+# See the alerts subject-scheme doc in alerts.py / both example READMEs.
+subject_pattern: "opennvr.alerts.>"
+
+# ── Webhook forwarding (optional) ──────────────────────────────────
+#
+# When set, every received alert is also POSTed as JSON to this URL.
+# Same wire shape as the alert that came in (§11.5). Failures are
+# logged but never crash the subscriber.
+#
+# Use cases:
+#   - Operator-UI inbox ingestion endpoint
+#   - SIEM (Splunk HEC, Elastic _bulk, Datadog logs intake)
+#   - Slack / Discord / Teams / PagerDuty incoming webhooks
+#
+# webhook_url: "https://hooks.slack.com/services/T000/B000/XXXXXX"
+webhook_url: null
+webhook_timeout_seconds: 5.0

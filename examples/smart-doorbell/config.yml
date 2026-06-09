@@ -1,0 +1,75 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the smart-doorbell example app.
+# Copy to config.yml, edit, then enroll family + start the daemon:
+#
+#   python smart_doorbell.py enroll --config config.yml \
+#       --person-id alice --name "Alice Smith" --image alice.jpg \
+#       --category family
+#
+#   python smart_doorbell.py daemon --config config.yml
+
+# REQUIRED — KAI-C base URL. KAI-C proxies the recognition inference
+# call to the InsightFace adapter, auditing every call.
+kaic_url: http://127.0.0.1:8100
+
+# REQUIRED — KAI-C's internal API key.
+kaic_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# InsightFace adapter name as registered with KAI-C. Default
+# assumes you ran the InsightFace adapter under name=insightface.
+recognition_adapter: insightface
+
+# Direct URL to the InsightFace adapter for /faces/* CRUD calls.
+# KAI-C does NOT proxy these routes (they're not part of the
+# contract), so the enroll / list-faces / delete-face subcommands
+# talk to the adapter directly. Bearer-token auth.
+adapter_url: http://127.0.0.1:9005
+adapter_token: REPLACE_WITH_OPENNVR_ADAPTER_TOKEN
+
+# REQUIRED for daemon mode — one entry per doorbell camera. The
+# frame_url is the JPEG snapshot endpoint for that camera.
+cameras:
+  - camera_id: front-door
+    frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
+  # - camera_id: back-door
+  #   frame_url: http://192.168.1.51/snapshot.jpg
+
+# How often to fetch each camera frame and run inference. Lower
+# values trade adapter load for faster alerts. With one camera at
+# 1s polling and ~50 ms per inference on CPU, the daemon idles at
+# under 5% CPU.
+poll_interval_seconds: 1.0
+request_timeout_seconds: 30.0
+
+# Cosine-similarity threshold for declaring a face "recognised."
+# 0.5 is a sane default; tighten if you're getting false-positive
+# matches against family lookalikes; loosen if family members
+# don't match consistently.
+recognition_threshold: 0.5
+
+# Plate-level dedup: don't refire the same alert (per camera and
+# per known person, or unknown bucket) within this window.
+dedup_window_seconds: 60.0
+
+# Attach a base64 JPEG of the camera frame to alerts when an
+# UNKNOWN face is detected. A small downstream relay can forward
+# the snapshot to Telegram / ntfy / Discord. Known-face alerts
+# stay small.
+attach_snapshot_for_unknowns: true
+
+# Cap on the raw JPEG embedded in unknown-face alerts. Default
+# 700 KB keeps the post-base64 envelope under NATS's 1 MB default
+# max_payload. Set to 0 to disable the cap (use if your NATS is
+# configured for >1 MB payloads). A snapshot above the cap is
+# dropped from the envelope; the alert still fires.
+snapshot_max_bytes: 716800
+
+# Alert delivery channels — webhook + NATS. Both independent of
+# the always-on stdout channel.
+#
+# webhook_url:   http://localhost:9999/doorbell-alerts
+# nats_alerts_url: nats://127.0.0.1:4222
+# nats_alerts_token: # leave unset if your NATS allows anonymous publish
+# nats_alerts_subject_prefix: opennvr.alerts

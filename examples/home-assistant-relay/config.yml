@@ -1,0 +1,86 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the home-assistant-relay example app.
+# Copy to config.yml, edit, then start the daemon:
+#
+#   python home_assistant_relay.py --config config.yml
+
+# ── NATS (where we read OpenNVR alerts from) ─────────────────────
+#
+# Required. Subscribes to ``opennvr.alerts.>`` by default; override
+# subject_pattern to scope down to specific sources or cameras.
+nats_url: nats://127.0.0.1:4222
+# nats_token: REPLACE_OR_LEAVE_UNSET_FOR_ANONYMOUS
+subject_pattern: opennvr.alerts.>
+
+# ── Backend (how we push into Home Assistant) ────────────────────
+#
+# Pick exactly one:
+#
+#   backend: mqtt   → uses paho-mqtt; HA auto-discovers the entities
+#                     via MQTT discovery the first time each one fires.
+#                     Recommended for most users; works with the bundled
+#                     Mosquitto add-on in HA OS.
+#
+#   backend: rest   → POSTs to HA's /api/states/<entity_id> endpoint.
+#                     Simpler to test against (no broker needed); the
+#                     entity registry still gets the entity but it's
+#                     surfaced as a "Set up via REST API" device which
+#                     doesn't get a device card. Use only if you can't
+#                     run MQTT.
+backend: mqtt
+
+# ── MQTT backend ─────────────────────────────────────────────────
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+  # Leave unset for anonymous; set if your broker has auth.
+  # username: opennvr
+  # password: REPLACE_ME
+  # MQTT discovery prefix HA listens on — default is "homeassistant"
+  # which matches HA's out-of-the-box configuration. Change only if
+  # you remapped HA's discovery prefix.
+  discovery_prefix: homeassistant
+  # Auto-off window for binary sensors. An OpenNVR alert is an event,
+  # not a continuous state; we hold the sensor "on" for this many
+  # seconds then automatically flip "off". 30s is a sane default for
+  # smart-doorbell and package-delivery; tune up for loitering.
+  auto_off_seconds: 30
+  # Quality-of-service for state publishes. 0 = at most once
+  # (default, fastest); 1 = at least once (broker acks); 2 = exactly
+  # once (slowest). HA recommends 1 for state.
+  qos: 1
+  # Retain state messages so HA repopulates after a restart without
+  # waiting for the next alert.
+  retain: true
+
+# ── REST backend ─────────────────────────────────────────────────
+#
+# Only used when backend is "rest". Long-lived access token from HA:
+# Settings → Profile → Long-Lived Access Tokens.
+# rest:
+#   url: http://homeassistant.local:8123
+#   token: REPLACE_WITH_HA_LONG_LIVED_ACCESS_TOKEN
+#   timeout_seconds: 5.0
+#   auto_off_seconds: 30
+
+# ── Mapping overrides ────────────────────────────────────────────
+#
+# By default the relay derives entity ids from the alert's source.name
+# + camera_id + a tag (e.g. ``binary_sensor.opennvr_front_porch_unknown_visitor``).
+# Override per-source if you want different device classes, friendly
+# names, or to scope to specific cameras only. Anything not in the
+# overrides list uses the built-in defaults.
+#
+# mappings:
+#   - source: smart-doorbell
+#     camera_id: front-porch          # optional — applies to all cameras if absent
+#     entity_id: binary_sensor.front_doorbell
+#     device_class: occupancy
+#     name: "Front Doorbell Visitor"
+#     auto_off_seconds: 15
+#   - source: package-delivery
+#     entity_id_template: "binary_sensor.opennvr_{camera_id}_package"
+#     device_class: occupancy
+#     name_template: "{camera_id} Package"

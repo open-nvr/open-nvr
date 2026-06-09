@@ -18,8 +18,8 @@ param(
     [string]$Command = "up"
 )
 
-$ComposeFile = "docker-compose.yml"
-$OsLabel     = "Windows (bridge network mode)"
+$ComposeFile = "docker-compose.tier0.yml"
+$OsLabel     = "Windows (tier0 demo / bridge network mode)"
 
 function Write-Color($Text, $Color = "White") {
     Write-Host $Text -ForegroundColor $Color

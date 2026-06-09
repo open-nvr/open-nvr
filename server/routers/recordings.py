@@ -235,11 +235,14 @@ async def queue_cloud_upload_for_day(
 
 @router.get("/cloud-upload/status")
 async def get_cloud_upload_status(
+    db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
     """Get current cloud upload worker and queue status."""
     service = CloudRecordingService.get_instance()
-    return service.get_queue_status()
+    status = service.get_queue_status()
+    status["configured"] = service.is_cloud_configured(db)
+    return status
 
 
 def _check_mediamtx_available() -> bool:
