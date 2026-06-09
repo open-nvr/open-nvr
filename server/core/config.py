@@ -36,31 +36,89 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # (M0 followup H-3 — single source of truth between runtime and tooling).
 from core.secret_policy import PLACEHOLDER_FRAGMENTS as _PLACEHOLDER_FRAGMENTS  # noqa: F401
 
-# Hosts that count as "loopback" for the purposes of V-015 MediaMTX bind
-# enforcement. Any other host requires ALLOW_REMOTE_MEDIAMTX=true.
+# Hosts whose *name* counts as "internal trust zone" for V-015 MediaMTX bind
+# enforcement. Numeric IP literals are classified by ipaddress.is_loopback /
+# is_private / is_link_local in _host_is_internal below; this set is only for
+# the bare-hostname fast path before any DNS resolution happens.
 #
-# NOTE: 0.0.0.0 is intentionally NOT loopback — it is the bind-everywhere /
+# NOTE: 0.0.0.0 is intentionally NOT internal — it is the bind-everywhere /
 # wildcard address. A URL written against 0.0.0.0 almost always means the
 # corresponding MediaMTX listener is also bound to 0.0.0.0, which is exactly
 # the public exposure V-015 must refuse. We treat it as the most obvious form
 # of misconfiguration and emit a specific error message in
-# _enforce_mediamtx_loopback below.
+# _enforce_mediamtx_internal below.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-# How long the loopback resolver is allowed to spend on getaddrinfo before we
-# give up and fail-closed. Broken DNS at boot must not hang startup.
+# How long the resolver is allowed to spend on getaddrinfo before we give up
+# and fail-closed. Broken DNS at boot must not hang startup.
 _DNS_RESOLVE_TIMEOUT_SECONDS = 2.0
 
 
-def _host_is_loopback(host: str | None) -> bool:
-    """Return True if ``host`` resolves to a loopback address.
+def _ip_is_internal(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if ``addr`` is inside OpenNVR's MediaMTX trust zone.
+
+    The trust zone is "anything that cannot have been routed in from the
+    public internet" — i.e., addresses that an attacker on the public
+    internet *cannot* directly reach. We delegate the classification to
+    Python's ``ipaddress`` module so the boundary stays aligned with
+    IANA's special-purpose-address registry; the practical effect is
+    that the following ranges are accepted:
+
+    * Loopback         — 127.0.0.0/8, ::1
+    * RFC1918          — 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    * IPv6 ULA         — fc00::/7        (RFC 4193, IPv6 RFC1918 equivalent)
+    * Link-local       — 169.254.0.0/16  (IPv4 APIPA), fe80::/10 (IPv6 LL)
+    * CGNAT            — 100.64.0.0/10   (RFC 6598, shared address space)
+    * IETF reserved    — 192.0.0.0/24, 198.18.0.0/15, 240.0.0.0/4
+    * Documentation    — 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                         (TEST-NET-1/2/3 — unroutable by spec)
+
+    The last three categories come along "for free" from
+    ``ipaddress.is_private`` and are not a security concern: none are
+    routable on the public internet, so an attacker cannot reach them.
+    The CGNAT range is the one operationally interesting case — an ISP
+    may route 100.64/10 internally, so a MediaMTX URL there is most
+    likely intentional (CGNAT-NAT'd home deployment) rather than a
+    misconfiguration.
+
+    Explicitly *rejected*:
+    * Public IPv4 / IPv6 (``is_global == True``)
+    * The unspecified address 0.0.0.0 / :: (caught below via
+      ``is_unspecified``; ``ipaddress.is_private`` would otherwise
+      accept 0.0.0.0/8 as "this network", which is wrong for our
+      purposes).
+
+    This intentionally accepts Docker bridge networks (default RFC1918)
+    and same-VPN multi-host deployments while still refusing public
+    addresses and the wildcard bind. There is **no escape hatch**:
+    cross-trust-boundary MediaMTX exposure must use the
+    MEDIAMTX_EXTERNAL_* URLs (which are scoped out of this validator by
+    design) behind a TLS reverse proxy. See
+    docs/SECURITY_ARCHITECTURE.md §2.2 (V-015).
+    """
+    # NOTE on `is_unspecified`: Python's ipaddress module reports
+    # 0.0.0.0/8 ("this network", RFC 5735) and :: under `is_private`,
+    # which would otherwise let the wildcard bind sneak past as "internal".
+    # We exclude it explicitly here so a caller that bypasses the URL-level
+    # 0.0.0.0 short-circuit still gets the right answer.
+    if addr.is_unspecified:
+        return False
+    return bool(
+        addr.is_loopback
+        or addr.is_private          # covers RFC1918 + IPv6 ULA
+        or addr.is_link_local       # covers 169.254.0.0/16 + fe80::/10
+    )
+
+
+def _host_is_internal(host: str | None) -> bool:
+    """Return True if ``host`` resolves to an address inside the trust zone.
 
     Accepts bare hostnames, IPv4 literals, and IPv6 literals (with/without
     brackets). For non-literal hostnames we resolve through getaddrinfo and
-    require *every* result to be loopback so a poisoned hosts file can't sneak
-    a routable address past us.
+    require *every* result to be internal so a poisoned hosts file can't
+    sneak a public address past us via a multi-A-record split.
 
-    Fails closed on DNS timeout (treats as non-loopback) so a broken
+    Fails closed on DNS timeout (treats as non-internal) so a broken
     /etc/resolv.conf at boot cannot mask a misconfigured public binding.
     """
     if not host:
@@ -69,10 +127,10 @@ def _host_is_loopback(host: str | None) -> bool:
     if h in _LOOPBACK_HOSTS:
         return True
     try:
-        # IP literal path — covers 127.0.0.1, 127.x.y.z, ::1, etc. Does NOT
-        # match 0.0.0.0 because ipaddress.ip_address("0.0.0.0").is_loopback
-        # is False (which is correct).
-        return ipaddress.ip_address(h).is_loopback
+        # IP literal path — covers 127.0.0.1, 10.x, 172.16-31.x, 192.168.x,
+        # ::1, fc00::/7, fe80::/10, etc. Does NOT match 0.0.0.0 because
+        # is_loopback / is_private / is_link_local are all False for it.
+        return _ip_is_internal(ipaddress.ip_address(h))
     except ValueError:
         pass
     # Hostname resolution path, bounded by a timeout so a broken resolver at
@@ -90,11 +148,20 @@ def _host_is_loopback(host: str | None) -> bool:
         sockaddr = info[4]
         addr = sockaddr[0]
         try:
-            if not ipaddress.ip_address(addr).is_loopback:
+            if not _ip_is_internal(ipaddress.ip_address(addr)):
                 return False
         except ValueError:
             return False
     return bool(infos)
+
+
+# NOTE: there is intentionally no back-compat alias for the old
+# ``_host_is_loopback`` name. The new function's semantics differ
+# materially — it accepts RFC1918, IPv6 ULA, and link-local in addition
+# to loopback — and silently rebinding the old name to the new
+# permissive check would be a footgun for any future caller. A grep of
+# the repo confirms no external import sites. Use ``_host_is_internal``
+# directly. (ISSUE-4 peer review m-3.)
 
 
 def _get_default_recordings_path() -> str:
@@ -256,13 +323,18 @@ class Settings(BaseSettings):
     default_admin_first_name: str = "System"
     default_admin_last_name: str = "Administrator"
 
-    # V-015: MediaMTX bind enforcement. By default OpenNVR refuses to start if
-    # MediaMTX endpoint URLs resolve to anything other than loopback, because
-    # the paper's three-tier architecture (Zenodo 17261761 §4.2) requires the
-    # middleware to be the only edge exposed to operators. Set this to True
-    # only if you know you are intentionally proxying MediaMTX behind a
-    # separate TLS-terminating reverse proxy on the management NIC.
-    allow_remote_mediamtx: bool = False
+    # V-015: MediaMTX bind enforcement. The MEDIAMTX_INTERNAL_* / MEDIAMTX_*
+    # URLs are the backend's ingress-side handles into MediaMTX (camera LAN
+    # / Docker bridge / VPN overlay) and must stay inside the trust zone:
+    # loopback + RFC1918 + IPv6 ULA + link-local. Anything else — public
+    # IPs, public FQDNs, the 0.0.0.0 wildcard — is refused at boot with
+    # **no escape hatch** because crossing the trust boundary plaintext
+    # voids the paper's three-tier guarantee (Zenodo 17261761 §4.2).
+    #
+    # For *egress* — the browser-facing HLS / WebRTC URLs published over
+    # the uplink NIC, terminated by a TLS reverse proxy — use the
+    # MEDIAMTX_EXTERNAL_* settings, which are deliberately scoped out of
+    # this validator. See docs/SECURITY_ARCHITECTURE.md §2.2 (V-015).
 
     # V-009 (M1a): Deployment-mode policy. The paper (Zenodo 17261761 §3.4 /
     # §4.1 Principle "Customer Sovereignty") treats vendor-controlled cloud
@@ -424,26 +496,46 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _enforce_mediamtx_loopback(self) -> "Settings":
-        """V-015: Refuse to start if MediaMTX endpoints are bound to a routable
-        interface unless ``ALLOW_REMOTE_MEDIAMTX=true`` is explicitly set.
+    def _enforce_mediamtx_internal(self) -> "Settings":
+        """V-015: Refuse to start if the *ingress-side* MediaMTX endpoint URLs
+        cross OpenNVR's trust boundary.
 
-        The paper's three-tier architecture (Zenodo 17261761 §4.2) treats the
-        middleware as the single hardened edge between cameras and operators;
-        exposing MediaMTX directly defeats that property. Loopback-only is the
-        Secure-by-Design default; the override exists for the case where a
-        separate TLS-terminating reverse proxy sits on the management NIC.
+        Two-NIC model. OpenNVR boxes typically sit between two interfaces:
+
+        * **Ingress / camera LAN.** RTSP, HLS-over-HTTP, and the MediaMTX
+          control plane live here. The medium itself is plaintext — that's
+          how IP cameras speak — and the security argument is that this
+          segment is *physically and logically* private (camera VLAN,
+          Docker bridge, VPN overlay). V-015 enforces exactly that: the
+          MEDIAMTX_*_URL handles the backend uses to reach MediaMTX must
+          resolve to an address that an attacker on the public internet
+          cannot directly route to.
+
+        * **Egress / uplink.** Browser-facing HLS / WebRTC published over
+          the operator-facing NIC, terminated by a TLS reverse proxy. The
+          MEDIAMTX_EXTERNAL_* settings cover this path and are
+          *deliberately scoped out* of this validator, because they
+          legitimately resolve to public hosts.
+
+        "Inside the trust zone" = loopback + RFC1918 + IPv6 ULA + IPv4/IPv6
+        link-local. Anything else (public IP, public FQDN, 0.0.0.0
+        wildcard, unparseable host) is refused at boot with **no escape
+        hatch**: per the paper's Secure-by-Design principle (Zenodo
+        17261761 §4.1), an unencrypted MediaMTX channel that crosses the
+        trust boundary is a CVE-by-default, and we won't ship a flag that
+        normalizes it. Operators with a TLS proxy in front of MediaMTX
+        should configure MEDIAMTX_EXTERNAL_* and keep the internal URLs on
+        the camera LAN.
+
+        See docs/SECURITY_ARCHITECTURE.md §2.2 (V-015) for the threat model.
         """
-        if self.allow_remote_mediamtx:
-            return self
-
         # (env_var_name, value) pairs we need to check. None values are skipped
         # because they mean "use default" which is always localhost.
         #
-        # MEDIAMTX_EXTERNAL_* URLs are intentionally NOT in this list —
-        # they are the browser-facing endpoints behind your TLS-terminating
-        # reverse proxy and may legitimately resolve to a routable host.
-        # See docs/SECURITY_ARCHITECTURE.md §2.2 (V-015 scope note).
+        # MEDIAMTX_EXTERNAL_* URLs are intentionally NOT in this list — they
+        # are the egress/uplink-side endpoints behind a TLS-terminating
+        # reverse proxy and may legitimately resolve to a public host. See
+        # docs/SECURITY_ARCHITECTURE.md §2.2 (V-015 scope note).
         candidates: list[tuple[str, str | None]] = [
             ("MEDIAMTX_BASE_URL", self.mediamtx_base_url),
             ("MEDIAMTX_ADMIN_API", self.mediamtx_admin_api),
@@ -465,40 +557,53 @@ class Settings(BaseSettings):
             host = parsed.hostname
             # M-1 reviewer finding: a scheme-less value like "192.168.1.5:8889"
             # parses with hostname=None, which would silently slip past the
-            # loopback check. Treat that as an offense in its own right so the
-            # operator sees a clear error rather than a downstream connect
-            # failure.
+            # check. Treat that as an offense in its own right so the operator
+            # sees a clear error rather than a downstream connect failure.
             if host is None:
                 offending.append(
                     f"{name}={raw!r} (unparseable host — did you forget the "
                     f"http:// scheme?)"
                 )
                 continue
-            # C-3 reviewer finding: 0.0.0.0 is the wildcard bind, not a
-            # loopback. Refuse it with a specific message so the operator
-            # understands the semantic, not just the syntactic, problem.
+            # C-3 reviewer finding: 0.0.0.0 is the wildcard bind, not an
+            # internal address. Refuse it with a specific message so the
+            # operator understands the semantic, not just the syntactic,
+            # problem.
             if host == "0.0.0.0":
                 offending.append(
                     f"{name}={raw!r} (host is 0.0.0.0 — that is the "
-                    f"bind-everywhere wildcard, not localhost; MediaMTX is "
-                    f"almost certainly exposed on every NIC. Set the URL to "
-                    f"127.0.0.1 and bind MediaMTX to 127.0.0.1 too.)"
+                    f"bind-everywhere wildcard, not an internal address; "
+                    f"MediaMTX is almost certainly exposed on every NIC "
+                    f"including the public uplink. Bind MediaMTX to the "
+                    f"camera-LAN address instead, or front it with TLS and "
+                    f"use MEDIAMTX_EXTERNAL_* for the public URL.)"
                 )
                 continue
-            if not _host_is_loopback(host):
+            if not _host_is_internal(host):
                 offending.append(f"{name}={raw!r} (host={host})")
 
         if offending:
             details = "\n  - ".join(offending)
             raise ValueError(
-                "V-015: MediaMTX endpoints are bound to a non-loopback host, "
-                "which violates the Secure-by-Design default. Either set them "
-                "back to localhost/127.0.0.1, or, if you are intentionally "
-                "fronting MediaMTX with a TLS-terminating reverse proxy on "
-                "the management NIC, set ALLOW_REMOTE_MEDIAMTX=true. "
+                "V-015: MediaMTX ingress endpoints resolve to a host outside "
+                "OpenNVR's trust zone (loopback / RFC1918 / IPv6 ULA / "
+                "link-local). MediaMTX speaks plaintext RTSP and HTTP on "
+                "this path, so a public-internet-reachable address would "
+                "void the Secure-by-Design guarantee. Bind MediaMTX to your "
+                "camera-LAN / Docker-bridge / VPN-overlay interface, or, "
+                "for browser-facing access, terminate TLS in a reverse "
+                "proxy and publish the public URL via MEDIAMTX_EXTERNAL_* "
+                "(which is intentionally outside this check). "
                 f"Offending settings:\n  - {details}"
             )
         return self
+
+    # NOTE: no back-compat alias for the previous
+    # ``_enforce_mediamtx_loopback`` method name — Pydantic registers
+    # validators under their current name (verified: V-015 fires exactly
+    # once at boot), and nothing in the repo imports the old symbol.
+    # Aliasing here would only obscure the validator's actual semantics.
+    # (ISSUE-4 peer review n-2.)
 
     def get_application_url(self) -> str:
         """Get the application URL, auto-detecting if not configured."""

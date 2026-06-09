@@ -137,16 +137,17 @@ Then `docker compose -f docker-compose.tier0.yml up -d` to remount.
 
 ### Use a different YOLOv8 model
 
-The default is `yolov8n.onnx` (nano, ~6 MB) fetched from Hugging Face
-on first boot. Override with `YOLOV8_WEIGHTS_URL` in `.env` to point at
-a fine-tuned model or a private mirror:
+The default is `yolov8n` (nano, ~6 MB). Because Ultralytics retired the pre-built ONNX from its public URLs, the Tier 0 init container downloads the official `yolov8n.pt` checkpoint and exports it to ONNX with `ultralytics` on first boot — one-time, takes 1–3 min on x86 and 10–15 min on a Raspberry Pi 5, cached on the `opennvr_yolov8_weights` volume thereafter.
+
+If you have a fine-tuned model or a private mirror that already serves a pre-built ONNX, point `YOLOV8_WEIGHTS_URL` at it in `.env`; the init container skips the `.pt` → ONNX export entirely:
 
 ```bash
 YOLOV8_WEIGHTS_URL=https://example.com/internal/yolov8s-people.onnx
 ```
 
-Wipe the cached weights volume to force a re-download after changing
-the URL:
+To pin a different upstream checkpoint instead, override `YOLOV8_PT_URL` (any `yolov8{n,s,m,l,x}.pt` URL from the ultralytics assets releases).
+
+Wipe the cached weights volume to force a re-download/re-export after changing either:
 
 ```bash
 docker compose -f docker-compose.tier0.yml down
@@ -196,9 +197,7 @@ Check the init container's logs:
 docker compose -f docker-compose.tier0.yml logs yolov8-weights-init
 ```
 
-A 503 from Hugging Face usually clears itself — the init container
-retries five times with backoff. If it fails permanently, mirror
-`yolov8n.onnx` to a URL you control and set `YOLOV8_WEIGHTS_URL`.
+The init container downloads `yolov8n.pt` (with retries) and exports it to ONNX via `ultralytics`. Failure modes worth checking: a network blocked from reaching `github.com/ultralytics/assets/releases/...` (set `YOLOV8_PT_URL` to your own mirror); pip can't install `ultralytics` (offline or proxied environment — same fix, host the wheels on a private index, or set `YOLOV8_WEIGHTS_URL` to a pre-built ONNX you already have). The container retries transient errors five times with backoff before failing.
 
 ### Camera shows up but no detections
 

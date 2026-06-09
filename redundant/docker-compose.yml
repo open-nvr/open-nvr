@@ -408,10 +408,23 @@ services:
 # ----------------------------------------------------
 # [WINDOWS/MAC] BRIDGE MODE: Uncomment lines below
 networks:
+  # ISSUE-6 v7: pin both bridge subnets so the trust-zone claim is
+  # deterministic (V-015 accepts the entire 172.16/12 range) and
+  # operator LANs don't accidentally collide with Docker's
+  # auto-pick. Override via OPENNVR_DOCKER_SUBNET /
+  # OPENNVR_PUBLIC_SUBNET if your LAN uses 172.28/16 or 172.29/16.
   sentinel_internal:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
   public_uplink:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${OPENNVR_PUBLIC_SUBNET:-172.29.0.0/16}
 # ----------------------------------------------------
 
 # ==========================================

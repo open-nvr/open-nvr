@@ -100,12 +100,29 @@ async def lifespan(app: FastAPI):
         from core.policy import audit_boot_posture, current_posture
 
         posture = current_posture()
+        # ISSUE-4: allow_remote_mediamtx was retired — V-015 is absolute,
+        # nothing to log.
         main_logger.info(
             f"Boot policy: deployment_mode={posture['deployment_mode']} "
-            f"ai_sovereignty={posture['ai_sovereignty']} "
-            f"allow_remote_mediamtx={posture['allow_remote_mediamtx']}"
+            f"ai_sovereignty={posture['ai_sovereignty']}"
         )
         audit_boot_posture()
+        # ISSUE-4 peer review M-1: an operator upgrading from a release
+        # that supported ALLOW_REMOTE_MEDIAMTX would otherwise have their
+        # flag silently ignored (Pydantic extra="ignore"). Surface it
+        # loudly at boot so they know the bypass is gone and where to
+        # look — V-015 is now absolute, MEDIAMTX_EXTERNAL_* is the
+        # cross-trust-boundary path.
+        if os.environ.get("ALLOW_REMOTE_MEDIAMTX"):
+            main_logger.warning(
+                "ALLOW_REMOTE_MEDIAMTX is set in the environment but has "
+                "been retired (ISSUE-4). V-015 is now absolute and accepts "
+                "loopback + RFC1918 + IPv6 ULA + link-local; there is no "
+                "longer an opt-out. If you were running MediaMTX behind a "
+                "TLS reverse proxy on the uplink, move the public URL to "
+                "MEDIAMTX_EXTERNAL_* (see docs/SECURITY_ARCHITECTURE.md "
+                "§2.2) and remove this env var to silence this warning."
+            )
     except Exception as exc:
         main_logger.error(f"Failed to record boot posture: {exc}", exc_info=True)
 

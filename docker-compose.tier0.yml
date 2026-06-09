@@ -6,7 +6,13 @@
 # adapter (YOLOv8 for object detection). Everything pulls from
 # pre-built images — no source builds, no toolchain, no manual
 # weights download. Target wall time on a normal broadband link
-# (50 Mbps, fresh Docker): under 5 minutes.
+# (50 Mbps, fresh Docker): under 5 minutes on x86.
+#
+# On edge hardware (Raspberry Pi 5), the YOLOv8 ONNX export adds
+# 10–15 min to *first* boot only — see `yolov8-weights-init` below
+# for why. Subsequent boots are instant (ONNX cached on the
+# opennvr_yolov8_weights volume). The v0.1.1 GHCR weights image
+# will eliminate this for the default case.
 #
 # Quickstart:
 #     cp .env.example .env
@@ -77,15 +83,27 @@ services:
         fi
         apk add --no-cache openssl >/dev/null
         umask 077
+        # ISSUE-6 v9: extend the SAN list with OPENNVR_HOST_IP when
+        # set so direct RTSPS clients (VLC, ffmpeg hitting
+        # rtsps://<host-ip>:8322) get a cert that matches the URL.
+        # Browsers don't see this cert — they go through nginx, which
+        # has its own cert — but the local-tools UX gets the same
+        # one-click-trust experience.
+        SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
           -keyout /certs/server.key -out /certs/server.crt \
           -subj "/CN=opennvr-mediamtx" \
-          -addext "subjectAltName=DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1" \
+          -addext "subjectAltName=$${SAN}" \
           -addext "basicConstraints=critical,CA:FALSE" \
           -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
           -addext "extendedKeyUsage=serverAuth"
         chmod 0644 /certs/server.crt
-        echo "Wrote /certs/server.{crt,key}."
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
     volumes:
       - ./mediamtx-certs:/certs
 
@@ -114,13 +132,27 @@ services:
       mediamtx-certs-init:
         condition: service_completed_successfully
     ports:
-      - "127.0.0.1:8322:8322" # RTSPS (TLS-required RTSP)
-      - "127.0.0.1:8888:8888" # HLS (HTTPS)
-      - "8889:8889" # WebRTC signaling (HTTPS)
-      - "8189:8189/tcp" # WebRTC ICE
-      - "8189:8189/udp" # WebRTC ICE
-      - "9997:9997" # API/metrics
-      - "127.0.0.1:9996:9996" # Playback API
+      # ── Host-loopback only (V-015 trust zone, host-side debugging) ──
+      - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
+      - "127.0.0.1:8888:8888" # HLS (browsers reach via nginx /hls/)
+      - "8889:8889" # WebRTC signalling (via nginx /webrtc/)
+      - "9997:9997" # MediaMTX admin API/metrics
+      - "127.0.0.1:9996:9996" # Recording playback (via nginx /playback/)
+      # ── WebRTC ICE media path (ISSUE-6 v8) ──────────────────────
+      # WebRTC media is DTLS-SRTP over UDP — browser ↔ mediamtx
+      # direct, NOT proxied by nginx. The UDP port must be reachable
+      # on the same NIC nginx publishes the UI on, so a LAN browser
+      # can complete the ICE handshake mediamtx advertised via
+      # webrtcAdditionalHosts. Bound to NGINX_BIND_HOST (uplink in
+      # dual-NIC mode, 0.0.0.0 in single-LAN) so the trust-zone
+      # constraint stays intact — cameras on a separate camera-LAN
+      # NIC cannot reach this port. Media is DTLS-SRTP-encrypted
+      # end-to-end and only usable with a JWT-authenticated SDP
+      # session, so the exposed surface is small.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/udp"
+      # TCP fallback for WebRTC ICE in case UDP is blocked (corporate
+      # firewalls, mobile carriers). Same exposure rationale as UDP.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/tcp"
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
@@ -130,8 +162,14 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
-      # LAN WebRTC: set MTX_WEBRTCADDITIONALHOSTS=<host-ip> in .env (empty = loopback only)
-      - MTX_WEBRTCADDITIONALHOSTS=${MTX_WEBRTCADDITIONALHOSTS:-}
+      # ISSUE-6 v8: ICE candidate advertisement. mediamtx puts the
+      # host(s) listed here in the SDP answer; the browser uses them
+      # to find the UDP/8189 media path. Set by start.sh based on
+      # the operator's declared topology (uplink IP in dual-NIC,
+      # detected LAN IP in single-LAN). Empty default means
+      # mediamtx falls back to auto-detection — works on simple
+      # single-NIC hosts but breaks behind NAT / multi-NIC.
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
     networks:
       - opennvr_internal
     healthcheck:
@@ -178,8 +216,16 @@ services:
   # via the YOLOV8_WEIGHTS_URL env var.
   # ──────────────────────────────────────────────────────────────
   yolov8-weights-init:
-    image: alpine:3.20
+    # Python image because Ultralytics no longer publishes a pre-built
+    # yolov8n.onnx anywhere reachable (HF Ultralytics/YOLOv8 is gated
+    # behind an allowlist; github.com/ultralytics/assets/releases/.../
+    # yolov8n.onnx returns 404). The PyTorch checkpoint (.pt) on the
+    # same release tag is stable, so we download that and export to
+    # ONNX with the ultralytics CLI at first boot. Cached on the
+    # opennvr_yolov8_weights volume, so this runs once per host.
+    image: python:3.11-slim
     container_name: opennvr_yolov8_weights_init
+    restart: "no"
     command:
       - sh
       - -c
@@ -190,20 +236,62 @@ services:
           echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
           exit 0
         fi
-        echo "Fetching yolov8n.onnx from $${YOLOV8_WEIGHTS_URL}..."
-        apk add --no-cache curl ca-certificates >/dev/null
-        # Retry up to 5 times — HF CDN occasionally 503s under load.
-        # --retry-all-errors covers transient TCP resets too.
+
+        # curl + ca-certificates are needed by both branches below, so
+        # install once. The cached-skip path above already exited, so
+        # this only runs on a genuinely fresh /weights volume.
+        apt-get update -qq >/dev/null
+        apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+
+        # Override path — an operator supplies a pre-built ONNX via
+        # YOLOV8_WEIGHTS_URL (fine-tuned model, private mirror, etc.).
+        # If set, we curl it directly and skip the .pt → ONNX export.
+        if [ -n "$${YOLOV8_WEIGHTS_URL}" ]; then
+          echo "YOLOV8_WEIGHTS_URL set; fetching pre-built ONNX from $${YOLOV8_WEIGHTS_URL}..."
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
+            --output "$$WEIGHTS" \
+            "$${YOLOV8_WEIGHTS_URL}"
+          echo "Downloaded $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+          exit 0
+        fi
+
+        # Default path: download yolov8n.pt and export to ONNX.
+        # ultralytics pulls torch + torchvision (~700 MB transient
+        # install in the init container's filesystem — not cached on
+        # the host). After the export, the ONNX itself lives on the
+        # /weights volume, so subsequent boots short-circuit at the
+        # top and don't run any of this. The pip install only repeats
+        # if an operator deletes the weights volume.
+        # Export takes 1–3 min on x86, 10–15 min on a Pi 5.
+        echo "Fetching yolov8n.pt from $${YOLOV8_PT_URL}..."
+        TMPDIR=$$(mktemp -d)
         curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
-          --output "$$WEIGHTS" \
-          "$${YOLOV8_WEIGHTS_URL}"
-        echo "Downloaded $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+          --output "$$TMPDIR/yolov8n.pt" \
+          "$${YOLOV8_PT_URL}"
+        echo "Installing ultralytics (one-time, ~700 MB)..."
+        pip install --quiet --no-cache-dir "ultralytics==8.3.40" "onnx>=1.16,<2"
+        # simplify=False is deliberate: matches the byte layout the
+        # adapter image was conformance-tested against. Do not flip
+        # without re-running the adapter conformance kit
+        # (docs/AI_ADAPTER_CONTRACT.md §11.4) — the simplifier folds
+        # constants and changes node naming, which can shift the
+        # adapter's model fingerprint and the audit-chain sha256.
+        echo "Exporting to ONNX (opset=12, imgsz=640) — this may take a few minutes on edge hardware..."
+        cd "$$TMPDIR"
+        yolo export model=yolov8n.pt format=onnx opset=12 imgsz=640 simplify=False
+        mv yolov8n.onnx "$$WEIGHTS"
+        rm -rf "$$TMPDIR"
+        echo "Exported $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
     environment:
-      # Override in .env to use a fine-tuned model or a private
-      # mirror. Default is the upstream Ultralytics ONNX release on
-      # Hugging Face — a stable, anonymous-pullable URL that
-      # matches the model the yolov8 adapter assumes at boot.
-      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-https://huggingface.co/Kalray/yolov8/resolve/main/yolov8n.onnx}
+      # Override to supply a pre-built ONNX (fine-tuned model or a
+      # private mirror); when set, we skip the .pt → ONNX export and
+      # curl this URL directly. Unset by default because the upstream
+      # Ultralytics ONNX URLs (HF + github assets) were both retired,
+      # so the safe default is to derive the ONNX from the .pt.
+      - YOLOV8_WEIGHTS_URL=${YOLOV8_WEIGHTS_URL:-}
+      # Stable upstream .pt URL. Pinned to v8.3.0 so the boot is
+      # reproducible across hosts and the ONNX export is deterministic.
+      - YOLOV8_PT_URL=${YOLOV8_PT_URL:-https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt}
     volumes:
       - opennvr_yolov8_weights:/weights
 
@@ -267,10 +355,17 @@ services:
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
       - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
-      # External (browser-facing) URLs — default to loopback; set in .env for a LAN demo
-      - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_EXTERNAL_BASE_URL:-http://127.0.0.1:8889}
-      - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_EXTERNAL_HLS_URL:-http://127.0.0.1:8888}
-      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_EXTERNAL_PLAYBACK_URL:-http://127.0.0.1:9996}
+      # ISSUE-6 v8: browser-facing URLs go through nginx so they
+      # work from any LAN device with TLS. MEDIAMTX_PUBLIC_URL is
+      # exported by start.sh as https://<uplink-IP> for dual-NIC or
+      # https://<detected-IP> for single-LAN. Falls back to
+      # https://localhost so the host-itself path keeps working
+      # when the script is bypassed (e.g., direct `docker compose
+      # up -d`). All three URLs are same-origin with the React UI,
+      # so no mixed-content blockers fire.
+      - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
+      - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
+      - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
       - KAI_C_URL=http://127.0.0.1:8100
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
@@ -311,12 +406,115 @@ services:
       start_period: 60s
       retries: 5
 
+  # ──────────────────────────────────────────────────────────────
+  # ISSUE-6: TLS reverse proxy for LAN access.
+  #
+  # opennvr-core binds its host port to 127.0.0.1:8000 only — by
+  # design, so the plaintext HTTP API is never reachable from the
+  # LAN. To let operators reach the UI from a phone or laptop on
+  # 192.168.x without compromising on cleartext-JWT-on-the-wire, we
+  # ship nginx as the public edge. It terminates TLS with a
+  # self-signed cert (CA: opennvr-local) and proxies everything to
+  # opennvr-core over the Docker internal bridge — which V-015's
+  # trust-zone semantics already classify as inside the boundary
+  # (loopback + RFC1918 + ULA + link-local). No new attack surface
+  # versus today's loopback-only posture; just the TLS edge moves
+  # from "absent" to "self-signed, in the Docker network namespace".
+  #
+  # Operators with their own reverse-proxy / TLS terminator (Caddy,
+  # Cloudflare Tunnel, nginx on bare metal) can disable this service
+  # by removing it from the compose and bind opennvr-core to
+  # 0.0.0.0:8000 themselves. The recommended path is to leave this
+  # in place.
+  # ──────────────────────────────────────────────────────────────
+  nginx-certs-init:
+    image: alpine:3.20
+    container_name: opennvr_nginx_certs_init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "nginx certs already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        umask 077
+        # SAN list covers common LAN access patterns. OPENNVR_HOST_IP
+        # (optional) lets the operator add the server's actual LAN IP
+        # so browsers don't even warn about CN mismatch — they still
+        # warn about the self-signed CA, but that's a one-click
+        # "accept the risk" rather than a hard block.
+        SAN="DNS:opennvr,DNS:opennvr.local,DNS:localhost,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-ui" \
+          -addext "subjectAltName=$${SAN}" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+    volumes:
+      - ./nginx-certs:/certs
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: opennvr_nginx
+    restart: unless-stopped
+    depends_on:
+      nginx-certs-init:
+        condition: service_completed_successfully
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      # NGINX_BIND_HOST lets the operator restrict the public edge to
+      # a specific interface (e.g., the management VLAN's IP).
+      # Default 0.0.0.0 because the whole point of this service is
+      # LAN reachability; restricting it requires a conscious choice.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:443:443"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:80:80"
+    volumes:
+      - ./nginx-certs:/etc/nginx/certs:ro
+      - ./nginx/opennvr.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - opennvr_internal
+    healthcheck:
+      # `wget -q -O - https://localhost/health` would also work but
+      # requires curl in the alpine image; using nginx's own ability
+      # to serve a 200 on /healthz (we add it in the config) keeps
+      # the image lean.
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
 # ==========================================
 # Networks
 # ==========================================
 networks:
   opennvr_internal:
     driver: bridge
+    # ISSUE-6 v7: pin the bridge subnet so the trust-zone claim is
+    # deterministic (V-015 accepts 172.16/12) and operator LANs
+    # don't accidentally collide with Docker's auto-pick. 172.28/16
+    # is well inside the V-015-accepted range and uncommon in
+    # consumer / SMB LANs (most home routers default to
+    # 192.168.0.0/24 or 192.168.1.0/24; corporate VPNs commonly use
+    # 10.x). If your LAN does use 172.28/16, override via the
+    # OPENNVR_DOCKER_SUBNET env var (and pick another RFC1918 range
+    # inside the V-015 trust zone — 172.16/12, 10/8, 192.168/16).
+    ipam:
+      driver: default
+      config:
+        - subnet: ${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
 
 # ==========================================
 # Volumes

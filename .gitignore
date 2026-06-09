@@ -22,6 +22,17 @@ byok-test-certs/
 # M1b-fixup H-3: locally-generated MediaMTX self-signed certs
 mediamtx-certs/
 
+# ISSUE-6: locally-generated nginx TLS-reverse-proxy self-signed cert.
+# Each operator's deployment mints its own keypair on first boot via
+# nginx-certs-init; never committed.
+nginx-certs/
+
+# ISSUE-6 v3: host-hardening artifacts. The nft template + snapshot
+# directories are operator-local — they reference the operator's
+# specific interface names and contain `nft list ruleset` snapshots
+# that may include details of their other firewall rules.
+host-hardening/
+
 # Secrets and credentials
 secrets/
 *.secret

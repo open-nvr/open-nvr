@@ -51,7 +51,11 @@ cp .env.example .env
 docker compose -f docker-compose.tier0.yml up -d
 ```
 
-Open <http://localhost:8000>, grab the one-time setup token from the core container logs, set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
+`./start.sh up` prints the URLs you should visit. Open <https://localhost/> from the host itself, or <https://&lt;server-ip&gt;/> from a phone/laptop on the same LAN — the script auto-detects your LAN IP and generates a self-signed certificate that includes it. Your browser will warn about the self-signed CA once; click **Advanced → Accept the risk and continue**. The cert and key live in `./nginx-certs/` on the host and never leave the machine.
+
+Live streams (WebRTC, HLS) and recording playback work from any device on your LAN. If your IP changes (DHCP renewal, moved boxes), run `./start.sh refresh-certs` to regenerate the cert with the new IP.
+
+Grab the one-time setup token from the start-script output (or `docker compose logs opennvr-core | grep -A 6 'first-time setup token'`), set an admin password, add a camera. Detection overlays appear within thirty seconds of the camera connecting.
 
 Full install, retention, production hardening: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
 

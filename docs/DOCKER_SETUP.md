@@ -114,13 +114,178 @@ docker compose ps
 
 ### 5. Access Application
 
-Open browser to: **http://localhost:8000**
+OpenNVR ships an nginx TLS reverse proxy (ISSUE-6) so the UI is reachable from any device on your LAN over HTTPS. Plain HTTP is never served — the `80 → 443` redirect ensures cleartext JWTs never traverse the network.
 
-**Default Credentials:**
-- Username: `admin`
-- Password: `admin123`
+**From the host machine:** open <https://localhost/>
 
-⚠️ **Change password immediately after first login!**
+**From a phone, tablet, or laptop on the same LAN:** open `https://<server-ip>/` (e.g. `https://192.168.1.100/`). You can find the server's LAN IP with `hostname -I` on Linux or `ipconfig getifaddr en0` on macOS. The `./start.sh up` output prints it for you.
+
+**About the browser warning.** On first visit the browser will warn that the certificate is not trusted. **This is expected.** OpenNVR generates a self-signed certificate on first boot and stores the keypair under `./nginx-certs/` on the host machine — it never leaves your network and is never committed to git. Click:
+
+- **Chrome / Edge:** *Advanced → Proceed to &lt;host&gt; (unsafe)*
+- **Firefox:** *Advanced → Accept the Risk and Continue*
+- **Safari:** *Show Details → visit this website → Visit Website*
+
+The warning sounds scary but the security model is straightforward: in a flat-LAN deployment with no public DNS or Let's Encrypt access, self-signed certs are the only way to encrypt the connection. The alternative is plaintext HTTP, which would leak your JWT auth tokens to anyone sniffing the LAN — strictly worse.
+
+**Silence the CN/IP-mismatch warning (optional).** The default cert has Subject Alternative Names for `localhost`, `127.0.0.1`, `opennvr`, `opennvr.local`, and `::1`. If you access the UI by IP from the LAN, the browser will also warn that the hostname doesn't match the cert. To fix that:
+
+```bash
+# Add your server's LAN IP to .env
+echo "OPENNVR_HOST_IP=192.168.1.100" >> .env
+
+# Regenerate the cert
+rm -rf ./nginx-certs/
+./start.sh up
+```
+
+The CA-not-trusted warning will still appear (one-click bypass), but the CN/IP-mismatch error will be gone.
+
+**Permanently trust the cert (optional).** For a cleaner UX, you can add `./nginx-certs/server.crt` to your operating system's trust store (or to your browser's certificate manager). After that, the browser shows the padlock with no warning at all.
+
+**Default Credentials:** OpenNVR no longer ships with a default password. The admin account is created with `password_set=False` and gated by a **one-time setup token** that is minted at first boot and printed to stdout (and also surfaced by `./start.sh up`). Paste the token into the first-time-setup page along with your chosen admin password. The token is consumed on first successful use; restart opennvr-core to re-arm if you miss it.
+
+⚠️ **Never expose plaintext HTTP (port 8000) to the LAN.** The compose intentionally binds opennvr-core to `127.0.0.1:8000:8000` so the only LAN-reachable surface is the TLS-terminating nginx on `:443`. Changing this defeats the security model — use the nginx proxy.
+
+### 5a. NIC topology — single-NIC vs dual-NIC vs VLAN
+
+OpenNVR's trust model assumes the *camera network* and the *operator network* can be told apart. The three deployment shapes:
+
+**Shape 1 — Single-NIC (default, home / small office).** One Ethernet/WiFi interface on the host. Cameras and operator devices share the same `192.168.x.0/24`. nginx binds to `0.0.0.0:443` — the one and only NIC. `start.sh` auto-detects this and configures it. Trust model: "I trust my LAN as a whole." Sufficient for most home installs.
+
+**Shape 2 — Dual-NIC (recommended for businesses and security-sensitive deployments).** Two physical interfaces. One feeds the camera network (no default route, DNS blackholed); the other is the operator uplink where users reach the UI. nginx binds *only* to the uplink NIC's IP, so a compromised camera physically cannot probe the UI or reach other devices on your LAN through this host. Declare the topology in `.env`:
+
+```bash
+CAMERA_NETWORK_INTERFACE=eth0
+MGMT_NETWORK_INTERFACE=eth1
+```
+
+Find your interface names with `ip -4 -o addr show scope global` (Linux) or `ifconfig` (macOS). On next `./start.sh up`, the script binds nginx to the management NIC's IPv4 and prints which NIC is which. Refuses to boot if `MGMT_NETWORK_INTERFACE` has no IPv4 address (typo guard).
+
+**Shape 3 — Single physical NIC with VLAN tagging (Shape 2 on one wire).** If you have a managed switch but only one Ethernet port on the host, 802.1Q VLAN tagging gives you the same isolation. The single physical NIC carries multiple tagged VLANs; the Linux kernel presents each as a separate interface:
+
+```bash
+# On the host (one-time setup; varies by distro / network manager):
+ip link add link eth0 name eth0.10 type vlan id 10    # camera VLAN
+ip link add link eth0 name eth0.20 type vlan id 20    # uplink VLAN
+ip addr add 10.10.0.1/24 dev eth0.10
+ip addr add 192.168.1.100/24 dev eth0.20
+ip link set eth0.10 up
+ip link set eth0.20 up
+```
+
+Then declare the same as Shape 2:
+
+```bash
+CAMERA_NETWORK_INTERFACE=eth0.10
+MGMT_NETWORK_INTERFACE=eth0.20
+```
+
+From OpenNVR's perspective `eth0.10` and `eth0.20` are indistinguishable from two physical NICs; the isolation is enforced at L2 by the managed switch. Requires (a) a VLAN-aware switch and (b) the switch ports for cameras and operators configured for the correct VLAN IDs. Most consumer $30 switches can't do this; typical SMB managed switches (Netgear GS308E, TP-Link TL-SG108E, MikroTik, Ubiquiti) can.
+
+**What to do if `start.sh` reports "multi-NIC, undeclared".** You have ≥2 NICs but haven't declared which is camera-LAN and which is uplink. nginx falls back to `0.0.0.0:443` (reachable from all NICs) with a loud warning. Either set the two env vars above, or accept that single-NIC trust applies and the warning is informational.
+
+⚠️ **What auto-detection cannot do.** There's no universal way to tell which NIC is "the camera NIC" vs "the uplink NIC" automatically — both could be RFC1918, both could have default routes set incorrectly, and the kernel boot order may shuffle names (`eth0` may not be the first cable you plugged in). The operator must declare the topology; `start.sh` will refuse to assume.
+
+### 5b. Interactive topology walkthrough (ISSUE-6 v3)
+
+When `./start.sh up` runs against a multi-NIC host whose topology hasn't been declared in `.env` AND a terminal is attached (interactive run, not CI/scripted), the script presents a guided menu instead of just warning. Sample session:
+
+```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  NIC topology: I see 2 routable interfaces.
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Detected interfaces:
+    1) eth0           192.168.1.100
+    2) eth1           192.168.2.150
+
+  How is your network set up?
+
+    1) Simple — one network for cameras, phone, and computer.
+       Most home / small-office setups.
+       Tip: change every camera's default password before connecting.
+
+    2) Advanced — cameras on a separate network from operators.
+       Needs two network cables or a VLAN-aware managed switch.
+       Stronger isolation if a camera gets hacked.
+
+    3) Not sure — I'll pick the safe default (Simple) for you.
+
+  Your choice [1/2/3]: 2
+  Which number is the CAMERA-LAN side?     [1-2]: 1
+  Which number is the OPERATOR-UPLINK side? [1-2]: 2
+
+  ✓ Dual-NIC mode saved.
+    camera network : eth0  (UI not exposed here)
+    operator uplink: eth1 (192.168.2.150)  ← UI bound here
+
+    Web UI: https://192.168.2.150/
+
+  Apply host firewall rules to enforce the camera/uplink separation?
+  This installs Linux firewall (nftables) rules that block IP
+  forwarding between eth0 (cameras) and eth1 (uplink).
+  Effect: a compromised camera cannot use this host as a
+  stepping stone to reach your LAN. Requires sudo once.
+  Every command is printed before running. Reverse with:
+      ./scripts/revert-camera-vlan-hardening.sh
+
+  Apply hardening now? [y/N]:
+```
+
+The choice persists to `.env` so subsequent runs skip the prompt. Selecting **s** writes `NGINX_BIND_HOST=0.0.0.0`; **d** writes `CAMERA_NETWORK_INTERFACE` + `MGMT_NETWORK_INTERFACE`; **l** writes nothing (you'll see the prompt again next boot). Same-NIC-for-both-sides is rejected with no `.env` write.
+
+### 5c. Optional: enforce the camera/uplink separation with host firewall rules
+
+Picking **dual-NIC** in the walkthrough surfaces a second prompt offering to install Linux firewall (nftables) rules that block IP forwarding between the camera network NIC and the uplink NIC. This is the only thing in OpenNVR's install path that asks for sudo, and it's gated behind explicit consent.
+
+**What the hardening does.**
+
+- Adds a dedicated nftables table `inet opennvr-vlan` with a single forward-chain rule that drops packets in both directions between the two declared NICs.
+- A compromised camera on the camera-LAN cannot pivot through the OpenNVR host to reach LAN devices on the uplink side.
+- An attacker on the LAN cannot reach cameras through the OpenNVR host either.
+
+**What it doesn't do (intentionally).**
+
+- Does not remove the default route from any NIC. Routing manipulation is a separate decision tracked under V-016.
+- Does not modify your existing firewall (UFW, firewalld, fail2ban, bare iptables) — `inet opennvr-vlan` is an isolated table; removing it never touches anything else.
+- Does not change DNS resolution. Operators with Pi-hole, AdGuard, dnsmasq, or systemd-resolved keep their current setup unchanged.
+- Does not run input/output filtering on the NICs. This avoids the "I just SSH'd in via eth0 and you blocked my session" failure mode.
+
+**Reversal is one command.**
+
+```bash
+./scripts/revert-camera-vlan-hardening.sh
+```
+
+The revert script lists the active rules, asks for confirmation, then runs `sudo nft delete table inet opennvr-vlan`. The rest of your firewall is untouched.
+
+**Run it yourself later, outside the walkthrough.**
+
+```bash
+./scripts/apply-camera-vlan-hardening.sh \
+    --camera-iface eth0 --mgmt-iface eth1 [--dry-run]
+```
+
+`--dry-run` prints the generated nftables ruleset and the exact commands that would execute, then exits without running them. Use it to audit before granting sudo.
+
+**Snapshots.** Every apply creates `./host-hardening/snapshot-<timestamp>/` containing the pre-apply `nft list ruleset`, `ip route show`, and `ip -4 -o addr show` output. Survives across reverts so you can compare before/after.
+
+### 5d. Live streams + recording playback from LAN devices
+
+After `./start.sh up` finishes, live WebRTC and HLS streams, plus recording playback, work from any device on the same LAN — phones, tablets, laptops. No additional configuration needed: nginx proxies `/webrtc/`, `/hls/`, and `/playback/` to MediaMTX over the Docker bridge, and the WebRTC media UDP port (`:8189`) is published on the same NIC the UI binds to.
+
+In dual-NIC mode the camera-LAN side stays isolated — every published port (UI 443, WebRTC 8189 UDP/TCP) binds only to the uplink NIC, so cameras on the camera-LAN cannot reach the management plane or the media plane.
+
+### 5e. Refreshing the TLS cert when your IP changes
+
+The self-signed cert generated on first boot includes your LAN IP in its SAN list. If your IP changes (DHCP renewal, you moved the box to a new network, you swapped NICs), the cert no longer matches and the browser shows an extra "CN/IP mismatch" warning. Fix:
+
+```bash
+./start.sh refresh-certs
+```
+
+This stops nginx + MediaMTX, deletes `./nginx-certs/` and `./mediamtx-certs/`, re-detects your current LAN IP, and brings the stack back up — the cert-init containers regenerate fresh certs with the new SAN. You'll need to accept the new cert in your browser once. Confirmation prompt appears on interactive shells; CI/scripted runs skip it.
 
 ---
 

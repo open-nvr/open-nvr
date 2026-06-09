@@ -641,9 +641,20 @@ async def get_playback_url(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Build direct MediaMTX URL
+    # Build the playback URL that the BROWSER will fetch. Must use the
+    # external fallback chain (ISSUE-6 v8): the browser cannot reach
+    # `http://mediamtx:9996/...` directly — that's the Docker-bridge
+    # internal URL, only routable from inside the compose. The
+    # external URL is TLS-fronted by nginx and reachable from LAN.
+    # See server/routers/streams.py for the same fallback pattern;
+    # any divergence between the two should be treated as a bug.
+    playback_base = (
+        settings.mediamtx_external_playback_url
+        or settings.mediamtx_playback_url
+        or "http://127.0.0.1:9996"
+    )
     params = {"path": path, "start": start, "duration": str(duration)}
-    playback_url = f"{settings.mediamtx_playback_url}/get?{urlencode(params)}"
+    playback_url = f"{playback_base.rstrip('/')}/get?{urlencode(params)}"
 
     return {"url": playback_url, "path": path, "start": start, "duration": duration}
 

@@ -101,8 +101,14 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _host_is_loopback(host: str | None) -> bool:
-    """Mirror of server/core/config.py:_host_is_loopback, kept narrow to
-    avoid pulling the server codebase into KAI-C."""
+    """Loopback-only host check for V-022 (AI sovereignty / local_only).
+
+    Intentionally narrower than ``server/core/config.py:_host_is_internal``,
+    which accepts RFC1918 for V-015 (MediaMTX trust zone). V-022 is the
+    stronger claim — "all AI inference happens on this box" — so even an
+    RFC1918 adapter on a peer host violates the policy. Kept inline so
+    KAI-C doesn't need to import from the server package.
+    """
     if not host:
         return False
     h = host.strip("[]").lower()

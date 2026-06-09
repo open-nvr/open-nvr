@@ -48,12 +48,19 @@ APPLICATION_URL=http://localhost:8000
 API_PREFIX=/api/v1
 
 # =============================================================================
-# MediaMTX (loopback-only by default — Zenodo 17261761 §4.2 Tier 2)
+# MediaMTX — INGRESS (camera LAN / Docker bridge / VPN overlay)
+# Zenodo 17261761 §4.2 Tier 2
 # =============================================================================
-# The startup validator rejects any of the URLs below if they resolve to a
-# non-loopback host, unless ALLOW_REMOTE_MEDIAMTX=true is explicitly set
-# (only do this when MediaMTX is fronted by a TLS-terminating reverse proxy
-# on the management NIC).
+# V-015 rejects any URL below that resolves outside the OpenNVR trust zone:
+#
+#   accepted:  loopback (127.0.0.1, ::1, localhost)
+#              RFC1918  (10/8, 172.16/12, 192.168/16) — incl. Docker bridges
+#              IPv6 ULA (fc00::/7), IPv4/IPv6 link-local
+#   rejected:  public IPs, public FQDNs, the 0.0.0.0 wildcard bind
+#
+# There is NO escape-hatch flag. For browser-facing access over the uplink
+# NIC, terminate TLS in a reverse proxy and use MEDIAMTX_EXTERNAL_* below
+# (those URLs are intentionally outside this check).
 MEDIAMTX_BASE_URL=http://127.0.0.1:8889
 MEDIAMTX_STREAM_PREFIX=cam-
 MEDIAMTX_PATH_MODE=id
@@ -62,7 +69,6 @@ MEDIAMTX_ADMIN_API=http://127.0.0.1:9997/v3
 MEDIAMTX_HLS_URL=http://127.0.0.1:8888
 MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554
 MEDIAMTX_PLAYBACK_URL=http://127.0.0.1:9996
-ALLOW_REMOTE_MEDIAMTX=False
 
 # V-019 (M1b): the MediaMTX YAML templates ship with rtspEncryption="yes"
 # so the operator-facing RTSP server refuses plaintext clients. Some dev

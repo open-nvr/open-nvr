@@ -137,45 +137,136 @@ function Invoke-Validate {
 # ── Banner ─────────────────────────────────────────────────
 function Show-FirstTimeSetupToken {
     param([array]$ComposeArgs)
-    # V-001 / M0 C-1 UX: poll opennvr-core logs for the setup-token
-    # banner after a `docker compose up -d` so the operator can copy
-    # it from the wizard's terminal instead of grepping logs.
-    $maxWaitSeconds = 30
-    $pollIntervalSeconds = 1
+    # V-001 / M0 C-1 UX: surface the setup-token banner so the operator
+    # can copy it from the wizard's terminal instead of grepping logs.
+    #
+    # ISSUE-5 fix: the previous version polled docker logs for 30s
+    # after `compose up -d`. But `up -d` returns when containers are
+    # *scheduled*, not when they're *healthy*. Post-ISSUE-3 the
+    # yolov8-weights-init container takes ~3 min on x86 / ~10-15 min
+    # on a Pi 5 to export the ONNX model before opennvr-core even
+    # starts. A 30-second poll always lost that race on slow hardware
+    # and fell through to a misleading "either the admin is already
+    # activated or the server is still starting" message.
+    #
+    # New strategy: wait for opennvr-core's Docker healthcheck to pass
+    # first (with progress feedback so the operator isn't staring at a
+    # silent terminal for 15 min), THEN extract the banner from the
+    # logs. Once healthy, the banner is unambiguously present — its
+    # absence then means the admin is already activated, which we
+    # report as such.
+    $container = "opennvr_core"          # container_name from compose
+    # $env:OPENNVR_SETUP_TOKEN_MAX_WAIT_S exists so a future smoke-test
+    # harness can short-circuit the 20-minute production timeout with
+    # something testable, e.g. $env:OPENNVR_SETUP_TOKEN_MAX_WAIT_S=10.
+    $maxWaitSeconds = 1200               # 20 min — covers Pi 5 + YOLO export
+    if ($env:OPENNVR_SETUP_TOKEN_MAX_WAIT_S) {
+        $maxWaitSeconds = [int]$env:OPENNVR_SETUP_TOKEN_MAX_WAIT_S
+    }
+    $pollIntervalSeconds = 2
     $elapsed = 0
+    $lastHealth = ""
+    $lastMessageAt = 0
     $banner = ""
+
+    Write-Color ""
+    Write-Color "  Waiting for opennvr-core to be healthy before showing the" DarkGray
+    Write-Color "  first-time setup token. Init containers can take 10-15 min" DarkGray
+    Write-Color "  on a Pi 5 the first time (YOLOv8 .pt -> ONNX export)." DarkGray
+
     while ($elapsed -lt $maxWaitSeconds) {
+        # docker inspect returns empty if the container hasn't been
+        # created yet (yolov8-weights-init still running). Treat that
+        # as "waiting".
+        $health = ""
         try {
-            # --no-log-prefix strips per-line container decoration so
-            # the banner is clean. --since 5m narrows the window so a
-            # long-running server's older boot banner doesn't fall
-            # out of view.
-            $raw = & docker compose @ComposeArgs logs `
-                --no-color --no-log-prefix --since 5m --tail 1000 opennvr-core 2>$null
-            if ($raw) {
-                $match = ($raw -split "`n") -match "first-time setup token"
-                if ($match) {
-                    # Capture the matching line plus the next 8 lines (the
-                    # banner is about 7 lines long).
-                    $lines = $raw -split "`n"
-                    for ($i = 0; $i -lt $lines.Length; $i++) {
-                        if ($lines[$i] -match "first-time setup token") {
-                            # +6 to match the -A 6 used in start.sh /
-                            # README / React form guidance.
-                            $end = [Math]::Min($i + 6, $lines.Length - 1)
-                            $banner = ($lines[$i..$end] -join "`n")
-                            break
-                        }
+            $health = (& docker inspect `
+                --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' `
+                $container 2>$null).Trim()
+        } catch {
+            $health = "absent"
+        }
+        if (-not $health) { $health = "absent" }
+
+        switch ($health) {
+            "healthy" {
+                Write-Color "  [OK] opennvr-core is healthy" Green
+                break
+            }
+            "unhealthy" {
+                Write-Color ""
+                Write-Color "  opennvr-core reported unhealthy. Inspect:" Yellow
+                Write-Color ("      docker compose " + ($ComposeArgs -join ' ') + " logs --tail 100 opennvr-core") DarkGray
+                Write-Color ""
+                return
+            }
+            "none" {
+                # Container running, no healthcheck defined (custom
+                # image stripped it). No signal to wait on — fall
+                # through to banner extraction immediately. The token
+                # banner is printed early in lifespan, so if the
+                # container exists it's almost certainly in the logs.
+                Write-Color "  opennvr-core has no healthcheck; checking logs now" DarkGray
+                break
+            }
+            default {
+                # absent / starting — periodic progress message
+                if (($health -ne $lastHealth) -or `
+                    (($elapsed - $lastMessageAt) -ge 15)) {
+                    if ($health -eq "absent") {
+                        Write-Color ("  [${elapsed}s] opennvr-core not yet created (init containers running)...") DarkGray
+                    } else {
+                        Write-Color ("  [${elapsed}s] opennvr-core booting...") DarkGray
                     }
-                    if ($banner) { break }
+                    $lastMessageAt = $elapsed
                 }
             }
-        } catch {
-            # ignore — best effort
         }
+        if ($health -eq "healthy" -or $health -eq "none") { break }
+        $lastHealth = $health
         Start-Sleep -Seconds $pollIntervalSeconds
         $elapsed += $pollIntervalSeconds
     }
+
+    if ($elapsed -ge $maxWaitSeconds) {
+        Write-Color ""
+        Write-Color ("  Timed out after " + $maxWaitSeconds + "s waiting for opennvr-core") Yellow
+        Write-Color "  to become healthy. Check init container progress:" Yellow
+        Write-Color ("      docker compose " + ($ComposeArgs -join ' ') + " ps") DarkGray
+        Write-Color ("      docker compose " + ($ComposeArgs -join ' ') + " logs --tail 100 opennvr-core") DarkGray
+        Write-Color "  Once healthy, retrieve the token manually:" DarkGray
+        Write-Color ("      docker compose " + ($ComposeArgs -join ' ') + " logs opennvr-core | Select-String 'first-time setup token' -Context 0,6") DarkGray
+        Write-Color ""
+        return
+    }
+
+    # Healthy — the lifespan hook prints the banner very early in
+    # boot, so it's definitely in the logs by now. --tail 5000 scoops
+    # the early-boot region without a brittle --since time window.
+    #
+    # Iterating in reverse and taking the FIRST hit gives us the most
+    # recent banner. If opennvr-core crash-looped during boot,
+    # ``maybe_arm`` runs once per restart and prints a fresh banner
+    # with a new token each time; earlier banners are stale (their
+    # in-memory tokens died with the container) and would mislead the
+    # operator into copy-pasting an invalidated value.
+    try {
+        $raw = & docker compose @ComposeArgs logs `
+            --no-color --no-log-prefix --tail 5000 opennvr-core 2>$null
+        if ($raw) {
+            $lines = $raw -split "`n"
+            for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+                if ($lines[$i] -match "first-time setup token") {
+                    $end = [Math]::Min($i + 6, $lines.Length - 1)
+                    $banner = ($lines[$i..$end] -join "`n")
+                    break
+                }
+            }
+        }
+    } catch {
+        # ignore — fall through to the "already activated" path
+    }
+
     Write-Color ""
     if ($banner) {
         Write-Color "  🔑 First-time setup token (one-time use — copy into the UI):" Yellow
@@ -183,10 +274,13 @@ function Show-FirstTimeSetupToken {
         foreach ($line in ($banner -split "`n")) { Write-Color ("  " + $line) White }
         Write-Color ""
     } else {
-        Write-Color "  (No first-time setup token detected — either the admin is" DarkGray
-        Write-Color "  already activated or the server is still starting. To check" DarkGray
-        Write-Color "  manually:" DarkGray
-        Write-Color "      docker compose logs opennvr-core | Select-String 'first-time setup token' -Context 0,6" DarkGray
+        # Container healthy AND no banner = admin already activated on
+        # a previous boot. Unambiguous now.
+        $adminUser = "admin"
+        try { $adminUser = (Get-EnvVar "DEFAULT_ADMIN_USERNAME") } catch { }
+        Write-Color "  First-time setup is already complete." Green
+        Write-Color ("  Log in at http://localhost:8000 as " + $adminUser + ".") DarkGray
+        Write-Color "  (To re-arm the setup token, wipe the database volume and restart.)" DarkGray
         Write-Color ""
     }
 }
