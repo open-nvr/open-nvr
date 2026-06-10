@@ -224,8 +224,66 @@ def create_initial_data():
             .filter(User.username == settings.default_admin_username)
             .first()
         )
+
+        # ISSUE-27 defense-in-depth: reject any DEFAULT_ADMIN_PASSWORD
+        # that matches a documented-default, a historical .env.example
+        # leak, or a common weak value. The ISSUE-26 fix blanks the
+        # value in the shipped template, but operators with existing
+        # ``.env`` files (or copies from old tutorials, backups, or
+        # AI-generated examples) can still arrive here with a known-
+        # bad password. Honoring it would defeat the secure-by-default
+        # setup-token flow at runtime, even though the template fix is
+        # in place. So we treat the reject list as terminal: if matched,
+        # we discard the supplied value, fall through to the
+        # password_set=False path, and print a loud warning explaining
+        # what happened so the operator can audit their .env.
+        #
+        # Extend this list as new bad defaults are discovered. Keep
+        # values lowercase here and compare against ``.lower()`` of the
+        # supplied password so common casing tricks (``Admin``,
+        # ``ADMIN``) all hit the same entry.
+        KNOWN_BAD_PASSWORDS = frozenset({
+            "securepass123!",      # historical .env.example default (ISSUE-26)
+            "admin",
+            "password",
+            "password123",
+            "changeme",
+            "letmein",
+            "opennvr",
+            "default",
+            "12345",
+            "123456",
+            "qwerty",
+        })
+
         if not admin_user:
             initial_password = settings.default_admin_password
+            if initial_password and initial_password.lower() in KNOWN_BAD_PASSWORDS:
+                # Loud, explicit refusal. Print to stderr so the operator
+                # sees it in their `./start.sh up` output even if stdout
+                # is captured by another tool.
+                import sys as _sys
+                _sys.stderr.write(
+                    "\n"
+                    "================================================================\n"
+                    " ⚠  REFUSING DEFAULT_ADMIN_PASSWORD — known-bad value (ISSUE-27)\n"
+                    "----------------------------------------------------------------\n"
+                    " Your .env's DEFAULT_ADMIN_PASSWORD matches a documented\n"
+                    " default or a common weak password. Honoring it would mean\n"
+                    " every fresh deploy lands on the same globally-known\n"
+                    " credential — the V-001 anti-pattern OpenNVR positions\n"
+                    " itself against (Zenodo §3.1, ETSI EN 303 645).\n"
+                    "\n"
+                    " Falling back to the secure setup-token flow instead.\n"
+                    "\n"
+                    " Fix: edit .env, blank the DEFAULT_ADMIN_PASSWORD line:\n"
+                    "     DEFAULT_ADMIN_PASSWORD=\n"
+                    " The token below is your one-time bootstrap credential.\n"
+                    "================================================================\n"
+                    "\n"
+                )
+                # Fall through to the password_set=False path.
+                initial_password = ""
             if initial_password:
                 hashed = get_password_hash(initial_password)
                 password_set = True
@@ -236,11 +294,12 @@ def create_initial_data():
                     "manager and not a checked-in file."
                 )
             else:
-                # No password provided -> store a hash of a high-entropy
-                # random value so even reading the source code does not
-                # let an attacker authenticate. The account stays gated by
-                # password_set=False; activation goes through the
-                # one-time-token-gated first-time-setup flow.
+                # No password provided (or rejected as known-bad) — store
+                # a hash of a high-entropy random value so even reading
+                # the source code does not let an attacker authenticate.
+                # The account stays gated by password_set=False;
+                # activation goes through the one-time-token-gated
+                # first-time-setup flow.
                 hashed = get_password_hash(_secrets.token_urlsafe(64))
                 password_set = False
                 bootstrap_msg = (

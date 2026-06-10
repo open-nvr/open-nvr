@@ -28,12 +28,6 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
-    # httpx is only used by the test suite (test_main_v2.py,
-    # test_registry.py, test_stream_proxy.py) for FastAPI TestClient
-    # plus direct async HTTP calls in the stream-proxy round-trip
-    # tests. Runtime KAI-C uses ``requests`` (sync) + ``websockets``
-    # (async) — no httpx in the live path.
-    "httpx>=0.27,<1.0",
 ]
 
 [build-system]

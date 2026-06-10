@@ -501,6 +501,22 @@ services:
         condition: service_completed_successfully
       opennvr-core:
         condition: service_healthy
+      # ISSUE-21: nginx's opennvr.conf uses ``proxy_pass https://mediamtx:8889/``
+      # (literal hostname) at lines 89/107/127. nginx resolves those at
+      # CONFIG LOAD time, not at request time — so if mediamtx isn't yet
+      # registered in the Docker bridge DNS when nginx parses its config,
+      # nginx dies with ``host not found in upstream "mediamtx"`` and
+      # crash-loops forever (because every restart attempt hits the same
+      # config-parse error). The opennvr-core dependency above usually
+      # wins this race by accident — opennvr-core's healthcheck waits
+      # on mediamtx via service_healthy too. But on recovery boots (e.g.
+      # after switching from docker-compose.linux.yml host networking
+      # to tier0 bridge networking, where stale Docker networks confuse
+      # the DNS until they're pruned), the race surfaces. Adding an
+      # explicit dependency on mediamtx itself makes the startup order
+      # deterministic and removes the failure mode entirely.
+      mediamtx:
+        condition: service_healthy
     ports:
       # NGINX_BIND_HOST lets the operator restrict the public edge to
       # a specific interface (e.g., the management VLAN's IP).

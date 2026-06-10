@@ -322,6 +322,279 @@ audit log.
   UDP/TCP both published, recordings.py uses external chain, no
   regression on opennvr-core's loopback-only binding).
 
+- **V-022 sovereignty validator accepts Docker bridge URLs
+  (ISSUE-28).** Operator on a tier0 deploy hit:
+  
+  ```
+  RuntimeError: V-022: AI_SOVEREIGNTY=local_only requires every
+  adapter URL to be loopback. The following adapters violate
+  that policy:
+    - default='http://yolov8-adapter:9002' (host=yolov8-adapter)
+  ```
+  
+  kai-c refused to start. Root cause: the validator was written
+  in the host-networking era when all adapter URLs were
+  `127.0.0.1:<port>`. Tier 0 ships with bridge networking + Docker
+  service-DNS URLs (`http://yolov8-adapter:9002`), and the
+  loopback-only check rejected them. But Docker bridge networks
+  are confined to a single physical host — packets between
+  containers stay inside the kernel networking stack and never
+  reach the NIC. Bridge URLs are **equally "on this machine"**
+  for sovereignty purposes; the validator was just narrowed too
+  aggressively.
+  
+  Fix in `kai-c/main.py`:
+  
+  * `_host_is_loopback` → renamed to `_host_is_on_this_machine`
+    with the old name preserved as a back-compat alias.
+  * The check now accepts: loopback IPs + hostnames AND any
+    address that resolves into `OPENNVR_DOCKER_SUBNET` (default
+    `172.28.0.0/16`, operator-overridable). Continues to reject:
+    non-bridge RFC1918 (peer hosts on the LAN), public IPs,
+    `0.0.0.0` wildcard.
+  * Error message updated to name the bridge subnet explicitly
+    so operators who DO hit a legitimate violation (e.g. an
+    `ADAPTER_URL` pointing at a peer VM) know what URLs are
+    accepted.
+  
+  Acceptance matrix:
+  
+  | URL | Old | New | Why |
+  |---|---|---|---|
+  | `http://localhost:9100` | ✓ | ✓ | loopback |
+  | `http://127.0.0.1:9100` | ✓ | ✓ | loopback IPv4 |
+  | `http://[::1]:9100` | ✓ | ✓ | loopback IPv6 |
+  | `http://yolov8-adapter:9002` | ✗ | ✓ | Docker bridge (NEW — tier0) |
+  | `http://172.28.0.7:9002` | ✗ | ✓ | direct bridge IP (NEW) |
+  | `http://192.168.1.50:9100` | ✗ | ✗ | peer host on LAN |
+  | `http://api.openai.com` | ✗ | ✗ | public |
+  
+  New regression test
+  `tests/host-hardening/test_v022_sovereignty_docker_bridge.sh`
+  (4 tests) locks the new contract — the renamed function
+  exists, its logic handles the 7-case acceptance matrix above,
+  the error message references the bridge subnet, and tier0.yml
+  ships an `ADAPTER_URL` value that passes the validator.
+  
+  V-022's stronger claim is unchanged: AI inference still must
+  not leave this physical box. The fix just acknowledges that
+  Docker bridge networking is "this box."
+
+- **`init_db.py` refuses known-bad DEFAULT_ADMIN_PASSWORD at
+  runtime (ISSUE-27 — defense in depth for ISSUE-26).** The
+  ISSUE-26 fix blanked `.env.example`'s hardcoded password line,
+  but operators with existing `.env` files (created before the
+  fix, copied from a tutorial, or from an AI-generated template)
+  still arrive at boot with `DEFAULT_ADMIN_PASSWORD=SecurePass123!`.
+  init_db.py would honor it as a "provisioned bootstrap" — same
+  V-001 violation, just at a different layer.
+  
+  Defense-in-depth: init_db.py now has a `KNOWN_BAD_PASSWORDS`
+  reject list. If `settings.default_admin_password` matches one
+  of these (case-insensitive), init_db.py:
+  
+  1. Prints a loud framed warning to stderr explaining the
+     refusal and pointing the operator at the fix (blank the
+     value in `.env`).
+  2. Sets `initial_password = ""` and falls through to the
+     existing setup-token flow.
+  3. The admin is seeded with `password_set=False` and the
+     setup-token banner prints normally.
+  
+  The reject list ships with the historical .env.example default
+  plus the common weak-password checklist (admin, password,
+  changeme, letmein, opennvr, default, 12345, 123456, qwerty).
+  Extending the list is a one-line edit.
+  
+  Test 4 in
+  `tests/host-hardening/test_env_example_no_default_creds.sh`
+  AST-parses init_db.py, locates the `KNOWN_BAD_PASSWORDS`
+  frozenset, and asserts it contains at minimum `securepass123!`,
+  `admin`, `password`, `changeme`. So a future PR can't
+  accidentally remove these entries without the test failing.
+  
+  Operator recovery on existing deploys (independent of the
+  source fix):
+  
+  ```bash
+  # Blank the value in YOUR .env, not just the template
+  sed -i 's/^DEFAULT_ADMIN_PASSWORD=.*/DEFAULT_ADMIN_PASSWORD=/' .env
+  
+  # Wipe the DB volume (admin row currently has password_set=True)
+  ./start.sh down
+  docker volume rm $(docker volume ls -q | grep opennvr_db_data)
+  
+  # Restart — token banner will print
+  ./start.sh up
+  ```
+  
+  After this commit lands, even operators who don't blank their
+  `.env` will get the warning + setup-token flow at next boot.
+
+- **`.env.example` no longer ships a hardcoded admin password
+  (ISSUE-26 — V-001 violation).** The `.env.example` template
+  shipped with `DEFAULT_ADMIN_PASSWORD=SecurePass123!` as a literal
+  value. Every operator who ran `cp .env.example .env` (or whose
+  install wizard inherited template defaults) silently ended up
+  with that exact known credential as their admin password.
+  `init_db.py`'s "provisioned bootstrap" code path then seeded the
+  admin user with `password_set=True` and that password, bypassing
+  the one-time setup-token flow entirely.
+  
+  Concrete impact path:
+  
+  1. Operator does `cp .env.example .env` (or the install wizard
+     does it equivalent under the hood).
+  2. `.env` now contains `DEFAULT_ADMIN_PASSWORD=SecurePass123!`.
+  3. opennvr-core boots, `init_db.py` reads
+     `settings.default_admin_password`, sees it's truthy, seeds
+     `admin` with `password_set=True` and that exact password.
+  4. `maybe_arm()` correctly skips minting a token (admin is
+     already activated).
+  5. `start.sh up`'s banner-grep finds no token in the logs and
+     prints *"First-time setup is already complete"* — the
+     operator has no idea what credential they got.
+  6. The operator hits the UI and either gets the setup screen
+     (cached frontend from before init_db ran) or the login
+     screen, and is stuck because they were never told the
+     password is the literal `.env.example` default.
+  
+  This is the V-001 / ETSI EN 303 645 "unique credential" anti-
+  pattern OpenNVR's threat model positions itself against.
+  Shipping it in the source template is the worst possible form
+  of it.
+  
+  Fix:
+  
+  * `.env.example` now ships `DEFAULT_ADMIN_PASSWORD=` (empty).
+    The accompanying comment explains the two paths clearly:
+    *empty → secure-by-default setup-token flow* (the recommended
+    path); *set to a value → provisioned bootstrap from a secrets
+    manager* (the unattended-deploy path).
+  * New regression test
+    `tests/host-hardening/test_env_example_no_default_creds.sh`
+    (3 tests) locks the class of bug:
+    
+    1. `.env.example`'s `DEFAULT_ADMIN_PASSWORD` line must be
+       blank — anything after the `=` triggers a failure.
+    2. No `docker-compose*.yml` may pin
+       `DEFAULT_ADMIN_PASSWORD` to a literal value (catches the
+       bug re-introduced at the compose layer).
+    3. `scripts/install.sh` may not write a literal
+       `DEFAULT_ADMIN_PASSWORD` value into the `.env` it
+       generates (catches the bug re-introduced at the
+       installer layer).
+  
+  Operators on existing deploys: if you find yourself stuck on
+  the setup screen with `password_set=True` for admin in your DB,
+  your password is whatever `.env`'s `DEFAULT_ADMIN_PASSWORD`
+  was set to during install — most likely `SecurePass123!` from
+  the old template. Log in with that, then immediately change
+  it in the UI (Settings → Account → Change Password).
+  
+  Net: 116 host-hardening tests across 12 suites, all green
+  (after `git add` of the two new test files).
+
+- **kai-c no longer crashes on import (ISSUE-24).** Operator
+  reported the kai-c middleware crash-looping inside the
+  opennvr-core container with:
+  
+  ```
+  File "/app/kai-c/kai_c/registry.py", line 46, in <module>
+      import httpx
+  ModuleNotFoundError: No module named 'httpx'
+  ```
+  
+  Root cause: `kai-c/pyproject.toml` declared httpx in
+  `[dependency-groups].dev` with a stale comment claiming
+  *"Runtime KAI-C uses `requests` (sync) + `websockets` (async) —
+  no httpx in the live path"*. That comment was aspirational,
+  not accurate. Production code in `kai_c/registry.py` imports
+  httpx at module top-level (line 46) AND constructs
+  `httpx.AsyncClient(trust_env=False)` at runtime (line 198)
+  for adapter capabilities probing + health checks (lines 143,
+  150). The Dockerfile correctly runs `uv sync --no-dev` which
+  skipped the misplaced dep, leading to the production crash.
+  
+  Fix:
+  
+  * Move `httpx>=0.27,<1.0` from `[dependency-groups].dev` to
+    `[project].dependencies` in `kai-c/pyproject.toml`. Replace
+    the misleading comment with a correct one tied to ISSUE-24.
+  * New regression test
+    `tests/host-hardening/test_kai_c_runtime_deps.sh` that walks
+    every `.py` file under `kai-c/kai_c/` (production code, not
+    tests), parses the AST, and asserts every top-level `import X`
+    and `from X import Y` has a corresponding entry in
+    `[project].dependencies`. Stdlib modules and known
+    bundled-via transitive deps (e.g. starlette via fastapi) are
+    whitelisted. The line-scanner parser handles the edge case
+    where a comment inside the dependencies list contains a
+    literal `]` character (e.g. our own `[dependency-groups]`
+    reference) — a naive non-greedy regex would stop there and
+    silently drop later entries.
+  * Plus a positive contract test that pins httpx specifically
+    so a future "remove the httpx import line" PR can't satisfy
+    test 1 vacuously while leaving the runtime paths broken.
+  
+  Operator recovery (immediate, while waiting for the GHA
+  rebuild of `:latest`):
+  
+  ```bash
+  # Install httpx into the running opennvr-core's kai-c venv
+  docker compose exec opennvr-core /app/kai-c-venv/bin/pip install httpx
+  docker compose restart opennvr-core
+  ```
+  
+  After this commit lands + the GHA publish-images workflow
+  rebuilds `ghcr.io/open-nvr/core:latest`, `docker compose pull
+  opennvr-core` picks up the proper fix.
+  
+  Total: 113 host-hardening tests across 11 suites, all green.
+
+- **nginx no longer crash-loops on "host not found in upstream
+  mediamtx" (ISSUE-21).** Operator switching from
+  `docker-compose.linux.yml` (host mode) to
+  `docker-compose.tier0.yml` (bridge mode) reported nginx
+  endlessly restarting with:
+  
+  ```
+  [emerg] host not found in upstream "mediamtx" in
+  /etc/nginx/conf.d/default.conf:89
+  ```
+  
+  Root cause: nginx's `opennvr.conf` uses
+  `proxy_pass https://mediamtx:8889/` (and `:8888`, `:9996`) —
+  literal hostnames that nginx resolves at CONFIG LOAD time, not
+  at request time. The tier0 compose listed nginx's
+  `depends_on:` as `nginx-certs-init` + `opennvr-core` but not
+  mediamtx itself. opennvr-core's healthcheck happens to wait
+  on mediamtx (via its own `depends_on`), so on a clean boot
+  the chain wins the race by accident. On recovery boots —
+  post-compose-file switch with stale Docker networks confusing
+  bridge DNS — nginx loses the race and every restart attempt
+  hits the same config-parse error.
+  
+  Fix: add `mediamtx: service_healthy` to nginx's `depends_on`
+  in `docker-compose.tier0.yml`. New regression test #18 in
+  `tests/host-hardening/test_media_proxy.sh` parses the compose
+  and asserts the dependency + condition shape, so a future
+  refactor can't accidentally remove it.
+  
+  Operator recovery (one-time, for boxes already wedged in the
+  crash-loop state):
+  
+  ```bash
+  ./start.sh down
+  docker compose -f docker-compose.tier0.yml down --remove-orphans
+  docker network prune -f
+  docker container prune -f
+  ./start.sh up
+  ```
+  
+  Plus the new `depends_on` makes future starts deterministic so
+  the recovery dance won't be needed again.
+
 - **CI pytest test_m1b_mediamtx_hardening.py fixed for the
   ISSUE-17 include shim (ISSUE-20).** The pytest
   `test_compose_has_mediamtx_certs_init_service` walked

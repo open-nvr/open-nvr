@@ -243,6 +243,45 @@ for kind in webrtc hls playback; do
 done
 pass
 
+# ── 18. nginx depends on mediamtx (ISSUE-21) ─────────────────
+# nginx's opennvr.conf uses ``proxy_pass https://mediamtx:8889/`` (and
+# :8888, :9996) which nginx resolves at CONFIG LOAD time, not at request
+# time. Without an explicit ``depends_on: mediamtx``, nginx can race
+# ahead of the bridge DNS being populated with mediamtx's hostname and
+# crash-loop forever with ``host not found in upstream "mediamtx"``.
+# On a clean first boot the opennvr-core dependency usually wins this
+# race by accident (it waits on mediamtx via service_healthy too), but
+# on recovery boots (post compose-file switch + stale Docker networks)
+# the race surfaces. Lock the dependency explicitly.
+start_test "tier0 nginx service depends_on: mediamtx with service_healthy"
+dep_check=$(python3 - "${REPO_ROOT}" <<'PY'
+import sys, yaml
+from pathlib import Path
+c = yaml.safe_load((Path(sys.argv[1]) / "docker-compose.tier0.yml").read_text())
+nginx = c["services"]["nginx"]
+deps = nginx.get("depends_on", {})
+if not isinstance(deps, dict):
+    print(f"depends_on is not a dict: {deps!r}")
+    sys.exit(1)
+if "mediamtx" not in deps:
+    print("nginx.depends_on is missing mediamtx")
+    sys.exit(1)
+cond = deps["mediamtx"].get("condition")
+if cond != "service_healthy":
+    print(f"mediamtx condition is {cond!r} (expected service_healthy)")
+    sys.exit(1)
+print("ok")
+PY
+)
+if echo "$dep_check" | grep -q "^ok"; then
+    pass
+else
+    fail "nginx must depend on mediamtx (service_healthy): ${dep_check}
+Without this, nginx can start before mediamtx is registered in the
+Docker bridge DNS and crash-loop with ``host not found in upstream
+\"mediamtx\"`` at config load time."
+fi
+
 # ── Summary ──────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"

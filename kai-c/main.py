@@ -99,25 +99,66 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
+# ISSUE-28: the V-022 sovereignty claim is "all AI inference happens on
+# this physical machine." In host-networking mode that's equivalent to
+# "loopback URLs only." In tier0's bridge-networking mode, adapters are
+# reached via Docker service DNS (``http://yolov8-adapter:9002``) which
+# resolves to a Docker-bridge IP inside ``OPENNVR_DOCKER_SUBNET`` —
+# packets between bridge-network containers stay inside the host's
+# kernel networking stack and never reach the physical NIC, so they
+# are equally "on this machine" for sovereignty purposes.
+#
+# The validator therefore also accepts any host that resolves to an
+# address inside the configured Docker bridge subnet. The subnet is
+# operator-configurable via OPENNVR_DOCKER_SUBNET so non-standard
+# deployments (e.g. operators who overrode 172.28/16 to dodge a LAN
+# collision per ISSUE-6 v7) keep working without losing the sovereignty
+# guarantee.
+#
+# We INTENTIONALLY do not accept generic RFC1918 here — that would
+# allow ``adapter-vm.internal`` resolving to 192.168.1.50 on a peer
+# host to pass, which violates "all inference on THIS box." The
+# acceptance is bound to the operator's own Docker subnet only.
+_DOCKER_BRIDGE_SUBNET = os.getenv("OPENNVR_DOCKER_SUBNET", "172.28.0.0/16")
 
-def _host_is_loopback(host: str | None) -> bool:
-    """Loopback-only host check for V-022 (AI sovereignty / local_only).
 
-    Intentionally narrower than ``server/core/config.py:_host_is_internal``,
-    which accepts RFC1918 for V-015 (MediaMTX trust zone). V-022 is the
-    stronger claim — "all AI inference happens on this box" — so even an
-    RFC1918 adapter on a peer host violates the policy. Kept inline so
-    KAI-C doesn't need to import from the server package.
+def _host_is_on_this_machine(host: str | None) -> bool:
+    """Sovereignty-local host check for V-022 (AI_SOVEREIGNTY=local_only).
+
+    Accepts:
+      * loopback hosts (``localhost``, ``127.0.0.1``, ``::1``, anything
+        resolving to ``is_loopback``);
+      * hosts that resolve to an address inside OPENNVR_DOCKER_SUBNET —
+        i.e. the operator's own Docker bridge network, where traffic
+        stays inside this host's kernel networking stack.
+
+    Rejects everything else, including non-bridge RFC1918 / ULA / LAN
+    addresses (those represent peer hosts on the same LAN, which V-022
+    is specifically about excluding from the AI plane).
+
+    Replaces the original ``_host_is_loopback`` which only accepted
+    loopback. Kept inline so KAI-C doesn't need to import from the
+    server package.
     """
     if not host:
         return False
     h = host.strip("[]").lower()
     if h in _LOOPBACK_HOSTS:
         return True
+    # Direct-IP check (caller passed e.g. ``127.0.0.1`` or ``172.28.0.5``).
     try:
-        return ipaddress.ip_address(h).is_loopback
+        ip = ipaddress.ip_address(h)
+        if ip.is_loopback:
+            return True
+        try:
+            if ip in ipaddress.ip_network(_DOCKER_BRIDGE_SUBNET):
+                return True
+        except (ValueError, TypeError):
+            pass
+        return False
     except ValueError:
         pass
+    # Hostname — resolve and check every returned address.
     saved = socket.getdefaulttimeout()
     try:
         socket.setdefaulttimeout(2.0)
@@ -127,16 +168,39 @@ def _host_is_loopback(host: str | None) -> bool:
             return False
     finally:
         socket.setdefaulttimeout(saved)
-    return bool(infos) and all(
-        ipaddress.ip_address(info[4][0]).is_loopback for info in infos
-    )
+    if not infos:
+        return False
+    try:
+        bridge_net = ipaddress.ip_network(_DOCKER_BRIDGE_SUBNET)
+    except (ValueError, TypeError):
+        bridge_net = None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_loopback:
+            continue
+        if bridge_net is not None and ip in bridge_net:
+            continue
+        return False
+    return True
+
+
+# Back-compat alias — some tests / external callers may use the old name.
+_host_is_loopback = _host_is_on_this_machine
 
 
 def _validate_adapters_match_sovereignty() -> None:
     """Refuse to start if AI_SOVEREIGNTY=local_only but any registered
-    adapter URL is non-loopback. Called immediately after ADAPTER_REGISTRY
-    is defined so a mis-set env var is caught before the server accepts a
-    single request."""
+    adapter URL points off this machine. Called immediately after
+    ADAPTER_REGISTRY is defined so a mis-set env var is caught before
+    the server accepts a single request.
+
+    ISSUE-28: "on this machine" includes loopback AND the operator's
+    own Docker bridge subnet (OPENNVR_DOCKER_SUBNET, default
+    172.28.0.0/16). Bridge-network traffic between containers stays
+    inside the kernel networking stack — equivalent to loopback for
+    sovereignty purposes. See ``_host_is_on_this_machine`` for the
+    full acceptance criteria.
+    """
     if AI_SOVEREIGNTY != "local_only":
         return
     offenders: list[str] = []
@@ -148,18 +212,21 @@ def _validate_adapters_match_sovereignty() -> None:
             offenders.append(
                 f"{name}={url!r} (host is 0.0.0.0, the wildcard bind, not loopback)"
             )
-        elif not _host_is_loopback(host):
+        elif not _host_is_on_this_machine(host):
             offenders.append(f"{name}={url!r} (host={host})")
     if offenders:
         details = "\n  - ".join(offenders)
         raise RuntimeError(
             "V-022: AI_SOVEREIGNTY=local_only requires every adapter URL "
-            "to be loopback. The following adapters violate that policy:\n"
+            "to be on this machine (loopback or Docker bridge subnet "
+            f"{_DOCKER_BRIDGE_SUBNET}). "
+            "The following adapters violate that policy:\n"
             f"  - {details}\n"
             "Either set ADAPTER_URL (and any per-model overrides) to a "
-            "127.0.0.1 / ::1 / localhost URL, or set AI_SOVEREIGNTY="
-            "federated|cloud_allowed if you have explicitly accepted the "
-            "sovereignty trade-off."
+            "127.0.0.1 / ::1 / localhost URL or a Docker service-DNS "
+            "name resolving inside the bridge subnet, or set "
+            "AI_SOVEREIGNTY=federated|cloud_allowed if you have explicitly "
+            "accepted the sovereignty trade-off."
         )
 
 # ============================================================
