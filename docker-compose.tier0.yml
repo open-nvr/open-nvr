@@ -357,7 +357,7 @@ services:
   # OpenNVR core — backend + frontend + KAI-C.
   # ──────────────────────────────────────────────────────────────
   opennvr-core:
-    image: ghcr.io/open-nvr/core:${CORE_TAG:-dev-ac}
+    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
     container_name: opennvr_core
     restart: unless-stopped
     depends_on:
