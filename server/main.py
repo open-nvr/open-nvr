@@ -214,17 +214,10 @@ async def lifespan(app: FastAPI):
                         " successful use. Restart the server to mint a new one.\n"
                         "================================================================\n"
                     )
-                    # Print first so it lands in standard stdout (which supervisord
-                    # redirects to opennvr-backend.log); then explicitly write to
-                    # PID 1's stdout so it appears in `docker logs` and `start.sh`.
+                    # Print first so it lands in container/journald stdout even
+                    # if the structured logger is misconfigured; then log the
+                    # ARMED event (without the token value) for audit.
                     print(banner, flush=True)
-                    try:
-                        with open("/proc/1/fd/1", "w") as f:
-                            f.write(banner)
-                            f.flush()
-                    except Exception:
-                        pass
-
                     main_logger.info(
                         "First-time-setup token armed; see stdout for the value."
                     )

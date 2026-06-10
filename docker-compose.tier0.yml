@@ -58,7 +58,7 @@ services:
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
       interval: 10s
       timeout: 5s
       start_period: 40s
@@ -223,7 +223,7 @@ services:
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      test: [ "CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list" ]
       interval: 30s
       timeout: 10s
       start_period: 10s
@@ -247,7 +247,7 @@ services:
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      test: [ "CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz" ]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -309,7 +309,7 @@ services:
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
     restart: "no"
-    entrypoint: ["sh", "-c"]
+    entrypoint: [ "sh", "-c" ]
     command: |
       set -e
       WEIGHTS=/weights/yolov8n.onnx
@@ -347,7 +347,7 @@ services:
     # to hit /infer directly from outside the compose can add a
     # ``127.0.0.1:9002:9002`` port mapping.
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9002/health', timeout=2).status_code == 200 else 1)"]
+      test: [ "CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9002/health', timeout=2).status_code == 200 else 1)" ]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -357,7 +357,7 @@ services:
   # OpenNVR core — backend + frontend + KAI-C.
   # ──────────────────────────────────────────────────────────────
   opennvr-core:
-    image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
+    image: ghcr.io/open-nvr/core:${CORE_TAG:-dev-ac}
     container_name: opennvr_core
     restart: unless-stopped
     depends_on:
@@ -426,7 +426,7 @@ services:
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -534,7 +534,7 @@ services:
       # requires curl in the alpine image; using nginx's own ability
       # to serve a 200 on /healthz (we add it in the config) keeps
       # the image lean.
-      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz"]
+      test: [ "CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz" ]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -565,8 +565,8 @@ networks:
 # ==========================================
 volumes:
   opennvr_db_data:
-  shared_frames:
-  # yolov8 model weights — persistent so the init container only
+  shared_frames: # yolov8 model weights — persistent so the init container only
+
   # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``
   # to force a re-download (e.g., after the weights URL changes).
   opennvr_yolov8_weights:
