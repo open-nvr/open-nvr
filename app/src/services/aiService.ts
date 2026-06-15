@@ -55,4 +55,9 @@ export const aiService = {
     api.delete(`/api/v1/ai-detection-results/${id}`),
   deleteOldDetectionResults: (days: number) =>
     api.delete(`/api/v1/ai-detection-results/bulk/older-than/${days}`),
+
+  // Live events WebSocket: mint a short-lived, single-use ticket so the
+  // long-lived JWT never has to ride in the ws URL (which leaks into logs).
+  createEventsWsTicket: () =>
+    api.post('/api/v1/events/ws-ticket'),
 }

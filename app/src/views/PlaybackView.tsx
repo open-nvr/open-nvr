@@ -122,8 +122,8 @@ export function PlaybackView() {
     setError(null)
     try {
       if (token) api.setToken(token)
-      
-      const recordingsRes = await apiService.getRecordingsByDate(undefined, token || undefined)
+
+      const recordingsRes = await apiService.getRecordingsByDate()
       
       setCameras(recordingsRes.data?.cameras || [])
       setTotalRecordings(recordingsRes.data?.total_recordings || 0)

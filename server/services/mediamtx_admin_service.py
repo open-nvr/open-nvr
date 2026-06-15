@@ -664,7 +664,7 @@ class MediaMtxAdminService:
         rtsp_url: str,
         enable_recording: bool = False,
         rtsp_transport: str = "tcp",
-        recording_segment_seconds: int = 300,
+        recording_segment_seconds: int = settings.recording_segment_seconds,
         recording_path: str | None = None,
         transport_security: str | None = None,
     ) -> dict[str, Any]:
@@ -942,8 +942,17 @@ class MediaMtxAdminService:
 
     @staticmethod
     async def enable_recording(
-        camera_id: int, duration: str = "60s", segment_duration: str = "10s"
+        camera_id: int,
+        duration: str | None = None,
+        part_duration: str = "1s",
     ) -> dict[str, Any]:
+        # `duration` is the segment length (recordSegmentDuration) — default to the
+        # configured RECORDING_SEGMENT_SECONDS (resolved at call time) instead of a
+        # hardcoded value. `part_duration` is the fMP4 part length
+        # (recordPartDuration) — flush/seek granularity inside each file; `1s`
+        # matches the mediamtx*.yml configs and favours low-latency playback.
+        if duration is None:
+            duration = f"{settings.recording_segment_seconds}s"
         """Enable recording for a camera stream."""
         from core.database import SessionLocal
         from models import Camera
@@ -962,6 +971,7 @@ class MediaMtxAdminService:
                 "record": True,
                 "recordPath": f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f",
                 "recordFormat": "fmp4",
+                "recordPartDuration": part_duration,
                 "recordSegmentDuration": duration,
                 "recordDeleteAfter": "168h",  # 7 days default
             }
@@ -1009,8 +1019,10 @@ class MediaMtxAdminService:
                 "recording_enabled": conf.get("record", False),
                 "record_path": conf.get("recordPath"),
                 "record_format": conf.get("recordFormat", "mp4"),
-                "segment_duration": conf.get("recordPartDuration", "10s"),
-                "total_duration": conf.get("recordSegmentDuration", "60s"),
+                "part_duration": conf.get("recordPartDuration", "1s"),
+                "segment_duration": conf.get(
+                    "recordSegmentDuration", f"{settings.recording_segment_seconds}s"
+                ),
                 "delete_after": conf.get("recordDeleteAfter", "168h"),
             }
 

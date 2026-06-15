@@ -28,6 +28,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from core.config import settings
+
 
 # Base schemas
 class RoleBase(BaseModel):
@@ -236,7 +238,9 @@ class CameraConfigBase(BaseModel):
     source_url: str | None = None
     recording_enabled: bool = False
     recording_path: str | None = None
-    recording_segment_seconds: int = 60
+    recording_segment_seconds: int = Field(
+        default_factory=lambda: settings.recording_segment_seconds
+    )
     webrtc_publisher: bool = False
     rtmp_publisher: bool = False
     rtsp_transport: str | None = Field(None, pattern="^(udp|tcp|auto)?$")

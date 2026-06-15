@@ -309,17 +309,26 @@ services:
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
     restart: "no"
-    entrypoint: ["sh", "-c"]
-    command: |
-      set -e
-      WEIGHTS=/weights/yolov8n.onnx
-      if [ -s "$$WEIGHTS" ]; then
-        echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
-        exit 0
-      fi
-      echo "Copying pre-baked yolov8n.onnx into volume..."
-      cp /yolov8n.onnx "$$WEIGHTS"
-      echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    # NOTE: entrypoint is list-form ["sh","-ec"] and command is a
+    # single-item LIST (the "- |" below), not a bare "command: |"
+    # string. Docker Compose word-splits a *string* command before
+    # exec, so "command: |\n set -e\n ..." reaches the container as
+    # `sh -c set -e WEIGHTS=... ...` — sh -c runs only the first token
+    # (`set`), dumps env, exits 0, and copies nothing → empty weights
+    # volume → adapter FileNotFoundError → every /infer returns 503.
+    # A list item is passed verbatim as one argument, so the whole
+    # script runs.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/yolov8n.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked yolov8n.onnx into volume..."
+        cp /yolov8n.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
     volumes:
       - opennvr_yolov8_weights:/weights
 

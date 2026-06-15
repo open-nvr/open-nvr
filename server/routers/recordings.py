@@ -282,10 +282,12 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
     return row
 
 
-async def _authenticate_request(
-    request: Request, token: str | None, db: Session
-) -> User | None:
-    """Authenticate request from either Authorization header or token query param."""
+async def _authenticate_request(request: Request, db: Session) -> User | None:
+    """Authenticate a request from the Authorization: Bearer header.
+
+    The JWT is taken ONLY from the header — never from a ?token= query param,
+    which would leak the long-lived token into access logs / browser history.
+    """
     user_obj = None
 
     if request:
@@ -295,11 +297,6 @@ async def _authenticate_request(
             td = verify_token(tok)
             if td:
                 user_obj = db.query(User).filter(User.username == td.username).first()
-
-    if not user_obj and token:
-        td = verify_token(token)
-        if td:
-            user_obj = db.query(User).filter(User.username == td.username).first()
 
     if user_obj and user_obj.is_active:
         return user_obj
@@ -526,7 +523,6 @@ async def recording_status(
 @router.get("/playback/list")
 async def list_recordings(
     path: str = Query(..., description="Camera path (e.g., cam-57)"),
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -534,7 +530,7 @@ async def list_recordings(
     List available recordings from MediaMTX playback server.
     Returns segments with direct playback URLs.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -581,7 +577,6 @@ async def list_recordings(
 
 @router.get("/playback/cameras")
 async def list_recording_cameras(
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -589,7 +584,7 @@ async def list_recording_cameras(
     List all cameras that have recordings.
     Queries MediaMTX for each active camera.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -637,7 +632,6 @@ async def get_playback_url(
     path: str = Query(..., description="Camera path (e.g., cam-57)"),
     start: str = Query(..., description="Start time in RFC3339 format"),
     duration: float = Query(..., description="Duration in seconds"),
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -645,7 +639,7 @@ async def get_playback_url(
     Get a direct MediaMTX playback URL for a recording.
     The URL can be used directly in a video player.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -677,7 +671,6 @@ async def create_hls_session(
     camera_id: int = Query(..., description="Camera ID"),
     start: str = Query(..., description="Start time in RFC3339 format"),
     end: str = Query(..., description="End time in RFC3339 format"),
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -696,7 +689,7 @@ async def create_hls_session(
 
     from services.hls_playback_service import HlsPlaybackService
 
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -856,7 +849,6 @@ async def get_hls_segment(
 @router.delete("/playback/hls/{session_id}")
 async def delete_hls_session(
     session_id: str,
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -867,7 +859,7 @@ async def delete_hls_session(
     """
     from services.hls_playback_service import HlsPlaybackService
 
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -917,7 +909,6 @@ async def get_playback_config(
 @router.get("/today/{camera_id}")
 async def get_today_segments(
     camera_id: int,
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -929,7 +920,7 @@ async def get_today_segments(
     from datetime import datetime
     from urllib.parse import quote
 
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1160,7 +1151,6 @@ def _group_filesystem_recordings_by_date(
 @router.get("/list")
 async def list_recordings_by_date(
     camera_id: int | None = Query(default=None, description="Filter by camera ID"),
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -1169,7 +1159,7 @@ async def list_recordings_by_date(
     Returns user-friendly recording counts (1 recording = 1 day per camera).
     Falls back to filesystem listing if MediaMTX is unavailable.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1268,7 +1258,6 @@ async def list_recordings_by_date(
 
 @router.get("/stats")
 async def get_recording_stats(
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -1277,7 +1266,7 @@ async def get_recording_stats(
     Returns counts and durations in user-friendly format.
     Falls back to filesystem listing if MediaMTX is unavailable.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1560,7 +1549,6 @@ def _group_filesystem_items_into_sessions(
 @router.get("/sessions-for-ai")
 async def get_recording_sessions_for_ai(
     camera_id: int | None = Query(default=None, description="Filter by camera ID"),
-    token: str | None = Query(default=None),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -1569,7 +1557,7 @@ async def get_recording_sessions_for_ai(
     Sessions are continuous recording periods (with small gaps allowed).
     Falls back to filesystem listing if MediaMTX is unavailable.
     """
-    user_obj = await _authenticate_request(request, token, db)
+    user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 

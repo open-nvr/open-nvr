@@ -381,9 +381,10 @@ pathDefaults:
   # No manual editing required - just set MEDIAMTX_SECRET in server/.env!
   ###############################################
 
-  # Startup hook - calls backend with secret from environment variable
-  runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/api/v1/mediamtx/startup/hook?delay=5"'
-  runOnInitRestart: no
+  # NOTE: runOnInit lives ONLY on the __startup__ path below, not here in
+  # pathDefaults. In pathDefaults it is inherited by EVERY camera path, so each
+  # camera (re)provision re-fires the startup hook → re-provision → re-fire,
+  # an infinite reload/provision loop that also fragments recordings.
 
   runOnDemand:
   runOnDemandRestart: no
@@ -417,4 +418,9 @@ paths:
   __startup__:
     source: publisher
     record: no
+    # Startup hook - provisions cameras from backend DB once on MediaMTX start.
+    # runOnInitRestart MUST be 'no': the curl exits immediately, so 'yes' would
+    # re-run it forever. The backend also self-provisions on its own startup.
+    runOnInit: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/api/v1/mediamtx/startup/hook?delay=5"'
+    runOnInitRestart: no
 

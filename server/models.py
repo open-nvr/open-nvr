@@ -39,6 +39,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
+from core.config import settings
 from core.database import Base
 
 
@@ -251,7 +252,12 @@ class CameraConfig(Base):
     source_url = Column(String(500), nullable=True)
     recording_enabled = Column(Boolean, default=False)
     recording_path = Column(String(500), nullable=True)
-    recording_segment_seconds = Column(Integer, default=60)
+    # Fallback default for rows created without an explicit value. Reads the
+    # configured RECORDING_SEGMENT_SECONDS (default 1h) at insert time, so
+    # there is one source of truth — not a separate hardcoded number here.
+    recording_segment_seconds = Column(
+        Integer, default=lambda: settings.recording_segment_seconds
+    )
     webrtc_publisher = Column(Boolean, default=False)
     rtmp_publisher = Column(Boolean, default=False)
     rtsp_transport = Column(String(16), nullable=True)

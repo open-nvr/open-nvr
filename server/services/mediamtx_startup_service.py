@@ -28,6 +28,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from core.database import SessionLocal
 from core.logging_config import mediamtx_logger
 from models import Camera, CameraConfig
@@ -438,7 +439,8 @@ class MediaMtxStartupService:
                 provision_config["recording"] = {
                     "enabled": True,
                     "path": recording_path,
-                    "segment_seconds": config.recording_segment_seconds or 300,
+                    "segment_seconds": config.recording_segment_seconds
+                    or settings.recording_segment_seconds,
                 }
             elif config.recording_enabled is False:
                 # Explicitly disabled - set recording to False

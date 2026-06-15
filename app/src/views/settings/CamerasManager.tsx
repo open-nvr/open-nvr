@@ -79,7 +79,6 @@ export function CamerasManager() {
   const [provisionConfig, setProvisionConfig] = useState({
     enable_recording: false,
     rtsp_transport: 'tcp',
-    recording_segment_seconds: 300,
     recording_path: ''
   })
   const [showBulkAssign, setShowBulkAssign] = useState(false)
@@ -314,7 +313,6 @@ export function CamerasManager() {
     setProvisionConfig({
       enable_recording: false,
       rtsp_transport: 'tcp',
-      recording_segment_seconds: 300,
       recording_path: ''
     })
     setShowProvisionDialog(true)
@@ -740,20 +738,6 @@ export function CamerasManager() {
 
               {provisionConfig.enable_recording && (
                 <>
-                  <Field label="Recording Segment Duration">
-                    <select
-                      className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2"
-                      value={provisionConfig.recording_segment_seconds}
-                      onChange={(e) => setProvisionConfig(prev => ({ ...prev, recording_segment_seconds: Number(e.target.value) }))}
-                    >
-                      <option value="60">1 minute</option>
-                      <option value="300">5 minutes (default)</option>
-                      <option value="600">10 minutes</option>
-                      <option value="1800">30 minutes</option>
-                      <option value="3600">1 hour</option>
-                    </select>
-                  </Field>
-
                   <Field label="Recording Path (Optional)">
                     <input
                       className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 w-full"

@@ -157,9 +157,30 @@ export function AIDetectionResults() {
     const reconnectDelayMs = () =>
       Math.min(60000, 1000 * Math.pow(2, reconnectAttempt))
 
-    const connect = () => {
+    const scheduleReconnect = () => {
+      if (closedByUnmount) return
+      const delay = reconnectDelayMs()
+      reconnectAttempt += 1
+      reconnectTimer = setTimeout(connect, delay)
+    }
+
+    const connect = async () => {
+      // Browsers can't set an Authorization header on a WebSocket handshake,
+      // so mint a short-lived, single-use ticket over the authenticated REST
+      // API and pass that instead of the long-lived JWT (which would leak into
+      // access logs). A fresh ticket is fetched on every (re)connect.
+      let ticket: string
+      try {
+        const res = await apiService.createEventsWsTicket()
+        ticket = res.data.ticket
+      } catch {
+        scheduleReconnect()
+        return
+      }
+      if (closedByUnmount) return
+
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-      const url = `${proto}://${window.location.host}/api/v1/events/ws?token=${encodeURIComponent(token)}`
+      const url = `${proto}://${window.location.host}/api/v1/events/ws?ticket=${encodeURIComponent(ticket)}`
       ws = new WebSocket(url)
 
       ws.onopen = () => {
@@ -241,10 +262,7 @@ export function AIDetectionResults() {
       }
 
       ws.onclose = () => {
-        if (closedByUnmount) return
-        const delay = reconnectDelayMs()
-        reconnectAttempt += 1
-        reconnectTimer = setTimeout(connect, delay)
+        scheduleReconnect()
       }
     }
 

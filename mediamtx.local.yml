@@ -374,9 +374,10 @@ pathDefaults:
   # NOTE: Uses curl.exe on Windows (not PowerShell's curl alias)
   ###############################################
 
-  # Startup hook - calls backend with secret
-  runOnInit: 'curl.exe -X GET -H "X-MTX-Secret: YOUR_SECRET_HERE" "http://127.0.0.1:8000/api/v1/mediamtx/startup/hook"'
-  runOnInitRestart: yes
+  # NOTE: runOnInit lives ONLY on the __startup__ path below, not here in
+  # pathDefaults. In pathDefaults it is inherited by EVERY camera path, so each
+  # camera (re)provision re-fires the startup hook → re-provision → re-fire,
+  # an infinite reload/provision loop that also fragments recordings.
 
   runOnDemand:
   runOnDemandRestart: no
@@ -410,4 +411,9 @@ paths:
   __startup__:
     source: publisher
     record: no
+    # Startup hook - provisions cameras from backend DB once on MediaMTX start.
+    # runOnInitRestart MUST be 'no': the curl exits immediately, so 'yes' would
+    # re-run it forever. The backend also self-provisions on its own startup.
+    runOnInit: 'curl.exe -X GET -H "X-MTX-Secret: YOUR_SECRET_HERE" "http://127.0.0.1:8000/api/v1/mediamtx/startup/hook"'
+    runOnInitRestart: no
 

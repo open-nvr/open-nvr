@@ -26,10 +26,12 @@ Used by:
 Auth
 ----
 FastAPI's HTTPBearer dependency doesn't work on the WS handshake — browsers
-can't set custom headers when opening a WebSocket. So we accept the JWT as
-a ``?token=<jwt>`` query param and validate it with the same ``verify_token``
-used for the REST API. Server-to-server clients can send the token either
-way (query param wins if both present).
+can't set custom headers when opening a WebSocket. So the client first calls
+the authenticated ``POST /events/ws-ticket`` endpoint to mint a short-lived,
+single-use ticket, then opens ``/events/ws?ticket=<ticket>``. This keeps the
+long-lived JWT out of URLs (and therefore out of access logs). Server-to-server
+clients authenticate the same way: call ``POST /events/ws-ticket`` with their
+bearer token, then open the socket with the returned ticket.
 
 Filters
 -------
@@ -43,12 +45,14 @@ Both can be combined. Missing filters mean "everything".
 from __future__ import annotations
 
 import json
+import secrets
+import time
 from typing import Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 
-from core.auth import verify_token
+from core.auth import get_current_active_user
 from core.database import get_db
 from core.logging_config import main_logger
 from models import User
@@ -57,20 +61,68 @@ from services.event_bus_service import get_event_bus
 router = APIRouter()
 
 
-def _authenticate_ws_token(token: str | None, db: Session) -> User | None:
-    """
-    Validate a JWT supplied via query param, return the matching active user
-    or None. We deliberately do NOT raise here — the caller closes the socket
-    with a proper code so the client sees a clean rejection.
-    """
-    if not token:
-        return None
+# ---------------------------------------------------------------------------
+# Single-use WebSocket tickets
+#
+# Browsers cannot attach an Authorization header to a WebSocket handshake, so
+# historically the long-lived JWT was passed as ``?token=<jwt>`` — which lands
+# in nginx/proxy access logs and browser history. Instead, an authenticated
+# REST call mints a short-lived, single-use ticket and the client opens
+# ``/events/ws?ticket=<ticket>``. An in-memory store is safe because the API
+# runs as a single uvicorn worker (see supervisord.conf); if that ever becomes
+# multiple workers, move this to a shared store (e.g. Redis).
+# ---------------------------------------------------------------------------
+_WS_TICKET_TTL_SECONDS = 30
+_ws_tickets: dict[str, tuple[str, float]] = {}  # ticket -> (username, expires_at)
 
-    token_data = verify_token(token)
-    if token_data is None:
-        return None
 
-    user = db.query(User).filter(User.username == token_data.username).first()
+def _prune_ws_tickets(now: float) -> None:
+    for tok in [t for t, (_, exp) in _ws_tickets.items() if exp <= now]:
+        _ws_tickets.pop(tok, None)
+
+
+def _mint_ws_ticket(username: str) -> tuple[str, int]:
+    now = time.time()
+    _prune_ws_tickets(now)
+    ticket = secrets.token_urlsafe(32)
+    _ws_tickets[ticket] = (username, now + _WS_TICKET_TTL_SECONDS)
+    return ticket, _WS_TICKET_TTL_SECONDS
+
+
+def _consume_ws_ticket(ticket: str) -> str | None:
+    """Validate and *consume* a ticket (single use); return its username or None."""
+    entry = _ws_tickets.pop(ticket, None)  # pop() => cannot be replayed
+    if entry is None:
+        return None
+    username, expires_at = entry
+    if expires_at <= time.time():
+        return None
+    return username
+
+
+@router.post("/events/ws-ticket")
+async def create_ws_ticket(current_user: User = Depends(get_current_active_user)):
+    """Mint a short-lived, single-use ticket for opening the events WebSocket.
+
+    The client (which cannot set an Authorization header on a WebSocket) calls
+    this authenticated endpoint, then opens ``/events/ws?ticket=<ticket>``.
+    """
+    ticket, ttl = _mint_ws_ticket(current_user.username)
+    return {"ticket": ticket, "expires_in": ttl}
+
+
+def _authenticate_ws(ticket: str | None, db: Session) -> User | None:
+    """Authenticate a WS handshake using a single-use ticket.
+
+    We deliberately do NOT raise here — the caller closes the socket with a
+    proper code so the client sees a clean rejection.
+    """
+    if not ticket:
+        return None
+    username = _consume_ws_ticket(ticket)
+    if not username:
+        return None
+    user = db.query(User).filter(User.username == username).first()
     if user is None or not user.is_active:
         return None
     return user
@@ -79,7 +131,7 @@ def _authenticate_ws_token(token: str | None, db: Session) -> User | None:
 @router.websocket("/events/ws")
 async def events_stream(
     websocket: WebSocket,
-    token: str | None = Query(default=None, description="JWT access token"),
+    ticket: str | None = Query(default=None, description="Single-use WS ticket"),
     camera_id: int | None = Query(default=None, description="Filter to one camera"),
     task: list[str] | None = Query(default=None, description="Filter to these task names"),
 ):
@@ -106,7 +158,7 @@ async def events_stream(
     db_gen = get_db()
     db: Session = next(db_gen)
     try:
-        user = _authenticate_ws_token(token, db)
+        user = _authenticate_ws(ticket, db)
     finally:
         # Mirror FastAPI's get_db teardown without relying on Depends here
         # (WebSocket routes can't use Depends() for request-scoped DB sessions

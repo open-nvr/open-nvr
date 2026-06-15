@@ -84,7 +84,7 @@ class MediaMtxConfigService:
             "record": True,
             "recordPath": f"{base_path}/{stream_name}/%Y/%m/%d/%H/%M/%S",
             "recordFormat": "mp4",  # or "ts" for transport stream
-            "recordSegmentDuration": "5m",  # 5-minute segments
+            "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",  # Keep recordings for 30 days
         }
 
@@ -104,7 +104,7 @@ class MediaMtxConfigService:
             # Recording settings
             "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
             "recordFormat": "mp4",
-            "recordSegmentDuration": "5m",
+            "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",  # 30 days
             # Performance settings
             "readTimeout": "10s",
@@ -144,7 +144,7 @@ class MediaMtxConfigService:
             "record": False,
             "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
             "recordFormat": "mp4",
-            "recordSegmentDuration": "5m",
+            "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",
             # Webhook settings
             **{k: v for k, v in webhook_config.items() if v is not None},
@@ -401,7 +401,7 @@ pathDefaults:
   record: no
   recordPath: {base_path}/%path/%Y/%m/%d/%H-%M-%S-%f
   recordFormat: fmp4
-  recordSegmentDuration: 5m
+  recordSegmentDuration: {settings.recording_segment_seconds}s
   recordDeleteAfter: 168h  # 7 days
   
   # Webhook integration for recording events

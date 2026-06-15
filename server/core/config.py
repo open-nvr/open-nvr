@@ -225,6 +225,12 @@ class Settings(BaseSettings):
     mediamtx_admin_token: str | None = None
     mediamtx_auto_provision: bool = True  # Enable/disable auto-provisioning on startup
 
+    # Default recording segment length (seconds) the backend sends to MediaMTX
+    # when provisioning a camera that has no explicit value of its own. Env var:
+    # RECORDING_SEGMENT_SECONDS. Default 3600 (1h) to match the MediaMTX
+    # pathDefaults `recordSegmentDuration: 1h` — keep them in sync.
+    recording_segment_seconds: int = 3600
+
     # MediaMTX service URLs (internal - for backend to MediaMTX communication)
     mediamtx_hls_url: str | None = "http://localhost:8888"  # HLS streaming endpoint
     mediamtx_rtsp_url: str | None = "rtsp://localhost:8554"  # RTSP streaming endpoint

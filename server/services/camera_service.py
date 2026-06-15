@@ -23,6 +23,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from core.logging_config import camera_logger
 from models import Camera, CameraPermission, User
 from schemas import CameraCreate, CameraUpdate
@@ -111,7 +112,7 @@ class CameraService:
                         rtsp_url=db_camera.rtsp_url,
                         enable_recording=False,
                         rtsp_transport="tcp",
-                        recording_segment_seconds=300,
+                        recording_segment_seconds=settings.recording_segment_seconds,
                     )
 
                     if provision_result.get("status") == "ok":
@@ -159,7 +160,7 @@ class CameraService:
                                 source_url=db_camera.rtsp_url,
                                 recording_enabled=False,
                                 rtsp_transport="tcp",
-                                recording_segment_seconds=300,
+                                recording_segment_seconds=settings.recording_segment_seconds,
                                 last_provisioned_at=func.now(),
                                 transport_security=transport_security,
                                 # M1c-selfrev H-2: probe-driven, not

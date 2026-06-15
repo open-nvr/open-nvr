@@ -45,7 +45,7 @@ export function CameraConfigManager() {
   const navigate = useNavigate()
   const [cameras, setCameras] = useState<Camera[]>([])
   const [selectedCamId, setSelectedCamId] = useState<number | ''>('')
-  const [cfg, setCfg] = useState<Partial<CameraConfig>>({ stream_protocol: 'rtsp', recording_enabled: false, recording_segment_seconds: 60 })
+  const [cfg, setCfg] = useState<Partial<CameraConfig>>({ stream_protocol: 'rtsp', recording_enabled: false })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -93,8 +93,7 @@ export function CameraConfigManager() {
         setCfg({ 
           camera_id: camId, 
           stream_protocol: 'rtsp', 
-          recording_enabled: false, 
-          recording_segment_seconds: 60,
+          recording_enabled: false,
           source_url: selectedCamera?.rtsp_url || null
         })
       } else {
@@ -123,7 +122,6 @@ export function CameraConfigManager() {
           source_url: cfg.source_url || null,
           recording_enabled: !!cfg.recording_enabled,
           recording_path: cfg.recording_path || null,
-          recording_segment_seconds: Number(cfg.recording_segment_seconds) || 60,
           webrtc_publisher: !!cfg.webrtc_publisher,
           rtmp_publisher: !!cfg.rtmp_publisher,
           rtsp_transport: cfg.rtsp_transport || null,
@@ -138,7 +136,6 @@ export function CameraConfigManager() {
           source_url: cfg.source_url || null,
           recording_enabled: !!cfg.recording_enabled,
           recording_path: cfg.recording_path || null,
-          recording_segment_seconds: Number(cfg.recording_segment_seconds) || 60,
           webrtc_publisher: !!cfg.webrtc_publisher,
           rtmp_publisher: !!cfg.rtmp_publisher,
           rtsp_transport: cfg.rtsp_transport || null,
@@ -273,21 +270,6 @@ export function CameraConfigManager() {
                   
                   {cfg.recording_enabled && (
                     <>
-                      <label className="flex flex-col gap-1">
-                        <span className="text-[var(--text-dim)]">Segment Duration</span>
-                        <select 
-                          className="bg-[var(--panel)] border border-neutral-700 px-2 py-1" 
-                          value={cfg.recording_segment_seconds || 60} 
-                          onChange={(e) => setCfg({ ...cfg, recording_segment_seconds: Number(e.target.value) })}
-                        >
-                          <option value="60">1 minute</option>
-                          <option value="300">5 minutes</option>
-                          <option value="600">10 minutes</option>
-                          <option value="1800">30 minutes</option>
-                          <option value="3600">1 hour</option>
-                        </select>
-                      </label>
-                      
                       <label className="flex flex-col gap-1 col-span-2">
                         <span className="text-[var(--text-dim)]">Recording Path (optional)</span>
                         <input 

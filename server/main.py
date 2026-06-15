@@ -22,12 +22,16 @@ Configures the application, middleware, and includes all routers.
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import settings
+
+# Auth dependency used to protect routers that ship without their own auth guards
+# (ONVIF camera control and Suricata intrusion logs/stream were previously open).
+from dependencies import get_current_active_user
 
 # Auto-provision imports
 from core.database import SessionLocal, init_db
@@ -485,7 +489,11 @@ app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(general.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
-app.include_router(onvif_router.router, prefix=settings.api_prefix)
+app.include_router(
+    onvif_router.router,
+    prefix=settings.api_prefix,
+    dependencies=[Depends(get_current_active_user)],
+)
 app.include_router(network_router.router, prefix=settings.api_prefix)
 app.include_router(integrations.router, prefix=settings.api_prefix)
 app.include_router(cloud_router.router, prefix=settings.api_prefix)
@@ -498,8 +506,16 @@ app.include_router(cloud_providers.router, prefix=settings.api_prefix)
 app.include_router(cloud_inference.router, prefix=settings.api_prefix)
 app.include_router(compliance.router, prefix=settings.api_prefix)
 
-app.include_router(suricata_logs, prefix=settings.api_prefix)
-app.include_router(suricata_stream, prefix=settings.api_prefix)
+app.include_router(
+    suricata_logs,
+    prefix=settings.api_prefix,
+    dependencies=[Depends(get_current_active_user)],
+)
+app.include_router(
+    suricata_stream,
+    prefix=settings.api_prefix,
+    dependencies=[Depends(get_current_active_user)],
+)
 app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
 

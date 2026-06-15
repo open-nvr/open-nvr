@@ -20,10 +20,12 @@ import { api } from '../lib/api'
 
 export const recordingService = {
   // Playback
-  getRecordingsByDate: (cameraId?: number, token?: string) => {
+  // Note: these go through the shared api client, which already sends the
+  // bearer token in the Authorization header. We deliberately do NOT pass the
+  // JWT as a ?token= query param (it would leak into access logs/history).
+  getRecordingsByDate: (cameraId?: number) => {
     const params: Record<string, any> = {}
     if (cameraId) params.camera_id = cameraId
-    if (token) params.token = token
     return api.get('/api/v1/recordings/list', { params })
   },
   getRecordings: (opts?: { limit?: number; offset?: number; camera_id?: number }) => {
@@ -32,21 +34,13 @@ export const recordingService = {
   getRecordingSessionsForAI: (params?: { camera_id?: number }) => {
     return api.get('/api/v1/recordings/sessions-for-ai', { params })
   },
-  getRecordingStats: (token?: string) => {
-    const params: Record<string, any> = {}
-    if (token) params.token = token
-    return api.get('/api/v1/recordings/stats', { params })
-  },
+  getRecordingStats: () => api.get('/api/v1/recordings/stats'),
   getPlaybackConfig: () => api.get('/api/v1/recordings/config'),
-  getPlaybackList: (path: string, token?: string) => {
-    const params: Record<string, any> = { path }
-    if (token) params.token = token
-    return api.get('/api/v1/recordings/playback/list', { params })
+  getPlaybackList: (path: string) => {
+    return api.get('/api/v1/recordings/playback/list', { params: { path } })
   },
-  getPlaybackUrl: (path: string, start: string, duration: number, token?: string) => {
-    const params: Record<string, any> = { path, start, duration }
-    if (token) params.token = token
-    return api.get('/api/v1/recordings/playback/url', { params })
+  getPlaybackUrl: (path: string, start: string, duration: number) => {
+    return api.get('/api/v1/recordings/playback/url', { params: { path, start, duration } })
   },
   getTodaySegments: (cameraId: number) => api.get(`/api/v1/recordings/today/${cameraId}`),
 

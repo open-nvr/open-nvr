@@ -72,7 +72,13 @@ export function SuricataAlertStream() {
 
     async function fetchStream() {
       try {
-        const resp = await fetch('/api/v1/suricata/alerts/stream', { signal: abortController.signal });
+        // This endpoint is now auth-protected on the backend; attach the bearer token.
+        const token = localStorage.getItem('opennvr.token');
+        const resp = await fetch('/api/v1/suricata/alerts/stream', {
+          signal: abortController.signal,
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!resp.ok) throw new Error(`Stream error (${resp.status})`);
         if (!resp.body) throw new Error('No response body');
         reader = resp.body.getReader();
         let buffer = '';
