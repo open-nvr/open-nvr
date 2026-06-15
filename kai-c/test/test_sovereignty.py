@@ -21,6 +21,7 @@ from kai_c.sovereignty import (
     SovereigntyViolation,
     check_adapter,
     host_is_loopback,
+    host_is_on_this_machine,
 )
 
 
@@ -70,7 +71,9 @@ def test_local_only_accepts_loopback_url_no_egress():
 
 
 def test_local_only_refuses_non_loopback_url():
-    with pytest.raises(SovereigntyViolation, match="non-loopback"):
+    # A LAN peer host (not loopback, not in the Docker bridge subnet) is
+    # still refused under local_only.
+    with pytest.raises(SovereigntyViolation, match="not on this machine"):
         check_adapter(
             sovereignty_mode="local_only",
             adapter_url="http://192.168.1.10:9100",
@@ -97,6 +100,85 @@ def test_local_only_refuses_loopback_url_with_egress_declared():
             adapter_url="http://127.0.0.1:9100",
             capabilities=_caps(egress=["api.openai.com"]),
         )
+
+
+# ── ISSUE-70: local_only must accept on-box Docker-bridge adapters ──
+
+
+def _mock_resolver(monkeypatch, mapping: dict[str, str]):
+    """Patch socket.getaddrinfo so service names resolve to fixed IPs
+    without touching real DNS."""
+    import socket as _socket
+
+    real = _socket.getaddrinfo
+
+    def fake(host, *args, **kwargs):
+        if host in mapping:
+            return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (mapping[host], 0))]
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake)
+
+
+def test_local_only_accepts_docker_service_name_on_bridge(monkeypatch):
+    """The reported bug: ``yolov8-adapter:9002`` resolves to a Docker
+    bridge IP (inside OPENNVR_DOCKER_SUBNET). It is on this machine, so
+    local_only must accept it instead of returning a sovereignty 400."""
+    _mock_resolver(monkeypatch, {"yolov8-adapter": "172.28.0.7"})
+    check_adapter(
+        sovereignty_mode="local_only",
+        adapter_url="http://yolov8-adapter:9002",
+        capabilities=_caps(egress=[]),
+    )
+
+
+def test_local_only_accepts_direct_bridge_ip(monkeypatch):
+    check_adapter(
+        sovereignty_mode="local_only",
+        adapter_url="http://172.28.0.7:9002",
+        capabilities=_caps(egress=[]),
+    )
+
+
+def test_local_only_still_refuses_lan_peer_service_name(monkeypatch):
+    """A service name that resolves OUTSIDE the bridge subnet (a peer VM
+    on the LAN) must still be refused — the fix must not become a
+    blanket allow."""
+    _mock_resolver(monkeypatch, {"adapter-vm.internal": "192.168.1.50"})
+    with pytest.raises(SovereigntyViolation, match="not on this machine"):
+        check_adapter(
+            sovereignty_mode="local_only",
+            adapter_url="http://adapter-vm.internal:9002",
+            capabilities=None,
+        )
+
+
+def test_local_only_bridge_adapter_with_egress_still_refused(monkeypatch):
+    """Being on the bridge does NOT exempt an adapter from the
+    network_egress (cloud-proxy) check."""
+    _mock_resolver(monkeypatch, {"yolov8-adapter": "172.28.0.7"})
+    with pytest.raises(SovereigntyViolation, match="network_egress"):
+        check_adapter(
+            sovereignty_mode="local_only",
+            adapter_url="http://yolov8-adapter:9002",
+            capabilities=_caps(egress=["api.openai.com"]),
+        )
+
+
+def test_host_is_on_this_machine_table(monkeypatch):
+    _mock_resolver(
+        monkeypatch,
+        {"yolov8-adapter": "172.28.0.7", "adapter-vm.internal": "192.168.1.50"},
+    )
+    assert host_is_on_this_machine("localhost")
+    assert host_is_on_this_machine("127.0.0.1")
+    assert host_is_on_this_machine("::1")
+    assert host_is_on_this_machine("172.28.0.7")
+    assert host_is_on_this_machine("yolov8-adapter")
+    assert not host_is_on_this_machine("adapter-vm.internal")
+    assert not host_is_on_this_machine("8.8.8.8")
+    assert not host_is_on_this_machine("0.0.0.0")
+    assert not host_is_on_this_machine(None)
 
 
 # ── federated mode ─────────────────────────────────────────────────
