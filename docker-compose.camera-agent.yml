@@ -89,40 +89,43 @@ services:
       retries: 10
 
   # ──────────────────────────────────────────────────────────────
-  # BLIP scene-caption adapter — VOICE + CHAT. Pulled from GHCR. Powers the
-  # camera-agent's ``describe_camera`` tool with real natural-language scene
-  # captions ("a person sitting at a desk"). Without it, describe_camera falls
-  # back to the YOLOv8 object detector (class labels only). The
-  # ``caption-adapter-register`` one-shot registers it with KAI-C once healthy.
+  # Caption adapter — VOICE + CHAT. Pulled from GHCR. Powers the
+  # camera-agent's ``describe_camera`` tool with natural-language scene
+  # captions. Without it, describe_camera falls back to the YOLOv8 detector.
   #
-  # The published blip-adapter image ships with the ~990 MB BLIP weights baked
-  # in (issue #79), so it captions offline under local_only — no first-run
-  # HuggingFace download and no need to relax sovereignty. The hf-cache volume
-  # below just persists the runtime cache across restarts.
+  # Controlled by CAPTION_ADAPTER in .env (default: moondream).
+  #   CAPTION_ADAPTER=moondream  → ghcr.io/open-nvr/moondream-adapter (VQA + captions)
+  #   CAPTION_ADAPTER=blip       → ghcr.io/open-nvr/blip-adapter       (captions only)
+  #
+  # Both images ship with weights baked in — no runtime download, no egress.
+  # Both are run on port 9007 (neutral, avoids conflicts with standalone adapters).
   # ──────────────────────────────────────────────────────────────
-  blip-adapter:
+  caption-adapter:
     profiles: [camera-agent, camera-agent-chat]
-    image: ghcr.io/open-nvr/blip-adapter:${ADAPTER_TAG:-latest}
-    container_name: opennvr_blip_adapter
+    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${ADAPTER_TAG:-main}
+    container_name: opennvr_caption_adapter
     restart: unless-stopped
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
     volumes:
-      - opennvr_blip_hf_cache:/root/.cache/huggingface
+      - opennvr_caption_hf_cache:/root/.cache/huggingface
+    command:
+      - sh
+      - -c
+      - "uvicorn adapters.${CAPTION_ADAPTER:-moondream}.main:app --host 0.0.0.0 --port 9007"
     networks:
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9006/health', timeout=2).status_code == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:9007/health',timeout=2).status_code==200 else 1)"]
       interval: 15s
       timeout: 5s
       start_period: 120s
       retries: 20
 
   # ──────────────────────────────────────────────────────────────
-  # Caption-adapter auto-registration (test-report S-5) — VOICE + CHAT. On a
-  # clean install the caption adapter was NOT registered with KAI-C, so
-  # describe_camera silently fell back to the detector. This one-shot registers
-  # BLIP so the agent actually uses real scene captions.
+  # Caption-adapter auto-registration — VOICE + CHAT. Registers whichever
+  # caption adapter is configured (CAPTION_ADAPTER in .env) with KAI-C so
+  # describe_camera uses real captions instead of falling back to the detector.
   # ──────────────────────────────────────────────────────────────
   caption-adapter-register:
     profiles: [camera-agent, camera-agent-chat]
@@ -132,15 +135,18 @@ services:
     depends_on:
       opennvr-core:
         condition: service_healthy
+      caption-adapter:
+        condition: service_healthy
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     command:
       - sh
       - -c
       - |
         set -e
-        name="blip"
-        url="http://blip-adapter:9006"
+        name="$${CAPTION_ADAPTER:-moondream}"
+        url="http://caption-adapter:9007"
         echo "Auto-registering caption adapter '$$name' -> $$url with KAI-C…"
         i=0
         while [ $$i -lt 30 ]; do
@@ -241,16 +247,18 @@ services:
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        cadapter=$$(sed_esc "$${CAPTION_ADAPTER:-moondream}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            -e "s/[$$][{]CAPTION_ADAPTER[}]/blip/g" \
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             < /template/config.docker.yml > /generated/config.yml
-        echo "Wrote /generated/config.yml (voice) from template."
+        echo "Wrote /generated/config.yml (voice) with caption_adapter=$$cadapter."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config:/generated
@@ -270,7 +278,7 @@ services:
         condition: service_healthy
       piper-adapter:
         condition: service_healthy
-      blip-adapter:
+      caption-adapter:
         condition: service_healthy
       ollama:
         condition: service_healthy
@@ -306,16 +314,18 @@ services:
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
         lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
         omodel=$$(sed_esc "$${OLLAMA_MODEL}")
+        cadapter=$$(sed_esc "$${CAPTION_ADAPTER:-moondream}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
-            -e "s/[$$][{]CAPTION_ADAPTER[}]/blip/g" \
+            -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             < /template/config.docker.chat.yml > /generated/config.yml
-        echo "Wrote /generated/config.yml (chat) from template."
+        echo "Wrote /generated/config.yml (chat) with caption_adapter=$$cadapter."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
       - ./examples/camera-agent:/template:ro
       - opennvr_camera_agent_config_chat:/generated
@@ -331,10 +341,9 @@ services:
     depends_on:
       camera-agent-config-init-chat:
         condition: service_completed_successfully
-      # Chat uses BLIP scene captions, so wait for the adapter to be healthy and
-      # registered before the first turn (else describe_camera falls back to the
-      # detector until BLIP comes up).
-      blip-adapter:
+      # Wait for the caption adapter to be healthy before the first turn
+      # (else describe_camera falls back to the detector).
+      caption-adapter:
         condition: service_healthy
       ollama:
         condition: service_healthy
@@ -357,8 +366,8 @@ volumes:
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.
   opennvr_whisper_models:
-  # HuggingFace cache for the BLIP scene-caption adapter (~990 MB).
-  opennvr_blip_hf_cache:
+  # HuggingFace cache for the caption adapter (used by BLIP; moondream bakes its model in).
+  opennvr_caption_hf_cache:
   # Piper writes generated WAVs here before optionally returning inline
   # base64 audio to the camera-agent.
   opennvr_piper_audio:
