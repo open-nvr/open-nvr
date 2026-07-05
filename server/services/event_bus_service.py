@@ -56,6 +56,7 @@ from core.logging_config import main_logger
 # JSON clients can match on plain strings without extra serialization rules.
 EVENT_INFERENCE_RESULT = "inference_result"
 EVENT_INFERENCE_ERROR = "inference_error"
+EVENT_CAMERA_EVENT = "camera_event"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -208,5 +209,21 @@ async def publish_inference_result(
         "camera_id": camera_id,
         "model_id": model_id,
         "task": task,
+        "payload": payload,
+    })
+
+
+async def publish_camera_event(
+    *,
+    camera_id: int,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Publish a camera-native alarm (motion/tamper/etc) to the live bus so the
+    dashboard/agents see it in real time, alongside inference results."""
+    await get_event_bus().publish({
+        "event_type": EVENT_CAMERA_EVENT,
+        "camera_id": camera_id,
+        "task": event_type,
         "payload": payload,
     })

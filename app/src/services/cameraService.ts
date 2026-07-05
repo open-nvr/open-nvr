@@ -96,4 +96,55 @@ export const cameraService = {
     ip: string,
     params: { username: string; password: string; port?: number }
   ) => api.post(`/api/v1/camera/${encodeURIComponent(ip)}/time/sync`, '', { params }),
+
+  // Camera Settings (device driver — Phase 0: read-only)
+  getCameraCapabilities: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/capabilities`),
+  refreshCameraCapabilities: (cameraId: number) => api.post(`/api/v1/cameras/${cameraId}/capabilities/refresh`),
+  getCameraDeviceInfo: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/info`),
+  getCameraNetwork: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/network`),
+  getCameraStorage: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/storage`),
+  getCameraTime: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/time`),
+  syncCameraTimeManual: (cameraId: number, payload: { timezone?: string | null }) =>
+    api.post(`/api/v1/cameras/${cameraId}/time/sync-manual`, payload),
+  setCameraNtp: (cameraId: number, payload: { server: string; timezone?: string | null }) =>
+    api.put(`/api/v1/cameras/${cameraId}/time/ntp`, payload),
+  getCameraImaging: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/imaging`),
+  setCameraImaging: (cameraId: number, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/imaging`, payload),
+  getCameraEncoder: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/encoder`),
+  setCameraEncoder: (cameraId: number, configToken: string, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/encoder/${encodeURIComponent(configToken)}`, payload),
+  getCameraOsd: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/osd`),
+  setCameraOsd: (cameraId: number, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/osd`, payload),
+  getCameraMotion: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/motion`),
+  setCameraMotion: (cameraId: number, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/motion`, payload),
+
+  // Camera events (native alarm stream)
+  getCameraEvents: (cameraId: number, limit = 50) =>
+    api.get(`/api/v1/cameras/${cameraId}/events`, { params: { limit } }),
+  getCameraEventsStatus: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/events/status`),
+  subscribeCameraEvents: (cameraId: number) =>
+    api.post(`/api/v1/cameras/${cameraId}/events/subscribe`),
+  unsubscribeCameraEvents: (cameraId: number) =>
+    api.post(`/api/v1/cameras/${cameraId}/events/unsubscribe`),
+
+  // Per-camera AI detectors (reuse ai-model-management)
+  getAiModels: () => api.get('/api/v1/ai-model-management'),
+  startInference: (modelId: number) =>
+    api.post(`/api/v1/ai-model-management/${modelId}/start-inference`),
+  stopInference: (modelId: number) =>
+    api.post(`/api/v1/ai-model-management/${modelId}/stop-inference`),
+  getInferenceStatus: (modelId: number) =>
+    api.get(`/api/v1/ai-model-management/${modelId}/inference-status`),
+
+  // On-camera accounts + reboot (gated)
+  getCameraUsers: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/camera-users`),
+  createCameraUser: (cameraId: number, payload: { username: string; password: string; level: string }) =>
+    api.post(`/api/v1/cameras/${cameraId}/camera-users`, payload),
+  deleteCameraUser: (cameraId: number, username: string) =>
+    api.delete(`/api/v1/cameras/${cameraId}/camera-users/${encodeURIComponent(username)}`),
+  rebootCamera: (cameraId: number) => api.post(`/api/v1/cameras/${cameraId}/reboot`),
 }

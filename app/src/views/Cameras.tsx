@@ -23,9 +23,10 @@ import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
-import { Unplug } from 'lucide-react'
+import { Unplug, Settings2 } from 'lucide-react'
 import { AddCameraDialog } from './LiveView'
 import { QrScanner } from '../components/QrScanner'
+import { CameraSettings } from './settings/CameraSettings'
 
 type Camera = {
   id: number
@@ -99,6 +100,7 @@ export function Cameras() {
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
   const [scanQr, setScanQr] = useState(false)
+  const [settingsFor, setSettingsFor] = useState<Camera | null>(null)
 
   const [form, setForm] = useState<CameraForm>({
     name: '',
@@ -547,6 +549,15 @@ export function Cameras() {
                           </svg>
                         </button>
                       )}
+                      {canManageCameras && (
+                        <button
+                          className="p-1.5 border border-neutral-700 bg-[var(--panel-2)] hover:bg-neutral-700 transition-colors rounded"
+                          onClick={() => setSettingsFor(c)}
+                          title="Camera Settings"
+                        >
+                          <Settings2 className="w-4 h-4" />
+                        </button>
+                      )}
                       {c.mediamtx_provisioned === true && (
                         <>
                           {/* Recording is automatic on an NVR — no manual
@@ -655,6 +666,12 @@ export function Cameras() {
           )}
         </div>
       )}
+
+      <CameraSettings
+        open={!!settingsFor}
+        camera={settingsFor}
+        onClose={() => setSettingsFor(null)}
+      />
     </section>
   )
 }

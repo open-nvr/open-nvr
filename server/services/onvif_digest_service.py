@@ -43,16 +43,22 @@ TDS_NS = "http://www.onvif.org/ver10/device/wsdl"
 TRT_NS = "http://www.onvif.org/ver10/media/wsdl"
 TT_NS = "http://www.onvif.org/ver10/schema"
 TPT_NS = "http://www.onvif.org/ver20/ptz/wsdl"
+TIMG_NS = "http://www.onvif.org/ver20/imaging/wsdl"
 
 
 def _soap_envelope(body: str) -> str:
-    """Wrap body XML in SOAP envelope with namespaces."""
+    """Wrap body XML in SOAP envelope with namespaces.
+
+    Extra (unused-by-a-given-request) xmlns declarations are harmless, so all
+    ONVIF service prefixes live here — device (tds), media (trt), ptz (tptz),
+    imaging (timg), and shared schema types (tt)."""
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="{SOAP_NS}"
                xmlns:tds="{TDS_NS}"
                xmlns:trt="{TRT_NS}"
                xmlns:tt="{TT_NS}"
-               xmlns:tptz="{TPT_NS}">
+               xmlns:tptz="{TPT_NS}"
+               xmlns:timg="{TIMG_NS}">
   <soap:Body>
     {body}
   </soap:Body>

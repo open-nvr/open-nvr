@@ -56,6 +56,7 @@ from routers import (
     audit_logs,
     auth,
     camera_config,
+    camera_settings,
     cameras,
     internal_camera_agent,
     cloud as cloud_router,
@@ -382,6 +383,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Error stopping inference tasks: {e}")
 
+    # Stop all camera event-stream subscriptions
+    try:
+        from services.camera_event_manager import get_camera_event_manager
+
+        await get_camera_event_manager().stop_all()
+        main_logger.info("All camera event subscriptions stopped")
+    except Exception as e:
+        main_logger.error(f"Error stopping camera event subscriptions: {e}")
+
     # FFmpeg-based RTSP proxy/recorder cleanup removed
 
 
@@ -492,6 +502,7 @@ async def get_jwks():
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
+app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)

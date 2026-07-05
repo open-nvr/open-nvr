@@ -230,6 +230,12 @@ class Camera(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    capability = relationship(
+        "CameraCapability",
+        back_populates="camera",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class CameraPermission(Base):
@@ -327,6 +333,70 @@ class CameraConfig(Base):
     max_restart_attempts = Column(Integer, default=3, nullable=False)
 
     camera = relationship("Camera", back_populates="config")
+
+
+class CameraCapability(Base):
+    """Cached snapshot of what a camera's device driver can read/drive.
+
+    Populated by a capability probe (services/camera_drivers/capabilities.py)
+    that talks to the camera over ONVIF (+ vendor APIs) and records which
+    settings areas are supported, the resolved ONVIF service endpoints, and
+    refreshed device metadata. The settings UI reads this to render only the
+    tabs/controls a given device actually supports. Semantics mirror the
+    transport-security probe on CameraConfig (result + probed_at).
+
+    Capability data is an open, nested, per-vendor document, so it lives as
+    JSON here rather than as dozens of columns on CameraConfig.
+    """
+
+    __tablename__ = "camera_capabilities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id"), nullable=False, unique=True
+    )
+
+    driver_name = Column(String(50), nullable=True)  # onvif | hikvision | ...
+    manufacturer = Column(String(100), nullable=True)
+    model = Column(String(100), nullable=True)
+    firmware_version = Column(String(100), nullable=True)
+
+    onvif_endpoints = Column(JSON, nullable=True)  # {device, media, imaging, ...}
+    supported_areas = Column(JSON, nullable=True)  # {imaging: true, ptz: false, ...}
+    capabilities = Column(JSON, nullable=True)  # nested detail (ranges/tokens)
+
+    # 'ok' | 'partial' | 'unreachable' | 'error' | 'not_probed'
+    probe_result = Column(
+        String(20), nullable=False, default="not_probed", server_default="not_probed"
+    )
+    probed_at = Column(DateTime(timezone=True), nullable=True)
+    probe_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    camera = relationship("Camera", back_populates="capability")
+
+
+class CameraEvent(Base):
+    """A camera-native alarm (motion / tamper / video-loss / IO) received from
+    the device's event stream. History store parallel to AIDetectionResult; the
+    live copy is fanned out on the in-process event bus for the dashboard."""
+
+    __tablename__ = "camera_events"
+    __table_args__ = (
+        Index("ix_camera_event_cam_time", "camera_id", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id"), nullable=False, index=True
+    )
+    event_type = Column(String(50), nullable=False)  # VMD | tamperdetection | ...
+    event_state = Column(String(20), nullable=True)  # active | inactive
+    description = Column(String(200), nullable=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class Recording(Base):
