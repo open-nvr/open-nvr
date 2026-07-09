@@ -13,6 +13,14 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 
 [Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.17261761)
 
+<!--
+  HERO DEMO — highest-leverage asset for stars. Record a ~15–25s GIF of the
+  camera-agent answering a question about a live camera, save it as
+  .github/demo-agent.gif, then uncomment the line below. Shot list: see the
+  launch notes. Until then this stays a comment so nothing renders broken.
+-->
+<!-- <img src=".github/demo-agent.gif" alt="Ask your cameras a question — answered locally" width="760" /> -->
+
 </div>
 
 ---
@@ -42,6 +50,24 @@ The architecture is published — a peer-citable paper this year, 34 references,
 **It runs on the hardware you already have.** If the machine it's on has a camera — a laptop webcam, a USB or Pi camera, the onboard sensor on a drone or robot — the agent can discover and use it with zero provisioning. Any device that can see a camera or a stream can run its own on-board sovereign agent.
 
 **It's built for sovereignty.** For homelab users that means the doorbell that doesn't phone home. For defence, critical infrastructure, healthcare, and government deployments it means tactical AI that runs on your hardware under your control — models you've fine-tuned, models you can't share with a vendor, analytics whose detection logic itself is operationally sensitive. The procurement brief is in [`docs/GOVERNMENT_DEPLOYMENT.md`](docs/GOVERNMENT_DEPLOYMENT.md).
+
+## How it compares
+
+Frigate is the right call for a lot of homelabbers, and we say so — [the full, honest breakdown](docs/COMPARISONS.md) walks through Frigate, ZoneMinder, Shinobi, Viseron, and Verkada one by one. OpenNVR is solving a *different* problem: auditable AI surveillance with operator-controlled, sovereign AI. Where that difference shows up:
+
+| | **OpenNVR** | **Frigate** | **ZoneMinder** | **Verkada** (cloud) |
+|---|:---:|:---:|:---:|:---:|
+| Self-hosted, runs air-gapped | ✅ | ✅ | ✅ | ❌ |
+| AI detection out of the box | ✅ | ✅ | plugins | ✅ (vendor) |
+| **Open adapter contract** — any model, any license, out-of-tree | ✅ | in-tree¹ | ❌ | ❌ |
+| **Talk to your cameras** — local voice + text agent | ✅ | ❌ | ❌ | ❌ |
+| **End-to-end audit chain** + model-fingerprint drift detection | ✅ | ❌ | ❌ | ❌ |
+| **Default-deny sovereignty gates** (no cloud/AI egress until you allow it) | ✅ | partial | ❌ | ❌ |
+| **§889 / covered-vendor self-check** built in | ✅ | ❌ | ❌ | ❌ |
+| Peer-citable architecture paper | ✅ | ❌ | ❌ | ❌ |
+| You control the AI (weights, egress, fine-tunes) | ✅ | ✅ | ✅ | ❌ |
+
+<sub>¹ Frigate ships strong AI (face, LPR, CLIP search, GenAI descriptions) — the architectural difference is *how it's added*: Frigate's capabilities land in-tree under one license; OpenNVR ships a published wire contract + Apache-2.0 SDK so third parties publish adapters out-of-tree under **any** license, including proprietary or classified. Full nuance, and who should pick which: [`docs/COMPARISONS.md`](docs/COMPARISONS.md).</sub>
 
 ## Quickstart
 
