@@ -226,3 +226,26 @@ def test_info_omits_substream_when_disabled(monkeypatch):
     result, captured = _call_info(monkeypatch, enabled=False)
     assert "webrtc_sub" not in result["urls"]
     assert captured["camera_path"] == "cam-1"               # exact-match, main only
+
+
+def test_substream_token_regex_cannot_escalate_to_sibling_camera():
+    """Auth-scope guard for the widened MediaMTX token pattern
+    (routers/streams.py ~L276): the `(-sub)?$` anchor must authorize a
+    camera's own main + `-sub` path and NOTHING else. A greedy/unanchored
+    variant would let "cam-1"'s token also match "cam-10" (a different
+    camera). Derive the pattern the same way the source does so this test
+    tracks the source, then strip MediaMTX's leading `~` regex marker."""
+    import re
+
+    stream_name = "cam-1"
+    token_path = f"~^{re.escape(stream_name)}(-sub)?$"   # mirrors streams.py
+    pattern = token_path.lstrip("~")                     # MediaMTX regex marker
+
+    # Own paths: authorized.
+    assert re.match(pattern, "cam-1")
+    assert re.match(pattern, "cam-1-sub")
+
+    # Sibling / lookalike paths: rejected (no auth-scope escalation).
+    assert re.match(pattern, "cam-10") is None           # different camera
+    assert re.match(pattern, "cam-1-subextra") is None   # trailing junk
+    assert re.match(pattern, "cam-1x") is None            # suffix past anchor

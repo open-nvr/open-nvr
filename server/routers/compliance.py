@@ -40,6 +40,27 @@ from models import AuditLog, Camera, Recording, User
 router = APIRouter(prefix="/compliance", tags=["compliance"])
 
 
+@router.get("/security-check")
+async def get_security_check(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Lite, local §889 / security posture check computed from the camera
+    inventory OpenNVR already has (no scanning, nothing leaves the box). Flags
+    covered-vendor cameras (public FCC Covered List), public-IP exposure,
+    plaintext streams, and default usernames. For a formal, audit-ready §889
+    attestation (OEM-rebrand resolution, CVE cross-reference, signed report),
+    OpenNVR Scout is the full assessment this points to."""
+    from datetime import datetime, timezone
+
+    from services.security_compliance import check_cameras
+
+    cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+    result = check_cameras(cameras)
+    result["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return result
+
+
 @router.get("/summary")
 async def get_compliance_summary(
     db: Session = Depends(get_db),

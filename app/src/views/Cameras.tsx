@@ -25,6 +25,7 @@ import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
 import { Unplug } from 'lucide-react'
 import { AddCameraDialog } from './LiveView'
+import { QrScanner } from '../components/QrScanner'
 
 type Camera = {
   id: number
@@ -97,6 +98,7 @@ export function Cameras() {
   const [editing, setEditing] = useState<Camera | null>(null)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
+  const [scanQr, setScanQr] = useState(false)
 
   const [form, setForm] = useState<CameraForm>({
     name: '',
@@ -650,7 +652,10 @@ export function Cameras() {
                 <input type="number" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} min={1} max={65535} />
               </Field>
               <Field label="RTSP URL">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
+                <div className="flex gap-2">
+                  <input className="flex-1 bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
+                  <button type="button" className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded text-xs whitespace-nowrap" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">Scan QR</button>
+                </div>
               </Field>
               <Field label="Substream URL">
                 <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
@@ -679,6 +684,13 @@ export function Cameras() {
               </div>
             </form>
           </div>
+          {scanQr && (
+            <QrScanner
+              title="Scan the QR from the OpenNVR Cam app"
+              onResult={(text) => { setForm({ ...form, rtsp_url: text }); setScanQr(false) }}
+              onClose={() => setScanQr(false)}
+            />
+          )}
         </div>
       )}
     </section>

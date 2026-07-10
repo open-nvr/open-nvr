@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
+import { QrScanner } from '../components/QrScanner'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { usePermissions } from '../hooks/usePermissions'
 import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
@@ -1020,6 +1021,7 @@ export function AddCameraDialog({
   const [profiles, setProfiles] = useState<Array<{token: string, name: string, stream_uri?: string, width?: number, height?: number}>>([])
   const [selectedProfile, setSelectedProfile] = useState<string>('')
   const [rtspUrl, setRtspUrl] = useState('')
+  const [scanQr, setScanQr] = useState(false)
   const [deviceInfo, setDeviceInfo] = useState<{
     manufacturer?: string
     model?: string
@@ -1560,13 +1562,23 @@ export function AddCameraDialog({
 
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                  placeholder="rtsp://192.168.1.100:554/stream1"
-                  value={form.rtsp_url}
-                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="flex-1 bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
+                    placeholder="rtsp://192.168.1.100:554/stream1"
+                    value={form.rtsp_url}
+                    onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] text-xs whitespace-nowrap"
+                    onClick={() => setScanQr(true)}
+                    title="Scan the QR from the OpenNVR Cam app"
+                  >
+                    Scan QR
+                  </button>
+                </div>
                 <span className="text-[10px] text-[var(--text-dim)]">
                   Optional. No need to put credentials in the URL — the
                   Username/Password above are added automatically. Leave blank to
@@ -1647,6 +1659,13 @@ export function AddCameraDialog({
           )}
         </div>
       </div>
+      {scanQr && (
+        <QrScanner
+          title="Scan the QR from the OpenNVR Cam app"
+          onResult={(text) => { setForm(f => ({ ...f, rtsp_url: text })); setScanQr(false) }}
+          onClose={() => setScanQr(false)}
+        />
+      )}
     </div>
   )
 }

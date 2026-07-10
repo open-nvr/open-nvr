@@ -17,7 +17,11 @@
  */
 
 import { useEffect, useState, useCallback } from 'react'
-import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle } from 'lucide-react'
+import { Download, RefreshCw, FileText, Activity, Camera, Database, HardDrive, AlertTriangle, ShieldAlert, ShieldCheck, Mail } from 'lucide-react'
+import { toDataURL } from 'qrcode'
+
+// Where a phone that scans the panel's QR lands. `ref` tags the lead source.
+const ASSESSMENT_URL = 'https://opennvr.org/contact?ref=nvr-889'
 import { apiService } from '../lib/apiService'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
@@ -67,6 +71,21 @@ interface AccessAudit {
   days: number
 }
 
+interface SecurityFlag { code: string; severity: 'high' | 'medium' | 'low'; label: string }
+interface SecurityCameraRow {
+  id: number; name: string; ip: string; manufacturer: string; model: string
+  covered: { parent: string; kind: string } | null
+  flags: SecurityFlag[]
+}
+interface SecurityCheck {
+  posture: 'ok' | 'attention' | 'covered_vendor'
+  covered_vendor_found: boolean
+  summary: { cameras: number; covered_vendor: number; internet_exposed: number; plaintext_stream: number; weak_credentials: number }
+  cameras: SecurityCameraRow[]
+  note: string
+  generated_at?: string
+}
+
 function Badge({ children, variant = 'neutral' }: { children: React.ReactNode; variant?: 'success' | 'warning' | 'destructive' | 'neutral' | 'info' }) {
   const styles = {
     success: 'bg-green-900/50 text-green-400',
@@ -111,10 +130,176 @@ function KpiCard({ icon, label, value, tone = 'neutral' }: { icon: React.ReactNo
   )
 }
 
+function SecuritySection({ data }: { data: SecurityCheck | null }) {
+  // QR is rendered locally (no network) — encodes the assessment URL so an
+  // operator on an offline box can scan it with their (connected) phone.
+  const [qrUrl, setQrUrl] = useState<string>('')
+  useEffect(() => {
+    let alive = true
+    toDataURL(ASSESSMENT_URL, { width: 160, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      .then((u) => { if (alive) setQrUrl(u) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [])
+  if (!data) return null
+  const covered = data.covered_vendor_found
+  const s = data.summary
+  const flagged = data.cameras.filter((c) => c.flags.length > 0)
+  const sevVariant = (sev: string) =>
+    sev === 'high' ? 'destructive' : sev === 'medium' ? 'warning' : 'neutral'
+  const stats: [string, number, string][] = [
+    ['Covered-vendor', s.covered_vendor, s.covered_vendor ? 'text-red-400' : 'text-[var(--text)]'],
+    ['Internet-exposed', s.internet_exposed, s.internet_exposed ? 'text-red-400' : 'text-[var(--text)]'],
+    ['Plaintext stream', s.plaintext_stream, s.plaintext_stream ? 'text-yellow-400' : 'text-[var(--text)]'],
+    ['Default username', s.weak_credentials, s.weak_credentials ? 'text-yellow-400' : 'text-[var(--text)]'],
+  ]
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            {covered ? (
+              <ShieldAlert size={18} className="text-red-400" />
+            ) : data.posture === 'attention' ? (
+              <ShieldAlert size={18} className="text-yellow-400" />
+            ) : (
+              <ShieldCheck size={18} className="text-green-400" />
+            )}
+            <div>
+              <CardTitle>Security &amp; §889 Compliance</CardTitle>
+              <div className="text-[11px] text-[var(--text-dim)] mt-0.5">
+                Instant self-check · not an official §889 attestation
+              </div>
+            </div>
+          </div>
+          <Badge variant={covered ? 'destructive' : data.posture === 'attention' ? 'warning' : 'success'}>
+            {covered ? 'Covered vendor found' : data.posture === 'attention' ? 'Needs attention' : 'No issues found'}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="mb-4 text-[11px] leading-relaxed text-[var(--text-dim)]">
+          A fast, automated snapshot from the cameras OpenNVR already manages — private (nothing leaves this box).
+          It surfaces the <span className="text-[var(--text)]">obvious</span> covered-vendor and configuration risks.
+          It is <span className="text-[var(--text)]">not</span> an official §889 attestation — the full OpenNVR assessment below is.
+        </div>
+        {covered && (
+          <div className="mb-4 rounded border border-red-500/50 bg-red-900/20 p-4">
+            <div className="text-sm font-medium text-red-300 mb-1">
+              NDAA §889 covered-vendor cameras detected ({s.covered_vendor}).
+            </div>
+            <p className="text-xs text-[var(--text-dim)] mb-3">
+              Running federal or state contracts? Covered equipment (Hikvision/Dahua and their
+              affiliate brands) may require rip-and-replace and a signed §889 attestation.
+            </p>
+            <div className="text-xs text-[var(--text-dim)] mb-2">
+              Get your official §889 assessment &amp; signed attestation — OpenNVR is offline-first, so reach us directly:
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              {qrUrl && (
+                <div className="shrink-0 text-center">
+                  <img
+                    src={qrUrl}
+                    alt="Scan to reach OpenNVR about a §889 assessment"
+                    width={92}
+                    height={92}
+                    className="rounded bg-white p-1"
+                  />
+                  <div className="mt-1 text-[10px] text-[var(--text-dim)]">Scan from your phone</div>
+                </div>
+              )}
+              <div className="flex flex-col gap-1.5">
+                <a
+                  href="mailto:contact@cryptovoip.in?subject=OpenNVR%20%C2%A7889%20assessment%20request"
+                  className="inline-flex w-fit items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
+                >
+                  <Mail size={14} /> contact@cryptovoip.in
+                </a>
+                <span className="text-xs text-[var(--text-dim)]">
+                  or, from a connected device, visit{' '}
+                  <span className="text-[var(--text)]">opennvr.org/contact</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {stats.map(([label, val, cls]) => (
+            <div key={label} className="rounded border border-neutral-800 bg-[var(--panel-2)] p-3">
+              <div className={`text-xl font-semibold ${cls}`}>{val}</div>
+              <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {flagged.length > 0 ? (
+          <div className="space-y-2">
+            {flagged.map((c) => (
+              <div
+                key={c.id}
+                className="flex items-start justify-between gap-3 rounded border border-neutral-800 bg-[var(--panel-2)] p-2.5"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm text-[var(--text)]">
+                    {c.name} <span className="text-[var(--text-dim)]">· {c.ip}</span>
+                  </div>
+                  <div className="text-xs text-[var(--text-dim)]">
+                    {[c.manufacturer, c.model].filter(Boolean).join(' ') || 'unidentified'}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-1">
+                  {c.flags.map((f, i) => (
+                    <Badge key={i} variant={sevVariant(f.severity)}>{f.label}</Badge>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-green-400">
+            No covered-vendor or high-risk cameras found in your inventory.
+          </div>
+        )}
+
+        <div className="mt-4 rounded border border-cyan-500/30 bg-[var(--panel-2)] p-3.5">
+          <div className="text-sm font-semibold text-[var(--text)]">The full OpenNVR §889 Security Assessment</div>
+          <div className="mt-0.5 mb-2.5 text-xs text-[var(--text-dim)]">
+            A hands-on engagement led by our security team — not a self-serve scan. We assess every camera on
+            your network, meet with your people, and deliver a signed report your contracting officer accepts.
+          </div>
+          <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2 text-xs text-[var(--text-dim)]">
+            {[
+              'A dedicated OpenNVR security SPOC — your single point of contact from kickoff to attestation',
+              'Live working sessions with our expert team — findings walkthrough, remediation planning & Q&A',
+              'Our deep automated Scout scan — 40+ checks across 12 categories, on every device',
+              'Forensic OEM-rebrand detection — unmasks Hikvision/Dahua hidden behind other brands',
+              'Live CVE & CISA-KEV threat intelligence on each device',
+              'Active security testing — encryption, stream auth, network exposure & more',
+              'A signed, audit-ready §889 attestation (PDF) auditors accept',
+              'Continuous monitoring, drift alerts & re-attestation each cycle',
+              'An expert remediation roadmap to a compliant, sovereign estate',
+            ].map((t) => (
+              <li key={t} className="flex gap-1.5">
+                <span className="text-cyan-400">+</span>
+                <span>{t}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-2.5 text-xs text-cyan-300">
+            …and much more — a defensible compliance package, not just a scan.
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function Compliance() {
   const [summary, setSummary] = useState<ComplianceSummary | null>(null)
   const [coverage, setCoverage] = useState<RecordingCoverage | null>(null)
   const [accessAudit, setAccessAudit] = useState<AccessAudit | null>(null)
+  const [securityCheck, setSecurityCheck] = useState<SecurityCheck | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [coverageDays, setCoverageDays] = useState(30)
@@ -134,6 +319,14 @@ export function Compliance() {
       setSummary(summaryRes.data)
       setCoverage(coverageRes.data)
       setAccessAudit(auditRes.data)
+      // Lite §889/security check — independent so an older server (no endpoint)
+      // never blanks the rest of the page.
+      try {
+        const scRes = await apiService.getSecurityCheck()
+        setSecurityCheck(scRes.data)
+      } catch {
+        setSecurityCheck(null)
+      }
     } catch (error: any) {
       console.error('Error fetching compliance data:', error)
       setError(error?.response?.data?.detail || error?.message || 'Failed to load compliance data')
@@ -212,6 +405,9 @@ export function Compliance() {
           <strong>Error:</strong> {error}
         </div>
       )}
+
+      {/* Security & §889 lite check */}
+      <SecuritySection data={securityCheck} />
 
       {/* KPI Cards */}
       {summary ? (

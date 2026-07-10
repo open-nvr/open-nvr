@@ -20,6 +20,7 @@ import { api } from '../lib/api'
 
 export const complianceService = {
   getComplianceSummary: () => api.get('/api/v1/compliance/summary'),
+  getSecurityCheck: () => api.get('/api/v1/compliance/security-check'),
   getRecordingCoverage: (params?: any) =>
     api.get('/api/v1/compliance/recording-coverage', { params }),
   getAccessAudit: (params?: any) =>
