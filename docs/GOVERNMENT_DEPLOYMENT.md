@@ -144,7 +144,7 @@ between buying a surveillance product and operating a surveillance
 
 ## What it costs
 
-The software is AGPLv3 — no per-camera licence fees, no per-seat fees, no cloud subscription. The hardware is commodity x86, anywhere from Raspberry Pi-class up to enterprise servers, so existing equipment is typically reusable. Storage scales linearly with the retention you configure: 1080p H.264 at 24×7 is roughly 25 GB per camera per week, much less with motion-triggered recording. Commercial support and indemnification are available through **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)** and cover deployment assistance, custom-adapter authoring, compliance evidence packs, and SLA-backed incident response for regulated environments.
+The software is AGPLv3 — no per-camera licence fees, no per-seat fees, no cloud subscription. The hardware is commodity x86, anywhere from Raspberry Pi-class up to enterprise servers, so existing equipment is typically reusable. Storage scales linearly with the retention you configure: 1080p H.264 at 24×7 is roughly 25 GB per camera per week, much less with motion-triggered recording. Commercial support and indemnification are available through **[contact@opennvr.org](mailto:contact@opennvr.org)** and cover deployment assistance, custom-adapter authoring, compliance evidence packs, and SLA-backed incident response for regulated environments.
 
 ## What it doesn't do
 
@@ -175,4 +175,4 @@ with the SDK + template scaffold.
 
 ## Contact
 
-Technical questions go in [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions). Security disclosures go through [private GHSA reporting](https://github.com/open-nvr/open-nvr/security/advisories) or `security@cryptovoip.in`. For procurement, commercial licensing, and SLA-backed support, write to **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**.
+Technical questions go in [GitHub Discussions](https://github.com/open-nvr/open-nvr/discussions). Security disclosures go through [private GHSA reporting](https://github.com/open-nvr/open-nvr/security/advisories) or `contact@opennvr.org`. For procurement, commercial licensing, and SLA-backed support, write to **[contact@opennvr.org](mailto:contact@opennvr.org)**.

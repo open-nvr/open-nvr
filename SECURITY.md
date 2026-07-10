@@ -10,7 +10,7 @@ The `0.1.x` line is supported. Earlier development snapshots are not — if you'
 
 **Please do not open a public GitHub issue for sensitive security vulnerabilities.** Public issues are immediately indexed; we want a chance to ship a fix before the world sees the report.
 
-The preferred channel is GitHub's [private vulnerability reporting](https://github.com/open-nvr/open-nvr/security/advisories/new) on this repository — it gives us a private thread, an audit trail, and a way to credit you in the eventual advisory. If that channel isn't workable for you, email **security@cryptovoip.in** with the subject `OpenNVR security report` and as much detail as you can share without exposing your own systems.
+The preferred channel is GitHub's [private vulnerability reporting](https://github.com/open-nvr/open-nvr/security/advisories/new) on this repository — it gives us a private thread, an audit trail, and a way to credit you in the eventual advisory. If that channel isn't workable for you, email **contact@opennvr.org** with the subject `OpenNVR security report` and as much detail as you can share without exposing your own systems.
 
 A useful report identifies the OpenNVR version (`git describe` output or release tag), the deployment shape (standard stack compose, host-mode Linux, bare-metal dev), the minimum steps that reproduce the issue, and the impact an attacker has once it triggers. A suggested fix or mitigation is welcome if you have one, but not required.
 

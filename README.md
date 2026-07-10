@@ -307,7 +307,7 @@ Eleven of the thirteen shipped examples are listed above; [`inference-listener`]
 
 Bugs go in [Issues](https://github.com/open-nvr/open-nvr/issues), design questions in [Discussions](https://github.com/open-nvr/open-nvr/discussions), security reports via [private GHSA advisory](https://github.com/open-nvr/open-nvr/security/advisories/new). PR flow is in [`CONTRIBUTING.md`](CONTRIBUTING.md); the [roadmap](docs/ROADMAP.md) names where help is wanted next.
 
-Commercial deployments — deployment assistance, NDA adapter authoring, compliance evidence packs, SLA-backed support — [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
+Commercial deployments — deployment assistance, NDA adapter authoring, compliance evidence packs, SLA-backed support — [contact@opennvr.org](mailto:contact@opennvr.org).
 
 ## Documentation
 

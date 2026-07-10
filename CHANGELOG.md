@@ -180,7 +180,7 @@ test suite designed to be read in five minutes.
 - [`docs/SUPPORT.md`](docs/SUPPORT.md) — community support channels and
   commercial-support tiers (deployment, custom adapters, compliance
   evidence packs, SLA, sponsored development) via
-  [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
+  [contact@opennvr.org](mailto:contact@opennvr.org).
 - [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) — bare-metal developer setup.
 - [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md) — Docker-only path.
 - Per-example `README.md` files documenting each reference application.
