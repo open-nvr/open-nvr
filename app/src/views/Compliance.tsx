@@ -210,10 +210,10 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
               )}
               <div className="flex flex-col gap-1.5">
                 <a
-                  href="mailto:contact@cryptovoip.in?subject=OpenNVR%20%C2%A7889%20assessment%20request"
+                  href="mailto:contact@opennvr.org?subject=OpenNVR%20%C2%A7889%20assessment%20request"
                   className="inline-flex w-fit items-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500"
                 >
-                  <Mail size={14} /> contact@cryptovoip.in
+                  <Mail size={14} /> contact@opennvr.org
                 </a>
                 <span className="text-xs text-[var(--text-dim)]">
                   or, from a connected device, visit{' '}
