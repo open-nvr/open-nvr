@@ -58,6 +58,12 @@ from kai_c.stream_proxy import (
 
 logger = logging.getLogger("kai-c")
 
+# The OpenNVR release this build is cut from — KAI-C ships in the same image and
+# on the same tag as the core server, so it reports the same version. This is the
+# *release* version, not the AI Adapter Contract version (that's v1, negotiated
+# per adapter via /capabilities).
+__version__ = "0.1.0"
+
 
 # ============================================================
 # AI sovereignty policy (V-022)
@@ -383,7 +389,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="KAI-C (Kavach AI Connector)",
     description="Middleware connector between OpenNVR Kavach and AI Adapters",
-    version="2.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -516,7 +522,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "KAI-C (Kavach AI Connector)",
-        "version": "1.0.0",
+        "version": __version__,
         "status": "running",
         "configured_adapters": list(ADAPTER_REGISTRY.keys())
     }
@@ -898,7 +904,7 @@ async def get_all_capabilities():
     """
     all_capabilities = {
         "kai_c": {
-            "version": "1.0.0",
+            "version": __version__,
             "service": "kai-c"
         },
         "adapters": {}

@@ -6,7 +6,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-07-10
+## [0.1.0] — 2026-07-14
 
 First public release. The architecture has been redesigned around three
 principles: secure by default, sovereign by design, and pluggable by contract.
