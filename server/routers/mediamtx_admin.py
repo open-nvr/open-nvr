@@ -127,11 +127,8 @@ async def mtx_paths_patch(
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    # V-003 (M1c-fu-sr-v2 P-1): patch_path is the 5th MediaMTX entry
-    # path. If the payload would change the camera's ingest source URL,
-    # the per-camera transport_security policy applies — even for the
-    # superuser using this admin/debug surface. Look up the policy and
-    # thread it through.
+    # If the payload changes the camera's ingest source URL, the per-camera
+    # transport policy applies here too (admin/debug surface). See V-003.
     from models import CameraConfig
     from services.transport_probe_service import TransportPolicyViolation
 
@@ -177,16 +174,21 @@ async def push_rtsp_stream(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
-    """Push RTSP stream to MediaMTX."""
+    """Push RTSP stream to MediaMTX.
+
+    NVR policy: recording is mandatory, so ``enable_recording`` is forced on
+    here regardless of the query param — a `curl` cannot provision a camera
+    without recording. Enforced at the HTTP entry point (not in the shared
+    service, which stays policy-neutral and DB-free for unit tests).
+    """
+    enable_recording = True  # NVR: recording can't be opted out of
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    # V-003 (M1c-followup-selfrev): respect the camera's stored
-    # transport_security policy even on this admin/debug surface so
-    # a privileged user can't accidentally re-introduce plaintext for
-    # a camera marked rtsps_required. cfg may be None for an
-    # un-provisioned camera; in that case pass None so the gate skips.
+    # Respect the camera's stored transport policy even on this admin/debug
+    # surface, so a privileged user can't re-introduce plaintext for an
+    # rtsps_required camera. cfg=None (un-provisioned) skips the gate. See V-003.
     from models import CameraConfig
     from services.transport_probe_service import TransportPolicyViolation
 

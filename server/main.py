@@ -98,36 +98,25 @@ async def lifespan(app: FastAPI):
     setup_logging()
     main_logger.info("Logging system initialized")
 
-    # V-009 + V-022 (M1a): record the active offline-first policy in the
-    # audit log so compliance reports can show which posture was in effect
-    # for any given time window. Done before DB init so the entry lands
-    # even if the database is later unreachable.
+    # Record the offline-first posture in the audit log before DB init, so it's
+    # captured even if the database is unreachable later. See V-009 / V-022.
     try:
         from core.policy import audit_boot_posture, current_posture
 
         posture = current_posture()
-        # ISSUE-4: allow_remote_mediamtx was retired — V-015 is absolute,
-        # nothing to log.
         main_logger.info(
             f"Boot policy: deployment_mode={posture['deployment_mode']} "
             f"ai_sovereignty={posture['ai_sovereignty']}"
         )
         audit_boot_posture()
-        # ISSUE-4 peer review M-1: an operator upgrading from a release
-        # that supported ALLOW_REMOTE_MEDIAMTX would otherwise have their
-        # flag silently ignored (Pydantic extra="ignore"). Surface it
-        # loudly at boot so they know the bypass is gone and where to
-        # look — V-015 is now absolute, MEDIAMTX_EXTERNAL_* is the
-        # cross-trust-boundary path.
+        # Warn loudly if the retired ALLOW_REMOTE_MEDIAMTX env var is still set
+        # (Pydantic would otherwise ignore it silently). See V-015.
         if os.environ.get("ALLOW_REMOTE_MEDIAMTX"):
             main_logger.warning(
-                "ALLOW_REMOTE_MEDIAMTX is set in the environment but has "
-                "been retired (ISSUE-4). V-015 is now absolute and accepts "
-                "loopback + RFC1918 + IPv6 ULA + link-local; there is no "
-                "longer an opt-out. If you were running MediaMTX behind a "
-                "TLS reverse proxy on the uplink, move the public URL to "
-                "MEDIAMTX_EXTERNAL_* (see docs/SECURITY_ARCHITECTURE.md "
-                "§2.2) and remove this env var to silence this warning."
+                "ALLOW_REMOTE_MEDIAMTX is set but has been retired; there is no "
+                "longer an opt-out. If MediaMTX runs behind a TLS reverse proxy, "
+                "move the public URL to MEDIAMTX_EXTERNAL_* (see "
+                "docs/SECURITY_ARCHITECTURE.md §2.2) and remove this env var."
             )
     except Exception as exc:
         main_logger.error(f"Failed to record boot posture: {exc}", exc_info=True)
@@ -165,11 +154,8 @@ async def lifespan(app: FastAPI):
                     )
                     admin_role = db.query(_Role).filter(_Role.name == "admin").first()
                     if admin_role:
-                        # Re-seed path: create admin with an unguessable
-                        # placeholder hash (M0 followup M-4 — never the
-                        # literal "__UNSET__") and force first-time-setup.
-                        # The operator activates the account via the
-                        # token-gated /auth/first-time-setup flow.
+                        # Re-seed: create admin with an unguessable placeholder
+                        # hash and force the token-gated first-time-setup flow.
                         import secrets as _secrets
                         admin_user = _User(
                             username=settings.default_admin_username,
@@ -196,13 +182,8 @@ async def lifespan(app: FastAPI):
                         )
                         create_initial_data()
 
-            # Upgrade-path permission seeding: permissions introduced in
-            # later releases (e.g. ``apps.install``) never materialize on
-            # deployments whose Permission table predates them — the full
-            # seed above only runs on an EMPTY table. Idempotently ensure
-            # they exist so operators can grant them from the roles UI.
-            # Fail-closed either way: a missing row just means nobody but
-            # admin (full_access/superuser) can pass the check.
+            # Idempotently seed permissions added in later releases (e.g.
+            # apps.install); the full seed above only runs on an empty table.
             try:
                 from models import Permission as _Permission2
 
@@ -228,13 +209,9 @@ async def lifespan(app: FastAPI):
                     "Upgrade-path permission seeding failed", exc_info=True
                 )
 
-            # M0 followup C-1: if any user is still in password_set=False
-            # state after seeding, arm a one-time first-time-setup token and
-            # print it to stdout. The token gates /auth/first-time-setup so
-            # an attacker on the management network cannot race the operator
-            # to claim the admin account. Re-arming happens on every startup
-            # while a pending user exists; restarting the server is the
-            # supported recovery path for an operator who missed the print.
+            # If any user still needs first-time setup, arm a one-time token and
+            # print it to stdout; it gates /auth/first-time-setup so nobody can
+            # race the operator to claim the admin account. Re-armed each boot.
             try:
                 from services.first_time_setup_service import maybe_arm
 
@@ -583,14 +560,25 @@ if os.path.exists(FRONTEND_DIST):
         # 1. API routes are already handled above (FastAPI checks them first).
 
         # 2. Check if a physical file exists at the requested path in build/dist
-        #    (This handles /logo.png, /manifest.json, /favicon.ico)
-        full_path = os.path.join(FRONTEND_DIST, file_path)
-        if os.path.isfile(full_path):
-            return FileResponse(full_path)
+        #    (This handles /logo.png, /manifest.json, /favicon.ico).
+        #
+        #    SECURITY: os.path.join happily escapes FRONTEND_DIST when
+        #    file_path contains ``..`` segments or is absolute, and FileResponse
+        #    would then serve arbitrary files (.env, JWT signing keys, DB creds)
+        #    to an unauthenticated client. Resolve the path (collapsing ``..``
+        #    and symlinks) and require it to stay inside FRONTEND_DIST before
+        #    serving; anything that escapes falls through to the SPA index.
+        dist_root = os.path.realpath(FRONTEND_DIST)
+        requested = os.path.realpath(os.path.join(dist_root, file_path))
+        if os.path.isfile(requested) and (
+            requested == dist_root or requested.startswith(dist_root + os.sep)
+        ):
+            return FileResponse(requested)
 
-        # 3. If no file found, and it's not an API route, assume it's a client-side route
+        # 3. If no file found (or the path escaped the build dir), and it's not
+        #    an API route, assume it's a client-side route
         #    (e.g. /dashboard, /login) -> Serve index.html
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return FileResponse(os.path.join(dist_root, "index.html"))
 
 else:
     main_logger.warning(

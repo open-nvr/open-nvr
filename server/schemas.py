@@ -302,18 +302,15 @@ class CameraConfigResponse(CameraConfigBase):
         pattern="^(supported|not_supported|inconclusive|not_probed)$",
     )
     transport_security_probed_at: datetime | None = None
-    # M1c-selfrev H-2: whether the policy reflects an explicit operator
-    # choice. The UI can use this to render "policy: operator-set" vs.
-    # "policy: probe-driven" so operators know whether a re-probe will
-    # change anything.
+    # Whether the policy is an explicit operator choice vs probe-driven, so the
+    # UI can show "operator-set" vs "probe-driven". See V-003.
     transport_security_operator_set: bool = False
 
     class Config:
         from_attributes = True
 
 
-# M1c-selfrev H-2: dedicated request body for the
-# PUT /api/v1/cameras/{id}/transport-security endpoint.
+# Request body for PUT /api/v1/cameras/{id}/transport-security.
 class TransportSecurityUpdate(BaseModel):
     """Explicit operator override for a camera's transport policy."""
 
@@ -506,11 +503,8 @@ class UserResponse(UserBase):
 class FirstTimeSetupRequest(BaseModel):
     username: str
     password: str = Field(..., min_length=8)
-    # M0 followup C-1: the setup token is minted at server startup when a
-    # user with password_set=False exists, and printed to stdout + audit log
-    # exactly once. The endpoint refuses without a matching token so an
-    # attacker on the management network cannot race the operator to claim
-    # the admin account.
+    # One-time token minted at startup; required so nobody can race the
+    # operator to claim the admin account. See V-001.
     setup_token: str = Field(..., min_length=8)
 
 

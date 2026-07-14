@@ -21,14 +21,9 @@ dependencies = [
     # (opennvr.inference.* subjects). Best-effort publishing on the
     # /infer + /infer/stream paths; NATS down doesn't break inference.
     "nats-py>=2.6",
-    # ISSUE-24: httpx is a RUNTIME dependency — kai_c/registry.py
-    # imports it at module top-level (line 46) and constructs
-    # ``httpx.AsyncClient(trust_env=False)`` at runtime for adapter
-    # capabilities + health probing (registry.py:143, 150, 187, 198).
-    # Previously misplaced in [dependency-groups].dev with a comment
-    # claiming "no httpx in the live path" — that was aspirational,
-    # not accurate. Dockerfile's ``uv sync --no-dev`` correctly skipped
-    # dev deps, which made kai-c crash on first import in production.
+    # RUNTIME dependency: registry.py imports httpx at module top-level and
+    # uses it for adapter capabilities + health probing. Must NOT be a dev-only
+    # dep (uv sync --no-dev would drop it and crash kai-c on import).
     "httpx>=0.27,<1.0",
 ]
 

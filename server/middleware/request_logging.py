@@ -26,6 +26,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from core.logging_config import api_logger
+from utils.url_redaction import redact_query_params, redact_url_query
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
@@ -55,9 +56,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             message=f"{request.method} {request.url.path}",
             extra_data={
                 "method": request.method,
-                "url": str(request.url),
+                # Redact secrets carried in the URL / query string (camera
+                # creds, stream tokens, MFA codes) before they hit the log.
+                "url": redact_url_query(str(request.url)),
                 "path": request.url.path,
-                "query_params": dict(request.query_params),
+                "query_params": redact_query_params(request.query_params),
                 "headers": sanitized_headers,
                 "client_host": client_host,
                 "user_agent": user_agent,
@@ -80,7 +83,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 message=f"{request.method} {request.url.path} - {response.status_code}",
                 extra_data={
                     "method": request.method,
-                    "url": str(request.url),
+                    "url": redact_url_query(str(request.url)),
                     "path": request.url.path,
                     "status_code": response.status_code,
                     "process_time_seconds": round(process_time, 3),
@@ -105,7 +108,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 f"Request failed: {request.method} {request.url.path}",
                 extra={
                     "method": request.method,
-                    "url": str(request.url),
+                    "url": redact_url_query(str(request.url)),
                     "path": request.url.path,
                     "process_time_seconds": round(process_time, 3),
                     "exception_type": type(exc).__name__,

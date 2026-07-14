@@ -43,6 +43,10 @@ export const recordingService = {
     return api.get('/api/v1/recordings/playback/url', { params: { path, start, duration } })
   },
   getTodaySegments: (cameraId: number) => api.get(`/api/v1/recordings/today/${cameraId}`),
+  // Raw per-clip segments for a camera on a given day (YYYY-MM-DD). Powers the
+  // DVR playback timeline (footage/gap blocks + wall-clock seeking).
+  getSegments: (cameraId: number, date?: string) =>
+    api.get(`/api/v1/recordings/segments/${cameraId}`, { params: date ? { date } : {} }),
 
   // HLS VOD
   createHlsPlaybackSession: (params: { camera_id: number; start: string; end: string }) => {

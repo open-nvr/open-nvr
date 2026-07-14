@@ -1199,7 +1199,7 @@ export function AddCameraDialog({
       // Auto-provision to MediaMTX
       if (newCameraId) {
         try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: false })
+          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
         } catch (e) {
           console.warn('Auto-provision failed, camera added but not streaming:', e)
         }
@@ -1241,7 +1241,7 @@ export function AddCameraDialog({
       // Auto-provision to MediaMTX
       if (newCameraId) {
         try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: false })
+          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
         } catch (e) {
           console.warn('Auto-provision failed, camera added but not streaming:', e)
         }

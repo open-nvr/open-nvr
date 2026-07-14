@@ -215,10 +215,8 @@ async def get_stream_target(
 
 @router.post(
     "/targets",
-    # V-009 (M1a): cloud streaming pushes recordings to external RTMP/RTMPS/
-    # SRT endpoints. Creating a target spawns an FFmpeg subprocess that
-    # opens an outbound connection, so this is exactly the cloud-egress
-    # surface deployment_mode=offline must refuse.
+    # Creating a target spawns an FFmpeg subprocess with an outbound connection
+    # to an external RTMP/SRT endpoint — refused in offline mode. See V-009.
     dependencies=[Depends(require_outbound_allowed)],
 )
 async def create_or_update_stream_target(
@@ -337,7 +335,7 @@ async def delete_stream_target(
 
 @router.post(
     "/targets/{target_id}/start",
-    # V-009 (M1a): launching a stream opens an outbound connection.
+    # Launching a stream opens an outbound connection. See V-009.
     dependencies=[Depends(require_outbound_allowed)],
 )
 async def start_stream(

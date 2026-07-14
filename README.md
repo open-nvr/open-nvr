@@ -189,7 +189,7 @@ cp .env.example .env
 
 Skipping `./start.sh up` and using bare `docker compose up -d` works too, but you'll lose: NIC topology auto-detect, the security posture banner, the one-time setup token surfacing. Grep the logs manually if you go that route.
 
-**Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options. [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md#compose-file-reference) explains every compose file in the repo and when each one applies.
+**Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options, and a [compose-file reference](DOCKER_QUICKSTART.md#compose-file-reference) explaining every compose file and when each applies.
 
 ## Talk to your cameras
 

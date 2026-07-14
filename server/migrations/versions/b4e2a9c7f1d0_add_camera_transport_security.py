@@ -58,14 +58,8 @@ def upgrade() -> None:
             ),
         ),
     )
-    # M1c-selfrev H-2: track whether `transport_security` was last set
-    # by an explicit operator action (True) or by the probe-driven
-    # default (False). The /probe-transport endpoint refuses to
-    # overwrite an operator-set value unless ?reset_policy=true.
-    # Without this flag we couldn't distinguish a probe-driven
-    # "rtsps_preferred" from an operator who deliberately chose
-    # "rtsps_preferred" — they're the same value but mean different
-    # things about the policy lifecycle.
+    # Track whether transport_security was last set by an explicit operator
+    # action (True) or by the probe-driven default (False). See V-003.
     op.add_column(
         "camera_configs",
         sa.Column(

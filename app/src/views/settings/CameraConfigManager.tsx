@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '../../lib/apiService'
+import { useSnackbar } from '../../components/Snackbar'
 
 type Camera = {
   id: number
@@ -43,9 +44,11 @@ type CameraConfig = {
 
 export function CameraConfigManager() {
   const navigate = useNavigate()
+  const { showError } = useSnackbar()
   const [cameras, setCameras] = useState<Camera[]>([])
   const [selectedCamId, setSelectedCamId] = useState<number | ''>('')
-  const [cfg, setCfg] = useState<Partial<CameraConfig>>({ stream_protocol: 'rtsp', recording_enabled: false })
+  // Recording is mandatory on an NVR — always on, never operator-toggled.
+  const [cfg, setCfg] = useState<Partial<CameraConfig>>({ stream_protocol: 'rtsp', recording_enabled: true })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -83,17 +86,18 @@ export function CameraConfigManager() {
       if (!data.source_url && selectedCamera?.rtsp_url) {
         data.source_url = selectedCamera.rtsp_url
       }
-      
-      setCfg(data)
+
+      // Recording is always on for an NVR — never surface it as off.
+      setCfg({ ...data, recording_enabled: true })
     } catch (e: any) {
       if (e?.status === 404) {
         // config not found: reset to defaults but keep camera_id
         // Auto-populate source URL if camera has RTSP URL
         const selectedCamera = cameras.find(c => c.id === camId)
-        setCfg({ 
-          camera_id: camId, 
-          stream_protocol: 'rtsp', 
-          recording_enabled: false,
+        setCfg({
+          camera_id: camId,
+          stream_protocol: 'rtsp',
+          recording_enabled: true,
           source_url: selectedCamera?.rtsp_url || null
         })
       } else {
@@ -120,7 +124,7 @@ export function CameraConfigManager() {
         await apiService.updateCameraConfig(selectedCamId, {
           stream_protocol: cfg.stream_protocol,
           source_url: cfg.source_url || null,
-          recording_enabled: !!cfg.recording_enabled,
+          recording_enabled: true, // NVR: recording is mandatory, never disabled here
           recording_path: cfg.recording_path || null,
           webrtc_publisher: !!cfg.webrtc_publisher,
           rtmp_publisher: !!cfg.rtmp_publisher,
@@ -134,7 +138,7 @@ export function CameraConfigManager() {
           camera_id: selectedCamId,
           stream_protocol: (cfg.stream_protocol as any) || 'rtsp',
           source_url: cfg.source_url || null,
-          recording_enabled: !!cfg.recording_enabled,
+          recording_enabled: true, // NVR: recording is mandatory, never disabled here
           recording_path: cfg.recording_path || null,
           webrtc_publisher: !!cfg.webrtc_publisher,
           rtmp_publisher: !!cfg.rtmp_publisher,
@@ -259,11 +263,16 @@ export function CameraConfigManager() {
                 <h4 className="text-[var(--text-dim)] font-medium mb-2">Recording Settings</h4>
                 <div className="grid grid-cols-2 gap-3">
                   <label className="flex items-center gap-2">
-                    <input 
-                      type="checkbox" 
-                      className="accent-[var(--accent)]" 
-                      checked={!!cfg.recording_enabled} 
-                      onChange={(e) => setCfg({ ...cfg, recording_enabled: e.target.checked })} 
+                    <input
+                      type="checkbox"
+                      className="accent-[var(--accent)]"
+                      checked={true}
+                      onChange={(e) => {
+                        // NVR: recording can't be turned off from the UI.
+                        if (!e.target.checked) {
+                          showError('Restricted action. Contact support.')
+                        }
+                      }}
                     />
                     <span>Enable Recording</span>
                   </label>

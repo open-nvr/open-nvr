@@ -30,6 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AnyHttpUrl, BaseModel, Field
 from typing import Dict, Any, Optional
+import hmac
 import ipaddress
 import logging
 import socket
@@ -59,7 +60,7 @@ logger = logging.getLogger("kai-c")
 
 
 # ============================================================
-# V-022 (M1a): AI sovereignty policy
+# AI sovereignty policy (V-022)
 # ============================================================
 # Mirrors the server-side `settings.ai_sovereignty` field. KAI-C cannot
 # import from `core.config` (it is a separate sub-project that runs in its
@@ -97,29 +98,37 @@ if AI_SOVEREIGNTY not in {"local_only", "federated", "cloud_allowed"}:
 # future refactor that calls lifespan directly.
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
+# When INTERNAL_API_KEY is unset, the internal surface used to be fully
+# anonymous — a silent, fail-OPEN default. That insecure mode is now explicit
+# opt-in: set KAI_C_ALLOW_ANONYMOUS=true only for a local single-host dev box
+# with no key. Otherwise an empty key fails CLOSED (all internal endpoints 401).
+KAI_C_ALLOW_ANONYMOUS = os.getenv("KAI_C_ALLOW_ANONYMOUS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _internal_api_key_ok(supplied: Optional[str]) -> bool:
+    """Return True if a request bearing X-Internal-Api-Key ``supplied`` may
+    reach KAI-C's internal surface (v2 endpoints, /infer/cloud, the WS proxy).
+
+    * Key set   -> constant-time match required (no timing oracle, no silent
+      bypass when the key happens to be empty).
+    * Key empty + KAI_C_ALLOW_ANONYMOUS -> allowed (explicit local-dev opt-in).
+    * Key empty + no opt-in -> DENIED (fail closed).
+    """
+    if INTERNAL_API_KEY:
+        return bool(supplied) and hmac.compare_digest(supplied, INTERNAL_API_KEY)
+    return KAI_C_ALLOW_ANONYMOUS
+
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-# ISSUE-28: the V-022 sovereignty claim is "all AI inference happens on
-# this physical machine." In host-networking mode that's equivalent to
-# "loopback URLs only." In standard's bridge-networking mode, adapters are
-# reached via Docker service DNS (``http://yolov8-adapter:9002``) which
-# resolves to a Docker-bridge IP inside ``OPENNVR_DOCKER_SUBNET`` —
-# packets between bridge-network containers stay inside the host's
-# kernel networking stack and never reach the physical NIC, so they
-# are equally "on this machine" for sovereignty purposes.
-#
-# The validator therefore also accepts any host that resolves to an
-# address inside the configured Docker bridge subnet. The subnet is
-# operator-configurable via OPENNVR_DOCKER_SUBNET so non-standard
-# deployments (e.g. operators who overrode 172.28/16 to dodge a LAN
-# collision per ISSUE-6 v7) keep working without losing the sovereignty
-# guarantee.
-#
-# We INTENTIONALLY do not accept generic RFC1918 here — that would
-# allow ``adapter-vm.internal`` resolving to 192.168.1.50 on a peer
-# host to pass, which violates "all inference on THIS box." The
-# acceptance is bound to the operator's own Docker subnet only.
+# local_only accepts loopback + the operator's own Docker bridge subnet (bridge
+# traffic stays in-kernel, so it counts as "on this machine"), but not generic
+# RFC1918. See V-022 and DESIGN_NOTES: KAI-C sovereignty & the Docker bridge.
 _DOCKER_BRIDGE_SUBNET = os.getenv("OPENNVR_DOCKER_SUBNET", "172.28.0.0/16")
 
 
@@ -195,12 +204,9 @@ def _validate_adapters_match_sovereignty() -> None:
     ADAPTER_REGISTRY is defined so a mis-set env var is caught before
     the server accepts a single request.
 
-    ISSUE-28: "on this machine" includes loopback AND the operator's
-    own Docker bridge subnet (OPENNVR_DOCKER_SUBNET, default
-    172.28.0.0/16). Bridge-network traffic between containers stays
-    inside the kernel networking stack — equivalent to loopback for
-    sovereignty purposes. See ``_host_is_on_this_machine`` for the
-    full acceptance criteria.
+    "On this machine" includes loopback and the operator's Docker bridge
+    subnet — see ``_host_is_on_this_machine`` and DESIGN_NOTES: KAI-C
+    sovereignty & the Docker bridge.
     """
     if AI_SOVEREIGNTY != "local_only":
         return
@@ -284,6 +290,22 @@ async def lifespan(app: FastAPI):
     """
     global _registry, _nats_publisher
 
+    # Auth posture (finding #8): make the effective auth mode explicit in the
+    # logs so an operator is never silently running fail-open.
+    if INTERNAL_API_KEY:
+        logger.info("Internal API key auth ENABLED for the internal surface.")
+    elif KAI_C_ALLOW_ANONYMOUS:
+        logger.warning(
+            "INTERNAL_API_KEY is unset and KAI_C_ALLOW_ANONYMOUS is on: the "
+            "internal surface is ANONYMOUS. Local-dev only — never production."
+        )
+    else:
+        logger.warning(
+            "INTERNAL_API_KEY is unset: the internal surface fails CLOSED (all "
+            "calls 401). Set INTERNAL_API_KEY, or KAI_C_ALLOW_ANONYMOUS=true for "
+            "a local dev box."
+        )
+
     _registry = AdapterRegistry(
         sovereignty_mode=AI_SOVEREIGNTY,
         audit=_audit,
@@ -365,11 +387,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# CORS. KAI-C is an internal, server-to-server service: the OpenNVR backend
+# reaches it over loopback with X-Internal-Api-Key, and no browser calls it
+# directly (it has no host port and no nginx route). So cross-origin browser
+# access is CLOSED by default instead of the previous "*" + credentials (which
+# is spec-invalid anyway). Set KAI_C_CORS_ORIGINS=https://a,https://b to allow
+# specific origins if a browser ever needs direct access.
+_cors_origins = [
+    o.strip() for o in os.getenv("KAI_C_CORS_ORIGINS", "").split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -557,7 +587,7 @@ async def process_local_inference(request: dict):
     """
     Process local AI inference request through KAI-C.
 
-    Accepts TWO request shapes (ISSUE-73):
+    Accepts TWO request shapes:
 
       * contract-v1 (current backend default, OPENNVR_ADAPTER_CONTRACT=v1)::
 
@@ -599,9 +629,7 @@ async def process_local_inference(request: dict):
             # is effectively in adapter-contract shape already. Forward
             # every top-level key (``task`` + params) as an inference
             # parameter per the contract; drop only the structural
-            # ``input`` key if a caller sends a hybrid body. (ISSUE-73:
-            # this branch used not to exist, so v1 bodies hit the URI
-            # path below, found no URI, and 400'd as "frame not found".)
+            # ``input`` key if a caller sends a hybrid body.
             adapter_body = {k: v for k, v in req.items() if k != "input"}
             if not adapter_body.get("frame_b64"):
                 raise HTTPException(
@@ -729,11 +757,9 @@ async def process_cloud_inference(
 
     Flow: OpenNVR Backend → KAI-C → Cloud Provider API → KAI-C → OpenNVR Backend
     """
-    # V-022 (M1a): refuse the entire cloud-provider proxy path when the
-    # operator has set AI_SOVEREIGNTY=local_only. The server-side router
-    # already 403s its own /cloud-inference/* endpoints, but this is the
-    # defence-in-depth at the KAI-C side: a misconfigured or compromised
-    # caller cannot route to HuggingFace by hitting KAI-C directly.
+    # Defense-in-depth: refuse the cloud-provider proxy path in local_only mode
+    # so a misconfigured/compromised caller can't route to a vendor by hitting
+    # KAI-C directly (the server router already 403s its own routes). See V-022.
     if AI_SOVEREIGNTY == "local_only":
         raise HTTPException(
             status_code=403,
@@ -744,8 +770,9 @@ async def process_cloud_inference(
             ),
         )
 
-    # Validate internal API key
-    if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
+    # Validate internal API key (constant-time; an empty key fails closed
+    # unless KAI_C_ALLOW_ANONYMOUS is explicitly set).
+    if not _internal_api_key_ok(x_internal_api_key):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Invalid internal API key"
@@ -935,19 +962,19 @@ async def get_schemas(task: Optional[str] = None):
 
 
 def require_internal_api_key(x_internal_api_key: Optional[str] = Header(None)) -> None:
-    """Auth dependency for the v2 endpoints (peer-review SR-NEW-7).
+    """Auth dependency for the v2 endpoints.
 
-    Same dev-mode-bypass pattern as the legacy ``/infer/cloud`` endpoint:
-    if ``INTERNAL_API_KEY`` is empty (dev / single-host loopback
-    deployments) all calls pass. In production the operator sets the
-    env var and OpenNVR backend MUST send the matching
-    ``X-Internal-Api-Key`` header.
+    Delegates to ``_internal_api_key_ok``: with ``INTERNAL_API_KEY`` set a
+    constant-time header match is required; with it empty the call is denied
+    unless ``KAI_C_ALLOW_ANONYMOUS`` is explicitly set for local dev. (An empty
+    key used to fail OPEN — silently disabling auth for the whole surface; it
+    now fails closed.)
 
     All v2 endpoints depend on this so register/deregister/infer cannot
     be reached anonymously by an attacker who finds KAI-C's port open
     on a non-loopback interface.
     """
-    if INTERNAL_API_KEY and x_internal_api_key != INTERNAL_API_KEY:
+    if not _internal_api_key_ok(x_internal_api_key):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: missing or invalid X-Internal-Api-Key",
@@ -1362,14 +1389,13 @@ async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
     # Defensive: require both INTERNAL_API_KEY to be set AND the
     # supplied header to non-empty-match. (Peer review H3 — guards
     # against a future code path that sets INTERNAL_API_KEY=None.)
-    if INTERNAL_API_KEY:
-        supplied = websocket.headers.get("x-internal-api-key")
-        if not supplied or supplied != INTERNAL_API_KEY:
-            await websocket.close(
-                code=CLOSE_POLICY_REFUSED,
-                reason="unauthorized",
-            )
-            return
+    supplied = websocket.headers.get("x-internal-api-key")
+    if not _internal_api_key_ok(supplied):
+        await websocket.close(
+            code=CLOSE_POLICY_REFUSED,
+            reason="unauthorized",
+        )
+        return
 
     registry = get_registry()
     adapter = registry.get(adapter_name)

@@ -34,9 +34,9 @@ router = APIRouter(prefix="/system", tags=["system"])  # mounted at /api/v1
 
 @router.get("/posture")
 async def get_security_posture(current_user=Depends(get_current_active_user)):
-    """V-009 + V-022 (M1a): expose the active offline-first policy so the UI
-    can render a deployment-mode badge and the operator can confirm what
-    sovereignty profile is in effect.
+    """Expose the active offline-first policy so the UI can show a
+    deployment-mode badge and the operator can confirm the sovereignty profile.
+    See V-009 / V-022.
 
     Read-only and authenticated-user-scope (not just superuser) — operators
     monitoring the system should be able to see this without admin rights.

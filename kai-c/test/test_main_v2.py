@@ -86,6 +86,12 @@ def kaic_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ADAPTER_URL", "http://127.0.0.1:9100")
     monkeypatch.setenv("KAI_C_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("INTERNAL_API_KEY", "")
+    # The internal surface fails closed on an unset key (see c6d7b1f). These
+    # functional tests exercise endpoint behaviour, not auth, so run them as an
+    # authorised local-dev box via the explicit opt-in. Auth is covered on its
+    # own: test_v2_endpoints_require_internal_api_key_when_set (key set) and
+    # test_v2_endpoints_fail_closed_when_key_unset (key unset, no opt-in).
+    monkeypatch.setenv("KAI_C_ALLOW_ANONYMOUS", "true")
     return {"audit_path": tmp_path / "audit.jsonl"}
 
 
@@ -332,6 +338,41 @@ def test_v2_endpoints_require_internal_api_key_when_set(kaic_test_env, monkeypat
             headers={"X-Internal-Api-Key": "production-secret-token"},
         )
         assert response.status_code == 200, response.text
+
+
+def test_v2_endpoints_fail_closed_when_key_unset(kaic_test_env, monkeypatch):
+    """Regression for c6d7b1f: with INTERNAL_API_KEY unset and no explicit
+    KAI_C_ALLOW_ANONYMOUS opt-in, the internal surface fails CLOSED — every v2
+    endpoint returns 401 rather than silently allowing anonymous calls."""
+    monkeypatch.setenv("INTERNAL_API_KEY", "")
+    monkeypatch.setenv("KAI_C_ALLOW_ANONYMOUS", "")
+    if "main" in sys.modules:
+        importlib.reload(sys.modules["main"])
+    import main as kaic_main
+
+    stub = _StubAdapter()
+    transport = httpx.MockTransport(stub.respond)
+    original_init = kaic_main.AdapterRegistry.__init__
+
+    def patched_init(self, *args, **kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(transport=transport)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(kaic_main.AdapterRegistry, "__init__", patched_init)
+
+    from fastapi.testclient import TestClient
+    with TestClient(kaic_main.app) as client:
+        for method, path, body in [
+            ("POST", "/api/v1/adapters/register", {"name": "x", "url": "http://127.0.0.1:9100"}),
+            ("GET",  "/api/v1/adapters",          None),
+            ("POST", "/api/v1/infer/x",           {}),
+            ("GET",  "/api/v1/audit",             None),
+        ]:
+            request_kwargs = {"json": body} if body is not None else {}
+            response = client.request(method, path, **request_kwargs)
+            assert response.status_code == 401, (
+                f"{method} {path} returned {response.status_code} (should fail closed)"
+            )
 
 
 def test_register_rejects_malformed_url(kaic_app):

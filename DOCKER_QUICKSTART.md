@@ -113,6 +113,21 @@ Open <http://localhost:9100/demo>, click "Start", and ask
 *"is there a person at the front door?"* — the agent fetches a live
 frame, runs YOLOv8 + BLIP via tool calls, and speaks the answer back.
 
+## Compose file reference
+
+The repo ships one base stack plus optional overlays. Combine the base with an
+overlay using repeated `-f` flags and the overlay's `--profile`.
+
+| File | What it is | How to use |
+|---|---|---|
+| `docker-compose.yml` | **Core stack** — Postgres, MediaMTX, NATS, the YOLOv8 adapter, `opennvr-core` (backend + frontend + KAI-C), and nginx. | `docker compose -f docker-compose.yml up -d` |
+| `docker-compose.apps.yml` | **Detector apps overlay** — the example SDK apps (intrusion, loitering, LPR, …). | add `-f docker-compose.apps.yml --profile apps` |
+| `docker-compose.camera-agent.yml` | **Camera-agent overlay** — the voice/chat agent plus its Whisper/Piper/caption/Ollama adapters. | add `-f docker-compose.camera-agent.yml --profile camera-agent` (or `camera-agent-chat`) |
+| `docker-compose.installer.yml` | **App-installer** — the single privileged reconciler for one-click installs (holds the Docker socket). Opt-in only. | add `-f docker-compose.installer.yml --profile app-installer` |
+
+MediaMTX config lives in `mediamtx.docker.yml` (mounted into the container);
+`mediamtx.yml` / `mediamtx.local.yml` are for running MediaMTX outside Docker.
+
 ## Common operations
 
 ```bash

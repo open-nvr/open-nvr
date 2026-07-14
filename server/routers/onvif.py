@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
+from core.config import _host_is_internal
 from core.database import get_db
 from routers.network import (
     detect_local_subnets,
@@ -54,6 +55,52 @@ from services.onvif_service import (
 )
 
 router = APIRouter(tags=["onvif"])
+
+
+def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
+    """SSRF guard for the per-camera ONVIF endpoints.
+
+    The ``ip`` these endpoints connect to is fully client-supplied. Without a
+    check, an authenticated caller (or a stolen token / CSRF) could drive the
+    server to open connections to arbitrary hosts and ports — internal service
+    probing or public / cloud-metadata addresses. Two layers:
+
+    * **Floor** — refuse anything that isn't an internal address
+      (loopback / RFC1918 / IPv6 ULA / link-local), reusing the V-015
+      trust-zone classifier so a public IP is always rejected.
+    * **Subnet** — when the operator has configured Camera LAN subnet(s),
+      require the target to be inside one of them (the same restriction
+      ``/discover`` already enforces on its scan ranges).
+    """
+    try:
+        target = ipaddress.ip_address(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid IP address: {ip!r}")
+
+    if not _host_is_internal(ip):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Refusing ONVIF connection to non-internal address {ip!r}; "
+                "ONVIF is restricted to the camera LAN."
+            ),
+        )
+
+    configured = get_camera_lan_subnets(db)
+    if configured:
+        for cidr in configured:
+            try:
+                if target in ipaddress.ip_network(cidr, strict=False):
+                    return
+            except ValueError:
+                continue
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"IP {ip} is outside the configured Camera LAN subnet(s) "
+                f"({', '.join(configured)})."
+            ),
+        )
 
 
 @router.get("/discover")
@@ -146,6 +193,7 @@ async def connect_device(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    db: Session = Depends(get_db),
 ):
     """
     Connect to ONVIF device and get all profiles with stream URIs.
@@ -153,6 +201,7 @@ async def connect_device(
     Uses HTTP Digest authentication which is compatible with Hikvision and most devices.
     Returns device info and all available profiles with their RTSP stream URIs.
     """
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await connect_and_get_profiles(ip, username, password, port)
         return result
@@ -171,8 +220,10 @@ async def camera_profiles(
     use_digest: bool = Query(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
+    db: Session = Depends(get_db),
 ):
     """Get media profiles from camera. Set use_digest=true for Hikvision devices."""
+    _assert_ip_in_camera_lan(ip, db)
     try:
         if use_digest:
             profiles = await fetch_profiles_digest(ip, username, password, port)
@@ -195,8 +246,10 @@ async def camera_stream_uri(
     use_digest: bool = Query(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
+    db: Session = Depends(get_db),
 ):
     """Get stream URI for a profile. Set use_digest=true for Hikvision devices."""
+    _assert_ip_in_camera_lan(ip, db)
     try:
         if use_digest:
             uri = await get_stream_uri_digest(
@@ -221,7 +274,9 @@ async def camera_ptz_move(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    db: Session = Depends(get_db),
 ):
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await ptz_continuous_move(
             ip, username, password, profile_token, x, y, z, port
@@ -240,7 +295,9 @@ async def camera_ptz_stop(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    db: Session = Depends(get_db),
 ):
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
         return {"ip": ip, "profileToken": profile_token, "result": result}
@@ -254,8 +311,10 @@ async def camera_ptz_stop(
 async def camera_get_time(
     ip: str,
     port: int = Query(80, ge=1, le=65535),
+    db: Session = Depends(get_db),
 ):
     """Read the camera clock via GetSystemDateAndTime (no credentials needed)."""
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await get_system_datetime(ip, port)
         return {"ip": ip, **result}
@@ -272,8 +331,10 @@ async def camera_sync_time(
     username: str = Query(...),
     password: str = Query(...),
     current_user=Depends(get_current_superuser),
+    db: Session = Depends(get_db),
 ):
     """Push the NVR's current UTC time to the camera (superuser only)."""
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await set_system_datetime(ip, username, password, port)
         return {"ip": ip, **result}
@@ -293,7 +354,9 @@ async def camera_ptz_preset(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    db: Session = Depends(get_db),
 ):
+    _assert_ip_in_camera_lan(ip, db)
     try:
         result = await ptz_presets(
             ip,

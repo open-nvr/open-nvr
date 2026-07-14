@@ -16,46 +16,11 @@
 
 """First-time-setup token service.
 
-M0 followup C-1 — closes the bootstrap-race admin-takeover window introduced
-by V-001's ``password_set=False`` admin bootstrap. Without this gate, any
-unauthenticated caller on the management network could race the legitimate
-operator to ``POST /auth/first-time-setup`` and claim the admin account.
-
-How it works
-------------
-At server startup, after the admin user is created/verified, ``main.py`` calls
-:func:`maybe_arm` which:
-
-* checks whether any user in the database is in the ``password_set=False``
-  state — i.e. whether first-time setup is actually pending;
-* if so, mints a cryptographically random token, stores it in a process-local
-  singleton, and prints it to stdout + the audit log exactly once;
-* otherwise does nothing.
-
-The ``/auth/first-time-setup`` endpoint requires the token in its payload.
-Verification is constant-time (``hmac.compare_digest``). On success the token
-is consumed (cleared) so it cannot be replayed even if it leaks afterward.
-
-Why an in-memory singleton (and not the DB / a file)
-----------------------------------------------------
-The token only needs to live as long as the bootstrap window. Operators that
-miss the printed value can simply restart the server to re-arm. Keeping the
-token out of the database avoids the migration burden and avoids ever
-persisting a credential we want to be ephemeral. The Zenodo paper §4.1
-"Secure-by-Design" defaults principle calls for the secure path to be the
-default path; this matches.
-
-Threat model coverage
----------------------
-* Pre-patch: any LAN attacker who reaches OpenNVR before the operator wins
-  the admin role. (Critical.)
-* Post-patch: an attacker would additionally need the printed setup token,
-  which is only emitted to the operator's own stdout/audit channels.
-
-Residual: an attacker with read access to the server process's stdout or to
-the audit log file is a higher-privilege threat already and is out of scope
-for this gate; it should be addressed by tier-2/tier-3 file-permission
-hardening in the deployment guide.
+Gates POST /auth/first-time-setup with a one-time token minted at startup, so
+nobody can race the operator to claim the freshly-bootstrapped admin account.
+The token is a process-local singleton, printed to stdout + audit log once, and
+consumed on first successful (constant-time) use.
+See V-001 and DESIGN_NOTES: first-time-setup token.
 """
 
 from __future__ import annotations

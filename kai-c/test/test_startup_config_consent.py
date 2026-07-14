@@ -53,6 +53,9 @@ def kaic_app_permissioned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ADAPTER_URL", "http://127.0.0.1:9100")
     monkeypatch.setenv("KAI_C_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("INTERNAL_API_KEY", "")
+    # Internal surface fails closed on an unset key (c6d7b1f); run these
+    # functional tests as an authorised local-dev box via the explicit opt-in.
+    monkeypatch.setenv("KAI_C_ALLOW_ANONYMOUS", "true")
 
     if "main" in sys.modules:
         importlib.reload(sys.modules["main"])

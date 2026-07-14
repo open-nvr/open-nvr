@@ -888,8 +888,17 @@ async def provision_camera_mediamtx(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Manually provision camera in MediaMTX with optional recording configuration."""
+    """Manually provision a camera in MediaMTX.
+
+    NVR policy: recording is mandatory, so ``enable_recording`` is forced on here
+    regardless of the query param — a `curl` with ``?enable_recording=false``
+    still provisions with recording enabled. Enforcement also lives at the
+    service choke point (push_rtsp_stream); this keeps the response/logs honest.
+    """
     from services.mediamtx_admin_service import MediaMtxAdminService
+
+    # Recording cannot be opted out of on an NVR. See docstring.
+    enable_recording = True
 
     _log_provision_start(
         current_user.id,
@@ -914,11 +923,9 @@ async def provision_camera_mediamtx(
                 status_code=400, detail="Camera has no RTSP URL configured"
             )
 
-        # M1c-followup: thread the camera's transport_security policy
-        # through to push_rtsp_stream so rtsps_required cameras refuse
-        # to provision against plaintext URLs at runtime. CameraConfig
-        # may not exist yet on a never-provisioned camera; in that case
-        # we pass None and the policy gate skips (pre-probe state).
+        # Thread the transport policy through to push_rtsp_stream so an
+        # rtsps_required camera refuses a plaintext URL. No CameraConfig yet
+        # (never provisioned) → pass None, gate skips. See V-003.
         from models import CameraConfig
         from services.transport_probe_service import TransportPolicyViolation
 
@@ -1044,7 +1051,14 @@ def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
     db.commit()
 
 
-@router.post("/{camera_id}/toggle-recording")
+# DISABLED — this is a Network Video RECORDER: recording is automatic and must
+# not be switchable off by anyone, including via the API. The route is
+# intentionally commented out so a direct `curl` cannot enable/disable
+# recording. Recording is turned on once at camera-configure time (see
+# CameraService, enable_recording=True). The handler is kept (not deleted) so
+# the behaviour can be restored by re-enabling the decorator if the product
+# decision ever changes.
+# @router.post("/{camera_id}/toggle-recording")
 async def toggle_camera_recording(
     camera_id: int,
     enable: bool,
@@ -1052,7 +1066,7 @@ async def toggle_camera_recording(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Toggle recording for a camera."""
+    """Enable/disable recording for a camera. (Route disabled — see note above.)"""
     # Check permissions
     if not CameraService.user_has_permission(
         db, camera_id, current_user.id, require_manage=True
@@ -1222,10 +1236,7 @@ async def ptz_stop(
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)
 
 
-# V-003 (M1c): re-probe a camera's RTSPS support and update its
-# transport_security policy. Lives at the end of the file so it
-# doesn't disrupt the existing route ordering (provision / permissions /
-# PTZ etc. above).
+# Re-probe a camera's RTSPS support and update its transport policy. See V-003.
 @router.post("/{camera_id}/probe-transport")
 async def probe_camera_transport(
     camera_id: int,
@@ -1268,8 +1279,7 @@ async def probe_camera_transport(
     Pass ``?reset_policy=true`` to clear the override AND let the probe
     drive the value.
     """
-    # M1c: imports inline to keep import-time graph slim (matches the
-    # other endpoints in this router).
+    # Imports inline to keep the import graph slim (matches other endpoints).
     from datetime import UTC, datetime
 
     from models import CameraConfig
@@ -1301,17 +1311,14 @@ async def probe_camera_transport(
             ),
         )
 
-    # M1c-selfrev H-1: honour the port override so cameras with RTSPS
-    # on a non-default port (some Hikvision firmware uses 443) can be
-    # probed without editing the camera record.
+    # Honour the port override so a camera with RTSPS on a non-default port
+    # (some Hikvision firmware uses 443) can be probed without editing it.
     outcome = await TransportProbeService.probe(
         camera.rtsp_url, rtsps_port=port
     )
 
-    # M1c-selfrev H-2: use the explicit operator_set flag rather than
-    # pattern-matching the value — an operator who deliberately chose
-    # "rtsps_preferred" gets the same protection as one who chose
-    # "rtsps_required".
+    # Use the explicit operator_set flag, not value pattern-matching, so a
+    # deliberate "rtsps_preferred" choice is protected the same as "required".
     operator_set_explicitly = bool(config.transport_security_operator_set)
     if reset_policy or not operator_set_explicitly:
         config.transport_security = policy_for_outcome(outcome)
@@ -1357,9 +1364,8 @@ async def probe_camera_transport(
     }
 
 
-# M1c-selfrev H-2: explicit operator-override endpoint. Setting the
-# policy here flips `transport_security_operator_set` to True so the
-# probe-driven re-probe path doesn't quietly walk it back.
+# Explicit operator-override endpoint. Setting the policy here flips
+# transport_security_operator_set=True so a later re-probe won't walk it back.
 @router.put("/{camera_id}/transport-security")
 async def set_camera_transport_security(
     camera_id: int,

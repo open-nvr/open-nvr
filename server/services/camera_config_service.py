@@ -135,8 +135,7 @@ class CameraConfigService:
             },
             "rtsp_transport": cfg.rtsp_transport,
         }
-        # V-003 (M1c-followup-selfrev): respect the per-camera RTSPS
-        # policy. cfg is guaranteed non-None by the early check above.
+        # Respect the per-camera RTSPS policy (cfg is non-None here). See V-003.
         try:
             result = await MediaMtxAdminService.provision_path(
                 cam.id,
@@ -145,13 +144,7 @@ class CameraConfigService:
                 transport_security=cfg.transport_security,
             )
         except TransportPolicyViolation as exc:
-            # M1c-fu-sr-v2 P-5: emit an audit-log entry so this refusal
-            # surface matches the other three entry paths
-            # (camera.transport_policy_refused on the cameras router,
-            # mediamtx.startup.camera_policy_blocked on the startup
-            # service, the admin-debug-push 409). Without this the
-            # config-driven re-provision was the only refusal that
-            # left no audit trace.
+            # Audit the refusal so this entry path matches the others.
             try:
                 camera_logger.log_action(
                     "camera_config.transport_policy_refused",

@@ -132,6 +132,18 @@ def verify_token(token: str) -> TokenData | None:
         payload = jwt.decode(
             token, settings.secret_key, algorithms=[settings.algorithm]
         )
+        # Only ACCESS tokens may authenticate a request. Refresh tokens are
+        # long-lived (30 days) and must be exchanged at /auth/refresh, never
+        # presented as a bearer token — otherwise a leaked refresh token
+        # becomes a 30-day API session. A missing/other type fails closed.
+        token_type = payload.get("type")
+        if token_type != "access":
+            auth_logger.log_action(
+                "auth.token_verify_failed",
+                message="Token verification failed: non-access token presented",
+                extra_data={"reason": "wrong_token_type", "token_type": token_type},
+            )
+            return None
         username: str = payload.get("sub")
         if username is None:
             auth_logger.log_action(

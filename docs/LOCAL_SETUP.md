@@ -250,7 +250,7 @@ mkdir -p /home/user/opennvr/Recordings
 
 **Navigate to AI adapters directory:**
 ```bash
-cd ../AI-adapters/AIAdapters
+cd ../ai-adapter
 ```
 
 **Create virtual environment using `uv`:**
@@ -320,7 +320,7 @@ npm run dev
 
 **Terminal 5 - AI Adapters (Optional):**
 ```bash
-cd AI-adapters/AIAdapters
+cd ai-adapter
 source .venv/bin/activate  # Linux/Mac
 # or
 .\.venv\Scripts\Activate.ps1  # Windows
@@ -335,9 +335,9 @@ python -m adapter.main
 - **API Docs**: http://localhost:8000/docs
 - **MediaMTX API**: http://localhost:9997
 
-**Default Credentials:**
-- Username: `admin`
-- Password: `admin123`
+**First login:** There is no default password. On first boot the backend prints a
+one-time setup token to its stdout/logs — paste it into the first-time-setup page
+and choose your admin password. See V-001 in `SECURITY_ARCHITECTURE.md`.
 
 ---
 
@@ -420,8 +420,7 @@ opennvr/
 │   │   ├── services/      # API clients
 │   │   └── main.tsx       # App entry
 │   └── package.json
-├── AI-adapters/           # AI inference engines
-│   ├── AIAdapters/        # Main AI adapter
+├── ai-adapter/            # AI inference adapters (sibling repo)
 ├── kai-c/                 # KAI-C controller
 ├── mediamtx/              # Streaming server
 │   └── mediamtx.yml       # Configuration
@@ -516,7 +515,7 @@ curl http://127.0.0.1:9997/v3/config/paths/get/cam-1
 
 **Check Python environment:**
 ```bash
-cd AI-adapters/AIAdapters
+cd ai-adapter
 which python  # Should point to .venv
 uv tree | grep opencv
 ```
@@ -622,5 +621,5 @@ tail -f server/logs/server.log
 
 ---
 
-**Last Updated**: February 2026
+*Setup issues? See [ARCHITECTURE.md](ARCHITECTURE.md) or open a GitHub issue.*
 

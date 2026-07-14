@@ -17,24 +17,36 @@
 """
 HLS Playback Service
 
-Generates HLS VOD manifests from MediaMTX recordings.
-Since MediaMTX does not support HLS VOD natively, this service:
-1. Queries MediaMTX /list endpoint for segment info
-2. Generates HLS .m3u8 manifests with configurable segment duration
-3. Manages playback sessions with expiry
-4. Proxies segment requests to MediaMTX /get endpoint
+Generates HLS VOD manifests for MediaMTX recordings.
+
+Two playback paths exist; a session prefers the first and falls back to the
+second automatically:
+
+1. Byte-range (fast seek, default): the recording is a single fragmented-MP4
+   file on disk. We scan its atom headers once to map every moof/mdat fragment
+   to a byte offset+length, then emit an HLS playlist whose init segment and
+   media segments are #EXT-X-BYTERANGE slices of that one file. hls.js seeks by
+   issuing an HTTP Range request for the target fragment — no re-scan, so a seek
+   deep into a 1h recording is a single ~KB ranged read instead of MediaMTX
+   walking every fragment from the start of the file.
+2. MediaMTX proxy (fallback): when the on-disk file can't be resolved or the
+   requested window spans multiple files, segments are proxied from MediaMTX's
+   /get endpoint (correct, but re-seeks the un-indexed fMP4 on every request).
 
 Security:
 - Session-based authentication (session_id is auth token)
 - Sessions are time-limited and tied to user
-- All MediaMTX access is proxied (localhost only)
+- On-disk file access is confined to the recordings base via V-005 path checks
 """
 
 import asyncio
+import os
+import struct
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -58,6 +70,14 @@ class PlaybackSession:
     expires_at: float  # Session expiry timestamp
     segments: list[dict[str, Any]] = field(default_factory=list)
     total_duration: float = 0.0
+
+    # Byte-range playback (path 1). Populated when the recording resolves to a
+    # single on-disk fMP4 file we can index. When file_path is set the manifest
+    # is emitted as #EXT-X-BYTERANGE slices; otherwise the MediaMTX proxy path
+    # (path 2) is used.
+    file_path: str | None = None
+    init_length: int = 0  # bytes [0, init_length) = ftyp+moov init segment
+    byte_segments: list[dict[str, Any]] = field(default_factory=list)
 
 
 class HlsPlaybackService:
@@ -133,6 +153,7 @@ class HlsPlaybackService:
         start_time: datetime,
         end_time: datetime,
         ttl_seconds: int | None = None,
+        db: Any = None,
     ) -> PlaybackSession:
         """
         Create a new HLS playback session.
@@ -145,6 +166,9 @@ class HlsPlaybackService:
             start_time: Recording start time
             end_time: Recording end time
             ttl_seconds: Session TTL (default: SESSION_TTL_SECONDS)
+            db: DB session, used to resolve the on-disk recording file for the
+                fast byte-range path. When omitted, only the MediaMTX proxy
+                path is available.
 
         Returns:
             PlaybackSession with segment info populated
@@ -188,6 +212,19 @@ class HlsPlaybackService:
             segments=segments,
             total_duration=total_duration,
         )
+
+        # Try the fast byte-range path: resolve the single on-disk file covering
+        # this window and index its fragments. Any failure leaves the session on
+        # the MediaMTX proxy path (byte_segments stays empty). Runs off the event
+        # loop since it does blocking file I/O.
+        try:
+            await asyncio.to_thread(
+                cls._attach_byte_index, session, camera_id, db, total_duration
+            )
+        except Exception as e:
+            recording_logger.warning(
+                f"[HLS] Byte-range indexing failed, using MediaMTX fallback: {e}"
+            )
 
         # Store session
         async with cls._lock:
@@ -273,7 +310,229 @@ class HlsPlaybackService:
             return [], 0.0
 
     @classmethod
+    def _attach_byte_index(
+        cls,
+        session: PlaybackSession,
+        camera_id: int,
+        db: Any,
+        total_duration: float,
+    ) -> None:
+        """Resolve the on-disk recording and populate the byte-range index.
+
+        Blocking (file I/O). On success sets ``session.file_path``,
+        ``session.init_length`` and ``session.byte_segments``. On any failure
+        it leaves those unset so the session falls back to the MediaMTX proxy.
+        """
+        if db is None:
+            return
+
+        path = cls._resolve_recording_file(
+            camera_id, session.start_time, session.end_time, db
+        )
+        if path is None:
+            recording_logger.debug(
+                f"[HLS] No single on-disk file for camera {camera_id}; "
+                "using MediaMTX fallback"
+            )
+            return
+
+        scan = cls._scan_fmp4(path)
+        if scan is None:
+            recording_logger.debug(
+                f"[HLS] {path.name} is not an indexable fMP4; using MediaMTX fallback"
+            )
+            return
+
+        init_length, fragments = scan
+        file_size = path.stat().st_size
+
+        # Fragments are ~recordPartDuration (1s) each. We don't parse per-sample
+        # timings — distributing the known total across fragments is accurate
+        # enough for the seek map; the decoder resolves exact PTS from each
+        # fragment's baseMediaDecodeTime once landed.
+        n = len(fragments)
+        # If the on-disk file covers noticeably less than the window MediaMTX
+        # reported, the range spans multiple files — leave it on the proxy path
+        # so nothing is silently truncated.
+        media_bytes = file_size - init_length
+        if total_duration > 0 and media_bytes <= 0:
+            return
+        avg_part = (total_duration / n) if (total_duration > 0 and n) else 1.0
+
+        frags_per_seg = max(1, round(cls.SEGMENT_DURATION / avg_part))
+
+        byte_segments: list[dict[str, Any]] = []
+        for i in range(0, n, frags_per_seg):
+            group = fragments[i : i + frags_per_seg]
+            first_off = group[0][0]
+            last_off, last_len = group[-1]
+            length = (last_off + last_len) - first_off
+            byte_segments.append(
+                {
+                    "offset": first_off,
+                    "length": length,
+                    "duration": len(group) * avg_part,
+                }
+            )
+
+        session.file_path = str(path)
+        session.init_length = init_length
+        session.byte_segments = byte_segments
+        recording_logger.info(
+            f"[HLS] Indexed {path.name}: {n} fragments -> "
+            f"{len(byte_segments)} byte-range segments (init={init_length}B)"
+        )
+
+    @classmethod
+    def _resolve_recording_file(
+        cls, camera_id: int, start_time: datetime, end_time: datetime, db: Any
+    ) -> Path | None:
+        """Find the single on-disk recording file that contains ``start_time``.
+
+        Returns the file whose start timestamp is the latest at or before the
+        session start (i.e. the file the session begins inside), path-checked
+        against the recordings base (V-005). Returns None if nothing matches.
+
+        Matching is done on the tz-stripped wall clock: the recording filename,
+        MediaMTX's /list start (which the frontend echoes back as ``start``) and
+        list_recordings' timestamps all describe the same server-local instant,
+        so comparing naive wall-clock times matches on any server timezone.
+        """
+        from services.storage_service import (
+            get_effective_recordings_base_path,
+            resolve_under_root,
+            storage_service,
+        )
+
+        start_naive = start_time.replace(tzinfo=None)
+
+        # Filter ourselves on the naive clock; list_recordings' own start/end
+        # filtering assumes UTC-labelled timestamps and would misfire off-UTC.
+        listing = storage_service.list_recordings(
+            db, camera_id=camera_id, start=None, end=None, limit=1000
+        )
+        best_rel: str | None = None
+        best_ts: datetime | None = None
+        for item in listing.get("items", []):
+            ts_str = item.get("start_time")
+            rel = item.get("relpath")
+            if not ts_str or not rel:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str).replace(tzinfo=None)
+            except ValueError:
+                continue
+            # The file that contains the session start begins at or (allowing a
+            # small clock skew) just before it; keep the latest such.
+            if ts <= start_naive + timedelta(seconds=1) and (
+                best_ts is None or ts > best_ts
+            ):
+                best_ts, best_rel = ts, rel
+
+        if best_rel is None:
+            return None
+
+        root = Path(get_effective_recordings_base_path(db))
+        try:
+            resolved = resolve_under_root(root, best_rel)
+        except Exception:
+            return None
+        return resolved if resolved.is_file() else None
+
+    @classmethod
+    def _scan_fmp4(
+        cls, path: Path
+    ) -> tuple[int, list[tuple[int, int]]] | None:
+        """Walk the top-level atoms of a fragmented-MP4 file.
+
+        Reads only box headers (8-16 bytes each), seeking over mdat payloads,
+        so a 1h/~3600-fragment file costs a few thousand tiny reads. Returns
+        ``(init_length, [(fragment_offset, fragment_length), ...])`` where
+        ``init_length`` is the byte length of the ftyp+moov init segment, or
+        None if the file isn't a usable fMP4.
+        """
+        fragments: list[tuple[int, int]] = []
+        init_length = 0
+        frag_start: int | None = None
+
+        with open(path, "rb") as f:
+            total = os.fstat(f.fileno()).st_size
+            pos = 0
+            while pos + 8 <= total:
+                f.seek(pos)
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                box_size = struct.unpack(">I", hdr[:4])[0]
+                box_type = hdr[4:8]
+                header_len = 8
+                if box_size == 1:
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        break
+                    box_size = struct.unpack(">Q", ext)[0]
+                    header_len = 16
+                elif box_size == 0:
+                    # Box extends to EOF.
+                    box_size = total - pos
+                if box_size < header_len or pos + box_size > total:
+                    break  # malformed / truncated
+
+                if box_type in (b"ftyp", b"moov"):
+                    # ftyp then moov are the init segment; its end is the
+                    # boundary the #EXT-X-MAP byte range points at.
+                    init_length = pos + box_size
+                elif box_type == b"moof":
+                    frag_start = pos
+                elif box_type == b"mdat" and frag_start is not None:
+                    fragments.append((frag_start, (pos + box_size) - frag_start))
+                    frag_start = None
+
+                pos += box_size
+
+        if init_length <= 0 or not fragments:
+            return None
+        return init_length, fragments
+
+    @classmethod
     def generate_manifest(cls, session: PlaybackSession) -> str:
+        """
+        Generate HLS VOD manifest (.m3u8) for a session.
+
+        Uses the byte-range playlist when the recording was indexed on disk
+        (fast-seek path), otherwise the MediaMTX-proxied segment playlist.
+        """
+        if session.file_path and session.byte_segments:
+            return cls._generate_byterange_manifest(session)
+
+        return cls._generate_proxy_manifest(session)
+
+    @classmethod
+    def _generate_byterange_manifest(cls, session: PlaybackSession) -> str:
+        """Single-file byte-range playlist (fast-seek path).
+
+        Every media segment and the init segment are #EXT-X-BYTERANGE slices of
+        one recording file served by the ``media`` endpoint. hls.js turns each
+        into an HTTP Range request, so seeking is a direct ranged read.
+        """
+        max_dur = max((s["duration"] for s in session.byte_segments), default=1.0)
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            f"#EXT-X-TARGETDURATION:{int(max_dur) + 1}",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            f'#EXT-X-MAP:URI="media",BYTERANGE="{session.init_length}@0"',
+        ]
+        for seg in session.byte_segments:
+            lines.append(f"#EXTINF:{seg['duration']:.3f},")
+            lines.append(f"#EXT-X-BYTERANGE:{seg['length']}@{seg['offset']}")
+            lines.append("media")
+        lines.append("#EXT-X-ENDLIST")
+        return "\n".join(lines)
+
+    @classmethod
+    def _generate_proxy_manifest(cls, session: PlaybackSession) -> str:
         """
         Generate HLS VOD manifest (.m3u8) for a session.
 

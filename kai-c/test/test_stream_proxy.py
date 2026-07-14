@@ -233,6 +233,10 @@ def kaic_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ADAPTER_URL", "http://127.0.0.1:65535")
     monkeypatch.setenv("KAI_C_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("INTERNAL_API_KEY", "")  # dev-mode for most tests
+    # Internal surface fails closed on an unset key (c6d7b1f); the dev-mode
+    # tests run as an authorised local-dev box via the explicit opt-in. Tests
+    # that assert auth rejection set a real INTERNAL_API_KEY, which overrides.
+    monkeypatch.setenv("KAI_C_ALLOW_ANONYMOUS", "true")
     return {"audit_path": tmp_path / "audit.jsonl"}
 
 

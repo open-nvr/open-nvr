@@ -442,15 +442,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       el.muted = isMuted
       el.autoplay = autoPlay
 
-      // Native HLS (Safari)
-      if (el.canPlayType('application/vnd.apple.mpegurl')) {
-        el.src = hlsPlaybackUrl
-        el.play().catch(() => {})
-        setIsLoading(false)
-        return
-      }
-
-      // HLS.js for VOD playback
+      // Prefer hls.js: it fetches our #EXT-X-BYTERANGE VOD fragments as exact
+      // closed-range requests, which is what makes deep seeks a single small
+      // ranged read. Some browsers' native HLS engines (incl. desktop Chromium
+      // that reports canPlayType('...mpegurl') as playable) over-fetch byte-range
+      // VOD with open-ended ranges, redundantly streaming toward EOF. So only
+      // fall back to native HLS when hls.js isn't available (iOS Safari).
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
@@ -510,8 +507,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             }
           }
         })
+      } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS fallback (iOS Safari, where hls.js/MSE isn't available).
+        el.src = hlsPlaybackUrl
+        el.play().catch(() => {})
+        setIsLoading(false)
       } else {
-        console.warn('[HLS Playback] HLS.js not supported, falling back to MP4')
+        console.warn('[HLS Playback] Neither hls.js nor native HLS available, falling back to MP4')
         setError('HLS not supported')
         setIsLoading(false)
         onHlsPlaybackError?.()

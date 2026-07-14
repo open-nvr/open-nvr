@@ -49,6 +49,7 @@ from core.logging_config import mediamtx_logger
 from services.storage_service import get_effective_recordings_base_path
 from services.stream_service import _build_stream_name
 from utils.path_mapper import get_mediamtx_recording_path
+from utils.url_redaction import redact_url_credentials
 
 # Shared timeout for all MediaMTX Admin API calls (seconds)
 _TIMEOUT = httpx.Timeout(10.0)
@@ -428,20 +429,14 @@ class MediaMtxAdminService:
         *,
         transport_security: str | None = None,
     ) -> dict[str, Any]:
-        """Update specific path configuration (validates that protected fields are not modified).
+        """Update specific path configuration (protected fields are not modified).
 
-        V-003 (M1c-followup-selfrev-v2 P-1): the patch surface accepts an
-        arbitrary ``source`` field, which means a superuser hitting
-        ``PATCH /api/v1/mediamtx/admin/paths/{id}`` could re-introduce
-        plaintext rtsp:// on a camera marked rtsps_required and bypass
-        the policy that ``provision_path`` enforces. Run the same gate
-        here when the payload mutates ``source``.
+        Re-runs the transport policy gate when the payload mutates ``source``,
+        so a PATCH can't re-introduce plaintext rtsp:// on an rtsps_required
+        camera. See V-003.
         """
-        # V-003 enforcement: if the payload would change the camera's
-        # source URL, the per-camera policy applies. We only gate on
-        # payload["source"] (the field MediaMTX uses for ingest);
-        # patches that touch record/hook fields and leave source
-        # untouched are policy-neutral and pass through.
+        # Only gate when the source URL changes; record/hook-only patches
+        # are policy-neutral and pass through.
         if transport_security is not None and isinstance(payload, dict):
             new_source = payload.get("source")
             if new_source:
@@ -670,10 +665,14 @@ class MediaMtxAdminService:
     ) -> dict[str, Any]:
         """Push RTSP stream to MediaMTX and optionally enable recording.
 
-        V-003 (M1c-followup-selfrev): ``transport_security`` is threaded
-        through to ``provision_path`` where the enforcement gate lives.
-        push_rtsp_stream itself is one of four callers — see
-        ``provision_path`` for the gate and the bypass-audit notes.
+        ``transport_security`` is threaded through to ``provision_path``, where
+        the enforcement gate lives (this is one of its four callers). See V-003.
+
+        NVR policy note: recording is mandatory, but that is enforced at the
+        HTTP entry points (the provisioning routers) rather than here — this
+        service stays policy-neutral so unit tests can exercise it without a DB,
+        and so ``enable_recording`` keeps meaning what it says. Callers that
+        provision a real camera (routers, CameraService) pass True.
         """
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
 
@@ -752,23 +751,12 @@ class MediaMtxAdminService:
     ) -> dict[str, Any]:
         """Provision a MediaMTX path for a camera.
 
-        V-003 (M1c-followup-selfrev): ``provision_path`` is the choke
-        point — every code path that creates / replaces a camera-fed
-        MediaMTX path goes through here. By running the transport-policy
-        gate at this level instead of one layer up, we cover the four
-        callers found by the bypass audit: ``push_rtsp_stream``, the
-        startup auto-provisioner (``MediaMtxStartupService``), the
-        config-driven re-provisioner (``CameraConfigService.provision``),
-        and the admin debug endpoint at ``/admin/streams/push/{id}``.
-        All four pass ``transport_security`` here; ``None`` (the default)
-        means "skip the check" — used during initial camera-create
-        before the probe has set the policy.
+        The single choke point for camera-fed paths, so the transport-policy
+        gate runs here and covers every caller. ``transport_security=None``
+        skips the check (initial camera-create, before the probe). See V-003.
         """
-        # V-003 enforcement gate. Runs BEFORE any MediaMTX HTTP — a
-        # refusal here costs no network and leaves MediaMTX state
-        # untouched. The exception carries enough context for the
-        # caller (router / startup loop / admin endpoint) to surface
-        # a meaningful error or audit-log entry.
+        # Enforcement gate, before any MediaMTX HTTP so a refusal costs no
+        # network and leaves MediaMTX untouched.
         if transport_security is not None:
             from services.transport_probe_service import enforce_transport_policy
 
@@ -916,7 +904,16 @@ class MediaMtxAdminService:
                     "camera_ip": camera_ip,
                     "path": name,
                     "url": url,
-                    "payload": payload,
+                    # Redact user:pass@ in the source/sub URLs before logging;
+                    # the live payload sent to MediaMTX keeps its credentials.
+                    "payload": {
+                        **payload,
+                        **{
+                            k: redact_url_credentials(payload[k])
+                            for k in ("source_url", "substream_url")
+                            if k in payload
+                        },
+                    },
                     "error_type": type(e).__name__,
                     "action": "mediamtx.provision_path_exception",
                 },

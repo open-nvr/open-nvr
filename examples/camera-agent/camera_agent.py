@@ -5324,11 +5324,38 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+class _RedactTokensFilter(logging.Filter):
+    """Blank credential-bearing query values in log lines.
+
+    MediaMTX accepts its scoped streaming JWT as a ``?jwt=`` query param, so
+    any URL that carries one (e.g. a WHEP request logged by uvicorn's access
+    logger) would otherwise land in the logs verbatim — a live read token for
+    whoever can read the logs. Same for our own bearer-ish params.
+    """
+
+    _SENSITIVE = re.compile(
+        r"\b(jwt|token|access_token|refresh_token|api_key)=[^&\s\"']+",
+        re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and "=" in record.msg:
+            record.msg = self._SENSITIVE.sub(r"\1=[redacted]", record.msg)
+        if isinstance(record.args, tuple) and record.args:
+            record.args = tuple(
+                self._SENSITIVE.sub(r"\1=[redacted]", a)
+                if isinstance(a, str) else a
+                for a in record.args)
+        return True
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
     )
+    redact = _RedactTokensFilter()
+    for h in logging.getLogger().handlers:
+        h.addFilter(redact)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5343,6 +5370,12 @@ def main(argv: list[str] | None = None) -> int:
         app, host=cfg.host, port=cfg.port, log_level=args.log_level.lower()
     )
     server = uvicorn.Server(config)
+    # uvicorn installs its own handlers (no propagation to root), so the
+    # access log needs the redaction filter attached directly. After
+    # uvicorn.Config so its dictConfig can't wipe the filter.
+    redact = _RedactTokensFilter()
+    for name in ("uvicorn.access", "uvicorn.error"):
+        logging.getLogger(name).addFilter(redact)
 
     def _sig(signum: int, frame: Any) -> None:
         logger.info("received signal %d; stopping", signum)

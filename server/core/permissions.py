@@ -73,17 +73,9 @@ def get_camera_or_403(
 
 
 def user_has_permission(user: User, permission_name: str) -> bool:
-    """True when ``user`` holds ``permission_name`` (a name-based RBAC
-    capability, e.g. ``apps.install``).
-
-    Resolution mirrors ``GET /users/me/permissions`` exactly so a
-    require-permission gate and the UI's permission listing can never
-    disagree:
-
-    * superusers hold every permission;
-    * a role with the ``full_access`` wildcard permission holds every
-      permission;
-    * otherwise the named permission must be present on the user's role.
+    """True if ``user`` holds ``permission_name``. Superusers and roles with the
+    ``full_access`` wildcard hold every permission; otherwise the named
+    permission must be on the user's role.
     """
     if getattr(user, "is_superuser", False):
         return True
@@ -96,30 +88,16 @@ def user_has_permission(user: User, permission_name: str) -> bool:
 
 
 class RequirePermission:
-    """FastAPI dependency factory that gates a route on a named RBAC
-    permission — the reusable "require this capability" seam the app
-    install endpoints need (there wasn't one before; permission checks
-    were previously either superuser-only or ad-hoc in the router).
+    """FastAPI dependency factory gating a route on a named RBAC permission.
 
-    Usage::
-
-        require_apps_install = RequirePermission("apps.install")
-
-        @router.post("/...")
-        async def endpoint(user: User = Depends(require_apps_install)):
-            ...
-
-    Returns the authenticated ``User`` (so the route can audit the
-    actor) or raises 403 when the permission is absent. It composes on
-    top of ``get_current_active_user``, so an unauthenticated call still
-    fails with the usual 401 first.
+    Usage: ``user = Depends(RequirePermission("apps.install"))``.
+    Returns the authenticated User, or 403 if the permission is absent
+    (401 first if unauthenticated).
     """
 
     def __init__(self, permission_name: str):
         self.permission_name = permission_name
-        # Give the callable instance a ``__name__`` so it introspects like
-        # a plain function dependency (FastAPI + tests that read
-        # ``dependant.call.__name__`` — see test_apps_registry).
+        # __name__ so FastAPI (and tests) introspect it like a plain function.
         self.__name__ = f"require_permission[{permission_name}]"
 
     def __call__(

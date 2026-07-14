@@ -1,27 +1,18 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""
-V-022 sovereignty enforcement (v2).
+"""Sovereignty enforcement for AI adapters (V-022).
 
-The original M1a implementation in main.py only checked that adapter
-URLs were loopback. Per §11.1 of the contract design, the V-022
-tightening also inspects the adapter's declared
-``permissions.network_egress``:
+Beyond loopback, checks the adapter's declared ``permissions.network_egress``:
 
-* ``local_only``    — adapter URL MUST be loopback AND
-                       ``permissions.network_egress`` MUST be empty.
-                       Any non-empty egress list means the adapter is
-                       a cloud-proxy and is refused.
-* ``federated``     — adapter MAY have a non-empty
-                       ``permissions.network_egress`` list but it MUST
-                       enumerate every host explicitly. Wildcards
-                       (``*``, ``*.example.com``) are refused.
-* ``cloud_allowed`` — no checks; suitable for hosted deployments.
+* ``local_only``    — URL must be loopback AND network_egress empty (a non-empty
+                       list means it's a cloud-proxy → refused).
+* ``federated``     — network_egress may be non-empty but must enumerate every
+                       host explicitly; wildcards are refused.
+* ``cloud_allowed`` — no checks.
 
-These checks run at registration time (so an adapter that violates
-policy never enters the registry) and on every ``/capabilities`` poll
-(so an adapter that ADDS egress at runtime gets de-registered).
+Runs at registration and on every /capabilities poll, so an adapter that adds
+egress at runtime is de-registered.
 """
 from __future__ import annotations
 
@@ -40,21 +31,9 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 VALID_SOVEREIGNTY_MODES = frozenset({"local_only", "federated", "cloud_allowed"})
 
-# ISSUE-70 / ISSUE-28: the V-022 sovereignty claim is "all AI inference
-# happens on THIS physical machine", not "loopback URLs only". In a
-# normal single-box Docker deployment the adapter runs in its own
-# container and is reached by its service name (e.g.
-# ``http://yolov8-adapter:9002``), which resolves to a Docker-bridge IP
-# inside ``OPENNVR_DOCKER_SUBNET``. Packets between bridge-network
-# containers never leave the host's kernel networking stack, so those
-# adapters are equally "on this machine" for sovereignty purposes.
-#
-# main.py's ``_host_is_on_this_machine`` already encoded this for the
-# import-time startup guard, but the registration- and poll-time check
-# below (the one the registry actually calls) stayed loopback-only, so
-# the on-box adapter was wrongly refused and never registered. The
-# subnet is operator-configurable so non-standard bridge ranges keep
-# working without losing the sovereignty guarantee.
+# "On this machine" = loopback + the operator's own Docker bridge subnet
+# (bridge traffic stays in-kernel). Operator-configurable for non-standard
+# bridge ranges. See V-022 and DESIGN_NOTES: KAI-C sovereignty & the Docker bridge.
 _DOCKER_BRIDGE_SUBNET = os.getenv("OPENNVR_DOCKER_SUBNET", "172.28.0.0/16")
 
 
@@ -118,9 +97,8 @@ def host_is_on_this_machine(host: str | None) -> bool:
     addresses (those are peer hosts on the same LAN, which V-022
     specifically excludes from the AI plane).
 
-    Mirrors ``_host_is_on_this_machine`` in main.py so the registration-
-    and poll-time checks agree with the import-time startup guard
-    (ISSUE-70).
+    Mirrors ``_host_is_on_this_machine`` in main.py so the registration- and
+    poll-time checks agree with the import-time startup guard.
     """
     if host_is_loopback(host):
         return True

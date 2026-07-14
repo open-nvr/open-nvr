@@ -139,7 +139,7 @@ class NatsPublisher:
         """Drain pending publishes and close the connection. Called from
         the FastAPI shutdown hook. Logs publish counts so operators
         can see how many events were broadcast / dropped over the
-        process's lifetime (peer review M4)."""
+        process's lifetime."""
         logger.info(
             "NATS publisher shutting down — published=%d failed=%d",
             self.published_count, self.failed_count,

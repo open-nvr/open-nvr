@@ -21,295 +21,439 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenNVR Agent</title>
   <style>
-    /* OpenNVR product palette (app/src/index.css dark theme). The accent is
-       the wordmark cyan from app/public/opennvr-logo.svg so the whole UI
-       matches the brand's white + cyan combination. */
-    :root {
-      --bg:#0b1220; --bg2:#111827; --panel:#0f172a; --panel2:#1f2937; --text:#e5e7eb; --muted:#9ca3af;
-      --wordmark:#ffffff; --accent:#5eb3f6; --accent-strong:#3d9df3; --danger:#e53e3e;
-      --user:#9ae6b4; --agent:#90cdf4; --border:#293241;
+    /* ── OpenNVR Agent — modern AI console ──────────────────────────────
+       Brand: white + cyan wordmark. Dark, glassy, full-viewport app shell
+       (the page never scrolls — the chat and rail scroll internally). */
+    :root{
+      --bg:#070b14; --bg2:#0b1220;
+      --glass:rgba(20,29,48,0.55); --glass2:rgba(30,41,66,0.55);
+      --stroke:rgba(148,178,232,0.12); --stroke2:rgba(148,178,232,0.20);
+      --text:#eef2fb; --muted:#93a1bd; --faint:#64708c;
+      --wordmark:#ffffff; --accent:#5eb3f6; --accent2:#7dd3fc; --accent-strong:#3d9df3;
+      --danger:#f2555a; --amber:#f6c453; --user:#8ce6b0; --agent:#8fd0ff;
+      --radius:18px; --radius-sm:12px;
+      --shadow:0 18px 50px -20px rgba(0,0,0,0.75);
     }
-    * { box-sizing:border-box; }
-    body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-      background:var(--bg); color:var(--text); padding:1.5rem 1rem; }
-    .wrap { max-width:60rem; margin:0 auto; }
-    .alarmbar.chime{background:#b7791f;}
-    .alarmbar.chime .ab-btn{display:none;}
-    .alarmbar.pulse{background:#c05621;}
-    .alarmbar { display:flex; align-items:center; gap:0.6rem; background:var(--danger); color:#fff;
-      padding:0.7rem 0.9rem; border-radius:0.6rem; margin-bottom:1rem; font-weight:700;
-      animation:alarmflash 0.9s ease-in-out infinite; }
-    .alarmbar .ab-text { flex:1; }
-    .alarmbar .ab-btn { background:#fff; color:var(--danger); border:none; padding:0.4rem 0.85rem;
-      border-radius:0.4rem; font-weight:700; cursor:pointer; }
-    @keyframes alarmflash { 0%,100%{opacity:1;} 50%{opacity:0.72;} }
+    *{box-sizing:border-box;}
+    html,body{height:100%;}
+    body{
+      margin:0; color:var(--text); overflow:hidden;
+      font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased;
+      background:
+        radial-gradient(1200px 700px at 12% -8%, rgba(61,157,243,0.10), transparent 55%),
+        radial-gradient(1100px 800px at 108% 4%, rgba(125,211,252,0.08), transparent 55%),
+        linear-gradient(180deg,var(--bg2),var(--bg));
+    }
 
-    .app { display:grid; grid-template-columns:1fr 19rem; gap:1rem; align-items:start; }
-    @media (max-width:760px) { .app { grid-template-columns:1fr; } }
-    .card { background:var(--panel); border-radius:0.75rem; padding:1.25rem; }
-    .head { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
-    /* Wordmark header: "Open" white + "NVR" cyan (the logo's two tones),
-       bold like the svg, then " Agent" in the white tone. */
-    h1 { margin:0; font-size:1.35rem; font-weight:700; color:var(--wordmark); }
-    h1 .wm-nvr { color:var(--accent); }
-    .titlerow { display:flex; align-items:center; gap:0.55rem; }
-    p.lede { margin:0.15rem 0 0 0; color:var(--muted); font-size:0.88rem; }
+    /* ── ambient glow layers (behind everything) ─────────────────────── */
+    .ambient{position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden;}
+    .ambient .blob{position:absolute; border-radius:50%; filter:blur(90px); opacity:0.5;}
+    .ambient .b1{width:46vw; height:46vw; left:-10vw; top:-14vw;
+      background:radial-gradient(circle,rgba(61,157,243,0.34),transparent 62%); animation:drift1 26s ease-in-out infinite;}
+    .ambient .b2{width:40vw; height:40vw; right:-12vw; top:-8vw;
+      background:radial-gradient(circle,rgba(125,211,252,0.22),transparent 62%); animation:drift2 32s ease-in-out infinite;}
+    @keyframes drift1{0%,100%{transform:translate(0,0)}50%{transform:translate(4vw,3vw)}}
+    @keyframes drift2{0%,100%{transform:translate(0,0)}50%{transform:translate(-3vw,4vw)}}
+    /* the "glow up while speaking" wash — lit only when the agent speaks
+       (and softly while it listens), keyed off the avatar state via :has(). */
+    .ambient-speak{position:fixed; inset:0; z-index:0; pointer-events:none; opacity:0;
+      transition:opacity 0.5s ease;
+      background:
+        radial-gradient(140% 55% at 50% 0%, rgba(94,179,246,0.20), transparent 60%),
+        radial-gradient(140% 55% at 50% 100%, rgba(94,179,246,0.16), transparent 60%);
+      box-shadow:inset 0 0 200px 30px rgba(94,179,246,0.20);}
+    body:has(#ram.speaking) .ambient-speak{opacity:1; animation:glowbreath 2.6s ease-in-out infinite;}
+    body:has(#ram.listening) .ambient-speak{opacity:0.45;
+      background:radial-gradient(140% 55% at 50% 100%, rgba(242,85,90,0.14), transparent 60%);
+      box-shadow:inset 0 0 180px 26px rgba(242,85,90,0.14);}
+    @keyframes glowbreath{0%,100%{opacity:0.6}50%{opacity:1}}
 
-    .ram { width:68px; height:68px; flex:0 0 auto; position:relative; }
-    .avatar-video { position:absolute; inset:0; width:100%; height:100%; border-radius:50%; object-fit:cover; display:none; }
-    .ram.has-video .avatar-video { display:block; }
-    .ram.has-video svg { display:none; }
-    .ram svg { width:100%; height:100%; display:block; }
-    .ram .ring,.ram .iris { transform-origin:center; transform-box:fill-box; }
-    .ram.idle .ring{stroke:var(--muted);animation:breathe 3.5s ease-in-out infinite}.ram.idle .iris{fill:var(--muted)}
-    .ram.listening .ring{stroke:var(--accent);animation:pulse 1.4s ease-out infinite}.ram.listening .iris{fill:var(--accent)}
-    .ram.thinking .ring{stroke:#f6c453;stroke-dasharray:14 10;animation:spin 1.1s linear infinite}.ram.thinking .iris{fill:#f6c453}
-    .ram.speaking .ring{stroke:var(--agent);animation:bounce 0.7s ease-in-out infinite}.ram.speaking .iris{fill:var(--agent)}
-    @keyframes breathe{0%,100%{opacity:.55}50%{opacity:1}}
-    @keyframes pulse{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.15);opacity:.25}}
+    /* ── app shell (fills the viewport, uses the full width) ─────────── */
+    .wrap{position:relative; z-index:1; height:100vh; max-width:1560px; margin:0 auto;
+      padding:1.1rem 1.4rem 1.3rem; display:flex; flex-direction:column; gap:0.9rem;}
+    .app{flex:1 1 auto; min-height:0; display:grid;
+      grid-template-columns:minmax(0,1fr) 22rem; gap:1.1rem; align-items:stretch;}
+    @media (max-width:900px){ .wrap{height:auto; min-height:100vh; overflow:auto;}
+      body{overflow:auto;} .app{grid-template-columns:1fr;} }
+    .main-col{min-height:0; display:flex;}
+    .side{min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:0.9rem; padding-right:2px;}
+
+    .card{background:var(--glass); border:1px solid var(--stroke); border-radius:var(--radius);
+      -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px); box-shadow:var(--shadow);}
+    .main-col > .card{flex:1 1 auto; min-height:0; display:flex; flex-direction:column;
+      padding:1.35rem 1.4rem 1.2rem;}
+
+    /* ── header: glowing orb + wordmark ──────────────────────────────── */
+    .head{display:flex; align-items:center; gap:1rem; margin-bottom:1rem; flex:0 0 auto;}
+    h1{margin:0; font-size:1.5rem; font-weight:700; letter-spacing:-0.01em; color:var(--wordmark);}
+    h1 .wm-nvr{background:linear-gradient(90deg,var(--accent),var(--accent2));
+      -webkit-background-clip:text; background-clip:text; color:transparent;}
+    .titlerow{display:flex; align-items:center; gap:0.55rem;}
+    p.lede{margin:0.2rem 0 0; color:var(--muted); font-size:0.9rem;}
+
+    .ram{width:74px; height:74px; flex:0 0 auto; position:relative; border-radius:50%;
+      transition:box-shadow 0.35s ease;}
+    .avatar-video{position:absolute; inset:0; width:100%; height:100%; border-radius:50%; object-fit:cover; display:none;}
+    .ram.has-video .avatar-video{display:block;} .ram.has-video svg{display:none;}
+    .ram svg{width:100%; height:100%; display:block;}
+    .ram .ring,.ram .iris{transform-origin:center; transform-box:fill-box;}
+    .ram.idle{box-shadow:0 0 0 1px rgba(255,255,255,0.05), 0 0 26px rgba(148,163,184,0.16);}
+    .ram.idle .ring{stroke:var(--muted); animation:breathe 3.5s ease-in-out infinite;} .ram.idle .iris{fill:var(--muted);}
+    .ram.listening{box-shadow:0 0 0 1px rgba(242,85,90,0.45), 0 0 42px rgba(242,85,90,0.4);}
+    .ram.listening .ring{stroke:var(--danger); animation:pulse 1.4s ease-out infinite;} .ram.listening .iris{fill:var(--danger);}
+    .ram.thinking{box-shadow:0 0 0 1px rgba(246,196,83,0.45), 0 0 42px rgba(246,196,83,0.35);}
+    .ram.thinking .ring{stroke:var(--amber); stroke-dasharray:14 10; animation:spin 1.1s linear infinite;} .ram.thinking .iris{fill:var(--amber);}
+    .ram.speaking{box-shadow:0 0 0 1px rgba(94,179,246,0.55), 0 0 60px rgba(94,179,246,0.5); animation:orbpulse 2s ease-in-out infinite;}
+    .ram.speaking .ring{stroke:var(--accent); animation:bounce 0.7s ease-in-out infinite;} .ram.speaking .iris{fill:var(--accent);}
+    @keyframes breathe{0%,100%{opacity:0.55}50%{opacity:1}}
+    @keyframes pulse{0%{transform:scale(0.85);opacity:1}100%{transform:scale(1.15);opacity:0.25}}
     @keyframes spin{to{transform:rotate(360deg)}}
-    @keyframes bounce{0%,100%{transform:scale(.92)}50%{transform:scale(1.12)}}
-    /* Mouth: hidden unless speaking; its height is driven by the TTS amplitude. */
-    .ram .mouth{fill:var(--agent);opacity:0;transition:opacity .15s;}
-    .ram.speaking .mouth{opacity:.92;}
-    .ram.speaking .iris{opacity:.85;}
-    .micdot{display:inline-flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--danger);margin-top:.25rem;}
-    .micdot::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--danger);animation:blink 1.2s steps(2,start) infinite;}
-    .waketoggle{display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:var(--muted);margin:.55rem 0 0;cursor:pointer;user-select:none;}
-    .waketoggle input{accent-color:var(--accent);}
+    @keyframes bounce{0%,100%{transform:scale(0.92)}50%{transform:scale(1.12)}}
+    @keyframes orbpulse{0%,100%{box-shadow:0 0 0 1px rgba(94,179,246,0.55),0 0 46px rgba(94,179,246,0.4)}50%{box-shadow:0 0 0 1px rgba(94,179,246,0.7),0 0 72px rgba(94,179,246,0.6)}}
+    .ram .mouth{fill:var(--accent); opacity:0; transition:opacity 0.15s;}
+    .ram.speaking .mouth{opacity:0.92;} .ram.speaking .iris{opacity:0.85;}
+    .micdot{display:inline-flex; align-items:center; gap:0.3rem; font-size:0.72rem; color:var(--danger); margin-top:0.25rem;}
+    .micdot::before{content:""; width:0.5rem; height:0.5rem; border-radius:50%; background:var(--danger); animation:blink 1.2s steps(2,start) infinite;}
 
-    label.field { font-size:0.75rem; color:var(--muted); display:block; margin-bottom:0.35rem; }
-    .cambox { border:1px solid var(--border); border-radius:0.5rem; padding:0.5rem 0.6rem; margin-bottom:0.75rem;
-      display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6.5rem; overflow-y:auto; }
-    .cambox label { display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer; }
-    .cambox input { accent-color:var(--accent); }
-    .ic { width:1.05em; height:1.05em; vertical-align:-0.16em; flex:0 0 auto; }
-    .talk { width:100%; background:var(--accent); color:#fff; border:none; padding:1.05rem 1.25rem;
-      border-radius:0.6rem; font-weight:700; cursor:pointer; font-size:1.05rem; transition:background .15s,transform .05s,box-shadow .08s;
-      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none; -webkit-user-select:none; user-select:none; }
-    .talk:hover:not(:disabled){background:var(--accent-strong);} .talk:active:not(:disabled){transform:scale(.99);}
-    .talk:disabled{opacity:.5;cursor:progress;}
-    /* Live listening session: red, with a "recording" dot; a mic-level ring is
-       drawn from JS (box-shadow) so you can see it hearing you. */
-    .talk.listening{background:var(--danger);color:#fff;} .talk.listening::before{content:"● ";animation:blink 1s steps(2,start) infinite;}
+    /* ── Whisper-style voice pill (bars + state label) ───────────────── */
+    .voicebar{display:flex; justify-content:center; height:0; opacity:0; overflow:hidden;
+      margin:0; transition:height 0.35s ease, opacity 0.3s ease, margin 0.35s ease; flex:0 0 auto;}
+    body:has(#ram.listening) .voicebar,
+    body:has(#ram.thinking) .voicebar,
+    body:has(#ram.speaking) .voicebar{height:52px; opacity:1; margin:0.1rem 0 0.85rem;}
+    .voicebar .pill{display:inline-flex; align-items:center; gap:5px; height:44px; padding:0 1.05rem;
+      border-radius:999px; background:rgba(94,179,246,0.10); border:1px solid rgba(94,179,246,0.30);
+      -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+      box-shadow:0 0 34px rgba(94,179,246,0.28);}
+    .voicebar .bar{width:4px; height:9px; border-radius:2px; background:var(--accent);
+      animation:vwave 1s ease-in-out infinite;}
+    .voicebar .bar:nth-child(1){animation-delay:-0.9s} .voicebar .bar:nth-child(2){animation-delay:-0.7s}
+    .voicebar .bar:nth-child(3){animation-delay:-0.5s} .voicebar .bar:nth-child(4){animation-delay:-0.3s}
+    .voicebar .bar:nth-child(5){animation-delay:-0.15s} .voicebar .bar:nth-child(6){animation-delay:-0.45s}
+    .voicebar .bar:nth-child(7){animation-delay:-0.65s}
+    .voicebar .lbl{font-size:0.78rem; font-weight:600; color:var(--accent); margin-left:0.55rem; letter-spacing:0.01em;}
+    .voicebar .lbl::after{content:"Listening…";}
+    body:has(#ram.thinking) .voicebar .lbl::after{content:"Thinking…";}
+    body:has(#ram.speaking) .voicebar .lbl::after{content:"Speaking…";}
+    body:has(#ram.listening) .voicebar .pill{background:rgba(242,85,90,0.10); border-color:rgba(242,85,90,0.32); box-shadow:0 0 34px rgba(242,85,90,0.26);}
+    body:has(#ram.listening) .voicebar .bar{background:var(--danger);}
+    body:has(#ram.listening) .voicebar .lbl{color:var(--danger);}
+    body:has(#ram.thinking) .voicebar .pill{background:rgba(246,196,83,0.10); border-color:rgba(246,196,83,0.32); box-shadow:0 0 34px rgba(246,196,83,0.22);}
+    body:has(#ram.thinking) .voicebar .bar{background:var(--amber); animation-duration:1.4s;}
+    body:has(#ram.thinking) .voicebar .lbl{color:var(--amber);}
+    @keyframes vwave{0%,100%{height:8px}50%{height:28px}}
+
+    /* ── cameras ─────────────────────────────────────────────────────── */
+    label.field{font-size:0.72rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--faint);
+      display:block; margin-bottom:0.4rem; flex:0 0 auto;}
+    .cambox{border:1px solid var(--stroke); border-radius:var(--radius-sm); padding:0.55rem 0.65rem;
+      margin-bottom:0.7rem; display:flex; flex-wrap:wrap; gap:0.4rem 0.9rem; max-height:6rem; overflow-y:auto;
+      background:rgba(0,0,0,0.16); flex:0 0 auto;}
+    .cambox label{display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; cursor:pointer;}
+    .cambox input{accent-color:var(--accent);}
+    .ic{width:1.05em; height:1.05em; vertical-align:-0.16em; flex:0 0 auto;}
+    .camlbl{font-size:0.72rem; color:var(--faint); margin:0.1rem 0 0.35rem;}
+    .camstrip{display:flex; gap:0.5rem; flex-wrap:wrap; margin:0.35rem 0 0.2rem; flex:0 0 auto;}
+    .camtile{position:relative; width:132px; border:1px solid var(--stroke); border-radius:var(--radius-sm);
+      overflow:hidden; background:var(--glass2); cursor:pointer; transition:border-color 0.15s, transform 0.1s;}
+    .camtile:hover{border-color:var(--accent); transform:translateY(-1px);}
+    .camtile img{display:block; width:100%; height:74px; object-fit:cover;}
+    .camtile .ct-off{height:74px; display:flex; align-items:center; justify-content:center; color:var(--faint); font-size:0.66rem;}
+    .camtile .ct-nm{display:flex; align-items:center; justify-content:space-between; gap:0.3rem;
+      padding:0.24rem 0.4rem; font-size:0.68rem; color:var(--muted);}
+    .camtile .ct-nm span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+    .camtile .ct-x{background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.8rem; padding:0;}
+    .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
+
+    /* ── talk button ─────────────────────────────────────────────────── */
+    .talk{width:100%; border:none; cursor:pointer; flex:0 0 auto;
+      background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      padding:1.05rem 1.25rem; border-radius:14px; font-weight:750; font-size:1.05rem;
+      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none;
+      -webkit-user-select:none; user-select:none; box-shadow:0 10px 30px -12px rgba(94,179,246,0.7);
+      transition:transform 0.05s, filter 0.15s;}
+    .talk:hover:not(:disabled){filter:brightness(1.06);} .talk:active:not(:disabled){transform:scale(0.99);}
+    .talk:disabled{opacity:0.5; cursor:progress;}
+    .talk.listening{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff;}
+    .talk.listening::before{content:"● "; animation:blink 1s steps(2,start) infinite;}
     @keyframes blink{to{visibility:hidden;}}
-    .row { display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; }
-    .status { padding:0.5rem 0.7rem; border-radius:0.375rem; background:rgba(255,255,255,0.04); color:var(--muted); font-size:0.83rem; flex:1; }
-    .status.active{color:var(--accent);} .status.error{color:var(--danger);}
-    .chip { font-size:0.72rem; padding:0.22rem 0.5rem; border-radius:999px; background:rgba(94,179,246,0.15); color:var(--accent); white-space:nowrap; }
-    .ghost { background:transparent; color:var(--muted); border:1px solid var(--border); padding:0.45rem 0.7rem; border-radius:0.375rem; cursor:pointer; font-size:0.8rem; }
-    .ghost:hover{color:var(--text);}
-    .log { margin-top:1rem; background:rgba(0,0,0,0.25); border-radius:0.5rem; padding:0.75rem; height:18rem; overflow-y:auto; font-size:0.9rem; line-height:1.45; display:flex; flex-direction:column; gap:0.3rem; }
-    .log:empty::after { content:"Your conversation will appear here."; color:var(--muted); font-size:0.82rem; }
-    .msg{max-width:86%;} .msg .who{font-weight:500; font-size:0.72rem; display:block; margin-bottom:2px;}
-    .msg.user{align-self:flex-end; background:#1d2740; border-radius:11px 11px 3px 11px; padding:0.45rem 0.65rem;} .msg.user .who{color:var(--user);}
-    .msg.agent{align-self:flex-start; background:var(--panel2); border:1px solid var(--border); border-radius:11px 11px 11px 3px; padding:0.45rem 0.65rem;} .msg.agent .who{color:var(--agent);}
-    .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--muted); font-size:0.78rem; font-style:italic;}
-    .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
-    .frame-thumb{width:128px; max-width:42vw; border-radius:7px; border:1px solid var(--border); cursor:pointer; display:block;}
+
+    /* ── rows, status, chips, ghost buttons ──────────────────────────── */
+    .row{display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; flex:0 0 auto;}
+    .status{padding:0.55rem 0.75rem; border-radius:10px; background:rgba(255,255,255,0.035);
+      border:1px solid var(--stroke); color:var(--muted); font-size:0.83rem; flex:1;}
+    .status.active{color:var(--accent); border-color:rgba(94,179,246,0.3);}
+    .status.error{color:var(--danger); border-color:rgba(242,85,90,0.35);}
+    .chip{font-size:0.72rem; padding:0.24rem 0.55rem; border-radius:999px; white-space:nowrap;
+      background:rgba(94,179,246,0.14); color:var(--accent); border:1px solid rgba(94,179,246,0.22);}
+    .ghost{background:rgba(255,255,255,0.03); color:var(--muted); border:1px solid var(--stroke);
+      padding:0.5rem 0.75rem; border-radius:10px; cursor:pointer; font-size:0.8rem; transition:all 0.15s;}
+    .ghost:hover{color:var(--text); border-color:var(--stroke2); background:rgba(255,255,255,0.06);}
+    .askrow{gap:0.5rem;}
+    .askrow input{flex:1; background:rgba(0,0,0,0.28); color:var(--text); border:1px solid var(--stroke);
+      border-radius:12px; padding:0.68rem 0.8rem; font-size:0.95rem; transition:border-color 0.15s;}
+    .askrow input::placeholder{color:var(--faint);}
+    .askrow input:focus{outline:none; border-color:var(--accent);}
+    .askrow .ghost{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      border:none; font-weight:700; padding-left:1.1rem; padding-right:1.1rem;}
+    .askrow .ghost:hover{filter:brightness(1.06);}
+
+    /* ── conversation log + bubbles ──────────────────────────────────── */
+    .log{margin-top:0.85rem; flex:1 1 auto; min-height:0; overflow-y:auto;
+      background:rgba(0,0,0,0.22); border:1px solid var(--stroke); border-radius:var(--radius-sm);
+      padding:0.9rem; font-size:0.92rem; line-height:1.5; display:flex; flex-direction:column; gap:0.45rem;}
+    .log:empty{align-items:center; justify-content:center;}
+    .log:empty::after{content:"Ask your cameras anything — tap Talk or type below."; color:var(--faint); font-size:0.85rem;}
+    .msg{max-width:82%;} .msg .who{font-weight:600; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; display:block; margin-bottom:3px;}
+    .msg.user{align-self:flex-end; background:linear-gradient(180deg,rgba(94,179,246,0.18),rgba(61,157,243,0.12));
+      border:1px solid rgba(94,179,246,0.22); border-radius:14px 14px 4px 14px; padding:0.55rem 0.75rem;}
+    .msg.user .who{color:var(--user);}
+    .msg.agent{align-self:flex-start; background:var(--glass2); border:1px solid var(--stroke);
+      border-radius:14px 14px 14px 4px; padding:0.55rem 0.75rem;} .msg.agent .who{color:var(--agent);}
+    .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--faint); font-size:0.78rem; font-style:italic;}
+    .msg .olink{margin-top:6px; font-size:0.76rem; padding:0.35rem 0.6rem;}
+    .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:7px;}
+    .frame-thumb{width:132px; max-width:42vw; border-radius:9px; border:1px solid var(--stroke); cursor:pointer; display:block;}
     .frame-thumb:hover{border-color:var(--accent);}
-    .frame-cap{font-size:0.68rem; color:var(--muted); margin-top:2px;}
-    .lightbox{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:50; align-items:center; justify-content:center; padding:2rem; cursor:zoom-out;}
+    .frame-cap{font-size:0.68rem; color:var(--faint); margin-top:2px;}
+    .lightbox{display:none; position:fixed; inset:0; background:rgba(3,7,15,0.86); z-index:50;
+      align-items:center; justify-content:center; padding:2rem; cursor:zoom-out; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);}
     .lightbox.show{display:flex;}
-    .lightbox img{max-width:90vw; max-height:80vh; border-radius:10px;}
+    .lightbox img{max-width:90vw; max-height:80vh; border-radius:12px; box-shadow:var(--shadow);}
     .lightbox figcaption{color:#cbd5e1; text-align:center; margin-top:0.5rem; font-size:0.85rem;}
 
-    .side .card { padding:0.85rem 0.9rem; margin-bottom:1rem; }
-    .side h2 { font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 .5rem 0; }
-    .side .empty-note { color:var(--muted); font-size:0.78rem; }
-    .item { display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; background:var(--panel2); border-radius:8px; margin:.3rem 0; font-size:0.83rem; }
-    .item .badge{width:18px;text-align:center;flex:0 0 auto;} .item.running .badge{animation:spin 1.1s linear infinite;display:inline-block;}
-    .item .q{flex:1;} .item.done .q{color:var(--muted);} .item .count{color:var(--accent);font-variant-numeric:tabular-nums;}
-    .item .stop{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:0.95rem;} .item .stop:hover{color:var(--danger);}
-    .item.ringing{background:rgba(229,62,62,0.14);} #alarmCard .item .badge{color:var(--danger);}
-    .presets{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.4rem;}
-    .presets .ghost{font-size:0.78rem;}
-    .cardhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;}
+    /* ── pinned-frame chip ───────────────────────────────────────────── */
+    #pinChip .chip{background:rgba(246,196,83,0.14); color:var(--amber); border-color:rgba(246,196,83,0.28);}
+
+    /* ── right rail cards ────────────────────────────────────────────── */
+    .side .card{padding:0.95rem 1rem;}
+    .side h2{font-size:0.7rem; color:var(--faint); text-transform:uppercase; letter-spacing:0.06em; margin:0 0 0.55rem;}
+    .side .empty-note{color:var(--faint); font-size:0.78rem;}
+    .cardhead{display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;}
     .cardhead h2{margin:0;}
-    .addbtn{width:22px;height:22px;line-height:1;flex:0 0 auto;border-radius:6px;border:1px solid var(--border);
-      background:transparent;color:var(--muted);font-size:1.05rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-    .addbtn:hover{color:var(--accent);border-color:var(--accent);}
-    .addbtn.open{background:var(--accent);color:#fff;border-color:var(--accent);}
-    /* camera strip: live thumbnails; click = pin frame to chat, ⤢ = detail */
-    .camstrip{display:flex;gap:.5rem;flex-wrap:wrap;margin:.4rem 0 .2rem;}
-    .camtile{position:relative;width:132px;border:1px solid var(--border);border-radius:8px;
-      overflow:hidden;background:var(--panel2);cursor:pointer;}
-    .camtile img{display:block;width:100%;height:74px;object-fit:cover;}
-    .camtile .ct-off{height:74px;display:flex;align-items:center;justify-content:center;
-      color:var(--muted);font-size:.66rem;}
-    .camtile .ct-nm{display:flex;align-items:center;justify-content:space-between;gap:.3rem;
-      padding:.2rem .35rem;font-size:.68rem;color:var(--muted);}
-    .camtile .ct-nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-    .camtile .ct-x{background:transparent;border:none;color:var(--muted);cursor:pointer;
-      font-size:.8rem;padding:0;}
-    .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
-    .camtile:hover{border-color:var(--accent);}
-    /* NOTE: a display: rule beats the hidden attribute, so [hidden] must
-       win explicitly or flex containers leak open on load. */
-    [hidden]{display:none !important;}
-    #loginOverlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
-      justify-content:center;padding:1rem;background:
-      radial-gradient(60% 50% at 50% 32%, rgba(94,179,246,.10), transparent 70%),
-      rgba(5,8,14,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
-    .login-card{background:linear-gradient(180deg,var(--panel),var(--bg2));
-      border:1px solid var(--border);border-radius:16px;width:min(360px,94vw);
-      padding:1.6rem 1.5rem 1.2rem;display:flex;flex-direction:column;gap:.4rem;
-      box-shadow:0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(94,179,246,.06);
-      animation:login-in .28s ease;}
-    @keyframes login-in{from{opacity:0;transform:translateY(10px) scale(.985);}to{opacity:1;transform:none;}}
-    .login-brand{display:flex;flex-direction:column;align-items:center;gap:.35rem;
-      margin-bottom:.9rem;text-align:center;}
-    .login-avatar{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;
-      color:var(--accent);background:rgba(94,179,246,.08);
-      box-shadow:0 0 0 1px rgba(94,179,246,.35),0 0 24px rgba(94,179,246,.18);}
-    .login-avatar svg{width:44px;height:44px;}
-    .login-wordmark{font-size:1.25rem;font-weight:700;color:var(--wordmark);letter-spacing:.01em;}
-    .login-wordmark .wm-nvr{color:var(--accent);}
-    .login-agent{font-size:.76rem;color:var(--muted);}
-    .login-agent b{color:var(--text);font-weight:600;}
-    .login-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;
-      letter-spacing:.06em;margin:.35rem 0 .15rem;}
-    .login-opt{text-transform:none;letter-spacing:0;opacity:.7;}
-    .login-card input{background:var(--panel2);color:var(--text);border:1px solid var(--border);
-      border-radius:9px;padding:.6rem .7rem;font-size:.88rem;
-      transition:border-color .15s ease,box-shadow .15s ease;}
-    .login-card input:focus{outline:none;border-color:var(--accent);
-      box-shadow:0 0 0 3px rgba(94,179,246,.18);}
-    .login-err{color:#f87171;font-size:.75rem;margin-top:.35rem;
-      background:rgba(229,62,62,.08);border:1px solid rgba(229,62,62,.35);
-      border-radius:8px;padding:.45rem .6rem;}
-    #loginGo{margin-top:.8rem;background:linear-gradient(180deg,var(--accent),var(--accent-strong));
-      color:#04121f;border:none;border-radius:10px;padding:.65rem;font-size:.9rem;
-      font-weight:700;cursor:pointer;transition:filter .15s ease,transform .1s ease;}
-    #loginGo:hover{filter:brightness(1.08);}
-    #loginGo:active{transform:translateY(1px);}
-    #loginGo:disabled{opacity:.6;cursor:default;}
-    .login-foot{margin-top:.7rem;font-size:.66rem;color:var(--muted);text-align:center;}
-    .camlbl{font-size:.7rem;color:var(--muted);margin:.2rem 0 .1rem;}
-    /* per-camera screen (in-page navigation; URL = /demo/camera/{id}) */
-    .ctop{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;}
-    .ctitle{font-size:1rem;font-weight:600;}
-    .csub{font-size:.72rem;color:var(--muted);}
-    .ctop .recl{margin-left:auto;text-decoration:none;display:inline-flex;align-items:center;font-size:.75rem;}
-    .player{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--border);
-      background:var(--panel2);cursor:pointer;min-height:120px;}
-    .player img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;}
-    .player .ovl{position:absolute;top:7px;left:8px;font-size:.72rem;color:#fff;
-      background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums;}
-    .modepill{position:absolute;top:7px;right:8px;font-size:.65rem;color:#fff;
-      background:rgba(0,0,0,.55);padding:2px 8px;border-radius:999px;display:flex;align-items:center;gap:5px;}
-    .modepill .mdot{width:7px;height:7px;border-radius:50%;background:#4fd18a;}
-    .modepill.review .mdot{background:#f6c453;}
-    .player.review::after{content:"";position:absolute;inset:0;background:rgba(246,196,83,.06);pointer-events:none;}
-    .transport{display:flex;align-items:center;gap:.5rem;margin-top:.45rem;}
-    .pbtn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:7px;
-      width:30px;height:28px;cursor:pointer;font-size:.75rem;}
-    .pbtn:hover{border-color:var(--accent,var(--muted));}
-    .track{position:relative;flex:1;height:28px;display:flex;align-items:center;}
-    .track input{width:100%;accent-color:var(--accent,#4fd1c5);}
-    .track .mk{position:absolute;top:4px;width:8px;height:8px;border-radius:50%;background:#f6c453;
-      transform:translateX(-50%);cursor:pointer;border:1px solid var(--panel);}
-    .livebtn{background:var(--danger,#e53e3e);color:#fff;border:none;border-radius:7px;
-      padding:0 10px;height:28px;font-size:.7rem;cursor:pointer;font-weight:700;}
-    .livebtn.on{background:var(--panel2);color:var(--muted);border:1px solid var(--border);font-weight:400;}
-    .tnote{font-size:.66rem;color:var(--muted);margin-top:.2rem;}
-    .askrow input{transition:box-shadow .18s ease,border-color .18s ease;}
-    .askrow.pulse input{border-color:var(--accent);box-shadow:0 0 0 3px rgba(94,179,246,.28);}
-    .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.55rem;position:relative;}
-    .apill{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:999px;
-      padding:.35rem .75rem;font-size:.75rem;cursor:pointer;}
-    .apill:hover{border-color:var(--accent,var(--muted));color:var(--accent,var(--text));}
-    .apill.talk2{background:var(--accent,#4fd1c5);color:#062321;border-color:var(--accent,#4fd1c5);font-weight:700;}
-    .pop{position:absolute;top:38px;left:0;z-index:20;background:var(--panel2);border:1px solid var(--border);
-      border-radius:9px;padding:.6rem;width:250px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:none;}
-    .pop.show{display:block;}
-    .pop h4{margin:0 0 .4rem;font-size:.78rem;font-weight:600;}
-    .pop input,.pop select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);
-      border-radius:6px;padding:.35rem .5rem;font-size:.75rem;margin-bottom:.35rem;}
-    .pop .go{background:var(--accent,#4fd1c5);color:#062321;border:none;font-weight:700;border-radius:6px;
-      padding:.4rem .6rem;font-size:.75rem;cursor:pointer;width:100%;}
-    #camScoped{margin-top:.5rem;}
-    .player video{display:block;width:100%;aspect-ratio:16/9;object-fit:contain;background:#000;}
-    #recRow{margin-top:.55rem;}
-    .rec-head{display:flex;align-items:center;gap:.5rem;}
-    .rec-lbl{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
-    #recDay{background:var(--panel2);color:var(--text);border:1px solid var(--border);
-      border-radius:6px;font-size:.72rem;padding:.15rem .3rem;}
-    .rec-head .recl{margin-left:auto;font-size:.7rem;color:var(--muted);text-decoration:none;}
-    .rec-head .recl:hover{color:var(--accent);}
-    .rec-segs{display:flex;gap:.35rem;overflow-x:auto;padding:.35rem 0 .2rem;}
-    .rec-segs::-webkit-scrollbar{height:5px;}
-    .rec-segs::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
-    .rec-seg{flex:0 0 auto;background:var(--panel2);border:1px solid var(--border);
-      border-radius:7px;padding:.3rem .55rem;font-size:.72rem;cursor:pointer;color:var(--text);}
-    .rec-seg small{display:block;color:var(--muted);font-size:.62rem;}
-    .rec-seg:hover,.rec-seg.on{border-color:var(--accent);color:var(--accent);}
-    .rec-note{font-size:.7rem;color:var(--muted);padding:.3rem 0;}
-    .evt{display:flex;align-items:flex-start;gap:.45rem;padding:.4rem .5rem;background:var(--panel2);
-      border:1px solid var(--border);border-radius:8px;margin-top:.32rem;cursor:pointer;
-      font-size:.75rem;text-align:left;width:100%;}
-    .evt:hover{border-color:var(--accent);}
-    .evt .ev-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:.28rem;}
-    .evt .ev-body{flex:1;min-width:0;}
-    .evt .ev-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-    .evt .ev-sub{display:block;color:var(--muted);font-size:.66rem;}
-    .ringrow{display:flex;gap:.35rem;align-items:center;margin-bottom:.35rem;}
-    .ringrow input{flex:1;margin-bottom:0;}
-    .ringrow select{flex:1;margin-bottom:0;}
-    .ev-scope{font-size:.66rem;color:var(--muted);}
-    .ev-scope a{color:var(--accent);text-decoration:none;}
-    .hwrow{padding:.42rem .5rem;background:var(--panel2);border:1px solid var(--border);
-      border-radius:8px;margin:.3rem 0;font-size:.74rem;}
-    .hwrow .hw-nm{font-weight:600;font-size:.78rem;}
-    .hwrow .hw-min,.hwtips .hw-min{color:var(--muted);}
-    .hwrow .hw-rec{color:var(--accent);}
-    .hwrow .hw-rec.ok{color:var(--muted);}
-    .hwrow .hw-note,.hwtips .hw-note{color:var(--muted);font-size:.68rem;}
-    .hwtips{margin-top:.4rem;font-size:.74rem;}
-    .headbtns{display:flex;align-items:center;gap:.4rem;flex:0 0 auto;}
-    .restorebtn{background:transparent;border:1px solid var(--border);border-radius:6px;
-      color:var(--muted);font-size:.68rem;padding:.18rem .45rem;cursor:pointer;white-space:nowrap;}
-    .restorebtn:hover{color:var(--accent);border-color:var(--accent);}
-    .skillhint{color:var(--muted);font-size:0.72rem;margin:-.15rem 0 .5rem;}
-    .skill{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;background:var(--panel2);
-      border:1px solid var(--border);border-radius:8px;margin:.3rem 0;font-size:0.82rem;}
-    .skill .sk-ic{width:18px;text-align:center;flex:0 0 auto;}
-    .skill .sk-body{flex:1;min-width:0;}
+    .headbtns{display:flex; align-items:center; gap:0.4rem; flex:0 0 auto;}
+    .addbtn{width:24px; height:24px; line-height:1; flex:0 0 auto; border-radius:8px; border:1px solid var(--stroke);
+      background:rgba(255,255,255,0.03); color:var(--muted); font-size:1.05rem; cursor:pointer;
+      display:flex; align-items:center; justify-content:center; transition:all 0.15s;}
+    .addbtn:hover{color:var(--accent); border-color:var(--accent);}
+    .addbtn.open{background:var(--accent); color:#04121f; border-color:var(--accent);}
+    .restorebtn{background:transparent; border:1px solid var(--stroke); border-radius:8px; color:var(--muted);
+      font-size:0.68rem; padding:0.2rem 0.5rem; cursor:pointer; white-space:nowrap;}
+    .restorebtn:hover{color:var(--accent); border-color:var(--accent);}
+
+    .item{display:flex; align-items:center; gap:0.5rem; padding:0.45rem 0.55rem; background:var(--glass2);
+      border:1px solid var(--stroke); border-radius:10px; margin:0.32rem 0; font-size:0.83rem;}
+    .item .badge{width:18px; text-align:center; flex:0 0 auto;}
+    .item.running .badge{animation:spin 1.1s linear infinite; display:inline-block;}
+    .item .q{flex:1;} .item.done .q{color:var(--muted);} .item .count{color:var(--accent); font-variant-numeric:tabular-nums;}
+    .item .stop{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem;}
+    .item .stop:hover{color:var(--danger);}
+    .item.ringing{background:rgba(242,85,90,0.16); border-color:rgba(242,85,90,0.3);}
+    #alarmCard .item .badge{color:var(--danger);}
+    .presets{display:flex; flex-wrap:wrap; gap:0.4rem; margin-top:0.4rem;}
+    .presets .ghost{font-size:0.78rem;}
+
+    /* skills */
+    .skillhint{color:var(--faint); font-size:0.72rem; margin:-0.15rem 0 0.5rem;}
+    .skill{display:flex; align-items:center; gap:0.5rem; padding:0.45rem 0.55rem; background:var(--glass2);
+      border:1px solid var(--stroke); border-radius:10px; margin:0.32rem 0; font-size:0.82rem;}
+    .skill .sk-ic{width:18px; text-align:center; flex:0 0 auto;}
+    .skill .sk-body{flex:1; min-width:0;}
     .skill .sk-nm{display:block;}
-    .skill .sk-uses{display:block;font-size:.66rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-    .skill .sk-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;flex:0 0 auto;padding:0 .1rem;}
+    .skill .sk-uses{display:block; font-size:0.66rem; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .skill .sk-x{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem; flex:0 0 auto; padding:0 0.1rem;}
     .skill .sk-x:hover{color:var(--danger);}
-    #skillBrowse{margin-top:.5rem;border-top:1px solid var(--border);padding-top:.5rem;}
-    #skillSearch,.addform input,.addform select{width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);
-      border-radius:6px;padding:.4rem .5rem;font-size:.8rem;margin-bottom:.4rem;}
-    #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none;border-color:var(--accent);}
-    .brow{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin:.25rem 0;font-size:0.8rem;background:var(--panel2);}
-    .brow .b-ic{width:18px;text-align:center;flex:0 0 auto;}
-    .brow .b-nm{flex:1;min-width:0;}.brow .b-nm small{display:block;color:var(--muted);font-size:.66rem;}
-    .brow .b-add{background:var(--accent);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:.72rem;padding:.28rem .55rem;pointer-events:none;}
-    .brow .b-need{font-size:.66rem;color:var(--muted);text-align:right;max-width:52%;}
-    .brow .b-enable{flex:0 0 auto;font-size:.66rem;font-weight:700;color:var(--accent);text-decoration:none;border:1px solid var(--accent);border-radius:6px;padding:.2rem .4rem;white-space:nowrap;}
-    .brow .b-enable:hover{background:var(--accent);color:#fff;}
-    /* Add-list rows: the whole row is clickable when the skill can be enabled;
-       greyed (with the reason on the right) when it can't be yet. */
+    #skillBrowse{margin-top:0.5rem; border-top:1px solid var(--stroke); padding-top:0.5rem;}
+    #skillSearch,.addform input,.addform select{width:100%; background:rgba(0,0,0,0.28); color:var(--text);
+      border:1px solid var(--stroke); border-radius:9px; padding:0.45rem 0.55rem; font-size:0.8rem; margin-bottom:0.4rem;}
+    #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none; border-color:var(--accent);}
+    .brow{display:flex; align-items:center; gap:0.5rem; padding:0.42rem 0.5rem; border-radius:10px; margin:0.25rem 0;
+      font-size:0.8rem; background:var(--glass2); border:1px solid var(--stroke);}
+    .brow .b-ic{width:18px; text-align:center; flex:0 0 auto;}
+    .brow .b-nm{flex:1; min-width:0;} .brow .b-nm small{display:block; color:var(--faint); font-size:0.66rem;}
+    .brow .b-add{background:var(--accent); color:#04121f; border:none; border-radius:7px; font-weight:700;
+      font-size:0.72rem; padding:0.28rem 0.55rem; pointer-events:none;}
+    .brow .b-need{font-size:0.66rem; color:var(--faint); text-align:right; max-width:52%;}
+    .brow .b-enable{flex:0 0 auto; font-size:0.66rem; font-weight:700; color:var(--accent); text-decoration:none;
+      border:1px solid var(--accent); border-radius:7px; padding:0.2rem 0.4rem; white-space:nowrap;}
+    .brow .b-enable:hover{background:var(--accent); color:#04121f;}
     .brow.addable{cursor:pointer;}
     .brow.addable:hover{outline:1px solid var(--accent);}
     .brow.addable:hover .b-add{background:var(--accent-strong);}
-    .brow.off{opacity:.55;}
-    .addform{margin:.3rem 0 .5rem;}
-    .addform-lbl{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--muted);margin-bottom:.4rem;}
-    .addform-lbl input{width:auto;flex:1;margin:0;}
-    .ghost.primary{background:var(--accent);color:#fff;border:none;font-weight:700;width:100%;}
-    .notifyrow{display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;}
-    .notifyrow .empty-note{flex:1;}
-    .notifyrow .ghost{font-size:0.72rem;padding:0.3rem 0.55rem;}
-    .askrow{gap:0.4rem;}
-    .askrow input{flex:1;background:var(--bg2);color:var(--text);border:1px solid var(--border);
-      border-radius:0.5rem;padding:0.6rem 0.7rem;font-size:0.95rem;}
-    .askrow .ghost{background:var(--accent);color:#fff;border:none;font-weight:700;}
+    .brow.off{opacity:0.55;}
+    .addform{margin:0.3rem 0 0.5rem;}
+    .addform-lbl{display:flex; align-items:center; gap:0.4rem; font-size:0.72rem; color:var(--muted); margin-bottom:0.4rem;}
+    .addform-lbl input{width:auto; flex:1; margin:0;}
+    .ghost.primary{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f; border:none; font-weight:700; width:100%;}
+    .ghost.primary:hover{filter:brightness(1.06);}
+    .notifyrow{display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem;}
+    .notifyrow .empty-note{flex:1;} .notifyrow .ghost{font-size:0.72rem; padding:0.3rem 0.55rem;}
+
+    /* hardware */
+    .hwrow{padding:0.44rem 0.55rem; background:var(--glass2); border:1px solid var(--stroke);
+      border-radius:10px; margin:0.3rem 0; font-size:0.74rem;}
+    .hwrow .hw-nm{font-weight:600; font-size:0.78rem;}
+    .hwrow .hw-min,.hwtips .hw-min{color:var(--muted);}
+    .hwrow .hw-rec{color:var(--accent);} .hwrow .hw-rec.ok{color:var(--muted);}
+    .hwrow .hw-note,.hwtips .hw-note{color:var(--faint); font-size:0.68rem;}
+    .hwtips{margin-top:0.4rem; font-size:0.74rem;}
+
+    /* ── per-camera screen ───────────────────────────────────────────── */
+    .ctop{display:flex; align-items:center; gap:0.6rem; margin-bottom:0.5rem; flex:0 0 auto;}
+    .ctitle{font-size:1rem; font-weight:600;} .csub{font-size:0.72rem; color:var(--muted);}
+    .ctop .recl{margin-left:auto; text-decoration:none; display:inline-flex; align-items:center; font-size:0.75rem;}
+    .player{position:relative; border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--stroke);
+      background:#05080f; cursor:pointer; min-height:120px; flex:0 0 auto;}
+    /* Small, viewport-safe stream window: cap the media height so the
+       transport + action pills below always stay on screen (the page is
+       fixed-vh). ⛶ goes full screen for a big view. */
+    .player img{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain;}
+    .fsbtn{position:absolute; bottom:8px; right:8px; z-index:2; width:32px; height:28px;
+      background:rgba(0,0,0,0.55); border:none; color:#fff; border-radius:7px; cursor:pointer;
+      font-size:0.85rem; line-height:1;}
+    .fsbtn:hover{background:rgba(0,0,0,0.78);}
+    .player:fullscreen{display:flex; align-items:center; justify-content:center; background:#000; border:none;}
+    .player:fullscreen img,.player:fullscreen video{max-height:100vh; width:100%; height:100%; object-fit:contain;}
+    .player .ovl{position:absolute; top:7px; left:8px; font-size:0.72rem; color:#fff; background:rgba(0,0,0,0.55);
+      padding:2px 7px; border-radius:6px; font-variant-numeric:tabular-nums;}
+    .modepill{position:absolute; top:7px; right:8px; font-size:0.65rem; color:#fff; background:rgba(0,0,0,0.55);
+      padding:2px 8px; border-radius:999px; display:flex; align-items:center; gap:5px;}
+    .modepill .mdot{width:7px; height:7px; border-radius:50%; background:#4fd18a;}
+    .modepill.review .mdot{background:var(--amber);}
+    .player.review::after{content:""; position:absolute; inset:0; background:rgba(246,196,83,0.06); pointer-events:none;}
+    .transport{display:flex; align-items:center; gap:0.5rem; margin-top:0.45rem; flex:0 0 auto;}
+    .pbtn{background:var(--glass2); border:1px solid var(--stroke); color:var(--text); border-radius:8px;
+      width:30px; height:28px; cursor:pointer; font-size:0.75rem;}
+    .pbtn:hover{border-color:var(--accent);}
+    .track{position:relative; flex:1; height:28px; display:flex; align-items:center;}
+    .track input{width:100%; accent-color:var(--accent);}
+    .track .mk{position:absolute; top:4px; width:8px; height:8px; border-radius:50%; background:var(--amber);
+      transform:translateX(-50%); cursor:pointer; border:1px solid var(--bg);}
+    .livebtn{background:var(--danger); color:#fff; border:none; border-radius:8px; padding:0 10px; height:28px;
+      font-size:0.7rem; cursor:pointer; font-weight:700;}
+    .livebtn.on{background:var(--glass2); color:var(--muted); border:1px solid var(--stroke); font-weight:400;}
+    .tnote{font-size:0.66rem; color:var(--faint); margin-top:0.2rem;}
+    .acts{display:flex; flex-wrap:wrap; gap:0.4rem; margin-top:0.55rem; position:relative;}
+    .apill{background:rgba(255,255,255,0.03); border:1px solid var(--stroke); color:var(--text); border-radius:999px;
+      padding:0.38rem 0.8rem; font-size:0.75rem; cursor:pointer; transition:all 0.15s;}
+    .apill:hover{border-color:var(--accent); color:var(--accent);}
+    .apill.talk2{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f; border-color:transparent; font-weight:700;}
+    .pop{position:absolute; top:40px; left:0; z-index:20; background:var(--bg2); border:1px solid var(--stroke2);
+      border-radius:12px; padding:0.7rem; width:250px; box-shadow:var(--shadow); display:none;}
+    .pop.show{display:block;}
+    .pop h4{margin:0 0 0.45rem; font-size:0.78rem; font-weight:600;}
+    .pop input,.pop select{width:100%; background:rgba(0,0,0,0.28); color:var(--text); border:1px solid var(--stroke);
+      border-radius:8px; padding:0.4rem 0.5rem; font-size:0.75rem; margin-bottom:0.4rem;}
+    .pop .go{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f; border:none;
+      font-weight:700; border-radius:8px; padding:0.45rem 0.6rem; font-size:0.75rem; cursor:pointer; width:100%;}
+    #camScoped{margin-top:0.5rem;}
+
+    /* ── alarm bar ───────────────────────────────────────────────────── */
+    .alarmbar{display:flex; align-items:center; gap:0.6rem; color:#fff; padding:0.75rem 0.95rem; border-radius:14px;
+      flex:0 0 auto; font-weight:700; background:linear-gradient(180deg,#ff5c61,var(--danger));
+      box-shadow:0 0 40px rgba(242,85,90,0.5); animation:alarmflash 0.9s ease-in-out infinite;}
+    .alarmbar .ab-text{flex:1;}
+    .alarmbar .ab-btn{background:#fff; color:var(--danger); border:none; padding:0.45rem 0.9rem; border-radius:9px; font-weight:700; cursor:pointer;}
+    @keyframes alarmflash{0%,100%{opacity:1}50%{opacity:0.78}}
+
+    /* ── scrollbars ──────────────────────────────────────────────────── */
+    .log::-webkit-scrollbar,.side::-webkit-scrollbar,.cambox::-webkit-scrollbar{width:8px;}
+    .log::-webkit-scrollbar-thumb,.side::-webkit-scrollbar-thumb,.cambox::-webkit-scrollbar-thumb{
+      background:rgba(148,178,232,0.18); border-radius:8px;}
+    .log::-webkit-scrollbar-thumb:hover,.side::-webkit-scrollbar-thumb:hover{background:rgba(148,178,232,0.32);}
+    .log,.side,.cambox{scrollbar-width:thin; scrollbar-color:rgba(148,178,232,0.22) transparent;}
+
+    /* a display: rule beats [hidden]; keep [hidden] winning for flex/grid toggles. */
+    [hidden]{display:none !important;}
+
+    /* ── alarm-bar levels: chime = notice, pulse = urgent ────────────── */
+    .alarmbar.chime{background:linear-gradient(180deg,#e2ae3a,#b7791f); box-shadow:0 0 40px rgba(214,158,46,0.4);}
+    .alarmbar.chime .ab-btn{display:none;}
+    .alarmbar.pulse{background:linear-gradient(180deg,#e07b2d,#c05621); box-shadow:0 0 40px rgba(221,107,32,0.45);}
+
+    /* camera-screen "Ask" pulses the ask box */
+    .askrow input{transition:box-shadow 0.18s ease, border-color 0.18s ease;}
+    .askrow.pulse input{border-color:var(--accent); box-shadow:0 0 0 3px rgba(94,179,246,0.28);}
+
+    /* ── recorded segments (served by the main OpenNVR server) ───────── */
+    #recRow{margin-top:0.55rem; flex:0 0 auto;}
+    .rec-head{display:flex; align-items:center; gap:0.5rem;}
+    .rec-lbl{font-size:0.68rem; color:var(--faint); text-transform:uppercase; letter-spacing:0.06em;}
+    #recDay{background:rgba(0,0,0,0.28); color:var(--text); border:1px solid var(--stroke);
+      border-radius:7px; font-size:0.72rem; padding:0.15rem 0.3rem;}
+    .rec-head .recl{margin-left:auto; font-size:0.7rem; color:var(--muted); text-decoration:none;}
+    .rec-head .recl:hover{color:var(--accent);}
+    .rec-segs{display:flex; gap:0.35rem; overflow-x:auto; padding:0.35rem 0 0.2rem;}
+    .rec-segs::-webkit-scrollbar{height:5px;}
+    .rec-segs::-webkit-scrollbar-thumb{background:rgba(148,178,232,0.18); border-radius:3px;}
+    .rec-seg{flex:0 0 auto; background:var(--glass2); border:1px solid var(--stroke); border-radius:8px;
+      padding:0.3rem 0.55rem; font-size:0.72rem; cursor:pointer; color:var(--text); transition:all 0.15s;}
+    .rec-seg small{display:block; color:var(--faint); font-size:0.62rem;}
+    .rec-seg:hover,.rec-seg.on{border-color:var(--accent); color:var(--accent);}
+    .rec-note{font-size:0.7rem; color:var(--faint); padding:0.3rem 0;}
+    .player video{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain; background:#000;}
+
+    /* ── events feed ─────────────────────────────────────────────────── */
+    .evt{display:flex; align-items:flex-start; gap:0.45rem; padding:0.4rem 0.5rem; background:var(--glass2);
+      border:1px solid var(--stroke); border-radius:10px; margin-top:0.32rem; cursor:pointer;
+      font-size:0.75rem; text-align:left; width:100%; color:var(--text); transition:border-color 0.15s;}
+    .evt:hover{border-color:var(--accent);}
+    .evt .ev-dot{width:8px; height:8px; border-radius:50%; flex:0 0 auto; margin-top:0.28rem;}
+    .evt .ev-body{flex:1; min-width:0;}
+    .evt .ev-title{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+    .evt .ev-sub{display:block; color:var(--faint); font-size:0.66rem;}
+    .ringrow{display:flex; gap:0.35rem; align-items:center; margin-bottom:0.35rem;}
+    .ringrow input{flex:1; margin-bottom:0;}
+    .ringrow select{flex:1; margin-bottom:0;}
+    .ev-scope{font-size:0.66rem; color:var(--faint);}
+    .ev-scope a{color:var(--accent); text-decoration:none;}
+
+    /* ── login overlay (auth_mode="opennvr") ─────────────────────────── */
+    #loginOverlay{position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center;
+      padding:1rem; background:radial-gradient(60% 50% at 50% 32%, rgba(94,179,246,0.10), transparent 70%), rgba(4,7,13,0.82);
+      backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);}
+    .login-card{background:linear-gradient(180deg,rgba(20,29,48,0.92),rgba(11,18,32,0.96));
+      border:1px solid var(--stroke2); border-radius:var(--radius); width:min(360px,94vw);
+      padding:1.6rem 1.5rem 1.2rem; display:flex; flex-direction:column; gap:0.4rem;
+      box-shadow:var(--shadow), 0 0 0 1px rgba(94,179,246,0.06); animation:login-in 0.28s ease;}
+    @keyframes login-in{from{opacity:0; transform:translateY(10px) scale(0.985);} to{opacity:1; transform:none;}}
+    .login-brand{display:flex; flex-direction:column; align-items:center; gap:0.35rem; margin-bottom:0.9rem; text-align:center;}
+    .login-avatar{width:64px; height:64px; border-radius:50%; display:grid; place-items:center; color:var(--accent);
+      background:rgba(94,179,246,0.08); box-shadow:0 0 0 1px rgba(94,179,246,0.35), 0 0 24px rgba(94,179,246,0.18);}
+    .login-avatar svg{width:44px; height:44px;}
+    .login-wordmark{font-size:1.25rem; font-weight:700; color:var(--wordmark); letter-spacing:0.01em;}
+    .login-wordmark .wm-nvr{background:linear-gradient(90deg,var(--accent),var(--accent2));
+      -webkit-background-clip:text; background-clip:text; color:transparent;}
+    .login-agent{font-size:0.76rem; color:var(--muted);}
+    .login-agent b{color:var(--text); font-weight:600;}
+    .login-lbl{font-size:0.68rem; color:var(--faint); text-transform:uppercase; letter-spacing:0.06em; margin:0.35rem 0 0.15rem;}
+    .login-opt{text-transform:none; letter-spacing:0; opacity:0.7;}
+    .login-card input{background:rgba(0,0,0,0.28); color:var(--text); border:1px solid var(--stroke);
+      border-radius:10px; padding:0.6rem 0.7rem; font-size:0.88rem; transition:border-color 0.15s ease, box-shadow 0.15s ease;}
+    .login-card input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(94,179,246,0.18);}
+    .login-err{color:#f87171; font-size:0.75rem; margin-top:0.35rem; background:rgba(242,85,90,0.08);
+      border:1px solid rgba(242,85,90,0.35); border-radius:9px; padding:0.45rem 0.6rem;}
+    #loginGo{margin-top:0.8rem; background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      border:none; border-radius:11px; padding:0.65rem; font-size:0.9rem; font-weight:700; cursor:pointer;
+      transition:filter 0.15s ease, transform 0.1s ease;}
+    #loginGo:hover{filter:brightness(1.08);} #loginGo:active{transform:translateY(1px);}
+    #loginGo:disabled{opacity:0.6; cursor:default;}
+    .login-foot{margin-top:0.7rem; font-size:0.66rem; color:var(--faint); text-align:center;}
+
+    /* ── install-time interaction mode (from /agent text_mode) ─────────
+       voice → the text box never shows; text → the voice controls never
+       show. The body class is set once in loadAgent(). */
+    body.mode-voice .askrow, body.mode-voice #camAsk{display:none !important;}
+    body.mode-text #talk, body.mode-text .voicebar, body.mode-text #micdot,
+    body.mode-text #camTalk{display:none !important;}
+    body.mode-voice .log:empty::after{content:"Ask your cameras anything — tap Talk and speak.";}
+    body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
   </style>
 </head>
 <body>
+  <div class="ambient" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span></div>
+  <div class="ambient-speak" aria-hidden="true"></div>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
@@ -363,6 +507,7 @@
               <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
               <span class="ovl" id="camTs"></span>
               <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
+              <button class="fsbtn" id="camFs" type="button" title="Full screen" aria-label="Full screen">⛶</button>
             </div>
             <div class="transport">
               <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
@@ -407,6 +552,7 @@
             <div class="empty-note" id="camScoped"></div>
           </div>
 
+          <div class="voicebar" aria-hidden="true"><div class="pill"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="lbl"></span></div></div>
           <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <div class="row" id="pinChip" hidden>
             <span class="chip">📌 Asking about a <span id="pinCam"></span> frame</span>
@@ -417,7 +563,7 @@
             <button id="askBtn" class="ghost" type="button">Send</button>
           </div>
           <div class="row">
-            <div class="status" id="status">Ready. Tap Talk and speak, or type a question.</div>
+            <div class="status" id="status">Ready.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="reset" class="ghost" type="button">Reset</button>
@@ -818,13 +964,18 @@
       if(_authMode==="opennvr"&&!_token) showLogin();
       window._opennvrUi=a.opennvr_ui_url||"";            // deep-link base for recordings
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
+      // Interaction mode is chosen at install time (text_mode in the
+      // config): the body class hides the OTHER mode's controls entirely —
+      // voice installs never show the text box, text installs never show
+      // the Talk button / voice pill (CSS: body.mode-voice / body.mode-text).
       if(a.text_mode){
-        // Text/chat profile: lead with typing; the voice controls don't apply.
-        document.getElementById("talk").style.display="none";
+        document.body.classList.add("mode-text");
         ledeEl.innerHTML=`Type a question — e.g. <em>"how many people on cam1?"</em>`;
         setStatus("Ready. Type a question.");
       } else {
-        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak, or type below — it answers from your cameras.`;
+        document.body.classList.add("mode-voice");
+        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak — it listens and answers aloud.`;
+        setStatus("Ready. Tap Talk and speak.");
       }
     }catch{} }
 
@@ -980,11 +1131,12 @@
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
-    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc) return;
+    async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc||_playback) return;
       const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
         if(!r.ok) throw new Error();
+        const v=$("camVideo"); if(v) v.hidden=true;   // snapshot mode owns the player
         setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
         $("camTs").textContent=fmtClock(Date.now()/1000);
       }catch{ if(gen===_viewGen){ img.hidden=true; off.hidden=false; } } }
@@ -1002,7 +1154,9 @@
     function stopWebrtc(){
       if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
       if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
-      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; } }
+      // Hide the video surface too — leaving it visible stacks a dead
+      // <video> above the snapshot <img> and doubles the player height.
+      const v=$("camVideo"); if(v&&v.srcObject){ v.srcObject=null; v.hidden=true; } }
     // The same WebRTC (WHEP) the OpenNVR Live view plays — that's why its
     // streams are smooth while snapshot polling looks 'laggy/buffering'.
     // Returns true when the stream is up; false → caller falls back.
@@ -1029,7 +1183,11 @@
         const resp=await fetch(d.whep_url,{method:"POST",
           headers:{"Content-Type":"application/sdp"},body:offer.sdp||""});
         if(!(resp.status===200||resp.status===201)) throw new Error("WHEP "+resp.status);
-        _whepResource=resp.headers.get("Location");
+        // MediaMTX returns Location as a relative path — resolve it against
+        // the WHEP URL's origin, or the teardown DELETE hits the agent (404)
+        // and prints the ?jwt= token into the agent's access log.
+        const loc=resp.headers.get("Location");
+        _whepResource=loc?new URL(loc,d.whep_url).href:null;
         await pc.setRemoteDescription({type:"answer",sdp:await resp.text()});
         // give ICE a moment; if no track arrives, treat as failed
         const ok=await Promise.race([gotTrack,new Promise(r=>setTimeout(()=>r(false),6000))]);
@@ -1092,10 +1250,14 @@
           const nxt=+s2.value+1; if(nxt>=+s2.max){ goLive(); } else { s2.value=nxt; reviewAt(nxt); } },1000); }
         if(!_playing&&_stepTimer){ clearInterval(_stepTimer); _stepTimer=null; } });
       const player=$("camPlayer");
-      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl")) return;
+      if(player) player.addEventListener("click",(e)=>{ if(e.target.closest(".modepill,.ovl,.fsbtn")) return;
         if(_playback) return;               // recorded playback has its own controls
         const cam=window._camScreenCam; if(!cam) return;
-        pinFrame(cam,_revTs||undefined); }); })();
+        pinFrame(cam,_revTs||undefined); });
+      const fs=$("camFs");
+      if(fs) fs.addEventListener("click",(e)=>{ e.stopPropagation();
+        if(document.fullscreenElement){ document.exitFullscreen().catch(()=>{}); }
+        else if(player&&player.requestFullscreen){ player.requestFullscreen().catch(()=>{}); } }); })();
 
     // ── Events: ONE what-happened feed (alarms + watches + app alerts).
     // Clicking an event opens the camera AND jumps to the moment: review

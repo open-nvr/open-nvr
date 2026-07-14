@@ -549,47 +549,9 @@ export function Cameras() {
                       )}
                       {c.mediamtx_provisioned === true && (
                         <>
-                          {canManageCameras && (
-                            <button
-                              className={`p-1.5 border rounded transition-colors ${c.recording_enabled ? 'border-red-600 bg-red-900/20 text-red-400 hover:bg-red-900/40' : 'border-neutral-600 bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}`}
-                              onClick={async () => {
-                                const targetState = !c.recording_enabled
-                                try {
-                                  // Optimistic update
-                                  setCameras(prev => prev.map(cam => cam.id === c.id ? { ...cam, recording_enabled: targetState } : cam))
-                                  
-                                  const { data } = await apiService.toggleCameraRecording(c.id, targetState)
-                                  if (data.status === 'ok' || data.recording_enabled !== undefined) {
-                                    if (targetState) {
-                                      showSuccess(`Recording enabled for ${c.name}`)
-                                    } else {
-                                      showError(`Recording disabled for ${c.name}`)
-                                    }
-                                    await refreshCameras()
-                                  } else {
-                                    // Revert
-                                    setCameras(prev => prev.map(cam => cam.id === c.id ? { ...cam, recording_enabled: !targetState } : cam))
-                                    showError('Failed to toggle recording')
-                                  }
-                                } catch (e: any) {
-                                  // Revert
-                                  setCameras(prev => prev.map(cam => cam.id === c.id ? { ...cam, recording_enabled: !targetState } : cam))
-                                  showError(e?.data?.detail || e?.message || 'Failed to toggle recording')
-                                }
-                              }}
-                              title={c.recording_enabled ? "Stop Recording" : "Start Recording"}
-                            >
-                              {c.recording_enabled ? (
-                                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                  <rect x="6" y="6" width="12" height="12" rx="1" />
-                                </svg>
-                              ) : (
-                                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                  <circle cx="12" cy="12" r="8" />
-                                </svg>
-                              )}
-                            </button>
-                          )}
+                          {/* Recording is automatic on an NVR — no manual
+                              start/stop control. The Recording column shows its
+                              live status. */}
                           <button
                             className="p-1.5 border border-blue-600 bg-blue-900/20 text-blue-400 hover:bg-blue-900/40 transition-colors rounded"
                             onClick={() => navigate(`/live?camera=${c.id}`)}

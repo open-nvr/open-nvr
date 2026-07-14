@@ -14,73 +14,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Per-camera RTSPS reachability probe (V-003).
+"""Per-camera RTSPS reachability probe.
 
-Why this exists
----------------
-The Zenodo paper (DOI 10.5281/zenodo.17261761) §3.2 calls out plaintext
-RTSP as a systemic weakness. M1b (V-019) hardened the operator-facing
-side; M1c (V-003) is the *camera-facing* counterpart: detect whether
-each camera supports RTSPS and surface that to the operator so they can
-make an informed transport-security choice per camera.
-
-What the probe does (and doesn't do)
--------------------------------------
-For a given RTSP URL the probe:
-
-1. Parses the host (and best-effort RTSPS port — see below).
-2. Opens an async TCP connection to the candidate (host, rtsps_port).
-3. Wraps it in TLS using a permissive context (``verify_mode=CERT_NONE``,
-   ``check_hostname=False``). Cameras almost universally ship with
-   self-signed or factory certificates — the goal here is "is there a
-   TLS server listening?" not "is its identity verifiable?" Auth-time
-   identity pinning is tracked separately under V-018.
-4. If the TLS handshake completes within ``timeout`` seconds, returns
-   ``ProbeOutcome.SUPPORTED``.
-5. On TCP refusal / unreachable / handshake failure, returns
-   ``ProbeOutcome.NOT_SUPPORTED``.
-6. On DNS-resolution failure, timeout, or generic OS error, returns
-   ``ProbeOutcome.INCONCLUSIVE`` (informational; the operator's existing
-   ``transport_security`` choice is preserved).
-
-It does NOT:
-
-* Open an RTSP DESCRIBE session — TLS handshake completion is sufficient
-  evidence that the camera speaks RTSPS. Doing RTSP after the handshake
-  would add ~200ms and would not change the True/False outcome.
-* Validate the certificate. Camera CAs are out of scope for V-003.
-* Probe multiple ports if the first one fails. The probe is intentionally
-  fast and conservative; operators who need probing on non-default ports
-  can pass an explicit ``rtsps_port``.
-
-Port-selection rules
---------------------
-The default RTSPS port per RFC 2326 / RFC 7826 is 322 (TCP). Many camera
-vendors instead reuse the RTSP port (554) and switch to TLS on demand,
-or pick an arbitrary high port. The probe rules, in order:
-
-1. If the operator passed ``rtsps_port``, use that verbatim.
-2. Else if the URL host contains an explicit port that is *not* 554,
-   reuse it (the camera is likely already on a non-default RTSP port).
-3. Else use 322 (the spec default).
-
-This is documented behaviour — the operator can re-probe with a custom
-port via the API once they know what their camera does.
-
-Use
----
-::
-
-    from services.transport_probe_service import TransportProbeService
-
-    outcome = await TransportProbeService.probe(rtsp_url)
-    config.transport_security_probe_result = outcome.value
-    config.transport_security_probed_at = datetime.now(UTC)
-    # Policy decision still lives on the operator — see camera_service
-    # for how the `transport_security` field is set from the outcome.
-
-The probe is async (``asyncio.open_connection``) so a fleet-wide re-probe
-does not serialise on the event loop. Default timeout is 5s per camera.
+Detects whether a camera supports RTSPS (TLS RTSP) via an async TLS handshake
+and reports SUPPORTED / NOT_SUPPORTED / INCONCLUSIVE, so the operator can pick a
+per-camera transport-security policy. The policy decision itself lives in
+camera_service. See V-003 and DESIGN_NOTES: transport-security probe.
 """
 
 from __future__ import annotations
@@ -153,15 +92,9 @@ def _resolve_probe_target(
 
 
 def _build_permissive_tls_context() -> ssl.SSLContext:
-    """TLS context for camera probing.
-
-    Camera certs are almost universally self-signed or rooted to a
-    vendor-specific CA the OpenNVR host won't trust. The probe's job is
-    "is a TLS server listening?" — *identity* verification is a separate
-    concern tracked under V-018 (certificate pinning for cameras that
-    expose stable identity material). Using ``check_hostname=False`` +
-    ``CERT_NONE`` here is the documented trade-off; do NOT use this
-    context for any code that exchanges credentials over the link.
+    """Permissive TLS context for probing only (camera certs are self-signed).
+    Checks a TLS server is listening, not its identity. Never reuse this for a
+    link that exchanges credentials. See V-018.
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -311,47 +244,15 @@ def enforce_transport_policy(
     *,
     camera_id: int | None = None,
 ) -> None:
-    """V-003 runtime enforcement: refuse if the camera's transport_security
-    policy is incompatible with the URL we're about to hand to MediaMTX.
-
-    Decision table:
-
-    +---------------------+-----------+---------+-----------------+
-    | policy              | URL       | result  | side effect     |
-    +=====================+===========+=========+=================+
-    | rtsps_required      | rtsps://  | allow   | -               |
-    +---------------------+-----------+---------+-----------------+
-    | rtsps_required      | rtsp://   | REFUSE  | raises          |
-    +---------------------+-----------+---------+-----------------+
-    | rtsps_preferred     | rtsps://  | allow   | -               |
-    +---------------------+-----------+---------+-----------------+
-    | rtsps_preferred     | rtsp://   | allow   | logs warning    |
-    +---------------------+-----------+---------+-----------------+
-    | plaintext_allowed   | (any)     | allow   | -               |
-    +---------------------+-----------+---------+-----------------+
-    | None / unknown      | (any)     | allow   | -               |
-    +---------------------+-----------+---------+-----------------+
-
-    The ``None`` row covers the camera-create case where the probe has
-    not yet run and the policy column on CameraConfig is still at its
-    server-default. Callers in that path should pass ``policy=None``
-    explicitly so the intent is clear.
-
-    The ``rtsps_preferred`` warning is informational — it tells the
-    operator that the camera supports RTSPS (the probe said so) but
-    the URL they configured is plaintext. The honest fix is to update
-    the URL, not to silently upgrade it here (URL rewriting based on
-    "what we think the RTSPS port is" creates load-bearing assumptions
-    that break for non-standard camera ports).
+    """Refuse (raise) if the camera's transport_security policy is incompatible
+    with the URL about to be handed to MediaMTX. Unknown policy values fail
+    closed. See V-003 and DESIGN_NOTES: transport-security probe.
     """
     if not policy or policy == "plaintext_allowed":
         return
 
-    # M1c-fu-sr-v2 P-2: defense-in-depth — unknown policy values are
-    # bugs (pydantic constrains the enum upstream, but a hand-edited DB
-    # row, a future enum addition not yet handled here, or a typo
-    # like "rtsp_required" without the trailing 's' must NOT silently
-    # default to allow). Fail-closed for the security gate.
+    # Fail closed on unknown policy values: a hand-edited DB row or a typo
+    # (e.g. "rtsp_required") must not silently default to allow.
     _KNOWN_POLICIES = ("rtsps_required", "rtsps_preferred")
     if policy not in _KNOWN_POLICIES:
         try:

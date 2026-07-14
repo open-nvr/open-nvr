@@ -217,11 +217,9 @@ class CloudRecordingService:
         relative_path: str,
     ) -> dict[str, Any]:
         """Upload a recording file to another NVR instance with BYOK certificate support."""
-        # V-009 (M1a) defense-in-depth: the router-level gate already 403s
-        # the /cloud-upload/day endpoint, but background retry-loops and the
-        # queue worker can re-enter this method after a runtime mode flip.
-        # Refuse here too so an in-flight queue cannot leak data after the
-        # operator switches to offline mode.
+        # Defense-in-depth: the router gate 403s the endpoint, but a background
+        # retry/queue worker could re-enter after a runtime mode flip, so
+        # re-check here too. See V-009.
         from core.policy import cloud_outbound_allowed
 
         if not cloud_outbound_allowed():
@@ -417,12 +415,24 @@ class CloudRecordingService:
         destination_key: str,
     ) -> dict[str, Any]:
         """Queue a file for upload to cloud storage."""
+        # Don't queue anything while offline — the upload can't succeed and a
+        # queued task would just retry-loop. See V-009.
+        from core.policy import cloud_outbound_allowed
+
+        if not cloud_outbound_allowed():
+            return {
+                "status": "refused",
+                "message": (
+                    "Cloud upload refused: deployment_mode=offline. "
+                    "Set deployment_mode=hybrid|cloud to enable."
+                ),
+            }
         task = UploadTask(
             file_path=file_path,
             camera_id=camera_id,
             destination_key=destination_key,
         )
-        
+
         await self._upload_queue.put(task)
         self._stats["queued_total"] += 1
         self._stats["updated_at"] = datetime.utcnow().isoformat()
@@ -452,7 +462,16 @@ class CloudRecordingService:
                     logger.debug("Upload queue empty, worker stopping")
                     break
                 continue
-            
+
+            # Drop (don't attempt or retry) uploads while offline, so a stale
+            # queued task can't loop forever showing a refused "Uploading…"
+            # state. See V-009.
+            from core.policy import cloud_outbound_allowed
+
+            if not cloud_outbound_allowed():
+                self._upload_queue.task_done()
+                continue
+
             task.status = UploadStatus.UPLOADING
             task.attempts += 1
             self._active_file = task.file_path

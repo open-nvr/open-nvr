@@ -77,7 +77,7 @@ export function CamerasManager() {
   const [showProvisionDialog, setShowProvisionDialog] = useState(false)
   const [provisioningCamera, setProvisioningCamera] = useState<Camera | null>(null)
   const [provisionConfig, setProvisionConfig] = useState({
-    enable_recording: false,
+    enable_recording: true, // NVR: recording is mandatory
     rtsp_transport: 'tcp',
     recording_path: ''
   })
@@ -311,7 +311,7 @@ export function CamerasManager() {
   const openProvisionDialog = (camera: Camera) => {
     setProvisioningCamera(camera)
     setProvisionConfig({
-      enable_recording: false,
+      enable_recording: true, // NVR: recording is mandatory
       rtsp_transport: 'tcp',
       recording_path: ''
     })
@@ -729,8 +729,11 @@ export function CamerasManager() {
                   <input
                     type="checkbox"
                     className="accent-[var(--accent)]"
-                    checked={provisionConfig.enable_recording}
-                    onChange={(e) => setProvisionConfig(prev => ({ ...prev, enable_recording: e.target.checked }))}
+                    checked={true}
+                    onChange={(e) => {
+                      // NVR: recording is mandatory and can't be turned off.
+                      if (!e.target.checked) showError('Restricted action. Contact support.')
+                    }}
                   />
                   Enable Recording
                 </label>

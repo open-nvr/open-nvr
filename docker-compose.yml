@@ -1,47 +1,18 @@
 # ==========================================
-# OpenNVR — Standard Compose
+# OpenNVR — Standard Compose (NVR core + YOLOv8 adapter)
 # ==========================================
+# Fastest install: pre-built images, no source build. First boot pulls YOLOv8
+# ONNX weights into a cached volume (~5 min on x86 broadband).
 #
-# The fastest, most opinionated install path: NVR core + one AI
-# adapter (YOLOv8 for object detection). Everything pulls from
-# pre-built images — no source builds, no toolchain, no manual
-# weights download. Target wall time on a normal broadband link
-# (50 Mbps, fresh Docker): under 5 minutes on x86.
-#
-# The YOLOv8 ONNX weights are pulled from GHCR and copied into the
-# opennvr_yolov8_weights volume on first boot. Subsequent boots reuse
-# the cached volume.
-#
-# Quickstart — one command:
-#     ./start.sh          # Linux / macOS   (start.ps1 on Windows)
-#
-# On first run it creates and configures .env for you (generating secrets),
-# offers to set up the Camera Agent example, then builds and starts the stack.
-# Open http://localhost:8000 and follow the one-time setup flow.
-#
-# Prefer to drive Compose directly? The launcher just wraps these:
-#     cp .env.example .env
-#     ./scripts/generate-secrets.sh --write
+# Quickstart (the launcher wraps these):
+#     ./start.sh                 # Linux/macOS  (start.ps1 on Windows)
+#   or manually:
+#     cp .env.example .env && ./scripts/generate-secrets.sh --write
 #     docker compose -f docker-compose.yml up -d
+# Then open https://localhost/ and follow the one-time setup.
 #
-# To layer the camera-agent voice example on top (the launcher does this for
-# you when you pick it in the installer):
-#     docker compose \
-#         -f docker-compose.yml \
-#         -f docker-compose.camera-agent.yml \
-#         --profile camera-agent up -d
-#
-# To enable additional adapters (Piper TTS, Whisper STT, fast-plate-
-# ocr LPR, InsightFace facial recognition, BLIP captions), see
-# docs/AI_ADAPTER_CONTRACT.md. Each is a single image addition
-# and a one-line KAI-C registry entry; the camera-agent overlay is
-# a worked example of the same pattern.
-#
-# For production, add external TLS termination, a managed Postgres,
-# and reverse-proxy authentication. Camera discovery remains bridge-safe
-# by using explicit IPs or unicast subnet scanning. This stack gets you to "boxes
-# on your camera feed" in five minutes so you can decide whether
-# the rest of the project is worth your evening.
+# Overlays, extra adapters, and production notes: see DOCKER_QUICKSTART.md
+# and docs/ARCHITECTURE.md.
 # ==========================================
 
 services:
@@ -67,24 +38,11 @@ services:
       start_period: 40s
       retries: 5
 
-  # ──────────────────────────────────────────────────────────────
   # MediaMTX cert init — one-shot self-signed cert generator.
-  # See docker-compose.yml for the long-form rationale; same shape
-  # here so behaviour is identical across install paths.
-  # ──────────────────────────────────────────────────────────────
   mediamtx-certs-init:
-    # ISSUE-7 v6: was alpine:3.20 + runtime ``apk add openssl``. That
-    # apk fetch hits dl-cdn.alpinelinux.org, which several operator
-    # ISPs (IN/CN/IR reports) filter — the container exits with
-    # "Permission denied" and mediamtx never starts. alpine/openssl
-    # ships the openssl CLI pre-baked at the registry layer, so the
-    # image pull (registry-1.docker.io — reachable) is the only
-    # network operation the container needs. Pinned tag, multi-arch
-    # (amd64/arm64/armv7), ~6 MB.
-    #
-    # ``entrypoint: []`` clears the image's default ENTRYPOINT
-    # (``["openssl"]``) so the existing ``command: [sh, -c, ...]``
-    # runs as the container's argv.
+    # alpine/openssl ships the openssl CLI pre-baked (avoids a runtime apk
+    # fetch that some ISPs block). entrypoint: [] clears its default openssl
+    # entrypoint so our `sh -c` command runs.
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_mediamtx_certs_init
@@ -98,12 +56,8 @@ services:
           exit 0
         fi
         umask 077
-        # ISSUE-6 v9: extend the SAN list with OPENNVR_HOST_IP when
-        # set so direct RTSPS clients (VLC, ffmpeg hitting
-        # rtsps://<host-ip>:8322) get a cert that matches the URL.
-        # Browsers don't see this cert — they go through nginx, which
-        # has its own cert — but the local-tools UX gets the same
-        # one-click-trust experience.
+        # Add OPENNVR_HOST_IP to the cert SAN so direct RTSPS clients (VLC,
+        # ffmpeg) get a matching cert. Browsers use nginx's cert instead.
         SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
         if [ -n "$${OPENNVR_HOST_IP}" ]; then
           SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
@@ -122,58 +76,21 @@ services:
     volumes:
       - ./mediamtx-certs:/certs
 
-  # ──────────────────────────────────────────────────────────────
-  # MediaMTX — RTSP / HLS / WebRTC streaming server.
-  # We keep the inline multi-stage build here even in standard stack
-  # because it's just a 15-second binary-copy from the official
-  # MediaMTX image plus ``apk add curl`` for runOnInit webhooks.
-  # Publishing it as a separate GHCR image isn't worth the moving
-  # parts for that small a build.
-  # ──────────────────────────────────────────────────────────────
+  # MediaMTX — RTSP / HLS / WebRTC streaming server. Inline build =
+  # official MediaMTX binary + curl (for runOnInit webhooks).
   mediamtx:
     build:
       context: .
       dockerfile_inline: |
-        # ISSUE-7 v4: use curlimages/curl as the FINAL base instead
-        # of alpine:3.20 + multi-stage COPY of just the curl binary.
-        # The v1 approach left curl unable to load libcurl.so.4 (and
-        # libssl, libcrypto, libnghttp2, ...) at runtime, breaking
-        # the mediamtx healthcheck and runOnInit hooks. curlimages/
-        # curl is itself an alpine image with curl + all its
-        # libraries correctly wired, so using it as the base gives
-        # us a working curl for free. We then COPY only the mediamtx
-        # Go binary in — mediamtx is statically linked, no libs
-        # needed. Still no `apk add`, so the build doesn't depend
-        # on Alpine package mirrors being reachable (the original
-        # ISSUE-7 v1 goal).
-        #
-        # ⚠ Base-swap checklist. When changing the FROM line below,
-        # audit every inheritable setting and override or accept it
-        # consciously. The v1 / v4 / v5 incomplete-fix series in this
-        # repo's history was caused by forgetting one of these each
-        # time. The full list:
-        #   * USER         — inherited image's user (often non-root)
-        #   * WORKDIR      — inherited CWD; affects where the
-        #                    ENTRYPOINT looks for relative-path
-        #                    files like config YAMLs
-        #   * ENTRYPOINT   — inherited entrypoint
-        #   * CMD          — inherited default args; passed to OUR
-        #                    ENTRYPOINT if we don't clear it
-        #   * ENV          — inherited env vars (PATH, HOME, etc.)
-        #   * HEALTHCHECK  — inherited; usually replaced in compose
-        #   * EXPOSE       — inherited; usually replaced in compose
-        #   * STOPSIGNAL   — usually fine to inherit
-        # If you change the base and don't review every line below
-        # against this list, expect a silent runtime break.
+        # Base on curlimages/curl (working curl for the healthcheck +
+        # runOnInit hooks, no `apk add`), then copy in the statically-linked
+        # mediamtx binary. If you change the FROM line, re-audit inherited
+        # USER/WORKDIR/ENTRYPOINT/CMD/ENV so the boot doesn't silently break.
         FROM bluenviron/mediamtx:1.15.4 AS mediamtx-base
         FROM curlimages/curl:8.10.1
         USER root
         WORKDIR /
-        # CMD [] explicitly clears any default args from the base
-        # image. curlimages/curl:8.10.1 has no CMD set today, but
-        # if a future tag adds one (e.g. ["--help"]) it would be
-        # passed to mediamtx as its config-file argument and break
-        # the boot silently. Defensive — costs nothing.
+        # Clear any inherited CMD so it isn't passed to mediamtx as a config arg.
         CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
@@ -185,26 +102,17 @@ services:
       mediamtx-certs-init:
         condition: service_completed_successfully
     ports:
-      # ── Host-loopback only (V-015 trust zone, host-side debugging) ──
+      # Host-loopback only (host-side debugging). See V-015.
       - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
       - "127.0.0.1:8888:8888" # HLS (browsers reach via nginx /hls/)
       - "127.0.0.1:8889:8889" # WebRTC signalling (via nginx /webrtc/)
       - "127.0.0.1:9997:9997" # MediaMTX admin API/metrics
       - "127.0.0.1:9996:9996" # Recording playback (via nginx /playback/)
-      # ── WebRTC ICE media path (ISSUE-6 v8) ──────────────────────
-      # WebRTC media is DTLS-SRTP over UDP — browser ↔ mediamtx
-      # direct, NOT proxied by nginx. The UDP port must be reachable
-      # on the same NIC nginx publishes the UI on, so a LAN browser
-      # can complete the ICE handshake mediamtx advertised via
-      # webrtcAdditionalHosts. Bound to NGINX_BIND_HOST (uplink in
-      # dual-NIC mode, 0.0.0.0 in single-LAN) so the trust-zone
-      # constraint stays intact — cameras on a separate camera-LAN
-      # NIC cannot reach this port. Media is DTLS-SRTP-encrypted
-      # end-to-end and only usable with a JWT-authenticated SDP
-      # session, so the exposed surface is small.
+      # WebRTC ICE media (DTLS-SRTP over UDP, browser ↔ mediamtx direct, not via
+      # nginx). Bound to NGINX_BIND_HOST so it stays on the operator NIC, off
+      # the camera LAN. See V-015.
       - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/udp"
-      # TCP fallback for WebRTC ICE in case UDP is blocked (corporate
-      # firewalls, mobile carriers). Same exposure rationale as UDP.
+      # TCP fallback for WebRTC ICE when UDP is blocked.
       - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/tcp"
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
@@ -215,13 +123,9 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
-      # ISSUE-6 v8: ICE candidate advertisement. mediamtx puts the
-      # host(s) listed here in the SDP answer; the browser uses them
-      # to find the UDP/8189 media path. Set by start.sh based on
-      # the operator's declared topology (uplink IP in dual-NIC,
-      # detected LAN IP in single-LAN). Empty default means
-      # mediamtx falls back to auto-detection — works on simple
-      # single-NIC hosts but breaks behind NAT / multi-NIC.
+      # ICE candidate hosts advertised in the SDP answer (so the browser can
+      # reach UDP/8189). Set by start.sh from the detected topology; empty =
+      # mediamtx auto-detects (fine on single-NIC, breaks behind NAT/multi-NIC).
       - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
     networks:
       - opennvr_internal
@@ -256,41 +160,13 @@ services:
       start_period: 10s
       retries: 3
 
-  # ──────────────────────────────────────────────────────────────
-  # YOLOv8 weights init — one-shot copier for the ONNX weights
-  # that the YOLOv8 adapter expects at /weights/yolov8n.onnx.
-  #
-  # ISSUE-7 v3 architecture: instead of downloading and exporting
-  # at first boot (which used apt-get + pip install + ultralytics
-  # CLI — three external-repo dependencies that broke for operators
-  # behind ISP filters), this container is just a thin copier. It
-  # pulls a pre-baked image whose only contents are the ONNX file,
-  # then `cp`s that file into the weights volume. Total time on
-  # first boot: ~5 seconds when the image is pullable from GHCR.
-  #
-  # We can't bake the weights into the adapter image itself
-  # because that image is a generic, vendor-neutral adapter — the
-  # specific model weight choice (yolov8n vs yolov8s vs a
-  # fine-tuned model) lives with the operator. Operators with a
-  # custom model build their own weights image; see
-  # examples/yolov8-weights/README.md for the recipe.
-  # ──────────────────────────────────────────────────────────────
+  # YOLOv8 weights init — copies the pre-baked ONNX weights into the volume the
+  # adapter reads (a thin copier, so first boot needs no apt/pip). Bring your own
+  # model via a custom weights image — see examples/yolov8-weights/README.md.
   yolov8-weights-init:
-    # ISSUE-7 v3: use a pre-baked weights image instead of the old
-    # python:3.11-slim + apt+pip+export path. The old path failed for
-    # operators behind ISP filters that block deb.debian.org or
-    # pypi.org (reported from IN/CN/IR). The new pattern works for
-    # every operator who can pull Docker images at all:
-    #
-    #   * `image:` points at ghcr.io/open-nvr/yolov8-weights:v8.3.0
-    #     — published by .github/workflows/build-yolov8-weights.yml
-    #     on each release tag. A 20-MB alpine image containing just
-    #     /yolov8n.onnx. Pull is <5 sec.
-    #
-    # Custom / fine-tuned models: build the image yourself with your
-    # .pt as a build context, push to your private registry, set
-    # YOLOV8_WEIGHTS_IMAGE in .env. See examples/yolov8-weights/
-    # README.md for the recipe.
+    # A ~20 MB image containing just /yolov8n.onnx (built by
+    # build-yolov8-weights.yml). Override YOLOV8_WEIGHTS_IMAGE in .env for a
+    # custom model.
     image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
@@ -382,14 +258,9 @@ services:
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
       - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
-      # ISSUE-6 v8: browser-facing URLs go through nginx so they
-      # work from any LAN device with TLS. MEDIAMTX_PUBLIC_URL is
-      # exported by start.sh as https://<uplink-IP> for dual-NIC or
-      # https://<detected-IP> for single-LAN. Falls back to
-      # https://localhost so the host-itself path keeps working
-      # when the script is bypassed (e.g., direct `docker compose
-      # up -d`). All three URLs are same-origin with the React UI,
-      # so no mixed-content blockers fire.
+      # Browser-facing URLs go through nginx (TLS, any LAN device).
+      # MEDIAMTX_PUBLIC_URL is set by start.sh from the detected topology and
+      # falls back to https://localhost. Same-origin with the UI (no mixed content).
       - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
@@ -444,29 +315,12 @@ services:
       start_period: 60s
       retries: 5
 
-  # ──────────────────────────────────────────────────────────────
-  # ISSUE-6: TLS reverse proxy for LAN access.
-  #
-  # opennvr-core binds its host port to 127.0.0.1:8000 only — by
-  # design, so the plaintext HTTP API is never reachable from the
-  # LAN. To let operators reach the UI from a phone or laptop on
-  # 192.168.x without compromising on cleartext-JWT-on-the-wire, we
-  # ship nginx as the public edge. It terminates TLS with a
-  # self-signed cert (CA: opennvr-local) and proxies everything to
-  # opennvr-core over the Docker internal bridge — which V-015's
-  # trust-zone semantics already classify as inside the boundary
-  # (loopback + RFC1918 + ULA + link-local). No new attack surface
-  # versus today's loopback-only posture; just the TLS edge moves
-  # from "absent" to "self-signed, in the Docker network namespace".
-  #
-  # Operators with their own reverse-proxy / TLS terminator (Caddy,
-  # Cloudflare Tunnel, nginx on bare metal) can disable this service
-  # by removing it from the compose and bind opennvr-core to
-  # 0.0.0.0:8000 themselves. The recommended path is to leave this
-  # in place.
-  # ──────────────────────────────────────────────────────────────
+  # nginx — the LAN-facing TLS edge. opennvr-core binds only to
+  # 127.0.0.1:8000, so nginx terminates TLS (self-signed) and proxies to it
+  # over the Docker bridge (inside the trust zone). See V-015. Operators with
+  # their own TLS terminator can drop this service and bind core to 0.0.0.0.
   nginx-certs-init:
-    # ISSUE-7 v6: same fix as mediamtx-certs-init above. See its
+    # Same pre-baked openssl approach as mediamtx-certs-init above. See its
     # comment block for the dl-cdn.alpinelinux.org filter rationale.
     image: alpine/openssl:3.3.2
     entrypoint: []
@@ -513,26 +367,13 @@ services:
         condition: service_completed_successfully
       opennvr-core:
         condition: service_healthy
-      # ISSUE-21: nginx's opennvr.conf uses ``proxy_pass https://mediamtx:8889/``
-      # (literal hostname) at lines 89/107/127. nginx resolves those at
-      # CONFIG LOAD time, not at request time — so if mediamtx isn't yet
-      # registered in the Docker bridge DNS when nginx parses its config,
-      # nginx dies with ``host not found in upstream "mediamtx"`` and
-      # crash-loops forever (because every restart attempt hits the same
-      # config-parse error). The opennvr-core dependency above usually
-      # wins this race by accident — opennvr-core's healthcheck waits
-      # on mediamtx via service_healthy too. But on recovery boots (e.g.
-      # after switching Docker network layouts, where stale networks confuse
-      # the DNS until they're pruned), the race surfaces. Adding an
-      # explicit dependency on mediamtx itself makes the startup order
-      # deterministic and removes the failure mode entirely.
+      # nginx resolves its proxy_pass upstreams at config-load time, so it must
+      # start after mediamtx or it crash-loops on "host not found in upstream".
       mediamtx:
         condition: service_healthy
     ports:
-      # NGINX_BIND_HOST lets the operator restrict the public edge to
-      # a specific interface (e.g., the management VLAN's IP).
-      # Default 0.0.0.0 because the whole point of this service is
-      # LAN reachability; restricting it requires a conscious choice.
+      # NGINX_BIND_HOST restricts the public edge to a specific interface
+      # (e.g. a management VLAN). Default 0.0.0.0 for LAN reachability.
       - "${NGINX_BIND_HOST:-0.0.0.0}:443:443"
       - "${NGINX_BIND_HOST:-0.0.0.0}:80:80"
     volumes:
@@ -557,15 +398,9 @@ services:
 networks:
   opennvr_internal:
     driver: bridge
-    # ISSUE-6 v7: pin the bridge subnet so the trust-zone claim is
-    # deterministic (V-015 accepts 172.16/12) and operator LANs
-    # don't accidentally collide with Docker's auto-pick. 172.28/16
-    # is well inside the V-015-accepted range and uncommon in
-    # consumer / SMB LANs (most home routers default to
-    # 192.168.0.0/24 or 192.168.1.0/24; corporate VPNs commonly use
-    # 10.x). If your LAN does use 172.28/16, override via the
-    # OPENNVR_DOCKER_SUBNET env var (and pick another RFC1918 range
-    # inside the V-015 trust zone — 172.16/12, 10/8, 192.168/16).
+    # Pinned so the trust zone is deterministic and doesn't collide with the
+    # operator's LAN. Override via OPENNVR_DOCKER_SUBNET (stay inside RFC1918).
+    # See V-015.
     ipam:
       driver: default
       config:

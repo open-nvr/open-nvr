@@ -474,10 +474,8 @@ class StreamProxy:
                 "[correlation_id=%s]", exc, self._correlation_id,
             )
             return
-        # Fire-and-forget but keep a ref so the task lives until it
-        # completes (peer review M1 — Python's asyncio doc warns
-        # about unreferenced tasks being GC'd). The done-callback
-        # discards the ref so the set doesn't grow unbounded.
+        # Keep a ref so the task isn't GC'd before it completes; the
+        # done-callback discards it so the set doesn't grow unbounded.
         task = asyncio.create_task(
             self._nats_publisher.publish_inference_completed(event)
         )

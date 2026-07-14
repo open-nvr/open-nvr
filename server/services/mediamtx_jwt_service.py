@@ -42,6 +42,39 @@ from jose import jwt
 from core.logging_config import main_logger
 
 
+def _harden_key_file_permissions(path: Path) -> None:
+    """Restrict a private-key file to the current owner only.
+
+    POSIX: ``chmod 0600``. Windows: ``os.chmod`` only toggles the read-only
+    bit and does NOT restrict other users, so use ``icacls`` to drop inherited
+    ACEs and grant the current user Full control alone. Best-effort — logged,
+    never fatal (the key still works; this is defence-in-depth against another
+    local account reading it).
+    """
+    try:
+        if os.name == "nt":
+            import getpass
+            import subprocess
+
+            user = os.environ.get("USERNAME") or getpass.getuser()
+            # /inheritance:r removes inherited ACEs; /grant:r replaces the
+            # user's ACE with Full control. List args -> no shell.
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except Exception as exc:
+        main_logger.warning(
+            "[MediaMTX JWT] Could not harden private-key permissions on %s: %s",
+            path,
+            exc,
+        )
+
+
 class MediaMtxJwtService:
     """Service for generating MediaMTX-compatible JWT tokens with JWKS support."""
 
@@ -88,11 +121,8 @@ class MediaMtxJwtService:
             )
             cls.PUBLIC_KEY_PATH.write_bytes(public_pem)
 
-            # Set restrictive permissions on private key
-            try:
-                os.chmod(cls.PRIVATE_KEY_PATH, 0o600)
-            except Exception:
-                pass  # Windows doesn't support chmod
+            # Restrict the private key to the owner (POSIX chmod; Windows ACL).
+            _harden_key_file_permissions(cls.PRIVATE_KEY_PATH)
 
             main_logger.info("[MediaMTX JWT] RSA key pair generated successfully")
 

@@ -16,39 +16,16 @@
 
 """Runtime policy gates for the offline-first architecture.
 
-This module implements the M1a deployment-mode and AI-sovereignty gates
-described in the founding paper (Zenodo DOI 10.5281/zenodo.17261761) and
-the security architecture document under ``docs/SECURITY_ARCHITECTURE.md``.
+Two FastAPI dependencies gate outbound work at the call sites that initiate it
+(narrow by design, not a global middleware, so nothing over- or under-blocks):
 
-Two gates are exported:
+* require_outbound_allowed — 403s cloud-touching routes when deployment_mode is
+  "offline". See V-009.
+* require_ai_sovereignty_allowed — 403s AI-inference routes to non-local
+  adapters when ai_sovereignty is "local_only". See V-022.
 
-* :func:`require_outbound_allowed` — FastAPI dependency that 403s any route
-  initiating a cloud-touching outbound call when
-  ``settings.deployment_mode == "offline"``. Use on every endpoint that
-  ultimately triggers an HTTP request to a non-loopback host or spawns a
-  subprocess that pushes data outside the trust boundary.
-
-* :func:`require_ai_sovereignty_allowed` — FastAPI dependency *and* plain
-  helper that gates AI-inference paths. In ``local_only`` mode any path
-  that would route a frame to a non-local adapter is refused. In
-  ``federated`` mode raw frame data is still refused; only anonymised
-  parameter exchange is allowed (the federated runtime is responsible for
-  honouring that distinction).
-
-Two additional small helpers, :func:`audit_boot_posture` and
-:func:`current_posture`, are provided so callers can record the active
-policy at startup and surface it to the operator via ``/system/posture``.
-
-Design notes
-------------
-* The gates are intentionally *narrow*: they sit at the precise call-sites
-  that initiate outbound work, not at a single global middleware. A global
-  middleware would either over-block (refusing legitimate metadata reads
-  in offline mode) or under-block (missing subprocess-mediated outbound
-  like FFmpeg-to-RTMP). Per-callsite gating is verbose but auditable.
-* Failures are logged via the audit logger so every blocked attempt is
-  visible in compliance reports — that is the actual product of the
-  policy, not just the refusal itself.
+audit_boot_posture / current_posture record and surface the active policy
+(/system/posture). Blocked attempts are audit-logged.
 """
 
 from __future__ import annotations
@@ -83,13 +60,9 @@ def _log_block(event: str, request: Request | None, detail: dict[str, Any]) -> N
 
 
 def require_outbound_allowed(request: Request) -> None:
-    """V-009: FastAPI dependency that blocks cloud-touching routes when
-    ``settings.deployment_mode == "offline"``.
-
-    Apply with ``Depends(require_outbound_allowed)`` on any endpoint that
-    initiates an outbound call (or spawns a subprocess that does). Reads
-    of stored metadata do *not* need this gate, so operators can still
-    list and clean up cloud configuration even when offline.
+    """403 cloud-touching routes when deployment_mode is "offline". Apply to any
+    endpoint that initiates an outbound call; metadata reads don't need it.
+    See V-009.
     """
     if settings.deployment_mode == "offline":
         _log_block(
@@ -114,13 +87,9 @@ def require_outbound_allowed(request: Request) -> None:
 
 
 def require_ai_sovereignty_allowed(request: Request) -> None:
-    """V-022: FastAPI dependency that blocks AI-inference paths that would
-    cross the customer's sovereignty boundary in ``local_only`` mode.
-
-    This is enforced in addition to :func:`require_outbound_allowed` on
-    routes that specifically initiate AI inference, so an operator who
-    wants cloud recording but local-only AI can express that policy as
-    ``deployment_mode=hybrid, ai_sovereignty=local_only``.
+    """403 AI-inference routes that would forward frames to a non-local adapter
+    when ai_sovereignty is "local_only". Stacks with require_outbound_allowed.
+    See V-022.
     """
     if settings.ai_sovereignty == "local_only":
         _log_block(
@@ -193,12 +162,8 @@ def current_posture() -> dict[str, Any]:
     return {
         "deployment_mode": settings.deployment_mode,
         "ai_sovereignty": settings.ai_sovereignty,
-        # V-015 (ISSUE-4): no policy bit here — the validator is absolute,
-        # there is nothing operator-tunable to surface.
-        # V-019 (M1b): operator's acknowledgement of plaintext MediaMTX
-        # outputs (i.e. they are running the permissive `mediamtx.local.yml`
-        # template instead of the hardened `mediamtx.docker.yml`). Default
-        # is False; surfacing it here makes the deviation auditable.
+        # Operator's acknowledgement of plaintext MediaMTX outputs, surfaced
+        # so the deviation is auditable. See V-019.
         "mediamtx_allow_plaintext_outputs": settings.mediamtx_allow_plaintext_outputs,
     }
 

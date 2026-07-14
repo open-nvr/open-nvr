@@ -299,10 +299,8 @@ async def get_stream_info(
         or settings.mediamtx_hls_url
         or "http://127.0.0.1:8888"
     )
-    # M1b-fixup-v2 F-1: RTSPS URL follows the same external/internal
-    # fallback pattern as HLS/WebRTC/playback so the value handed to
-    # browser clients is resolvable on their network (not the Docker
-    # internal hostname `mediamtx`).
+    # RTSPS URL uses the same external/internal fallback as HLS/WebRTC so the
+    # value handed to browsers is resolvable on their network. See V-019.
     rtsps_base = (
         settings.mediamtx_external_rtsps_url
         or settings.mediamtx_rtsps_url

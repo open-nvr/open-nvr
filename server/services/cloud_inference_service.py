@@ -371,12 +371,9 @@ class CloudInferenceService:
             PermissionError: If deployment_mode=offline or
                 ai_sovereignty=local_only refuses the call.
         """
-        # V-009 + V-022 (M1a) defense-in-depth: the router-level gate already
-        # 403s most of these calls, but `/cloud-inference/jobs` schedules
-        # asynchronous work that resumes from a background task, so the
-        # outbound call can survive a mid-flight policy change. Re-check at
-        # the actual httpx call-site so the policy is also enforced on the
-        # async path.
+        # Defense-in-depth: /cloud-inference/jobs runs async work that can
+        # survive a mid-flight policy change, so re-check at the call site.
+        # See V-009 / V-022.
         from core.policy import (
             assert_ai_sovereignty_allows_remote,
             assert_cloud_outbound_allowed,

@@ -16,36 +16,14 @@
 
 """Single source of truth for the placeholder-secret detector.
 
-Imported by:
-
-* ``server/core/config.py`` — the runtime Pydantic validator that rejects
-  weak/placeholder secrets at startup (V-002).
-* ``Makefile`` ``check-secrets`` target — the CI-friendly linter that
-  flags an ``.env`` file before the operator ever starts the server.
-
-This file has **no dependencies** beyond the Python standard library so
-that the Makefile can import it without triggering the rest of the
-application's import graph (which would in turn require a fully populated
-``.env`` just to discover the fragment list — see M0 followup H-3).
+Imported by config.py's startup validator (V-002) and the Makefile's
+check-secrets linter. Kept dependency-free (stdlib only) so the Makefile can
+import it without loading the rest of the app.
 """
 
-# Substrings that indicate a value is still a placeholder shipped in
-# env.example or in a quickstart copy. Match is case-insensitive and
-# substring-based so that variants ("change-this-XYZ", "your-secret-here-...",
-# etc.) all get rejected.
-#
-# Aligned with Zenodo paper (DOI 10.5281/zenodo.17261761) §3.1 (default
-# credentials, ETSI EN 303 645 unique-credential requirement) and §4.1
-# Principle "Secure-by-Design" defaults.
-#
-# Each fragment must be at least 6 characters: shorter fragments (e.g.
-# "todo", "fixme") can appear by chance inside a legitimately random
-# urlsafe-base64 secret. ``secrets.token_urlsafe(48)`` contains the
-# substring "todo" roughly 1-in-17,000 of the time, which would cause
-# false positives at fleet scale and would erode operator trust in the
-# validator. Six characters is the lowest length where the per-secret
-# false-positive rate stays below ~1-in-10-million for the 64-char
-# alphabet we generate from.
+# Substrings that mark a value as a shipped placeholder (case-insensitive,
+# substring match). Each is >=6 chars: shorter fragments can occur by chance
+# inside a real random secret and cause false positives. See V-002.
 PLACEHOLDER_FRAGMENTS: tuple[str, ...] = (
     "change-this",
     "change_this",
@@ -66,6 +44,5 @@ PLACEHOLDER_FRAGMENTS: tuple[str, ...] = (
     "example",
 )
 
-# Backwards-compatible private alias for code that previously imported the
-# list from core.config. Either name is acceptable.
+# Private alias kept for older import sites.
 _PLACEHOLDER_FRAGMENTS = PLACEHOLDER_FRAGMENTS

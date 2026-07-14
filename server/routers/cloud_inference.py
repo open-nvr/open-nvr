@@ -57,10 +57,7 @@ def get_inference_service():
 @router.post(
     "/infer",
     response_model=CloudInferenceResponse,
-    # V-009 + V-022 (M1a): refused when deployment_mode=offline or
-    # ai_sovereignty=local_only. Both gates are stacked so an operator who
-    # wants cloud recording but local-only AI can express that as
-    # deployment_mode=hybrid + ai_sovereignty=local_only.
+    # Refused in offline / local_only mode; both gates stacked. See V-009 / V-022.
     dependencies=[
         Depends(require_outbound_allowed),
         Depends(require_ai_sovereignty_allowed),
@@ -123,8 +120,7 @@ async def run_inference(
     "/jobs",
     response_model=AIInferenceJobResponse,
     status_code=status.HTTP_201_CREATED,
-    # V-009 + V-022 (M1a): async cloud inference goes through the same gates
-    # as the sync path above — refused in offline / local_only mode.
+    # Async cloud inference uses the same gates as the sync path. See V-009 / V-022.
     dependencies=[
         Depends(require_outbound_allowed),
         Depends(require_ai_sovereignty_allowed),

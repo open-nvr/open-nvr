@@ -293,11 +293,9 @@ class CameraConfig(Base):
         default="rtsps_preferred",
         server_default="rtsps_preferred",
     )
-    # M1c-selfrev H-2: True iff `transport_security` was set by an
-    # explicit operator action (PUT /cameras/{id}/transport-security or
-    # config update). False means it's probe-driven. The re-probe
-    # endpoint refuses to overwrite an operator-set policy unless the
-    # caller passes ?reset_policy=true (which also clears this flag).
+    # True iff `transport_security` was set by an explicit operator action
+    # (vs probe-driven). A re-probe won't overwrite an operator-set policy
+    # unless ?reset_policy=true. See V-003.
     transport_security_operator_set = Column(
         Boolean,
         nullable=False,

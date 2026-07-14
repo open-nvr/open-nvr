@@ -37,6 +37,7 @@ import {
 } from 'lucide-react'
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
+import { PlaybackConsole } from '../components/PlaybackConsole'
 
 // Daily recording - one entry per camera per day
 interface DailyRecording {
@@ -108,6 +109,8 @@ export function PlaybackView() {
   const [hlsSessionId, setHlsSessionId] = useState<string | null>(null)
   const [playbackMode, setPlaybackMode] = useState<'hls' | 'mp4'>('hls')
   const [playingRecording, setPlayingRecording] = useState<{ camera: string; date: string; duration: number; cameraId: number; firstStart: string } | null>(null)
+  // DVR playback console target (preferred path when MediaMTX is available).
+  const [consoleTarget, setConsoleTarget] = useState<{ cameraId: number; cameraName: string; date: string } | null>(null)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
@@ -249,51 +252,16 @@ export function PlaybackView() {
       setShowPlayer(true)
       return
     }
-    
-    setPlaybackError(null)
-    setPlaybackLoading(true)
-    setPlaybackMode('hls')
-    setPlayingRecording({
-      camera: camera.camera_name,
-      date: recording.date,
-      duration: recording.total_duration,
+
+    // MediaMTX is available → open the full DVR playback console (timeline,
+    // scrubbing, per-clip seeking, gap-aware auto-advance). The console fetches
+    // the day's raw segments itself.
+    setConsoleTarget({
       cameraId: camera.camera_id,
-      firstStart: recording.first_start,
+      cameraName: camera.camera_name,
+      date: recording.date,
     })
     setShowPlayer(true)
-    
-    try {
-      // Calculate end time from first_start + total_duration
-      const startDate = new Date(recording.first_start)
-      const endDate = new Date(startDate.getTime() + (recording.total_duration * 1000))
-      
-      // Request HLS session from backend
-      const response = await apiService.createHlsPlaybackSession({
-        camera_id: camera.camera_id,
-        start: recording.first_start,
-        end: endDate.toISOString(),
-      })
-      
-      if (response.data && response.data.manifest_url) {
-        const session = response.data as HlsPlaybackSession
-        setHlsSessionId(session.session_id)
-        setHlsPlaybackUrl(session.manifest_url)
-        setPlaybackUrl(recording.playback_url) // Keep MP4 URL for fallback
-        console.log('[Playback] HLS session created:', session.session_id)
-      } else {
-        // Fallback to MP4 if HLS session fails
-        console.warn('[Playback] HLS session creation returned empty, falling back to MP4')
-        setPlaybackMode('mp4')
-        setPlaybackUrl(recording.playback_url)
-      }
-    } catch (err: any) {
-      console.warn('[Playback] HLS session creation failed, falling back to MP4:', err?.message)
-      // Fallback to direct MP4 URL
-      setPlaybackMode('mp4')
-      setPlaybackUrl(recording.playback_url)
-    } finally {
-      setPlaybackLoading(false)
-    }
   }
 
   const uploadRecordingDay = async (camera: CameraWithRecordings, recording: DailyRecording) => {
@@ -313,7 +281,12 @@ export function PlaybackView() {
         setQueuedDayKey((current) => (current === dayKey ? null : current))
       }, 6000)
     } catch (err: any) {
-      showError(err?.data?.detail || err?.message || 'Failed to queue cloud upload')
+      const detail = err?.data?.detail || err?.message || ''
+      showError(
+        /deployment_mode=offline|not configured|no cloud|refused/i.test(detail)
+          ? 'Cloud server not configured — cloud upload is unavailable.'
+          : detail || 'Failed to queue cloud upload'
+      )
     } finally {
       setQueueingDayKey((current) => (current === dayKey ? null : current))
     }
@@ -346,6 +319,7 @@ export function PlaybackView() {
     setHlsPlaybackUrl(null)
     setHlsSessionId(null)
     setPlayingRecording(null)
+    setConsoleTarget(null)
     setPlaybackMode('hls')
     if (videoRef.current) {
       videoRef.current.pause()
@@ -445,7 +419,7 @@ export function PlaybackView() {
       )}
 
       {/* Main content - accordion style camera list */}
-      {user?.is_superuser && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0 || !!cloudUploadStatus.active_file) && (
+      {user?.is_superuser && cloudUploadConfigured && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0) && (
         <div className="bg-[var(--panel)] border border-neutral-700 p-3">
           <div className="flex items-center justify-between text-sm">
             <div className="font-medium">Cloud Upload Status</div>
@@ -463,12 +437,6 @@ export function PlaybackView() {
           {cloudUploadStatus.active_file && (
             <div className="mt-2 text-xs text-[var(--text-dim)] truncate">
               Uploading: {cloudUploadStatus.active_file}
-            </div>
-          )}
-
-          {!!cloudUploadStatus.stats?.last_error?.message && (
-            <div className="mt-2 text-xs text-red-400 truncate" title={cloudUploadStatus.stats?.last_error?.message || ''}>
-              Last error: {cloudUploadStatus.stats?.last_error?.message}
             </div>
           )}
         </div>
@@ -594,8 +562,18 @@ export function PlaybackView() {
         )}
       </div>
 
-      {/* Video Player Modal */}
-      {showPlayer && (playbackUrl || hlsPlaybackUrl || playbackError) && (
+      {/* DVR Playback Console (preferred — MediaMTX available) */}
+      {showPlayer && consoleTarget && (
+        <PlaybackConsole
+          cameraId={consoleTarget.cameraId}
+          cameraName={consoleTarget.cameraName}
+          date={consoleTarget.date}
+          onClose={closePlayer}
+        />
+      )}
+
+      {/* Video Player Modal (fallback — MediaMTX offline / error) */}
+      {showPlayer && !consoleTarget && (playbackUrl || hlsPlaybackUrl || playbackError) && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-[var(--panel)] border border-neutral-700 w-full max-w-5xl">
             {/* Header */}
@@ -607,14 +585,8 @@ export function PlaybackView() {
                   <Play size={18} className="text-[var(--accent)]" />
                 )}
                 <div>
-                  <h3 className="font-medium flex items-center gap-2">
+                  <h3 className="font-medium">
                     {playingRecording?.camera || 'Playback'}
-                    {playbackMode === 'hls' && hlsPlaybackUrl && (
-                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">HLS</span>
-                    )}
-                    {playbackMode === 'mp4' && playbackUrl && (
-                      <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">MP4</span>
-                    )}
                   </h3>
                   {playingRecording && (
                     <p className="text-xs text-[var(--text-dim)]">
@@ -671,18 +643,6 @@ export function PlaybackView() {
                   <Clock size={14} />
                   {playingRecording ? formatDuration(playingRecording.duration) : 'N/A'}
                 </span>
-                {playbackMode === 'hls' && hlsPlaybackUrl && (
-                  <span className="flex items-center gap-1.5 text-green-400">
-                    <PlayCircle size={14} />
-                    HLS VOD (5s segments)
-                  </span>
-                )}
-                {playbackMode === 'mp4' && (
-                  <span className="flex items-center gap-1.5 text-blue-400">
-                    <Film size={14} />
-                    Direct MP4
-                  </span>
-                )}
                 {playbackError && (
                   <span className="flex items-center gap-1.5 text-amber-400">
                     <AlertCircle size={14} />

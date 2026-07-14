@@ -91,14 +91,9 @@ async def first_time_setup(
     request: Request = None,
 ):
     """Complete first-time setup: set password and enable MFA."""
-    # M0 followup C-1: gate on the one-time setup token that was minted at
-    # server startup and printed to stdout + audit log. This closes the
-    # bootstrap-race window where any LAN attacker could claim the admin
-    # account before the operator. The constant-time check + immediate
-    # consume happens inside the service.
-    #
-    # We deliberately do this BEFORE the username lookup so an unauthenticated
-    # caller cannot use this endpoint as a user-existence oracle.
+    # Gate on the one-time setup token (constant-time check + consume inside the
+    # service). Done BEFORE the username lookup so this can't be used as a
+    # user-existence oracle. See V-001.
     if not _verify_setup_token(payload.setup_token):
         try:
             auth_logger.log_action(

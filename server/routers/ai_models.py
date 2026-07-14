@@ -764,7 +764,11 @@ async def run_recording_inference(
         import cv2
 
         from services.inference_manager import get_inference_manager
-        from services.storage_service import get_effective_recordings_base_path
+        from services.storage_service import (
+            RecordingPathError,
+            get_effective_recordings_base_path,
+            resolve_under_root,
+        )
 
         recordings_base = get_effective_recordings_base_path(db)
         inference_manager = get_inference_manager()
@@ -791,9 +795,19 @@ async def run_recording_inference(
                 detail="Either 'recording_path' or 'segments' must be provided",
             )
 
-        # Validate all segments exist
+        # Validate every segment: it must stay INSIDE the recordings base
+        # (V-005) and exist. seg_path is request-supplied — without
+        # resolve_under_root an absolute path or a ``..`` segment would escape
+        # the recordings folder and let this endpoint read/probe arbitrary
+        # files off disk via cv2.VideoCapture below.
         for seg_path in segments_to_process:
-            video_path = Path(recordings_base) / seg_path
+            try:
+                video_path = resolve_under_root(Path(recordings_base), seg_path)
+            except RecordingPathError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid recording path: {seg_path}",
+                ) from exc
             if not video_path.exists():
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

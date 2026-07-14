@@ -28,6 +28,7 @@ from core.logging_config import camera_logger
 from models import Camera, CameraPermission, User
 from schemas import CameraCreate, CameraUpdate
 from services.mediamtx_admin_service import MediaMtxAdminService
+from utils.url_redaction import redact_url_credentials
 
 
 class CameraService:
@@ -94,7 +95,8 @@ class CameraService:
                         "camera_id": db_camera.id,
                         "camera_name": db_camera.name,
                         "ip_address": db_camera.ip_address,
-                        "rtsp_url": db_camera.rtsp_url,
+                        # Redact user:pass@ before it reaches the log file.
+                        "rtsp_url": redact_url_credentials(db_camera.rtsp_url),
                     },
                 )
 
@@ -105,13 +107,15 @@ class CameraService:
             # Auto-provision if RTSP URL is present
             if db_camera.rtsp_url:
                 try:
-                    # Default settings for auto-provisioning
-                    # Recording disabled by default, TCP transport, 5 min segments
+                    # Default settings for auto-provisioning.
+                    # This is a Network Video RECORDER: recording is always on by
+                    # default the moment a camera is configured — it is not an
+                    # operator opt-in. TCP transport, configured segment length.
                     provision_result = await MediaMtxAdminService.push_rtsp_stream(
                         camera_id=db_camera.id,
                         camera_ip=db_camera.ip_address,
                         rtsp_url=db_camera.rtsp_url,
-                        enable_recording=False,
+                        enable_recording=True,
                         rtsp_transport="tcp",
                         recording_segment_seconds=settings.recording_segment_seconds,
                     )
@@ -124,16 +128,10 @@ class CameraService:
 
                         from models import CameraConfig
 
-                        # V-003 (M1c): probe the camera for RTSPS support
-                        # so we can record the outcome at create time and
-                        # default transport_security to a value that
-                        # reflects what the camera actually offers.
-                        #
-                        # The probe is best-effort: if it can't reach
-                        # the camera (DNS / timeout / etc) the outcome
-                        # is INCONCLUSIVE and policy stays at the safe
-                        # "rtsps_preferred" default — the operator can
-                        # re-probe later via the camera router endpoint.
+                        # Probe the camera for RTSPS support at create time and
+                        # default transport_security accordingly. Best-effort:
+                        # unreachable → INCONCLUSIVE, policy stays rtsps_preferred
+                        # (operator can re-probe later). See V-003.
                         from datetime import UTC, datetime
 
                         from services.transport_probe_service import (
@@ -159,15 +157,13 @@ class CameraService:
                                 camera_id=db_camera.id,
                                 stream_protocol="rtsp",
                                 source_url=db_camera.rtsp_url,
-                                recording_enabled=False,
+                                recording_enabled=True,
                                 rtsp_transport="tcp",
                                 recording_segment_seconds=settings.recording_segment_seconds,
                                 last_provisioned_at=func.now(),
                                 transport_security=transport_security,
-                                # M1c-selfrev H-2: probe-driven, not
-                                # operator-set, so a later re-probe can
-                                # update the value without an explicit
-                                # reset_policy=true.
+                                # Probe-driven, not operator-set, so a later
+                                # re-probe can update it without reset_policy.
                                 transport_security_operator_set=False,
                                 transport_security_probe_result=probe_outcome.value,
                                 transport_security_probed_at=probed_at,
