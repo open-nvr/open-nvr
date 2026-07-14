@@ -87,6 +87,11 @@ from routers import (
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
 
+# The OpenNVR release this build is cut from. Surfaced in /health and in the
+# OpenAPI schema, and quoted in bug reports (see SECURITY.md) — so it tracks the
+# git tag, not the API shape. Bump it in the release commit.
+__version__ = "0.1.0"
+
 # FFmpeg-based RTSP proxy and recorder removed
 
 
@@ -384,7 +389,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OpenNVR Surveillance System API",
     description="A comprehensive surveillance system API with user management, camera control, and recording management",
-    version="1.0.0",
+    version=__version__,
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -465,7 +470,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "OpenNVR Surveillance System API",
-        "version": "1.0.0",
+        "version": __version__,
     }
 
 

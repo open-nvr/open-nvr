@@ -53,7 +53,7 @@ synchronous-feeling channel; maintainers watch it actively.
 
 ## Commercial support (paid)
 
-Contact: **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)**
+Contact: **[contact@opennvr.org](mailto:contact@opennvr.org)**
 
 Commercial support exists because some deployments need things community
 volunteers can't offer at scale: response-time guarantees, deployment
@@ -126,7 +126,7 @@ A few things are explicitly outside the scope of what commercial support buys. T
 
 ### How to engage
 
-Email **[contact@cryptovoip.in](mailto:contact@cryptovoip.in)** with:
+Email **[contact@opennvr.org](mailto:contact@opennvr.org)** with:
 
 1. **Your deployment shape** — what you're trying to do, what hardware /
    network / scale you're working with, what's blocking you.

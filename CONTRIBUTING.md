@@ -324,7 +324,7 @@ opening the PR saves a review cycle.
 
 ## Code of conduct
 
-We want this to stay a project people enjoy contributing to. The expectation is welcoming, inclusive language and respectful disagreement; personal attacks, harassment, doxxing, and inflammatory off-topic posting are not part of that. Report violations to **contact@cryptovoip.in** — reports are confidential.
+We want this to stay a project people enjoy contributing to. The expectation is welcoming, inclusive language and respectful disagreement; personal attacks, harassment, doxxing, and inflammatory off-topic posting are not part of that. Report violations to **contact@opennvr.org** — reports are confidential.
 
 ## Getting help while you contribute
 

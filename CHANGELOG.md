@@ -4,7 +4,9 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.0
+## [Unreleased]
+
+## [0.1.0] — 2026-07-14
 
 First public release. The architecture has been redesigned around three
 principles: secure by default, sovereign by design, and pluggable by contract.
@@ -178,7 +180,7 @@ test suite designed to be read in five minutes.
 - [`docs/SUPPORT.md`](docs/SUPPORT.md) — community support channels and
   commercial-support tiers (deployment, custom adapters, compliance
   evidence packs, SLA, sponsored development) via
-  [contact@cryptovoip.in](mailto:contact@cryptovoip.in).
+  [contact@opennvr.org](mailto:contact@opennvr.org).
 - [`docs/LOCAL_SETUP.md`](docs/LOCAL_SETUP.md) — bare-metal developer setup.
 - [`docs/DOCKER_SETUP.md`](docs/DOCKER_SETUP.md) — Docker-only path.
 - Per-example `README.md` files documenting each reference application.
@@ -1546,4 +1548,5 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/open-nvr/open-nvr/releases/tag/v0.1.0
