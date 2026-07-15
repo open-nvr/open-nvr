@@ -13,13 +13,9 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 
 [Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.17261761)
 
-<!--
-  HERO DEMO — highest-leverage asset for stars. Record a ~15–25s GIF of the
-  camera-agent answering a question about a live camera, save it as
-  .github/demo-agent.gif, then uncomment the line below. Shot list: see the
-  launch notes. Until then this stays a comment so nothing renders broken.
--->
-<!-- <img src=".github/demo-agent.gif" alt="Ask your cameras a question — answered locally" width="760" /> -->
+<a href="https://opennvr.org/camera-agent">
+  <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
+</a>
 
 </div>
 
