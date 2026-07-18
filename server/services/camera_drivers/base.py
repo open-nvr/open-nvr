@@ -41,7 +41,6 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Result dataclasses (all JSON-serializable via to_dict)
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from fastapi import HTTPException
 
 from services import onvif_digest_service as ods
 
-from .base import (
+from ..base import (
     CameraDriver,
     Capabilities,
     DeviceInfo,

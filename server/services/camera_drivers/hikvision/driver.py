@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import HTTPException
 
-from .base import (
+from ..base import (
     Capabilities,
     MotionInfo,
     NetworkInfo,
@@ -40,8 +40,8 @@ from .base import (
     StorageSlot,
     UsersInfo,
 )
-from .isapi_service import isapi_request
-from .onvif_driver import OnvifDriver
+from ..onvif.driver import OnvifDriver
+from .isapi import isapi_request
 
 _OVERLAY_PATH = "/ISAPI/System/Video/inputs/channels/1/overlays"
 _MOTION_PATH = "/ISAPI/System/Video/inputs/channels/1/motionDetection"

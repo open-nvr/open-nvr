@@ -107,6 +107,17 @@ function probeBadge(result: string | undefined) {
   return <Badge variant="destructive">Probe error</Badge>
 }
 
+/** Friendly label for the selected vendor driver shown in the header badge. */
+const DRIVER_LABELS: Record<string, string> = {
+  hikvision: 'Native: Hikvision ISAPI',
+  dahua: 'Native: Dahua CGI',
+  cpplus: 'Native: CP Plus (Dahua CGI)',
+  onvif: 'ONVIF baseline',
+}
+function driverLabel(name: string): string {
+  return DRIVER_LABELS[name] ?? name
+}
+
 /** Small per-tab async loader (each tab reads live from the device). */
 function useDeviceRead<T>(fn: () => Promise<{ data: T }>, deps: unknown[]) {
   const [data, setData] = useState<T | null>(null)
@@ -1162,7 +1173,17 @@ export function CameraSettings({
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             {probeBadge(caps?.probe_result)}
-            {caps?.driver_name && <Badge variant="info">{caps.driver_name}</Badge>}
+            {caps?.driver_name && (
+              <Badge variant="info">{driverLabel(caps.driver_name)}</Badge>
+            )}
+            {caps?.capabilities?.hardware_verified === false && (
+              <span
+                className="text-xs text-amber-500"
+                title="This vendor driver's write paths have not yet been verified against real hardware."
+              >
+                not hardware-verified
+              </span>
+            )}
             {caps?.probed_at && (
               <span className="text-xs text-[var(--text-dim)]">
                 Probed {new Date(caps.probed_at).toLocaleString()}

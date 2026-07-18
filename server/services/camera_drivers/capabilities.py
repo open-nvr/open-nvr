@@ -59,7 +59,7 @@ async def probe_and_store(db: Session, camera_id: int) -> CameraCapability:
 
     row = _get_or_create_row(db, camera_id)
     try:
-        driver = await get_driver_for_camera(db, camera_id)
+        driver = await get_driver_for_camera(db, camera_id, force=True)
         info = await driver.get_info()
         caps = await driver.get_capabilities()
 

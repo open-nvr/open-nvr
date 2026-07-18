@@ -19,10 +19,10 @@ Coverage:
 
 from __future__ import annotations
 
-import datetime as _dt  # noqa: I001
+import datetime as _dt
 
 if not hasattr(_dt, "UTC"):
-    _dt.UTC = _dt.timezone.utc
+    _dt.UTC = _dt.timezone.utc  # noqa: UP017 - 3.10 sandbox polyfill
 
 import os
 import secrets
@@ -55,11 +55,11 @@ _lm.setup_logging = lambda *a, **k: None
 sys.modules.setdefault("core.logging_config", _lm)
 
 from services import onvif_digest_service as ods  # noqa: E402
-from services.camera_drivers import hikvision_isapi_driver as hik  # noqa: E402
-from services.camera_drivers.hikvision_isapi_driver import (  # noqa: E402
+from services.camera_drivers.hikvision import driver as hik  # noqa: E402
+from services.camera_drivers.hikvision.driver import (  # noqa: E402
     HikvisionIsapiDriver,
 )
-from services.camera_drivers.onvif_driver import (  # noqa: E402
+from services.camera_drivers.onvif.driver import (  # noqa: E402
     OnvifDriver,
     _prefix_to_netmask,
 )
@@ -132,8 +132,10 @@ ISAPI_STORAGE_FULL = """<storage><hddList size="1">
     [
         ("HIKVISION", "HikvisionIsapiDriver"),
         ("Hikvision Digital Technology", "HikvisionIsapiDriver"),
-        ("Dahua", "OnvifDriver"),
-        ("CP Plus", "OnvifDriver"),
+        ("Dahua", "DahuaCgiDriver"),
+        ("Dahua Technology", "DahuaCgiDriver"),
+        ("CP Plus", "CpPlusDriver"),  # Dahua OEM — own package, priority over dahua
+        ("Secureye", "OnvifDriver"),  # no native package — string pass falls back
         ("", "OnvifDriver"),
         (None, "OnvifDriver"),
     ],
@@ -726,7 +728,7 @@ HEARTBEAT_ALERT = """<EventNotificationAlert version="2.0">
 
 
 def test_parse_event_alert_motion():
-    from services.camera_drivers.hikvision_isapi_driver import parse_event_alert
+    from services.camera_drivers.hikvision.driver import parse_event_alert
 
     ev = parse_event_alert(VMD_ALERT)
     assert ev is not None
@@ -737,7 +739,7 @@ def test_parse_event_alert_motion():
 
 
 def test_parse_event_alert_filters_heartbeat():
-    from services.camera_drivers.hikvision_isapi_driver import parse_event_alert
+    from services.camera_drivers.hikvision.driver import parse_event_alert
 
     assert parse_event_alert(HEARTBEAT_ALERT) is None  # videoloss/inactive keepalive
 
