@@ -152,10 +152,17 @@ class OnvifDriver(CameraDriver):
             "encoder": has("media"),
             "osd": False,  # baseline OSD not implemented; vendor drivers add it
             "ptz": has("ptz"),
-            "events": has("events"),
+            # The device advertises an Events endpoint, but this baseline does
+            # not implement subscribe_events() — advertising it would surface a
+            # tab that fails on use. Vendor drivers that DO implement a native
+            # event stream turn this on.
+            "events": False,
             "motion": False,  # baseline motion not implemented; vendor drivers add it
             "storage": False,  # not exposed via the ONVIF baseline
-            "users": True,  # device service GetUsers (gated tab, later phase)
+            # Not implemented in the baseline (no get_users override) — a
+            # vendor driver must turn this on. Advertising it here produced an
+            # always-empty Users tab on non-Hikvision/Dahua cameras.
+            "users": False,
             "audio": False,  # detected in a later phase
         }
         return Capabilities(

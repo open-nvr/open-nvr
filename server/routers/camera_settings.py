@@ -29,7 +29,7 @@ abstraction, not just here.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ from core.database import get_db
 from core.permissions import get_camera_or_403
 from models import Camera, CameraCapability, CameraEvent
 from services.camera_drivers.capabilities import get_or_probe, probe_and_store
+from services.audit_service import write_audit_log
 from services.camera_drivers.registry import get_driver_for_camera
 from services.camera_event_manager import get_camera_event_manager
 
@@ -60,6 +61,10 @@ class ImagingUpdate(BaseModel):
     ir_cut_filter: str | None = None  # ON | OFF | AUTO (day/night)
     wdr: str | None = None  # ON | OFF
     backlight: str | None = None  # ON | OFF
+    # Vendor-only extras (Hikvision ISAPI); ignored by drivers that lack them.
+    flip: str | None = None  # ON | OFF (rotate 180)
+    noise_reduction: int | None = None  # 0-100
+    noise_reduce_mode: str | None = None  # close | general | advanced
 
 
 class EncoderUpdate(BaseModel):
@@ -75,9 +80,35 @@ class OsdUpdate(BaseModel):
     channel_name_enabled: bool | None = None
     text_enabled: bool | None = None
     text: str | None = None
+    # Multi-slot form: [{"id": 2, "enabled": true, "text": "Gate"}]
+    slots: list[dict] | None = None
+
+
+class ServiceUpdate(BaseModel):
+    enabled: bool
+
+
+class ConfigBackupRequest(BaseModel):
+    # The camera encrypts the backup with this; the same key restores it.
+    secret_key: str
 
 
 class MotionUpdate(BaseModel):
+    enabled: bool | None = None
+    sensitivity: int | None = None
+
+
+class IpFilterUpdate(BaseModel):
+    enabled: bool
+    mode: str = "allow"  # allow (whitelist, strong) | deny (blacklist, weak)
+    entries: list[str] | None = None
+
+
+class CloudUpdate(BaseModel):
+    enabled: bool
+
+
+class SmartUpdate(BaseModel):
     enabled: bool | None = None
     sensitivity: int | None = None
 
@@ -340,6 +371,203 @@ async def set_motion(
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Motion update failed: {e}")
+
+
+@router.get("/{camera_id}/smart")
+async def get_smart(
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Read analytics detectors (line crossing, intrusion, face, tamper)."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        return (await driver.get_smart()).to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Smart read failed: {e}")
+
+
+@router.put("/{camera_id}/smart/{detector_key}")
+async def set_smart(
+    detector_key: str,
+    payload: SmartUpdate,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Enable/disable one analytics detector and set its sensitivity."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        patch = payload.model_dump(exclude_none=True)
+        return (await driver.set_smart(detector_key, patch)).to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Smart update failed: {e}")
+
+
+@router.get("/{camera_id}/services")
+async def get_camera_services(
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Read the camera's network services (UPnP, SNMP, FTP, DDNS, email, …)."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        return (await driver.get_services()).to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Services read failed: {e}")
+
+
+@router.put("/{camera_id}/services/{service_key}")
+async def set_camera_service(
+    service_key: str,
+    payload: ServiceUpdate,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Enable/disable one network service on the camera."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        result = await driver.set_service(service_key, payload.enabled)
+        write_audit_log(
+            db,
+            action="camera.service.update",
+            entity_type="camera",
+            entity_id=camera.id,
+            details={"service": service_key, "enabled": payload.enabled},
+        )
+        return result.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Service update failed: {e}")
+
+
+@router.get("/{camera_id}/snapshot-still")
+async def get_camera_snapshot_still(
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """A JPEG still pulled straight from the camera via its native API."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        return Response(content=await driver.get_snapshot(), media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Snapshot failed: {e}")
+
+
+@router.post("/{camera_id}/config-backup")
+async def export_camera_config(
+    payload: ConfigBackupRequest,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Download the camera's full configuration blob (vendor backup format)."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        blob = await driver.export_config(payload.secret_key)
+        write_audit_log(
+            db,
+            action="camera.config.export",
+            entity_type="camera",
+            entity_id=camera.id,
+            details={"bytes": len(blob)},
+        )
+        return Response(
+            content=blob,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="camera-{camera.id}-config.bin"'
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Config export failed: {e}")
+
+
+@router.get("/{camera_id}/security")
+async def get_camera_security(
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Read camera-side security posture (IP filter, cloud, login lock,
+    protocol/port state) plus the address this server reaches the camera from."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        return (await driver.get_security()).to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Security read failed: {e}")
+
+
+@router.put("/{camera_id}/security/ip-filter")
+async def set_camera_ip_filter(
+    payload: IpFilterUpdate,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Write the camera's IP filter.
+
+    LOCKOUT-CAPABLE. The driver enforces the guardrails: an ``allow`` list is
+    refused if empty, this server's real source address is force-included and
+    verified, the list is staged with the filter disabled and read back before
+    being armed, and access is re-verified afterwards.
+    """
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        result = await driver.set_ip_filter(
+            enabled=payload.enabled,
+            mode=payload.mode,
+            entries=payload.entries or [],
+        )
+        write_audit_log(
+            db,
+            action="camera.ip_filter.update",
+            entity_type="camera",
+            entity_id=camera.id,
+            details={
+                "enabled": payload.enabled,
+                "mode": payload.mode,
+                "entries": result.ip_filter_entries,
+            },
+        )
+        return result.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"IP filter update failed: {e}")
+
+
+@router.put("/{camera_id}/security/cloud")
+async def set_camera_cloud(
+    payload: CloudUpdate,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Enable/disable the vendor P2P cloud tunnel (Hik-Connect / EZVIZ)."""
+    try:
+        driver = await get_driver_for_camera(db, camera.id)
+        result = await driver.set_cloud(payload.enabled)
+        write_audit_log(
+            db,
+            action="camera.cloud.update",
+            entity_type="camera",
+            entity_id=camera.id,
+            details={"enabled": payload.enabled},
+        )
+        return result.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cloud update failed: {e}")
 
 
 @router.post("/{camera_id}/events/subscribe")

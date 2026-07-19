@@ -22,6 +22,7 @@ import { UsersManager } from './settings/UsersManager'
 import { RolesManager } from './settings/RolesManager'
 import { PermissionsManager } from './settings/PermissionsManager'
 import { CameraConfigManager } from './settings/CameraConfigManager'
+import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
 import { PasswordPolicy } from './settings/PasswordPolicy'
 import { SecurityFirewall } from './settings/SecurityFirewall'
 import { SecurityPorts } from './settings/SecurityPorts'
@@ -74,7 +75,14 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     ],
   },
   { key: 'webrtc', label: 'Webrtc', panel: () => <WebRTCSettings />, submenu: [] },
-  { key: 'camera-config', label: 'Camera-Config', panel: () => <CameraConfigManager />, submenu: [] },
+  {
+    key: 'camera-config',
+    label: 'Camera-Config',
+    submenu: [
+      { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
+      { slug: 'device', label: 'Device Settings', panel: () => <CameraDeviceConfig /> },
+    ],
+  },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
   {
     key: 'media-source',

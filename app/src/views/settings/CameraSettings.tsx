@@ -41,12 +41,16 @@ const ALL_TABS: { key: string; label: string; area: string }[] = [
   { key: 'osd', label: 'OSD', area: 'osd' },
   { key: 'ptz', label: 'PTZ', area: 'ptz' },
   { key: 'motion', label: 'Motion', area: 'motion' },
+  { key: 'smart', label: 'Smart', area: 'smart' },
+  { key: 'security', label: 'Security', area: 'security' },
+  { key: 'services', label: 'Services', area: 'services' },
   { key: 'events', label: 'Events', area: 'events' },
   { key: 'ai', label: 'AI', area: 'ai' },
   { key: 'time', label: 'Time', area: 'time' },
   { key: 'network', label: 'Network', area: 'network' },
   { key: 'storage', label: 'Storage', area: 'storage' },
   { key: 'users', label: 'Users', area: 'users' },
+  { key: 'maintenance', label: 'Maintenance', area: 'info' },
 ]
 
 function Toggle({
@@ -93,11 +97,14 @@ const IMG_NUM: [string, string][] = [
   ['contrast', 'Contrast'],
   ['saturation', 'Saturation'],
   ['sharpness', 'Sharpness'],
+  ['noise_reduction', 'Noise reduction'],
 ]
 const IMG_SEL: [string, string][] = [
   ['ir_cut_filter', 'Day / Night (IR-cut)'],
   ['wdr', 'Wide Dynamic Range'],
   ['backlight', 'Backlight compensation'],
+  ['noise_reduce_mode', 'Noise reduction mode'],
+  ['flip', 'Flip / rotate 180°'],
 ]
 
 function probeBadge(result: string | undefined) {
@@ -652,9 +659,523 @@ function OsdTab({ cameraId }: { cameraId: number }) {
           onChange={(e) => setForm({ ...form, text: e.target.value })}
         />
       </div>
+      {(data.slots || []).filter((sl: any) => sl.id !== 1).length > 0 && (
+        <div className="border-t border-[var(--border)] pt-4 space-y-2">
+          <p className="text-xs text-[var(--text-dim)]">
+            Additional text overlays
+          </p>
+          {(data.slots || [])
+            .filter((sl: any) => sl.id !== 1)
+            .map((sl: any) => {
+              const patched = (form.slots || []).find((x: any) => x.id === sl.id)
+              const enabled = patched?.enabled ?? sl.enabled ?? false
+              const text = patched?.text ?? sl.text ?? ''
+              const upd = (next: any) => {
+                const rest = (form.slots || []).filter((x: any) => x.id !== sl.id)
+                setForm({
+                  ...form,
+                  slots: [...rest, { id: sl.id, enabled, text, ...next }],
+                })
+              }
+              return (
+                <div key={sl.id} className="flex items-center gap-2">
+                  <Toggle
+                    label={`#${sl.id}`}
+                    checked={!!enabled}
+                    onChange={(v) => upd({ enabled: v })}
+                  />
+                  <input
+                    className={`flex-1 ${INPUT_CLS}`}
+                    placeholder={`Overlay ${sl.id} text`}
+                    value={text}
+                    disabled={!enabled}
+                    onChange={(e) => upd({ text: e.target.value })}
+                  />
+                </div>
+              )
+            })}
+        </div>
+      )}
       <Button variant="primary" onClick={save} disabled={saving}>
         {saving ? 'Applying…' : 'Apply changes'}
       </Button>
+    </div>
+  )
+}
+
+function ServicesTab({ cameraId }: { cameraId: number }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const { data } = await apiService.getCameraServices(cameraId)
+      setData(data)
+    } catch (e: any) {
+      setError(e?.data?.detail || e?.message || 'Failed to read services')
+    } finally {
+      setLoading(false)
+    }
+  }, [cameraId])
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const toggle = async (key: string, enabled: boolean) => {
+    setBusy(key)
+    try {
+      const { data: res } = await apiService.setCameraService(cameraId, key, enabled)
+      setData(res)
+      showSuccess('Service updated')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to update service')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (loading) return <Skeleton className="h-40 w-full" />
+  if (error) return <ErrorCard message={error} onRetry={load} />
+  if (!data?.supported)
+    return <EmptyState title="Service settings not available for this device" />
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-[var(--text-dim)]">
+        Network services running on the camera. Turning off the ones you don't
+        use reduces the camera's attack surface.
+      </p>
+      {(data.services || []).map((s: any) => (
+        <div
+          key={s.key}
+          className="flex items-center justify-between gap-3 border border-[var(--border)] rounded px-3 py-2"
+        >
+          <div className="min-w-0">
+            <div className="text-sm">{s.label}</div>
+            {s.detail && (
+              <div className="text-xs text-[var(--text-dim)] truncate font-mono">
+                {s.detail}
+              </div>
+            )}
+          </div>
+          {!s.supported ? (
+            <span className="text-xs text-[var(--text-dim)] shrink-0">
+              not supported
+            </span>
+          ) : s.writable ? (
+            <Toggle
+              label=""
+              checked={!!s.enabled}
+              onChange={(v) => !busy && toggle(s.key, v)}
+            />
+          ) : (
+            <Badge variant={s.enabled ? 'info' : 'neutral'}>
+              {s.enabled == null ? 'unknown' : s.enabled ? 'on' : 'off'}
+            </Badge>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function MaintenanceTab({ cameraId }: { cameraId: number }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [busy, setBusy] = useState('')
+  const [confirmReboot, setConfirmReboot] = useState(false)
+  const [secretKey, setSecretKey] = useState('')
+
+  const reboot = async () => {
+    setBusy('reboot')
+    try {
+      await apiService.rebootCamera(cameraId)
+      setConfirmReboot(false)
+      showSuccess('Reboot command sent — the camera will be offline briefly')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Reboot failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const backup = async () => {
+    setBusy('backup')
+    try {
+      const res = await apiService.exportCameraConfig(cameraId, secretKey)
+      const url = URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `camera-${cameraId}-config.bin`
+      a.click()
+      URL.revokeObjectURL(url)
+      showSuccess('Configuration downloaded')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Config export failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-[var(--border)] rounded p-3 space-y-2">
+        <div className="text-sm">Configuration backup</div>
+        <p className="text-xs text-[var(--text-dim)]">
+          Download the camera's full settings as a vendor backup file. Useful
+          before making changes, and for cloning setup to an identical camera.
+        </p>
+        <input
+          className={`w-full ${INPUT_CLS}`}
+          placeholder="Encryption key for the backup"
+          value={secretKey}
+          onChange={(e) => setSecretKey(e.target.value)}
+        />
+        <p className="text-xs text-amber-500">
+          The camera encrypts the backup with this key and the same key is
+          required to restore it. Store it somewhere safe — without it the
+          backup is useless.
+        </p>
+        <Button onClick={backup} disabled={busy === 'backup' || !secretKey.trim()}>
+          {busy === 'backup' ? 'Exporting…' : 'Download backup'}
+        </Button>
+      </div>
+
+      <div className="border border-[var(--border)] rounded p-3 space-y-2">
+        <div className="text-sm">Reboot camera</div>
+        <p className="text-xs text-[var(--text-dim)]">
+          The camera will drop its stream and recording for roughly a minute.
+        </p>
+        {!confirmReboot ? (
+          <Button onClick={() => setConfirmReboot(true)}>Reboot…</Button>
+        ) : (
+          <div className="flex gap-2">
+            <Button variant="primary" onClick={reboot} disabled={busy === 'reboot'}>
+              {busy === 'reboot' ? 'Rebooting…' : 'Confirm reboot'}
+            </Button>
+            <Button onClick={() => setConfirmReboot(false)}>Cancel</Button>
+          </div>
+        )}
+      </div>
+
+      <p className="text-xs text-[var(--text-dim)]">
+        OpenNVR never factory-resets a camera and never changes its IP — those
+        stay on the camera's own web page by design.
+      </p>
+    </div>
+  )
+}
+
+function SecurityTab({ cameraId }: { cameraId: number }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const [extra, setExtra] = useState('')
+  const [confirmLock, setConfirmLock] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const { data } = await apiService.getCameraSecurity(cameraId)
+      setData(data)
+    } catch (e: any) {
+      setError(e?.data?.detail || e?.message || 'Failed to read security settings')
+    } finally {
+      setLoading(false)
+    }
+  }, [cameraId])
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const applyFilter = async (enabled: boolean) => {
+    setBusy('filter')
+    try {
+      const entries = enabled
+        ? [data.server_ip, ...extra.split(',').map((s: string) => s.trim())].filter(Boolean)
+        : []
+      const { data: res } = await apiService.setCameraIpFilter(cameraId, {
+        enabled,
+        mode: 'allow',
+        entries,
+      })
+      setData(res)
+      setConfirmLock(false)
+      showSuccess(enabled ? 'Camera locked to OpenNVR' : 'IP filter disabled')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to update IP filter')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const applyCloud = async (enabled: boolean) => {
+    setBusy('cloud')
+    try {
+      const { data: res } = await apiService.setCameraCloud(cameraId, enabled)
+      setData(res)
+      showSuccess(enabled ? 'Cloud enabled' : 'Vendor cloud disabled')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to update cloud setting')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (loading) return <Skeleton className="h-40 w-full" />
+  if (error) return <ErrorCard message={error} onRetry={load} />
+  if (!data?.supported)
+    return <EmptyState title="Security settings not available for this device" />
+
+  const locked = data.ip_filter_enabled && data.ip_filter_mode === 'allow'
+
+  return (
+    <div className="space-y-5">
+      {/* --- IP allowlist (lockout-capable) --- */}
+      <div className="border border-[var(--border)] rounded p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm">Restrict access to OpenNVR only</span>
+          {locked ? (
+            <Badge variant="success">Locked</Badge>
+          ) : (
+            <Badge variant="neutral">Open</Badge>
+          )}
+        </div>
+
+        {!data.ip_filter_supported ? (
+          <p className="text-xs text-[var(--text-dim)]">
+            This camera does not support IP filtering.
+          </p>
+        ) : locked ? (
+          <>
+            <p className="text-xs text-[var(--text-dim)]">
+              Only these addresses can reach this camera:{' '}
+              <span className="font-mono">
+                {(data.ip_filter_entries || []).join(', ')}
+              </span>
+            </p>
+            <Button onClick={() => applyFilter(false)} disabled={busy === 'filter'}>
+              {busy === 'filter' ? 'Working…' : 'Remove restriction'}
+            </Button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-[var(--text-dim)]">
+              The camera will accept connections only from OpenNVR (
+              <span className="font-mono">{data.server_ip || 'unknown'}</span>).
+              Everyone else is refused — even with the correct password.
+            </p>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">
+                Additional allowed addresses (optional, comma-separated)
+              </span>
+              <input
+                value={extra}
+                onChange={(e) => setExtra(e.target.value)}
+                placeholder="e.g. 192.168.1.20"
+                className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-3 py-2 text-sm font-mono"
+              />
+            </label>
+
+            {!confirmLock ? (
+              <Button
+                variant="primary"
+                onClick={() => setConfirmLock(true)}
+                disabled={!data.server_ip}
+              >
+                Lock camera to OpenNVR
+              </Button>
+            ) : (
+              <div className="space-y-2 border border-amber-600/50 bg-amber-600/10 rounded p-3">
+                <p className="text-xs">
+                  <strong>Read this first.</strong> If OpenNVR's address changes
+                  later (for example on DHCP), it will no longer be able to reach
+                  this camera and the only way back is the camera's physical reset
+                  button. Give this server a static IP or DHCP reservation before
+                  continuing.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="primary"
+                    onClick={() => applyFilter(true)}
+                    disabled={busy === 'filter'}
+                  >
+                    {busy === 'filter' ? 'Applying…' : 'I understand — lock it'}
+                  </Button>
+                  <Button onClick={() => setConfirmLock(false)}>Cancel</Button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* --- vendor cloud --- */}
+      {data.cloud_supported && (
+        <div className="border border-[var(--border)] rounded p-3 space-y-2">
+          <Toggle
+            label="Vendor cloud (P2P)"
+            checked={!!data.cloud_enabled}
+            onChange={(v) => applyCloud(v)}
+          />
+          <p className="text-xs text-[var(--text-dim)]">
+            {data.cloud_enabled
+              ? `This camera can reach the vendor cloud${
+                  data.cloud_host ? ` (${data.cloud_host})` : ''
+                }. Disable it to keep the camera fully offline.`
+              : 'Disabled — the camera is not phoning home to the vendor cloud.'}
+          </p>
+        </div>
+      )}
+
+      {/* --- read-only posture --- */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <ReadOnlyField
+          label="Brute-force login lockout"
+          value={
+            data.illegal_login_lock == null
+              ? undefined
+              : data.illegal_login_lock
+                ? 'Enabled'
+                : 'Disabled'
+          }
+        />
+        <ReadOnlyField label="OpenNVR is seen as" value={data.server_ip} />
+      </div>
+
+      {!!(data.protocols || []).length && (
+        <div className="space-y-1">
+          <p className="text-xs text-[var(--text-dim)]">
+            Open services (read-only — disabling the HTTP port here would cut
+            OpenNVR off from the camera)
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {data.protocols.map((p: any) => (
+              <Badge
+                key={p.protocol}
+                variant={p.enabled === false ? 'neutral' : 'info'}
+              >
+                {p.protocol}:{p.port}{' '}
+                {/* Some services (e.g. the SDK port) expose no enable flag at
+                    all — reporting that as "off" would understate what is
+                    actually listening, so say the state is unknown. */}
+                {p.enabled == null ? '(no toggle)' : p.enabled ? 'on' : 'off'}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SmartTab({ cameraId }: { cameraId: number }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const { data } = await apiService.getCameraSmart(cameraId)
+      setData(data)
+    } catch (e: any) {
+      setError(e?.data?.detail || e?.message || 'Failed to read smart detection')
+    } finally {
+      setLoading(false)
+    }
+  }, [cameraId])
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const apply = async (key: string, patch: Record<string, any>) => {
+    setBusy(key)
+    try {
+      const { data } = await apiService.setCameraSmart(cameraId, key, patch)
+      setData(data)
+      showSuccess('Detector updated')
+    } catch (e: any) {
+      showError(e?.data?.detail || e?.message || 'Failed to update detector')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (loading) return <Skeleton className="h-40 w-full" />
+  if (error) return <ErrorCard message={error} onRetry={load} />
+  if (!data?.supported)
+    return <EmptyState title="Smart detection not available for this device" />
+
+  return (
+    <div className="space-y-3">
+      {(data.detectors || []).map((d: any) => (
+        <div
+          key={d.key}
+          className="border border-[var(--border)] rounded p-3 space-y-3"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm">{d.label}</span>
+              {d.configured === false && d.enabled && (
+                <Badge variant="warning">no region defined</Badge>
+              )}
+            </div>
+            {d.supported ? (
+              <Toggle
+                label=""
+                checked={!!d.enabled}
+                onChange={(v) => apply(d.key, { enabled: v })}
+              />
+            ) : (
+              <span className="text-xs text-[var(--text-dim)]">
+                not supported by this model
+              </span>
+            )}
+          </div>
+
+          {d.supported && d.sensitivity != null && (
+            <div className="flex items-center gap-3">
+              <label className="w-24 text-xs text-[var(--text-dim)]">
+                Sensitivity
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={d.sensitivity_max ?? 100}
+                defaultValue={d.sensitivity}
+                disabled={busy === d.key}
+                onMouseUp={(e) =>
+                  apply(d.key, {
+                    sensitivity: parseInt((e.target as HTMLInputElement).value),
+                  })
+                }
+                className="flex-1 accent-[var(--accent)]"
+              />
+              <span className="w-14 text-right text-xs font-mono">
+                {d.sensitivity} / {d.sensitivity_max}
+              </span>
+            </div>
+          )}
+
+          {d.supported && d.configured === false && (
+            <p className="text-xs text-[var(--text-dim)]">
+              This detector has no line or region drawn, so it will not trigger
+              even when enabled. Draw one in the camera's own web interface.
+            </p>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -1111,15 +1632,14 @@ function StorageTab({ cameraId }: { cameraId: number }) {
   if (error) return <ErrorCard message={error} onRetry={reload} />
   if (!data?.supported)
     return <EmptyState title="Storage info not available for this device" />
-  if (!data.present)
-    return (
-      <EmptyState
-        title="No SD card / disk detected"
-        description="This camera has no local storage inserted."
-      />
-    )
   return (
     <div className="space-y-3">
+      {!data.present && (
+        <EmptyState
+          title="No SD card / disk detected"
+          description="This camera has no local storage inserted."
+        />
+      )}
       {(data.slots || []).map((s: any, i: number) => (
         <div
           key={i}
@@ -1137,25 +1657,60 @@ function StorageTab({ cameraId }: { cameraId: number }) {
           />
         </div>
       ))}
+
+      {data.nas_supported && (
+        <div className="border-t border-[var(--border)] pt-3 space-y-2">
+          <p className="text-xs text-[var(--text-dim)]">
+            Network storage — supported mount types:{' '}
+            <span className="font-mono">
+              {(data.nas_mount_types || []).join(', ') || 'unknown'}
+            </span>
+          </p>
+          {(data.nas_mounts || []).length === 0 ? (
+            <p className="text-xs text-[var(--text-dim)]">
+              No network share is mounted on this camera.
+            </p>
+          ) : (
+            data.nas_mounts.map((n: any, i: number) => (
+              <div
+                key={i}
+                className="grid grid-cols-2 sm:grid-cols-4 gap-4 rounded border border-[var(--border)] p-3"
+              >
+                <ReadOnlyField label="Address" value={n.address} />
+                <ReadOnlyField label="Path" value={n.path} />
+                <ReadOnlyField label="Type" value={n.type} />
+                <ReadOnlyField label="Status" value={n.status} />
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-export function CameraSettings({
-  open,
+/**
+ * The tabbed device-settings panel for one camera. Shared by the modal (opened
+ * from a camera row) and the Settings > Camera Configuration page, so both
+ * surfaces render exactly the same capability-gated tabs.
+ */
+export function CameraSettingsPanel({
   camera,
-  onClose,
+  active: activeProp,
 }: {
-  open: boolean
   camera: CameraLite | null
-  onClose: () => void
+  active?: boolean
 }) {
-  const { caps, loading, error, reload } = useCameraCapabilities(camera?.id ?? null, open)
+  const enabled = activeProp ?? true
+  const { caps, loading, error, reload } = useCameraCapabilities(
+    camera?.id ?? null,
+    enabled
+  )
   const [active, setActive] = useState('info')
 
   useEffect(() => {
-    if (open) setActive('info')
-  }, [open, camera?.id])
+    if (enabled) setActive('info')
+  }, [enabled, camera?.id])
 
   const tabs = ALL_TABS.filter(
     (t) => t.area === 'info' || t.area === 'ai' || caps?.supported_areas?.[t.area]
@@ -1163,12 +1718,7 @@ export function CameraSettings({
   const activeTab = tabs.some((t) => t.key === active) ? active : 'info'
 
   return (
-    <Modal
-      open={open}
-      title={camera ? `Camera settings — ${camera.name}` : 'Camera settings'}
-      onClose={onClose}
-      widthClassName="w-[820px]"
-    >
+    <>
       {!camera ? null : (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
@@ -1214,6 +1764,12 @@ export function CameraSettings({
                 {activeTab === 'osd' && <OsdTab cameraId={camera.id} />}
                 {activeTab === 'ptz' && <PtzTab cameraId={camera.id} />}
                 {activeTab === 'motion' && <MotionTab cameraId={camera.id} />}
+                {activeTab === 'smart' && <SmartTab cameraId={camera.id} />}
+                {activeTab === 'security' && <SecurityTab cameraId={camera.id} />}
+                {activeTab === 'services' && <ServicesTab cameraId={camera.id} />}
+                {activeTab === 'maintenance' && (
+                  <MaintenanceTab cameraId={camera.id} />
+                )}
                 {activeTab === 'events' && <EventsTab cameraId={camera.id} />}
                 {activeTab === 'ai' && <AiTab cameraId={camera.id} />}
                 {activeTab === 'users' && <UsersTab cameraId={camera.id} />}
@@ -1229,6 +1785,28 @@ export function CameraSettings({
           )}
         </div>
       )}
+    </>
+  )
+}
+
+/** Modal wrapper — opened from the gear icon on a camera row. */
+export function CameraSettings({
+  open,
+  camera,
+  onClose,
+}: {
+  open: boolean
+  camera: CameraLite | null
+  onClose: () => void
+}) {
+  return (
+    <Modal
+      open={open}
+      title={camera ? `Camera settings — ${camera.name}` : 'Camera settings'}
+      onClose={onClose}
+      widthClassName="w-[820px]"
+    >
+      <CameraSettingsPanel camera={camera} active={open} />
     </Modal>
   )
 }

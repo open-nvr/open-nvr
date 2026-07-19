@@ -120,6 +120,25 @@ export const cameraService = {
   getCameraMotion: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/motion`),
   setCameraMotion: (cameraId: number, payload: Record<string, any>) =>
     api.put(`/api/v1/cameras/${cameraId}/motion`, payload),
+  getCameraServices: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/services`),
+  setCameraService: (cameraId: number, key: string, enabled: boolean) =>
+    api.put(`/api/v1/cameras/${cameraId}/services/${key}`, { enabled }),
+  exportCameraConfig: (cameraId: number, secretKey: string) =>
+    api.post(
+      `/api/v1/cameras/${cameraId}/config-backup`,
+      { secret_key: secretKey },
+      { responseType: 'blob' }
+    ),
+  getCameraSecurity: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/security`),
+  setCameraIpFilter: (cameraId: number, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/security/ip-filter`, payload),
+  setCameraCloud: (cameraId: number, enabled: boolean) =>
+    api.put(`/api/v1/cameras/${cameraId}/security/cloud`, { enabled }),
+  getCameraSmart: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/smart`),
+  setCameraSmart: (cameraId: number, key: string, payload: Record<string, any>) =>
+    api.put(`/api/v1/cameras/${cameraId}/smart/${key}`, payload),
 
   // Camera events (native alarm stream)
   getCameraEvents: (cameraId: number, limit = 50) =>

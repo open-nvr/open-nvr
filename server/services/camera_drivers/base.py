@@ -91,6 +91,10 @@ class StorageInfo:
     supported: bool = False
     present: bool = False  # a card/disk is actually inserted
     slots: list[StorageSlot] = field(default_factory=list)
+    # Network storage: which mount types the device supports and what is mounted
+    nas_supported: bool = False
+    nas_mount_types: list[str] = field(default_factory=list)
+    nas_mounts: list[dict[str, Any]] = field(default_factory=list)
     source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,6 +102,9 @@ class StorageInfo:
             "supported": self.supported,
             "present": self.present,
             "slots": [s.to_dict() for s in self.slots],
+            "nas_supported": self.nas_supported,
+            "nas_mount_types": self.nas_mount_types,
+            "nas_mounts": self.nas_mounts,
             "source": self.source,
         }
 
@@ -149,8 +156,11 @@ class OsdInfo:
     supported: bool = False
     datetime_enabled: bool | None = None
     channel_name_enabled: bool | None = None
+    # Slot 1 kept as flat fields for backward compatibility; ``slots`` carries
+    # every text overlay the device exposes: {id, enabled, text, x, y}.
     text_enabled: bool | None = None
     text: str | None = None
+    slots: list[dict[str, Any]] = field(default_factory=list)
     source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -167,6 +177,107 @@ class MotionInfo:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ServiceEntry:
+    """One network service the camera exposes (UPnP, SNMP, FTP, DDNS, …).
+
+    ``writable`` is False for services whose config is too complex to drive
+    safely from here (QoS, event HTTP hosts) — those are shown read-only.
+    """
+
+    key: str
+    label: str
+    supported: bool = False
+    enabled: bool | None = None
+    writable: bool = False
+    detail: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ServicesInfo:
+    supported: bool = False
+    services: list[ServiceEntry] = field(default_factory=list)
+    source: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "supported": self.supported,
+            "services": [s.to_dict() for s in self.services],
+            "source": self.source,
+        }
+
+
+@dataclass
+class SecurityInfo:
+    """Camera-side security posture.
+
+    ``ip_filter`` is the lockout-capable one: in ``allow`` mode the camera
+    refuses every source not on the list, so the list MUST contain the address
+    OpenNVR reaches it from. See ``feature.md``.
+    """
+
+    supported: bool = False
+    ip_filter_supported: bool = False
+    ip_filter_enabled: bool | None = None
+    ip_filter_mode: str | None = None  # "allow" | "deny"
+    ip_filter_entries: list[str] = field(default_factory=list)
+    ip_filter_max: int | None = None
+    # The source address the camera actually sees us as — the address that must
+    # be on the allowlist. Computed from the live socket, never guessed.
+    server_ip: str | None = None
+    illegal_login_lock: bool | None = None
+    cloud_supported: bool = False
+    cloud_enabled: bool | None = None
+    cloud_host: str | None = None
+    # Read-only: disabling the HTTP port would cut OpenNVR off from the camera,
+    # so protocol toggles are reported but deliberately not writable here.
+    protocols: list[dict[str, Any]] = field(default_factory=list)
+    source: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SmartDetector:
+    """One analytics detector (line crossing, intrusion, face, tamper…).
+
+    ``configured`` reports whether the detector actually has a line/region
+    drawn on the device. Several detectors happily report ``enabled=true``
+    while doing nothing because no region was ever defined — the UI must be
+    able to say so rather than implying the feature is live. ``None`` means
+    "not applicable" (e.g. face detection needs no region).
+    """
+
+    key: str
+    label: str
+    supported: bool = False
+    enabled: bool | None = None
+    sensitivity: int | None = None
+    sensitivity_max: int = 100
+    configured: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SmartInfo:
+    supported: bool = False
+    detectors: list[SmartDetector] = field(default_factory=list)
+    source: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "supported": self.supported,
+            "detectors": [d.to_dict() for d in self.detectors],
+            "source": self.source,
+        }
 
 
 @dataclass
@@ -200,6 +311,9 @@ CAPABILITY_AREAS = (
     "time",
     "osd",
     "motion",
+    "smart",  # analytics: line crossing, intrusion, face, tamper
+    "security",  # camera-side IP filter / cloud / login lock
+    "services",  # UPnP / SNMP / FTP / DDNS / QoS / event hosts
     "events",
     "network",  # read-only display
     "storage",  # read-only display
@@ -272,6 +386,44 @@ class CameraDriver(ABC):
 
     async def set_motion(self, patch: dict[str, Any]) -> MotionInfo:
         raise NotImplementedError("Motion config not supported by this driver")
+
+    async def get_smart(self) -> SmartInfo:
+        """Read analytics detectors (line crossing, intrusion, face, tamper)."""
+        return SmartInfo(supported=False)
+
+    async def set_smart(self, key: str, patch: dict[str, Any]) -> SmartInfo:
+        raise NotImplementedError("Smart detection not supported by this driver")
+
+    async def get_services(self) -> ServicesInfo:
+        """Read the camera's network services (UPnP/SNMP/FTP/DDNS/…)."""
+        return ServicesInfo(supported=False)
+
+    async def set_service(self, key: str, enabled: bool) -> ServicesInfo:
+        raise NotImplementedError("Service toggles not supported by this driver")
+
+    async def get_snapshot(self) -> bytes:
+        """Return a JPEG still from the camera."""
+        raise NotImplementedError("Snapshot not supported by this driver")
+
+    async def export_config(self, secret_key: str) -> bytes:
+        """Return the camera's full configuration blob (backup).
+
+        Vendors typically encrypt the blob with ``secret_key``; the same key is
+        required to restore it, so it is the caller's to keep.
+        """
+        raise NotImplementedError("Config export not supported by this driver")
+
+    async def get_security(self) -> SecurityInfo:
+        """Read camera-side security posture (IP filter, cloud, lockout)."""
+        return SecurityInfo(supported=False)
+
+    async def set_ip_filter(
+        self, *, enabled: bool, mode: str, entries: list[str]
+    ) -> SecurityInfo:
+        raise NotImplementedError("IP filtering not supported by this driver")
+
+    async def set_cloud(self, enabled: bool) -> SecurityInfo:
+        raise NotImplementedError("Cloud toggle not supported by this driver")
 
     async def subscribe_events(self):
         """Async generator of normalized camera events. Base is unsupported;
