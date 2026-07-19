@@ -49,10 +49,16 @@ export function CameraDeviceConfig() {
     let alive = true
     setLoading(true)
     apiService
-      .getCameras({ limit: 200 })
+      // active_only=false so a temporarily-inactive camera can still be
+      // configured; the list endpoint answers {cameras: [...], total: n}.
+      .getCameras({ limit: 200, active_only: false })
       .then((res: any) => {
         if (!alive) return
-        const list: Cam[] = res.data?.items ?? res.data ?? []
+        const list: Cam[] = Array.isArray(res.data?.cameras)
+          ? res.data.cameras
+          : Array.isArray(res.data)
+            ? res.data
+            : []
         setCameras(list)
         setSelected((cur) => cur ?? list[0] ?? null)
       })
