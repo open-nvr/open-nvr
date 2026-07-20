@@ -18,7 +18,7 @@
 Dahua CGI HTTP primitive — Dahua's ``/cgi-bin/*.cgi`` device API over HTTP
 Digest.
 
-Mirrors ``hikvision.isapi.isapi_request``: a thin ``httpx`` call returning
+Self-contained per vendor (see docs/adding-a-camera-vendor.md): a thin ``httpx`` call returning
 ``(status_code, text)`` that raises only on transport failure (callers decide
 what a non-200 means). Dahua replies are ``key=value`` text (one per line), not
 XML — ``parse_kv`` turns a response body into a flat dict keyed by the full

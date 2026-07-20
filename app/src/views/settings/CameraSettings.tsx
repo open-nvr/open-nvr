@@ -50,7 +50,7 @@ const ALL_TABS: { key: string; label: string; area: string }[] = [
   { key: 'network', label: 'Network', area: 'network' },
   { key: 'storage', label: 'Storage', area: 'storage' },
   { key: 'users', label: 'Users', area: 'users' },
-  { key: 'maintenance', label: 'Maintenance', area: 'info' },
+  { key: 'maintenance', label: 'Maintenance', area: 'maintenance' },
 ]
 
 function Toggle({
@@ -92,20 +92,37 @@ const encFormOf = (c: any): EncForm => ({
   gov_length: c.gov_length,
 })
 
-const IMG_NUM: [string, string][] = [
-  ['brightness', 'Brightness'],
-  ['contrast', 'Contrast'],
-  ['saturation', 'Saturation'],
-  ['sharpness', 'Sharpness'],
-  ['noise_reduction', 'Noise reduction'],
-]
-const IMG_SEL: [string, string][] = [
-  ['ir_cut_filter', 'Day / Night (IR-cut)'],
-  ['wdr', 'Wide Dynamic Range'],
-  ['backlight', 'Backlight compensation'],
-  ['noise_reduce_mode', 'Noise reduction mode'],
-  ['flip', 'Flip / rotate 180°'],
-]
+/**
+ * Friendlier names for known image keys. Anything not listed is humanised from
+ * its key, so a driver can expose new settings without a frontend change —
+ * which vendors do a lot (Secureye alone reports 24).
+ */
+const IMG_LABELS: Record<string, string> = {
+  ir_cut_filter: 'Day / Night (IR-cut)',
+  wdr: 'Wide Dynamic Range',
+  wdr_level: 'WDR level',
+  backlight: 'Backlight compensation',
+  noise_reduce_mode: 'Noise reduction mode',
+  noise_reduction: 'Noise reduction',
+  flip: 'Flip / rotate 180°',
+  white_balance: 'White balance',
+  wb_red: 'White balance — red',
+  wb_blue: 'White balance — blue',
+  ir_light_mode: 'IR light mode',
+  ir_brightness: 'IR brightness (day)',
+  ir_night_brightness: 'IR brightness (night)',
+  light_suppression: 'Light suppression',
+  light_suppression_strength: 'Light suppression strength',
+  defog_strength: 'Defog strength',
+  image_style: 'Image style',
+  scene_mode: 'Scene mode',
+}
+function imgLabel(key: string): string {
+  return (
+    IMG_LABELS[key] ??
+    key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+  )
+}
 
 function probeBadge(result: string | undefined) {
   if (result === 'ok') return <Badge variant="success">Reachable</Badge>
@@ -119,6 +136,7 @@ const DRIVER_LABELS: Record<string, string> = {
   hikvision: 'Native: Hikvision ISAPI',
   dahua: 'Native: Dahua CGI',
   cpplus: 'Native: CP Plus (Dahua CGI)',
+  secureye: 'Native: Secureye CGI',
   onvif: 'ONVIF baseline',
 }
 function driverLabel(name: string): string {
@@ -1454,11 +1472,15 @@ function ImageTab({ cameraId }: { cameraId: number }) {
   return (
     <div className="space-y-5">
       <div className="space-y-3">
-        {IMG_NUM.filter(([k]) => k in data.settings).map(([k, label]) => {
+        {Object.keys(data.settings)
+          .filter((k) => data.ranges?.[k]?.min !== undefined)
+          .sort()
+          .map((k) => {
           const r = data.ranges?.[k] || { min: 0, max: 100 }
+          const label = imgLabel(k)
           return (
             <div key={k} className="flex items-center gap-3">
-              <label className="w-28 text-sm text-[var(--text-dim)]">{label}</label>
+              <label className="w-44 text-sm text-[var(--text-dim)]">{label}</label>
               <input
                 type="range"
                 min={r.min}
@@ -1474,20 +1496,33 @@ function ImageTab({ cameraId }: { cameraId: number }) {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {IMG_SEL.filter(([k]) => k in data.settings).map(([k, label]) => (
+        {Object.keys(data.settings)
+          .filter((k) => data.ranges?.[k]?.min === undefined)
+          .sort()
+          .map((k) => (
           <label key={k} className="flex flex-col gap-1">
-            <span className="text-xs text-[var(--text-dim)]">{label}</span>
-            <select
-              value={form[k] ?? ''}
-              onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-              className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-3 py-2 text-sm"
-            >
-              {(data.ranges?.[k]?.options || [form[k]]).map((o: string) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
+            <span className="text-xs text-[var(--text-dim)]">{imgLabel(k)}</span>
+            {data.ranges?.[k]?.options ? (
+              <select
+                value={form[k] ?? ''}
+                onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+                className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+              >
+                {data.ranges[k].options.map((o: string) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              /* Device reported a value but no option list (e.g. shutter
+                 "1/12") — free text rather than a select with one entry. */
+              <input
+                value={form[k] ?? ''}
+                onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+                className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-3 py-2 text-sm font-mono"
+              />
+            )}
           </label>
         ))}
       </div>

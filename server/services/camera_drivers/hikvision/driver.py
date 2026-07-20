@@ -258,6 +258,8 @@ class HikvisionIsapiDriver(OnvifDriver):
         caps.supported_areas["smart"] = True
         caps.supported_areas["security"] = True
         caps.supported_areas["services"] = True
+        # Native reboot + encrypted config backup are implemented below.
+        caps.supported_areas["maintenance"] = True
         return caps
 
     # --- imaging: ONVIF baseline + ISAPI-only extras (flip, noise reduction) ---

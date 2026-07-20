@@ -314,6 +314,7 @@ CAPABILITY_AREAS = (
     "smart",  # analytics: line crossing, intrusion, face, tamper
     "security",  # camera-side IP filter / cloud / login lock
     "services",  # UPnP / SNMP / FTP / DDNS / QoS / event hosts
+    "maintenance",  # reboot / config backup (only where a driver implements them)
     "events",
     "network",  # read-only display
     "storage",  # read-only display

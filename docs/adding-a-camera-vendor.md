@@ -92,6 +92,28 @@ class AcmeDriver(OnvifDriver):
     # override get_osd/set_osd/get_motion/... using your own HTTP primitive
 ```
 
+## Finding a vendor's real endpoints
+
+Do **not** conclude an area is unsupported just because another vendor's paths
+return 404/400. That mistake was made once already with Secureye: its Hikvision-
+style `/ISAPI/Image/...` and `/ISAPI/.../overlays` paths return HTTP 400, so
+imaging and OSD were initially reported unsupported and their tabs hidden — when
+in fact the device serves both perfectly well under its **own** `/CGI/`
+namespace.
+
+The camera's own web UI is the authoritative source. What worked:
+
+1. `GET /` and pull the app bundle (`js/app.min.js.gz`).
+2. Grep it for path literals: `grep -oaE '"/[A-Za-z][A-Za-z0-9_./-]{2,40}"'`.
+3. Many firmwares embed a full endpoint manifest — Secureye's had a 700-entry
+   `h[<n>]="CGI/Image/channels/[1-]/color/template/[0-7]"` table listing every
+   supported path with its parameter ranges.
+4. Confirm each candidate with a real request before implementing it.
+
+Also check `GET /ISAPI/System/deviceInfo` (or the ONVIF `GetDeviceInformation`)
+for a `platformVersionList` — Secureye's advertised `cgi`, `onvif` and `rtsp`
+platforms, which was the clue that a native CGI API existed at all.
+
 ## Testing
 
 Add `server/tests/test_<vendor>_driver.py`, fully mocked (monkeypatch your HTTP
@@ -115,12 +137,22 @@ Many "brands" are rebadged OEM hardware and do **not** need their own package:
   internally still routes correctly: it matches `cpplus` by string, **fails** the
   Dahua probe, and the registry's fingerprint pass lands it on the Hikvision
   driver.
-- **Secureye** and similar pure rebadgers have **no package at all**. They rebrand
-  Dahua or Hikvision hardware unit-by-unit with no native API of their own, so
-  there is nothing brand-specific to implement. The fingerprint pass is the
-  answer: the manufacturer string matches nothing, and whichever native probe
-  (ISAPI or Dahua CGI) succeeds wins. Adding a Secureye package would just
-  duplicate one of those two probes.
+- **Secureye** *did* turn out to need its own package — and the reason is
+  instructive. The unit tested (SP-C2QN, platform `CGI_V3.0.0`) is not a Dahua or
+  Hikvision rebadge: it implements a **partial, namespace-free ISAPI subset** of
+  its own. It answered `/ISAPI/System/deviceInfo` with `200` + `<DeviceInfo`, so
+  the original Hikvision probe **claimed it** — and then most of the Hikvision
+  driver's endpoints returned HTTP 400 against it.
+
+  Two lessons, both now encoded in the code:
+  1. **Probes must be specific, not merely positive.** The Hikvision probe now
+     additionally requires the Hikvision XML namespace, so an ISAPI-alike cannot
+     satisfy it. `tests/test_secureye_driver.py` pins both directions.
+  2. **Don't assume a brand is a rebadge until you have fingerprinted one.** A
+     Secureye unit built on genuine Hikvision or Dahua internals will still fail
+     the Secureye probe, fall through the fingerprint pass, and land on the right
+     native driver — the design handles both cases, but only because detection is
+     probe-based rather than name-based.
 
 Rule of thumb: **only create a package when the brand has a native HTTP API you
 will actually call.** Otherwise let detection route it — a genuine ONVIF-only

@@ -164,6 +164,10 @@ class OnvifDriver(CameraDriver):
             # always-empty Users tab on non-Hikvision/Dahua cameras.
             "users": False,
             "audio": False,  # detected in a later phase
+            # No reboot/config-export in the baseline — a vendor driver that
+            # implements them turns this on. Otherwise the tab would offer
+            # buttons that only error.
+            "maintenance": False,
         }
         return Capabilities(
             driver_name=self.driver_name,

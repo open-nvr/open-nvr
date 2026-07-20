@@ -135,7 +135,7 @@ ISAPI_STORAGE_FULL = """<storage><hddList size="1">
         ("Dahua", "DahuaCgiDriver"),
         ("Dahua Technology", "DahuaCgiDriver"),
         ("CP Plus", "CpPlusDriver"),  # Dahua OEM — own package, priority over dahua
-        ("Secureye", "OnvifDriver"),  # no native package — string pass falls back
+        ("Secureye", "SecureyeDriver"),  # partial ISAPI subset, own package
         ("", "OnvifDriver"),
         (None, "OnvifDriver"),
     ],
