@@ -89,7 +89,9 @@ class MediaMtxConfigService:
         }
 
     @staticmethod
-    def generate_global_config() -> dict[str, Any]:
+    def generate_global_config(
+        ice_servers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Generate global MediaMTX configuration recommendations.
 
         Returns:
@@ -117,7 +119,11 @@ class MediaMtxConfigService:
             "rtspRangeType": "clock",
             # WebRTC settings (for WHEP playback)
             "webrtcAddress": f":{settings.mediamtx_webrtc_port}",
-            "webrtcICEServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
+            # Uses the STUN/TURN configured in Settings > More Settings > WebRTC
+            # when supplied; the public STUN is only a fallback for a fresh
+            # install with nothing configured yet.
+            "webrtcICEServers": ice_servers
+            or [{"urls": ["stun:stun.l.google.com:19302"]}],
             # HLS settings (optional)
             "hlsAddress": f":{settings.mediamtx_hls_port}",
             "hlsAllow": "all",

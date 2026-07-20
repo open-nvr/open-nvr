@@ -895,58 +895,6 @@ class RecordingExportRequest(BaseModel):
 
 
 # General settings schemas
-class GeneralSystemSettings(BaseModel):
-    device_name: str = Field("OpenNVR", min_length=1)
-    timezone: str = Field("UTC", min_length=1)
-    ntp_enabled: bool = True
-    ntp_server: str = Field("pool.ntp.org", min_length=1)
-
-
-class GeneralNetworkSettings(BaseModel):
-    dhcp_enabled: bool = True
-    ipv4_address: str | None = None
-    ipv4_subnet_mask: str | None = None
-    ipv4_gateway: str | None = None
-    preferred_dns: str | None = None
-    alternate_dns: str | None = None
-    mtu: int = Field(1500, ge=576, le=9000)
-
-
-class GeneralAlarmSettings(BaseModel):
-    motion_alarm_enabled: bool = False
-    motion_sensitivity: int = Field(3, ge=1, le=5)
-    tamper_alarm_enabled: bool = False
-    notify_email: str | None = None
-
-
-class GeneralRs232Settings(BaseModel):
-    baud_rate: int = Field(9600, ge=110, le=115200)
-    data_bits: Literal[5, 6, 7, 8] = 8
-    stop_bits: Literal[1, 2] = 1
-    parity: Literal["none", "even", "odd"] = "none"
-
-
-class GeneralLiveViewSettings(BaseModel):
-    default_layout: Literal[
-        "1x1", "2x2", "3x3", "4x4", "1+5", "1+7", "2+8", "1+12", "4+9", "1+1+10"
-    ] = "2x2"
-    show_osd: bool = True
-    low_latency_mode: bool = False
-
-
-# Custom Window Layout schema for "More Settings" > "Window Settings"
-class CustomWindowLayout(BaseModel):
-    id: str = Field(..., min_length=1, max_length=50)  # e.g. "1+7", "2+6"
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str | None = None
-    enabled: bool = True
-    # Grid definition: list of tile positions
-    # Each tile: {row, col, rowSpan, colSpan}
-    grid_columns: int = Field(4, ge=1, le=8)  # Total columns in the grid
-    grid_rows: int = Field(4, ge=1, le=8)  # Total rows in the grid
-    tiles: list[dict[str, int]] = []  # [{row, col, rowSpan, colSpan}, ...]
-
-
 class WindowDivisionSettings(BaseModel):
     # Built-in layouts enabled/disabled
     layouts_enabled: dict[str, bool] = {
@@ -967,24 +915,6 @@ class WindowDivisionSettings(BaseModel):
     default_layout: str = "2x2"
 
 
-class GeneralExceptionsSettings(BaseModel):
-    email_on_motion: bool = False
-    email_on_stream_failure: bool = True
-    webhook_url: str | None = None
-
-
-class GeneralUserSettings(BaseModel):
-    session_timeout_minutes: int = Field(30, ge=1, le=1440)
-    password_expiry_days: int = Field(90, ge=0, le=3650)
-
-
-class GeneralPosSettings(BaseModel):
-    enabled: bool = False
-    tcp_host: str = "127.0.0.1"
-    tcp_port: int = Field(9000, ge=1, le=65535)
-
-
-# Cloud settings schemas
 class CloudStreamingSettings(BaseModel):
     enabled: bool = False
     server_url: str | None = None

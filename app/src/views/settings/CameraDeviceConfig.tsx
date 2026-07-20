@@ -16,8 +16,9 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { ChevronLeft } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { EmptyState, ErrorCard, Skeleton } from '../../components/ui'
+import { Badge, EmptyState, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
 import { CameraSettingsPanel } from './CameraSettings'
 
@@ -25,19 +26,22 @@ type Cam = {
   id: number
   name: string
   ip_address: string
+  is_active?: boolean
   manufacturer?: string | null
   model?: string | null
 }
 
 /**
- * Settings > Camera Configuration.
+ * Settings > Camera-Config > Device Settings.
  *
- * Pick any camera and configure the device itself. The tabs shown are driven by
- * what that specific camera supports — a Hikvision exposes its native ISAPI
- * areas, a Dahua/CP Plus its CGI areas, and any other ONVIF camera the common
- * baseline. Mixed-vendor fleets are the normal case, not a special one.
+ * Two steps by design: pick a camera, then configure it. Camera settings are
+ * per-device and capability-dependent — a single flat page can't represent
+ * "these settings, for this camera", and a dropdown hides the fleet. So the
+ * list is the landing view and selecting one drills in.
  *
- * Renders the same panel as the per-row settings modal (no duplicated UI).
+ * Everything shown for a camera is detected from the device itself: a Hikvision
+ * exposes its native ISAPI areas, a Secureye its CGI areas, and any other ONVIF
+ * camera the common baseline. Mixed-vendor fleets are the normal case.
  */
 export function CameraDeviceConfig() {
   const [cameras, setCameras] = useState<Cam[]>([])
@@ -49,7 +53,7 @@ export function CameraDeviceConfig() {
     let alive = true
     setLoading(true)
     apiService
-      // active_only=false so a temporarily-inactive camera can still be
+      // active_only=false so a temporarily-offline camera can still be
       // configured; the list endpoint answers {cameras: [...], total: n}.
       .getCameras({ limit: 200, active_only: false })
       .then((res: any) => {
@@ -60,7 +64,6 @@ export function CameraDeviceConfig() {
             ? res.data
             : []
         setCameras(list)
-        setSelected((cur) => cur ?? list[0] ?? null)
       })
       .catch(
         (e: any) =>
@@ -82,40 +85,62 @@ export function CameraDeviceConfig() {
       />
     )
 
-  return (
-    <div className="space-y-4">
-      <label className="flex flex-col gap-1 max-w-md">
-        <span className="text-xs text-[var(--text-dim)]">Camera</span>
-        <select
-          value={selected?.id ?? ''}
-          onChange={(e) =>
-            setSelected(
-              cameras.find((c) => c.id === Number(e.target.value)) ?? null
-            )
-          }
-          className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+  // --- step 2: one camera selected ---
+  if (selected) {
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => setSelected(null)}
+          className="flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
         >
-          {cameras.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} — {c.ip_address}
-              {c.manufacturer ? ` (${c.manufacturer}${c.model ? ` ${c.model}` : ''})` : ''}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <p className="text-xs text-[var(--text-dim)]">
-        The tabs below are detected from the selected camera — vendor-specific
-        features appear only on cameras that support them, and the rest fall
-        back to the common ONVIF settings.
-      </p>
-
-      {selected && (
-        <div className="border-t border-[var(--border)] pt-4">
-          {/* key forces a clean remount (and re-probe) when the camera changes */}
-          <CameraSettingsPanel key={selected.id} camera={selected} />
+          <ChevronLeft size={16} /> All cameras
+        </button>
+        <div>
+          <h3 className="text-lg font-medium">{selected.name}</h3>
+          <p className="text-xs text-[var(--text-dim)] font-mono">
+            {selected.ip_address}
+            {selected.manufacturer ? ` · ${selected.manufacturer}` : ''}
+            {selected.model ? ` ${selected.model}` : ''}
+          </p>
         </div>
-      )}
+        <CameraSettingsPanel key={selected.id} camera={selected} />
+      </div>
+    )
+  }
+
+  // --- step 1: pick a camera ---
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-[var(--text-dim)]">
+        Select a camera to configure the device itself. Available settings are
+        detected per camera, so vendor-specific features appear only where the
+        hardware supports them.
+      </p>
+      <div className="space-y-2">
+        {cameras.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => setSelected(c)}
+            className="w-full flex items-center justify-between gap-4 rounded border border-[var(--border)] bg-[var(--panel-2)]/40 px-4 py-3 text-left hover:bg-[var(--panel-2)] transition-colors"
+          >
+            <div className="min-w-0">
+              <div className="text-sm">{c.name}</div>
+              <div className="text-xs text-[var(--text-dim)] font-mono truncate">
+                {c.ip_address}
+                {c.manufacturer ? ` · ${c.manufacturer}` : ''}
+                {c.model ? ` ${c.model}` : ''}
+              </div>
+            </div>
+            <div className="shrink-0">
+              {c.is_active === false ? (
+                <Badge variant="neutral">Inactive</Badge>
+              ) : (
+                <Badge variant="success">Active</Badge>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

@@ -18,7 +18,6 @@
 
 import { RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { Modal } from '../../components/Modal'
 import { useSnackbar } from '../../components/Snackbar'
 import {
   Badge,
@@ -34,24 +33,66 @@ import { apiService } from '../../lib/apiService'
 
 type CameraLite = { id: number; name: string }
 
-const ALL_TABS: { key: string; label: string; area: string }[] = [
-  { key: 'info', label: 'Info', area: 'info' },
-  { key: 'image', label: 'Image', area: 'imaging' },
-  { key: 'video', label: 'Video', area: 'encoder' },
-  { key: 'osd', label: 'OSD', area: 'osd' },
-  { key: 'ptz', label: 'PTZ', area: 'ptz' },
-  { key: 'motion', label: 'Motion', area: 'motion' },
-  { key: 'smart', label: 'Smart', area: 'smart' },
-  { key: 'security', label: 'Security', area: 'security' },
-  { key: 'services', label: 'Services', area: 'services' },
-  { key: 'events', label: 'Events', area: 'events' },
-  { key: 'ai', label: 'AI', area: 'ai' },
-  { key: 'time', label: 'Time', area: 'time' },
-  { key: 'network', label: 'Network', area: 'network' },
-  { key: 'storage', label: 'Storage', area: 'storage' },
-  { key: 'users', label: 'Users', area: 'users' },
-  { key: 'maintenance', label: 'Maintenance', area: 'maintenance' },
+/**
+ * Camera settings, grouped. Sixteen flat tabs was too many to scan, so related
+ * areas are collected into five groups. Each entry maps to a capability area
+ * reported by the camera's driver — a group with no supported members is hidden
+ * entirely rather than shown empty, so what you see is what the device can do.
+ */
+type TabDef = { key: string; label: string; area: string }
+type GroupDef = { key: string; label: string; tabs: TabDef[] }
+
+const GROUPS: GroupDef[] = [
+  {
+    key: 'general',
+    label: 'General',
+    tabs: [
+      { key: 'info', label: 'Info', area: 'info' },
+      { key: 'image', label: 'Image', area: 'imaging' },
+      { key: 'video', label: 'Video', area: 'encoder' },
+      { key: 'osd', label: 'OSD', area: 'osd' },
+      { key: 'time', label: 'Time', area: 'time' },
+    ],
+  },
+  {
+    key: 'events',
+    label: 'Events & Detection',
+    tabs: [
+      { key: 'motion', label: 'Motion', area: 'motion' },
+      { key: 'smart', label: 'Smart', area: 'smart' },
+      { key: 'events', label: 'Events', area: 'events' },
+      { key: 'ai', label: 'AI', area: 'ai' },
+      { key: 'ptz', label: 'PTZ', area: 'ptz' },
+    ],
+  },
+  {
+    key: 'network',
+    label: 'Network',
+    tabs: [
+      { key: 'network', label: 'Network', area: 'network' },
+      { key: 'services', label: 'Services', area: 'services' },
+    ],
+  },
+  {
+    key: 'security',
+    label: 'Security',
+    tabs: [
+      { key: 'security', label: 'Access Control', area: 'security' },
+      { key: 'users', label: 'Camera Users', area: 'users' },
+    ],
+  },
+  {
+    key: 'maintenance',
+    label: 'Storage & Maintenance',
+    tabs: [
+      { key: 'storage', label: 'Storage', area: 'storage' },
+      { key: 'maintenance', label: 'Maintenance', area: 'maintenance' },
+    ],
+  },
 ]
+
+/** 'info' and 'ai' are always offered; everything else must be reported. */
+const ALWAYS_ON = new Set(['info', 'ai'])
 
 function Toggle({
   checked,
@@ -1742,15 +1783,33 @@ export function CameraSettingsPanel({
     enabled
   )
   const [active, setActive] = useState('info')
+  const [group, setGroup] = useState('general')
 
   useEffect(() => {
-    if (enabled) setActive('info')
+    if (enabled) {
+      setActive('info')
+      setGroup('general')
+    }
   }, [enabled, camera?.id])
 
-  const tabs = ALL_TABS.filter(
-    (t) => t.area === 'info' || t.area === 'ai' || caps?.supported_areas?.[t.area]
-  )
-  const activeTab = tabs.some((t) => t.key === active) ? active : 'info'
+  // Keep only what this camera actually supports, then drop groups left empty.
+  const groups = GROUPS.map((g) => ({
+    ...g,
+    tabs: g.tabs.filter(
+      (t) => ALWAYS_ON.has(t.area) || caps?.supported_areas?.[t.area]
+    ),
+  })).filter((g) => g.tabs.length > 0)
+
+  const activeGroup =
+    groups.find((g) => g.key === group) ?? groups[0] ?? { key: '', label: '', tabs: [] }
+  const tabs = activeGroup.tabs
+  const activeTab = tabs.some((t) => t.key === active) ? active : (tabs[0]?.key ?? 'info')
+
+  // Areas the driver reports it cannot drive — surfaced once, honestly, rather
+  // than as tabs that open onto nothing.
+  const unavailable = GROUPS.flatMap((g) => g.tabs)
+    .filter((t) => !ALWAYS_ON.has(t.area) && !caps?.supported_areas?.[t.area])
+    .map((t) => t.label)
 
   return (
     <>
@@ -1791,8 +1850,40 @@ export function CameraSettingsPanel({
             />
           ) : (
             <>
-              <Tabs tabs={tabs} active={activeTab} onChange={setActive} />
-              <div className="pt-2">
+              <div className="flex gap-4">
+                <nav className="w-48 shrink-0 space-y-1">
+                  {groups.map((g) => (
+                    <button
+                      key={g.key}
+                      onClick={() => {
+                        setGroup(g.key)
+                        setActive(g.tabs[0]?.key ?? 'info')
+                      }}
+                      className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
+                        g.key === activeGroup.key
+                          ? 'bg-[var(--panel-2)] text-[var(--text)]'
+                          : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]/60'
+                      }`}
+                    >
+                      {g.label}
+                      <span className="ml-1 text-xs opacity-60">
+                        {g.tabs.length}
+                      </span>
+                    </button>
+                  ))}
+                  {unavailable.length > 0 && (
+                    <p className="pt-3 text-xs text-[var(--text-dim)] leading-relaxed">
+                      Not supported by this camera:{' '}
+                      {unavailable.join(', ')}
+                    </p>
+                  )}
+                </nav>
+
+                <div className="flex-1 min-w-0">
+                  {tabs.length > 1 && (
+                    <Tabs tabs={tabs} active={activeTab} onChange={setActive} />
+                  )}
+                  <div className="pt-2">
                 {activeTab === 'info' && <InfoTab cameraId={camera.id} />}
                 {activeTab === 'image' && <ImageTab cameraId={camera.id} />}
                 {activeTab === 'video' && <VideoTab cameraId={camera.id} />}
@@ -1811,6 +1902,8 @@ export function CameraSettingsPanel({
                 {activeTab === 'time' && <TimeTab cameraId={camera.id} />}
                 {activeTab === 'network' && <NetworkTab cameraId={camera.id} />}
                 {activeTab === 'storage' && <StorageTab cameraId={camera.id} />}
+                  </div>
+                </div>
               </div>
               <p className="text-xs text-[var(--text-dim)] border-t border-[var(--border)] pt-3">
                 OpenNVR never changes a camera's IP and never factory-resets it —
@@ -1821,27 +1914,5 @@ export function CameraSettingsPanel({
         </div>
       )}
     </>
-  )
-}
-
-/** Modal wrapper — opened from the gear icon on a camera row. */
-export function CameraSettings({
-  open,
-  camera,
-  onClose,
-}: {
-  open: boolean
-  camera: CameraLite | null
-  onClose: () => void
-}) {
-  return (
-    <Modal
-      open={open}
-      title={camera ? `Camera settings — ${camera.name}` : 'Camera settings'}
-      onClose={onClose}
-      widthClassName="w-[820px]"
-    >
-      <CameraSettingsPanel camera={camera} active={open} />
-    </Modal>
   )
 }

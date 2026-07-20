@@ -66,7 +66,6 @@ from routers import (
     compliance,
     events as events_router,
     firmware as firmware_router,
-    general,
     integrations,
     media_source,
     mediamtx_admin,
@@ -514,7 +513,6 @@ app.include_router(webrtc.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
-app.include_router(general.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(

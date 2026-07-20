@@ -32,14 +32,6 @@ import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
 import { MediaServerManager } from './settings/MediaServerManager'
 import { RecordingSettings } from './settings/RecordingSettings'
-import { SystemSettings } from './settings/general/SystemSettings'
-import { NetworkSettings } from './settings/general/NetworkSettings'
-import { AlarmSettings } from './settings/general/AlarmSettings'
-import { Rs232Settings } from './settings/general/Rs232Settings'
-import { LiveViewSettings } from './settings/general/LiveViewSettings'
-import { ExceptionsSettings } from './settings/general/ExceptionsSettings'
-import { UserSettings } from './settings/general/UserSettings'
-import { PosSettings } from './settings/general/PosSettings'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
 
@@ -50,37 +42,16 @@ type SubEntry = { slug: string; label: string; panel: () => React.ReactElement }
 type TabEntry = { key: string; label: string; panel?: () => React.ReactElement; submenu: SubEntry[] }
 
 const SETTINGS_REGISTRY: TabEntry[] = [
-  {
-    key: 'general',
-    label: 'General',
-    submenu: [
-      { slug: 'general', label: 'General', panel: () => <SystemSettings /> },
-      { slug: 'alarm', label: 'Alarm', panel: () => <AlarmSettings /> },
-      { slug: 'rs-232', label: 'RS-232', panel: () => <Rs232Settings /> },
-      { slug: 'live-view', label: 'Live View', panel: () => <LiveViewSettings /> },
-      { slug: 'exceptions', label: 'Exceptions', panel: () => <ExceptionsSettings /> },
-      { slug: 'user', label: 'User', panel: () => <UserSettings /> },
-      { slug: 'pos', label: 'POS', panel: () => <PosSettings /> },
-    ],
-  },
-  // Manage-Users moved to sidebar (Access Control)
-  {
-    key: 'security',
-    label: 'Security',
-    submenu: [
-      { slug: 'firewall', label: 'Firewall', panel: () => <SecurityFirewall /> },
-      { slug: 'port-settings', label: 'Port Settings', panel: () => <SecurityPorts /> },
-      { slug: 'platform-access', label: 'Platform Access', panel: () => <SecurityPlatformAccess /> },
-      { slug: 'nat', label: 'NAT', panel: () => <SecurityNAT /> },
-    ],
-  },
-  { key: 'webrtc', label: 'Webrtc', panel: () => <WebRTCSettings />, submenu: [] },
+  // Camera-scoped configuration. Everything below this entry is NVR-scoped —
+  // keeping that split explicit is why the camera's own security settings live
+  // inside Camera-Config rather than next to the NVR firewall.
   {
     key: 'camera-config',
     label: 'Camera-Config',
+    panel: () => <CameraDeviceConfig />,
     submenu: [
-      { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
       { slug: 'device', label: 'Device Settings', panel: () => <CameraDeviceConfig /> },
+      { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
@@ -95,9 +66,22 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     ],
   },
   {
+    // OpenNVR's OWN security — not a camera's. Camera-side access control is
+    // under Camera-Config > (camera) > Security.
+    key: 'security',
+    label: 'Security',
+    submenu: [
+      { slug: 'firewall', label: 'Firewall', panel: () => <SecurityFirewall /> },
+      { slug: 'port-settings', label: 'Port Settings', panel: () => <SecurityPorts /> },
+      { slug: 'platform-access', label: 'Platform Access', panel: () => <SecurityPlatformAccess /> },
+      { slug: 'nat', label: 'NAT', panel: () => <SecurityNAT /> },
+    ],
+  },
+  {
     key: 'more-settings',
     label: 'More Settings',
     submenu: [
+      { slug: 'webrtc', label: 'WebRTC', panel: () => <WebRTCSettings /> },
       { slug: 'window-settings', label: 'Window Settings', panel: () => <WindowSettings /> },
       { slug: 'uplink', label: 'Uplink', panel: () => <MoreUplink /> },
     ],
@@ -118,7 +102,7 @@ export function Settings() {
   const { activeTabKey, activeSubKey } = useMemo(() => {
     const match = location.pathname.split('/settings')[1] || ''
     const parts = match.replace(/^\//, '').split('/').filter(Boolean)
-    const tab = parts[0] || 'webrtc'
+    const tab = parts[0] || 'camera-config'
     const sub = parts[1] || ''
     return { activeTabKey: tab, activeSubKey: sub }
   }, [location.pathname])

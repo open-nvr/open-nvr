@@ -24,7 +24,7 @@ import json
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from models import SecuritySetting
 from schemas import (
@@ -119,12 +119,15 @@ async def update_webrtc_settings(
 @router.get("/rtc-config", response_model=WebRTCClientConfig)
 async def get_client_rtc_config(
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_superuser),
+    current_user=Depends(get_current_active_user),
 ):
-    """Return a sanitized config suitable for RTCPeerConnection init and negotiation hints.
+    """ICE configuration for RTCPeerConnection, used by the live player.
 
-    Note: Currently restricted to superuser to avoid leaking TURN secrets broadly. Adjust as needed
-    if clients need this anonymously via reverse proxy.
+    Any authenticated user needs this to watch a stream, so it is not
+    superuser-gated. TURN credentials are inherently client-side — the browser
+    cannot relay through TURN without them — so restricting this endpoint would
+    break playback rather than protect the secret. Keep TURN credentials
+    short-lived if that matters for a deployment.
     """
     row = _get_webrtc_row(db)
     try:
