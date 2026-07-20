@@ -1,8 +1,12 @@
 <div align="center">
 
-<img src=".github/opennvr-logo.svg" alt="OpenNVR" width="300" />
+<img src=".github/opennvr-logo.svg" alt="OpenNVR — open-source self-hosted AI NVR for IP cameras" width="300" />
+
+# OpenNVR — open-source, self-hosted NVR with AI you control
 
 ### Cameras are everywhere. Almost none of them are yours.
+
+**A self-hosted, offline-first network video recorder for ONVIF/RTSP IP cameras, with a pluggable AI platform. Runs on Docker — a laptop, a Raspberry Pi, or an air-gapped server.**
 
 OpenNVR™ is the open, sovereign platform for recording your cameras and running AI on them — entirely on hardware you own, with **AI you choose and control**. No vendor cloud holds your footage or watches it for you. Air-gapped by default, an audit trail you can hand to a regulator. From a homelab doorbell that never phones home, to a laptop you spin it up on in a minute, to the air-gapped government site that legally cannot use anything else.
 
