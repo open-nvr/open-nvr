@@ -1,0 +1,60 @@
+# detect-pipeline (OpenNVR Tier-0)
+
+Always-on, low-risk detection for [compute-gated inference](../docs/design/compute-gated-inference.md).
+Pulls a camera **substream from MediaMTX**, hardware-decodes it, and runs
+`motion → region select → cheap detector → tracker → best-frame`. **Nothing is
+gated here** (the gate + shadow mode are PR B); recording stays MediaMTX's job
+and is never touched.
+
+Ported CV logic (motion, region geometry, best-frame, tracker metric) is derived
+from Frigate `6f80bcd19` (MIT) — see [`NOTICE`](NOTICE).
+
+## Install
+
+```bash
+cd detect-pipeline
+pip install -e .          # numpy + opencv-python-headless
+```
+
+## Run the tests
+
+```bash
+python -m pytest -q       # 65 unit/integration/smoke tests, no ffmpeg or camera needed
+```
+
+## Manual verification
+
+Run the **real pipeline** on a video file (or RTSP URL) and eyeball an annotated
+MP4 — motion boxes (yellow), detector regions (blue), tracked objects with IDs
+(green), and a CALIBRATING banner while motion warms up.
+
+```bash
+# a clip of people walking — real detection, no model download (OpenCV HOG)
+python -m detect_pipeline --source people.mp4 --out annotated.mp4 --detector hog
+
+# quick "is the whole chain alive?" on any clip with motion (deterministic blob detector)
+python -m detect_pipeline --source clip.mp4 --out annotated.mp4 --detector blob
+
+# straight off a MediaMTX substream republish
+python -m detect_pipeline --source rtsp://127.0.0.1:8554/cam_sub --out out.mp4 --detector hog
+```
+
+It prints a summary, e.g.:
+
+```
+processed 300 frames @ 640x360 | detector=hog | unique tracks=4 | max concurrent=2 | wrote annotated.mp4
+```
+
+Open the annotated MP4 to confirm: motion only fires on real movement, the
+detector runs on regions (not the whole frame), track IDs stay stable as objects
+move, and the banner shows the detector standing down during lighting changes.
+
+Detectors: `hog` (real people, default), `blob` (deterministic, for smoke
+checks), `stub` (motion + regions only).
+
+## Not yet in PR A (deliberately)
+- The gate (skip detection on stationary tracks) + shadow mode + audit → **PR B**.
+- Kalman motion prediction in the tracker, and the learned per-camera region
+  grid → documented follow-ups.
+- The KAI-C-backed accelerator detector adapter (this uses local reference
+  detectors) → lands with the detector-spec wiring.

@@ -151,3 +151,43 @@ class FrameSource:
             restarts += 1
             log.warning("frame source for %s ended; restart #%d", self.rtsp_url, restarts)
             self._sleep(self.backoff_seconds)
+
+
+class VideoFileSource:
+    """Frame source backed by a video file or RTSP URL via OpenCV VideoCapture.
+
+    For manual verification and the demo CLI: yields the same I420 ``Frame``
+    objects the ffmpeg path produces, so it exercises the real pipeline. (The
+    production path uses the hwaccel ffmpeg FrameSource; this is the convenient
+    "run it on a clip" path.)
+    """
+
+    def __init__(self, path: str, *, max_frames: int | None = None) -> None:
+        self.path = path
+        self.max_frames = max_frames
+
+    def stream(self) -> Iterator[Frame]:
+        import cv2  # local import: only the demo path needs OpenCV here
+
+        cap = cv2.VideoCapture(self.path)
+        if not cap.isOpened():
+            raise RuntimeError(f"could not open video source: {self.path!r}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        seq = 0
+        try:
+            while True:
+                ok, bgr = cap.read()
+                if not ok:
+                    return
+                h, w = bgr.shape[:2]
+                # I420 needs even dimensions
+                w -= w % 2
+                h -= h % 2
+                bgr = bgr[:h, :w]
+                yuv = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420)
+                yield Frame(yuv.tobytes(), w, h, seq, seq / fps)
+                seq += 1
+                if self.max_frames is not None and seq >= self.max_frames:
+                    return
+        finally:
+            cap.release()

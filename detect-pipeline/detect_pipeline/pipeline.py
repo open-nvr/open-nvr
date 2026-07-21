@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -39,6 +40,17 @@ log = logging.getLogger("detect_pipeline.pipeline")
 
 # on_tracks(frame, tracks, calibrating)
 OnTracks = Callable[[object, list[Track], bool], None]
+
+
+@dataclass
+class FrameResult:
+    """Everything one frame produced — for downstream use, audit, and the demo
+    overlay (motion boxes + regions + tracks)."""
+
+    tracks: list[Track]
+    motion_boxes: list[Box] = field(default_factory=list)
+    regions: list[Box] = field(default_factory=list)
+    calibrating: bool = False
 
 
 def nms(dets: list[Detection], iou_threshold: float = 0.5) -> list[Detection]:
@@ -94,15 +106,15 @@ class DetectPipeline:
         self.region_multiplier = region_multiplier
         self.min_region = get_min_region_size(model_size[0], model_size[1])
 
-    def process_frame(self, frame) -> list[Track]:
-        """Run one frame end-to-end and return the current confirmed tracks."""
+    def process_frame(self, frame) -> FrameResult:
+        """Run one frame end-to-end; return tracks + motion boxes + regions."""
         luma = np.frombuffer(frame.y_plane, np.uint8).reshape(frame.height, frame.width)
         motion_boxes = self.motion.detect(luma)
 
         # While calibrating (warm-up / whole-frame flash) do NOT run the detector;
         # tracks still age. Recording is unaffected (MediaMTX).
         if self.motion.is_calibrating():
-            return self.tracker.update([])
+            return FrameResult(self.tracker.update([]), motion_boxes, [], True)
 
         frame_shape = (frame.height, frame.width)
         track_boxes = [t.box for t in self.tracker.tracks]
@@ -119,14 +131,11 @@ class DetectPipeline:
                 dets.extend(detections_to_frame(raws, region))
             dets = nms(dets)
 
-        return self.tracker.update(dets)
+        return FrameResult(self.tracker.update(dets), motion_boxes, regions, False)
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
         """Consume the frame source forever (bounded in tests by a finite source)."""
         for frame in self.frame_source.stream():
-            calibrating = False
-            tracks = self.process_frame(frame)
-            # process_frame already applied motion; expose calibrating state
-            calibrating = self.motion.is_calibrating()
+            result = self.process_frame(frame)
             if on_tracks is not None:
-                on_tracks(frame, tracks, calibrating)
+                on_tracks(frame, result.tracks, result.calibrating)
