@@ -165,14 +165,16 @@ class WorkerManager:
         *,
         enabled: bool = True,
         worker_factory: WorkerFactory | None = None,
-        detector: DetectorAdapter | None = None,
+        detector_factory: Callable[[], DetectorAdapter] | None = None,
         model_size: int = 320,
         device: str = "/dev/dri/renderD128",
     ) -> None:
         self.provider = provider
         self.sink = sink
         self.enabled = enabled
-        self._detector = detector
+        # A factory (not a shared instance) so each worker thread gets its own
+        # detector — cv2 detectors aren't guaranteed thread-safe to share.
+        self._detector_factory = detector_factory or (lambda: StubDetector())
         self._model_size = model_size
         self._device = device
         self._factory = worker_factory or self._default_factory
@@ -180,7 +182,7 @@ class WorkerManager:
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
-            spec, sink, detector=self._detector,
+            spec, sink, detector=self._detector_factory(),
             model_size=self._model_size, device=self._device,
         )
 

@@ -10,6 +10,15 @@ dependencies = [
     "opencv-python-headless>=4.9",
 ]
 
+[project.optional-dependencies]
+# The container service also needs a NATS client to publish detections.
+service = [
+    "nats-py>=2.6",
+]
+
+[project.scripts]
+opennvr-tier0 = "detect_pipeline.run:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
