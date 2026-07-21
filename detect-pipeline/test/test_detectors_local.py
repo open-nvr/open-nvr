@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from detect_pipeline.detectors_local import BrightBlobDetector, HogPersonDetector
+from detect_pipeline.detectors_local import (
+    BrightBlobDetector,
+    HogPersonDetector,
+    hog_available,
+)
 
 
+@pytest.mark.skipif(not hog_available(), reason="OpenCV build lacks HOGDescriptor (removed in OpenCV 5)")
 def test_hog_returns_nothing_on_blank():
     blank = np.full((320, 320, 3), 128, np.uint8)
     assert HogPersonDetector().detect(blank) == []

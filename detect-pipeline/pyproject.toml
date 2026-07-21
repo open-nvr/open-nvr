@@ -7,7 +7,10 @@ dependencies = [
     # Tier-0 CV: motion detection + (later) region math operate on numpy luma
     # arrays. Headless OpenCV — no GUI/GTK deps, correct for a server component.
     "numpy>=1.26",
-    "opencv-python-headless>=4.9",
+    # Cap below 5.0: OpenCV 5 removed HOGDescriptor (our default reference
+    # detector) and changed other APIs. Pin to the well-tested 4.x surface until
+    # the pipeline is validated against 5.x.
+    "opencv-python-headless>=4.9,<5",
 ]
 
 [project.optional-dependencies]

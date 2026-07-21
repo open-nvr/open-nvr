@@ -20,10 +20,20 @@ import numpy as np
 from .detector import RawDetection
 
 
+def hog_available() -> bool:
+    """Whether this OpenCV build ships HOGDescriptor (removed in OpenCV 5)."""
+    return hasattr(cv2, "HOGDescriptor")
+
+
 class HogPersonDetector:
     """OpenCV HOG pedestrian detector wrapped as a DetectorAdapter."""
 
     def __init__(self, win_stride: int = 8, scale: float = 1.05) -> None:
+        if not hog_available():
+            raise RuntimeError(
+                "This OpenCV build has no HOGDescriptor (removed in OpenCV 5). "
+                "Pin opencv-python-headless<5, or use a different --detector."
+            )
         self._hog = cv2.HOGDescriptor()
         self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
         self._win_stride = (win_stride, win_stride)

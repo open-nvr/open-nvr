@@ -35,6 +35,17 @@ def test_env_overrides():
     assert cfg.model_size == 640
 
 
+def test_detector_factory_falls_back_to_stub_when_hog_unavailable(monkeypatch):
+    import numpy as np
+
+    import detect_pipeline.detectors_local as dl
+    from detect_pipeline.run import _detector_factory
+
+    monkeypatch.setattr(dl, "hog_available", lambda: False)   # simulate OpenCV 5
+    det = _detector_factory("hog")()                          # must not raise
+    assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
+
+
 def test_build_manager_honours_disabled():
     cfg = config_from_env({"DETECT_PIPELINE_ENABLED": "false"})
     mgr = build_manager(cfg, EventSink(lambda s, d: None))

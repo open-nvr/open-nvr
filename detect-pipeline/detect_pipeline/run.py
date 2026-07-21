@@ -68,8 +68,14 @@ def config_from_env(env: dict) -> ServiceConfig:
 
 def _detector_factory(name: str):
     if name == "hog":
-        from .detectors_local import HogPersonDetector
-        return HogPersonDetector
+        from .detectors_local import HogPersonDetector, hog_available
+        if hog_available():
+            return HogPersonDetector
+        # Never crash-loop the container on an OpenCV build without HOG — run
+        # (tracks motion regions) but detect nothing until a real detector is set.
+        from .detector import StubDetector
+        log.warning("detector 'hog' unavailable in this OpenCV build; using stub")
+        return StubDetector
     if name == "blob":
         from .detectors_local import BrightBlobDetector
         return BrightBlobDetector
