@@ -7,9 +7,13 @@ dependencies = [
     # Tier-0 CV: motion detection + (later) region math operate on numpy luma
     # arrays. Headless OpenCV — no GUI/GTK deps, correct for a server component.
     "numpy>=1.26",
-    # Cap below 5.0: OpenCV 5 removed HOGDescriptor (our default reference
-    # detector) and changed other APIs. Pin to the well-tested 4.x surface until
-    # the pipeline is validated against 5.x.
+    # Cap below 5.0 for now. OpenCV 5 moved the classic HOG/Haar detectors to
+    # opencv_contrib (xobjdetect) — they're no longer in the -headless wheel —
+    # because DNN detectors are faster/more accurate. Our default reference
+    # detector is HOG, so 4.x keeps it available. EXIT PATH: replace HOG with a
+    # small ONNX model via cv2.dnn.readNetFromONNX (present in the main wheel on
+    # BOTH 4.x and 5.x) — then this cap can be lifted. Tracked as a follow-up
+    # alongside the KAI-C accelerator detector adapter (same ONNX path).
     "opencv-python-headless>=4.9,<5",
 ]
 

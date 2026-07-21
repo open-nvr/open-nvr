@@ -100,3 +100,7 @@ a broker outage never stops a worker.
   grid → documented follow-ups.
 - The KAI-C-backed accelerator detector adapter (this uses local reference
   detectors) → lands with the detector-spec wiring.
+- A `cv2.dnn` ONNX reference detector to replace HOG (OpenCV 5 moved HOG to
+  `opencv_contrib`; `cv2.dnn.readNetFromONNX` is in the main wheel on both 4.x
+  and 5.x). This lifts the `opencv<5` cap and improves detection quality —
+  scoped with the accelerator adapter (same ONNX path).
