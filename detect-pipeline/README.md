@@ -73,6 +73,27 @@ move, and the banner shows the detector standing down during lighting changes.
 Detectors: `hog` (real people, default), `blob` (deterministic, for smoke
 checks), `stub` (motion + regions only).
 
+## As an OpenNVR service (integrated)
+
+Ships as the `detect-pipeline` container in `docker-compose.yml`. It's an
+**additive consumer**: it discovers cameras from opennvr-core's existing internal
+endpoint, pulls the **same MediaMTX tap** the camera-agent uses (OpenNVR stays
+the owner of the single camera connection), runs Tier-0 per camera, and publishes
+detections to the existing `opennvr.inference.tier0.<camera_id>.completed` NATS
+subjects. It changes nothing about ingest, recording, or serving.
+
+**On by default.** Disable without a redeploy:
+
+```bash
+# .env
+DETECT_PIPELINE_ENABLED=false     # container stays up but idle
+DETECT_DETECTOR=hog               # hog (people) | blob | stub
+DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
+```
+
+Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —
+a broker outage never stops a worker.
+
 ## Not yet in PR A (deliberately)
 - The gate (skip detection on stationary tracks) + shadow mode + audit → **PR B**.
 - Kalman motion prediction in the tracker, and the learned per-camera region

@@ -229,6 +229,41 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────
+  # Tier-0 detect-pipeline — always-on, per-camera motion→region→
+  # detect→track. Additive consumer: pulls the SAME MediaMTX tap the
+  # camera-agent uses (via opennvr-core's internal endpoint) and
+  # publishes detections to the existing opennvr.inference.* NATS
+  # subjects. Changes nothing about ingest, recording, or serving.
+  # On by default; set DETECT_PIPELINE_ENABLED=false to disable.
+  # ──────────────────────────────────────────────────────────────
+  detect-pipeline:
+    build:
+      context: ./detect-pipeline
+    image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
+    container_name: opennvr_detect_pipeline
+    restart: unless-stopped
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      - DETECT_PIPELINE_ENABLED=${DETECT_PIPELINE_ENABLED:-true}
+      - OPENNVR_INTERNAL_URL=http://opennvr-core:8000
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - NATS_URL=nats://nats:4222
+      - DETECT_DETECTOR=${DETECT_DETECTOR:-hog}
+      - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
+    # For VAAPI/QSV hardware decode, pass the render node through and set
+    # DETECT_HWACCEL=vaapi in .env (uncomment):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # OpenNVR core — backend + frontend + KAI-C.
   # ──────────────────────────────────────────────────────────────
   opennvr-core:
