@@ -894,25 +894,6 @@ class RecordingExportRequest(BaseModel):
     format: Literal["original", "zip"] = "zip"
 
 
-# General settings schemas
-class WindowDivisionSettings(BaseModel):
-    # Built-in layouts enabled/disabled
-    layouts_enabled: dict[str, bool] = {
-        "1x1": True,
-        "2x2": True,
-        "3x3": True,
-        "4x4": True,
-        "1+5": True,
-        "1+7": True,
-        "2+8": True,
-        "1+12": True,
-        "4+9": True,
-        "1+1+10": True,
-    }
-    # Custom user-defined layouts
-    custom_layouts: list[CustomWindowLayout] = []
-    # Default layout for live view
-    default_layout: str = "2x2"
 
 
 class CloudStreamingSettings(BaseModel):
