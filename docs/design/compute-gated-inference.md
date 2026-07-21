@@ -191,21 +191,13 @@ produces that honestly per deployment.
 
 ## Phased plan
 
-**Phase 1 — gate + safety rails (ship together, never separately):**
-1. Tier 0 always-on detector in KAI-C; Tier 1 dispatch gated on Tier-0 hits.
-2. Per-camera sensitivity + "always analyze" override.
-3. Critical-class force-escalate.
-4. Heartbeat pass.
-5. Shadow / calibration mode with the metric above.
-6. Gate-decision audit records (score + threshold, per skip).
-
-**Phase 2 — payoff:**
-7. Natural-language standing rules compiled to primitives.
-8. Dynamic FPS / compute reinvestment.
-9. Adapter cost-tier + trigger conditions in the manifest.
-
-Phase 1 items 1–6 are a single unit: the gate must not ship without the rails
-that make it safe.
+The delivery plan is finalized in Part II under **"Finalized phased plan"** —
+two implementation PRs (PR A: efficient full-time detection, no gating, low
+risk; PR B: the gate + all its safety rails, shipped together), with the payoff
+features as additive follow-ups. See that section for the authoritative
+sequencing; the safety-critical rule is unchanged: the gate never ships without
+its rails, and it defaults to shadow mode until the measured miss rate justifies
+enforcement.
 
 ## Open questions / to validate on hardware
 
@@ -378,28 +370,49 @@ and transport ours.
 Keep every enrichment local — differentiator: Frigate's newer GenAI can call
 OpenAI; ours stays sovereign and audited.
 
-## Finalized phased plan (this PR → follow-ups)
+## Finalized phased plan (this PR → two implementation PRs)
 
-This PR (`feat/compute-gated-inference`) is **design only** (this doc).
-Implementation lands as stacked PRs:
+This PR (`feat/compute-gated-inference`) is **design only** (this doc); merge it
+to anchor the work. Implementation follows as **two** PRs — the split is not
+process for its own sake, it is the risk control that keeps invariant "a missed
+critical event is unacceptable" enforceable. The two phases separate the
+*low-risk, no-gating* work from the *gate* so the CV port is proven correct
+before any gating exists.
 
-- **PR 1 — decode + substream + accelerator plumbing** (biggest hardware win, no
-  gating): ffmpeg role split + hwaccel presets; detect on substream; capability
-  descriptor gains `accelerator` + input tensor spec; a reference OpenVINO/Coral
-  cheap-detector adapter.
-- **PR 2 — Tier-0 pipeline** (ports, nothing gated yet): `detect-pipeline` worker —
-  motion → region grid → cheap detector adapter → Norfair → tracks; emits
-  detections + records. Runs full-time, so **zero accuracy risk** while we validate
-  the port.
-- **PR 3 — the gate + safety rails** (ship together): stationary interval gate;
-  per-camera sensitivity + `always_analyze`; critical-class force-escalate;
-  heartbeat; **shadow mode** + the miss metric; gate-decision audit; Tier-1
-  dispatch (best-crop, rate-limited, async) through KAI-C.
-- **PR 4 — payoff**: NL standing rules compiled to primitives; dynamic FPS /
-  compute reinvestment; CLIP semantic search; audio adapter.
+**PR A — efficient full-time detection (no gating; low risk).**
+Everything runs on every frame; nothing is skipped, so accuracy cannot regress —
+this PR only makes detection *cheaper* and *possible on modest hardware*.
+- ffmpeg role split + hwaccel decode presets (port `ffmpeg_presets`); detect on
+  the substream, record `-c copy` on the mainstream.
+- Capability descriptor gains `accelerator` + input-tensor spec; a reference
+  OpenVINO/Coral cheap-detector adapter.
+- `detect-pipeline` worker: motion (port) → region grid (port) → cheap detector
+  adapter → Norfair tracker (port) → tracks + best-frame; emits detections and
+  records. **Runs full-time, everything analyzed** — so this PR validates the
+  ported CV logic on real cameras at **zero accuracy risk**.
 
-The gate (PR 3) never merges without its rails, and shadow mode gates the
-transition from "measure" to "enforce".
+This PR alone delivers most of the "runs on a Pi 5 / N100" benefit (hwaccel
+decode + accelerator backend + substream), independent of whether the gate ever
+lands.
+
+**PR B — the gate + all its safety rails (ship together, never apart).**
+Only now is anything skipped, and only behind the rails that make it safe.
+- Stationary interval gate; per-camera sensitivity + `always_analyze`;
+  critical-class force-escalate; heartbeat pass.
+- **Shadow mode** + the miss metric — measures the real miss rate on the
+  operator's cameras *before* the gate is trusted; gates the transition from
+  "measure" to "enforce".
+- Gate-decision audit events; Tier-1 dispatch (best-crop, rate-limited, async)
+  through KAI-C.
+
+Merge PR A first and let it soak. PR B must never merge without its rails, and
+`mode: shadow` is the default until the measured miss rate justifies `enforce`.
+
+**Later (separate, not blocking):** the payoff features — NL standing rules
+compiled to primitives, dynamic FPS / compute reinvestment, CLIP semantic
+search, audio adapter — land as independent follow-ups once A and B are stable.
+They are additive and carry no accuracy risk to the gate, so they need no fixed
+sequencing.
 
 ## Pitfalls to plan for (from Frigate source)
 
@@ -605,9 +618,9 @@ reason to choose OpenNVR.
 
 ## Implication for the phased plan
 
-- PRs 1–3 (decode/accelerator, Tier-0, gate+rails) = **reach table stakes.**
-  Judge them by "is it credibly efficient and accurate on a Pi 5 / N100," not by
-  Frigate parity.
+- PR A + PR B (efficient full-time detection, then gate + rails) = **reach table
+  stakes.** Judge them by "is it credibly efficient and accurate on a Pi 5 /
+  N100," not by Frigate parity.
 - The differentiated effort — audit of gate decisions, the governed adapter
   contract, provably-local standing rules — is where disproportionate time
   should go, because that is the part Frigate cannot easily answer.
