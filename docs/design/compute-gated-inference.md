@@ -547,3 +547,67 @@ class InputSpec(BaseModel):
 #                              cost: Cost (exists), scheduling: Scheduling (exists),
 #                              trigger: {classes: [...], zones: [...], min_score: float}
 ```
+
+---
+
+# Competitive positioning — build this as table stakes, win elsewhere
+
+Read this before picking up the implementation PRs. It sets the *goal*, and the
+goal is not "beat Frigate at detection."
+
+## Where this sits vs. Frigate
+
+On the detection pipeline itself, **do not try to out-Frigate Frigate.** Frigate
+has a 5+ year head start on exactly this loop, a large maintainer community,
+mature accelerator support (Coral, Hailo, OpenVINO, TensorRT, RKNN), a polished
+UI, and years of real-world tuning behind the motion / stationary / tracking
+edge cases we are porting. Framed as "OpenNVR detection vs. Frigate detection,"
+OpenNVR loses for years, and reimplementing their CV loop is a permanent
+maintenance tax against a faster-moving upstream.
+
+So this work is **catch-up to table stakes, not a competitive win.** Its job is
+to remove the disqualifier — "OpenNVR can't run efficiently on affordable
+hardware" — so OpenNVR is allowed to compete at all in the self-hosted space.
+Necessary, not sufficient.
+
+**Scope the port as "credibly efficient and accurate," not "better than
+Frigate."** The moment this becomes a feature-for-feature race on detection
+quality and UI polish, a smaller team loses to Frigate's community
+indefinitely. Port enough to be credible; stop there.
+
+## Where OpenNVR actually wins (and why the gate matters)
+
+The gate matters because it *frees* effort to spend on the axes where OpenNVR is
+not competing with Frigate at all:
+
+- **Governance / audit / sovereignty.** Frigate has none of this and it is hard
+  to retrofit onto its design. The gate turns it from a claim into a demonstrated
+  feature: an audit record for *non-events* ("nothing alerted at 03:14 —
+  score 0.02 < 0.15 threshold") is something no competitor produces.
+- **Any-model adapter contract.** Frigate's detectors are a fixed plugin set.
+  OpenNVR's "any model behind a governed HTTP/WS contract" is a different
+  proposition, and the accelerator/trigger descriptor in this design extends it
+  rather than copying Frigate's closed detector list.
+- **Provably-local enrichment.** Frigate's newer GenAI features can call OpenAI.
+  OpenNVR's local VLM agent is the sovereign version — a differentiator that
+  *strengthens* as Frigate leans further on cloud.
+- **The buyer.** Frigate owns homelab/hobbyist. OpenNVR's wedge is regulated /
+  air-gapped / §889 / government / compliance buyers who cannot use a
+  cloud-touching or unauditable system. Frigate is not built for them.
+
+## The one-line framing
+
+Build the gate because **without it OpenNVR is disqualified** — a self-hosted NVR
+that melts a Pi is a non-starter and reviewers will say so. Position it as
+**"Frigate-class efficiency, plus governance and provable locality Frigate
+structurally can't offer."** Efficiency is the price of entry; governance is the
+reason to choose OpenNVR.
+
+## Implication for the phased plan
+
+- PRs 1–3 (decode/accelerator, Tier-0, gate+rails) = **reach table stakes.**
+  Judge them by "is it credibly efficient and accurate on a Pi 5 / N100," not by
+  Frigate parity.
+- The differentiated effort — audit of gate decisions, the governed adapter
+  contract, provably-local standing rules — is where disproportionate time
+  should go, because that is the part Frigate cannot easily answer.
