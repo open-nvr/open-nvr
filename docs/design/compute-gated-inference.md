@@ -249,6 +249,8 @@ with OpenNVR's AGPLv3, so this is a reuse-vs-reimplement decision on *engineerin
 merit, not a legal wall. Rules:
 
 - Pin any ported code to a specific **current, MIT-era commit SHA** and record it.
+  This review is against **Frigate `6f80bcd19` (v0.18-beta, 2026-07-18), MIT** —
+  use that SHA (or newer MIT) as the port baseline.
 - Keep the MIT copyright/permission notice in a `NOTICE` file and file headers.
 - Do **not** pull from old AGPL-era tags — that snapshot is still AGPL.
 
@@ -415,3 +417,133 @@ Frigate (MIT): `frigate/video/detect.py`, `frigate/motion/improved_motion.py`,
 `frigate/detectors/detection_api.py` + `plugins/{openvino,edgetpu_tfl}.py`,
 `frigate/object_detection/base.py`, `frigate/video/ffmpeg.py`, `frigate/ffmpeg_presets.py`.
 OpenNVR: `kai-c/kai_c/{contract_types,connector,stream_proxy,registry,sovereignty,audit,events}.py`.
+
+---
+
+# Appendix — portable specifics (exact values from Frigate 6f80bcd19)
+
+Read from the local source so the implementation PRs port real numbers, not
+approximations. File paths are relative to `frigate/`.
+
+## Detector contract (`detectors/detection_api.py`) — mirror as the KAI-C adapter descriptor
+
+```
+class DetectionApi(ABC):
+    type_key: str                       # accelerator discriminator: openvino|edgetpu|onnx|...
+    supported_models: list[ModelTypeEnum]
+    def __init__(cfg):  thresh = 0.4;  height = cfg.model.height;  width = cfg.model.width
+    def detect_raw(tensor_input) -> np.ndarray   # (K,6): [class_id, score, ymin,xmin,ymax,xmax], normalized 0–1, sorted desc
+```
+- The **framework** shapes input via `create_tensor_input` (`util/object.py`):
+  crop the region → `yuv_region_2_{rgb,bgr,yuv}` per `model.input_pixel_format`
+  → resize to `(model.height, model.width)`. The plugin stays layout-dumb.
+- `model` config carries `width, height, input_tensor` (layout), `input_dtype`
+  (`int` | `float`→/255 | `float_denorm`), `input_pixel_format` (rgb|bgr|yuv).
+- Default confidence `thresh = 0.4`. `calculate_grids_strides()` (strides 8/16/32)
+  is the shared YOLO-family anchor helper.
+
+→ **KAI-C mapping:** the adapter capability descriptor declares `type_key`
+(accelerator), `supported_models`, and the input spec; KAI-C ships the
+already-cropped/resized tensor (or JPEG) and expects the sorted, capped `(K,6)`
+normalized array back. Extend `contract_types.CapabilityDescriptor` accordingly.
+
+## Motion defaults (`config/camera/motion.py` + `motion/improved_motion.py`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `threshold` | **30** | pixel-diff threshold (1–255); higher = less sensitive |
+| `lightning_threshold` | **0.8** | if motion covers >80 % of frame, **stop detecting but keep recording** (dawn/dusk/IR) |
+| `contour_area` | **10** | min contour area to count as a motion box |
+| `frame_alpha` | **0.01** | background running-average alpha, steady state |
+| `delta_alpha` | **0.2** | background alpha while calibrating |
+| `improve_contrast` | **True** | contrast-normalize before diff |
+
+Algorithm invariants to port: contrast clip to the **4th/96th percentile over a
+50-frame moving window**; motion must **persist ≥10 frames** before it is absorbed
+into the background; "calibrated" once `pct_motion < 0.05` **and** `≤4` contours;
+recalibrate whenever `pct_motion > lightning_threshold`, area >80 %, or the PTZ
+motor is moving (rebaseline `avg_frame` on motor stop). This block is the
+single biggest false-positive defense — do not shortcut it.
+
+## Detect / stationary (`config/camera/detect.py`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `fps` | **5** | detection frame rate (on the substream) |
+| `min_initialized` | `fps // 2` | consecutive hits before a track is created (`initialization_delay`) |
+| `max_disappeared` | ~`fps × 5` | frames a track survives unmatched (`hit_counter_max`) |
+| `stationary.threshold` | (frames of no motion to mark stationary) | flips a track to "stationary" |
+| `stationary.interval` | (N) | re-run the detector on a stationary track **once every N frames** |
+| `stationary.classifier` | bool | enables the NCC/phase-correlation appearance check to prevent flip-flop |
+
+Stationary tracks (no overlapping motion) are **seeded from their last box with
+the detector skipped**, except every `interval`-th frame — zero regions ⇒ zero
+detector calls that frame. This is the core steady-state compute win.
+
+## Region math (`util/object.py`)
+
+- `min_region = max(model.h, model.w)` if `<320` (rounded **up to a multiple of 4**),
+  else **320** (`get_min_region_size`).
+- Cluster region size multiplier **1.35** (`get_cluster_region`); startup-scan
+  regions multiplier **1**, top **8** historically-popular grid cells on frame 1.
+- A box joins a cluster only if `area(box) / area(cluster_region) ≥ 0.05` (5 %).
+- Per-camera **8×8 learned region-size grid** built from historical true-positive
+  boxes — snap motion regions to it (this is what keeps detector inputs stable).
+
+## Best-frame priority (`util/image.py::is_better_thumbnail`) — port verbatim
+
+1. person → better (or first) **face** attr; car → better (or first) **license_plate**
+   attr. Once the thumb has the attribute, only a *better* one replaces it.
+2. else new is **not edge-clipped** while current is.
+3. else `new.score > current.score + 0.05`.
+4. else `new.area > current.area × 1.1`.
+
+Feed **this** crop to Tier-1 — a plain "max score" picker hands the VLM
+edge-clipped, face-less frames.
+
+## Tracking (`track/norfair_tracker.py`) — per-class Kalman (R, Q, distance_threshold)
+
+| Class | R | Q | dist_thresh | Notes |
+|---|---|---|---|---|
+| default | 3.4 | — | 2.5 | |
+| car | 3.4 | 0.03 | 2.5 | |
+| license_plate | 2.5 | 0.05 | 3.75 | |
+| person (PTZ) | 4.5 | 0.25 | 2.0 | reid histogram dist 0.5, `reid_hit_counter_max` 10 |
+| (dynamic) | 4 | 0.2 | 3.0 | |
+
+`initialization_delay = detect.min_initialized`, `hit_counter_max =
+detect.max_disappeared`. Distance = **size-aware bottom-center + width/height
+ratios**, not centroid-IoU (prevents ID swaps between nearby same-class objects).
+
+## Hardware-accel decode presets (`ffmpeg_presets.py`) — directly reusable strings
+
+The `hwdownload,format=nv12` step (bringing GPU frames back to system memory as
+yuv420p for the pipe) is the load-bearing detail.
+
+| Backend | Decode | Scale |
+|---|---|---|
+| Intel/AMD **VAAPI** | `-hwaccel vaapi -hwaccel_device {dev} -hwaccel_output_format vaapi` | `scale_vaapi=w={w}:h={h},hwdownload,format=nv12` |
+| Intel **QSV** | `-hwaccel qsv -qsv_device {dev} -hwaccel_output_format qsv -c:v h264_qsv` | `vpp_qsv=w={w}:h={h}:format=nv12,hwdownload,format=nv12,format=yuv420p` |
+| **NVIDIA** CUDA | `-hwaccel cuda -hwaccel_output_format cuda` | `scale_cuda=w={w}:h={h},hwdownload,format=nv12` |
+| **Jetson** | `-c:v h264_nvmpi -resize {w}x{h}` | (scaled in decoder) |
+| **Rockchip** RKMPP | `-hwaccel rkmpp -hwaccel_output_format drm_prime` | (drm_prime) |
+| **RPi** v4l2m2m | `-c:v h264_v4l2m2m` | `-vf fps={fps},scale={w}:{h}` |
+
+`LibvaGpuSelector` auto-picks `/dev/dri/renderD*` via `vainfo`. Recording uses a
+separate `-c copy` remux (`-f segment -segment_time 10`) — never decoded.
+
+## Concrete `contract_types` extension (illustrative)
+
+```python
+class Accelerator(BaseModel):
+    backend: str            # "openvino" | "edgetpu" | "onnx" | "tensorrt" | "rknn" | "cpu"
+    device: str | None = None
+class InputSpec(BaseModel):
+    width: int; height: int
+    layout: str = "nhwc"    # nhwc | nchw
+    dtype: str = "uint8"    # uint8 | float | float_denorm
+    pixel_format: str = "rgb"
+# add to CapabilityDescriptor: accelerator: Accelerator | None, input: InputSpec | None,
+#                              cost: Cost (exists), scheduling: Scheduling (exists),
+#                              trigger: {classes: [...], zones: [...], min_score: float}
+```
