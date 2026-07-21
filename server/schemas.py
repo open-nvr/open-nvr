@@ -675,56 +675,31 @@ class TurnServer(BaseModel):
     credential: str | None = Field(None, max_length=255)
 
 
-class WebRTCICE(BaseModel):
-    transport_policy: Literal["all", "relay"] = "all"
-    candidate_pool_size: int = Field(0, ge=0, le=10)
-    trickle: bool = True
-
-
-class ResolutionCap(BaseModel):
-    width: int = Field(1920, ge=160, le=7680)
-    height: int = Field(1080, ge=120, le=4320)
-
-
-class WebRTCBandwidth(BaseModel):
-    video_max_bitrate_kbps: int = Field(2500, ge=64, le=200000)
-    audio_max_bitrate_kbps: int = Field(64, ge=8, le=1024)
-    max_fps: int = Field(30, ge=1, le=240)
-    resolution_cap: ResolutionCap = ResolutionCap()
-
-
-AllowedVideoCodec = Literal["h264", "vp8", "vp9", "av1"]
-AllowedAudioCodec = Literal["opus", "pcmu", "pcma", "aac"]
-
-
-class WebRTCCodecs(BaseModel):
-    video_preferred: list[AllowedVideoCodec] = ["h264", "vp9", "vp8", "av1"]
-    audio_preferred: list[AllowedAudioCodec] = ["opus"]
-
-
 class WebRTCSettings(BaseModel):
+    """WebRTC ICE configuration — only the fields that actually affect playback.
+
+    Bandwidth/FPS/resolution/codec knobs were removed: OpenNVR plays via WHEP, a
+    receive-only consumer of whatever MediaMTX publishes, so a viewer cannot cap
+    those — the camera/MediaMTX decides. STUN/TURN/transport-policy are the real,
+    useful controls (NAT traversal for remote viewing).
+    """
+
     stun_servers: list[str] = ["stun:stun.l.google.com:19302"]
     turn_servers: list[TurnServer] = []
-    ice: WebRTCICE = WebRTCICE()
-    bandwidth: WebRTCBandwidth = WebRTCBandwidth()
-    codecs: WebRTCCodecs = WebRTCCodecs()
+    transport_policy: Literal["all", "relay"] = "all"
 
 
 class WebRTCSettingsUpdate(BaseModel):
     stun_servers: list[str] | None = None
     turn_servers: list[TurnServer] | None = None
-    ice: WebRTCICE | None = None
-    bandwidth: WebRTCBandwidth | None = None
-    codecs: WebRTCCodecs | None = None
+    transport_policy: Literal["all", "relay"] | None = None
 
 
 class WebRTCClientConfig(BaseModel):
-    """Client-friendly config for RTCPeerConnection and negotiation hints."""
+    """Client-friendly config for RTCPeerConnection init."""
 
     iceServers: list[dict[str, Any]]
     iceTransportPolicy: Literal["all", "relay"]
-    codecPreferences: dict[str, list[str]]
-    bandwidth: dict[str, Any]
 
 
 # Media Source (MediaMTX) settings schemas

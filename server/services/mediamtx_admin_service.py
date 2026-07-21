@@ -369,6 +369,30 @@ class MediaMtxAdminService:
         except Exception as e:
             return {"status": "error", "message": f"Request failed: {e!s}"}
 
+    @staticmethod
+    async def set_webrtc_ice_servers(ice_servers: list[dict[str, Any]]) -> dict[str, Any]:
+        """Set MediaMTX's WebRTC ICE servers (``webrtcICEServers2``).
+
+        This field is in READ_ONLY_INFRASTRUCTURE_FIELDS on purpose — the generic
+        admin PATCH must not expose it — but OpenNVR itself owns it via the
+        WebRTC settings page, so this dedicated method patches it directly,
+        skipping the user-facing read-only guard. NOTE the key is
+        ``webrtcICEServers2`` (the current MediaMTX key), not ``webrtcICEServers``.
+        """
+        if not MediaMtxAdminService.is_configured():
+            return {"status": "no_admin_api"}
+        url = MediaMtxAdminService._base() + "/config/global/patch"
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.patch(
+                    url,
+                    json={"webrtcICEServers2": ice_servers},
+                    headers=MediaMtxAdminService._headers(),
+                )
+            return MediaMtxAdminService._to_result("global", resp)
+        except Exception as e:
+            return {"status": "error", "message": f"Request failed: {e!s}"}
+
     # === PATH DEFAULTS ===
 
     @staticmethod
