@@ -7,6 +7,8 @@
 #   - server pytest regressions
 #   - kai-c pytest regressions (incl. the async-fixture infra that
 #     previously emitted 9 ERRORs before pytest-asyncio was wired up)
+#   - detect-pipeline pytest regressions (Tier-0 CV pipeline + service),
+#     including the real-ffmpeg decode tests
 #   - example pytest regressions across all nine shipped examples
 #   - React frontend build failures
 #
@@ -75,6 +77,27 @@ jobs:
         run: uv sync
       - name: Run pytest
         working-directory: kai-c
+        run: uv run pytest -q
+
+  # ── Tier-0 detect-pipeline ───────────────────────────────────────
+  # detect-pipeline/ uses [dependency-groups] dev = [pytest], installed
+  # by default on `uv sync`. ffmpeg is installed so the real-ffmpeg
+  # decode/probe integration tests run (they skipif ffmpeg is absent).
+  detect-pipeline:
+    name: detect-pipeline (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        working-directory: detect-pipeline
+        run: uv sync
+      - name: Run pytest
+        working-directory: detect-pipeline
         run: uv run pytest -q
 
   # ── Example apps ─────────────────────────────────────────────────
