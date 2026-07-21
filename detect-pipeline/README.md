@@ -35,9 +35,30 @@ python -m detect_pipeline --source people.mp4 --out annotated.mp4 --detector hog
 # quick "is the whole chain alive?" on any clip with motion (deterministic blob detector)
 python -m detect_pipeline --source clip.mp4 --out annotated.mp4 --detector blob
 
-# straight off a MediaMTX substream republish
-python -m detect_pipeline --source rtsp://127.0.0.1:8554/cam_sub --out out.mp4 --detector hog
+# straight off a real OpenNVR-provisioned camera (production ffmpeg path,
+# hwaccel decode, auto-probed resolution, bounded to 20s)
+python -m detect_pipeline \
+  --source "rtsp://<user>:<pass>@<camera-ip>:554/<substream-path>" \
+  --out out.mp4 --detector hog --hwaccel vaapi --seconds 20
 ```
+
+### Against a real camera
+
+`rtsp(s)://` sources use the **production ffmpeg FrameSource** (hardware decode,
+TCP transport, auto-restart) — not OpenCV — so this run validates the real decode
+path. Resolution is auto-probed with `ffprobe` (override with `--width/--height`).
+
+Fastest first test — point at the **camera's own substream** directly
+(plaintext, no TLS): use the camera's low-res RTSP URL (Dahua/CP-Plus
+`subtype=1`, Hikvision/Uniview `…/N02`), with credentials in the URL.
+
+For the **MediaMTX republish** (the production single-connection path): MediaMTX
+serves operator RTSP as `rtsps://` on `127.0.0.1:8322` (localhost, basic auth,
+TLS cert required) — run this on the OpenNVR host and pass the rtsps URL with
+credentials.
+
+Pick `--hwaccel` for the host: `vaapi` (Intel/AMD), `nvidia`, `qsv`, `rpi`,
+`rkmpp`, `jetson`, or `cpu`.
 
 It prints a summary, e.g.:
 

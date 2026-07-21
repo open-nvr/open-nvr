@@ -191,3 +191,35 @@ class VideoFileSource:
                     return
         finally:
             cap.release()
+
+
+def _parse_ffprobe(text: str) -> tuple[int, int, float]:
+    """Parse ffprobe -show_entries stream=width,height,avg_frame_rate -of json."""
+    import json
+
+    stream = json.loads(text)["streams"][0]
+    w, h = int(stream["width"]), int(stream["height"])
+    rate = stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0/1"
+    num, _, den = rate.partition("/")
+    fps = float(num) / float(den) if den and float(den) != 0 else 0.0
+    return w, h, fps
+
+
+def probe_stream(
+    url: str, *, rtsp_transport: str = "tcp", timeout: float = 15.0
+) -> tuple[int, int, float] | None:
+    """Return (width, height, fps) of a stream via ffprobe, or None on failure."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-rtsp_transport", rtsp_transport,
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,avg_frame_rate",
+        "-of", "json", url,
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        return _parse_ffprobe(out.stdout)
+    except Exception:
+        return None

@@ -18,15 +18,16 @@ Detectors:
 from __future__ import annotations
 
 import argparse
+import itertools
 import logging
 import sys
 
 import cv2
-import numpy as np
 
 from .detector import StubDetector, to_bgr
 from .detectors_local import BrightBlobDetector, HogPersonDetector
-from .frame_source import VideoFileSource
+from .ffmpeg_presets import HwAccel
+from .frame_source import FrameSource, VideoFileSource, probe_stream
 from .motion import MotionConfig, MotionDetector
 from .pipeline import DetectPipeline
 from .tracking import TrackConfig, Tracker
@@ -58,23 +59,49 @@ def _draw(bgr, result) -> None:
         cv2.putText(bgr, "CALIBRATING", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
 
+def _open_source(args) -> tuple[object, int, int]:
+    """Return (frame iterator, width, height). RTSP goes through the production
+    ffmpeg FrameSource (hwaccel, tcp); files through OpenCV VideoFileSource."""
+    if args.source.startswith(("rtsp://", "rtsps://")):
+        w, h, fps = args.width, args.height, args.fps
+        if not (w and h):
+            probed = probe_stream(args.source, rtsp_transport=args.rtsp_transport)
+            if probed is None:
+                raise SystemExit(
+                    "could not probe stream resolution — pass --width and --height "
+                    "(and check the URL / credentials / TLS)"
+                )
+            w, h, _fps = probed
+        # A live stream is infinite: bound it so a test run terminates.
+        max_frames = args.max_frames or (args.seconds * args.fps if args.seconds else args.fps * 20)
+        src = FrameSource(
+            args.source, width=w, height=h, fps=args.fps,
+            hwaccel=HwAccel(args.hwaccel), device=args.device,
+            rtsp_transport=args.rtsp_transport, max_restarts=0,
+        )
+        return itertools.islice(src.stream(), max_frames), w, h
+
+    # file: peek the first frame for resolution, then chain it back
+    src = VideoFileSource(args.source, max_frames=args.max_frames)
+    stream = src.stream()
+    first = next(stream)
+    return itertools.chain([first], stream), first.width, first.height
+
+
 def run(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    source = VideoFileSource(args.source, max_frames=args.max_frames)
-
-    # Peek the first frame to learn the resolution, then rebuild the stream.
-    stream = source.stream()
     try:
-        first = next(stream)
-    except StopIteration:
-        print("no frames read from source", file=sys.stderr)
+        frames_iter, w, h = _open_source(args)
+    except (SystemExit, RuntimeError, StopIteration) as e:
+        print(f"no frames from source: {e}", file=sys.stderr)
         return 2
-    h, w = first.height, first.width
 
     motion = MotionDetector((h, w), MotionConfig(frame_height=args.motion_height))
     tracker = Tracker((h, w), TrackConfig(fps=args.fps, min_initialized=max(1, args.fps // 2)))
+    # process_frame is driven directly here, so the pipeline's own frame_source
+    # is unused (None); run() is only for the always-on production loop.
     pipe = DetectPipeline(
-        source, motion, _make_detector(args.detector), tracker,
+        None, motion, _make_detector(args.detector), tracker,
         model_size=(args.model_size, args.model_size),
     )
 
@@ -87,8 +114,7 @@ def run(args: argparse.Namespace) -> int:
     ids: set[int] = set()
     max_concurrent = 0
 
-    def handle(frame):
-        nonlocal frames, max_concurrent
+    for frame in frames_iter:
         result = pipe.process_frame(frame)
         frames += 1
         ids.update(t.id for t in result.tracks)
@@ -98,12 +124,12 @@ def run(args: argparse.Namespace) -> int:
             _draw(bgr, result)
             writer.write(bgr)
 
-    handle(first)                      # the frame we already pulled
-    for frame in stream:               # the rest
-        handle(frame)
-
     if writer is not None:
         writer.release()
+
+    if frames == 0:
+        print("no frames processed", file=sys.stderr)
+        return 2
 
     print(
         f"processed {frames} frames @ {w}x{h} | detector={args.detector} | "
@@ -122,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--model-size", type=int, default=320)
     p.add_argument("--motion-height", type=int, default=180)
     p.add_argument("--max-frames", type=int, default=None)
+    # RTSP-source options (ignored for file sources)
+    p.add_argument("--hwaccel", choices=[a.value for a in HwAccel], default="cpu",
+                   help="hardware decode backend for rtsp sources")
+    p.add_argument("--device", default="/dev/dri/renderD128", help="hwaccel device")
+    p.add_argument("--rtsp-transport", default="tcp", choices=["tcp", "udp"])
+    p.add_argument("--width", type=int, default=None, help="override probed width")
+    p.add_argument("--height", type=int, default=None, help="override probed height")
+    p.add_argument("--seconds", type=int, default=None,
+                   help="stop a live rtsp stream after N seconds (default 20)")
     return run(p.parse_args(argv))
 
 
