@@ -237,8 +237,10 @@ services:
   # On by default; set DETECT_PIPELINE_ENABLED=false to disable.
   # ──────────────────────────────────────────────────────────────
   detect-pipeline:
-    build:
-      context: ./detect-pipeline
+    # Pulled from GHCR (built + published by publish-detect-pipeline.yml), like
+    # opennvr-core and yolov8-adapter — no local build. To build from source
+    # instead: `docker compose build` with a build: override, or run the
+    # component directly (see detect-pipeline/README.md).
     image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
     container_name: opennvr_detect_pipeline
     restart: unless-stopped
