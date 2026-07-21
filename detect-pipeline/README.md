@@ -19,7 +19,7 @@ pip install -e .          # numpy + opencv-python-headless
 ## Run the tests
 
 ```bash
-python -m pytest -q       # 65 unit/integration/smoke tests, no ffmpeg or camera needed
+python -m pytest -q       # 82 unit/integration/smoke tests (real-ffmpeg tests run if ffmpeg present, else skip)
 ```
 
 ## Manual verification
