@@ -500,6 +500,39 @@ class FirewallAction(str, enum.Enum):
     deny = "deny"
 
 
+class DeviceStatus(str, enum.Enum):
+    approved = "approved"
+    pending = "pending"
+    blocked = "blocked"
+
+
+class TrustedDevice(Base):
+    """A device (by client IP) known to the OpenNVR app-layer firewall.
+
+    ``approved`` may use OpenNVR; ``pending`` has attempted access but awaits an
+    admin decision (blocked meanwhile); ``blocked`` is explicitly denied. The
+    first device to authenticate on a fresh install is auto-approved so the
+    installer is never locked out.
+    """
+
+    __tablename__ = "trusted_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ip_address = Column(String(45), nullable=False, unique=True, index=True)
+    label = Column(String(100), nullable=True)
+    status = Column(
+        SAEnum(DeviceStatus), nullable=False, default=DeviceStatus.pending
+    )
+    user_agent = Column(String(400), nullable=True)
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now())
+    attempt_count = Column(Integer, nullable=False, default=1)
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    auto_enrolled = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class FirewallRule(Base):
     """Firewall rule with simple fields and prioritization."""
 

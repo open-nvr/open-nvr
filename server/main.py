@@ -83,6 +83,8 @@ from routers import (
     system,
     users,
     webrtc,
+    window_settings,
+    device_firewall,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -432,6 +434,13 @@ app.add_middleware(
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 
+# Device firewall — refuse API access from unapproved client IPs. Added before
+# request logging so RequestLogging (added last = outermost) still records
+# blocked attempts.
+from middleware.device_firewall import DeviceFirewallMiddleware
+
+app.add_middleware(DeviceFirewallMiddleware)
+
 # Add request logging middleware
 app.add_middleware(RequestLoggingMiddleware)
 
@@ -510,6 +519,8 @@ app.include_router(permissions.router, prefix=settings.api_prefix)
 app.include_router(password_policy.router, prefix=settings.api_prefix)
 app.include_router(security.router, prefix=settings.api_prefix)
 app.include_router(webrtc.router, prefix=settings.api_prefix)
+app.include_router(window_settings.router, prefix=settings.api_prefix)
+app.include_router(device_firewall.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)

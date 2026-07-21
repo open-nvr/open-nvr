@@ -201,6 +201,18 @@ async function request(method: string, url: string, data?: any, options: Request
     }
   }
 
+  // Device firewall: a blocked device gets 403 with this code on every guarded
+  // call. Surface it once, app-wide, instead of as scattered errors.
+  if (resp.status === 403 && (payload as any)?.code === 'device_not_approved') {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('device-blocked', {
+          detail: { ip: (payload as any)?.device_ip },
+        })
+      )
+    }
+  }
+
   if (!resp.ok) {
     const err: any = new Error(extractErrorMessage(payload, resp.status))
     err.status = resp.status

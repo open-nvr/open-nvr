@@ -1142,3 +1142,25 @@ class IntegrationRead(IntegrationBase):
 
     class Config:
         from_attributes = True
+
+
+# --- Window layout preferences (Live View grid) — kept live; consumed by
+# LiveView.tsx and the More Settings > Window Settings page. ---
+class CustomWindowLayout(BaseModel):
+    id: str = Field(..., min_length=1, max_length=50)  # e.g. "1+7", "2+6"
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+    enabled: bool = True
+    grid_columns: int = Field(4, ge=1, le=8)
+    grid_rows: int = Field(4, ge=1, le=8)
+    tiles: list[dict[str, int]] = []  # [{row, col, rowSpan, colSpan}, ...]
+
+
+class WindowDivisionSettings(BaseModel):
+    layouts_enabled: dict[str, bool] = {
+        "1x1": True, "2x2": True, "3x3": True, "4x4": True,
+        "1+5": True, "1+7": True, "2+8": True, "1+12": True,
+        "4+9": True, "1+1+10": True,
+    }
+    custom_layouts: list[CustomWindowLayout] = []
+    default_layout: str = "2x2"

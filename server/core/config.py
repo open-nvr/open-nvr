@@ -135,6 +135,20 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
 
+    # Device firewall (app-layer access control).
+    # Break-glass HARD-OFF. The admin toggles enforcement from the UI (stored in
+    # the DB); this env override forces it off regardless, for recovery from a
+    # lockout: set DEVICE_FIREWALL_KILL=true and restart, then fix the device
+    # list, then clear it. Loopback is always allowed even when enforcing.
+    device_firewall_kill: bool = False
+    # Comma-separated CIDRs whose X-Forwarded-For header is trusted (the reverse
+    # proxy in front of us). MUST be the proxy only — never 0.0.0.0/0 — or a
+    # client can spoof its source IP. Defaults cover Docker bridge + loopback.
+    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128,172.16.0.0/12"
+    # CIDRs treated as internal services (MediaMTX, KAI-C, adapters) that must
+    # never be firewalled. Defaults to the Docker bridge range + loopback.
+    internal_service_cidrs: str = "127.0.0.1/32,::1/128,172.16.0.0/12"
+
     # Application settings
     debug: bool = False  # Never enable debug in production
     host: str = "127.0.0.1"  # Localhost only - blocks network access from other devices

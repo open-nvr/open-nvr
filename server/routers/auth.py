@@ -370,6 +370,21 @@ async def login_for_access_token(
     except Exception as e:
         auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
+    # Device firewall: enroll this client on successful login. The first device
+    # on a fresh install is auto-approved; later devices are recorded pending.
+    try:
+        from core.client_ip import get_client_ip
+        from services import device_firewall_service as _dfw
+
+        if request is not None:
+            _dfw.register_authenticated_device(
+                db,
+                get_client_ip(request),
+                request.headers.get("user-agent"),
+                user.id,
+            )
+    except Exception:
+        pass
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
@@ -491,6 +506,21 @@ async def login_with_json(
             ip=request.client.host if request and request.client else None,
             user_agent=request.headers.get("user-agent") if request else None,
         )
+    except Exception:
+        pass
+    # Device firewall: enroll this client on successful login. The first device
+    # on a fresh install is auto-approved; later devices are recorded pending.
+    try:
+        from core.client_ip import get_client_ip
+        from services import device_firewall_service as _dfw
+
+        if request is not None:
+            _dfw.register_authenticated_device(
+                db,
+                get_client_ip(request),
+                request.headers.get("user-agent"),
+                user.id,
+            )
     except Exception:
         pass
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}

@@ -23,11 +23,8 @@ import { RolesManager } from './settings/RolesManager'
 import { PermissionsManager } from './settings/PermissionsManager'
 import { CameraConfigManager } from './settings/CameraConfigManager'
 import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
+import { DeviceFirewall } from './settings/DeviceFirewall'
 import { PasswordPolicy } from './settings/PasswordPolicy'
-import { SecurityFirewall } from './settings/SecurityFirewall'
-import { SecurityPorts } from './settings/SecurityPorts'
-import { SecurityPlatformAccess } from './settings/SecurityPlatformAccess'
-import { SecurityNAT } from './settings/SecurityNAT'
 import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
 import { MediaServerManager } from './settings/MediaServerManager'
@@ -66,16 +63,13 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     ],
   },
   {
-    // OpenNVR's OWN security — not a camera's. Camera-side access control is
-    // under Camera-Config > (camera) > Security.
-    key: 'security',
-    label: 'Security',
-    submenu: [
-      { slug: 'firewall', label: 'Firewall', panel: () => <SecurityFirewall /> },
-      { slug: 'port-settings', label: 'Port Settings', panel: () => <SecurityPorts /> },
-      { slug: 'platform-access', label: 'Platform Access', panel: () => <SecurityPlatformAccess /> },
-      { slug: 'nat', label: 'NAT', panel: () => <SecurityNAT /> },
-    ],
+    // OpenNVR's own device firewall — which machines may use OpenNVR. Not a
+    // camera's access control (that is under Camera-Config > (camera) >
+    // Security).
+    key: 'firewall',
+    label: 'Firewall',
+    panel: () => <DeviceFirewall />,
+    submenu: [],
   },
   {
     key: 'more-settings',
