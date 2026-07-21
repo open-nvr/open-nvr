@@ -234,3 +234,184 @@ inference_gate:
           zone: doorway
           when: after_hours
 ```
+
+---
+
+# Part II — Frigate source review & the finalized OpenNVR design
+
+Part I is the concept. Part II is grounded in a source-level read of Frigate and
+of OpenNVR's actual KAI-C code, and supersedes Part I where they differ.
+
+## Licensing: we can reuse Frigate code
+
+Frigate's `LICENSE` is now **MIT** (relicensed from AGPL-3.0). MIT is compatible
+with OpenNVR's AGPLv3, so this is a reuse-vs-reimplement decision on *engineering*
+merit, not a legal wall. Rules:
+
+- Pin any ported code to a specific **current, MIT-era commit SHA** and record it.
+- Keep the MIT copyright/permission notice in a `NOTICE` file and file headers.
+- Do **not** pull from old AGPL-era tags — that snapshot is still AGPL.
+
+## What Frigate actually does (the parts worth taking)
+
+From source (`frigate/video/detect.py`, `motion/improved_motion.py`, `track/*`,
+`detectors/*`, `util/object.py`):
+
+- **It is not "motion → crop → detect".** Each frame the detector runs on a
+  *union* of regions from three sources: (a) Kalman-predicted boxes of existing
+  tracked objects, (b) motion boxes not already covered, snapped to a **learned
+  per-camera 8×8 region-size grid** built from historical true-positive boxes,
+  (c) an 8-cell startup scan on the first frame. Regions are squared, `//4`-aligned,
+  min 320 px, and cluster members must be ≥5 % of region area.
+- **Motion** = running-average background subtraction on a downscaled Y-plane,
+  with moving-average contrast normalization, a **10-frame persistence gate**
+  before motion is absorbed into the background, and a `lightning_threshold` that
+  stops *detection* but keeps *recording* during whole-frame flashes (dawn/dusk,
+  IR cut). Plain frame-diff would flood the detector daily — the most
+  underestimated piece in the codebase.
+- **Tracking** = Norfair (Kalman) with a **size-aware bottom-center distance**
+  (not centroid-IoU), per-class R/Q tuning, an initialization delay, and a
+  "0.0 score on a missed frame" history. Centroid-IoU churns IDs.
+- **Stationary interval gate** (the compute win): a stationary track
+  (`motionless_count ≥ threshold`, no overlapping motion) is **seeded from its
+  last box without calling the detector**, except one real detection every
+  `interval` frames or when motion overlaps it. Zero regions ⇒ the detector runs
+  zero times that frame. An NCC / phase-correlation appearance classifier stops
+  stationary↔active flip-flop.
+- **Best-frame** = attribute-aware: bigger face/plate first, then not-edge-clipped,
+  then +0.05 score, then +10 % area. Feeding the expensive model *this* crop is
+  the biggest accuracy-preserving efficiency.
+- **Detector plugin contract** (`DetectionApi`): declares `type_key`
+  (accelerator) and `supported_models`, reads `model.{width,height,input_tensor,
+  input_dtype,pixel_format}`; the framework shapes the tensor; the plugin returns
+  a sorted, capped `(K,6)` normalized-box array. Almost exactly our adapter
+  contract.
+- **Decode/record split**: separate ffmpeg per role. Detect ffmpeg hwaccel-decodes
+  and scales the substream to raw yuv420p over a pipe; record ffmpeg is `-c copy`
+  remux of the mainstream (never decoded). Recording quality is fully independent
+  of inference.
+
+## Grounding in KAI-C (what exists vs. what's new)
+
+KAI-C today is a **governance middleware, not a detection pipeline**:
+
+- Exists: `registry.py` (`AdapterRegistry`/`RegisteredAdapter`), `sovereignty.py`
+  (`check_adapter`, egress), `audit.py` (`AuditStore.emit`, `AuditEventType`),
+  `connector.py` (`KaiConnector.process_stream`), `stream_proxy.py` (`StreamProxy`
+  WS relay + `_inspect_result_text` + inference broadcast), `events.py`
+  (`InferenceCompletedEvent`, NATS), and `contract_types.py` — which **already
+  defines `Cost`, `Scheduling`, `CapabilityDescriptor`, `Permissions`**.
+- Does **not** exist: any motion / region / tracking / detection loop. Inference
+  is on-demand (camera agent) or streamed straight through `StreamProxy`. There is
+  no Tier-0.
+
+So the gate is a **new pipeline component in front of KAI-C's dispatch**, reusing
+KAI-C's governance for every adapter call it chooses to make.
+
+## Finalized component design
+
+New component **`detect-pipeline`** (one worker per camera; ports Frigate's proven
+CV logic). It sits on the detect substream and calls adapters *through* KAI-C.
+
+```
+mainstream ─(-c copy)──────────────► recording (MediaMTX segments)      [never gated]
+
+substream ─ffmpeg hwaccel decode──► detect-pipeline  (Tier 0, always on)
+                                     ├─ motion            (port improved_motion)
+                                     ├─ region select     (port learned grid)
+                                     ├─ cheap detector    → via KAI-C, accel backend
+                                     ├─ Norfair + stationary interval gate
+                                     └─ gate decision + best-frame per track
+                                            │ new track / zone / ambiguous / interesting class
+                                            ▼
+                                     Tier 1 dispatch ─► KAI-C ─► expensive adapter (VLM/LLM/face/LPR)
+                                        (best crop, once per track-state, rate-limited, async)
+                                            │
+                                            ▼
+                                     KAI-C audit (gate score+threshold) + NATS InferenceCompleted
+```
+
+Wiring to real modules:
+
+- **Tier-1 dispatch** goes through `KaiConnector` / `StreamProxy`, so sovereignty
+  (`check_adapter`) and audit (`AuditStore.emit`) already apply — the gate never
+  bypasses governance.
+- **Adapter cost-tier** reuses the existing `Cost` + `Scheduling` in
+  `contract_types.py`; extend with `trigger` conditions and an `accelerator` +
+  input-tensor descriptor (mirror `DetectionApi`).
+- **Gate audit** = a new `AuditEventType` (e.g. `inference_gated`) emitted via
+  `AuditStore` with score + threshold — satisfies invariant 3.
+- **Broadcast** reuses `events.InferenceCompletedEvent` / NATS.
+- **Recording independence** = the MediaMTX `-c copy` path, untouched (invariant 1).
+
+## Reuse vs. reimplement (Frigate is MIT — decide on merit)
+
+| Frigate piece | Decision | Why |
+|---|---|---|
+| `motion/improved_motion.py` | **Port** (attribute, pin SHA) | Lighting/IR suppression is hard-won; a rewrite invites daily false-trigger floods |
+| `util/object.py` region math + learned grid | **Port** | Region jitter breaks tracking *and* adapter inputs |
+| `track/norfair_tracker.py` + stationary classifier | **Port** | ID stability and stationary flip-flop are the subtle parts |
+| best-frame `is_better_thumbnail` | **Port** | Accuracy-preserving; feeds Tier-1 the right crop |
+| detector plugin contract | **Adapt, don't port** | Express it as the KAI-C adapter capability descriptor over HTTP/WS, not an in-proc class |
+| SHM multi-process transport | **Reimplement** | Our adapters are network services; ship cropped tensors/JPEG via KAI-C, not shared memory |
+| `ffmpeg_presets.py` hwaccel/role presets | **Port the presets** | VAAPI/QSV/NVDEC/RKMPP strings are directly reusable |
+
+Net: port the CV-hard bits, express detection as a KAI-C adapter, keep governance
+and transport ours.
+
+## Adjacent optimizations (same effort, ordered by impact)
+
+1. **Accelerator backends** declared in the adapter capability descriptor
+   (OpenVINO / Coral / Hailo / TensorRT / RKNN) — the Tier-0 detector must run on
+   one; ~10× vs. CPU. Likely a bigger win than the gate itself.
+2. **Hardware-accelerated decode** on the detect ffmpeg (port `ffmpeg_presets`) —
+   often a bigger CPU win than the gate.
+3. **Detect-on-substream, record-on-mainstream** — we already have MAIN/SUB; make
+   it the default detect path.
+4. **Best-frame → one Tier-1 call per track** — makes the gate accuracy-*positive*.
+5. **CLIP embeddings** over tracked objects → semantic search feeding the camera
+   agent.
+6. **Audio events** as an adapter.
+
+Keep every enrichment local — differentiator: Frigate's newer GenAI can call
+OpenAI; ours stays sovereign and audited.
+
+## Finalized phased plan (this PR → follow-ups)
+
+This PR (`feat/compute-gated-inference`) is **design only** (this doc).
+Implementation lands as stacked PRs:
+
+- **PR 1 — decode + substream + accelerator plumbing** (biggest hardware win, no
+  gating): ffmpeg role split + hwaccel presets; detect on substream; capability
+  descriptor gains `accelerator` + input tensor spec; a reference OpenVINO/Coral
+  cheap-detector adapter.
+- **PR 2 — Tier-0 pipeline** (ports, nothing gated yet): `detect-pipeline` worker —
+  motion → region grid → cheap detector adapter → Norfair → tracks; emits
+  detections + records. Runs full-time, so **zero accuracy risk** while we validate
+  the port.
+- **PR 3 — the gate + safety rails** (ship together): stationary interval gate;
+  per-camera sensitivity + `always_analyze`; critical-class force-escalate;
+  heartbeat; **shadow mode** + the miss metric; gate-decision audit; Tier-1
+  dispatch (best-crop, rate-limited, async) through KAI-C.
+- **PR 4 — payoff**: NL standing rules compiled to primitives; dynamic FPS /
+  compute reinvestment; CLIP semantic search; audio adapter.
+
+The gate (PR 3) never merges without its rails, and shadow mode gates the
+transition from "measure" to "enforce".
+
+## Pitfalls to plan for (from Frigate source)
+
+- Region sizing/jitter → **port the learned grid**, don't reinvent.
+- Tracking is size-aware bottom-center distance, **not** centroid-IoU → ID churn otherwise.
+- Stationary flip-flop wastes Tier-1 budget → port the NCC/phase-correlation appearance classifier.
+- Lighting transients flood the detector → port contrast normalization + persistence gate + `lightning_threshold`.
+- Async Tier-1 must never stall Tier-0 capture → separate send/receive paths, back-pressure by degrading to Tier-0, never block the frame loop.
+- Best-frame must be attribute-aware, not max-score.
+
+## Source references
+
+Frigate (MIT): `frigate/video/detect.py`, `frigate/motion/improved_motion.py`,
+`frigate/util/object.py`, `frigate/track/{norfair_tracker,tracked_object,stationary_classifier}.py`,
+`frigate/detectors/detection_api.py` + `plugins/{openvino,edgetpu_tfl}.py`,
+`frigate/object_detection/base.py`, `frigate/video/ffmpeg.py`, `frigate/ffmpeg_presets.py`.
+OpenNVR: `kai-c/kai_c/{contract_types,connector,stream_proxy,registry,sovereignty,audit,events}.py`.
