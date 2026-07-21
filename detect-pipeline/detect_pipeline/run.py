@@ -11,7 +11,8 @@ it can be re-enabled without a redeploy).
 Env:
   DETECT_PIPELINE_ENABLED   on/off (default true)
   OPENNVR_INTERNAL_URL      opennvr-core base (default http://opennvr-core:8000)
-  DETECT_SERVICE_TOKEN      service token for the internal endpoint
+  INTERNAL_API_KEY          shared secret for opennvr-core's internal endpoint
+                            (the same INTERNAL_API_KEY the deployment already uses)
   NATS_URL                  e.g. nats://nats:4222 (best-effort; down != fatal)
   DETECT_DETECTOR           hog | blob | stub (default hog)
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
@@ -38,7 +39,7 @@ log = logging.getLogger("detect_pipeline.run")
 class ServiceConfig:
     enabled: bool
     core_url: str
-    service_token: str | None
+    api_key: str | None
     nats_url: str | None
     detector: str
     hwaccel: str
@@ -55,7 +56,7 @@ def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
         core_url=env.get("OPENNVR_INTERNAL_URL", "http://opennvr-core:8000"),
-        service_token=env.get("DETECT_SERVICE_TOKEN") or None,
+        api_key=env.get("INTERNAL_API_KEY") or None,
         nats_url=env.get("NATS_URL") or None,
         detector=env.get("DETECT_DETECTOR", "hog"),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
@@ -77,7 +78,7 @@ def _detector_factory(name: str):
 
 
 def build_manager(cfg: ServiceConfig, sink) -> WorkerManager:
-    provider = HttpCameraProvider(cfg.core_url, token=cfg.service_token)
+    provider = HttpCameraProvider(cfg.core_url, api_key=cfg.api_key)
     return WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
