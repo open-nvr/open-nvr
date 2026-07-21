@@ -3,7 +3,12 @@ name = "detect-pipeline"
 version = "0.0.1"
 description = "OpenNVR Tier-0 detection pipeline (compute-gated inference)"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    # Tier-0 CV: motion detection + (later) region math operate on numpy luma
+    # arrays. Headless OpenCV — no GUI/GTK deps, correct for a server component.
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+]
 
 [dependency-groups]
 dev = [
