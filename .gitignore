@@ -148,6 +148,9 @@ server/test_*.py
 # Example-app pytest suites (A2.5+): each example/{slug}/tests/ is part
 # of the shipped artifact and must be tracked.
 !examples/**/tests/test_*.py
+# detect-pipeline (Tier-0) pytest suite: same negation pattern — the tests
+# live in detect-pipeline/test/ (singular) and MUST be tracked so CI runs them.
+!detect-pipeline/test/test_*.py
 # App SDK pytest suite: same negation pattern as server/tests/. Without
 # this the blanket ``test_*.py`` above silently untracked the whole
 # sdk/opennvr-app-sdk/tests/ suite.
