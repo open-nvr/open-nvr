@@ -148,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="detect_pipeline", description=__doc__)
     p.add_argument("--source", required=True, help="video file path or rtsp:// URL")
     p.add_argument("--out", default=None, help="annotated MP4 to write")
-    p.add_argument("--detector", choices=["onnx", "hog", "blob", "stub"], default="hog")
+    # Default to blob for the demo: works on any OpenCV (4 or 5, no model). Use
+    # --detector onnx --model for real detection, or --detector hog on OpenCV 4.x.
+    p.add_argument("--detector", choices=["onnx", "hog", "blob", "stub"], default="blob")
     p.add_argument("--model", default=None, help="ONNX model path (for --detector onnx)")
     p.add_argument("--onnx-input", type=int, default=640, help="ONNX model input size")
     p.add_argument("--fps", type=int, default=5)

@@ -29,18 +29,20 @@ MP4 — motion boxes (yellow), detector regions (blue), tracked objects with IDs
 (green), and a CALIBRATING banner while motion warms up.
 
 ```bash
-# a clip of people walking — real detection, no model download (OpenCV HOG)
-python -m detect_pipeline --source people.mp4 --out annotated.mp4 --detector hog
+# real object detection (YOLOv8 ONNX) — point at a model
+python -m detect_pipeline --source people.mp4 --out annotated.mp4 --detector onnx --model yolov8n.onnx
 
-# quick "is the whole chain alive?" on any clip with motion (deterministic blob detector)
+# quick "is the whole chain alive?" on any clip with motion — no model, any OpenCV (default)
 python -m detect_pipeline --source clip.mp4 --out annotated.mp4 --detector blob
 
 # straight off a real OpenNVR-provisioned camera (production ffmpeg path,
 # hwaccel decode, auto-probed resolution, bounded to 20s)
 python -m detect_pipeline \
   --source "rtsp://<user>:<pass>@<camera-ip>:554/<substream-path>" \
-  --out out.mp4 --detector hog --hwaccel vaapi --seconds 20
+  --out out.mp4 --detector onnx --model yolov8n.onnx --hwaccel vaapi --seconds 20
 ```
+
+(`--detector hog` also works on **OpenCV 4.x only** — HOG was removed in OpenCV 5.)
 
 ### Against a real camera
 
@@ -111,4 +113,7 @@ detector adapter.
   grid → documented follow-ups.
 - The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
   TensorRT) — the local ONNX detector is CPU via cv2.dnn until then.
-- Lifting the `opencv<5` cap (validate cv2.dnn on OpenCV 5's new DNN engine).
+
+OpenCV 4.x **and** 5.x are supported (the suite passes on both). One thing to
+smoke-test on a host: real `yolov8n.onnx` inference through OpenCV 5's new DNN
+engine (it auto-falls-back to the classic engine if needed).

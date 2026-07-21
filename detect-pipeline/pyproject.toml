@@ -7,14 +7,15 @@ dependencies = [
     # Tier-0 CV: motion detection + (later) region math operate on numpy luma
     # arrays. Headless OpenCV — no GUI/GTK deps, correct for a server component.
     "numpy>=1.26",
-    # Cap below 5.0 for now. The default detector is now ONNX via
-    # cv2.dnn.readNetFromONNX (in the main wheel on BOTH 4.x and 5.x), so the
-    # detector itself is already forward-portable. The cap remains only until
-    # cv2.dnn is validated against OpenCV 5's rewritten (CPU-only) DNN engine and
-    # the rest of our cv2 usage is checked on 5.x — lifting it is a small,
-    # separate follow-up. (OpenCV 5 also moved HOG to opencv_contrib, so the
-    # optional 'hog' detector needs 4.x anyway.)
-    "opencv-python-headless>=4.9,<5",
+    # OpenCV 4.x AND 5.x are both supported: the full suite passes on 5.0.0
+    # (imgproc + cv2.dnn.blobFromImage/NMSBoxes all verified), and the default
+    # ONNX detector uses cv2.dnn.readNetFromONNX (in the main wheel on both), with
+    # ENGINE_AUTO falling back to the classic engine if the new one can't load a
+    # model. The <6 is normal major-version hygiene (guard the next unreleased
+    # major), NOT a block on 5.x. Note: HOG is gone on 5 (moved to opencv_contrib)
+    # — that's why the default detector is ONNX and 'hog' is 4.x-only.
+    # TODO: smoke-test real yolov8n.onnx inference on 5.0's new engine on a host.
+    "opencv-python-headless>=4.9,<6",
 ]
 
 [project.optional-dependencies]
