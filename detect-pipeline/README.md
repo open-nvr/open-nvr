@@ -19,7 +19,7 @@ pip install -e .          # numpy + opencv-python-headless
 ## Run the tests
 
 ```bash
-python -m pytest -q       # 83 unit/integration/smoke tests (real-ffmpeg tests run if ffmpeg present, else skip)
+python -m pytest -q       # 92 unit/integration/smoke tests (real-ffmpeg tests run if ffmpeg present, else skip)
 ```
 
 ## Manual verification
@@ -70,8 +70,10 @@ Open the annotated MP4 to confirm: motion only fires on real movement, the
 detector runs on regions (not the whole frame), track IDs stay stable as objects
 move, and the banner shows the detector standing down during lighting changes.
 
-Detectors: `hog` (real people, default), `blob` (deterministic, for smoke
-checks), `stub` (motion + regions only).
+Detectors: `onnx` (YOLOv8/YOLO11 via cv2.dnn — the production default; pass
+`--model yolov8n.onnx`), `hog` (people, no model download; the CLI default for a
+zero-asset demo), `blob` (deterministic, for smoke checks), `stub` (motion +
+regions only).
 
 ## As an OpenNVR service (integrated)
 
@@ -87,20 +89,26 @@ subjects. It changes nothing about ingest, recording, or serving.
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_DETECTOR=hog               # hog (people) | blob | stub
+DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
 ```
 
 Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —
 a broker outage never stops a worker.
 
+## Detector
+
+The default detector is **YOLOv8 ONNX via `cv2.dnn`** (`onnx_detector.py`),
+loading the same `yolov8n.onnx` the stack builds for the `yolov8-adapter`. The
+decode (YOLOv8/YOLO11 `(1, 4+nc, N)` → transpose → NMS) is a pure, unit-tested
+function; the net is injectable so tests need no model file. `cv2.dnn` is CPU;
+the accelerator backends (Coral/Hailo/OpenVINO/TensorRT) come with the KAI-C
+detector adapter.
+
 ## Not yet in PR A (deliberately)
 - The gate (skip detection on stationary tracks) + shadow mode + audit → **PR B**.
 - Kalman motion prediction in the tracker, and the learned per-camera region
   grid → documented follow-ups.
-- The KAI-C-backed accelerator detector adapter (this uses local reference
-  detectors) → lands with the detector-spec wiring.
-- A `cv2.dnn` ONNX reference detector to replace HOG (OpenCV 5 moved HOG to
-  `opencv_contrib`; `cv2.dnn.readNetFromONNX` is in the main wheel on both 4.x
-  and 5.x). This lifts the `opencv<5` cap and improves detection quality —
-  scoped with the accelerator adapter (same ONNX path).
+- The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
+  TensorRT) — the local ONNX detector is CPU via cv2.dnn until then.
+- Lifting the `opencv<5` cap (validate cv2.dnn on OpenCV 5's new DNN engine).

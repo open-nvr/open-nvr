@@ -42,6 +42,8 @@ class ServiceConfig:
     api_key: str | None
     nats_url: str | None
     detector: str
+    onnx_model: str
+    onnx_input: int
     hwaccel: str
     device: str
     model_size: int
@@ -58,7 +60,9 @@ def config_from_env(env: dict) -> ServiceConfig:
         core_url=env.get("OPENNVR_INTERNAL_URL", "http://opennvr-core:8000"),
         api_key=env.get("INTERNAL_API_KEY") or None,
         nats_url=env.get("NATS_URL") or None,
-        detector=env.get("DETECT_DETECTOR", "hog"),
+        detector=env.get("DETECT_DETECTOR", "onnx"),
+        onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
+        onnx_input=int(env.get("DETECT_ONNX_INPUT", "640")),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
@@ -66,30 +70,55 @@ def config_from_env(env: dict) -> ServiceConfig:
     )
 
 
-def _detector_factory(name: str):
-    if name == "hog":
-        from .detectors_local import HogPersonDetector, hog_available
-        if hog_available():
-            return HogPersonDetector
-        # Never crash-loop the container on an OpenCV build without HOG — run
-        # (tracks motion regions) but detect nothing until a real detector is set.
-        from .detector import StubDetector
-        log.warning("detector 'hog' unavailable in this OpenCV build; using stub")
-        return StubDetector
-    if name == "blob":
-        from .detectors_local import BrightBlobDetector
-        return BrightBlobDetector
+def _stub_factory():
     from .detector import StubDetector
     return StubDetector
 
 
+def _detector_factory(cfg: ServiceConfig):
+    """Return a zero-arg factory that builds one detector per worker.
+
+    Every path degrades to the stub (worker runs, tracks motion regions, detects
+    nothing) rather than crash-looping the container — so a missing/broken model,
+    or an OpenCV build without a detector, is never fatal.
+    """
+    name = cfg.detector
+    if name == "onnx":
+        if not cfg.onnx_model or not os.path.exists(cfg.onnx_model):
+            log.warning("ONNX model not found at %s; using stub detector", cfg.onnx_model)
+            return _stub_factory()
+        from .onnx_detector import OnnxYoloDetector
+
+        def make_onnx():
+            try:
+                return OnnxYoloDetector(model_path=cfg.onnx_model, input_size=cfg.onnx_input)
+            except Exception:
+                log.warning("failed to load ONNX model %s; using stub", cfg.onnx_model, exc_info=True)
+                from .detector import StubDetector
+                return StubDetector()
+
+        return make_onnx
+    if name == "hog":
+        from .detectors_local import HogPersonDetector, hog_available
+        if hog_available():
+            return HogPersonDetector
+        log.warning("detector 'hog' unavailable in this OpenCV build; using stub")
+        return _stub_factory()
+    if name == "blob":
+        from .detectors_local import BrightBlobDetector
+        return BrightBlobDetector
+    return _stub_factory()
+
+
 def build_manager(cfg: ServiceConfig, sink) -> WorkerManager:
     provider = HttpCameraProvider(cfg.core_url, api_key=cfg.api_key)
+    # Region crops match the detector input so the model sees full-detail crops.
+    model_size = cfg.onnx_input if cfg.detector == "onnx" else cfg.model_size
     return WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
-        detector_factory=_detector_factory(cfg.detector),
-        model_size=cfg.model_size,
+        detector_factory=_detector_factory(cfg),
+        model_size=model_size,
         device=cfg.device,
     )
 

@@ -3,14 +3,18 @@
 """Unit tests for service config parsing + manager wiring (no NATS/core)."""
 from __future__ import annotations
 
+import numpy as np
+
 from detect_pipeline.bus import EventSink
-from detect_pipeline.run import build_manager, config_from_env
+from detect_pipeline.run import _detector_factory, build_manager, config_from_env
 
 
-def test_defaults_are_enabled_with_hog():
+def test_defaults_are_enabled_with_onnx():
     cfg = config_from_env({})
     assert cfg.enabled is True                    # on by default
-    assert cfg.detector == "hog"
+    assert cfg.detector == "onnx"                 # ONNX is the default detector
+    assert cfg.onnx_model.endswith("yolov8n.onnx")
+    assert cfg.onnx_input == 640
     assert cfg.core_url.startswith("http://opennvr-core")
     assert cfg.refresh_seconds == 30.0
 
@@ -35,14 +39,18 @@ def test_env_overrides():
     assert cfg.model_size == 640
 
 
-def test_detector_factory_falls_back_to_stub_when_hog_unavailable(monkeypatch):
-    import numpy as np
+def test_onnx_detector_falls_back_to_stub_when_model_missing():
+    cfg = config_from_env({"DETECT_ONNX_MODEL": "/does/not/exist.onnx"})
+    det = _detector_factory(cfg)()                            # must not raise
+    assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
 
+
+def test_hog_detector_falls_back_to_stub_when_unavailable(monkeypatch):
     import detect_pipeline.detectors_local as dl
-    from detect_pipeline.run import _detector_factory
 
     monkeypatch.setattr(dl, "hog_available", lambda: False)   # simulate OpenCV 5
-    det = _detector_factory("hog")()                          # must not raise
+    cfg = config_from_env({"DETECT_DETECTOR": "hog"})
+    det = _detector_factory(cfg)()                            # must not raise
     assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
 
 

@@ -11,7 +11,7 @@ with IDs (green), and a CALIBRATING banner while the motion detector warms up.
     python -m detect_pipeline --source rtsp://127.0.0.1:8554/cam_sub --out out.mp4 --detector hog
 
 Detectors:
-  hog   OpenCV pedestrian detector — real people, no model download (default)
+  onnx  YOLOv8/YOLO11 ONNX via cv2.dnn (needs --model) — production default
   blob  largest bright blob per region — deterministic, for a quick chain check
   stub  no detections — see motion + regions only
 """
@@ -37,10 +37,15 @@ _BLUE = (255, 160, 0)
 _GREEN = (60, 220, 60)
 
 
-def _make_detector(name: str):
-    if name == "hog":
+def _make_detector(args):
+    if args.detector == "onnx":
+        if not args.model:
+            raise SystemExit("--detector onnx requires --model path/to/model.onnx")
+        from .onnx_detector import OnnxYoloDetector
+        return OnnxYoloDetector(model_path=args.model, input_size=args.onnx_input)
+    if args.detector == "hog":
         return HogPersonDetector()
-    if name == "blob":
+    if args.detector == "blob":
         return BrightBlobDetector()
     return StubDetector()
 
@@ -101,7 +106,7 @@ def run(args: argparse.Namespace) -> int:
     # process_frame is driven directly here, so the pipeline's own frame_source
     # is unused (None); run() is only for the always-on production loop.
     pipe = DetectPipeline(
-        None, motion, _make_detector(args.detector), tracker,
+        None, motion, _make_detector(args), tracker,
         model_size=(args.model_size, args.model_size),
     )
 
@@ -143,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="detect_pipeline", description=__doc__)
     p.add_argument("--source", required=True, help="video file path or rtsp:// URL")
     p.add_argument("--out", default=None, help="annotated MP4 to write")
-    p.add_argument("--detector", choices=["hog", "blob", "stub"], default="hog")
+    p.add_argument("--detector", choices=["onnx", "hog", "blob", "stub"], default="hog")
+    p.add_argument("--model", default=None, help="ONNX model path (for --detector onnx)")
+    p.add_argument("--onnx-input", type=int, default=640, help="ONNX model input size")
     p.add_argument("--fps", type=int, default=5)
     p.add_argument("--model-size", type=int, default=320)
     p.add_argument("--motion-height", type=int, default=180)

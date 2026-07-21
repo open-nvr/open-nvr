@@ -251,13 +251,23 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      # The default detector loads the same yolov8n.onnx the yolov8-adapter uses.
+      yolov8-weights-init:
+        condition: service_completed_successfully
     environment:
       - DETECT_PIPELINE_ENABLED=${DETECT_PIPELINE_ENABLED:-true}
       - OPENNVR_INTERNAL_URL=http://opennvr-core:8000
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
-      - DETECT_DETECTOR=${DETECT_DETECTOR:-hog}
+      # Default detector: YOLOv8 ONNX via cv2.dnn (falls back to no-op if the
+      # model is missing — the container never crash-loops).
+      - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
+      - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
+    volumes:
+      # Read-only mount of the shared yolov8 weights volume (built by
+      # yolov8-weights-init) — same model as the yolov8-adapter.
+      - opennvr_yolov8_weights:/app/model_weights:ro
     # For VAAPI/QSV hardware decode, pass the render node through and set
     # DETECT_HWACCEL=vaapi in .env (uncomment):
     # devices:
