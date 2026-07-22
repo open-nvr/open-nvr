@@ -71,3 +71,36 @@ DB models). Improves small-object recall and region stability.
 Stationary-object gate, shadow mode, per-camera `always_analyze`, critical-class
 force-escalate, gate-decision audit. The whole point of Tier-0; PR A is the
 always-on floor it sits on.
+
+---
+
+## 7. Pluggable Tier-0 triggers (`TriggerPolicy`) — keep the gate domain-agnostic
+
+**Why.** OpenNVR's identity is "any model behind a governed adapter contract,
+discovered in the registry, exported as a skill" — not object detection. Tier-0
+today ships one trigger: `motion` + a small object detector (the correct CCTV
+default). But if PR B's gate hardcodes "motion → object," it quietly re-narrows
+OpenNVR into an object NVR (a Frigate) and throws away the bring-your-own-model
+property. The real abstraction is: **cheap always-on trigger signal → gate →
+registered expensive model → audited bus.** Object motion is just one instance.
+
+**Scope.**
+- Add a `TriggerPolicy` to the adapter contract (`CapabilitiesResponse`, next to
+  `DetectorSpec` / `InputSpec` / `Accelerator`) so a model declares *what wakes
+  it*: `motion` (default), `scene_change` (frame-delta / contour change —
+  microscopy, structural change), `interval` (schedule — crop/vegetation survey,
+  time-lapse), `field_statistic` (diffuse-motion / brightness / texture — wind,
+  rain, fog, smoke), `chained` (another cheap model's output), `always`.
+- **Author PR B's gate against the `TriggerPolicy` interface, not against
+  motion.** This is the load-bearing obligation — see the "Tier-0 triggers are
+  pluggable" section in `docs/design/compute-gated-inference.md`.
+- Ship `motion` first (already have it). The non-object trigger *signals*
+  (`scene_change`, `field_statistic`, `interval`, ...) are their own follow-ups;
+  this item is about the *abstraction* so the door stays open.
+
+**Acceptance.** Contract carries `TriggerPolicy`; PR B's gate dispatches by
+declared trigger, not a hardcoded motion assumption; a non-object trigger (e.g.
+`interval` or `field_statistic`) can be added later without touching the gate
+core. Note: `field_statistic` for weather is a weak *primary* signal — pixels are
+a poor wind sensor; drive weather from a sensor/API and use the camera frame +
+Tier-1 VLM as visual corroboration.
