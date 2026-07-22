@@ -42,7 +42,11 @@ def _make_detector(args):
         if not args.model:
             raise SystemExit("--detector onnx requires --model path/to/model.onnx")
         from .onnx_detector import OnnxYoloDetector
-        return OnnxYoloDetector(model_path=args.model, input_size=args.onnx_input)
+        providers = [p.strip() for p in (args.providers or "").split(",") if p.strip()] or None
+        return OnnxYoloDetector(
+            model_path=args.model, input_size=args.onnx_input,
+            backend=args.backend, providers=providers,
+        )
     if args.detector == "hog":
         return HogPersonDetector()
     if args.detector == "blob":
@@ -153,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--detector", choices=["onnx", "hog", "blob", "stub"], default="blob")
     p.add_argument("--model", default=None, help="ONNX model path (for --detector onnx)")
     p.add_argument("--onnx-input", type=int, default=640, help="ONNX model input size")
+    p.add_argument("--backend", choices=["cvdnn", "ort"], default="cvdnn",
+                   help="onnx inference backend: cvdnn (zero-dep CPU) or ort (ONNX Runtime)")
+    p.add_argument("--providers", default=None,
+                   help="ort execution providers, comma-separated "
+                        "(e.g. OpenVINOExecutionProvider, TensorrtExecutionProvider)")
     p.add_argument("--fps", type=int, default=5)
     p.add_argument("--model-size", type=int, default=320)
     p.add_argument("--motion-height", type=int, default=180)

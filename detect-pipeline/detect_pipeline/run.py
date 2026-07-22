@@ -14,7 +14,11 @@ Env:
   INTERNAL_API_KEY          shared secret for opennvr-core's internal endpoint
                             (the same INTERNAL_API_KEY the deployment already uses)
   NATS_URL                  e.g. nats://nats:4222 (best-effort; down != fatal)
-  DETECT_DETECTOR           hog | blob | stub (default hog)
+  DETECT_DETECTOR           onnx | hog | blob | stub (default onnx)
+  DETECT_ONNX_BACKEND       cvdnn (default, zero-dep CPU) | ort (ONNX Runtime)
+  DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.
+                            "OpenVINOExecutionProvider" (Intel N100) or
+                            "TensorrtExecutionProvider,CUDAExecutionProvider"
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
@@ -44,6 +48,8 @@ class ServiceConfig:
     detector: str
     onnx_model: str
     onnx_input: int
+    onnx_backend: str
+    onnx_providers: str
     hwaccel: str
     device: str
     model_size: int
@@ -63,6 +69,8 @@ def config_from_env(env: dict) -> ServiceConfig:
         detector=env.get("DETECT_DETECTOR", "onnx"),
         onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
         onnx_input=int(env.get("DETECT_ONNX_INPUT", "640")),
+        onnx_backend=env.get("DETECT_ONNX_BACKEND", "cvdnn"),
+        onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
@@ -89,11 +97,19 @@ def _detector_factory(cfg: ServiceConfig):
             return _stub_factory()
         from .onnx_detector import OnnxYoloDetector
 
+        providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
+
         def make_onnx():
             try:
-                return OnnxYoloDetector(model_path=cfg.onnx_model, input_size=cfg.onnx_input)
+                return OnnxYoloDetector(
+                    model_path=cfg.onnx_model, input_size=cfg.onnx_input,
+                    backend=cfg.onnx_backend, providers=providers,
+                )
             except Exception:
-                log.warning("failed to load ONNX model %s; using stub", cfg.onnx_model, exc_info=True)
+                log.warning(
+                    "failed to load ONNX model %s (backend=%s); using stub",
+                    cfg.onnx_model, cfg.onnx_backend, exc_info=True,
+                )
                 from .detector import StubDetector
                 return StubDetector()
 

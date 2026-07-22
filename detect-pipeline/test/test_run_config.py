@@ -15,6 +15,17 @@ def test_defaults_are_enabled_with_onnx():
     assert cfg.detector == "onnx"                 # ONNX is the default detector
     assert cfg.onnx_model.endswith("yolov8n.onnx")
     assert cfg.onnx_input == 640
+    assert cfg.onnx_backend == "cvdnn"            # zero-dep default backend
+    assert cfg.onnx_providers == ""
+
+
+def test_onnx_backend_and_providers_override():
+    cfg = config_from_env({
+        "DETECT_ONNX_BACKEND": "ort",
+        "DETECT_ONNX_PROVIDERS": "OpenVINOExecutionProvider,CPUExecutionProvider",
+    })
+    assert cfg.onnx_backend == "ort"
+    assert cfg.onnx_providers == "OpenVINOExecutionProvider,CPUExecutionProvider"
     assert cfg.core_url.startswith("http://opennvr-core")
     assert cfg.refresh_seconds == 30.0
 

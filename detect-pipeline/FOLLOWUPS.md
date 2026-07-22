@@ -40,13 +40,21 @@ benchmark numbers — measure on the real boxes before publishing any figure.
 
 ---
 
-## 2. KAI-C accelerator detector adapter (Coral / Hailo / OpenVINO / TensorRT)
+## 2. Accelerator backends — Coral / Hailo / RKNN (ORT EPs already shipped)
 
-The local `cv2.dnn` detector is **CPU**. The production win on cheap hardware is
-running the model on an accelerator (OpenVINO on the N100 iGPU, Coral, Hailo, the
-Pi 5 AI HAT, TensorRT on Nvidia). Land as a KAI-C-backed detector adapter that
-declares its accelerator via the v1.1 `DetectorSpec`; the pipeline dispatches
-region crops to it through KAI-C (governed + audited). Frigate-parity axis.
+**Shipped in PR A:** the ONNX detector now has a **pluggable backend** —
+`cvdnn` (default, zero-dep CPU) and `ort` (ONNX Runtime). ORT execution providers
+already cover **OpenVINO** (Intel N100 iGPU/NPU), **TensorRT/CUDA** (Nvidia/Jetson),
+and **CoreML** on the *same* ONNX model — install the matching wheel and set
+`DETECT_ONNX_PROVIDERS`. See README "Pluggable inference backend."
+
+**Remaining:** Coral (EdgeTPU) and Hailo are **not** ORT providers — they need
+their own model format + SDK (TFLite+libedgetpu; HailoRT `.hef`), and Rockchip
+needs RKNN. Add each as a backend on the same `build_backend` seam, ideally
+dispatched through a KAI-C-backed adapter that declares its accelerator via the
+v1.1 `DetectorSpec` (governed + audited region-crop dispatch). Also declare the
+chosen backend/provider through `DetectorSpec` so it's config, not hard-coded.
+Frigate-parity axis.
 
 ## 3. Real-inference smoke on OpenCV 5
 

@@ -263,6 +263,11 @@ services:
       # model is missing — the container never crash-loops).
       - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
       - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
+      # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
+      # For an accelerator, set backend=ort + providers (and install the matching
+      # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
+      - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
     volumes:
       # Read-only mount of the shared yolov8 weights volume (built by

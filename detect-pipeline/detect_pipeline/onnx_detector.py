@@ -1,22 +1,35 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-ONNX object detector via ``cv2.dnn`` — the default Tier-0 reference detector.
+ONNX object detector for Tier-0, with a **pluggable inference backend**.
 
-Loads a YOLOv8/YOLO11-family ONNX model with ``cv2.dnn.readNetFromONNX`` (present
-in the OpenCV *main* wheel on both 4.x and 5.x — unlike HOG, which OpenCV 5 moved
-to opencv_contrib). This is the same ONNX path the KAI-C accelerator adapter and
-the stack's ``yolov8n.onnx`` use, so the local detector is consistent with the
-production one and far better quality than HOG.
+The same YOLOv8/YOLO11-family ONNX model is run through one of two backends:
 
-The decode (``postprocess_yolo``) is a pure function tested against synthetic
-output tensors, and the model/network is injectable, so nothing here requires a
-model file or a download at test time — the real model only loads in deployment.
+* ``cvdnn`` (default) — ``cv2.dnn`` from OpenCV, already a dependency, so it needs
+  **nothing extra to install** and runs on any platform. The OpenCV 5 DNN engine
+  is CPU-only but materially faster than 4.x. This is the zero-dependency floor.
+* ``ort`` — ONNX Runtime with selectable **execution providers**. On the *same*
+  ONNX file this is the on-ramp to accelerators: ``OpenVINOExecutionProvider``
+  (Intel CPU / iGPU / NPU — the N100 win), ``TensorrtExecutionProvider`` /
+  ``CUDAExecutionProvider`` (Nvidia / Jetson), ``CoreMLExecutionProvider`` (Mac).
+  It's an optional dependency (``pip install 'detect-pipeline[onnxruntime]'``, or
+  the matching accelerator wheel such as ``onnxruntime-openvino``).
+
+Backends implement one method — ``infer(blob) -> output_tensor`` — so preprocessing
+(``cv2.dnn.blobFromImage``) and the decode (``postprocess_yolo``) are shared and
+backend-agnostic. Coral (EdgeTPU) and Hailo need their own model format + SDK, so
+they are separate backends on this same seam, tracked as follow-ups / the KAI-C
+accelerator adapter — not ORT execution providers.
+
+The decode is a pure function tested against synthetic output tensors, and the
+net/session is injectable, so nothing here requires a model file, a download, or
+onnxruntime to be installed at test time — the real model only loads in deployment.
 
 YOLOv8/YOLO11 detect output is ``(1, 4+nc, N)`` (e.g. ``(1, 84, 8400)`` for COCO):
 4 box params (cx, cy, w, h in input pixels) + ``nc`` class scores per anchor, no
 objectness, no softmax. Transpose to ``(N, 4+nc)``, argmax the class scores,
-threshold, then ``cv2.dnn.NMSBoxes``.
+threshold, then ``cv2.dnn.NMSBoxes``. (NMS-free families — YOLO26, RF-DETR — need
+a different decode; that's a tracked follow-up, independent of the backend here.)
 """
 from __future__ import annotations
 
@@ -28,6 +41,8 @@ import numpy as np
 from .detector import RawDetection
 
 log = logging.getLogger("detect_pipeline.onnx_detector")
+
+_CPU_EP = "CPUExecutionProvider"
 
 # COCO-80 class names (the classes the default yolov8n.onnx predicts).
 COCO_LABELS = [
@@ -110,8 +125,102 @@ def postprocess_yolo(
     return out
 
 
+# ─────────────────────────── inference backends ───────────────────────────
+# A backend takes a preprocessed NCHW float32 blob and returns the raw model
+# output tensor. Preprocessing + decode live in the detector, so a backend is
+# tiny and the two are interchangeable.
+
+
+class CvDnnBackend:
+    """Run the ONNX model through ``cv2.dnn`` (default; zero extra dependency, CPU)."""
+
+    name = "cvdnn"
+
+    def __init__(self, model_path: str | None = None, *, net=None) -> None:
+        # ``net`` is injectable for tests (an object with .setInput()/.forward()).
+        if net is not None:
+            self._net = net
+        else:
+            if not model_path:
+                raise ValueError("CvDnnBackend needs a model_path or an injected net")
+            self._net = cv2.dnn.readNetFromONNX(model_path)
+
+    def infer(self, blob: np.ndarray) -> np.ndarray:
+        self._net.setInput(blob)
+        return self._net.forward()
+
+
+def resolve_providers(requested, available) -> list[str]:
+    """Pick ORT execution providers: ``requested ∩ available``, CPU always last.
+
+    Pure + testable. ``requested`` may be a list or a comma string; ``None`` means
+    "let ORT use whatever it has, by its own priority order". CPU is always kept as
+    a final fallback so a missing accelerator EP degrades instead of failing.
+    """
+    if isinstance(requested, str):
+        requested = [p.strip() for p in requested.split(",") if p.strip()]
+    available = list(available) if available else []
+    if not requested:
+        provs = list(available) if available else [_CPU_EP]
+    else:
+        provs = []
+        for p in requested:
+            if available and p not in available:
+                log.warning("ORT provider %s not available; skipping", p)
+                continue
+            provs.append(p)
+    if _CPU_EP not in provs:
+        provs.append(_CPU_EP)
+    return provs
+
+
+class OrtBackend:
+    """Run the ONNX model through ONNX Runtime with selectable execution providers.
+
+    This is the accelerator on-ramp: install the matching wheel
+    (``onnxruntime``, ``onnxruntime-openvino``, ``onnxruntime-gpu``) and pass
+    ``providers`` (e.g. ``["OpenVINOExecutionProvider"]`` on an Intel N100, or
+    ``["TensorrtExecutionProvider"]`` on Nvidia). The *same* ONNX model is used.
+    """
+
+    name = "ort"
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        *,
+        providers=None,
+        session=None,  # injectable for tests (obj with .get_inputs()/.run())
+    ) -> None:
+        if session is not None:
+            self._sess = session
+        else:
+            if not model_path:
+                raise ValueError("OrtBackend needs a model_path or an injected session")
+            import onnxruntime as ort  # lazy: optional dependency
+
+            provs = resolve_providers(providers, ort.get_available_providers())
+            log.info("ONNX Runtime backend using providers: %s", provs)
+            self._sess = ort.InferenceSession(model_path, providers=provs)
+        self._input = self._sess.get_inputs()[0].name
+
+    def infer(self, blob: np.ndarray) -> np.ndarray:
+        return self._sess.run(None, {self._input: blob})[0]
+
+
+def build_backend(name: str, model_path: str | None = None, *, providers=None,
+                  net=None, session=None):
+    """Construct an inference backend by name: ``cvdnn`` (default) or ``ort``."""
+    name = (name or "cvdnn").lower()
+    if name in ("cvdnn", "opencv", "dnn"):
+        return CvDnnBackend(model_path, net=net)
+    if name in ("ort", "onnxruntime", "onnx-runtime"):
+        return OrtBackend(model_path, providers=providers, session=session)
+    raise ValueError(f"unknown ONNX backend {name!r} (use 'cvdnn' or 'ort')")
+
+
 class OnnxYoloDetector:
-    """YOLOv8/YOLO11 ONNX detector run through cv2.dnn (CPU)."""
+    """YOLOv8/YOLO11 ONNX detector over a pluggable backend (``cvdnn`` or ``ort``)."""
 
     def __init__(
         self,
@@ -121,26 +230,36 @@ class OnnxYoloDetector:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         labels: list[str] | None = None,
-        net=None,  # injectable for tests (obj with .setInput()/.forward())
+        backend: str = "cvdnn",
+        providers=None,
+        net=None,      # injects a cv2.dnn net  -> cvdnn backend (also back-compat)
+        session=None,  # injects an ORT session -> ort backend
+        backend_impl=None,  # inject a fully-built backend
     ) -> None:
         self.input_size = input_size
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.labels = labels or COCO_LABELS
-        if net is not None:
-            self._net = net
+        if backend_impl is not None:
+            self._backend = backend_impl
+        elif net is not None:
+            self._backend = CvDnnBackend(net=net)
+        elif session is not None:
+            self._backend = OrtBackend(session=session)
+        elif model_path:
+            self._backend = build_backend(backend, model_path, providers=providers)
         else:
-            if not model_path:
-                raise ValueError("OnnxYoloDetector needs a model_path or an injected net")
-            self._net = cv2.dnn.readNetFromONNX(model_path)
+            raise ValueError(
+                "OnnxYoloDetector needs a model_path, or an injected net/session/backend_impl"
+            )
+        self.backend_name = getattr(self._backend, "name", "custom")
 
     def detect(self, crop: np.ndarray) -> list[RawDetection]:
         blob = cv2.dnn.blobFromImage(
             crop, scalefactor=1 / 255.0,
             size=(self.input_size, self.input_size), swapRB=True, crop=False,
         )
-        self._net.setInput(blob)
-        output = self._net.forward()
+        output = self._backend.infer(blob)
         return postprocess_yolo(
             output, input_size=self.input_size,
             conf_threshold=self.conf_threshold, iou_threshold=self.iou_threshold,

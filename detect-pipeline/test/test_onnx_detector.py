@@ -8,8 +8,12 @@ import pytest
 
 from detect_pipeline.onnx_detector import (
     COCO_LABELS,
+    CvDnnBackend,
     OnnxYoloDetector,
+    OrtBackend,
+    build_backend,
     postprocess_yolo,
+    resolve_providers,
 )
 
 INPUT = 640
@@ -94,3 +98,66 @@ def test_detector_requires_model_or_net():
 
 def test_coco_labels_length():
     assert len(COCO_LABELS) == 80
+
+
+# ─────────────────────── pluggable backend: ORT ───────────────────────
+
+class _FakeSession:
+    """Stand-in for an onnxruntime InferenceSession (no onnxruntime needed)."""
+
+    def __init__(self, output):
+        self._output = output
+        self.fed = None
+
+    def get_inputs(self):
+        class _I:
+            name = "images"
+        return [_I()]
+
+    def run(self, output_names, feed):
+        self.fed = feed
+        return [self._output]
+
+
+def test_ort_backend_with_injected_session():
+    sess = _FakeSession(_output([(320, 320, 60, 120, 0, 0.85)]))
+    det = OnnxYoloDetector(input_size=INPUT, session=sess)
+    assert det.backend_name == "ort"
+    dets = det.detect(np.zeros((INPUT, INPUT, 3), np.uint8))
+    # the same NCHW blob preprocessing feeds either backend
+    assert sess.fed["images"].shape == (1, 3, INPUT, INPUT)
+    assert len(dets) == 1 and dets[0].label == "person"
+
+
+def test_cvdnn_and_ort_agree_on_same_output():
+    out = _output([(200, 200, 40, 40, 2, 0.7)])
+    cv_det = OnnxYoloDetector(input_size=INPUT, net=_FakeNet(out))
+    ort_det = OnnxYoloDetector(input_size=INPUT, session=_FakeSession(out))
+    assert cv_det.backend_name == "cvdnn" and ort_det.backend_name == "ort"
+    assert cv_det.detect(np.zeros((INPUT, INPUT, 3), np.uint8)) == \
+        ort_det.detect(np.zeros((INPUT, INPUT, 3), np.uint8))
+
+
+def test_resolve_providers_filters_unavailable_and_keeps_cpu():
+    provs = resolve_providers(
+        ["OpenVINOExecutionProvider", "TensorrtExecutionProvider"],
+        available=["OpenVINOExecutionProvider", "CPUExecutionProvider"],
+    )
+    assert provs == ["OpenVINOExecutionProvider", "CPUExecutionProvider"]  # TRT dropped, CPU kept
+
+
+def test_resolve_providers_none_uses_available():
+    assert resolve_providers(None, ["CUDAExecutionProvider", "CPUExecutionProvider"]) == \
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_resolve_providers_accepts_comma_string_and_appends_cpu():
+    assert resolve_providers("OpenVINOExecutionProvider", available=[]) == \
+        ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_build_backend_selects_type():
+    assert isinstance(build_backend("cvdnn", net=_FakeNet(_output([]))), CvDnnBackend)
+    assert isinstance(build_backend("ort", session=_FakeSession(_output([]))), OrtBackend)
+    with pytest.raises(ValueError):
+        build_backend("tensorrt")   # not a backend name (it's an ORT provider)

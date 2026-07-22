@@ -92,6 +92,8 @@ subjects. It changes nothing about ingest, recording, or serving.
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
+DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
+DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)
 DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
 ```
 
@@ -100,12 +102,44 @@ a broker outage never stops a worker.
 
 ## Detector
 
-The default detector is **YOLOv8 ONNX via `cv2.dnn`** (`onnx_detector.py`),
-loading the same `yolov8n.onnx` the stack builds for the `yolov8-adapter`. The
-decode (YOLOv8/YOLO11 `(1, 4+nc, N)` → transpose → NMS) is a pure, unit-tested
-function; the net is injectable so tests need no model file. `cv2.dnn` is CPU;
-the accelerator backends (Coral/Hailo/OpenVINO/TensorRT) come with the KAI-C
-detector adapter.
+The default detector is **YOLOv8 ONNX** (`onnx_detector.py`), loading the same
+`yolov8n.onnx` the stack builds for the `yolov8-adapter`. The decode (YOLOv8/YOLO11
+`(1, 4+nc, N)` → transpose → NMS) is a pure, unit-tested function; the net/session
+is injectable so tests need no model file.
+
+### Pluggable inference backend — plug in an accelerator for more speed
+
+The model runs through a **pluggable backend** (preprocessing + decode are shared,
+so the backend is interchangeable):
+
+- **`cvdnn`** *(default)* — OpenCV's `cv2.dnn`. Already a dependency, so **nothing
+  extra to install**, runs anywhere. CPU only; the OpenCV 5 engine is much faster
+  than 4.x. This is the zero-dependency floor.
+- **`ort`** — **ONNX Runtime** with selectable *execution providers*. On the
+  **same ONNX model**, this is the on-ramp to hardware acceleration:
+
+| Hardware | Install | Select |
+|---|---|---|
+| Intel N100 / iGPU / NPU | `pip install onnxruntime-openvino` | `DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider` |
+| Nvidia / Jetson | `pip install onnxruntime-gpu` | `DETECT_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider` |
+| Apple Silicon | `pip install onnxruntime` | `DETECT_ONNX_PROVIDERS=CoreMLExecutionProvider` |
+| Any CPU | `pip install 'detect-pipeline[onnxruntime]'` | `DETECT_ONNX_BACKEND=ort` |
+
+```bash
+# .env — Intel N100 example
+DETECT_DETECTOR=onnx
+DETECT_ONNX_BACKEND=ort
+DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider,CPUExecutionProvider
+```
+
+CPU is always appended as a fallback, so a missing accelerator provider degrades
+instead of failing. CLI equivalent: `--backend ort --providers OpenVINOExecutionProvider`.
+
+**Coral (EdgeTPU)** and **Hailo** are *also* backends on this same seam, but they
+need their own model format + SDK (not ORT providers), so they land with the
+KAI-C accelerator adapter — see `FOLLOWUPS.md`. **YOLO26 / RF-DETR** (NMS-free)
+are a detector-family follow-up: they need a different decode, independent of the
+backend chosen here.
 
 ## Not yet in PR A (deliberately)
 - The gate (skip detection on stationary tracks) + shadow mode + audit → **PR B**.

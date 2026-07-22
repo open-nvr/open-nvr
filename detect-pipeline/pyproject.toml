@@ -23,6 +23,19 @@ dependencies = [
 service = [
     "nats-py>=2.6",
 ]
+# Optional ONNX Runtime backend (DETECT_ONNX_BACKEND=ort / --backend ort). The
+# default detector runs on cv2.dnn with no extra install; install this for the
+# faster/accelerator-capable path. For accelerators install the matching wheel
+# INSTEAD of plain onnxruntime — they conflict — and select the provider:
+#   Intel N100 / iGPU / NPU : pip install onnxruntime-openvino
+#                             DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider
+#   Nvidia / Jetson         : pip install onnxruntime-gpu
+#                             DETECT_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider
+# Coral (EdgeTPU) and Hailo are separate backends (own model format + SDK), not
+# ORT providers — tracked as follow-ups / the KAI-C accelerator adapter.
+onnxruntime = [
+    "onnxruntime>=1.17",
+]
 
 [project.scripts]
 opennvr-tier0 = "detect_pipeline.run:main"
