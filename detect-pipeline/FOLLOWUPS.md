@@ -112,3 +112,32 @@ declared trigger, not a hardcoded motion assumption; a non-object trigger (e.g.
 core. Note: `field_statistic` for weather is a weak *primary* signal — pixels are
 a poor wind sensor; drive weather from a sensor/API and use the camera frame +
 Tier-1 VLM as visual corroboration.
+
+---
+
+## 8. Wire consumers (camera-agent + apps) to Tier-0 events — PR B era
+
+**Context (decided).** There is **no new "shareable perception" contract.** The
+existing NATS bus + adapter contract + the `opennvr.tier0.v1` event schema (see
+`README.md` → *Event schema*) *is* the sharing mechanism. Apps get the PR A/PR B
+benefit by consuming these events — not by a new framework. Only **frame/stream
+models** are in scope (object detectors, VLM captioners, face, plate, pose). STT
+(Whisper), TTS (Piper/Ultravox), and the reasoning LLM (Qwen) do **not** touch
+camera frames and are explicitly **out of scope** for this optimization (the LLM
+still benefits *indirectly* — fewer/cheaper VLM tool-calls, cleaner inputs).
+
+**Do this once PR B (the gate) exists — app-side wiring, not a platform contract.**
+- **Camera-agent:** let relevant skills consume Tier-0 events / read the latest
+  result, and **gate their VLM calls** off them instead of always firing a fresh
+  on-demand inference. Answer metadata-only questions ("is anyone at the door?",
+  "how many cars?") straight from Tier-0 tracks with **no VLM call**. Feed the VLM
+  the Tier-0 **best frame/crop** when a call is actually needed.
+- **Apps / dashboards / alert relays:** subscribe to
+  `opennvr.inference.tier0.<camera>.completed` for cheap, always-on events.
+- **Verification-driven:** if a given app does **not** get the benefit, treat it as
+  a **wiring gap in that app** (not subscribing, or firing fresh inference) and fix
+  the wiring — do not add a contract.
+
+**Acceptance.** At least one camera-agent skill demonstrably answers from Tier-0
+metadata with no VLM call, and gates its VLM on Tier-0 events; existing behavior
+unchanged when the flag is off. Each change additive, opt-in, reversible.

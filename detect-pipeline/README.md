@@ -100,6 +100,42 @@ DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
 Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —
 a broker outage never stops a worker.
 
+## Event schema (what it publishes)
+
+Tier-0 reuses OpenNVR's **existing** inference bus — no new contract. Consumers
+(the camera-agent, apps, dashboards) subscribe to the same subject convention
+adapters already use:
+
+```
+opennvr.inference.tier0.<camera_id>.completed
+```
+
+Payload (`schema = opennvr.tier0.v1`), published only for frames that produced
+tracks (a 5 fps stream of empty results would be bus noise — set
+`publish_empty` to change):
+
+```jsonc
+{
+  "schema": "opennvr.tier0.v1",
+  "adapter": "tier0",
+  "camera_id": "cam_3",
+  "seq": 44120,                 // frame counter since the stream (re)started
+  "ts": 1837.42,                // monotonic seconds when the frame was read
+  "calibrating": false,         // motion detector still warming up / lighting flash
+  "tracks": [
+    { "id": 7, "label": "person", "score": 0.88,
+      "box": [x1, y1, x2, y2],  // full-frame pixels
+      "stationary": false }     // settled object (the PR B gate will suppress these)
+  ]
+}
+```
+
+This is the **stable slice consumers code against.** It is intentionally the whole
+"shareable" surface — the existing NATS bus + this schema. Apps get Tier-0's
+benefit by subscribing here; no separate perception contract is needed. Wiring
+consumers (camera-agent, apps) to consume/gate off these events is tracked for the
+PR B era in [`FOLLOWUPS.md`](FOLLOWUPS.md).
+
 ## Detector
 
 The default detector is **YOLOv8 ONNX** (`onnx_detector.py`), loading the same
