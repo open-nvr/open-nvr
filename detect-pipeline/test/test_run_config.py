@@ -56,6 +56,37 @@ def test_onnx_detector_falls_back_to_stub_when_model_missing():
     assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
 
 
+def test_onnx_factory_degrades_to_stub_when_backend_construction_raises(monkeypatch, tmp_path):
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"not a real onnx model")          # exists, so we reach construction
+    import detect_pipeline.onnx_detector as od
+
+    def boom(*a, **k):
+        raise RuntimeError("bad model / missing onnxruntime")
+
+    monkeypatch.setattr(od, "OnnxYoloDetector", boom)     # _detector_factory imports it at call time
+    cfg = config_from_env({"DETECT_ONNX_MODEL": str(model), "DETECT_ONNX_BACKEND": "ort"})
+    det = _detector_factory(cfg)()                        # must not raise
+    assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []  # degraded to stub
+
+
+def test_unknown_backend_falls_back_to_cvdnn(monkeypatch, tmp_path, caplog):
+    model = tmp_path / "m.onnx"
+    model.write_bytes(b"x")
+    import detect_pipeline.onnx_detector as od
+    seen = {}
+
+    def capture(*a, **k):
+        seen["backend"] = k.get("backend")
+        from detect_pipeline.detector import StubDetector
+        return StubDetector()
+
+    monkeypatch.setattr(od, "OnnxYoloDetector", capture)
+    cfg = config_from_env({"DETECT_ONNX_MODEL": str(model), "DETECT_ONNX_BACKEND": "garbage"})
+    _detector_factory(cfg)()
+    assert seen["backend"] == "cvdnn"                     # invalid -> safe default, not stub-by-error
+
+
 def test_hog_detector_falls_back_to_stub_when_unavailable(monkeypatch):
     import detect_pipeline.detectors_local as dl
 

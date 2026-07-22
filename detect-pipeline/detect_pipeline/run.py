@@ -98,12 +98,21 @@ def _detector_factory(cfg: ServiceConfig):
         from .onnx_detector import OnnxYoloDetector
 
         providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
+        backend = (cfg.onnx_backend or "cvdnn").lower()
+        if backend not in ("cvdnn", "ort"):
+            log.warning("unknown DETECT_ONNX_BACKEND=%r; falling back to cvdnn", cfg.onnx_backend)
+            backend = "cvdnn"
+        if providers and backend != "ort":
+            log.warning(
+                "DETECT_ONNX_PROVIDERS is set but backend=%s ignores it "
+                "(set DETECT_ONNX_BACKEND=ort to use execution providers)", backend,
+            )
 
         def make_onnx():
             try:
                 return OnnxYoloDetector(
                     model_path=cfg.onnx_model, input_size=cfg.onnx_input,
-                    backend=cfg.onnx_backend, providers=providers,
+                    backend=backend, providers=providers,
                 )
             except Exception:
                 log.warning(

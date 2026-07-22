@@ -161,3 +161,14 @@ def test_build_backend_selects_type():
     assert isinstance(build_backend("ort", session=_FakeSession(_output([]))), OrtBackend)
     with pytest.raises(ValueError):
         build_backend("tensorrt")   # not a backend name (it's an ORT provider)
+
+
+def test_build_backend_aliases():
+    assert build_backend("opencv", net=_FakeNet(_output([]))).name == "cvdnn"
+    assert build_backend("onnxruntime", session=_FakeSession(_output([]))).name == "ort"
+
+
+def test_resolve_providers_all_filtered_falls_back_to_cpu():
+    # every requested EP unavailable -> only the CPU fallback remains
+    assert resolve_providers(["HailoExecutionProvider"], available=["CPUExecutionProvider"]) == \
+        ["CPUExecutionProvider"]
