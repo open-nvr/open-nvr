@@ -138,6 +138,17 @@ avoid. The non-object trigger *signals* themselves (`scene_change`,
 `field_statistic`, ...) are follow-ups; naming the abstraction now is what keeps
 the door open.
 
+The set is **open**, not a fixed enum: `motion` is the default and `always` /
+`none` are valid, but a new model can *bring a new trigger* — declaratively (a
+predicate over exposed Tier-0 features) or as a cheap governed "trigger adapter"
+plugin. See [`trigger-policies.md`](./trigger-policies.md) for the authoring
+guide. The motivating far case is a **research / observation robot**: it has no
+"person/vehicle" events, so it declares its own (novelty, proximity, a
+measurement crossing a threshold) as a custom trigger — the gate runs, governs,
+and audits it without any change to the gate core. That is the property that
+keeps compute-gating faithful to "bring your own model" for cameras, microscopes,
+crop surveys, weather, and robots we haven't imagined yet.
+
 
 ## Controls that enforce "never miss a critical event"
 
