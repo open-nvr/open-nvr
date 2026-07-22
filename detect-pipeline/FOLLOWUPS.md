@@ -141,3 +141,83 @@ still benefits *indirectly* — fewer/cheaper VLM tool-calls, cleaner inputs).
 **Acceptance.** At least one camera-agent skill demonstrably answers from Tier-0
 metadata with no VLM call, and gates its VLM on Tier-0 events; existing behavior
 unchanged when the flag is off. Each change additive, opt-in, reversible.
+
+---
+
+## 9. Tier-0 metrics + measurement harness — prove PR A / PR B improvement
+
+**Why.** Today the detect-pipeline emits **logs only**; there's no way to quantify
+PR A's efficiency or PR B's savings. KAI-C already exposes `/metrics`
+(`adapter_infer_latency_seconds` p50/p95/p99 + counts) and an `audit.jsonl`, so
+the *expensive* tier is measurable — but Tier-0 is a blind spot, and the gate's
+miss-rate has no instrument until shadow mode exists. "Improvement" is only
+provable as a **baseline (always-on / no-gate) vs. gated** comparison on the same
+input.
+
+### 9a. detect-pipeline `/metrics` (Prometheus; mirror KAI-C's pattern)
+
+Expose a small `prometheus_client` endpoint from the service (optional/guarded,
+like everything else). Names (labels in `{}`):
+
+```
+# throughput / motion-gate effectiveness (the core PR A story)
+tier0_frames_total{camera}                      counter  # frames read from source
+tier0_detector_runs_total{camera}               counter  # detector actually invoked
+tier0_detector_skipped_total{camera,reason}     counter  # reason = calibrating | no_motion
+tier0_regions_per_frame{camera}                 histogram# regions sent to detector / active frame
+# results
+tier0_detections_total{camera,label}            counter
+tier0_tracks_started_total{camera}              counter
+tier0_tracks_active{camera}                     gauge
+tier0_events_published_total{camera}            counter  # NATS events emitted
+# latency (mirror adapter_infer_latency_seconds naming)
+tier0_stage_latency_seconds{camera,stage}       histogram# stage = decode|motion|region|detect|track
+tier0_frame_latency_seconds{camera}             histogram# end-to-end per frame
+# health / cost
+tier0_worker_up{camera}                         gauge
+tier0_restarts_total{camera}                    counter  # ffmpeg restarts
+# plus prometheus_client process collector: process_cpu_seconds_total,
+# process_resident_memory_bytes  -> CPU/RAM per worker process
+```
+
+**Derived KPIs (PR A):** motion-gate ratio = `detector_skipped / (runs + skipped)`;
+CPU-per-camera (idle vs active); frames/s; end-to-end latency.
+
+### 9b. Gate metrics (land with PR B / shadow mode)
+
+```
+gate_escalations_total{camera,model,reason}     counter
+gate_suppressions_total{camera,reason}          counter
+gate_decision_latency_seconds{camera}           histogram
+# shadow mode = the miss-rate instrument (log-only gate beside the always-on pipeline)
+gate_shadow_would_suppress_total{camera}        counter
+gate_shadow_missed_total{camera}                counter  # would-suppress that actually mattered
+```
+
+**Derived KPIs (PR B):** expensive-call **reduction factor** = baseline calls /
+gated calls (baseline calls come from KAI-C `adapter_infer_latency_seconds` count
++ `audit.jsonl`); **miss-rate** = `gate_shadow_missed / events_that_mattered`.
+
+### 9c. Benchmark harness (the baseline-vs-gated comparison)
+
+- A **fixed, documented clip corpus** (busy + idle segments; a labelled event set
+  for recall/precision). Reproducible; committed or referenced, never ad-hoc.
+- Run the *same* corpus under two configs: **A = baseline** (always-on full
+  inference, no gate) and **B = Tier-0 + gate**. Collect Tier-0 `/metrics`, KAI-C
+  call counts/latency, process CPU/RSS.
+- On the **target hardware** (Pi 5, Intel N100): also record max sustained cameras
+  @ target fps and wall energy (external meter / RAPL — out of software scope, but
+  documented). **Never invent these numbers — measure on the real boxes.**
+- Emit a comparison table (compute saved, call-reduction factor, miss-rate,
+  cameras/box). This *is* Paper 01's evaluation section — build once, use twice.
+
+### 9d. Wire the scrape (optional compose profile)
+
+KAI-C already speaks `/metrics`; flip MediaMTX `metrics: yes`; add an optional
+`prometheus` + `grafana` compose profile so all three are scrapeable. Opt-in, off
+by default.
+
+**Acceptance.** detect-pipeline `/metrics` scrapeable with the counters above; a
+documented, reproducible benchmark producing a **baseline-vs-gated** table on real
+Pi 5 / N100 hardware; no invented figures. Feeds both product observability and
+the Paper 01 evaluation + the hardware deployment guides.
