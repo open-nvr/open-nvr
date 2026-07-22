@@ -85,6 +85,60 @@ front-run it as an even cheaper pre-filter, but detection, not motion, is what
 decides "relevant"). Tier 0's model size is chosen to fit the target hardware
 while being good enough to never miss the event classes that matter.
 
+## Tier-0 triggers are pluggable — the domain-agnostic gate
+
+Everything above describes the **default** trigger: motion plus a small object
+detector, tuned for security cameras. That is the right default because most
+cameras are CCTV and "did a person/vehicle appear?" is the question. But object
+detection must not be *baked in* as the only way to wake Tier 1 — that would
+quietly turn OpenNVR into Frigate (a fixed object pipeline) and throw away its
+defining property: **any model, behind the governed adapter contract, discovered
+in the registry, exported as a skill.**
+
+So the real abstraction of compute-gated inference is not "object detection gates
+things." It is:
+
+> a cheap, always-on **trigger signal** -> a gate decision -> invoke a registered
+> **expensive model** -> governed, audited result on the bus.
+
+Object motion is one *instance* of the cheap trigger. The trigger is itself a
+pluggable capability, declared by the model's adapter (the same
+`CapabilitiesResponse` that already carries `InputSpec` / `DetectorSpec` /
+`Accelerator`). A model declares **what wakes it** via a `TriggerPolicy`:
+
+| `TriggerPolicy` | Cheap Tier-0 signal | Example domain |
+|---|---|---|
+| `motion` (default) | object motion + small detector | security / CCTV |
+| `scene_change` | frame-delta / contour change | microscopy, structural change |
+| `interval` | a schedule (every N min/hours) | crop / vegetation survey, time-lapse |
+| `field_statistic` | diffuse-motion / brightness / texture statistic | wind, rain, fog, smoke |
+| `chained` | another cheap model's output | "maybe-interesting" -> confirm |
+| `always` | never gate (run every frame) | domains that require it |
+
+The gate is written against `TriggerPolicy`, **not** against "motion." It never
+needs to know the *domain* — it maps whichever cheap trigger fired to whichever
+registered model should run, then publishes that model's result to the audited
+bus for the camera-agent and other consumers to act on. Microscope data,
+wind/rain patterns, contour change, and crop surveys are all the *same shape*:
+
+```
+  cheap always-on TRIGGER  ->  GATE (policy)  ->  registered EXPENSIVE model  ->  audited bus -> agent acts
+```
+
+This is exactly the axis Frigate cannot follow: its triggers *and* its detectors
+are a fixed object-detection set. OpenNVR's gate stays model-agnostic because the
+trigger is a declared capability, not a hardcoded assumption.
+
+**State today / design obligation.** Tier 0 ships one trigger — `motion` plus
+object detection (the CCTV default). PR B's gate MUST be authored against the
+`TriggerPolicy` interface rather than hardcoding motion, and the contract needs a
+`TriggerPolicy` field alongside `DetectorSpec`. If PR B hardcodes
+"motion -> object," it re-narrows OpenNVR into an object NVR — the one outcome to
+avoid. The non-object trigger *signals* themselves (`scene_change`,
+`field_statistic`, ...) are follow-ups; naming the abstraction now is what keeps
+the door open.
+
+
 ## Controls that enforce "never miss a critical event"
 
 | Control | Guarantee it provides |
