@@ -242,29 +242,28 @@ async def fetch_profiles_digest(
             status_code=status, detail=f"GetProfiles failed: {text[:500]}"
         )
 
-    # Parse profiles
+    # Parse profiles. Be tolerant of the two things ONVIF vendors vary:
+    #   * the XML namespace PREFIX (trt:/tt: on Hikvision; other vendors differ),
+    #   * ATTRIBUTE ORDER — Hikvision emits <Profiles token="..">, but Secureye/
+    #     Tiandy emits <Profiles fixed="true" token="..">, so ``token`` is not
+    #     always the first attribute. A regex that assumed either produced zero
+    #     profiles on the other vendor.
     profiles = []
-    # Find all profile blocks
-    profile_pattern = r'<trt:Profiles\s+token="([^"]+)"[^>]*>.*?<tt:Name>([^<]+)</tt:Name>.*?</trt:Profiles>'
-    matches = re.findall(profile_pattern, text, re.DOTALL)
+    for m in re.finditer(
+        r"<(?:\w+:)?Profiles\b([^>]*)>(.*?)</(?:\w+:)?Profiles>", text, re.DOTALL
+    ):
+        attrs, block = m.group(1), m.group(2)
+        tok = re.search(r'token="([^"]+)"', attrs)
+        if not tok:
+            continue
+        token = tok.group(1)
+        name_m = re.search(r"<(?:\w+:)?Name>([^<]+)</(?:\w+:)?Name>", block)
+        profile_info = {"token": token, "name": name_m.group(1) if name_m else token}
 
-    for token, name in matches:
-        # Check for video source configuration to determine resolution
-        profile_block_match = re.search(
-            rf'<trt:Profiles\s+token="{re.escape(token)}"[^>]*>.*?</trt:Profiles>',
-            text,
-            re.DOTALL,
-        )
-
-        profile_info = {"token": token, "name": name}
-
-        if profile_block_match:
-            block = profile_block_match.group(0)
-            # Extract video resolution if available
-            bounds_match = re.search(r'width="(\d+)"\s+height="(\d+)"', block)
-            if bounds_match:
-                profile_info["width"] = int(bounds_match.group(1))
-                profile_info["height"] = int(bounds_match.group(2))
+        bounds_match = re.search(r'width="(\d+)"\s+height="(\d+)"', block)
+        if bounds_match:
+            profile_info["width"] = int(bounds_match.group(1))
+            profile_info["height"] = int(bounds_match.group(2))
 
         profiles.append(profile_info)
 
@@ -323,6 +322,29 @@ async def get_stream_uri_digest(
     return uri_match.group(1)
 
 
+# Common ONVIF control ports across vendors (kept in sync with the discovery
+# scan in onvif_service._ONVIF_CANDIDATE_PORTS).
+_ONVIF_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
+
+
+async def resolve_onvif_port(ip: str, port_hint: int = 80) -> int:
+    """Return a port that actually answers ONVIF, trying ``port_hint`` first.
+
+    Uses an unauthenticated GetSystemDateAndTime (which ONVIF devices must serve
+    without credentials). Falls back to ``port_hint`` if nothing answers, so the
+    caller still gets a deterministic value.
+    """
+    candidates = [port_hint] + [p for p in _ONVIF_PORTS if p != port_hint]
+    for p in candidates:
+        try:
+            # Raises unless the port answers ONVIF (HTTP 200/401).
+            await get_system_datetime(ip, p)
+            return p
+        except Exception:
+            continue
+    return port_hint
+
+
 async def connect_and_get_profiles(
     ip: str,
     username: str,
@@ -340,6 +362,12 @@ async def connect_and_get_profiles(
 
     Returns complete device info with profiles and their stream URIs.
     """
+    # Resolve the real ONVIF control port. Cameras serve ONVIF on a range of
+    # ports (Hikvision 80, Secureye/Tiandy 8088, …); the caller often only has
+    # the default 80, so probe candidates and use whichever answers ONVIF. This
+    # makes both discovered and manually-entered cameras connect regardless of
+    # port.
+    port = await resolve_onvif_port(ip, port)
     main_logger.info(f"Connecting to ONVIF device at {ip}:{port}")
 
     # Get device info to validate credentials
