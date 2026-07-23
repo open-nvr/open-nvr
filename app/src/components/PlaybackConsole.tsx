@@ -288,9 +288,24 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
 
       if (browserMp4Url) {
         // Native <video> playback of the server-remuxed hvc1 MP4 (H.265 path).
-        // The endpoint supports HTTP Range, so seeking works normally.
+        // The remuxed file is the WHOLE on-disk segment and the endpoint serves
+        // HTTP Range, so once it's loaded the entire file is natively seekable.
+        // Expand the loaded window to the full duration so every seek within it
+        // is a native ranged seek — NOT a session re-create + full re-download
+        // (which is what made scrubbing re-fetch the whole segment each time).
         el.src = browserMp4Url
-        el.addEventListener('loadedmetadata', startAtOffset, { once: true })
+        el.addEventListener(
+          'loadedmetadata',
+          () => {
+            if (token !== loadTokenRef.current) return
+            loadedClipRef.current = {
+              startMs: windowStartRef.current,
+              endMs: windowStartRef.current + (el.duration || 0) * 1000,
+            }
+            startAtOffset()
+          },
+          { once: true }
+        )
         el.addEventListener(
           'error',
           () => {
