@@ -60,7 +60,8 @@ class CameraProvider(Protocol):
 
 
 class ResultSink(Protocol):
-    def publish(self, camera_id: str, result: FrameResult, frame) -> None:
+    def publish(self, camera_id: str, result: FrameResult, frame) -> bool:
+        """Return True iff an event was actually published (not a no-op frame)."""
         ...
 
 
@@ -150,8 +151,8 @@ class CameraWorker:
                 result = pipe.process_frame(frame)
                 record_frame(self.spec.camera_id, result, latency_s=time.monotonic() - t0)
                 try:
-                    self.sink.publish(self.spec.camera_id, result, frame)
-                    record_published(self.spec.camera_id)
+                    if self.sink.publish(self.spec.camera_id, result, frame):
+                        record_published(self.spec.camera_id)   # count real publishes only
                 except Exception:
                     log.debug("tier0 %s: sink error", self.spec.camera_id, exc_info=True)
                 if self.gate is not None:

@@ -58,11 +58,14 @@ class EventSink:
         # empty results would be pure noise on the bus.
         self.publish_empty = publish_empty
 
-    def publish(self, camera_id: str, result: FrameResult, frame) -> None:
+    def publish(self, camera_id: str, result: FrameResult, frame) -> bool:
+        """Publish the frame's detections. Returns True iff something was actually
+        put on the bus (so callers can count *real* events, not no-op frames)."""
         if not result.tracks and not self.publish_empty:
-            return
+            return False
         payload = build_payload(camera_id, result, frame)
         self._publish(subject_for(camera_id), json.dumps(payload).encode("utf-8"))
+        return True
 
 
 # ─────────────────────── gate decisions (PR B) ───────────────────────

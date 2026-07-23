@@ -53,6 +53,16 @@ def test_sink_skips_empty_by_default_but_can_publish_them():
     assert sent == [1]                                  # opt-in publishes empties
 
 
+def test_sink_publish_returns_whether_it_actually_published():
+    # the return value is what lets the worker count *real* events, not no-op
+    # frames (else tier0_events_published_total over-counts on quiet cameras).
+    sink = EventSink(lambda s, d: None)
+    assert sink.publish("c", FrameResult(tracks=[]), _frame()) is False
+    assert sink.publish("c", FrameResult(tracks=[_track()]), _frame()) is True
+    assert EventSink(lambda s, d: None, publish_empty=True).publish(
+        "c", FrameResult(tracks=[]), _frame()) is True
+
+
 # ── HttpCameraProvider ──────────────────────────────────────────────
 
 class _FakeResp(io.BytesIO):
