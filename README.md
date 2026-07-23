@@ -1,8 +1,12 @@
 <div align="center">
 
-<img src=".github/opennvr-logo.svg" alt="OpenNVR" width="300" />
+<img src=".github/opennvr-logo.svg" alt="OpenNVR — open-source self-hosted AI NVR for IP cameras" width="300" />
+
+# OpenNVR — open-source, self-hosted NVR with AI you control
 
 ### Cameras are everywhere. Almost none of them are yours.
+
+**A self-hosted, offline-first network video recorder for ONVIF/RTSP IP cameras, with a pluggable AI platform. Runs on Docker — a laptop, a Raspberry Pi, or an air-gapped server.**
 
 OpenNVR™ is the open, sovereign platform for recording your cameras and running AI on them — entirely on hardware you own, with **AI you choose and control**. No vendor cloud holds your footage or watches it for you. Air-gapped by default, an audit trail you can hand to a regulator. From a homelab doorbell that never phones home, to a laptop you spin it up on in a minute, to the air-gapped government site that legally cannot use anything else.
 
@@ -13,13 +17,9 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 
 [Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.17261761)
 
-<!--
-  HERO DEMO — highest-leverage asset for stars. Record a ~15–25s GIF of the
-  camera-agent answering a question about a live camera, save it as
-  .github/demo-agent.gif, then uncomment the line below. Shot list: see the
-  launch notes. Until then this stays a comment so nothing renders broken.
--->
-<!-- <img src=".github/demo-agent.gif" alt="Ask your cameras a question — answered locally" width="760" /> -->
+<a href="https://opennvr.org/camera-agent">
+  <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
+</a>
 
 </div>
 
