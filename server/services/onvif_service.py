@@ -178,7 +178,12 @@ _SOAP_ENVELOPE = """\
   </soap:Body>
 </soap:Envelope>"""
 
-_ONVIF_CANDIDATE_PORTS = (80,)
+# Cameras serve the ONVIF device service on a range of HTTP ports, not just 80.
+# The unicast subnet scan is the only discovery path that works in Docker bridge
+# mode (WS-Discovery multicast does not cross the bridge), so it must cover the
+# common ones or HTTPS-only / alt-port cameras are simply never found. Verified
+# examples: Hikvision → 80, Secureye/Sparsh (Tiandy OEM) → 8088.
+_ONVIF_CANDIDATE_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
 
 
 async def probe_onvif_device(
