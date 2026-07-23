@@ -229,3 +229,38 @@ by default.
 documented, reproducible benchmark producing a **baseline-vs-gated** table on real
 Pi 5 / N100 hardware; no invented figures. Feeds both product observability and
 the Paper 01 evaluation + the hardware deployment guides.
+
+---
+
+## 10. Tier-1 dispatch — close the loop (run the expensive model on escalations)
+
+**The gap.** PR B's gate *decides* which tracks are worth the expensive tier and
+*audits* every decision, but it does **not** run anything. Even in `enforce`,
+`GateResult.to_dispatch()` returns the escalations and nobody consumes them — so
+today the gate emits decisions + audit records, and no VLM/face/plate is actually
+invoked. This is the piece that turns "measured savings" into *delivered* savings.
+(Deliberately out of PR B — it crosses the detect-pipeline↔KAI-C boundary and
+needs the best-frame pixels; PR B is the decision + audit + measurement layer.)
+
+**Scope.**
+- A consumer (in KAI-C, or a small dispatcher) subscribes to gate escalations on
+  `opennvr.inference.tier0.<camera>.gate` (`escalate: true`), and for each one runs
+  the declared **expensive adapter** (VLM caption / face / plate) **through KAI-C**
+  — governed, sovereignty-checked, audited — **once, on the best frame**, then
+  publishes the Tier-1 result to the bus for the camera-agent/apps.
+- **Best-frame pixel handoff (the real design piece):** Tier-0 already picks the
+  best frame per track (`track.best`, a `ThumbCandidate` = label/box/score) but does
+  **not** retain the *pixels*. Closing the loop needs the actual best-frame image
+  (or a reference/URI to it) for the escalated track — align with KAI-C's existing
+  frame-slicer / `opennvr://` RAM-disk URIs so the crop is passed, not the whole
+  frame, and nothing extra is decoded.
+- Only in `enforce` mode; `shadow`/`off` dispatch nothing (unchanged).
+- Rate-limiting is already handled by the gate's cooldown — the dispatcher just
+  acts on escalations as they arrive.
+
+**Acceptance.** In `enforce`, a gate escalation causes exactly one governed,
+audited run of the declared expensive adapter on the best crop via KAI-C, and the
+result lands on the bus; `shadow`/`off` still run zero expensive inferences. This
+completes the end-to-end flow drawn in `docs/design/compute-gated-inference.md` /
+the architecture diagram (Gate → expensive models → results), of which PR B ships
+the Gate + audit + measurement.
