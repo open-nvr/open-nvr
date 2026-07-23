@@ -218,16 +218,45 @@ async def probe_onvif_device(
     return None
 
 
+async def _tcp_open(ip: str, port: int, timeout: float = 0.5) -> bool:
+    """Cheap liveness check: can we open a TCP connection to ip:port?
+
+    A full ONVIF SOAP probe is expensive (creates an HTTP client, sends a
+    request, waits on a slow TLS handshake for https). On a /24, ~250 of the
+    254 addresses have nothing listening, so doing the SOAP probe for every
+    host×port×scheme exhausts connections/conntrack and makes real cameras get
+    missed (they lose the race once resources are saturated). Gating on a
+    millisecond-cheap TCP connect first means only OPEN ports pay the ONVIF cost.
+    """
+    writer = None
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+
 async def scan_onvif_subnet(
     cidr: str,
     ports: tuple[int, ...] = _ONVIF_CANDIDATE_PORTS,
-    concurrency: int = 64,
+    concurrency: int = 128,
 ) -> list[dict[str, Any]]:
     """Scan a CIDR for ONVIF devices using unicast TCP probes.
 
-    Works across Docker bridge SNAT — no multicast required.  Probes each
-    host across candidate ports concurrently.  Returns a list of device dicts
-    with the same {ip, service_urls} shape as discover_onvif_devices().
+    Works across Docker bridge SNAT — no multicast required. Each host×port is
+    first checked with a cheap TCP connect; only OPEN ports get the full ONVIF
+    probe (http then https), so the scan stays fast and — crucially — doesn't
+    saturate connections/conntrack, which previously caused real cameras on
+    later addresses/ports (e.g. an ONVIF camera on 8088) to be missed. Returns a
+    list of device dicts with the {ip, scheme, service_urls} shape.
     """
     try:
         network = ipaddress.ip_network(cidr, strict=False)
@@ -236,19 +265,22 @@ async def scan_onvif_subnet(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def _bounded_probe(
-        ip_str: str, port: int, scheme: str
-    ) -> dict[str, Any] | None:
+    async def _bounded_probe(ip_str: str, port: int) -> dict[str, Any] | None:
         async with sem:
-            return await probe_onvif_device(ip_str, port, scheme=scheme)
+            if not await _tcp_open(ip_str, port):
+                return None  # nothing listening — skip the expensive ONVIF probe
+            # Port is open (rare): a real ONVIF probe is affordable, and we can
+            # try both schemes so a TLS-only control API is still discovered.
+            for scheme in ("http", "https"):
+                dev = await probe_onvif_device(ip_str, port, timeout=2.0, scheme=scheme)
+                if dev:
+                    return dev
+            return None
 
-    # Probe http first, then https, per host/port so common (http) cameras hit
-    # first and TLS-only devices are still found. Dedup by IP keeps one per host.
     tasks = [
-        _bounded_probe(str(host), port, scheme)
+        _bounded_probe(str(host), port)
         for host in network.hosts()
         for port in ports
-        for scheme in ("http", "https")
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)

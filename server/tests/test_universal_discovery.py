@@ -92,6 +92,36 @@ async def test_resolve_control_endpoint_trusts_hint_first(monkeypatch):
     assert tried[0] == ("https", 8088)
 
 
+@pytest.mark.asyncio
+async def test_subnet_scan_gates_onvif_probe_on_tcp_precheck(monkeypatch):
+    """Regression: the /24 scan must TCP-precheck each host:port and only run the
+    expensive ONVIF probe on OPEN ports — otherwise thousands of dead-IP SOAP
+    probes saturate connections and real cameras (e.g. one on 8088) get missed."""
+    from services import onvif_service as osvc
+
+    probed: list[tuple[str, int]] = []
+    open_ports = {("192.168.1.108", 8088)}  # only this host:port is "open"
+
+    async def fake_tcp_open(ip, port, timeout=0.5):
+        return (ip, port) in open_ports
+
+    async def fake_probe(ip, port, timeout=0.5, scheme="http"):
+        probed.append((ip, port))
+        if (ip, port) in open_ports and scheme == "http":
+            return {"ip": ip, "port": port, "scheme": scheme,
+                    "service_urls": [f"http://{ip}:{port}/onvif/device_service"]}
+        return None
+
+    monkeypatch.setattr(osvc, "_tcp_open", fake_tcp_open)
+    monkeypatch.setattr(osvc, "probe_onvif_device", fake_probe)
+
+    devices = await osvc.scan_onvif_subnet("192.168.1.104/29")
+    assert devices == [{"ip": "192.168.1.108", "scheme": "http",
+                        "service_urls": ["http://192.168.1.108:8088/onvif/device_service"]}]
+    # The ONVIF probe ran ONLY for the open port, never for the dead IPs.
+    assert all(p == ("192.168.1.108", 8088) for p in probed)
+
+
 def test_single_unified_port_list():
     """PTZ and the source resolver must not carry their own port lists — they
     route through the shared resolver (regression guard for the fragmentation
