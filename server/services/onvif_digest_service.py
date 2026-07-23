@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -92,7 +92,9 @@ async def _onvif_request(
     if username and password:
         auth = httpx.DigestAuth(username, password)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # verify=False: cameras use self-signed certs on the LAN; the whole point of
+    # supporting https here is reaching devices whose control API is TLS-only.
+    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             response = await client.post(
                 url, content=envelope, headers=headers, auth=auth
@@ -126,18 +128,24 @@ def _extract_path(url: str) -> str:
     return parsed.path or "/"
 
 
+def _device_url(ip: str, port: int, scheme: str = "http") -> str:
+    """Build the ONVIF device_service URL for a given scheme (http/https)."""
+    return f"{scheme}://{ip}:{port}/onvif/device_service"
+
+
 async def get_device_info(
     ip: str,
     username: str,
     password: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     """
     Get device information from ONVIF device.
 
     Returns device manufacturer, model, firmware version, etc.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = _device_url(ip, port, scheme)
     body = "<tds:GetDeviceInformation/>"
 
     status, text = await _onvif_request(url, body, username, password)
@@ -172,13 +180,14 @@ async def get_capabilities(
     username: str,
     password: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> dict[str, str]:
     """
     Get device capabilities and service endpoints.
 
     Returns dict of service name -> XAddr URL.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = _device_url(ip, port, scheme)
     body = "<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>"
 
     status, text = await _onvif_request(url, body, username, password)
@@ -194,11 +203,74 @@ async def get_capabilities(
 
     # Extract service XAddrs
     services = {}
-    for service in ["Device", "Media", "PTZ", "Events", "Imaging"]:
+    for service in ["Device", "Media", "PTZ", "Events", "Imaging", "Analytics"]:
         xaddr = _extract_xaddr(text, service)
         if xaddr:
             services[service.lower()] = xaddr
 
+    return services
+
+
+# GetServices returns the FULL service list (including ver20 media2 and
+# analytics) that GetCapabilities (ver10) omits — this is what lets the baseline
+# driver discover OSD (media2), analytics rules, recording, etc. on any camera.
+_SERVICE_NS_MAP = {
+    "http://www.onvif.org/ver10/device/wsdl": "device",
+    "http://www.onvif.org/ver10/media/wsdl": "media",
+    "http://www.onvif.org/ver20/media/wsdl": "media2",
+    "http://www.onvif.org/ver20/imaging/wsdl": "imaging",
+    "http://www.onvif.org/ver20/ptz/wsdl": "ptz",
+    "http://www.onvif.org/ver10/events/wsdl": "events",
+    "http://www.onvif.org/ver20/analytics/wsdl": "analytics",
+    "http://www.onvif.org/ver10/recording/wsdl": "recording",
+    "http://www.onvif.org/ver10/replay/wsdl": "replay",
+    "http://www.onvif.org/ver10/search/wsdl": "search",
+}
+
+
+async def get_services(
+    ip: str,
+    username: str,
+    password: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> dict[str, str]:
+    """Return a map of {short_service_name: XAddr} via ONVIF GetServices.
+
+    Falls back to GetCapabilities on any failure, so a camera that only
+    implements the older call still yields the services it does advertise.
+    """
+    url = _device_url(ip, port, scheme)
+    body = (
+        "<tds:GetServices><tds:IncludeCapability>false"
+        "</tds:IncludeCapability></tds:GetServices>"
+    )
+    try:
+        status, text = await _onvif_request(url, body, username, password)
+    except Exception:
+        status, text = 0, ""
+
+    services: dict[str, str] = {}
+    if status == 200 and text:
+        # Each <tds:Service> pairs a <tds:Namespace> with a <tds:XAddr>. Be
+        # namespace-prefix tolerant (vendors vary tds:/ter:/no-prefix).
+        for m in re.finditer(
+            r"<(?:\w+:)?Service\b[^>]*>(.*?)</(?:\w+:)?Service>", text, re.DOTALL
+        ):
+            block = m.group(1)
+            ns_m = re.search(r"<(?:\w+:)?Namespace>([^<]+)</(?:\w+:)?Namespace>", block)
+            xa_m = re.search(r"<(?:\w+:)?XAddr>([^<]+)</(?:\w+:)?XAddr>", block)
+            if ns_m and xa_m:
+                key = _SERVICE_NS_MAP.get(ns_m.group(1).strip())
+                if key:
+                    services[key] = xa_m.group(1).strip()
+
+    if not services:
+        # Fallback: older GetCapabilities (no media2/analytics granularity).
+        try:
+            services = await get_capabilities(ip, username, password, port, scheme)
+        except Exception:
+            services = {}
     return services
 
 
@@ -207,6 +279,7 @@ async def fetch_profiles_digest(
     username: str,
     password: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> list[dict[str, Any]]:
     """
     Get media profiles from ONVIF device using HTTP Digest auth.
@@ -215,14 +288,14 @@ async def fetch_profiles_digest(
     """
     # First get the media service URL
     try:
-        capabilities = await get_capabilities(ip, username, password, port)
+        capabilities = await get_capabilities(ip, username, password, port, scheme)
         media_url = capabilities.get("media")
         if not media_url:
             # Fallback to common Hikvision path
-            media_url = f"http://{ip}:{port}/onvif/media_service"
+            media_url = f"{scheme}://{ip}:{port}/onvif/media_service"
     except Exception:
         # Fallback to common Hikvision path
-        media_url = f"http://{ip}:{port}/onvif/media_service"
+        media_url = f"{scheme}://{ip}:{port}/onvif/media_service"
 
     body = "<trt:GetProfiles/>"
     status, text = await _onvif_request(media_url, body, username, password)
@@ -233,7 +306,7 @@ async def fetch_profiles_digest(
         )
     if status == 404:
         # Try alternate path
-        alt_url = f"http://{ip}:{port}/onvif/Media"
+        alt_url = f"{scheme}://{ip}:{port}/onvif/Media"
         status, text = await _onvif_request(alt_url, body, username, password)
         if status != 200:
             raise HTTPException(status_code=404, detail="Media service not found")
@@ -276,6 +349,7 @@ async def get_stream_uri_digest(
     password: str,
     profile_token: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> str:
     """
     Get RTSP stream URI for a profile using HTTP Digest auth.
@@ -284,12 +358,12 @@ async def get_stream_uri_digest(
     """
     # Get media service URL
     try:
-        capabilities = await get_capabilities(ip, username, password, port)
+        capabilities = await get_capabilities(ip, username, password, port, scheme)
         media_url = capabilities.get("media")
         if not media_url:
-            media_url = f"http://{ip}:{port}/onvif/media_service"
+            media_url = f"{scheme}://{ip}:{port}/onvif/media_service"
     except Exception:
-        media_url = f"http://{ip}:{port}/onvif/media_service"
+        media_url = f"{scheme}://{ip}:{port}/onvif/media_service"
 
     body = f"""<trt:GetStreamUri>
       <trt:StreamSetup>
@@ -307,7 +381,7 @@ async def get_stream_uri_digest(
         raise HTTPException(status_code=401, detail="Authentication failed")
     if status == 404:
         # Try alternate path
-        alt_url = f"http://{ip}:{port}/onvif/Media"
+        alt_url = f"{scheme}://{ip}:{port}/onvif/Media"
         status, text = await _onvif_request(alt_url, body, username, password)
     if status != 200:
         raise HTTPException(
@@ -323,26 +397,60 @@ async def get_stream_uri_digest(
 
 
 # Common ONVIF control ports across vendors (kept in sync with the discovery
-# scan in onvif_service._ONVIF_CANDIDATE_PORTS).
-ONVIF_CANDIDATE_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
+# scan in onvif_service._ONVIF_CANDIDATE_PORTS). 443/8443 are included so a
+# camera that serves ONVIF over TLS only is still resolved (each port is probed
+# http-then-https, so plain-HTTP cameras still hit on the first try).
+ONVIF_CANDIDATE_PORTS = (80, 8000, 8080, 8088, 2020, 8899, 443, 8443)
+
+
+async def resolve_control_endpoint(
+    ip: str,
+    port_hint: int | None = None,
+    scheme_hint: str | None = None,
+) -> tuple[str, int]:
+    """Return ``(scheme, port)`` that actually answers ONVIF, any port, http or https.
+
+    Probes an unauthenticated GetSystemDateAndTime (which ONVIF devices serve
+    without credentials) across the unified candidate ports, trying HTTP first
+    for speed and HTTPS as a fallback (some cameras serve ONVIF over TLS only).
+    A ``(scheme_hint, port_hint)`` that verifies is returned immediately so a
+    once-resolved endpoint is trusted without a full re-scan.
+
+    Falls back to the hints (or http/80) if nothing answers, so the caller
+    always gets a deterministic value.
+    """
+    # 1) trust a verified hint first (cheapest path for a known camera).
+    if port_hint:
+        for s in ([scheme_hint] if scheme_hint else []) + ["http", "https"]:
+            if not s:
+                continue
+            try:
+                await get_system_datetime(ip, port_hint, scheme=s, timeout=4.0)
+                return s, port_hint
+            except Exception:
+                continue
+
+    # 2) scan candidate ports; http then https per port so the common (http)
+    #    camera resolves on the first hit and only TLS-only devices pay for a
+    #    handshake.
+    ports = list(ONVIF_CANDIDATE_PORTS)
+    if port_hint and port_hint not in ports:
+        ports.insert(0, port_hint)
+    schemes = ["https", "http"] if scheme_hint == "https" else ["http", "https"]
+    for p in ports:
+        for s in schemes:
+            try:
+                await get_system_datetime(ip, p, scheme=s, timeout=4.0)
+                return s, p
+            except Exception:
+                continue
+    return (scheme_hint or "http"), (port_hint or 80)
 
 
 async def resolve_onvif_port(ip: str, port_hint: int = 80) -> int:
-    """Return a port that actually answers ONVIF, trying ``port_hint`` first.
-
-    Uses an unauthenticated GetSystemDateAndTime (which ONVIF devices must serve
-    without credentials). Falls back to ``port_hint`` if nothing answers, so the
-    caller still gets a deterministic value.
-    """
-    candidates = [port_hint] + [p for p in ONVIF_CANDIDATE_PORTS if p != port_hint]
-    for p in candidates:
-        try:
-            # Raises unless the port answers ONVIF (HTTP 200/401).
-            await get_system_datetime(ip, p)
-            return p
-        except Exception:
-            continue
-    return port_hint
+    """Back-compat shim: resolve only the port (scheme via the newer helper)."""
+    _, port = await resolve_control_endpoint(ip, port_hint)
+    return port
 
 
 async def connect_and_get_profiles(
@@ -350,6 +458,7 @@ async def connect_and_get_profiles(
     username: str,
     password: str,
     port: int = 80,
+    scheme: str | None = None,
 ) -> dict[str, Any]:
     """
     Connect to ONVIF device and get all profiles with stream URIs.
@@ -360,19 +469,20 @@ async def connect_and_get_profiles(
     3. Gets all profiles
     4. Gets stream URI for each profile
 
-    Returns complete device info with profiles and their stream URIs.
+    Returns complete device info with profiles and their stream URIs
+    (including the resolved ``scheme``).
     """
-    # Resolve the real ONVIF control port. Cameras serve ONVIF on a range of
-    # ports (Hikvision 80, Secureye/Tiandy 8088, …); the caller often only has
-    # the default 80, so probe candidates and use whichever answers ONVIF. This
-    # makes both discovered and manually-entered cameras connect regardless of
-    # port.
-    port = await resolve_onvif_port(ip, port)
-    main_logger.info(f"Connecting to ONVIF device at {ip}:{port}")
+    # Resolve the real ONVIF control endpoint. Cameras serve ONVIF on a range of
+    # ports (Hikvision 80, Secureye/Tiandy 8088, …) and either scheme (http or,
+    # for TLS-only devices, https); the caller often only has the default 80, so
+    # probe candidates and use whichever answers ONVIF. This makes both
+    # discovered and manually-entered cameras connect regardless of port/scheme.
+    scheme, port = await resolve_control_endpoint(ip, port, scheme)
+    main_logger.info(f"Connecting to ONVIF device at {scheme}://{ip}:{port}")
 
     # Get device info to validate credentials
     try:
-        device_info = await get_device_info(ip, username, password, port)
+        device_info = await get_device_info(ip, username, password, port, scheme)
     except HTTPException as e:
         if e.status_code == 401:
             raise
@@ -380,14 +490,14 @@ async def connect_and_get_profiles(
         device_info = {"manufacturer": "Unknown", "model": "Unknown"}
 
     # Get profiles
-    profiles = await fetch_profiles_digest(ip, username, password, port)
+    profiles = await fetch_profiles_digest(ip, username, password, port, scheme)
 
     # Get stream URI for each profile
     profiles_with_uri = []
     for profile in profiles:
         try:
             uri = await get_stream_uri_digest(
-                ip, username, password, profile["token"], port
+                ip, username, password, profile["token"], port, scheme
             )
             profile["stream_uri"] = uri
         except Exception as e:
@@ -400,6 +510,7 @@ async def connect_and_get_profiles(
     return {
         "ip": ip,
         "port": port,
+        "scheme": scheme,
         "device_info": device_info,
         "profiles": profiles_with_uri,
     }
@@ -413,14 +524,15 @@ async def get_ptz_service_url(
     username: str,
     password: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> str | None:
     """Get PTZ service URL from device capabilities."""
     try:
-        capabilities = await get_capabilities(ip, username, password, port)
+        capabilities = await get_capabilities(ip, username, password, port, scheme)
         return capabilities.get("ptz")
     except Exception:
         # Fallback to common paths
-        return f"http://{ip}:{port}/onvif/ptz_service"
+        return f"{scheme}://{ip}:{port}/onvif/ptz_service"
 
 
 async def ptz_continuous_move_digest(
@@ -432,9 +544,10 @@ async def ptz_continuous_move_digest(
     y: float,
     z: float,
     port: int = 80,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     """PTZ continuous move using HTTP Digest auth."""
-    ptz_url = await get_ptz_service_url(ip, username, password, port)
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
         raise HTTPException(status_code=404, detail="PTZ service not available")
 
@@ -460,9 +573,10 @@ async def ptz_stop_digest(
     password: str,
     profile_token: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     """PTZ stop using HTTP Digest auth."""
-    ptz_url = await get_ptz_service_url(ip, username, password, port)
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
     if not ptz_url:
         raise HTTPException(status_code=404, detail="PTZ service not available")
 
@@ -483,14 +597,20 @@ async def ptz_stop_digest(
 async def get_system_datetime(
     ip: str,
     port: int = 80,
+    scheme: str = "http",
+    timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Read the camera clock via GetSystemDateAndTime (no auth needed).
 
     Returns a dict with utc_datetime (ISO string) and camera_timezone if present.
+    Also the ONVIF-presence probe used by ``resolve_control_endpoint`` — a short
+    ``timeout`` keeps scheme/port scanning responsive.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = _device_url(ip, port, scheme)
     body = "<tds:GetSystemDateAndTime/>"
-    status, text = await _onvif_request(url, body, username=None, password=None)
+    status, text = await _onvif_request(
+        url, body, username=None, password=None, timeout=timeout
+    )
 
     if status not in (200, 401):
         raise HTTPException(
@@ -542,12 +662,13 @@ async def set_system_datetime(
     username: str,
     password: str,
     port: int = 80,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     """Push the NVR's current UTC clock to the camera via SetSystemDateAndTime.
 
     Uses Manual DateTimeType with the NVR's UTC time. Requires auth.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = _device_url(ip, port, scheme)
     now = datetime.now(UTC)
 
     body = f"""<tds:SetSystemDateAndTime>

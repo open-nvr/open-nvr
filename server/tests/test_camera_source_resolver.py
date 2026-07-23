@@ -82,11 +82,12 @@ def test_inject_credentials_fixes_bare_manual_url():
 
 @pytest.mark.asyncio
 async def test_resolve_via_onvif_unescapes_and_injects(monkeypatch):
-    async def fake_connect(ip, u, p, port):
-        # Only port 80 answers; returns an XML-escaped URI (as real cameras do).
-        if port != 80:
-            raise Exception("refused")
+    async def fake_connect(ip, u, p, port=None, scheme=None):
+        # connect_and_get_profiles self-resolves the endpoint; returns an
+        # XML-escaped URI (as real cameras do) plus the resolved port/scheme.
         return {
+            "port": 80,
+            "scheme": "http",
             "device_info": {
                 "manufacturer": "HIKVISION", "model": "DS-2CD204WFWD-I",
                 "firmwareversion": "V5.5.61", "serialnumber": "SN123", "hardwareid": "88",
@@ -140,10 +141,10 @@ async def test_resolve_returns_none_when_nothing_works(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_identity_returns_device_info(monkeypatch):
-    async def fake_connect(ip, u, p, port):
-        if port != 80:
-            raise Exception("refused")
+    async def fake_connect(ip, u, p, port=None, scheme=None):
         return {
+            "port": 80,
+            "scheme": "http",
             "device_info": {
                 "manufacturer": "HIKVISION", "model": "DS-2CD204WFWD-I",
                 "firmwareversion": "V5.5.61", "serialnumber": "SN123", "hardwareid": "88",
@@ -157,6 +158,7 @@ async def test_fetch_identity_returns_device_info(monkeypatch):
     assert r["model"] == "DS-2CD204WFWD-I"
     assert r["serial_number"] == "SN123"
     assert r["onvif_port"] == 80  # reused by the caller for time-sync
+    assert r["control_scheme"] == "http"
 
 
 @pytest.mark.asyncio
@@ -169,39 +171,51 @@ async def test_fetch_identity_returns_none_when_no_onvif(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sync_camera_time_uses_preferred_port(monkeypatch):
+async def test_sync_camera_time_uses_preferred_endpoint(monkeypatch):
     calls = []
 
-    async def fake_set(ip, u, p, port):
-        calls.append(port)
+    async def fake_resolve(ip, port_hint=None, scheme_hint=None):
+        return (scheme_hint or "http", port_hint or 80)
+
+    async def fake_set(ip, u, p, port, scheme="http"):
+        calls.append((port, scheme))
         return {"synced_utc": "2026-07-05T00:00:00Z"}
 
+    monkeypatch.setattr(ods, "resolve_control_endpoint", fake_resolve)
     monkeypatch.setattr(ods, "set_system_datetime", fake_set)
-    ok = await sync_camera_time("10.0.0.5", "admin", "pw", onvif_port=8000)
+    ok = await sync_camera_time(
+        "10.0.0.5", "admin", "pw", onvif_port=8000, control_scheme="http"
+    )
     assert ok is True
-    assert calls == [8000]  # only the known-good port is tried, no re-probe
+    assert calls == [(8000, "http")]  # the persisted endpoint is trusted
 
 
 @pytest.mark.asyncio
-async def test_sync_camera_time_probes_ports_when_none_given(monkeypatch):
+async def test_sync_camera_time_resolves_endpoint_when_none_given(monkeypatch):
     calls = []
 
-    async def fake_set(ip, u, p, port):
-        calls.append(port)
-        if port != 80:
-            raise Exception("refused")
+    async def fake_resolve(ip, port_hint=None, scheme_hint=None):
+        return ("http", 80)  # shared resolver finds the endpoint
+
+    async def fake_set(ip, u, p, port, scheme="http"):
+        calls.append((port, scheme))
         return {}
 
+    monkeypatch.setattr(ods, "resolve_control_endpoint", fake_resolve)
     monkeypatch.setattr(ods, "set_system_datetime", fake_set)
     ok = await sync_camera_time("10.0.0.5", "admin", "pw")
     assert ok is True
-    assert calls[0] == 80  # first candidate port answers
+    assert calls[0] == (80, "http")
 
 
 @pytest.mark.asyncio
 async def test_sync_camera_time_returns_false_and_never_raises(monkeypatch):
-    async def fake_set(ip, u, p, port):
+    async def fake_resolve(ip, port_hint=None, scheme_hint=None):
+        return ("http", 80)
+
+    async def fake_set(ip, u, p, port, scheme="http"):
         raise Exception("unreachable")
 
+    monkeypatch.setattr(ods, "resolve_control_endpoint", fake_resolve)
     monkeypatch.setattr(ods, "set_system_datetime", fake_set)
     assert await sync_camera_time("10.0.0.5", "admin", "pw") is False

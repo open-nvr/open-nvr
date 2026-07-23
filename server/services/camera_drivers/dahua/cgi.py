@@ -39,6 +39,7 @@ async def dahua_request(
     *,
     method: str = "GET",
     port: int = 80,
+    scheme: str = "http",
     params: dict[str, str] | None = None,
     timeout: float = 15.0,
 ) -> tuple[int, str]:
@@ -48,11 +49,12 @@ async def dahua_request(
     keys (``VideoWidget[0].TimeTitle.EncodeBlend``) are encoded correctly.
     Returns ``(status_code, response_text)``; raises HTTPException only on
     transport failure (timeout / connection refused), matching the ISAPI
-    primitive's contract so drivers handle both the same way.
+    primitive's contract so drivers handle both the same way. ``verify=False``
+    for self-signed camera certs.
     """
-    url = f"http://{ip}:{port}{path}"
+    url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(method, url, params=params, auth=auth)
             return resp.status_code, resp.text

@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -185,19 +185,20 @@ _SOAP_ENVELOPE = """\
 </soap:Envelope>"""
 
 async def probe_onvif_device(
-    ip: str, port: int = 80, timeout: float = 0.5
+    ip: str, port: int = 80, timeout: float = 0.5, scheme: str = "http"
 ) -> dict[str, Any] | None:
     """Probe a single IP:port for an ONVIF device service (no auth needed).
 
     Sends unauthenticated GetSystemDateAndTime — the one ONVIF operation
     cameras must answer without credentials.  Returns a device dict on hit,
-    None on miss / timeout.
+    None on miss / timeout.  ``verify=False`` so TLS-only cameras (self-signed
+    certs) are discovered too.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = f"{scheme}://{ip}:{port}/onvif/device_service"
     envelope = _SOAP_ENVELOPE.format(body=_ONVIF_PROBE_BODY)
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             resp = await client.post(url, content=envelope, headers=headers)
         # A real ONVIF device returns 200 or 401; either confirms ONVIF service presence.
         # A non-ONVIF host typically gives connection refused, 404, or non-XML.
@@ -207,12 +208,13 @@ async def probe_onvif_device(
             return {
                 "ip": ip,
                 "port": port,
+                "scheme": scheme,
                 "service_urls": [url],
             }
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         pass
     except Exception as exc:
-        main_logger.debug(f"probe_onvif_device {ip}:{port} unexpected: {exc}")
+        main_logger.debug(f"probe_onvif_device {scheme}://{ip}:{port} unexpected: {exc}")
     return None
 
 
@@ -234,26 +236,35 @@ async def scan_onvif_subnet(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def _bounded_probe(ip_str: str, port: int) -> dict[str, Any] | None:
+    async def _bounded_probe(
+        ip_str: str, port: int, scheme: str
+    ) -> dict[str, Any] | None:
         async with sem:
-            return await probe_onvif_device(ip_str, port)
+            return await probe_onvif_device(ip_str, port, scheme=scheme)
 
+    # Probe http first, then https, per host/port so common (http) cameras hit
+    # first and TLS-only devices are still found. Dedup by IP keeps one per host.
     tasks = [
-        _bounded_probe(str(host), port)
+        _bounded_probe(str(host), port, scheme)
         for host in network.hosts()
         for port in ports
+        for scheme in ("http", "https")
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Deduplicate by IP (keep first hit per IP regardless of port)
+    # Deduplicate by IP (keep first hit per IP regardless of port/scheme)
     seen: set[str] = set()
     devices: list[dict[str, Any]] = []
     for r in results:
         if isinstance(r, dict) and r.get("ip") and r["ip"] not in seen:
             seen.add(r["ip"])
-            # Return the expected {ip, service_urls} shape; drop internal port key
-            devices.append({"ip": r["ip"], "service_urls": r["service_urls"]})
+            # Return the {ip, scheme, service_urls} shape; drop internal port key
+            devices.append({
+                "ip": r["ip"],
+                "scheme": r.get("scheme", "http"),
+                "service_urls": r["service_urls"],
+            })
     return devices
 
 

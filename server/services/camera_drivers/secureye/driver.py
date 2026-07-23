@@ -52,7 +52,6 @@ import socket
 
 from fastapi import HTTPException
 
-from .cgi import cgi_request
 from ..base import (
     Capabilities,
     ImagingInfo,
@@ -67,6 +66,7 @@ from ..base import (
     StorageSlot,
 )
 from ..onvif.driver import OnvifDriver
+from .cgi import cgi_request
 
 _MOTION_PATH = "/ISAPI/System/Video/inputs/channels/1/motionDetection"
 _IPFILTER_PATH = "/ISAPI/System/Network/ipFilter"

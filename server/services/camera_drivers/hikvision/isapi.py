@@ -37,6 +37,7 @@ async def isapi_request(
     *,
     method: str = "GET",
     port: int = 80,
+    scheme: str = "http",
     body: str | None = None,
     timeout: float = 15.0,
 ) -> tuple[int, str]:
@@ -44,12 +45,13 @@ async def isapi_request(
 
     Returns ``(status_code, response_text)``. Raises HTTPException only on
     transport failure (timeout / connection refused), matching the ONVIF
-    primitive's contract so drivers handle both the same way.
+    primitive's contract so drivers handle both the same way. ``verify=False``
+    for self-signed camera certs on the LAN.
     """
-    url = f"http://{ip}:{port}{path}"
+    url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
     headers = {"Content-Type": "application/xml"} if body else {}
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(
                 method, url, content=body, headers=headers, auth=auth

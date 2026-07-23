@@ -347,12 +347,16 @@ class CameraDriver(ABC):
         username: str | None,
         password: str | None,
         http_port: int = 80,
+        scheme: str = "http",
     ) -> None:
         self.camera_id = camera_id
         self.ip = ip
         self.username = username or ""
         self.password = password or ""
         self.http_port = http_port
+        # Control-plane URL scheme ("http" or "https"). Resolved once per camera
+        # and persisted, so a TLS-only device is reached without re-probing.
+        self.scheme = scheme
 
     # --- identity / capability (required) ---
 

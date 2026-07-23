@@ -26,6 +26,8 @@ were verified against a real Hikvision device_service.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import re
 from datetime import UTC, datetime
 
@@ -39,9 +41,15 @@ from ..base import (
     DeviceInfo,
     EncoderInfo,
     ImagingInfo,
+    MotionInfo,
     NetworkInfo,
+    OsdInfo,
+    SmartDetector,
+    SmartInfo,
     StorageInfo,
+    StorageSlot,
     TimeInfo,
+    UsersInfo,
 )
 
 
@@ -118,13 +126,13 @@ class OnvifDriver(CameraDriver):
 
     @property
     def _device_url(self) -> str:
-        return f"http://{self.ip}:{self.http_port}/onvif/device_service"
+        return f"{self.scheme}://{self.ip}:{self.http_port}/onvif/device_service"
 
     # --- identity ---
 
     async def get_info(self) -> DeviceInfo:
         info = await ods.get_device_info(
-            self.ip, self.username, self.password, self.http_port
+            self.ip, self.username, self.password, self.http_port, self.scheme
         )
         return DeviceInfo(
             manufacturer=info.get("manufacturer"),
@@ -137,43 +145,54 @@ class OnvifDriver(CameraDriver):
     # --- capabilities ---
 
     async def get_capabilities(self) -> Capabilities:
-        try:
-            xaddrs = await ods.get_capabilities(
-                self.ip, self.username, self.password, self.http_port
-            )
-        except Exception:
-            xaddrs = {}
+        """Discover what the device advertises via ONVIF GetServices and turn
+        the corresponding capability areas on.
+
+        Unlike the old static baseline, this is dynamic: the same reader methods
+        that the UI calls (get_osd via Media2, get_motion/get_smart via
+        Analytics, subscribe_events via the Events service, get_users/reboot via
+        the Device service) are backed here, so advertising an area does NOT
+        surface a tab that errors — every reader degrades to ``supported=False``
+        data when the device turns out not to implement it. This is what makes
+        "dig out everything" work on ANY ONVIF brand, not just ones with a
+        native driver.
+        """
+        # Populates ``self._caps_raw`` (the GetServices map) without a 2nd call.
+        with contextlib.suppress(Exception):
+            await self._service_urls()
+        xaddrs = getattr(self, "_caps_raw", {}) or {}
         has = lambda k: bool(xaddrs.get(k))  # noqa: E731
+        # Advertisement-based gating: an area is on when the device advertises
+        # the ONVIF service that backs it (and this driver implements a reader
+        # for it). This is a single cheap GetServices call. Each reader degrades
+        # to supported=False data — never raises — so on the rare device that
+        # advertises a service but doesn't really populate it, the tab shows the
+        # frontend's per-area "not available" empty state rather than erroring.
         supported = {
             "info": True,
             "network": True,  # device service — read-only display
             "time": True,  # device service GetSystemDateAndTime
-            "imaging": has("imaging"),
-            "encoder": has("media"),
-            "osd": False,  # baseline OSD not implemented; vendor drivers add it
+            "imaging": has("imaging") or has("media"),
+            "encoder": has("media") or has("media2"),
             "ptz": has("ptz"),
-            # The device advertises an Events endpoint, but this baseline does
-            # not implement subscribe_events() — advertising it would surface a
-            # tab that fails on use. Vendor drivers that DO implement a native
-            # event stream turn this on.
-            "events": False,
-            "motion": False,  # baseline motion not implemented; vendor drivers add it
-            "storage": False,  # not exposed via the ONVIF baseline
-            # Not implemented in the baseline (no get_users override) — a
-            # vendor driver must turn this on. Advertising it here produced an
-            # always-empty Users tab on non-Hikvision/Dahua cameras.
+            "osd": has("media2"),  # OSD get/set via Media2
+            "events": has("events"),  # pull-point subscribe
+            "motion": has("analytics"),  # Analytics cell-motion
+            "smart": has("analytics"),  # Analytics rules (read-only over ONVIF)
+            "storage": has("recording") or has("search"),  # on-camera recordings
+            # SystemReboot is a universal ONVIF device operation.
+            "maintenance": True,
+            # ONVIF GetUsers support is genuinely inconsistent across brands, so
+            # the pure baseline leaves Users off; native drivers that verify it
+            # (Hikvision/Xiongmai/…) turn it on.
             "users": False,
             "audio": False,  # detected in a later phase
-            # No reboot/config-export in the baseline — a vendor driver that
-            # implements them turns this on. Otherwise the tab would offer
-            # buttons that only error.
-            "maintenance": False,
         }
         return Capabilities(
             driver_name=self.driver_name,
             supported_areas=supported,
             onvif_endpoints=xaddrs,
-            detail={},
+            detail={"native_api": "onvif"},
         )
 
     # --- network (read only) ---
@@ -223,12 +242,7 @@ class OnvifDriver(CameraDriver):
 
         return net
 
-    # --- storage (read only) ---
-
-    async def get_storage(self) -> StorageInfo:
-        # The ONVIF baseline does not expose SD health portably; vendor drivers
-        # override this (e.g. Hikvision ISAPI /ContentMgmt/Storage).
-        return StorageInfo(supported=False, source="onvif")
+    # (storage is implemented below via the ONVIF Recording service)
 
     # --- time / NTP (read + write) ---
 
@@ -329,18 +343,28 @@ class OnvifDriver(CameraDriver):
     _IMG_NUMERIC = ("brightness", "contrast", "saturation", "sharpness")
 
     async def _service_urls(self) -> dict[str, str]:
-        """Resolve (and cache) the media + imaging service XAddrs."""
+        """Resolve (and cache) the ONVIF service XAddrs the driver drives.
+
+        Also caches the raw GetServices map in ``self._caps_raw`` so
+        ``get_capabilities`` can gate areas without a second network call.
+        """
         if getattr(self, "_svc", None) is None:
             try:
-                caps = await ods.get_capabilities(
-                    self.ip, self.username, self.password, self.http_port
+                caps = await ods.get_services(
+                    self.ip, self.username, self.password, self.http_port, self.scheme
                 )
             except Exception:
                 caps = {}
-            base = f"http://{self.ip}:{self.http_port}/onvif"
+            self._caps_raw = caps
+            base = f"{self.scheme}://{self.ip}:{self.http_port}/onvif"
             self._svc = {
                 "media": caps.get("media") or f"{base}/Media",
+                "media2": caps.get("media2") or f"{base}/media2_service",
                 "imaging": caps.get("imaging") or f"{base}/Imaging",
+                "events": caps.get("events") or f"{base}/event_service",
+                "analytics": caps.get("analytics") or f"{base}/analytics_service",
+                # No portable default — only present if the camera advertises it.
+                "recording": caps.get("recording"),
             }
         return self._svc
 
@@ -598,3 +622,428 @@ class OnvifDriver(CameraDriver):
         )
         _check_ok(st, tx, "SetVideoEncoderConfiguration")
         return await self.get_encoder()
+
+    # --- OSD via Media2 (read + write) -------------------------------------
+
+    _MEDIA2_NS = "http://www.onvif.org/ver20/media/wsdl"
+
+    async def _get_osds_raw(self) -> tuple[int, str]:
+        urls = await self._service_urls()
+        return await ods._onvif_request(
+            urls["media2"],
+            f'<tr2:GetOSDs xmlns:tr2="{self._MEDIA2_NS}"/>',
+            self.username,
+            self.password,
+        )
+
+    async def get_osd(self) -> OsdInfo:
+        try:
+            st, xml = await self._get_osds_raw()
+        except Exception:
+            return OsdInfo(supported=False, source="onvif")
+        if st != 200 or "OSD" not in xml:
+            return OsdInfo(supported=False, source="onvif")
+        info = OsdInfo(supported=True, source="onvif")
+        slots: list[dict] = []
+        for m in re.finditer(
+            r'<(?:\w+:)?OSDs\b([^>]*)>(.*?)</(?:\w+:)?OSDs>', xml, re.DOTALL
+        ):
+            attrs, block = m.group(1), m.group(2)
+            tok = re.search(r'token="([^"]+)"', attrs)
+            ts = re.search(
+                r'<(?:\w+:)?TextString\b[^>]*>(.*?)</(?:\w+:)?TextString>',
+                block,
+                re.DOTALL,
+            )
+            text_type = plain = None
+            if ts:
+                text_type = _first(
+                    r'<(?:\w+:)?Type>([^<]+)</(?:\w+:)?Type>', ts.group(1)
+                )
+                plain = _first(
+                    r'<(?:\w+:)?PlainText>([^<]*)</(?:\w+:)?PlainText>', ts.group(1)
+                )
+            pos = re.search(r'x="(-?[0-9.]+)"\s+y="(-?[0-9.]+)"', block)
+            is_dt = (text_type or "").lower() in ("date", "time", "dateandtime")
+            if is_dt:
+                info.datetime_enabled = True
+            elif (text_type or "").lower() == "plain":
+                info.text_enabled = True
+                if info.text is None:
+                    info.text = plain
+            slots.append({
+                "id": tok.group(1) if tok else None,
+                "enabled": True,  # an OSD that exists is active (ONVIF has no flag)
+                "text": None if is_dt else plain,
+                "x": float(pos.group(1)) if pos else None,
+                "y": float(pos.group(2)) if pos else None,
+                "type": text_type,
+            })
+        info.slots = slots
+        return info
+
+    async def set_osd(self, patch: dict) -> OsdInfo:
+        """Update a text OSD's PlainText. Echoes the camera's own OSD element
+        back via Media2 SetOSD (safest — we don't reconstruct it)."""
+        urls = await self._service_urls()
+        st, xml = await self._get_osds_raw()
+        if st != 200:
+            raise HTTPException(status_code=502, detail="OSD not available on this device")
+        target_id = patch.get("slot_id") or patch.get("id")
+        new_text = patch.get("text")
+        chosen = None
+        for m in re.finditer(
+            r'(<(?:\w+:)?OSDs\b[^>]*>.*?</(?:\w+:)?OSDs>)', xml, re.DOTALL
+        ):
+            b = m.group(1)
+            tok = re.search(r'token="([^"]+)"', b)
+            tid = tok.group(1) if tok else None
+            if target_id and tid == target_id:
+                chosen = b
+                break
+            if not target_id and "PlainText" in b:
+                chosen = b
+                break
+        if not chosen:
+            raise HTTPException(status_code=404, detail="OSD slot not found")
+        if new_text is not None:
+            chosen = re.sub(
+                r'(<(?:\w+:)?PlainText>)[^<]*(</(?:\w+:)?PlainText>)',
+                lambda mm: mm.group(1) + _esc(str(new_text)) + mm.group(2),
+                chosen,
+                count=1,
+            )
+        # Re-tag the outer <...:OSDs> element as <tr2:OSD> for SetOSD.
+        inner = re.sub(r'^<(?:\w+:)?OSDs\b', '<tr2:OSD', chosen)
+        inner = re.sub(r'</(?:\w+:)?OSDs>$', '</tr2:OSD>', inner)
+        body = f'<tr2:SetOSD xmlns:tr2="{self._MEDIA2_NS}">{inner}</tr2:SetOSD>'
+        st2, tx2 = await ods._onvif_request(
+            urls["media2"], body, self.username, self.password
+        )
+        _check_ok(st2, tx2, "SetOSD")
+        return await self.get_osd()
+
+    # --- motion + smart via Analytics (read; motion write) -----------------
+
+    _ANALYTICS_NS = "http://www.onvif.org/ver20/analytics/wsdl"
+
+    async def _analytics_config_token(self) -> str | None:
+        if getattr(self, "_ana_tok", "unset") != "unset":
+            return self._ana_tok
+        urls = await self._service_urls()
+        try:
+            _, xml = await ods._onvif_request(
+                urls["media"],
+                "<trt:GetVideoAnalyticsConfigurations/>",
+                self.username,
+                self.password,
+            )
+            m = re.search(r'<(?:\w+:)?Configurations\b[^>]*token="([^"]+)"', xml)
+            self._ana_tok = m.group(1) if m else None
+        except Exception:
+            self._ana_tok = None
+        return self._ana_tok
+
+    async def get_motion(self) -> MotionInfo:
+        token = await self._analytics_config_token()
+        if not token:
+            return MotionInfo(supported=False, source="onvif")
+        urls = await self._service_urls()
+        body = (
+            f'<tan:GetAnalyticsModules xmlns:tan="{self._ANALYTICS_NS}">'
+            f"<tan:ConfigurationToken>{token}</tan:ConfigurationToken>"
+            "</tan:GetAnalyticsModules>"
+        )
+        try:
+            st, xml = await ods._onvif_request(
+                urls["analytics"], body, self.username, self.password
+            )
+        except Exception:
+            return MotionInfo(supported=False, source="onvif")
+        if st != 200:
+            return MotionInfo(supported=False, source="onvif")
+        cell = None
+        for mm in re.finditer(
+            r'<(?:\w+:)?AnalyticsModule\b([^>]*)>(.*?)</(?:\w+:)?AnalyticsModule>',
+            xml,
+            re.DOTALL,
+        ):
+            if "Motion" in mm.group(1) or "Cell" in mm.group(1):
+                cell = mm.group(2)
+                break
+        if cell is None:
+            return MotionInfo(supported=False, source="onvif")
+        info = MotionInfo(supported=True, enabled=True, source="onvif")
+        sens = re.search(r'Name="Sensitivity"[^>]*Value="(\d+)"', cell)
+        if sens:
+            info.sensitivity = int(sens.group(1))
+        return info
+
+    async def set_motion(self, patch: dict) -> MotionInfo:
+        """Best-effort: update the cell-motion Sensitivity via
+        ModifyAnalyticsModules (echoing back the camera's own module element)."""
+        token = await self._analytics_config_token()
+        urls = await self._service_urls()
+        if not token:
+            raise HTTPException(status_code=502, detail="Motion not available on this device")
+        body = (
+            f'<tan:GetAnalyticsModules xmlns:tan="{self._ANALYTICS_NS}">'
+            f"<tan:ConfigurationToken>{token}</tan:ConfigurationToken>"
+            "</tan:GetAnalyticsModules>"
+        )
+        _, xml = await ods._onvif_request(
+            urls["analytics"], body, self.username, self.password
+        )
+        m = re.search(
+            r'(<(?:\w+:)?AnalyticsModule\b[^>]*(?:Motion|Cell)[^>]*>.*?</(?:\w+:)?AnalyticsModule>)',
+            xml,
+            re.DOTALL,
+        )
+        if not m:
+            raise HTTPException(status_code=502, detail="No cell-motion module to modify")
+        module = m.group(1)
+        sens = patch.get("sensitivity")
+        if sens is not None:
+            sens = max(0, min(100, int(sens)))
+            if re.search(r'Name="Sensitivity"', module):
+                module = re.sub(
+                    r'(Name="Sensitivity"[^>]*Value=")\d+(")',
+                    lambda mm: mm.group(1) + str(sens) + mm.group(2),
+                    module,
+                    count=1,
+                )
+        module = re.sub(r'^<(?:\w+:)?AnalyticsModule\b', '<tan:AnalyticsModule', module)
+        module = re.sub(r'</(?:\w+:)?AnalyticsModule>$', '</tan:AnalyticsModule>', module)
+        mod_body = (
+            f'<tan:ModifyAnalyticsModules xmlns:tan="{self._ANALYTICS_NS}">'
+            f"<tan:ConfigurationToken>{token}</tan:ConfigurationToken>"
+            f"<tan:AnalyticsModule>{module}</tan:AnalyticsModule>"
+            "</tan:ModifyAnalyticsModules>"
+        )
+        st2, tx2 = await ods._onvif_request(
+            urls["analytics"], mod_body, self.username, self.password
+        )
+        _check_ok(st2, tx2, "ModifyAnalyticsModules")
+        return await self.get_motion()
+
+    async def get_smart(self) -> SmartInfo:
+        """Read analytics rules (line crossing, field/intrusion, tamper, …) as a
+        read-only detector list over generic ONVIF. Native drivers override this
+        with per-vendor enable/sensitivity control."""
+        token = await self._analytics_config_token()
+        if not token:
+            return SmartInfo(supported=False, source="onvif")
+        urls = await self._service_urls()
+        body = (
+            f'<tan:GetRules xmlns:tan="{self._ANALYTICS_NS}">'
+            f"<tan:ConfigurationToken>{token}</tan:ConfigurationToken>"
+            "</tan:GetRules>"
+        )
+        try:
+            st, xml = await ods._onvif_request(
+                urls["analytics"], body, self.username, self.password
+            )
+        except Exception:
+            return SmartInfo(supported=False, source="onvif")
+        if st != 200:
+            return SmartInfo(supported=False, source="onvif")
+        detectors: list[SmartDetector] = []
+        for m in re.finditer(r'<(?:\w+:)?Rule\b([^>]*)>(.*?)</(?:\w+:)?Rule>', xml, re.DOTALL):
+            attrs, block = m.group(1), m.group(2)
+            name = _first(r'Name="([^"]+)"', attrs)
+            rtype = _first(r'Type="([^"]+)"', attrs) or ""
+            rtype = rtype.split(":")[-1]
+            configured = bool(re.search(r'<(?:\w+:)?PolygonConfiguration|<(?:\w+:)?Polyline', block))
+            detectors.append(
+                SmartDetector(
+                    key=name or rtype,
+                    label=rtype or (name or "Rule"),
+                    supported=True,
+                    enabled=True,
+                    configured=configured or None,
+                )
+            )
+        return SmartInfo(supported=bool(detectors), detectors=detectors, source="onvif")
+
+    async def set_smart(self, key: str, patch: dict) -> SmartInfo:
+        # Generic ONVIF analytics rules are not portably writable (enable/region
+        # semantics vary per vendor); native drivers override this. Kept explicit
+        # so the API returns a clear message rather than a 500.
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Changing smart-detection rules isn't supported over generic "
+                "ONVIF for this camera — use the camera's own web UI."
+            ),
+        )
+
+    # --- storage via Recording service (read only) -------------------------
+
+    async def get_storage(self) -> StorageInfo:
+        urls = await self._service_urls()
+        rec_url = urls.get("recording")
+        if not rec_url:
+            return StorageInfo(supported=False, source="onvif")
+        try:
+            st, xml = await ods._onvif_request(
+                rec_url,
+                '<trec:GetRecordings xmlns:trec="http://www.onvif.org/ver10/recording/wsdl"/>',
+                self.username,
+                self.password,
+            )
+        except Exception:
+            return StorageInfo(supported=False, source="onvif")
+        if st != 200:
+            return StorageInfo(supported=False, source="onvif")
+        present = "RecordingToken" in xml or "Recordings" in xml
+        return StorageInfo(
+            supported=True,
+            present=present,
+            slots=[StorageSlot(name="onvif-recording", status="ok" if present else "empty")],
+            source="onvif",
+        )
+
+    # --- users + reboot via Device service ---------------------------------
+
+    async def get_users(self) -> UsersInfo:
+        try:
+            _, xml = await ods._onvif_request(
+                self._device_url, "<tds:GetUsers/>", self.username, self.password
+            )
+        except Exception:
+            return UsersInfo(supported=False, source="onvif")
+        users: list[dict] = []
+        for m in re.finditer(r'<(?:\w+:)?User\b[^>]*>(.*?)</(?:\w+:)?User>', xml, re.DOTALL):
+            block = m.group(1)
+            name = _first(r'<(?:\w+:)?Username>([^<]+)</(?:\w+:)?Username>', block)
+            level = _first(r'<(?:\w+:)?UserLevel>([^<]+)</(?:\w+:)?UserLevel>', block)
+            if not name:
+                continue
+            users.append({
+                "id": name,
+                "name": name,
+                "level": level,
+                "is_current": name == self.username,
+            })
+        return UsersInfo(supported=bool(users), users=users, source="onvif")
+
+    async def create_user(self, username: str, password: str, level: str) -> UsersInfo:
+        username = (username or "").strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        lvl = (level or "User").capitalize()
+        if lvl not in ("Administrator", "Operator", "User"):
+            lvl = "User"
+        body = (
+            "<tds:CreateUsers><tds:User>"
+            f"<tt:Username>{_esc(username)}</tt:Username>"
+            f"<tt:Password>{_esc(password or '')}</tt:Password>"
+            f"<tt:UserLevel>{lvl}</tt:UserLevel>"
+            "</tds:User></tds:CreateUsers>"
+        )
+        st, tx = await ods._onvif_request(
+            self._device_url, body, self.username, self.password
+        )
+        _check_ok(st, tx, "CreateUsers")
+        return await self.get_users()
+
+    async def delete_user(self, username: str) -> UsersInfo:
+        username = (username or "").strip()
+        # Never delete the account OpenNVR authenticates with — that locks us out.
+        if username and username == self.username:
+            raise HTTPException(
+                status_code=400,
+                detail="Refusing to delete the account OpenNVR uses to reach this camera",
+            )
+        body = (
+            "<tds:DeleteUsers>"
+            f"<tt:Username>{_esc(username)}</tt:Username>"
+            "</tds:DeleteUsers>"
+        )
+        st, tx = await ods._onvif_request(
+            self._device_url, body, self.username, self.password
+        )
+        _check_ok(st, tx, "DeleteUsers")
+        return await self.get_users()
+
+    async def reboot(self) -> dict:
+        st, tx = await ods._onvif_request(
+            self._device_url, "<tds:SystemReboot/>", self.username, self.password
+        )
+        _check_ok(st, tx, "SystemReboot")
+        return {"status": "rebooting"}
+
+    # --- events via ONVIF pull-point subscription --------------------------
+
+    _EVENTS_NS = "http://www.onvif.org/ver10/events/wsdl"
+
+    @staticmethod
+    def _parse_onvif_events(xml: str):
+        """Yield normalized event dicts from a PullMessages response."""
+        for nm in re.finditer(
+            r'<(?:\w+:)?NotificationMessage\b.*?</(?:\w+:)?NotificationMessage>',
+            xml,
+            re.DOTALL,
+        ):
+            block = nm.group(0)
+            topic = _first(r'<(?:\w+:)?Topic\b[^>]*>([^<]+)</(?:\w+:)?Topic>', block)
+            val = re.search(
+                r'<(?:\w+:)?SimpleItem\b[^>]*'
+                r'Name="(?:State|IsMotion|IsInside|Motion|active|LogicalState)"'
+                r'[^>]*Value="(true|false)"',
+                block,
+                re.IGNORECASE,
+            ) or re.search(r'Value="(true|false)"', block)
+            state = "active" if (val and val.group(1).lower() == "true") else "inactive"
+            etype = (topic or "event").split("/")[-1].split(":")[-1] or "event"
+            yield {
+                "event_type": etype,
+                "event_state": state,
+                "description": topic,
+            }
+
+    async def subscribe_events(self):
+        """Async generator of normalized events via ONVIF pull-point.
+
+        CreatePullPointSubscription → poll PullMessages, re-subscribing on error.
+        Works on any ONVIF camera that advertises the Events service.
+        """
+        urls = await self._service_urls()
+        ev_url = urls["events"]
+        create = (
+            f'<tev:CreatePullPointSubscription xmlns:tev="{self._EVENTS_NS}">'
+            "<tev:InitialTerminationTime>PT120S</tev:InitialTerminationTime>"
+            "</tev:CreatePullPointSubscription>"
+        )
+        pull = (
+            f'<tev:PullMessages xmlns:tev="{self._EVENTS_NS}">'
+            "<tev:Timeout>PT30S</tev:Timeout>"
+            "<tev:MessageLimit>20</tev:MessageLimit>"
+            "</tev:PullMessages>"
+        )
+        backoff = 5
+        while True:
+            try:
+                st, xml = await ods._onvif_request(
+                    ev_url, create, self.username, self.password
+                )
+                if st != 200:
+                    raise RuntimeError(f"CreatePullPointSubscription HTTP {st}")
+                addr = _first(
+                    r'<(?:\w+:)?Address>([^<]+)</(?:\w+:)?Address>', xml
+                ) or ev_url
+            except Exception:
+                await asyncio.sleep(backoff)
+                continue
+            # Poll this subscription until it errors, then re-subscribe.
+            while True:
+                try:
+                    st, xml = await ods._onvif_request(
+                        addr, pull, self.username, self.password, timeout=40.0
+                    )
+                except Exception:
+                    break
+                if st != 200:
+                    break
+                for ev in self._parse_onvif_events(xml):
+                    yield ev

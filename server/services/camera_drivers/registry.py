@@ -53,8 +53,9 @@ from .onvif.driver import OnvifDriver  # guaranteed baseline / terminal fallback
 
 logger = logging.getLogger(__name__)
 
-# camera_id -> resolved HTTP control port (ONVIF/ISAPI live on HTTP, not RTSP).
-_ENDPOINT_CACHE: dict[int, int] = {}
+# camera_id -> resolved (scheme, port) control endpoint (ONVIF/ISAPI live on
+# HTTP(S), not RTSP).
+_ENDPOINT_CACHE: dict[int, tuple[str, int]] = {}
 # camera_id -> selected driver class (per-process; persisted row is the durable
 # cache). Cleared on refresh / port invalidation.
 _DRIVER_CACHE: dict[int, type[CameraDriver]] = {}
@@ -156,49 +157,32 @@ def select_driver_class(manufacturer: str | None) -> type[CameraDriver]:
     return OnvifDriver
 
 
-async def resolve_http_port(
+async def resolve_endpoint(
     camera_id: int,
     ip: str,
     camera_port: int | None,
     onvif_port: int | None = None,
-) -> int:
-    """Find the camera's HTTP/ONVIF control port (cached per camera).
+    control_scheme: str | None = None,
+) -> tuple[str, int]:
+    """Find the camera's control endpoint ``(scheme, port)`` (cached per camera).
 
-    Works for any port on any camera, in priority order:
-      1. the port discovered and persisted when the camera was added
-         (``Camera.onvif_port``) — verified once, then trusted;
-      2. the shared candidate list (single source of truth in
-         ``onvif_digest_service``), so a new vendor port is added in one place;
-      3. default 80.
-
-    Probing uses an unauthenticated GetSystemDateAndTime (200/401 = "ONVIF HTTP
-    is here").
+    Works for any port on any camera, and either scheme (http or https), via the
+    single source of truth ``ods.resolve_control_endpoint``:
+      1. a persisted ``(control_scheme, onvif_port)`` is verified once, then trusted;
+      2. otherwise the shared candidate ports are scanned, http then https;
+      3. default ``("http", 80)``.
     """
     if camera_id in _ENDPOINT_CACHE:
         return _ENDPOINT_CACHE[camera_id]
 
-    # 1) trust the persisted port, but verify it still answers.
-    if onvif_port:
-        try:
-            await ods.get_system_datetime(ip, onvif_port)
-            _ENDPOINT_CACHE[camera_id] = onvif_port
-            return onvif_port
-        except Exception:
-            pass  # camera moved / firmware changed — fall through to a scan
-
-    # 2) shared candidate list; also try the camera's own configured port.
-    candidates = list(ods.ONVIF_CANDIDATE_PORTS)
-    if camera_port and camera_port not in (554, 0) and camera_port not in candidates:
-        candidates.insert(1, camera_port)
-    for port in candidates:
-        try:
-            await ods.get_system_datetime(ip, port)  # raises unless 200/401
-            _ENDPOINT_CACHE[camera_id] = port
-            return port
-        except Exception:
-            continue
-    _ENDPOINT_CACHE[camera_id] = 80
-    return 80
+    # Prefer the persisted ONVIF port as the hint; else the camera's own
+    # configured port when it isn't the RTSP port.
+    hint = onvif_port or (
+        camera_port if camera_port and camera_port not in (554, 0) else None
+    )
+    scheme, port = await ods.resolve_control_endpoint(ip, hint, control_scheme)
+    _ENDPOINT_CACHE[camera_id] = (scheme, port)
+    return scheme, port
 
 
 def invalidate_port_cache(camera_id: int) -> None:
@@ -276,18 +260,34 @@ async def get_driver_for_camera(
     if force:
         invalidate_port_cache(camera_id)
 
-    port = await resolve_http_port(
+    scheme, port = await resolve_endpoint(
         camera_id,
         camera.ip_address,
         camera.port,
         getattr(camera, "onvif_port", None),
+        getattr(camera, "control_scheme", None),
     )
+    # Persist the resolved endpoint so the next resolution trusts it directly
+    # (also self-heals a stale/wrong stored port, e.g. an old create-flow bug).
+    changed = False
+    if getattr(camera, "onvif_port", None) != port:
+        camera.onvif_port = port
+        changed = True
+    if getattr(camera, "control_scheme", None) != scheme:
+        camera.control_scheme = scheme
+        changed = True
+    if changed:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
     creds = {
         "camera_id": camera_id,
         "ip": camera.ip_address,
         "username": camera.username,
         "password": camera.password,  # hybrid property auto-decrypts
         "http_port": port,
+        "scheme": scheme,
     }
 
     cls = await _select_driver_cls(db, camera, creds, force=force)

@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -176,6 +176,10 @@ class Camera(Base):
     # Secureye/Tiandy 8088, others vary). Persisted so the driver layer never has
     # to re-guess from a fixed list — works for any port on any camera.
     onvif_port = Column(Integer, nullable=True)
+    # Control-plane URL scheme for the ONVIF/HTTP API: "http" (default) or
+    # "https" for cameras whose control API is TLS-only. Resolved with the port
+    # and persisted so a TLS-only device is reached without re-probing.
+    control_scheme = Column(String(8), nullable=True)
     username = Column(String(50), nullable=True)
     # password = Column(String(255), nullable=True)  # Legacy plaintext
     encrypted_password = Column(String(500), nullable=True)  # Store encrypted password

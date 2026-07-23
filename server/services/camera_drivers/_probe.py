@@ -26,18 +26,20 @@ async def fingerprint_get(
     username: str | None,
     password: str | None,
     *,
+    scheme: str = "http",
     timeout: float = _PROBE_TIMEOUT,
 ) -> tuple[int | None, str]:
-    """GET a vendor-signature URL over HTTP Digest.
+    """GET a vendor-signature URL over HTTP(S) Digest.
 
     Returns ``(status_code, body)``; ``(None, "")`` on any transport failure
     (unreachable host, timeout, TLS error). Never raises — detection must
-    degrade to "not this vendor", not crash the selection flow.
+    degrade to "not this vendor", not crash the selection flow. ``verify=False``
+    because cameras present self-signed certs on the LAN.
     """
-    url = f"http://{ip}:{port}{path}"
+    url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username or "", password or "")
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             resp = await client.get(url, auth=auth)
             return resp.status_code, resp.text
     except Exception:

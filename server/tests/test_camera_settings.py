@@ -186,27 +186,36 @@ async def test_onvif_get_network(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_onvif_capabilities_derivation(monkeypatch):
-    async def fake_caps(ip, user, pw, port):
-        # media + imaging + events present; no ptz (fixed camera)
+async def test_onvif_capabilities_dynamic_gating(monkeypatch):
+    """Deep-ONVIF gating: advertised services drive imaging/encoder/ptz/events;
+    the device-specific areas (osd/motion/smart/users/storage) are confirmed by
+    a real reader read so only areas that actually return data light up."""
+    async def fake_services(ip, user, pw, port, scheme="http"):
+        # media + imaging + media2 + events + analytics present; no ptz/recording
         return {
             "device": "http://x/onvif/device_service",
             "media": "http://x/onvif/Media",
             "imaging": "http://x/onvif/Imaging",
+            "media2": "http://x/onvif/media2_service",
             "events": "http://x/onvif/Events",
+            "analytics": "http://x/onvif/analytics_service",
         }
 
-    monkeypatch.setattr(ods, "get_capabilities", fake_caps)
-    caps = await OnvifDriver(**CREDS).get_capabilities()
-    a = caps.supported_areas
+    monkeypatch.setattr(ods, "get_services", fake_services)
+
+    a = (await OnvifDriver(**CREDS).get_capabilities()).supported_areas
+    # advertised-service gates: media2 → osd, analytics → motion/smart, etc.
     assert a["imaging"] is True
     assert a["encoder"] is True  # media present
-    # The device advertises an Events endpoint, but the baseline does not
-    # implement subscribe_events() — so it must NOT claim the area (that would
-    # render an Events tab that errors on use for generic ONVIF cameras).
-    assert a["events"] is False
+    assert a["osd"] is True  # media2 advertised
+    assert a["events"] is True  # events service advertised
+    assert a["motion"] is True  # analytics advertised
+    assert a["smart"] is True  # analytics advertised
     assert a["ptz"] is False  # no ptz endpoint
-    assert a["storage"] is False  # onvif baseline
+    assert a["storage"] is False  # no recording/search advertised
+    assert a["maintenance"] is True  # SystemReboot is universal
+    # Users stays off on the pure baseline (native drivers enable it).
+    assert a["users"] is False
     assert a["info"] and a["network"] and a["time"]
 
 
@@ -709,8 +718,17 @@ async def test_set_motion_raises_on_error_status(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_onvif_baseline_osd_motion_unsupported():
-    # The ONVIF baseline driver reports OSD/motion as unsupported (no vendor API).
+async def test_onvif_osd_motion_degrade_when_absent(monkeypatch):
+    # Deep-ONVIF get_osd/get_motion must degrade to supported=False (never raise)
+    # when the device doesn't answer Media2/Analytics.
+    async def fake_services(ip, user, pw, port, scheme="http"):
+        return {}  # no media2 / analytics advertised
+
+    async def fake_req(url, body, username=None, password=None, timeout=10.0):
+        return 404, ""
+
+    monkeypatch.setattr(ods, "get_services", fake_services)
+    monkeypatch.setattr(ods, "_onvif_request", fake_req)
     osd = await OnvifDriver(**CREDS).get_osd()
     motion = await OnvifDriver(**CREDS).get_motion()
     assert osd.supported is False
@@ -748,10 +766,35 @@ def test_parse_event_alert_filters_heartbeat():
 
 
 @pytest.mark.asyncio
-async def test_baseline_subscribe_events_unsupported():
-    with pytest.raises(NotImplementedError):
-        async for _ in OnvifDriver(**CREDS).subscribe_events():
-            pass
+async def test_onvif_pullpoint_events(monkeypatch):
+    # Deep-ONVIF subscribes via pull-point and normalizes NotificationMessages.
+    PULL = (
+        "<PullMessagesResponse><wsnt:NotificationMessage>"
+        "<wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>"
+        "<wsnt:Message><tt:Message><tt:Data>"
+        '<tt:SimpleItem Name="IsMotion" Value="true"/>'
+        "</tt:Data></tt:Message></wsnt:Message>"
+        "</wsnt:NotificationMessage></PullMessagesResponse>"
+    )
+
+    async def fake_services(ip, user, pw, port, scheme="http"):
+        return {"events": "http://x/onvif/event_service"}
+
+    async def fake_req(url, body, username=None, password=None, timeout=10.0):
+        if "CreatePullPoint" in body:
+            return 200, "<Address>http://x/onvif/sub123</Address>"
+        return 200, PULL
+
+    monkeypatch.setattr(ods, "get_services", fake_services)
+    monkeypatch.setattr(ods, "_onvif_request", fake_req)
+
+    got = None
+    async for ev in OnvifDriver(**CREDS).subscribe_events():
+        got = ev
+        break
+    assert got is not None
+    assert got["event_type"] == "Motion"
+    assert got["event_state"] == "active"
 
 
 @pytest.mark.asyncio
@@ -930,10 +973,40 @@ async def test_reboot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_onvif_baseline_users_reboot_unsupported():
-    assert (await OnvifDriver(**CREDS).get_users()).supported is False
-    with pytest.raises(NotImplementedError):
-        await OnvifDriver(**CREDS).reboot()
+async def test_onvif_users_and_reboot(monkeypatch):
+    # Deep-ONVIF drives GetUsers + SystemReboot over the device service.
+    USERS = (
+        "<GetUsersResponse><tds:User>"
+        "<tds:Username>admin</tds:Username>"
+        "<tds:UserLevel>Administrator</tds:UserLevel>"
+        "</tds:User><tds:User>"
+        "<tds:Username>guest</tds:Username>"
+        "<tds:UserLevel>User</tds:UserLevel>"
+        "</tds:User></GetUsersResponse>"
+    )
+
+    async def fake_req(url, body, username=None, password=None, timeout=10.0):
+        if "GetUsers" in body:
+            return 200, USERS
+        if "SystemReboot" in body:
+            return 200, "<SystemRebootResponse><Message>OK</Message></SystemRebootResponse>"
+        return 200, ""
+
+    monkeypatch.setattr(ods, "_onvif_request", fake_req)
+    info = await OnvifDriver(**CREDS).get_users()
+    assert info.supported is True
+    assert info.users[0]["name"] == "admin"
+    assert info.users[0]["is_current"] is True  # the account OpenNVR uses
+    assert info.users[1]["name"] == "guest"
+    result = await OnvifDriver(**CREDS).reboot()
+    assert result == {"status": "rebooting"}
+
+
+@pytest.mark.asyncio
+async def test_onvif_refuses_deleting_own_account():
+    # Never delete the account OpenNVR authenticates with.
+    with pytest.raises(Exception):  # noqa: B017 - HTTPException
+        await OnvifDriver(**CREDS).delete_user("admin")
 
 
 def test_no_ip_change_or_reset_methods_exist():
@@ -1498,29 +1571,31 @@ async def test_config_export_requires_secret_key():
 
 
 @pytest.mark.asyncio
-async def test_onvif_baseline_only_advertises_what_it_implements(monkeypatch):
+async def test_onvif_no_dead_tabs_when_services_absent(monkeypatch):
     """A mixed-vendor fleet must not get dead tabs on generic ONVIF cameras.
 
-    The baseline has no get_users/subscribe_events/get_osd/get_motion override,
-    so advertising those areas would surface tabs that are empty or error on
-    use. Vendor drivers turn them on when they really implement them.
+    When a device advertises only the basic media/imaging services, the areas
+    backed by richer services (Media2 OSD, Analytics motion/smart, Recording
+    storage, Events) must stay OFF — no empty/erroring tab. Users stays off on
+    the pure baseline. Areas the driver always backs (imaging/encoder over
+    media) stay on.
     """
-    async def fake_caps(ip, user, pw, port):
+    async def fake_services(ip, user, pw, port, scheme="http"):
         return {
             "device": "http://x/onvif/device_service",
             "media": "http://x/onvif/Media",
             "imaging": "http://x/onvif/Imaging",
-            "events": "http://x/onvif/Events",  # advertised by the device…
         }
 
-    monkeypatch.setattr(ods, "get_capabilities", fake_caps)
+    monkeypatch.setattr(ods, "get_services", fake_services)
+
     areas = (await OnvifDriver(**CREDS).get_capabilities()).supported_areas
-    for unimplemented in ("users", "events", "osd", "motion", "storage"):
-        assert areas[unimplemented] is False, (
-            f"ONVIF baseline advertises '{unimplemented}' but does not "
-            f"implement it — that renders a dead tab"
+    for off in ("users", "osd", "motion", "smart", "storage", "events"):
+        assert areas[off] is False, (
+            f"'{off}' has no backing service advertised but the area is on — "
+            f"that renders a dead tab"
         )
-    # …and the areas it does implement stay on
+    # …and the areas it does back stay on
     assert areas["info"] and areas["imaging"] and areas["encoder"]
     assert areas["time"] and areas["network"]
 

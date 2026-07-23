@@ -47,6 +47,7 @@ async def cgi_request(
     *,
     method: str = "GET",
     port: int = 80,
+    scheme: str = "http",
     body: str | None = None,
     timeout: float = 15.0,
 ) -> tuple[int, str]:
@@ -55,12 +56,12 @@ async def cgi_request(
     Returns ``(status_code, response_text)``. Raises HTTPException only on
     transport failure (timeout / connection refused) — a non-200 is data the
     caller interprets, since this firmware answers 400 for endpoints it simply
-    does not implement.
+    does not implement. ``verify=False`` for self-signed camera certs.
     """
-    url = f"http://{ip}:{port}{path}"
+    url = f"{scheme}://{ip}:{port}{path}"
     auth = httpx.DigestAuth(username, password) if username else None
     headers = {"Content-Type": "application/xml"} if body else {}
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
             resp = await client.request(
                 method, url, content=body, headers=headers, auth=auth
