@@ -128,7 +128,9 @@ class Gate:
         self._last_escalate: dict[int, float] = {}   # track_id -> last escalate time
         self._seen: set[int] = set()                  # track_ids ever observed
         self._was_stationary: dict[int, bool] = {}    # track_id -> stationary last frame
-        self._last_heartbeat: float = 0.0
+        # None until the first frame anchors it — a 0.0 seed would make the first
+        # real-clock frame (now = frame.ts, a large value) fire the heartbeat.
+        self._last_heartbeat: float | None = None
 
     def _decide(self, t: Track, now: float, heartbeat_due: bool) -> GateDecision:
         def out(escalate: bool, reason: str) -> GateDecision:
@@ -184,6 +186,8 @@ class Gate:
 
     def evaluate(self, tracks: list[Track], now: float) -> GateResult:
         """Decide escalate/suppress for each track at time ``now`` (monotonic secs)."""
+        if self._last_heartbeat is None:
+            self._last_heartbeat = now          # anchor the clock to the first frame
         heartbeat_due = (
             self.cfg.heartbeat_s > 0 and (now - self._last_heartbeat) >= self.cfg.heartbeat_s
         )

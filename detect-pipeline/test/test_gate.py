@@ -112,6 +112,16 @@ def test_always_analyze_ignores_cooldown():
     assert d.escalate and d.reason == "always_analyze"
 
 
+def test_heartbeat_does_not_fire_on_first_frame_with_real_clock():
+    # In production `now` is frame.ts (a large monotonic/epoch value). The first
+    # frame must NOT spuriously heartbeat — the clock anchors to it instead.
+    g = Gate(GateConfig(shadow=False, heartbeat_s=10))
+    assert g.evaluate([mk(tid=1)], now=1000.0).decisions[0].reason == "new_track"
+    # …and it still fires once heartbeat_s has genuinely elapsed since the anchor.
+    d = g.evaluate([mk(tid=1, motionless=60)], now=1011.0).decisions[0]
+    assert d.escalate and d.reason == "heartbeat"
+
+
 def test_heartbeat_fires_even_within_cooldown():
     # heartbeat is a hard latency floor: it must fire even if the track is still
     # in its per-track cooldown (heartbeat_s < cooldown_s).
