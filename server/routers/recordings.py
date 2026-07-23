@@ -792,6 +792,7 @@ async def create_hls_session(
         "browser_mp4_url": browser_mp4_url,
         "video_codec": session.video_codec,
         "needs_remux": needs_remux,
+        "file_offset_seconds": session.file_offset_seconds,
         "camera_id": camera_id,
         "camera_name": camera.name or f"Camera {camera_id}",
         "start": start,

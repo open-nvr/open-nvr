@@ -250,6 +250,10 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       // browser rejects the hev1 tag + PCM audio). The backend flags those and
       // exposes a server-remuxed, browser-playable hvc1 MP4 we play natively.
       let browserMp4Url: string | null = null
+      // Seconds from the remuxed file's start to this clip's start — lets the
+      // native player map the whole physical file's timeline (so seeks across it
+      // are native, no reload).
+      let fileOffsetSec = 0
       try {
         const res: any = await apiService.createHlsPlaybackSession({
           camera_id: cameraId,
@@ -261,6 +265,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         sessionIdRef.current = res.data?.session_id || null
         if (res.data?.needs_remux && res.data?.browser_mp4_url) {
           browserMp4Url = res.data.browser_mp4_url
+          fileOffsetSec = res.data.file_offset_seconds || 0
         }
         if (!manifestUrl && !browserMp4Url) throw new Error('No manifest returned')
       } catch {
@@ -288,21 +293,35 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
 
       if (browserMp4Url) {
         // Native <video> playback of the server-remuxed hvc1 MP4 (H.265 path).
-        // The remuxed file is the WHOLE on-disk segment and the endpoint serves
-        // HTTP Range, so once it's loaded the entire file is natively seekable.
-        // Expand the loaded window to the full duration so every seek within it
-        // is a native ranged seek — NOT a session re-create + full re-download
-        // (which is what made scrubbing re-fetch the whole segment each time).
+        // The remuxed file is the WHOLE physical on-disk segment; the requested
+        // clip starts `fileOffsetSec` into it. Anchor the timeline at the file's
+        // start (video t=0) so wall-clock <-> video time maps correctly, and set
+        // the loaded window to the whole file so EVERY seek within it is a native
+        // HTTP-Range seek — not a session re-create + full re-download (which is
+        // what made scrubbing re-fetch the segment each time).
+        const fileStartMs = clip.startMs - fileOffsetSec * 1000
+        windowStartRef.current = fileStartMs
+        const initialTimeSec = Math.max(0, fileOffsetSec + offsetSec)
         el.src = browserMp4Url
         el.addEventListener(
           'loadedmetadata',
           () => {
             if (token !== loadTokenRef.current) return
             loadedClipRef.current = {
-              startMs: windowStartRef.current,
-              endMs: windowStartRef.current + (el.duration || 0) * 1000,
+              startMs: fileStartMs,
+              endMs: fileStartMs + (el.duration || 0) * 1000,
             }
-            startAtOffset()
+            el.playbackRate = SPEEDS[rateIdx]
+            el.muted = muted
+            if (initialTimeSec > 0.05) {
+              try {
+                el.currentTime = initialTimeSec
+              } catch {
+                /* seekable range not ready; starts at head */
+              }
+            }
+            if (play) el.play().catch(() => {})
+            setBuffering(false)
           },
           { once: true }
         )
