@@ -774,9 +774,24 @@ async def create_hls_session(
         f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/index.m3u8"
     )
 
+    # H.265 (hev1) recordings can't play through hls.js/MSE as recorded (browser
+    # rejects the hev1 tag + PCM audio). For those, the client should use the
+    # browser-remux endpoint instead of the HLS manifest.
+    from services.hevc_remux_service import is_browser_incompatible_video
+
+    needs_remux = is_browser_incompatible_video(session.video_codec)
+    browser_mp4_url = (
+        f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/browser.mp4"
+        if needs_remux
+        else None
+    )
+
     return {
         "session_id": session.session_id,
         "manifest_url": manifest_url,
+        "browser_mp4_url": browser_mp4_url,
+        "video_codec": session.video_codec,
+        "needs_remux": needs_remux,
         "camera_id": camera_id,
         "camera_name": camera.name or f"Camera {camera_id}",
         "start": start,
@@ -893,6 +908,72 @@ async def get_hls_media(
             chunk = 64 * 1024
             while remaining > 0:
                 data = fh.read(min(chunk, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Cache-Control": "max-age=86400",
+        "Access-Control-Allow-Origin": "*",
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    return StreamingResponse(
+        _iter_file(),
+        status_code=status_code,
+        media_type="video/mp4",
+        headers=headers,
+    )
+
+
+@router.get("/playback/hls/{session_id}/browser.mp4")
+async def get_browser_playable_recording(
+    session_id: str,
+    request: Request = None,
+):
+    """Serve an H.265 recording as a browser-playable ``hvc1`` video-only MP4.
+
+    Remuxes the resolved on-disk recording once (pure-Python, no ffmpeg, no
+    re-encode — retag hev1->hvc1 + drop PCM audio), caches it, and serves it with
+    HTTP Range support so the native <video> element seeks normally. H.264
+    recordings never hit this route (they use the HLS byte-range path).
+    """
+    from fastapi.responses import StreamingResponse
+
+    from services.hevc_remux_service import get_browser_playable
+    from services.hls_playback_service import HlsPlaybackService
+
+    session = await HlsPlaybackService.get_session(session_id)
+    if not session or not session.file_path:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    remuxed = await get_browser_playable(session.file_path)
+    if remuxed is None:
+        raise HTTPException(
+            status_code=500, detail="Could not prepare this recording for playback"
+        )
+
+    path = Path(remuxed)
+    file_size = path.stat().st_size
+    range_header = request.headers.get("range") if request else None
+
+    start, end, status_code = 0, file_size - 1, 200
+    parsed = _parse_byte_range(range_header, file_size)
+    if parsed is not None:
+        start, end = parsed
+        status_code = 206
+    length = end - start + 1
+
+    def _iter_file():
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                data = fh.read(min(64 * 1024, remaining))
                 if not data:
                     break
                 remaining -= len(data)

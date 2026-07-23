@@ -78,6 +78,10 @@ class PlaybackSession:
     file_path: str | None = None
     init_length: int = 0  # bytes [0, init_length) = ftyp+moov init segment
     byte_segments: list[dict[str, Any]] = field(default_factory=list)
+    # Video sample-entry fourcc of the resolved file (hev1/hvc1/avc1). Drives
+    # browser-compat handling: an ``hev1`` (H.265) recording is served through
+    # the pure-Python remux (see hevc_remux_service) so it plays in the browser.
+    video_codec: str | None = None
 
 
 class HlsPlaybackService:
@@ -378,9 +382,18 @@ class HlsPlaybackService:
         session.file_path = str(path)
         session.init_length = init_length
         session.byte_segments = byte_segments
+        # Detect the video codec so the router can route H.265 recordings to the
+        # browser-remux path (H.264 keeps the fast byte-range path).
+        try:
+            from services.hevc_remux_service import probe_video_codec
+
+            session.video_codec = probe_video_codec(path)
+        except Exception:
+            session.video_codec = None
         recording_logger.info(
             f"[HLS] Indexed {path.name}: {n} fragments -> "
-            f"{len(byte_segments)} byte-range segments (init={init_length}B)"
+            f"{len(byte_segments)} byte-range segments (init={init_length}B, "
+            f"codec={session.video_codec})"
         )
 
     @classmethod

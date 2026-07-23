@@ -246,6 +246,10 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       setBuffering(true)
 
       let manifestUrl: string
+      // H.265 (hev1) recordings can't play through hls.js/MSE as recorded (the
+      // browser rejects the hev1 tag + PCM audio). The backend flags those and
+      // exposes a server-remuxed, browser-playable hvc1 MP4 we play natively.
+      let browserMp4Url: string | null = null
       try {
         const res: any = await apiService.createHlsPlaybackSession({
           camera_id: cameraId,
@@ -255,7 +259,10 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         if (token !== loadTokenRef.current) return // superseded by a newer load
         manifestUrl = res.data?.manifest_url
         sessionIdRef.current = res.data?.session_id || null
-        if (!manifestUrl) throw new Error('No manifest returned')
+        if (res.data?.needs_remux && res.data?.browser_mp4_url) {
+          browserMp4Url = res.data.browser_mp4_url
+        }
+        if (!manifestUrl && !browserMp4Url) throw new Error('No manifest returned')
       } catch {
         if (token === loadTokenRef.current) {
           setBuffering(false)
@@ -279,7 +286,22 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         setBuffering(false)
       }
 
-      if (Hls.isSupported()) {
+      if (browserMp4Url) {
+        // Native <video> playback of the server-remuxed hvc1 MP4 (H.265 path).
+        // The endpoint supports HTTP Range, so seeking works normally.
+        el.src = browserMp4Url
+        el.addEventListener('loadedmetadata', startAtOffset, { once: true })
+        el.addEventListener(
+          'error',
+          () => {
+            if (token === loadTokenRef.current) {
+              setBuffering(false)
+              setError('Failed to play this recording.')
+            }
+          },
+          { once: true }
+        )
+      } else if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
