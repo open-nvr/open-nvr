@@ -98,7 +98,9 @@ DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
 DETECT_GATE_MODE=off              # off (default) | shadow (measure) | enforce (act) — PR B
 DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static scenes
 DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
+DETECT_GATE_COOLDOWN_S=30         # re-escalate the same track at most once per N seconds
 DETECT_METRICS_PORT=9109          # Prometheus /metrics (0 to disable)
+# always_analyze is per-camera (gate config), deliberately not a global env.
 ```
 
 Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —

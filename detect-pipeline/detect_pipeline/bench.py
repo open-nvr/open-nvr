@@ -107,7 +107,7 @@ def tracks_from_source(
     """Drive a real frame source through the Tier-0 pipeline, yielding ``(tracks, ts)``."""
     from .motion import MotionConfig, MotionDetector
     from .pipeline import DetectPipeline
-    from .tracking import Tracker
+    from .tracking import Tracker, TrackConfig
 
     pipe = None
     seq = 0
@@ -116,7 +116,8 @@ def tracks_from_source(
             shape = (frame.height, frame.width)
             pipe = DetectPipeline(
                 None, MotionDetector(shape, MotionConfig()), detector,
-                Tracker(shape), model_size=(model_size, model_size),
+                Tracker(shape, TrackConfig(fps=fps)),   # thread fps into the lifecycle
+                model_size=(model_size, model_size),
             )
         result = pipe.process_frame(frame)
         ts = getattr(frame, "ts", None)

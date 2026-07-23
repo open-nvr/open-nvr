@@ -54,10 +54,11 @@ class ServiceConfig:
     device: str
     model_size: int
     refresh_seconds: float
-    # PR B — the gate (off by default; shadow measures; enforce acts)
+    # PR B — the gate (off by default; shadow measures; enforce acts). Note:
+    # `always_analyze` is deliberately NOT a global env — it is per-camera by
+    # design (a global "analyze everything" would silently disable the gate).
     gate_mode: str
     gate_heartbeat_s: float
-    gate_always_analyze: bool
     gate_critical_classes: str
     gate_cooldown_s: float
     metrics_port: int
@@ -84,7 +85,6 @@ def config_from_env(env: dict) -> ServiceConfig:
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
         gate_mode=env.get("DETECT_GATE_MODE", "off").strip().lower(),
         gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
-        gate_always_analyze=_truthy(env.get("DETECT_GATE_ALWAYS_ANALYZE", "false")),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),
         metrics_port=int(env.get("DETECT_METRICS_PORT", "9109")),
@@ -106,8 +106,7 @@ def _gate_factory(cfg: ServiceConfig):
 
     crit = frozenset(c.strip() for c in cfg.gate_critical_classes.split(",") if c.strip())
     gcfg = GateConfig(
-        shadow=(mode == "shadow"),
-        always_analyze=cfg.gate_always_analyze,
+        shadow=(mode == "shadow"),           # always_analyze stays per-camera (GateConfig default)
         critical_classes=crit,
         heartbeat_s=cfg.gate_heartbeat_s,
         escalate_cooldown_s=cfg.gate_cooldown_s,
