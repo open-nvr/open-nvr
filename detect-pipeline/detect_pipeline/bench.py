@@ -40,6 +40,8 @@ class BenchResult:
 
     @property
     def reduction_factor(self) -> float:
+        # gated==0 with events>0 means everything was suppressed — read miss_rate
+        # (==1.0) alongside this; we return baseline as a finite stand-in for "inf".
         return self.baseline_calls / self.gated_calls if self.gated_calls else float(self.baseline_calls)
 
     @property

@@ -101,7 +101,12 @@ class Metrics:
         with self._lock:
             counters = sorted(self._counters.items())
             gauges = sorted(self._gauges.items())
-            hists = sorted(self._hist.items())
+            # snapshot histogram values *under the lock* — copying by reference
+            # would risk a torn read against a concurrent observe().
+            hists = sorted(
+                (k, {"buckets": dict(v["buckets"]), "sum": v["sum"], "count": v["count"]})
+                for k, v in self._hist.items()
+            )
         lines: list[str] = []
         seen: set[str] = set()
 
