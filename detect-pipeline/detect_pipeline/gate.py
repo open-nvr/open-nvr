@@ -137,6 +137,16 @@ class Gate:
         if t.hits < self.cfg.min_hits:
             return out(False, "not_confirmed")
 
+        # ── unconditional floors: these deliberately BYPASS the per-track cooldown ──
+        #  * always_analyze = the gate is *disabled* for this camera (escalate every
+        #    frame); letting cooldown gate it would silently re-enable gating.
+        #  * heartbeat = a hard worst-case-latency bound; if cooldown could gate it,
+        #    the bound would not hold whenever heartbeat_s < cooldown_s.
+        if self.cfg.always_analyze:
+            return out(True, "always_analyze")
+        if heartbeat_due:
+            return out(True, "heartbeat")
+
         in_cooldown = (
             t.id in self._last_escalate
             and (now - self._last_escalate[t.id]) < self.cfg.escalate_cooldown_s
@@ -151,16 +161,13 @@ class Gate:
         is_new = t.id not in self._seen
         reactivated = self._was_stationary.get(t.id, False) and not t.stationary
 
-        # ── forced escalations: bypass stationary/uninteresting, still rate-limited ──
+        # ── forced escalations that MAY be rate-limited: once per cooldown is enough
+        #    for a re-look at the same critical object / zone intrusion ──
         if not in_cooldown:
-            if self.cfg.always_analyze:
-                return out(True, "always_analyze")
             if is_critical:
                 return out(True, "critical_class")
             if in_zone:
                 return out(True, "in_zone")
-            if heartbeat_due:
-                return out(True, "heartbeat")
 
         # ── normal path ──
         if not interesting:

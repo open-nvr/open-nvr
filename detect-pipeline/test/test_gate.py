@@ -103,6 +103,25 @@ def test_heartbeat_forces_pass_on_static_scene():
     assert d.escalate and d.reason == "heartbeat"
 
 
+def test_always_analyze_ignores_cooldown():
+    # always_analyze disables the gate for the camera -> escalate every frame,
+    # NOT once per cooldown (that would silently re-enable gating).
+    g = Gate(GateConfig(shadow=False, always_analyze=True, escalate_cooldown_s=30))
+    assert g.evaluate([mk()], now=0.0).decisions[0].reason == "always_analyze"
+    d = g.evaluate([mk()], now=5.0).decisions[0]      # well within cooldown
+    assert d.escalate and d.reason == "always_analyze"
+
+
+def test_heartbeat_fires_even_within_cooldown():
+    # heartbeat is a hard latency floor: it must fire even if the track is still
+    # in its per-track cooldown (heartbeat_s < cooldown_s).
+    g = Gate(GateConfig(shadow=False, heartbeat_s=10, escalate_cooldown_s=30))
+    assert g.evaluate([mk(tid=1)], now=0.0).decisions[0].reason == "new_track"
+    assert g.evaluate([mk(tid=1)], now=5.0).decisions[0].reason == "cooldown"
+    d = g.evaluate([mk(tid=1)], now=12.0).decisions[0]   # still <30s cooldown
+    assert d.escalate and d.reason == "heartbeat"
+
+
 # ───────────────────────────── lifecycle ─────────────────────────────
 
 def test_reused_id_after_disappearance_looks_new_again():
