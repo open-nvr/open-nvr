@@ -324,7 +324,7 @@ async def get_stream_uri_digest(
 
 # Common ONVIF control ports across vendors (kept in sync with the discovery
 # scan in onvif_service._ONVIF_CANDIDATE_PORTS).
-_ONVIF_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
+ONVIF_CANDIDATE_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
 
 
 async def resolve_onvif_port(ip: str, port_hint: int = 80) -> int:
@@ -334,7 +334,7 @@ async def resolve_onvif_port(ip: str, port_hint: int = 80) -> int:
     without credentials). Falls back to ``port_hint`` if nothing answers, so the
     caller still gets a deterministic value.
     """
-    candidates = [port_hint] + [p for p in _ONVIF_PORTS if p != port_hint]
+    candidates = [port_hint] + [p for p in ONVIF_CANDIDATE_PORTS if p != port_hint]
     for p in candidates:
         try:
             # Raises unless the port answers ONVIF (HTTP 200/401).

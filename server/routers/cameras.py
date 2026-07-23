@@ -225,6 +225,14 @@ async def create_camera(
             db=db, camera_create=camera_create, owner_id=current_user.id
         )
 
+        # Persist the ONVIF control port discovered above (Hikvision 80,
+        # Secureye/Tiandy 8088, …) so the driver layer never re-guesses it. Any
+        # port on any camera works because we remember what actually answered.
+        if onvif_port:
+            cam.onvif_port = onvif_port
+            db.commit()
+            db.refresh(cam)
+
         _log_camera_creation_success(current_user.id, cam, request)
         _record_audit_log(db, current_user.id, cam, request)
         _check_duplicate_ips(db, current_user.id, cam)

@@ -156,17 +156,38 @@ def select_driver_class(manufacturer: str | None) -> type[CameraDriver]:
     return OnvifDriver
 
 
-async def resolve_http_port(camera_id: int, ip: str, camera_port: int | None) -> int:
+async def resolve_http_port(
+    camera_id: int,
+    ip: str,
+    camera_port: int | None,
+    onvif_port: int | None = None,
+) -> int:
     """Find the camera's HTTP/ONVIF control port (cached per camera).
 
-    Cameras stream RTSP on 554 but serve ONVIF/ISAPI over HTTP (usually 80,
-    sometimes 8000). Probe candidates with an unauthenticated
-    GetSystemDateAndTime (a 200/401 means "ONVIF HTTP is here") and cache the
-    winner. Defaults to 80 if nothing answers.
+    Works for any port on any camera, in priority order:
+      1. the port discovered and persisted when the camera was added
+         (``Camera.onvif_port``) — verified once, then trusted;
+      2. the shared candidate list (single source of truth in
+         ``onvif_digest_service``), so a new vendor port is added in one place;
+      3. default 80.
+
+    Probing uses an unauthenticated GetSystemDateAndTime (200/401 = "ONVIF HTTP
+    is here").
     """
     if camera_id in _ENDPOINT_CACHE:
         return _ENDPOINT_CACHE[camera_id]
-    candidates = [80, 8000, 8080, 2020]
+
+    # 1) trust the persisted port, but verify it still answers.
+    if onvif_port:
+        try:
+            await ods.get_system_datetime(ip, onvif_port)
+            _ENDPOINT_CACHE[camera_id] = onvif_port
+            return onvif_port
+        except Exception:
+            pass  # camera moved / firmware changed — fall through to a scan
+
+    # 2) shared candidate list; also try the camera's own configured port.
+    candidates = list(ods.ONVIF_CANDIDATE_PORTS)
     if camera_port and camera_port not in (554, 0) and camera_port not in candidates:
         candidates.insert(1, camera_port)
     for port in candidates:
@@ -255,7 +276,12 @@ async def get_driver_for_camera(
     if force:
         invalidate_port_cache(camera_id)
 
-    port = await resolve_http_port(camera_id, camera.ip_address, camera.port)
+    port = await resolve_http_port(
+        camera_id,
+        camera.ip_address,
+        camera.port,
+        getattr(camera, "onvif_port", None),
+    )
     creds = {
         "camera_id": camera_id,
         "ip": camera.ip_address,

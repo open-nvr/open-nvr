@@ -171,7 +171,11 @@ class Camera(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=False)
-    port = Column(Integer, default=554)
+    port = Column(Integer, default=554)  # RTSP streaming port
+    # ONVIF/HTTP control port, discovered when the camera is added (Hikvision 80,
+    # Secureye/Tiandy 8088, others vary). Persisted so the driver layer never has
+    # to re-guess from a fixed list — works for any port on any camera.
+    onvif_port = Column(Integer, nullable=True)
     username = Column(String(50), nullable=True)
     # password = Column(String(255), nullable=True)  # Legacy plaintext
     encrypted_password = Column(String(500), nullable=True)  # Store encrypted password

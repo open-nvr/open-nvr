@@ -31,6 +31,12 @@ from fastapi import HTTPException
 
 from core.logging_config import main_logger
 
+# Single source of truth for ONVIF control ports (discovery scan, connect flow,
+# and driver registry all share it, so a new vendor port is added in one place).
+from services.onvif_digest_service import (
+    ONVIF_CANDIDATE_PORTS as _ONVIF_CANDIDATE_PORTS,
+)
+
 
 # Lazy imports for optional deps
 def _import_onvif():
@@ -177,14 +183,6 @@ _SOAP_ENVELOPE = """\
     {body}
   </soap:Body>
 </soap:Envelope>"""
-
-# Cameras serve the ONVIF device service on a range of HTTP ports, not just 80.
-# The unicast subnet scan is the only discovery path that works in Docker bridge
-# mode (WS-Discovery multicast does not cross the bridge), so it must cover the
-# common ones or HTTPS-only / alt-port cameras are simply never found. Verified
-# examples: Hikvision → 80, Secureye/Sparsh (Tiandy OEM) → 8088.
-_ONVIF_CANDIDATE_PORTS = (80, 8000, 8080, 8088, 2020, 8899)
-
 
 async def probe_onvif_device(
     ip: str, port: int = 80, timeout: float = 0.5
