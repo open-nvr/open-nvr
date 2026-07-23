@@ -96,6 +96,35 @@ def test_hog_detector_falls_back_to_stub_when_unavailable(monkeypatch):
     assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
 
 
+def test_gate_defaults_off():
+    from detect_pipeline.run import _gate_factory
+    cfg = config_from_env({})
+    assert cfg.gate_mode == "off"          # PR A behavior unchanged by default
+    assert cfg.metrics_port == 9109
+    assert _gate_factory(cfg) is None       # no gate when off
+
+
+def test_gate_factory_shadow_and_enforce():
+    from detect_pipeline.gate import Gate
+    from detect_pipeline.run import _gate_factory
+
+    gf = _gate_factory(config_from_env({
+        "DETECT_GATE_MODE": "shadow",
+        "DETECT_GATE_CRITICAL_CLASSES": "person, weapon",
+        "DETECT_GATE_HEARTBEAT_S": "5",
+    }))
+    g = gf()                                # fresh, stateful gate per camera
+    assert isinstance(g, Gate) and g.cfg.shadow is True
+    assert g.cfg.critical_classes == frozenset({"person", "weapon"})
+    assert g.cfg.heartbeat_s == 5.0
+    assert _gate_factory(config_from_env({"DETECT_GATE_MODE": "enforce"}))().cfg.shadow is False
+
+
+def test_gate_unknown_mode_disables():
+    from detect_pipeline.run import _gate_factory
+    assert _gate_factory(config_from_env({"DETECT_GATE_MODE": "garbage"})) is None
+
+
 def test_build_manager_honours_disabled():
     cfg = config_from_env({"DETECT_PIPELINE_ENABLED": "false"})
     mgr = build_manager(cfg, EventSink(lambda s, d: None))

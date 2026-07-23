@@ -32,7 +32,7 @@ import signal
 import threading
 from dataclasses import dataclass
 
-from .bus import EventSink
+from .bus import EventSink, GateEventSink
 from .providers import HttpCameraProvider
 from .service import WorkerManager
 
@@ -54,6 +54,13 @@ class ServiceConfig:
     device: str
     model_size: int
     refresh_seconds: float
+    # PR B — the gate (off by default; shadow measures; enforce acts)
+    gate_mode: str
+    gate_heartbeat_s: float
+    gate_always_analyze: bool
+    gate_critical_classes: str
+    gate_cooldown_s: float
+    metrics_port: int
 
 
 def _truthy(v: str) -> bool:
@@ -75,7 +82,37 @@ def config_from_env(env: dict) -> ServiceConfig:
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
+        gate_mode=env.get("DETECT_GATE_MODE", "off").strip().lower(),
+        gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
+        gate_always_analyze=_truthy(env.get("DETECT_GATE_ALWAYS_ANALYZE", "false")),
+        gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
+        gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),
+        metrics_port=int(env.get("DETECT_METRICS_PORT", "9109")),
     )
+
+
+def _gate_factory(cfg: ServiceConfig):
+    """Return a fresh-Gate factory (gate is stateful per camera), or None when off.
+
+    Default is off → PR A behavior is byte-for-byte unchanged. `shadow` computes +
+    audits decisions but never enforces; `enforce` actually gates the expensive tier.
+    """
+    mode = (cfg.gate_mode or "off").lower()
+    if mode not in ("shadow", "enforce"):
+        if mode != "off":
+            log.warning("unknown DETECT_GATE_MODE=%r; gate disabled", cfg.gate_mode)
+        return None
+    from .gate import Gate, GateConfig
+
+    crit = frozenset(c.strip() for c in cfg.gate_critical_classes.split(",") if c.strip())
+    gcfg = GateConfig(
+        shadow=(mode == "shadow"),
+        always_analyze=cfg.gate_always_analyze,
+        critical_classes=crit,
+        heartbeat_s=cfg.gate_heartbeat_s,
+        escalate_cooldown_s=cfg.gate_cooldown_s,
+    )
+    return lambda: Gate(gcfg)
 
 
 def _stub_factory():
@@ -135,7 +172,7 @@ def _detector_factory(cfg: ServiceConfig):
     return _stub_factory()
 
 
-def build_manager(cfg: ServiceConfig, sink) -> WorkerManager:
+def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     provider = HttpCameraProvider(cfg.core_url, api_key=cfg.api_key)
     # Region crops match the detector input so the model sees full-detail crops.
     model_size = cfg.onnx_input if cfg.detector == "onnx" else cfg.model_size
@@ -145,6 +182,8 @@ def build_manager(cfg: ServiceConfig, sink) -> WorkerManager:
         detector_factory=_detector_factory(cfg),
         model_size=model_size,
         device=cfg.device,
+        gate_factory=_gate_factory(cfg),
+        gate_sink=gate_sink,
     )
 
 
@@ -192,7 +231,12 @@ def main() -> int:  # pragma: no cover - integration entrypoint
              cfg.enabled, cfg.detector, cfg.hwaccel)
 
     publish, close = _make_publisher(cfg.nats_url)
-    manager = build_manager(cfg, EventSink(publish))
+    manager = build_manager(cfg, EventSink(publish), gate_sink=GateEventSink(publish))
+    log.info("tier0 gate mode=%s", cfg.gate_mode)
+    if cfg.metrics_port:
+        from .metrics import serve_metrics
+        serve_metrics(cfg.metrics_port)
+        log.info("tier0 metrics on :%d/metrics", cfg.metrics_port)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

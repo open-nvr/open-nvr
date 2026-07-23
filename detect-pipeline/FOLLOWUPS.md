@@ -74,11 +74,13 @@ Frigate snaps regions to an 8×8 grid learned from historical true-positive
 boxes. We defer it because it needs OpenNVR-side storage (Frigate uses its own
 DB models). Improves small-object recall and region stability.
 
-## 6. The gate itself → PR B
+## 6. The gate itself → PR B — ✅ LANDED
 
-Stationary-object gate, shadow mode, per-camera `always_analyze`, critical-class
-force-escalate, gate-decision audit. The whole point of Tier-0; PR A is the
-always-on floor it sits on.
+Stationary-object gate, shadow mode (default), `always_analyze`, critical-class
+force-escalate, heartbeat, per-track cooldown, and gate-decision audit (incl.
+non-events on `opennvr.tier0.gate.v1`). Implemented in `gate.py`, authored against
+`TriggerPolicy` (motion default). **Still owed:** on-hardware validation of the
+measured miss rate before flipping `enforce`.
 
 ---
 
@@ -144,10 +146,16 @@ unchanged when the flag is off. Each change additive, opt-in, reversible.
 
 ---
 
-## 9. Tier-0 metrics + measurement harness — prove PR A / PR B improvement
+## 9. Tier-0 metrics + measurement harness — ✅ LANDED (numbers owed on hardware)
 
-**Why.** Today the detect-pipeline emits **logs only**; there's no way to quantify
-PR A's efficiency or PR B's savings. KAI-C already exposes `/metrics`
+**Done:** `metrics.py` exposes Prometheus `/metrics` (`DETECT_METRICS_PORT`, dep-free)
+with the `tier0_*` + `gate_*` counters below; `bench.py` is the baseline-vs-gated
+harness (`python -m detect_pipeline.bench`). **Still owed:** run the harness on the
+real clip set / Pi 5 / N100 and record the actual reduction factor, miss rate, and
+capacity — never invented.
+
+**Why (original).** The detect-pipeline used to emit **logs only**; there was no way
+to quantify PR A's efficiency or PR B's savings. KAI-C already exposes `/metrics`
 (`adapter_infer_latency_seconds` p50/p95/p99 + counts) and an `audit.jsonl`, so
 the *expensive* tier is measurable — but Tier-0 is a blind spot, and the gate's
 miss-rate has no instrument until shadow mode exists. "Improvement" is only

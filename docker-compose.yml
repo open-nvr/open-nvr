@@ -269,6 +269,11 @@ services:
       - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
+      # PR B gate: off (default, no change) | shadow (measure) | enforce (act).
+      - DETECT_GATE_MODE=${DETECT_GATE_MODE:-off}
+      - DETECT_GATE_HEARTBEAT_S=${DETECT_GATE_HEARTBEAT_S:-0}
+      - DETECT_GATE_CRITICAL_CLASSES=${DETECT_GATE_CRITICAL_CLASSES:-}
+      - DETECT_METRICS_PORT=${DETECT_METRICS_PORT:-9109}
     volumes:
       # Read-only mount of the shared yolov8 weights volume (built by
       # yolov8-weights-init) — same model as the yolov8-adapter.

@@ -95,6 +95,10 @@ DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)
 DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
+DETECT_GATE_MODE=off              # off (default) | shadow (measure) | enforce (act) — PR B
+DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static scenes
+DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
+DETECT_METRICS_PORT=9109          # Prometheus /metrics (0 to disable)
 ```
 
 Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —
@@ -177,8 +181,42 @@ KAI-C accelerator adapter — see `FOLLOWUPS.md`. **YOLO26 / RF-DETR** (NMS-free
 are a detector-family follow-up: they need a different decode, independent of the
 backend chosen here.
 
-## Not yet in PR A (deliberately)
-- The gate (skip detection on stationary tracks) + shadow mode + audit → **PR B**.
+## The gate (PR B)
+
+The **gate** (`gate.py`) decides which Tier-0 tracks are worth the *expensive*
+Tier-1 model — so the costly model runs **once per event on the best frame**, not
+every frame. It is **off by default** (PR A behavior unchanged); `shadow` computes
+and audits every escalate/suppress decision without enforcing (so you *measure*
+the miss rate first); `enforce` actually gates.
+
+- **Safety rails:** `always_analyze` (disable the gate for critical cameras),
+  `critical_classes` (always escalate), a `heartbeat` pass (bound worst-case
+  latency), stationary suppression, and a per-track cooldown.
+- **Audit of non-events:** every decision — escalations *and* suppressions — is
+  published to `opennvr.inference.tier0.<camera>.gate` (`opennvr.tier0.gate.v1`).
+- **Trigger-agnostic:** authored against `TriggerPolicy` (motion is the shipped
+  default; scene-change/interval/… plug in on the same seam).
+
+### Metrics & measuring the win
+
+The service exposes Prometheus text at `:9109/metrics` (`DETECT_METRICS_PORT`):
+`tier0_frames_total`, `tier0_detector_runs_total` vs `tier0_detector_skipped_total{reason}`
+(the motion-gate ratio), `gate_escalations_total{reason}` / `gate_suppressions_total{reason}`,
+`gate_shadow_would_suppress_total`, and `tier0_frame_latency_seconds`.
+
+The **benchmark harness** quantifies the expensive-tier saving — baseline
+(always-on) vs gated — with a miss rate:
+
+```bash
+python -m detect_pipeline.bench --source people.mp4 --detector blob
+# frames=… | expensive calls: baseline=… gated=… (Nx fewer) | events=… missed=… (miss-rate …)
+```
+
+Run it on your real clip set / hardware — **do not publish invented numbers**.
+
+## Not yet (deliberately)
+- Accelerator detector adapters (Coral/Hailo/RKNN), RF-DETR/YOLO26, and the
+  on-hardware capacity/energy numbers → follow-ups (`FOLLOWUPS.md`).
 - Kalman motion prediction in the tracker, and the learned per-camera region
   grid → documented follow-ups.
 - The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
