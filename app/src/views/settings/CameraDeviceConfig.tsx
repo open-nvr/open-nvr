@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { ChevronLeft } from 'lucide-react'
+import { ChevronLeft, ExternalLink } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Badge, EmptyState, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
@@ -95,13 +95,30 @@ export function CameraDeviceConfig() {
         >
           <ChevronLeft size={16} /> All cameras
         </button>
-        <div>
-          <h3 className="text-lg font-medium">{selected.name}</h3>
-          <p className="text-xs text-[var(--text-dim)] font-mono">
-            {selected.ip_address}
-            {selected.manufacturer ? ` · ${selected.manufacturer}` : ''}
-            {selected.model ? ` ${selected.model}` : ''}
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-medium">{selected.name}</h3>
+            <p className="text-xs text-[var(--text-dim)] font-mono">
+              {selected.ip_address}
+              {selected.manufacturer ? ` · ${selected.manufacturer}` : ''}
+              {selected.model ? ` ${selected.model}` : ''}
+            </p>
+          </div>
+          {/* Direct link to the camera's own web portal — the universal way to
+              reach every vendor setting OpenNVR can't (or shouldn't) drive:
+              deep network config, SNMP/QoS/802.1x, storage, etc. Opens in a new
+              tab; http:// lets the camera redirect to https if it forces TLS. */}
+          {selected.ip_address && (
+            <a
+              href={`http://${selected.ip_address}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open the camera's own web page (full vendor settings) in a new tab"
+              className="flex shrink-0 items-center gap-1 text-sm text-[var(--accent)] hover:underline"
+            >
+              <ExternalLink size={14} /> Camera web page
+            </a>
+          )}
         </div>
         <CameraSettingsPanel key={selected.id} camera={selected} />
       </div>

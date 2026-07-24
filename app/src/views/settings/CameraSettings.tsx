@@ -1874,7 +1874,8 @@ export function CameraSettingsPanel({
                   {unavailable.length > 0 && (
                     <p className="pt-3 text-xs text-[var(--text-dim)] leading-relaxed">
                       Not supported by this camera:{' '}
-                      {unavailable.join(', ')}
+                      {unavailable.join(', ')}. Configure these on the camera's
+                      own web page (link above).
                     </p>
                   )}
                 </nav>
