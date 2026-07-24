@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -200,6 +201,18 @@ async def probe_onvif_device(
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             resp = await client.post(url, content=envelope, headers=headers)
+            # Some cameras (e.g. CP Plus/Dahua with "force HTTPS") answer HTTP
+            # with a 3xx redirect to their HTTPS endpoint instead of serving
+            # ONVIF. Follow one hop to the HTTPS device_service and re-POST so the
+            # device is still discovered (and reported on its real https port).
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("location", "")
+                if loc.lower().startswith("https://"):
+                    pu = urlparse(loc)
+                    port = pu.port or 443
+                    scheme = "https"
+                    url = f"https://{pu.hostname}:{port}/onvif/device_service"
+                    resp = await client.post(url, content=envelope, headers=headers)
         # A real ONVIF device returns 200 or 401; either confirms ONVIF service presence.
         # A non-ONVIF host typically gives connection refused, 404, or non-XML.
         if resp.status_code in (200, 401) and (
@@ -265,17 +278,20 @@ async def scan_onvif_subnet(
 
     sem = asyncio.Semaphore(concurrency)
 
+    # Ports that speak TLS get an https probe; everything else gets http (and
+    # ``probe_onvif_device`` itself follows a 302 http->https for cameras that
+    # force HTTPS). ONE probe per open port — firing both schemes at each host
+    # hammered flaky embedded cameras (doomed http-on-443 / https-on-80 attempts
+    # hang and make the device drop the probe that matters), causing intermittent
+    # discovery misses.
+    tls_ports = (443, 8443)
+
     async def _bounded_probe(ip_str: str, port: int) -> dict[str, Any] | None:
         async with sem:
             if not await _tcp_open(ip_str, port):
                 return None  # nothing listening — skip the expensive ONVIF probe
-            # Port is open (rare): a real ONVIF probe is affordable, and we can
-            # try both schemes so a TLS-only control API is still discovered.
-            for scheme in ("http", "https"):
-                dev = await probe_onvif_device(ip_str, port, timeout=2.0, scheme=scheme)
-                if dev:
-                    return dev
-            return None
+            scheme = "https" if port in tls_ports else "http"
+            return await probe_onvif_device(ip_str, port, timeout=2.0, scheme=scheme)
 
     tasks = [
         _bounded_probe(str(host), port)
