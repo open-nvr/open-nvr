@@ -76,8 +76,13 @@ def run_alembic_migrations():
             )
             return
 
-        # Create Alembic config
+        # Create Alembic config. alembic.ini's script_location is relative
+        # ("migrations"); the backend does NOT run from the server dir, so pin it
+        # to an absolute path or stamp/upgrade fail with "Path doesn't exist".
         alembic_cfg = Config(str(alembic_ini_path))
+        alembic_cfg.set_main_option(
+            "script_location", str(server_dir / "migrations")
+        )
 
         # Fast check: See if migrations are needed before running
         # This prevents hanging on command.upgrade() when DB is already up-to-date
@@ -131,18 +136,28 @@ def run_alembic_migrations():
 
 
 def _make_alembic_config():
-    """Return the Alembic Config, or None if alembic.ini isn't present."""
+    """Return the Alembic Config with an ABSOLUTE migrations path, or None if
+    alembic.ini isn't present.
+
+    Pinning script_location is essential: alembic.ini ships a relative
+    ``script_location = migrations``, and the backend process does not run from
+    the server directory — so ``command.stamp``/``upgrade`` fail with
+    "Path doesn't exist: migrations" unless we resolve it to an absolute path.
+    """
     from pathlib import Path
 
     from alembic.config import Config
 
-    ini = Path(__file__).parent.parent / "alembic.ini"
+    server_dir = Path(__file__).parent.parent
+    ini = server_dir / "alembic.ini"
     if not ini.exists():
         main_logger.warning(
             "alembic.ini not found at %s; schema managed by create_all only", ini
         )
         return None
-    return Config(str(ini))
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(server_dir / "migrations"))
+    return cfg
 
 
 def _alembic_is_initialized() -> bool:
