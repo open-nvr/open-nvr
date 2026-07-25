@@ -258,9 +258,30 @@ needs the best-frame pixels; PR B is the decision + audit + measurement layer.)
 - Rate-limiting is already handled by the gate's cooldown — the dispatcher just
   acts on escalations as they arrive.
 
+**Model-agnostic routing (do NOT hardcode the mapping).** The "which expensive
+model runs" is a **declarative map**, keyed on trigger/class → adapter — never a
+`switch`. The caption default is one editable row, not a special case:
+- **Default (zero config):** `person → caption`, `vehicle → caption` (BLIP/moondream).
+  A light, non-biometric default useful everywhere.
+- **Opt-in rows (documented, not default):** `person → face`, `car → plate` — heavier
+  and privacy/jurisdiction-sensitive, so sovereign-by-default = off unless enabled.
+- **Custom models add a row**, not code: a custom adapter declares its trigger (via
+  the contract / `trigger-policies.md`) and adds a routing rule; its escalations then
+  run *it* through KAI-C, governed.
+- **Honour the trigger mode** — the same flexibility as the per-camera `analyze=false`
+  ("no crop/no pipeline on this stream"), but at the model level:
+  `TriggerPolicy.none` = the adapter is *not* gated by Tier-0 (self-gates / raw stream);
+  `always` = run every frame; a **custom trigger** = wake on the model's own cheap
+  signal. The dispatcher must respect these, so a model is fully in control of its
+  own gating.
+- **All of it documented** (routing map + how to add a rule + how to add a custom
+  trigger + `none`/`always` semantics) in `docs/design/trigger-policies.md` and the
+  detect-pipeline README — a new model/skill is a config addition, never a core edit.
+
 **Acceptance.** In `enforce`, a gate escalation causes exactly one governed,
-audited run of the declared expensive adapter on the best crop via KAI-C, and the
-result lands on the bus; `shadow`/`off` still run zero expensive inferences. This
-completes the end-to-end flow drawn in `docs/design/compute-gated-inference.md` /
-the architecture diagram (Gate → expensive models → results), of which PR B ships
-the Gate + audit + measurement.
+audited run of the **routed** adapter on the best crop via KAI-C (default caption on
+person/vehicle; face/plate opt-in), and the result lands on the bus; `shadow`/`off`
+still run zero expensive inferences. A custom adapter with its own trigger + routing
+row works without touching the gate core; `TriggerPolicy.none`/`always` are honoured.
+This completes the end-to-end flow drawn in the architecture diagram (Gate →
+expensive models → results), of which PR B ships the Gate + audit + measurement.
