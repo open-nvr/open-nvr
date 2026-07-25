@@ -108,11 +108,25 @@ def test_dispatcher_drops_under_backpressure_and_balances_semaphore():
         if posts:
             break
         time.sleep(0.005)
+    from detect_pipeline.metrics import metrics
+    metrics.reset()
     d.dispatch("cam", "caption", crop, t)          # no slot -> dropped
     time.sleep(0.05)
     assert len(posts) == 1                          # second dropped, semaphore not leaked
+    assert metrics.value("tier1_dispatch_dropped_total", {"camera": "cam", "adapter": "caption"}) == 1
     gate.set()
     d.close()
+    metrics.reset()
+
+
+def test_dispatcher_emits_call_metrics():
+    from detect_pipeline.metrics import metrics
+    metrics.reset()
+    d = KaicDispatcher("http://k", task="caption", http_post=lambda *a: None)
+    d._run("cam_3", "caption", np.zeros((4, 4, 3), np.uint8), _track(1, "person"))
+    assert metrics.value("tier1_dispatch_total", {"camera": "cam_3", "adapter": "caption"}) == 1
+    assert metrics.value("tier1_dispatch_errors_total", {"camera": "cam_3", "adapter": "caption"}) == 0
+    metrics.reset()
 
 
 def test_kaic_dispatcher_posts_governed_infer():

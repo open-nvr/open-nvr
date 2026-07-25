@@ -23,8 +23,11 @@ import base64
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
+
+from .metrics import metrics
 
 log = logging.getLogger("detect_pipeline.dispatch")
 
@@ -108,9 +111,17 @@ class KaicDispatcher:
         self._post = http_post or _http_post_json
         self._sem = threading.Semaphore(max_inflight)
         self._pool = ThreadPoolExecutor(max_workers=max_inflight, thread_name_prefix="tier1-dispatch")
+        self._ilock = threading.Lock()
+        self._inflight = 0
+
+    def _bump_inflight(self, delta: int) -> None:
+        with self._ilock:
+            self._inflight += delta
+            metrics.gauge("tier1_dispatch_inflight", float(self._inflight))
 
     def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
         if not self._sem.acquire(blocking=False):
+            metrics.inc("tier1_dispatch_dropped_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch backpressure; dropping %s/%s", camera_id, adapter)
             return
         try:
@@ -119,15 +130,21 @@ class KaicDispatcher:
             self._sem.release()
 
     def _run(self, camera_id, adapter, crop_bgr, track) -> None:
+        self._bump_inflight(1)
+        metrics.inc("tier1_dispatch_total", {"camera": camera_id, "adapter": adapter})
+        t0 = time.monotonic()
         try:
             body = build_infer_body(
                 self.task, _encode_jpeg(crop_bgr, self.jpeg_quality),
                 {"camera_id": camera_id, "track_id": track.id, "label": track.label},
             )
             self._post(f"{self.base_url}/api/v1/infer/{adapter}", body, self.api_key, self.timeout)
+            metrics.observe("tier1_dispatch_latency_seconds", time.monotonic() - t0, {"adapter": adapter})
         except Exception:
+            metrics.inc("tier1_dispatch_errors_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch failed %s/%s", camera_id, adapter, exc_info=True)
         finally:
+            self._bump_inflight(-1)
             self._sem.release()
 
     def close(self) -> None:  # pragma: no cover

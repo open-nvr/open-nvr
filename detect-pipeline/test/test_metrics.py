@@ -6,7 +6,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from detect_pipeline.gate import GateDecision, GateResult
-from detect_pipeline.metrics import Metrics, metrics, record_frame, record_gate, record_published
+import os
+
+from detect_pipeline.metrics import (
+    Metrics,
+    metrics,
+    record_frame,
+    record_gate,
+    record_published,
+    sample_process_metrics,
+)
 
 
 def test_counter_and_gauge():
@@ -77,3 +86,13 @@ def test_record_gate_escalations_and_shadow_suppress():
     assert metrics.value("gate_shadow_would_suppress_total", {"camera": "a"}) == 1
     assert metrics.value("tier0_events_published_total", {"camera": "a"}) == 1
     metrics.reset()
+
+
+def test_sample_process_metrics_sets_rss_on_linux():
+    m = Metrics()
+    sample_process_metrics(m)          # first sample: RSS set, CPU% needs a delta
+    if not os.path.exists("/proc/self/stat"):
+        return                          # no-op off Linux; nothing to assert
+    assert m.value("tier0_process_resident_memory_bytes") > 0
+    sample_process_metrics(m)          # second sample: CPU% gauge now present
+    assert "tier0_process_cpu_percent" in m.render()

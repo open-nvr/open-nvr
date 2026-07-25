@@ -27,7 +27,9 @@ baseline / gated escalations.
 """
 from __future__ import annotations
 
+import os
 import threading
+import time
 from collections import defaultdict
 
 _BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
@@ -167,6 +169,33 @@ def record_gate(camera_id: str, gate_result) -> None:
                 metrics.inc("gate_shadow_would_suppress_total", {"camera": camera_id})
 
 
+_proc_prev: dict[str, float | None] = {"cpu_s": None, "t": None}
+
+
+def sample_process_metrics(registry: Metrics | None = None) -> None:
+    """Sample this process's CPU% + RSS from /proc and set gauges (Linux).
+
+    Emitted so the OpenNVR app can show detect-pipeline CPU/RAM next to the AI
+    adapters (which already export the same shape) and compare before/after
+    enabling the gate. No dependency — reads /proc directly; a no-op off Linux.
+    """
+    reg = registry or metrics
+    try:
+        with open("/proc/self/stat") as f:
+            parts = f.read().split()
+        cpu_s = (int(parts[13]) + int(parts[14])) / os.sysconf("SC_CLK_TCK")  # utime+stime
+        with open("/proc/self/statm") as f:
+            rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")        # resident pages
+    except Exception:                                                          # not Linux / no /proc
+        return
+    now = time.monotonic()
+    reg.gauge("tier0_process_resident_memory_bytes", float(rss))
+    if _proc_prev["cpu_s"] is not None and now > _proc_prev["t"]:
+        pct = (cpu_s - _proc_prev["cpu_s"]) / (now - _proc_prev["t"]) * 100.0
+        reg.gauge("tier0_process_cpu_percent", max(0.0, pct))
+    _proc_prev["cpu_s"], _proc_prev["t"] = cpu_s, now
+
+
 def serve_metrics(port: int = 9109, *, registry: Metrics | None = None):  # pragma: no cover
     """Start a background HTTP server exposing ``/metrics``. Best-effort."""
     import http.server
@@ -178,6 +207,7 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None):  # prag
         def do_GET(self):  # noqa: N802
             if self.path.rstrip("/") not in ("/metrics", ""):
                 self.send_response(404); self.end_headers(); return
+            sample_process_metrics(reg)          # refresh CPU%/RSS on each scrape
             body = reg.render().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4")

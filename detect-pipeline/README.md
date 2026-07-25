@@ -212,6 +212,17 @@ The service exposes Prometheus text at `:9109/metrics` (`DETECT_METRICS_PORT`):
 (the motion-gate ratio), `gate_escalations_total{reason}` / `gate_suppressions_total{reason}`,
 `gate_shadow_would_suppress_total`, and `tier0_frame_latency_seconds`.
 
+**Process resource use** (same shape the AI adapters already export, so the app can
+show detect-pipeline CPU/RAM next to them): `tier0_process_cpu_percent`,
+`tier0_process_resident_memory_bytes` — sampled from `/proc` on each scrape (Linux).
+
+**Expensive-model (Tier-1) calls** — the attributes of the AI calls the gate
+dispatches: `tier1_dispatch_total{camera,adapter}` (calls issued),
+`tier1_dispatch_errors_total{camera,adapter}`, `tier1_dispatch_dropped_total{camera,adapter}`
+(shed under backpressure), `tier1_dispatch_inflight` (gauge), and
+`tier1_dispatch_latency_seconds{adapter}` (histogram — how long the expensive model
+takes). Together these show *how often* the costly path runs and *what it costs*.
+
 The **benchmark harness** quantifies the expensive-tier saving — baseline
 (always-on) vs gated — with a miss rate:
 

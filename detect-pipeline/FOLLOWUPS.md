@@ -150,9 +150,18 @@ unchanged when the flag is off. Each change additive, opt-in, reversible.
 
 **Done:** `metrics.py` exposes Prometheus `/metrics` (`DETECT_METRICS_PORT`, dep-free)
 with the `tier0_*` + `gate_*` counters below; `bench.py` is the baseline-vs-gated
-harness (`python -m detect_pipeline.bench`). **Still owed:** run the harness on the
-real clip set / Pi 5 / N100 and record the actual reduction factor, miss rate, and
-capacity — never invented.
+harness (`python -m detect_pipeline.bench`). **Also landed since:**
+- **Process CPU/RAM** (`tier0_process_cpu_percent`, `tier0_process_resident_memory_bytes`)
+  sampled from `/proc` on each scrape — the *same shape* the AI adapters already
+  export, so the app can show detect-pipeline resource use beside them.
+- **Expensive-model (Tier-1) call attributes** (land with #10): `tier1_dispatch_total`,
+  `tier1_dispatch_errors_total`, `tier1_dispatch_dropped_total` (all `{camera,adapter}`),
+  `tier1_dispatch_inflight` (gauge), `tier1_dispatch_latency_seconds{adapter}`
+  (histogram). These are *how often* the costly path runs and *what each call costs*.
+
+**Still owed:** run the harness on the real clip set / Pi 5 / N100 and record the
+actual reduction factor, miss rate, and capacity — never invented. Surfacing these
+in the OpenNVR app UI is #11 below.
 
 **Why (original).** The detect-pipeline used to emit **logs only**; there was no way
 to quantify PR A's efficiency or PR B's savings. KAI-C already exposes `/metrics`
@@ -294,3 +303,45 @@ still run zero expensive inferences. A custom adapter with its own trigger + rou
 row works without touching the gate core; `TriggerPolicy.none`/`always` are honoured.
 This completes the end-to-end flow drawn in the architecture diagram (Gate →
 expensive models → results), of which PR B ships the Gate + audit + measurement.
+
+---
+
+## 11. Surface Tier-0 / gate / Tier-1 metrics in the OpenNVR app (no runbook needed)
+
+**Why.** Today the compute-gated numbers only exist at the detect-pipeline
+`:9109/metrics` text endpoint — so validating shadow mode means curling a port or
+running `bench.py` by hand (see `ENABLEMENT.md`). That's fine for a bring-up, but
+it shouldn't be the *ongoing* way to see the win. The app **already** scrapes and
+charts the AI adapters' `/metrics` (KAI-C polls each adapter every 60s →
+`/api/v1/adapters/{name}/metrics` → `app/src/views/AIAdapters.tsx` renders CPU%
+sparklines). The detect-pipeline emits the **same Prometheus shape** — including
+`tier0_process_cpu_percent` / `tier0_process_resident_memory_bytes` in the exact
+form the adapter cards already use — so surfacing it in-app is *wiring*, not a
+redesign. Then a user compares before/after (gate off → shadow → enforce) in the
+same UI where CPU/RAM already live, instead of reading a runbook.
+
+**Scope (app-side wiring, additive).**
+- **Scrape the detect-pipeline endpoint** the same way adapters are scraped: KAI-C
+  (or the core backend) polls `:9109/metrics`, exposes it at a stable API path
+  (e.g. `/api/v1/tier0/metrics`), cached like the adapter poll. No new format.
+- **A "Compute-gated" panel** (its own card, or a section on the camera/AI view) showing:
+  - **Resource use:** `tier0_process_cpu_percent` + `tier0_process_resident_memory_bytes`
+    — the same sparkline component the adapter cards use, side-by-side with the
+    expensive adapters so the trade is visible in one place.
+  - **The gate working:** motion-gate ratio (`tier0_detector_skipped_total` /
+    runs+skipped), `gate_escalations_total` vs `gate_suppressions_total`, and in
+    shadow, `gate_shadow_would_suppress_total` (the risk-free "what we'd save").
+  - **Expensive-call attributes:** `tier1_dispatch_total` (calls the gate actually
+    fired), `tier1_dispatch_latency_seconds` (p50/p95 — what each costs),
+    `tier1_dispatch_dropped_total` (backpressure), `tier1_dispatch_inflight`.
+- **Optional richer feed via NATS:** the gate already audits every decision to
+  `opennvr.inference.tier0.<cam>.gate`; the app could also live-tally escalate/suppress
+  from that subject for a real-time view without waiting on the 60s poll.
+- Everything read-only; nothing new to configure; shows nothing (or "gate off")
+  when the pipeline isn't running.
+
+**Acceptance.** A user can watch the gate's effect — CPU/RAM, motion-gate ratio,
+escalations vs suppressions, and expensive-call count/latency — **in the app**,
+next to the existing adapter CPU charts, across gate `off → shadow → enforce`,
+without running `bench.py` or curling `/metrics`. `ENABLEMENT.md`'s manual steps
+become the *bring-up* path, not the everyday one.

@@ -23,8 +23,14 @@ DETECT_METRICS_PORT=9109
 The gate computes and audits every escalate/suppress decision but **runs no
 expensive model**. Let it run on real cameras for a representative period, then:
 
-- **Read the metrics** (`:9109/metrics`) and/or run `python -m detect_pipeline.bench`
-  on a labelled clip set. Look at:
+- **Read the metrics.** During bring-up, curl `:9109/metrics` or run
+  `python -m detect_pipeline.bench` on a labelled clip set. The endpoint also emits
+  process CPU/RAM (`tier0_process_cpu_percent`, `tier0_process_resident_memory_bytes`)
+  and the expensive-call attributes (`tier1_dispatch_total`,
+  `tier1_dispatch_latency_seconds`, …) in the same Prometheus shape the AI adapters
+  use — so **surfacing them in the OpenNVR app, next to the existing adapter CPU
+  charts, is the intended everyday view** (FOLLOWUPS #11); the curl/bench path is for
+  the initial validation, not something you run forever. Look at:
   - **expensive-call reduction** = would-be gated calls vs always-on baseline
     (`gate_escalations_total` vs tracks-per-frame) — the compute you'll save.
   - **miss rate** = `gate_shadow_would_suppress_total` cross-checked against your
