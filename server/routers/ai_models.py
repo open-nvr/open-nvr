@@ -366,6 +366,23 @@ async def get_fleet_metrics(
         raise HTTPException(status_code=502, detail="KAI-C unreachable")
 
 
+@router.get("/tier0-metrics")
+async def get_tier0_metrics(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Compute-gated (Tier-0) inference metrics for the app's panel.
+
+    Read-only scrape of the detect-pipeline's Prometheus ``/metrics``
+    (``detect_pipeline_metrics_url``), reduced to process CPU/RAM, the
+    motion-gate ratio, gate escalations vs suppressions, and the
+    expensive-model (Tier-1) call count/latency. Unreachable pipeline is a
+    normal state (gate off / not deployed) → ``{available: false}``; never 502.
+    """
+    from services.tier0_metrics import get_tier0_metrics as _scrape
+
+    return await _scrape()
+
+
 @router.get("/adapters/{adapter_name}/metrics")
 async def get_adapter_metrics(
     adapter_name: str,

@@ -49,6 +49,8 @@ export const aiService = {
     api.get('/api/v1/ai-models/adapters-metrics'),
   getAdapterMetrics: (name: string) =>
     api.get(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/metrics`),
+  getTier0Metrics: () =>
+    api.get('/api/v1/ai-models/tier0-metrics'),
 
   // Adapter permission approval (AI Adapter Contract v1 governance).
   getAdapterPermissions: (name: string) =>

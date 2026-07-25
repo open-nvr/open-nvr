@@ -273,6 +273,9 @@ class Settings(BaseSettings):
     internal_api_key: str  # For adapter authentication
     kai_c_url: str = "http://localhost:8100"  # KAI-C orchestrator URL
     kai_c_ip: str = "127.0.0.1"  # KAI-C IP for whitelisting
+    # detect-pipeline Tier-0 Prometheus /metrics (compute-gated inference).
+    # Polled read-only for the app's Compute-gated panel; empty disables it.
+    detect_pipeline_metrics_url: str = "http://localhost:9109"
 
     @field_validator("secret_key", "mediamtx_secret", "internal_api_key")
     @classmethod
