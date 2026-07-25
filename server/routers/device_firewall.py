@@ -15,16 +15,20 @@
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Device-firewall admin API — approve/block the devices allowed to use OpenNVR.
+Device-firewall admin API — approve/block the browsers allowed to use OpenNVR.
+
+Devices are addressed by their opaque row ``id``, not by IP: identity is the
+server-issued device cookie (see ``device_firewall_service``), and many browsers
+legitimately share one address behind NAT.
 
 ``/status`` is intentionally reachable by anyone (it is in the middleware's open
-list) so a blocked device can learn *why* it is blocked and show its own IP.
-Everything else is superuser-only.
+list) so a blocked device can learn *why* it is blocked. Everything else is
+superuser-only.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -46,6 +50,7 @@ class DeviceLabel(BaseModel):
 
 def _serialize(dev) -> dict:
     return {
+        "id": dev.id,
         "ip_address": dev.ip_address,
         "label": dev.label,
         "status": dev.status.value if dev.status else None,
@@ -60,13 +65,15 @@ def _serialize(dev) -> dict:
 
 @router.get("/status")
 async def my_status(request: Request, db: Session = Depends(get_db)):
-    """This caller's device state — reachable even when blocked, so the UI can
-    tell the user their device is pending and show its IP to give an admin."""
-    ip = get_client_ip(request)
-    dev = dfw.get_device(db, ip)
+    """This caller's own state — reachable even when blocked, so the UI can tell
+    the user their browser is pending and give an admin something to identify it
+    by. ``device_id`` is the row an admin approves; ``device_ip`` is metadata."""
+    dev = dfw.get_device_by_token(db, request.cookies.get(dfw.DEVICE_COOKIE_NAME))
     return {
-        "device_ip": ip,
+        "device_id": dev.id if dev else None,
+        "device_ip": get_client_ip(request),
         "status": dev.status.value if dev and dev.status else "unknown",
+        "enrolled": dev is not None,
         "enforcement_active": dfw.enforcement_active(db),
     }
 
@@ -93,32 +100,37 @@ async def set_enforcement(
     return {"requested": payload.active, "enforcement_active": effective}
 
 
-@router.post("/devices/{ip}/approve")
+@router.post("/devices/{device_id}/approve")
 async def approve_device(
-    ip: str,
+    device_id: int,
     payload: DeviceLabel | None = None,
     user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     dev = dfw.approve(
-        db, ip, user_id=user.id, label=(payload.label if payload else None)
+        db, device_id, user_id=user.id, label=(payload.label if payload else None)
     )
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Device not found")
     return _serialize(dev)
 
 
-@router.post("/devices/{ip}/block")
+@router.post("/devices/{device_id}/block")
 async def block_device(
-    ip: str,
+    device_id: int,
     _user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
-    return _serialize(dfw.block(db, ip))
+    dev = dfw.block(db, device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return _serialize(dev)
 
 
-@router.delete("/devices/{ip}")
+@router.delete("/devices/{device_id}")
 async def delete_device(
-    ip: str,
+    device_id: int,
     _user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
-    return {"deleted": dfw.delete(db, ip)}
+    return {"deleted": dfw.delete(db, device_id)}

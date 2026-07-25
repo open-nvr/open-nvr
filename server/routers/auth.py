@@ -21,7 +21,7 @@ Handles user authentication and JWT token generation.
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -195,11 +195,57 @@ async def register_user(
     return user
 
 
+def _enroll_device(db, request, response, user_id: int | None) -> None:
+    """Device-firewall enrollment on successful login.
+
+    The BROWSER is identified by a long-lived device cookie, not by the client
+    IP (behind NAT every client shares one address, so an IP can neither
+    distinguish nor re-identify a device). A browser presenting no/unknown
+    cookie is issued a fresh token: the first one on a fresh install is
+    auto-approved, later ones are recorded pending for an admin to approve.
+
+    The cookie is deliberately never cleared on logout — signing out must not
+    cost an approval. Best-effort: enrollment failure must not fail the login.
+    """
+    if request is None:
+        return
+    try:
+        from core.client_ip import get_client_ip
+        from services import device_firewall_service as _dfw
+
+        _dev, issued = _dfw.register_authenticated_browser(
+            db,
+            request.cookies.get(_dfw.DEVICE_COOKIE_NAME),
+            get_client_ip(request),
+            request.headers.get("user-agent"),
+            user_id,
+        )
+        if issued and response is not None:
+            # Mark Secure only when the request really arrived over TLS: a plain
+            # http:// dev server would silently drop a Secure cookie, leaving the
+            # browser permanently unenrollable.
+            proto = (
+                request.headers.get("x-forwarded-proto") or request.url.scheme or ""
+            ).split(",")[0].strip().lower()
+            response.set_cookie(
+                _dfw.DEVICE_COOKIE_NAME,
+                issued,
+                max_age=_dfw.DEVICE_COOKIE_MAX_AGE,
+                httponly=True,  # unreadable by JS, so XSS cannot exfiltrate it
+                secure=proto == "https",
+                samesite="lax",
+                path="/",
+            )
+    except Exception:
+        pass
+
+
 @router.post("/login", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
     request: Request = None,
+    response: Response = None,
 ):
     """Login endpoint to get access token (supports MFA if enabled)."""
 
@@ -370,21 +416,9 @@ async def login_for_access_token(
     except Exception as e:
         auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
-    # Device firewall: enroll this client on successful login. The first device
-    # on a fresh install is auto-approved; later devices are recorded pending.
-    try:
-        from core.client_ip import get_client_ip
-        from services import device_firewall_service as _dfw
-
-        if request is not None:
-            _dfw.register_authenticated_device(
-                db,
-                get_client_ip(request),
-                request.headers.get("user-agent"),
-                user.id,
-            )
-    except Exception:
-        pass
+    # Device firewall: enroll this BROWSER on successful login (issues the
+    # device cookie when it has none). See _enroll_device.
+    _enroll_device(db, request, response, user.id)
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
@@ -393,6 +427,7 @@ async def login_with_json(
     user_credentials: UserLogin,
     db: Session = Depends(get_db),
     request: Request = None,
+    response: Response = None,
 ):
     """Alternative login endpoint using JSON body with optional TOTP code."""
 
@@ -508,21 +543,9 @@ async def login_with_json(
         )
     except Exception:
         pass
-    # Device firewall: enroll this client on successful login. The first device
-    # on a fresh install is auto-approved; later devices are recorded pending.
-    try:
-        from core.client_ip import get_client_ip
-        from services import device_firewall_service as _dfw
-
-        if request is not None:
-            _dfw.register_authenticated_device(
-                db,
-                get_client_ip(request),
-                request.headers.get("user-agent"),
-                user.id,
-            )
-    except Exception:
-        pass
+    # Device firewall: enroll this BROWSER on successful login (issues the
+    # device cookie when it has none). See _enroll_device.
+    _enroll_device(db, request, response, user.id)
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 

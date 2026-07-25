@@ -103,10 +103,12 @@ export const systemService = {
   listTrustedDevices: () => api.get('/api/v1/device-firewall/devices'),
   setFirewallEnforcement: (active: boolean) =>
     api.put('/api/v1/device-firewall/enforcement', { active }),
-  approveDevice: (ip: string, label?: string) =>
-    api.post(`/api/v1/device-firewall/devices/${encodeURIComponent(ip)}/approve`, { label }),
-  blockDevice: (ip: string) =>
-    api.post(`/api/v1/device-firewall/devices/${encodeURIComponent(ip)}/block`),
-  deleteDevice: (ip: string) =>
-    api.delete(`/api/v1/device-firewall/devices/${encodeURIComponent(ip)}`),
+  // Devices are addressed by their row id: identity is the server-issued device
+  // cookie, and many browsers share one IP behind NAT.
+  approveDevice: (id: number, label?: string) =>
+    api.post(`/api/v1/device-firewall/devices/${id}/approve`, { label }),
+  blockDevice: (id: number) =>
+    api.post(`/api/v1/device-firewall/devices/${id}/block`),
+  deleteDevice: (id: number) =>
+    api.delete(`/api/v1/device-firewall/devices/${id}`),
 }

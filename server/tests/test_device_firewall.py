@@ -61,53 +61,146 @@ def db():
         s.close()
 
 
-# --- enrollment (trust-on-first-use) ---
+# --- enrollment (trust-on-first-use, identified by device token) ---
 
 
-def test_first_device_auto_approved(db):
-    dev = dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
+def _login(db, token=None, ip="10.0.0.10", ua="UA", user_id=1):
+    """Simulate a successful login from a browser presenting ``token``."""
+    return dfw.register_authenticated_browser(db, token, ip, ua, user_id)
+
+
+def test_first_browser_auto_approved(db):
+    dev, issued = _login(db)
+    assert issued  # a fresh token was minted for the cookie
     assert dev.status.value == "approved"
     assert dev.auto_enrolled is True
-    assert dfw.is_allowed(db, "10.0.0.10") is True
+    assert dfw.is_allowed_browser(db, issued) is True
 
 
-def test_second_device_pending_and_blocked(db):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)  # first
-    second = dfw.register_authenticated_device(db, "10.0.0.20", "UA", 1)
+def test_second_browser_pending_and_blocked(db):
+    _, first = _login(db)  # first browser -> approved
+    second, second_token = _login(db, ua="Other UA")
+    assert second_token and second_token != first
     assert second.status.value == "pending"
-    assert dfw.is_allowed(db, "10.0.0.20") is False
+    assert dfw.is_allowed_browser(db, second_token) is False
+    assert dfw.is_allowed_browser(db, first) is True
 
 
-def test_never_downgrades_approved_device(db):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
-    dfw.register_authenticated_device(db, "10.0.0.20", "UA", 1)
-    dfw.approve(db, "10.0.0.20")
-    # a later login must not knock it back to pending
-    again = dfw.register_authenticated_device(db, "10.0.0.20", "UA", 1)
+def test_same_ip_different_browsers_are_distinct(db):
+    """The NAT bug: two devices sharing one address (Docker Desktop makes every
+    LAN client appear as the bridge gateway) must NOT share an approval."""
+    _, phone_free = _login(db, ip="172.28.0.1")  # first -> approved
+    laptop, laptop_token = _login(db, ip="172.28.0.1", ua="Another")
+    assert laptop.status.value == "pending"
+    assert dfw.is_allowed_browser(db, laptop_token) is False
+    assert dfw.is_allowed_browser(db, phone_free) is True
+
+
+def test_known_token_is_not_reissued_and_survives_logout(db):
+    """Logging out must never cost an approval: the device cookie outlives the
+    session, so the next login re-presents the SAME token and keeps its row."""
+    dev, issued = _login(db)
+    again, reissued = _login(db, token=issued)  # log out, log back in
+    assert reissued is None  # no new cookie — the approval is preserved
+    assert again.id == dev.id
     assert again.status.value == "approved"
+    assert again.attempt_count == 2
+    assert dfw.is_allowed_browser(db, issued) is True
+
+
+def test_unknown_token_is_not_approved(db):
+    _login(db)  # an approved browser exists
+    assert dfw.is_allowed_browser(db, "forged-token-value") is False
+    assert dfw.is_allowed_browser(db, None) is False
+
+
+def test_only_the_hash_is_stored(db):
+    """A database leak must not hand out approved-device access."""
+    dev, issued = _login(db)
+    assert dev.device_token_hash != issued
+    assert dev.device_token_hash == dfw.hash_device_token(issued)
+    assert len(dev.device_token_hash) == 64
+
+
+def test_login_updates_ip_metadata_only(db):
+    dev, issued = _login(db, ip="192.168.1.50")
+    assert dev.ip_address == "192.168.1.50"
+    # roaming to a new network keeps the SAME approved device (no DHCP churn)
+    same, reissued = _login(db, token=issued, ip="10.9.9.9")
+    assert reissued is None
+    assert same.id == dev.id and same.status.value == "approved"
+    assert same.ip_address == "10.9.9.9"
+
+
+def test_never_downgrades_approved_browser(db):
+    _login(db)  # first
+    second, token = _login(db, ua="Other")
+    dfw.approve(db, second.id)
+    again, _ = _login(db, token=token)  # a later login must not undo approval
+    assert again.status.value == "approved"
+
+
+def test_blocked_browser_is_never_auto_approved(db):
+    dev, token = _login(db)
+    dfw.block(db, dev.id)
+    # even as the only device (has_any_approved False), a block must hold
+    again, _ = _login(db, token=token)
+    assert again.status.value == "blocked"
+    assert dfw.is_allowed_browser(db, token) is False
+
+
+# --- admin actions address devices by id ---
+
+
+def test_admin_approve_block_delete_by_id(db):
+    _login(db)
+    dev, token = _login(db, ua="Other")
+    assert dfw.is_allowed_browser(db, token) is False
+    dfw.approve(db, dev.id, user_id=1, label="Front desk")
+    assert dfw.is_allowed_browser(db, token) is True
+    dfw.block(db, dev.id)
+    assert dfw.is_allowed_browser(db, token) is False
+    assert dfw.delete(db, dev.id) is True
+    assert dfw.delete(db, dev.id) is False  # already gone
+    assert dfw.approve(db, 99999) is None  # unknown id
+    assert dfw.block(db, 99999) is None
 
 
 # --- lockout safety ---
 
 
-def test_loopback_always_allowed_even_when_blocked(db):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)  # someone else first
-    dfw.block(db, "127.0.0.1")  # explicitly try to block loopback
-    assert dfw.is_allowed(db, "127.0.0.1") is True
+def test_legacy_ip_rows_do_not_block_bootstrap(db):
+    """Rows migrated from the IP era (no token) must not count as approved, or
+    a fresh install could never enroll its first browser."""
+    from models import DeviceStatus, TrustedDevice
+
+    db.add(
+        TrustedDevice(
+            ip_address="10.0.0.99", status=DeviceStatus.approved, attempt_count=1
+        )
+    )
+    db.commit()
+    assert dfw.has_any_approved(db) is False
+    dev, issued = _login(db)
+    assert dev.status.value == "approved"  # bootstrap still works
+    assert dfw.is_allowed_browser(db, issued) is True
 
 
-def test_internal_service_always_allowed(db):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
-    # Compose-network sibling (MediaMTX/KAI-C, pinned 172.28.0.0/16) — never gated
-    assert dfw.is_allowed(db, "172.28.0.5") is True
+def test_enforcement_off_allows_unknown_browser(db):
+    _login(db)
+    dfw.set_enforcement(db, False)
+    assert dfw.is_allowed_browser(db, "no-such-token") is True
 
 
-def test_lan_client_outside_pinned_subnet_is_gated(db):
-    """The old 172.16.0.0/12 default made the firewall a no-op for any LAN
-    that uses that space for clients. The narrowed default (pinned compose
-    subnet only) must actually gate such a client."""
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)  # first device
-    assert dfw.is_allowed(db, "172.18.0.5") is False  # in /12, NOT in /16
+def test_registry_error_fails_open(db, monkeypatch):
+    """A DB hiccup must never lock every admin out."""
+    _login(db)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(dfw, "get_device_by_token", boom)
+    assert dfw.is_allowed_browser(db, "anything") is True
 
 
 # --- trust-zone configuration (X-Forwarded-For / internal CIDRs) ---
@@ -140,69 +233,23 @@ def test_broad_trust_cidr_warns_loudly(capsys):
 
 
 def test_env_kill_forces_off(db, monkeypatch):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
-    blocked = dfw.register_authenticated_device(db, "10.0.0.20", "UA", 1)
-    assert dfw.is_allowed(db, "10.0.0.20") is False
+    _login(db)  # first browser -> approved
+    blocked, token = _login(db, ua="Other")
+    assert dfw.is_allowed_browser(db, token) is False
     monkeypatch.setattr(settings, "device_firewall_kill", True)
-    assert dfw.is_allowed(db, "10.0.0.20") is True  # break-glass
+    assert dfw.is_allowed_browser(db, token) is True  # break-glass
     assert blocked.status.value == "pending"  # state unchanged, just not enforced
 
 
-def test_disabled_allows_everyone(db):
-    dfw.set_enforcement(db, False)
-    assert dfw.is_allowed(db, "203.0.113.9") is True
-
-
-def test_admin_block_then_approve(db):
-    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
-    dfw.block(db, "10.0.0.99")
-    assert dfw.is_allowed(db, "10.0.0.99") is False
-    dfw.approve(db, "10.0.0.99", user_id=1)
-    assert dfw.is_allowed(db, "10.0.0.99") is True
-
-
-# --- touch() growth caps (scanner resilience) ---
-
-
-def test_touch_throttles_repeat_writes(db, monkeypatch):
-    dfw._recent_touches.clear()
-    d1 = dfw.touch(db, "10.1.0.1", "UA")
-    assert d1 is not None and d1.attempt_count == 1
-    # Same IP hammering again inside the window -> no DB write.
-    assert dfw.touch(db, "10.1.0.1", "UA") is None
-    # Past the window it records again.
-    monkeypatch.setattr(dfw, "TOUCH_THROTTLE_SECONDS", 0.0)
-    d2 = dfw.touch(db, "10.1.0.1", "UA")
-    assert d2 is not None and d2.attempt_count == 2
-
-
-def test_touch_caps_pending_rows(db, monkeypatch):
-    from models import DeviceStatus, TrustedDevice
-
-    dfw._recent_touches.clear()
-    monkeypatch.setattr(dfw, "MAX_PENDING_DEVICES", 5)
-    for i in range(9):  # a scanner sweeping distinct source IPs
-        dfw.touch(db, f"10.2.0.{i}", "scanner")
-    pending = (
-        db.query(TrustedDevice)
-        .filter(TrustedDevice.status == DeviceStatus.pending)
-        .count()
-    )
-    assert pending <= 5
-
-
-def test_touch_cap_never_evicts_approved_or_blocked(db, monkeypatch):
+def test_no_rows_created_by_unauthenticated_traffic(db):
+    """Enrollment happens only at authenticated login, so a scanner hammering
+    the API can no longer inflate the table (nor cost a write per request)."""
     from models import TrustedDevice
 
-    dfw._recent_touches.clear()
-    monkeypatch.setattr(dfw, "MAX_PENDING_DEVICES", 2)
-    dfw.approve(db, "10.3.0.1")
-    dfw.block(db, "10.3.0.2")
-    for i in range(6):
-        dfw.touch(db, f"10.4.0.{i}", "scanner")
-    statuses = {d.ip_address: d.status.value for d in db.query(TrustedDevice).all()}
-    assert statuses["10.3.0.1"] == "approved"
-    assert statuses["10.3.0.2"] == "blocked"
+    before = db.query(TrustedDevice).count()
+    for _ in range(50):
+        assert dfw.is_allowed_browser(db, "scanner-cookie") is False
+    assert db.query(TrustedDevice).count() == before
 
 
 # --- X-Forwarded-For trust (the spoofing bypass) ---

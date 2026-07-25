@@ -515,18 +515,30 @@ class DeviceStatus(str, enum.Enum):
 
 
 class TrustedDevice(Base):
-    """A device (by client IP) known to the OpenNVR app-layer firewall.
+    """A browser known to the OpenNVR app-layer firewall.
 
-    ``approved`` may use OpenNVR; ``pending`` has attempted access but awaits an
-    admin decision (blocked meanwhile); ``blocked`` is explicitly denied. The
-    first device to authenticate on a fresh install is auto-approved so the
-    installer is never locked out.
+    ``approved`` may use OpenNVR; ``pending`` has logged in but awaits an admin
+    decision (blocked meanwhile); ``blocked`` is explicitly denied. The first
+    browser to authenticate on a fresh install is auto-approved so the installer
+    is never locked out.
+
+    Identity is ``device_token_hash`` — the SHA-256 of a long random token the
+    server issues at login and stores in an HttpOnly cookie (it outlives the
+    session, so logging out never costs an approval). Identity is deliberately
+    NOT the client IP: NAT collapses every device behind one address (Docker
+    Desktop's port forwarding makes all LAN clients look like the bridge
+    gateway), so an IP can neither distinguish nor reliably re-identify a
+    device. ``ip_address`` is retained as metadata for the admin UI only.
+    Granularity is therefore per browser profile: a second profile, another
+    browser, or cleared cookies enroll as a new device needing approval.
     """
 
     __tablename__ = "trusted_devices"
 
     id = Column(Integer, primary_key=True, index=True)
-    ip_address = Column(String(45), nullable=False, unique=True, index=True)
+    device_token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    # Metadata ("last seen from"), NOT identity — see the class docstring.
+    ip_address = Column(String(45), nullable=True, index=True)
     label = Column(String(100), nullable=True)
     status = Column(
         SAEnum(DeviceStatus), nullable=False, default=DeviceStatus.pending

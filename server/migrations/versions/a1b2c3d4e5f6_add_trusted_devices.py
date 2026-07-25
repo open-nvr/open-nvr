@@ -17,7 +17,25 @@ down_revision: str | None = "f2b8d3e6a9c1"
 branch_labels = None
 depends_on = None
 
-_STATUS = sa.Enum("approved", "pending", "blocked", name="devicestatus")
+_LABELS = ("approved", "pending", "blocked")
+_STATUS = sa.Enum(*_LABELS, name="devicestatus")
+
+
+def _status_column_type(bind):
+    """The type to use for the ``status`` column inside ``create_table``.
+
+    On PostgreSQL the enum type is created once, explicitly, in upgrade(). The
+    column must then reference it with ``create_type=False``, or create_table
+    emits a SECOND ``CREATE TYPE`` and the upgrade dies with "type devicestatus
+    already exists" — which is what a from-scratch ``alembic upgrade head`` did
+    on a fresh Postgres install (existing deployments were unaffected: their
+    schema was built directly and stamped, so this migration never ran).
+    """
+    if bind.dialect.name == "postgresql":
+        from sqlalchemy.dialects import postgresql
+
+        return postgresql.ENUM(*_LABELS, name="devicestatus", create_type=False)
+    return _STATUS
 
 
 def upgrade() -> None:
@@ -30,7 +48,7 @@ def upgrade() -> None:
         sa.Column("label", sa.String(length=100), nullable=True),
         sa.Column(
             "status",
-            _STATUS,
+            _status_column_type(bind),
             nullable=False,
             server_default="pending",
         ),

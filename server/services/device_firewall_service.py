@@ -23,29 +23,43 @@ so only the application (which sees the real IP via the proxy's
 ``X-Forwarded-For``) can enforce on it. An OS-level backend for bare-metal
 appliances can be added later behind the same registry.
 
+Identity is a server-issued token, NOT the client IP. The IP cannot identify a
+device: NAT collapses every client behind one address — with Docker Desktop's
+port forwarding, *all* LAN clients arrive as the bridge gateway — so IP-keyed
+approval let a second device silently inherit the first one's approval. Instead,
+at login the server mints a long random token, stores its SHA-256, and returns
+it in an HttpOnly cookie. The cookie's lifetime is independent of the session,
+so logging out never costs an approval. Granularity is per browser profile (a
+second profile / another browser / cleared cookies = a new device to approve).
+
 Enrollment model (trust-on-first-use):
-* the FIRST device to authenticate on a fresh install is auto-approved, so the
+* the FIRST browser to authenticate on a fresh install is auto-approved, so the
   installer can never lock themselves out;
-* any later unknown device is recorded ``pending`` and blocked until an admin
-  approves it;
-* loopback and sibling containers (MediaMTX/KAI-C/adapters) are never firewalled.
+* any later browser is recorded ``pending`` and blocked until an admin approves;
+* loopback and internal service callers are never firewalled.
 
 Lockout safety is structural: enforcement is off until the admin turns it on,
 the env ``DEVICE_FIREWALL_KILL`` is a hard override that forces it off for
 recovery, loopback is always allowed (``docker exec`` recovery), and the CLI
-(``python -m manage_devices``) can approve an IP or disable enforcement without
-touching the database by hand.
+(``python -m manage_devices``) can approve a device or disable enforcement
+without touching the database by hand.
 """
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from core.client_ip import is_internal_service
 from core.config import settings
 from models import DeviceStatus, SecuritySetting, TrustedDevice
+
+# The HttpOnly cookie carrying the device token. Deliberately long-lived and
+# NEVER cleared on logout — it identifies the browser, not the session.
+DEVICE_COOKIE_NAME = "opennvr_device"
+DEVICE_COOKIE_MAX_AGE = 400 * 24 * 3600  # 400d is the browser-enforced ceiling
 
 # The admin's on/off lives in security_settings under this key. The env
 # ``device_firewall_kill`` is a hard override on top of it (break-glass).
@@ -88,120 +102,97 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def new_device_token() -> str:
+    """A fresh, unguessable device token (the cookie value)."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_device_token(raw_token: str) -> str:
+    """Only the hash is stored, so a database leak grants no access."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
 def has_any_approved(db: Session) -> bool:
+    """Whether any TOKEN-identified browser is approved.
+
+    Rows without a token (legacy IP-era rows, or CLI-created stubs) are ignored
+    so they can never block the trust-on-first-use bootstrap.
+    """
     return (
         db.query(TrustedDevice)
-        .filter(TrustedDevice.status == DeviceStatus.approved)
+        .filter(
+            TrustedDevice.status == DeviceStatus.approved,
+            TrustedDevice.device_token_hash.isnot(None),
+        )
         .first()
         is not None
     )
 
 
-def get_device(db: Session, ip: str) -> TrustedDevice | None:
+def get_device_by_token(db: Session, raw_token: str | None) -> TrustedDevice | None:
+    if not raw_token:
+        return None
     return (
-        db.query(TrustedDevice).filter(TrustedDevice.ip_address == ip).first()
+        db.query(TrustedDevice)
+        .filter(TrustedDevice.device_token_hash == hash_device_token(raw_token))
+        .first()
     )
 
 
-# touch() write-load and table-growth caps. A port scanner hammering the API
-# must not translate into one DB write per blocked request, nor into an
-# unbounded pile of pending rows.
-TOUCH_THROTTLE_SECONDS = 30.0
-MAX_PENDING_DEVICES = 200
-_recent_touches: dict[str, float] = {}  # ip -> monotonic ts of last DB write
+def get_device_by_id(db: Session, device_id: int) -> TrustedDevice | None:
+    return db.query(TrustedDevice).filter(TrustedDevice.id == device_id).first()
 
 
-def touch(db: Session, ip: str, user_agent: str | None = None) -> TrustedDevice | None:
-    """Record that ``ip`` was seen; create it as pending if new.
-
-    Throttled: repeat sightings of the same IP within ``TOUCH_THROTTLE_SECONDS``
-    skip the DB write (returns None). New pending rows are capped at
-    ``MAX_PENDING_DEVICES`` by evicting the least-recently-seen pending row, so
-    a scanner sweeping addresses can't inflate the table.
-    """
-    import time as _time
-
-    now_m = _time.monotonic()
-    last = _recent_touches.get(ip)
-    if last is not None and now_m - last < TOUCH_THROTTLE_SECONDS:
-        return None
-    if len(_recent_touches) > 4096:  # bound the throttle map itself
-        cutoff = now_m - TOUCH_THROTTLE_SECONDS
-        for k in [k for k, v in _recent_touches.items() if v < cutoff]:
-            _recent_touches.pop(k, None)
-    _recent_touches[ip] = now_m
-
-    dev = get_device(db, ip)
-    if dev is None:
-        pending = (
-            db.query(TrustedDevice)
-            .filter(TrustedDevice.status == DeviceStatus.pending)
-            .count()
-        )
-        if pending >= MAX_PENDING_DEVICES:
-            evict = (
-                db.query(TrustedDevice)
-                .filter(TrustedDevice.status == DeviceStatus.pending)
-                .order_by(TrustedDevice.last_seen.asc())
-                .first()
-            )
-            if evict is not None:
-                db.delete(evict)
-        dev = TrustedDevice(
-            ip_address=ip,
-            status=DeviceStatus.pending,
-            user_agent=(user_agent or "")[:400] or None,
-            attempt_count=1,
-        )
-        db.add(dev)
-    else:
-        dev.last_seen = _now()
-        dev.attempt_count = (dev.attempt_count or 0) + 1
-        if user_agent:
-            dev.user_agent = user_agent[:400]
-    db.commit()
-    db.refresh(dev)
-    return dev
-
-
-def is_allowed(db: Session, ip: str) -> bool:
-    """Whether a request from ``ip`` may proceed.
+def is_allowed_browser(db: Session, raw_token: str | None) -> bool:
+    """Whether the browser presenting ``raw_token`` may proceed.
 
     Fail-open on any registry error (a DB hiccup must never lock every admin
-    out — see feature.md); the caller logs the failure.
+    out — see feature.md); the caller logs the failure. An absent or unknown
+    token is NOT an error: it is simply not approved.
     """
     if not enforcement_active(db):
         return True
-    if is_internal_service(ip):
-        return True
     try:
-        dev = get_device(db, ip)
+        dev = get_device_by_token(db, raw_token)
     except Exception:
         return True  # fail-open
     return bool(dev and dev.status == DeviceStatus.approved)
 
 
-def register_authenticated_device(
-    db: Session, ip: str, user_agent: str | None, user_id: int | None
-) -> TrustedDevice:
-    """Called on a successful login.
+def register_authenticated_browser(
+    db: Session,
+    raw_token: str | None,
+    ip: str | None,
+    user_agent: str | None,
+    user_id: int | None,
+) -> tuple[TrustedDevice, str | None]:
+    """Called on a successful login. Enrolls / refreshes this browser.
 
-    Auto-approves the first device on a fresh install; otherwise ensures the
-    device is recorded (pending, unless already approved/blocked) so an admin
-    can act on it. Never downgrades an already-approved device.
+    Returns ``(row, token_to_set)`` where ``token_to_set`` is a NEW token the
+    caller must write to the device cookie (None when the browser already
+    presented a known one — re-issuing would orphan the existing approval).
+
+    The first token-identified browser on a fresh install is auto-approved so
+    the installer can never lock themselves out; any later browser is recorded
+    pending. Never downgrades an already-approved or blocked browser.
     """
-    dev = get_device(db, ip)
+    dev = get_device_by_token(db, raw_token)
+    issued: str | None = None
     first_ever = not has_any_approved(db)
 
     if dev is None:
+        issued = new_device_token()
         dev = TrustedDevice(
-            ip_address=ip,
-            user_agent=(user_agent or "")[:400] or None,
-            attempt_count=1,
+            device_token_hash=hash_device_token(issued),
+            status=DeviceStatus.pending,
+            attempt_count=0,
         )
         db.add(dev)
 
     dev.last_seen = _now()
+    dev.attempt_count = (dev.attempt_count or 0) + 1
+    if ip:
+        dev.ip_address = ip  # metadata: "last seen from"
     if user_agent:
         dev.user_agent = user_agent[:400]
 
@@ -209,22 +200,21 @@ def register_authenticated_device(
         dev.status = DeviceStatus.approved
         dev.auto_enrolled = True
         dev.approved_at = _now()
-        dev.label = dev.label or "First device (auto-enrolled)"
+        dev.label = dev.label or "First browser (auto-enrolled)"
     elif dev.status is None:
         dev.status = DeviceStatus.pending
 
     db.commit()
     db.refresh(dev)
-    return dev
+    return dev, issued
 
 
 def approve(
-    db: Session, ip: str, *, user_id: int | None = None, label: str | None = None
-) -> TrustedDevice:
-    dev = get_device(db, ip)
+    db: Session, device_id: int, *, user_id: int | None = None, label: str | None = None
+) -> TrustedDevice | None:
+    dev = get_device_by_id(db, device_id)
     if dev is None:
-        dev = TrustedDevice(ip_address=ip, attempt_count=0)
-        db.add(dev)
+        return None
     dev.status = DeviceStatus.approved
     dev.approved_by = user_id
     dev.approved_at = _now()
@@ -235,19 +225,18 @@ def approve(
     return dev
 
 
-def block(db: Session, ip: str) -> TrustedDevice:
-    dev = get_device(db, ip)
+def block(db: Session, device_id: int) -> TrustedDevice | None:
+    dev = get_device_by_id(db, device_id)
     if dev is None:
-        dev = TrustedDevice(ip_address=ip, attempt_count=0)
-        db.add(dev)
+        return None
     dev.status = DeviceStatus.blocked
     db.commit()
     db.refresh(dev)
     return dev
 
 
-def delete(db: Session, ip: str) -> bool:
-    dev = get_device(db, ip)
+def delete(db: Session, device_id: int) -> bool:
+    dev = get_device_by_id(db, device_id)
     if dev is None:
         return False
     db.delete(dev)

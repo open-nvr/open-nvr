@@ -22,13 +22,34 @@ import { Badge, Button, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
 
 type Device = {
-  ip_address: string
+  id: number
+  ip_address: string | null
   label: string | null
   status: 'approved' | 'pending' | 'blocked' | null
   user_agent: string | null
   attempt_count: number
   auto_enrolled: boolean
   last_seen: string | null
+}
+
+/** Condense a user-agent into something an admin can recognise at a glance. */
+function describeAgent(ua: string | null): string {
+  if (!ua) return 'Unknown browser'
+  const browser =
+    /Edg\//.test(ua) ? 'Edge'
+    : /OPR\//.test(ua) ? 'Opera'
+    : /Chrome\//.test(ua) ? 'Chrome'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /Safari\//.test(ua) ? 'Safari'
+    : 'Browser'
+  const os =
+    /Android/.test(ua) ? 'Android'
+    : /iPhone|iPad|iOS/.test(ua) ? 'iOS'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS X/.test(ua) ? 'macOS'
+    : /Linux/.test(ua) ? 'Linux'
+    : ''
+  return os ? `${browser} on ${os}` : browser
 }
 
 const STATUS_BADGE: Record<string, 'success' | 'warning' | 'destructive'> = {
@@ -38,12 +59,16 @@ const STATUS_BADGE: Record<string, 'success' | 'warning' | 'destructive'> = {
 }
 
 /**
- * OpenNVR device firewall — controls which devices (by IP) may use OpenNVR.
+ * OpenNVR device firewall — controls which browsers may use OpenNVR.
  *
- * The first device to log in on a fresh install is trusted automatically; any
- * new device is held pending until approved here. Enforcement is off until you
- * turn it on. Streams are covered too: MediaMTX only serves an OpenNVR-signed
- * token, which a blocked device cannot obtain.
+ * A device is identified by a long-lived cookie the server issues at login, not
+ * by its IP (behind NAT every client shares one address). The first browser to
+ * log in on a fresh install is trusted automatically; any new one is held
+ * pending until approved here. Because identity is per browser profile, a second
+ * profile / another browser / cleared cookies enroll as a new device.
+ *
+ * Enforcement is off until you turn it on. Streams are covered too: MediaMTX
+ * only serves an OpenNVR-signed token, which a blocked device cannot obtain.
  */
 export function DeviceFirewall() {
   const { showSuccess, showError } = useSnackbar()
@@ -87,8 +112,8 @@ export function DeviceFirewall() {
     }
   }
 
-  const act = async (fn: () => Promise<any>, ip: string) => {
-    setBusy(ip)
+  const act = async (fn: () => Promise<any>, key: string) => {
+    setBusy(key)
     try {
       await fn()
       await load()
@@ -119,9 +144,11 @@ export function DeviceFirewall() {
             )}
           </div>
           <p className="text-xs text-[var(--text-dim)] mt-1 max-w-xl">
-            When on, only approved devices can reach OpenNVR or its streams. The
-            first device to log in was trusted automatically. Turning this on
-            with unapproved devices present will lock them out immediately.
+            When on, only approved browsers can reach OpenNVR or its streams. The
+            first browser to log in was trusted automatically. Turning this on
+            with unapproved devices present will lock them out immediately. Each
+            browser profile counts separately — clearing cookies or using another
+            browser requires a fresh approval.
           </p>
         </div>
         <Button
@@ -152,9 +179,9 @@ export function DeviceFirewall() {
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[var(--text-dim)] border-b border-[var(--border)]">
-              <th className="px-3 py-2 font-medium">Device (IP)</th>
+              <th className="px-3 py-2 font-medium">Browser</th>
               <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium">Seen</th>
+              <th className="px-3 py-2 font-medium">Logins</th>
               <th className="px-3 py-2 font-medium">Last activity</th>
               <th className="px-3 py-2 font-medium text-right">Actions</th>
             </tr>
@@ -168,14 +195,15 @@ export function DeviceFirewall() {
               </tr>
             )}
             {devices.map((d) => (
-              <tr key={d.ip_address} className="border-b border-[var(--border)]/60">
+              <tr key={d.id} className="border-b border-[var(--border)]/60">
                 <td className="px-3 py-2">
-                  <div className="font-mono">{d.ip_address}</div>
-                  {(d.label || d.user_agent) && (
-                    <div className="text-xs text-[var(--text-dim)] truncate max-w-[22rem]">
-                      {d.label || d.user_agent}
-                    </div>
-                  )}
+                  <div>
+                    {d.label || describeAgent(d.user_agent)}
+                    <span className="ml-1.5 text-xs text-[var(--text-dim)]">#{d.id}</span>
+                  </div>
+                  <div className="text-xs text-[var(--text-dim)] font-mono truncate max-w-[22rem]">
+                    last seen from {d.ip_address || 'unknown'}
+                  </div>
                 </td>
                 <td className="px-3 py-2">
                   <Badge variant={STATUS_BADGE[d.status || ''] ?? 'neutral'}>
@@ -194,23 +222,23 @@ export function DeviceFirewall() {
                     {d.status !== 'approved' && (
                       <Button
                         variant="primary"
-                        disabled={busy === d.ip_address}
-                        onClick={() => act(() => apiService.approveDevice(d.ip_address), d.ip_address)}
+                        disabled={busy === String(d.id)}
+                        onClick={() => act(() => apiService.approveDevice(d.id), String(d.id))}
                       >
                         Approve
                       </Button>
                     )}
                     {d.status !== 'blocked' && (
                       <Button
-                        disabled={busy === d.ip_address}
-                        onClick={() => act(() => apiService.blockDevice(d.ip_address), d.ip_address)}
+                        disabled={busy === String(d.id)}
+                        onClick={() => act(() => apiService.blockDevice(d.id), String(d.id))}
                       >
                         Block
                       </Button>
                     )}
                     <Button
-                      disabled={busy === d.ip_address}
-                      onClick={() => act(() => apiService.deleteDevice(d.ip_address), d.ip_address)}
+                      disabled={busy === String(d.id)}
+                      onClick={() => act(() => apiService.deleteDevice(d.id), String(d.id))}
                     >
                       Forget
                     </Button>
@@ -225,7 +253,8 @@ export function DeviceFirewall() {
       <p className="text-xs text-[var(--text-dim)]">
         Locked out? Set <span className="font-mono">DEVICE_FIREWALL_KILL=true</span>{' '}
         and restart, or run{' '}
-        <span className="font-mono">python -m manage_devices approve &lt;ip&gt;</span>{' '}
+        <span className="font-mono">python -m manage_devices list</span> then{' '}
+        <span className="font-mono">python -m manage_devices approve &lt;id&gt;</span>{' '}
         inside the server container.
       </p>
     </div>
