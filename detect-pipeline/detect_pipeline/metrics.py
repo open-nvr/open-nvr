@@ -145,6 +145,7 @@ def record_frame(
     *,
     latency_s: float | None = None,
     detector_latency_s: float | None = None,
+    stage_latency_s: dict[str, float] | None = None,
     model: str | None = None,
 ) -> None:
     """Emit Tier-0 per-frame metrics from a FrameResult (service layer).
@@ -173,6 +174,8 @@ def record_frame(
         metrics.observe("tier0_frame_latency_seconds", latency_s, cam)
     if detector_latency_s is not None:
         metrics.observe("tier0_detector_latency_seconds", detector_latency_s, mcam)
+    for stage, secs in (stage_latency_s or {}).items():
+        metrics.observe("tier0_stage_latency_seconds", secs, {"camera": camera_id, "stage": stage})
 
 
 def record_published(camera_id: str) -> None:
@@ -188,6 +191,24 @@ def record_gate(camera_id: str, gate_result) -> None:
             metrics.inc("gate_suppressions_total", {"camera": camera_id, "reason": d.reason})
             if gate_result.shadow:
                 metrics.inc("gate_shadow_would_suppress_total", {"camera": camera_id})
+
+
+def record_worker_state(camera_id: str, up: bool, *, target_fps: float | None = None) -> None:
+    """Worker liveness + its configured target fps (the operator 'is it running' signal)."""
+    metrics.gauge("tier0_worker_up", 1.0 if up else 0.0, {"camera": camera_id})
+    if target_fps is not None:
+        metrics.gauge("tier0_target_fps", float(target_fps), {"camera": camera_id})
+
+
+def record_worker_restart(camera_id: str) -> None:
+    """A source (ffmpeg) restart for this camera — repeated restarts = an unhealthy feed."""
+    metrics.inc("tier0_worker_restarts_total", {"camera": camera_id})
+
+
+def record_processing_fps(camera_id: str, fps: float) -> None:
+    """Frames/s the worker is actually sustaining. Compare to target_fps: a ratio
+    well under 1 means the box can't keep up with this camera (the capacity signal)."""
+    metrics.gauge("tier0_processing_fps", float(fps), {"camera": camera_id})
 
 
 _proc_prev: dict[str, float | None] = {"cpu_s": None, "t": None}

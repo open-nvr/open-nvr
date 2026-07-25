@@ -161,6 +161,35 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     det_avg_ms, det_p95_ms = _hist_avg_and_p95(samples, "tier0_detector_latency_seconds")
     detections_by_class = {k: int(v) for k, v in _sums_grouped_by(samples, "tier0_detections_total", "label").items()}
 
+    # Per-stage average latency (ms) — where the frame's time actually goes.
+    stage_latency_ms: dict[str, float] = {}
+    stages = {s.labels["stage"] for s in samples
+              if s.name.startswith("tier0_stage_latency_seconds") and "stage" in s.labels}
+    for st in stages:
+        s_sum = sum(s.value for s in samples
+                    if s.name == "tier0_stage_latency_seconds_sum" and s.labels.get("stage") == st)
+        s_cnt = sum(s.value for s in samples
+                    if s.name == "tier0_stage_latency_seconds_count" and s.labels.get("stage") == st)
+        if s_cnt > 0:
+            stage_latency_ms[st] = round((s_sum / s_cnt) * 1000.0, 3)
+
+    # Operator health: are the workers up, and are they keeping up with the cameras?
+    worker_cams = {s.labels.get("camera") for s in samples if s.name == "tier0_worker_up"}
+    workers_up = int(sum(1 for s in samples if s.name == "tier0_worker_up" and s.value >= 1.0))
+    proc = {s.labels["camera"]: s.value for s in samples
+            if s.name == "tier0_processing_fps" and "camera" in s.labels}
+    tgt = {s.labels["camera"]: s.value for s in samples
+           if s.name == "tier0_target_fps" and "camera" in s.labels}
+    ratios = {c: proc[c] / tgt[c] for c in proc if tgt.get(c, 0) > 0}
+    worst_cam = min(ratios, key=ratios.get) if ratios else None
+    health = {
+        "workers_up": workers_up,
+        "workers_total": len([c for c in worker_cams if c is not None]),
+        "min_fps_ratio": round(ratios[worst_cam], 3) if worst_cam else None,
+        "worst_camera": worst_cam,
+        "restarts_total": int(_sum(samples, "tier0_worker_restarts_total")),
+    }
+
     # Coarse mode inference (best-effort UI label, not a control signal):
     #   no frames -> not running; frames but no gate metrics -> gate off;
     #   shadow-suppress counter present -> shadow; else acting -> enforce.
@@ -177,11 +206,13 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
         "available": True,
         "mode": mode,
         "model": model,
+        "health": health,
         "detector": {
             "latency_avg_ms": det_avg_ms,
             "latency_p95_ms": det_p95_ms,
             "detections_total": int(sum(detections_by_class.values())),
             "detections_by_class": detections_by_class,
+            "stage_latency_ms": stage_latency_ms,
         },
         "process": {
             "cpu_percent": _last_gauge(samples, "tier0_process_cpu_percent"),

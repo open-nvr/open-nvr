@@ -100,6 +100,20 @@ ENFORCE_TEXT = "\n".join([
     'tier1_dispatch_total{camera="cam1",adapter="caption"} 5',
     "# TYPE tier1_dispatch_inflight gauge",
     "tier1_dispatch_inflight 1",
+    # operator health: 2 cams, one behind (cam2 at 2/5 fps)
+    "# TYPE tier0_worker_up gauge",
+    'tier0_worker_up{camera="cam1"} 1',
+    'tier0_worker_up{camera="cam2"} 1',
+    "# TYPE tier0_target_fps gauge",
+    'tier0_target_fps{camera="cam1"} 5',
+    'tier0_target_fps{camera="cam2"} 5',
+    "# TYPE tier0_processing_fps gauge",
+    'tier0_processing_fps{camera="cam1"} 5',
+    'tier0_processing_fps{camera="cam2"} 2',
+    "# TYPE tier0_worker_restarts_total counter",
+    'tier0_worker_restarts_total{camera="cam2"} 3',
+    # stage latency: detect avg = 0.02s -> 20ms
+    _hist("tier0_stage_latency_seconds", "x", {}, 0.02, 1).replace('adapter="x"', 'camera="cam1",stage="detect"'),
     # count=5, sum=1.0 -> avg 200ms; first le>=4.75 is 0.25 -> p95 250ms
     _hist("tier1_dispatch_latency_seconds", "caption",
           {0.005: 0, 0.01: 0, 0.025: 0, 0.05: 0, 0.1: 0}, 1.0, 5),
@@ -142,6 +156,12 @@ def test_reduce_enforce_rollup():
     assert r["detector"]["latency_p95_ms"] == 25.0
     assert r["detector"]["detections_total"] == 16
     assert r["detector"]["detections_by_class"] == {"person": 12, "car": 4}
+    assert abs(r["detector"]["stage_latency_ms"]["detect"] - 20.0) < 1e-6
+    # operator health: both up, cam2 behind (2/5 = 0.4), restarts summed
+    assert r["health"]["workers_up"] == 2 and r["health"]["workers_total"] == 2
+    assert abs(r["health"]["min_fps_ratio"] - 0.4) < 1e-9
+    assert r["health"]["worst_camera"] == "cam2"
+    assert r["health"]["restarts_total"] == 3
 
 
 def test_mode_off_when_no_gate_metrics():

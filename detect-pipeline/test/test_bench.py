@@ -54,3 +54,13 @@ def test_result_dict_and_summary():
     d = r.as_dict()
     assert d["reduction_factor"] == 100.0 and d["miss_rate"] == 0.0
     assert "100x fewer" in r.summary() or "100.0x fewer" in r.summary()
+
+
+def test_fps_property_from_wall_time():
+    r = BenchResult(frames=100, wall_seconds=2.0)
+    assert r.fps == 50.0
+    assert r.as_dict()["fps"] == 50.0
+    assert "fps=50.0" in r.summary()
+    # untimed run: fps is None, omitted from the summary line
+    assert BenchResult(frames=100).fps is None
+    assert "fps=" not in BenchResult(frames=100).summary()

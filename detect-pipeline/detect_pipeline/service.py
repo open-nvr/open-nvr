@@ -33,7 +33,14 @@ from .frame_source import FrameSource, probe_stream
 from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import HwAccel
-from .metrics import record_frame, record_gate, record_published
+from .metrics import (
+    record_frame,
+    record_gate,
+    record_processing_fps,
+    record_published,
+    record_worker_restart,
+    record_worker_state,
+)
 from .motion import MotionConfig, MotionDetector
 from .pipeline import DetectPipeline, FrameResult
 from .tracking import TrackConfig, Tracker
@@ -150,18 +157,36 @@ class CameraWorker:
             model_size=(self.model_size, self.model_size),
         )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
+        record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
+        prev_seq: int | None = None
+        win_t0 = time.monotonic()
+        win_n = 0
         try:
             for frame in src.stream():
                 if self._stop.is_set():
                     break
+                # Frame.seq resets to 0 when the source (ffmpeg) restarts — a truthful
+                # restart signal without reaching into the source's internals.
+                seq = getattr(frame, "seq", None)
+                if seq == 0 and prev_seq is not None:
+                    record_worker_restart(self.spec.camera_id)
+                prev_seq = seq
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
                 record_frame(
                     self.spec.camera_id, result,
                     latency_s=time.monotonic() - t0,
                     detector_latency_s=getattr(result, "detect_latency_s", None),
+                    stage_latency_s=getattr(result, "stage_latency_s", None),
                     model=self.model_id,
                 )
+                # Sustained fps over a ~1s window — compared to target_fps, this is
+                # the "is the box keeping up with this camera" signal.
+                win_n += 1
+                now = time.monotonic()
+                if now - win_t0 >= 1.0:
+                    record_processing_fps(self.spec.camera_id, win_n / (now - win_t0))
+                    win_t0, win_n = now, 0
                 try:
                     if self.sink.publish(self.spec.camera_id, result, frame):
                         record_published(self.spec.camera_id)   # count real publishes only
@@ -172,6 +197,7 @@ class CameraWorker:
         except Exception:
             log.exception("tier0 %s: worker loop crashed", self.spec.camera_id)
         finally:
+            record_worker_state(self.spec.camera_id, False)
             log.info("tier0 %s: stopped", self.spec.camera_id)
 
     def _run_gate(self, result, frame) -> None:

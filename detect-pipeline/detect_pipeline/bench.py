@@ -38,6 +38,12 @@ class BenchResult:
     missed_events: int = 0           # events that never escalated
     escalations_by_reason: dict[str, int] = field(default_factory=dict)
     model_id: str | None = None      # which model produced this run (for A/B rows)
+    wall_seconds: float = 0.0        # wall time of the Tier-0 pass over the clip
+
+    @property
+    def fps(self) -> float | None:
+        """Sustained Tier-0 throughput — the speed axis. None until timed."""
+        return self.frames / self.wall_seconds if self.wall_seconds > 0 else None
 
     @property
     def reduction_factor(self) -> float:
@@ -52,6 +58,7 @@ class BenchResult:
     def as_dict(self) -> dict:
         return {
             "model_id": self.model_id,
+            "fps": round(self.fps, 2) if self.fps is not None else None,
             "frames": self.frames,
             "baseline_calls": self.baseline_calls,
             "gated_calls": self.gated_calls,
@@ -65,8 +72,9 @@ class BenchResult:
     def summary(self) -> str:
         d = self.as_dict()
         tag = f"[{d['model_id']}] " if d.get("model_id") else ""
+        fps = f"fps={d['fps']} | " if d.get("fps") is not None else ""
         return (
-            f"{tag}frames={d['frames']} | expensive calls: baseline={d['baseline_calls']} "
+            f"{tag}{fps}frames={d['frames']} | expensive calls: baseline={d['baseline_calls']} "
             f"gated={d['gated_calls']}  ({d['reduction_factor']}x fewer) | "
             f"events={d['events']} missed={d['missed_events']} (miss-rate {d['miss_rate']})"
         )
@@ -133,6 +141,8 @@ def tracks_from_source(
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI
     import argparse
     import json
+    import statistics
+    import time
 
     from .detector import StubDetector
     from .frame_source import VideoFileSource
@@ -146,25 +156,45 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI
     p.add_argument("--fps", type=int, default=5)
     p.add_argument("--heartbeat", type=float, default=0.0)
     p.add_argument("--cooldown", type=float, default=30.0)
+    p.add_argument("--repeat", type=int, default=1,
+                   help="run N times and report fps mean±std — so a small speed delta "
+                        "isn't just run-to-run noise")
     args = p.parse_args(argv)
 
-    if args.detector == "onnx":
-        from .onnx_detector import OnnxYoloDetector
-        det = OnnxYoloDetector(model_path=args.model)
-    elif args.detector == "blob":
-        from .detectors_local import BrightBlobDetector
-        det = BrightBlobDetector()
-    else:
-        det = StubDetector()
+    def _detector():
+        if args.detector == "onnx":
+            from .onnx_detector import OnnxYoloDetector
+            return OnnxYoloDetector(model_path=args.model)
+        if args.detector == "blob":
+            from .detectors_local import BrightBlobDetector
+            return BrightBlobDetector()
+        return StubDetector()
 
-    frames = VideoFileSource(args.source).stream()
-    cfg = GateConfig(shadow=False, heartbeat_s=args.heartbeat, escalate_cooldown_s=args.cooldown)
-    res = run_benchmark(tracks_from_source(frames, detector=det, fps=args.fps), cfg)
-    res.model_id = args.model_id or (
+    model_id = args.model_id or (
         args.model.rsplit("/", 1)[-1].rsplit(".", 1)[0] if args.model else args.detector
     )
-    print(res.summary())
-    print(json.dumps(res.as_dict(), indent=2))
+    cfg = GateConfig(shadow=False, heartbeat_s=args.heartbeat, escalate_cooldown_s=args.cooldown)
+
+    runs: list[BenchResult] = []
+    for _ in range(max(1, args.repeat)):
+        frames = VideoFileSource(args.source).stream()   # fresh generator each run
+        t0 = time.monotonic()
+        res = run_benchmark(tracks_from_source(frames, detector=_detector(), fps=args.fps), cfg)
+        res.wall_seconds = time.monotonic() - t0
+        res.model_id = model_id
+        runs.append(res)
+        print(res.summary())
+
+    last = runs[-1]
+    out = last.as_dict()
+    if len(runs) > 1:
+        fps_vals = [r.fps for r in runs if r.fps is not None]
+        if fps_vals:
+            out["fps_mean"] = round(statistics.fmean(fps_vals), 2)
+            out["fps_std"] = round(statistics.pstdev(fps_vals), 2) if len(fps_vals) > 1 else 0.0
+            print(f"[{model_id}] fps over {len(fps_vals)} runs: "
+                  f"mean={out['fps_mean']} std={out['fps_std']}")
+    print(json.dumps(out, indent=2))
     return 0
 
 

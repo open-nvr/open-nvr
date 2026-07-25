@@ -708,11 +708,19 @@ type Tier0MetricsResp = {
   reason?: 'disabled' | 'unreachable'
   mode?: 'not_running' | 'off' | 'shadow' | 'enforce'
   model?: string | null
+  health?: {
+    workers_up: number
+    workers_total: number
+    min_fps_ratio: number | null
+    worst_camera: string | null
+    restarts_total: number
+  }
   detector?: {
     latency_avg_ms: number | null
     latency_p95_ms: number | null
     detections_total: number
     detections_by_class: Record<string, number>
+    stage_latency_ms: Record<string, number>
   }
   process?: { cpu_percent: number | null; memory_bytes: number | null }
   frames?: {
@@ -816,6 +824,20 @@ function ComputeGatedPanel() {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Operator health — is it running, and is the box keeping up with the cameras? */}
+        {d.health && (d.health.workers_total > 0 || d.health.restarts_total > 0) && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <StatTile label="Workers up" value={`${d.health.workers_up} / ${d.health.workers_total}`}
+              sub="analyze-enabled cameras" warn={d.health.workers_up < d.health.workers_total} />
+            <StatTile label="Keeping up"
+              value={d.health.min_fps_ratio != null ? formatPct(d.health.min_fps_ratio) : '—'}
+              sub={d.health.worst_camera ? `worst: ${d.health.worst_camera}` : 'processed ÷ target fps'}
+              warn={d.health.min_fps_ratio != null && d.health.min_fps_ratio < 0.9} />
+            <StatTile label="Restarts" value={(d.health.restarts_total ?? 0).toLocaleString()}
+              sub="camera feed restarts" warn={(d.health.restarts_total ?? 0) > 0} />
+          </div>
+        )}
+
         {/* Process resource use — same signals the adapter cards show, side by side */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <StatTile label="CPU" value={p?.cpu_percent != null ? `${Math.round(p.cpu_percent)}%` : '—'} sub="detect-pipeline process" />
@@ -853,6 +875,16 @@ function ComputeGatedPanel() {
                   </span>
                 ))}
             </div>
+            {d.detector.stage_latency_ms && Object.keys(d.detector.stage_latency_ms).length > 0 && (
+              <div className="mt-2 pt-2 border-t border-[var(--border)] flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-[var(--text-dim)]">
+                <span className="uppercase tracking-wider">per-stage avg:</span>
+                {['decode', 'motion', 'region', 'detect', 'track']
+                  .filter((st) => d.detector!.stage_latency_ms[st] != null)
+                  .map((st) => (
+                    <span key={st}>{st} <span className="tabular-nums text-[var(--text)]">{formatMs(d.detector!.stage_latency_ms[st])}</span></span>
+                  ))}
+              </div>
+            )}
           </div>
         )}
 

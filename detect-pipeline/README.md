@@ -216,6 +216,14 @@ The service exposes Prometheus text at `:9109/metrics` (`DETECT_METRICS_PORT`):
 show detect-pipeline CPU/RAM next to them): `tier0_process_cpu_percent`,
 `tier0_process_resident_memory_bytes` — sampled from `/proc` on each scrape (Linux).
 
+**Operator health — "is it running and keeping up?"** (the capacity signal for a
+fixed box): `tier0_worker_up{camera}`, `tier0_processing_fps{camera}` vs
+`tier0_target_fps{camera}` (a ratio well under 1 = the box can't keep up with that
+camera), and `tier0_worker_restarts_total{camera}` (repeated feed restarts = an
+unhealthy camera). Plus `tier0_stage_latency_seconds{camera,stage}` — per-stage time
+(`decode|motion|region|detect|track`) so you can see *where* a frame's time goes, not
+just the end-to-end total.
+
 **Model-benchmarking signals** (compare two detectors of the same kind on speed +
 output): `tier0_detector_latency_seconds{camera,model}` (pure detector inference
 time — region loop only, excluding decode/motion/track), `tier0_detector_runs_total{camera,model}`,
@@ -237,9 +245,13 @@ The **benchmark harness** quantifies the expensive-tier saving — baseline
 (always-on) vs gated — with a miss rate:
 
 ```bash
-python -m detect_pipeline.bench --source people.mp4 --detector blob
-# frames=… | expensive calls: baseline=… gated=… (Nx fewer) | events=… missed=… (miss-rate …)
+python -m detect_pipeline.bench --source people.mp4 --detector blob --model-id yolov8n --repeat 5
+# [yolov8n] fps=… | frames=… | expensive calls: baseline=… gated=… (Nx fewer) | events=… missed=… (miss-rate …)
+# [yolov8n] fps over 5 runs: mean=… std=…    ← --repeat reports variance so a small delta isn't noise
 ```
+
+`--model-id` tags the row (A/B two builds of the same family); `--repeat N` reports
+the Tier-0 throughput (fps) as mean ± std across runs.
 
 Run it on your real clip set / hardware — **do not publish invented numbers**.
 

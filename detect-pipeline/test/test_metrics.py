@@ -13,7 +13,10 @@ from detect_pipeline.metrics import (
     metrics,
     record_frame,
     record_gate,
+    record_processing_fps,
     record_published,
+    record_worker_restart,
+    record_worker_state,
     sample_process_metrics,
 )
 
@@ -119,6 +122,32 @@ def test_record_frame_without_model_falls_back_to_camera_only():
     metrics.reset()
     record_frame("a", _Result(regions=[(0, 0, 1, 1)], tracks=[]))  # no model
     assert metrics.value("tier0_detector_runs_total", {"camera": "a"}) == 1
+    metrics.reset()
+
+
+def test_record_frame_emits_stage_latency():
+    metrics.reset()
+    record_frame("a", _Result(regions=[(0, 0, 1, 1)], tracks=[]),
+                 stage_latency_s={"motion": 0.003, "detect": 0.02, "track": 0.001})
+    out = metrics.render()
+    assert "# TYPE tier0_stage_latency_seconds histogram" in out
+    assert 'tier0_stage_latency_seconds_count{camera="a",stage="detect"} 1' in out
+    assert 'tier0_stage_latency_seconds_count{camera="a",stage="motion"} 1' in out
+    metrics.reset()
+
+
+def test_operator_health_recorders():
+    metrics.reset()
+    record_worker_state("a", True, target_fps=5)
+    record_processing_fps("a", 4.2)
+    record_worker_restart("a")
+    record_worker_restart("a")
+    assert metrics.value("tier0_worker_up", {"camera": "a"}) == 1.0
+    assert metrics.value("tier0_target_fps", {"camera": "a"}) == 5.0
+    assert metrics.value("tier0_processing_fps", {"camera": "a"}) == 4.2
+    assert metrics.value("tier0_worker_restarts_total", {"camera": "a"}) == 2
+    record_worker_state("a", False)
+    assert metrics.value("tier0_worker_up", {"camera": "a"}) == 0.0
     metrics.reset()
 
 

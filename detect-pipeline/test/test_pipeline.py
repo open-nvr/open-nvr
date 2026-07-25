@@ -88,6 +88,8 @@ def test_process_frame_exposes_detections_and_detector_latency():
     result = pipe.process_frame(_frame(0))
     assert [d.label for d in result.detections] == ["person"]
     assert result.detect_latency_s is not None and result.detect_latency_s >= 0.0
+    # stage breakdown present for a full (non-calibrating) frame
+    assert {"motion", "region", "detect", "track"} <= set(result.stage_latency_s)
 
 
 def test_process_frame_no_detector_latency_while_calibrating():

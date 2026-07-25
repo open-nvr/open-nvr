@@ -58,6 +58,9 @@ class FrameResult:
     # where the detector didn't run (calibrating / no motion).
     detections: list[Detection] = field(default_factory=list)
     detect_latency_s: float | None = None
+    # Per-stage wall time for the frame (decode/motion/region/detect/track) — lets
+    # the test-bed see *where* time goes, not just the end-to-end total.
+    stage_latency_s: dict[str, float] = field(default_factory=dict)
 
 
 def nms(dets: list[Detection], iou_threshold: float = 0.5) -> list[Detection]:
@@ -115,38 +118,52 @@ class DetectPipeline:
 
     def process_frame(self, frame) -> FrameResult:
         """Run one frame end-to-end; return tracks + motion boxes + regions."""
+        stages: dict[str, float] = {}
+        _t = time.monotonic()
         luma = np.frombuffer(frame.y_plane, np.uint8).reshape(frame.height, frame.width)
         motion_boxes = self.motion.detect(luma)
+        stages["motion"] = time.monotonic() - _t
 
         # While calibrating (warm-up / whole-frame flash) do NOT run the detector;
         # tracks still age. Recording is unaffected (MediaMTX).
         if self.motion.is_calibrating():
-            return FrameResult(self.tracker.update([]), motion_boxes, [], True)
+            _t = time.monotonic()
+            tracks = self.tracker.update([])
+            stages["track"] = time.monotonic() - _t
+            return FrameResult(tracks, motion_boxes, [], True, stage_latency_s=stages)
 
         frame_shape = (frame.height, frame.width)
         track_boxes = [t.box for t in self.tracker.tracks]
+        _t = time.monotonic()
         regions = select_regions(
             motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier
         )
+        stages["region"] = time.monotonic() - _t
 
         dets: list[Detection] = []
         bgr = None
         detect_latency_s: float | None = None
         if regions:
+            _t = time.monotonic()
             bgr = to_bgr(frame.data, frame.width, frame.height)
-            _t0 = time.monotonic()
+            stages["decode"] = time.monotonic() - _t
+            _t = time.monotonic()
             for region in regions:
                 crop = crop_and_resize(bgr, region, self.model_size[0], self.model_size[1])
                 raws = self.detector.detect(crop)
                 dets.extend(detections_to_frame(raws, region))
             dets = nms(dets)
-            detect_latency_s = time.monotonic() - _t0   # pure detector time (this model)
+            detect_latency_s = time.monotonic() - _t   # pure detector time (this model)
+            stages["detect"] = detect_latency_s
 
         # bgr is passed so the tracker can retain each track's best-frame crop
         # for Tier-1 dispatch (#10); None on frames with no detections.
+        _t = time.monotonic()
+        tracks = self.tracker.update(dets, bgr)
+        stages["track"] = time.monotonic() - _t
         return FrameResult(
-            self.tracker.update(dets, bgr), motion_boxes, regions, False,
-            detections=dets, detect_latency_s=detect_latency_s,
+            tracks, motion_boxes, regions, False,
+            detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
