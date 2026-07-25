@@ -31,6 +31,25 @@ export type RequestOptions = {
 
 const TOKEN_KEY = 'opennvr.token'
 const REFRESH_KEY = 'opennvr.refresh_token'
+// Device-firewall identity for THIS browser profile, issued by the server at
+// login. Sent on every request as X-Device-Token (a cookie can't be used: the
+// fetch calls below are deliberately `credentials: 'omit'`, so the browser
+// would ignore Set-Cookie and every device would look unenrolled).
+// Deliberately NOT cleared on logout — signing out must not cost an approval.
+const DEVICE_TOKEN_KEY = 'opennvr.device_token'
+const DEVICE_TOKEN_HEADER = 'X-Device-Token'
+
+export function setDeviceToken(token: string | null | undefined) {
+  if (token) localStorage.setItem(DEVICE_TOKEN_KEY, token)
+}
+
+export function getDeviceToken(): string | null {
+  try {
+    return localStorage.getItem(DEVICE_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
 
 let authToken: string | null = null
 let isRefreshing = false
@@ -168,6 +187,9 @@ async function request(method: string, url: string, data?: any, options: Request
   }
 
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`
+  // Identifies this browser to the device firewall (see DEVICE_TOKEN_KEY).
+  const deviceToken = getDeviceToken()
+  if (deviceToken) headers[DEVICE_TOKEN_HEADER] = deviceToken
 
   let { resp, payload } = await doFetch(method, fullUrl, headers, body, options)
 

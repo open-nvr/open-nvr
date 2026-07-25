@@ -550,6 +550,11 @@ class Token(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str
+    # Device-firewall identity for THIS browser, returned only when newly
+    # issued. The client stores it and sends it back as X-Device-Token on every
+    # request; it must outlive the session (never cleared on logout). Absent
+    # when the browser already presented a known token.
+    device_token: str | None = None
 
 
 class TokenData(BaseModel):

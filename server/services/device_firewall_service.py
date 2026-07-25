@@ -56,10 +56,27 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from models import DeviceStatus, SecuritySetting, TrustedDevice
 
-# The HttpOnly cookie carrying the device token. Deliberately long-lived and
-# NEVER cleared on logout — it identifies the browser, not the session.
+# How a browser presents its device token. The SPA sends it as a HEADER: its
+# fetch client uses ``credentials: 'omit'`` (deliberate — the API authenticates
+# with bearer tokens, not cookies), so a Set-Cookie would be ignored by the
+# browser and every device would look unenrolled. The cookie is still set and
+# accepted as a fallback for non-SPA clients. Both are long-lived and NEVER
+# cleared on logout — they identify the browser, not the session.
+DEVICE_HEADER_NAME = "x-device-token"
 DEVICE_COOKIE_NAME = "opennvr_device"
 DEVICE_COOKIE_MAX_AGE = 400 * 24 * 3600  # 400d is the browser-enforced ceiling
+
+
+def token_from_request(request) -> str | None:
+    """The device token presented by ``request`` — header first, cookie second."""
+    try:
+        return (
+            request.headers.get(DEVICE_HEADER_NAME)
+            or request.cookies.get(DEVICE_COOKIE_NAME)
+            or None
+        )
+    except Exception:
+        return None
 
 # The admin's on/off lives in security_settings under this key. The env
 # ``device_firewall_kill`` is a hard override on top of it (break-glass).

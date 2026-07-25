@@ -138,10 +138,20 @@ def test_open_path_never_gated(env):
         assert c.post(OPEN).status_code == 200
 
 
-def test_approved_browser_passes(env):
+def test_approved_browser_passes_via_header(env):
+    """The SPA sends the device token as a HEADER — its fetch client omits
+    credentials, so a cookie would never be stored or returned."""
     _dev, token = dfw.register_authenticated_browser(
         env.db, None, "192.168.31.50", "UA", 1
     )  # first browser -> approved
+    assert _get(env, headers={dfw.DEVICE_HEADER_NAME: token}).status_code == 200
+
+
+def test_approved_browser_passes_via_cookie(env):
+    """Cookie remains supported for non-SPA clients."""
+    _dev, token = dfw.register_authenticated_browser(
+        env.db, None, "192.168.31.50", "UA", 1
+    )
     assert _get(env, cookies={dfw.DEVICE_COOKIE_NAME: token}).status_code == 200
 
 
@@ -150,28 +160,40 @@ def test_pending_browser_is_refused(env):
     _dev, token = dfw.register_authenticated_browser(
         env.db, None, "192.168.31.50", "second", 1
     )
-    r = _get(env, cookies={dfw.DEVICE_COOKIE_NAME: token})
+    r = _get(env, headers={dfw.DEVICE_HEADER_NAME: token})
     assert r.status_code == 403
     assert r.json()["code"] == "device_not_approved"
 
 
-def test_forged_cookie_is_refused(env):
+def test_forged_token_is_refused(env):
     dfw.register_authenticated_browser(env.db, None, "192.168.31.50", "first", 1)
+    assert _get(env, headers={dfw.DEVICE_HEADER_NAME: "forged"}).status_code == 403
     assert _get(env, cookies={dfw.DEVICE_COOKIE_NAME: "forged"}).status_code == 403
 
 
-def test_session_without_device_cookie_is_refused(env):
-    """The bypass this design must close: a blocked browser deletes its device
-    cookie, hoping to be waved through as an 'internal' address — which is what
-    every NAT'd LAN client looks like on Docker Desktop."""
+def test_client_without_device_token_is_not_locked_out(env):
+    """Regression for a real lockout: an earlier revision denied "has a session
+    but no device token", which refused EVERY user the moment enforcement was
+    switched on — the SPA had no way to hold a token yet, so no browser had one,
+    including the admin's own. A tokenless caller whose address is internal
+    (which NAT makes every client look like) must still pass; it enrolls on its
+    next login."""
+    dfw.register_authenticated_browser(env.db, None, "172.28.0.1", "first", 1)
+    r = _get(env, xff="172.28.0.1", headers={"authorization": "Bearer some.jwt"})
+    assert r.status_code == 200
+
+
+def test_tokenless_external_client_is_refused(env):
+    """Where real client addresses survive (native Linux), an un-enrolled
+    browser is still refused — it must log in to enroll."""
     dfw.register_authenticated_browser(env.db, None, "192.168.31.50", "first", 1)
-    r = _get(env, headers={"authorization": "Bearer some.jwt.token"})
+    r = _get(env, xff="203.0.113.9", headers={"authorization": "Bearer some.jwt"})
     assert r.status_code == 403
 
 
-def test_sibling_service_without_cookie_or_session_passes(env):
-    """MediaMTX/KAI-C call the API from the compose network with neither a
-    browser cookie nor a user session; they must never be firewalled."""
+def test_sibling_service_without_token_passes(env):
+    """MediaMTX/KAI-C call the API from the compose network with no device
+    token; they must never be firewalled."""
     dfw.register_authenticated_browser(env.db, None, "192.168.31.50", "first", 1)
     assert _get(env, xff="172.28.0.5").status_code == 200
 

@@ -68,7 +68,7 @@ async def my_status(request: Request, db: Session = Depends(get_db)):
     """This caller's own state — reachable even when blocked, so the UI can tell
     the user their browser is pending and give an admin something to identify it
     by. ``device_id`` is the row an admin approves; ``device_ip`` is metadata."""
-    dev = dfw.get_device_by_token(db, request.cookies.get(dfw.DEVICE_COOKIE_NAME))
+    dev = dfw.get_device_by_token(db, dfw.token_from_request(request))
     return {
         "device_id": dev.id if dev else None,
         "device_ip": get_client_ip(request),

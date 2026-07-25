@@ -22,23 +22,27 @@ blocked device can render a clear "pending approval" page rather than a blank
 screen. Bootstrap paths (login, health, JWKS) stay open so the first browser can
 authenticate and enroll, and MediaMTX can fetch signing keys.
 
-A browser is identified by the device cookie the server issued at login, NOT by
-its IP: behind NAT every client shares one address (Docker Desktop's port
-forwarding makes all LAN clients appear as the bridge gateway), so IP-keyed
-gating silently let any second device inherit the first one's approval.
+A browser is identified by the device token the server issued at login (sent as
+the ``X-Device-Token`` header, or a cookie for non-SPA clients), NOT by its IP:
+behind NAT every client shares one address (Docker Desktop's port forwarding
+makes all LAN clients appear as the bridge gateway), so IP-keyed gating silently
+let any second device inherit the first one's approval.
 
 Decision order — machine callers first, then browsers:
   1. open path                          -> allow (bootstrap/SPA)
   2. loopback                           -> allow (``docker exec`` recovery)
-  3. valid internal API key             -> allow (sibling service, no cookie)
-  4. device cookie present              -> allow iff that browser is approved
-  5. user session but no device cookie  -> deny (user traffic must enroll; this
-                                           is what stops a blocked browser from
-                                           deleting its cookie to slip into the
-                                           internal-network case below)
-  6. no cookie, no session, internal net -> allow (sibling service on the
-                                           compose network)
-  7. otherwise                          -> deny
+  3. valid internal API key             -> allow (sibling service, no token)
+  4. device token present               -> allow iff that browser is approved
+  5. no device token, internal net      -> allow (sibling service on the compose
+                                           network, and any client from before
+                                           this feature shipped — see below)
+  6. otherwise                          -> deny
+
+Note on step 5: an earlier revision denied "session but no device token" to stop
+a blocked browser from dropping its token to be treated as internal. That rule
+locked EVERY user out, because the SPA had no way to hold a token yet. Closing
+that gap properly needs the client to always send one; until a release where
+that is guaranteed, an internal-network caller without a token is allowed.
 
 Fail-open by construction: if the master switch is off, or the caller is
 loopback / an internal service, or a registry lookup errors, the request
@@ -98,8 +102,7 @@ class DeviceFirewallMiddleware(BaseHTTPMiddleware):
         if is_loopback(ip) or _has_internal_key(request):
             return await call_next(request)
 
-        token = request.cookies.get(dfw.DEVICE_COOKIE_NAME)
-        has_session = bool(request.headers.get("authorization"))
+        token = dfw.token_from_request(request)
 
         db = SessionLocal()
         try:
@@ -108,9 +111,11 @@ class DeviceFirewallMiddleware(BaseHTTPMiddleware):
             if token:
                 if dfw.is_allowed_browser(db, token):
                     return await call_next(request)
-            elif not has_session and is_internal_service(ip):
-                # Sibling container (MediaMTX/KAI-C/adapters) calling the API
-                # without a browser cookie or a user session.
+            elif is_internal_service(ip):
+                # No device token: a sibling container (MediaMTX/KAI-C/adapters),
+                # or a browser that last logged in before this feature shipped.
+                # Allowing these is what keeps an upgrade from locking everyone
+                # out; they enroll on their next login.
                 return await call_next(request)
         finally:
             db.close()
