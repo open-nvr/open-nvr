@@ -30,6 +30,7 @@ from typing import Protocol
 
 from .detector import DetectorAdapter, StubDetector
 from .frame_source import FrameSource, probe_stream
+from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import HwAccel
 from .metrics import record_frame, record_gate, record_published
@@ -89,6 +90,8 @@ class CameraWorker:
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
         gate_sink=None,                          # publishes gate decisions (audit)
+        dispatcher=None,                         # Tier-1 dispatch (#10); shared, thread-safe
+        router=None,                             # escalation → adapter routing
     ) -> None:
         self.spec = spec
         self.sink = sink
@@ -98,6 +101,8 @@ class CameraWorker:
         self._frame_source = frame_source
         self.gate = gate
         self.gate_sink = gate_sink
+        self.dispatcher = dispatcher
+        self.router = router
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -172,6 +177,11 @@ class CameraWorker:
             record_gate(self.spec.camera_id, gres)
             if self.gate_sink is not None:
                 self.gate_sink.publish(self.spec.camera_id, gres, frame)
+            # Tier-1 dispatch (#10) — enforce-only; shadow/off dispatch nothing.
+            if self.dispatcher is not None and self.router is not None:
+                dispatch_escalations(
+                    self.spec.camera_id, result.tracks, gres, self.router, self.dispatcher
+                )
         except Exception:
             log.debug("tier0 %s: gate error", self.spec.camera_id, exc_info=True)
 
@@ -196,6 +206,8 @@ class WorkerManager:
         device: str = "/dev/dri/renderD128",
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
+        dispatcher=None,                                  # Tier-1 dispatch (#10), shared
+        router=None,
     ) -> None:
         self.provider = provider
         self.sink = sink
@@ -208,6 +220,9 @@ class WorkerManager:
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
         self._gate_sink = gate_sink
+        # The dispatcher is thread-safe (semaphore + pool) → shared across workers.
+        self._dispatcher = dispatcher
+        self._router = router
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
 
@@ -217,6 +232,7 @@ class WorkerManager:
             model_size=self._model_size, device=self._device,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
+            dispatcher=self._dispatcher, router=self._router,
         )
 
     def running_ids(self) -> set[str]:

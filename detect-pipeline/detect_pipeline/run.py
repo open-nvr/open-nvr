@@ -62,6 +62,9 @@ class ServiceConfig:
     gate_critical_classes: str
     gate_cooldown_s: float
     metrics_port: int
+    # #10 Tier-1 dispatch — off unless a KAI-C URL is set; only fires in enforce.
+    dispatch_kaic_url: str
+    dispatch_task: str
 
 
 def _truthy(v: str) -> bool:
@@ -88,6 +91,8 @@ def config_from_env(env: dict) -> ServiceConfig:
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),
         metrics_port=int(env.get("DETECT_METRICS_PORT", "9109")),
+        dispatch_kaic_url=env.get("DETECT_DISPATCH_KAIC_URL", ""),
+        dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
     )
 
 
@@ -175,6 +180,14 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     provider = HttpCameraProvider(cfg.core_url, api_key=cfg.api_key)
     # Region crops match the detector input so the model sees full-detail crops.
     model_size = cfg.onnx_input if cfg.detector == "onnx" else cfg.model_size
+    # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
+    # default). It still only fires on enforce escalations (shadow/off = nothing).
+    dispatcher = router = None
+    if cfg.dispatch_kaic_url:
+        from .dispatch import DispatchRouter, KaicDispatcher
+        dispatcher = KaicDispatcher(cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task)
+        router = DispatchRouter()
+        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
     return WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
@@ -183,6 +196,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         device=cfg.device,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
+        dispatcher=dispatcher,
+        router=router,
     )
 
 

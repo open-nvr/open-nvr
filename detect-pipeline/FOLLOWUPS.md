@@ -232,9 +232,18 @@ the Paper 01 evaluation + the hardware deployment guides.
 
 ---
 
-## 10. Tier-1 dispatch — close the loop (run the expensive model on escalations)
+## 10. Tier-1 dispatch — close the loop (run the expensive model on escalations) — ✅ v1 LANDED
 
-**The gap.** PR B's gate *decides* which tracks are worth the expensive tier and
+**Done (v1, flag-gated off).** `dispatch.py`: a declarative `DispatchRouter`
+(caption default on person/vehicle; face/plate opt-in; custom = a row) + an
+injectable `KaicDispatcher` that runs the routed adapter via KAI-C's governed
+`POST /api/v1/infer/{adapter}` on the track's **retained best-frame crop**
+(base64), async + best-effort + concurrency-capped. Wired into the worker
+(enforce-only). Enable with `DETECT_DISPATCH_KAIC_URL`. **Still owed:** validate
+shadow miss-rate on hardware before enabling; optional `opennvr://` URI handoff
+instead of base64; per-trigger (not just per-class) routing keys.
+
+**The gap (original).** PR B's gate *decides* which tracks are worth the expensive tier and
 *audits* every decision, but it does **not** run anything. Even in `enforce`,
 `GateResult.to_dispatch()` returns the escalations and nobody consumes them — so
 today the gate emits decisions + audit records, and no VLM/face/plate is actually

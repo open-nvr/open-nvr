@@ -100,6 +100,8 @@ DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static
 DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
 DETECT_GATE_COOLDOWN_S=30         # re-escalate the same track at most once per N seconds
 DETECT_METRICS_PORT=9109          # Prometheus /metrics (0 to disable)
+DETECT_DISPATCH_KAIC_URL=         # set to enable Tier-1 dispatch (#10); empty = off
+DETECT_DISPATCH_TASK=caption      # default task for routed adapters
 # always_analyze is per-camera (gate config), deliberately not a global env.
 ```
 
@@ -215,6 +217,23 @@ python -m detect_pipeline.bench --source people.mp4 --detector blob
 ```
 
 Run it on your real clip set / hardware — **do not publish invented numbers**.
+
+### Tier-1 dispatch (#10) — closing the loop
+
+When enabled, an **enforce** escalation actually runs the expensive model: the
+worker routes the track (declarative class→adapter map, `dispatch.py`) and sends
+its **best-frame crop** to KAI-C's governed `POST /api/v1/infer/{adapter}` — once,
+best-effort, concurrency-capped. KAI-C runs it (sovereignty + audit), and publishes
+to the existing `opennvr.inference.<adapter>.<camera>.completed` subject, so
+apps/agents consume it unchanged. **Off by default** — set `DETECT_DISPATCH_KAIC_URL`
+to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
+
+- **Default routing:** `caption` on person/vehicle (light, non-biometric). `face`/`plate`
+  are opt-in rows. A custom model adds a row keyed on its own class/trigger, and
+  `TriggerPolicy.none`/`always` let a model opt out/in — see
+  [`docs/design/trigger-policies.md`](../docs/design/trigger-policies.md).
+- **Discipline:** validate the shadow-mode miss rate on real hardware before flipping
+  `enforce` + dispatch.
 
 ## Not yet (deliberately)
 - Accelerator detector adapters (Coral/Hailo/RKNN), RF-DETR/YOLO26, and the

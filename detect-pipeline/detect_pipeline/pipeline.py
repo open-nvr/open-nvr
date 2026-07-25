@@ -123,6 +123,7 @@ class DetectPipeline:
         )
 
         dets: list[Detection] = []
+        bgr = None
         if regions:
             bgr = to_bgr(frame.data, frame.width, frame.height)
             for region in regions:
@@ -131,7 +132,9 @@ class DetectPipeline:
                 dets.extend(detections_to_frame(raws, region))
             dets = nms(dets)
 
-        return FrameResult(self.tracker.update(dets), motion_boxes, regions, False)
+        # bgr is passed so the tracker can retain each track's best-frame crop
+        # for Tier-1 dispatch (#10); None on frames with no detections.
+        return FrameResult(self.tracker.update(dets, bgr), motion_boxes, regions, False)
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
         """Consume the frame source forever (bounded in tests by a finite source)."""

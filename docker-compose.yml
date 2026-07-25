@@ -274,6 +274,9 @@ services:
       - DETECT_GATE_HEARTBEAT_S=${DETECT_GATE_HEARTBEAT_S:-0}
       - DETECT_GATE_CRITICAL_CLASSES=${DETECT_GATE_CRITICAL_CLASSES:-}
       - DETECT_METRICS_PORT=${DETECT_METRICS_PORT:-9109}
+      # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
+      # to run the gated model on enforce escalations, governed + audited by KAI-C.
+      - DETECT_DISPATCH_KAIC_URL=${DETECT_DISPATCH_KAIC_URL:-}
     volumes:
       # Read-only mount of the shared yolov8 weights volume (built by
       # yolov8-weights-init) — same model as the yolov8-adapter.
