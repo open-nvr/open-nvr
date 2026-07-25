@@ -46,7 +46,10 @@ class DispatchRouter:
 
     def __init__(self, routes: dict[str, list[str]] | None = None,
                  default: list[str] | None = None) -> None:
-        self.routes = dict(DEFAULT_ROUTES if routes is None else routes)
+        # deep-copy the list values so a caller mutating router.routes[k] can't
+        # bleed into DEFAULT_ROUTES (the module global) or another router.
+        src = DEFAULT_ROUTES if routes is None else routes
+        self.routes = {k: list(v) for k, v in src.items()}
         self.default = list(default or [])
 
     def route(self, label: str) -> list[str]:

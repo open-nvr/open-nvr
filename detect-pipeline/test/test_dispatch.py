@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import base64
+import threading
+import time
 
 import numpy as np
 
@@ -81,6 +83,37 @@ def test_no_dispatcher_is_a_noop():
 
 
 # ── the KAI-C client ──
+
+def test_router_does_not_mutate_module_default():
+    from detect_pipeline.dispatch import DEFAULT_ROUTES
+    r = DispatchRouter()
+    r.routes["person"].append("face")              # mutate the instance
+    assert DEFAULT_ROUTES["person"] == ["caption"]  # module global untouched
+
+
+def test_dispatcher_drops_under_backpressure_and_balances_semaphore():
+    # max_inflight=1: the first dispatch holds the slot; the second must be dropped
+    # (not queued, not deadlocked) — pinning the acquire/release balance.
+    posts: list = []
+    gate = threading.Event()
+
+    def blocking_post(url, body, api_key, timeout):
+        posts.append(url)
+        gate.wait(1.0)
+
+    d = KaicDispatcher("http://kaic:8100", task="caption", max_inflight=1, http_post=blocking_post)
+    crop, t = np.zeros((4, 4, 3), np.uint8), _track(1)
+    d.dispatch("cam", "caption", crop, t)          # takes the one slot (in flight)
+    for _ in range(200):                            # wait until it's actually posting
+        if posts:
+            break
+        time.sleep(0.005)
+    d.dispatch("cam", "caption", crop, t)          # no slot -> dropped
+    time.sleep(0.05)
+    assert len(posts) == 1                          # second dropped, semaphore not leaked
+    gate.set()
+    d.close()
+
 
 def test_kaic_dispatcher_posts_governed_infer():
     posted = {}

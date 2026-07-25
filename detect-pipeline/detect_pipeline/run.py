@@ -183,11 +183,16 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
     # default). It still only fires on enforce escalations (shadow/off = nothing).
     dispatcher = router = None
-    if cfg.dispatch_kaic_url:
+    if cfg.dispatch_kaic_url and (cfg.gate_mode or "").lower() == "enforce":
         from .dispatch import DispatchRouter, KaicDispatcher
         dispatcher = KaicDispatcher(cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task)
         router = DispatchRouter()
         log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
+    elif cfg.dispatch_kaic_url:
+        # URL set but gate isn't enforcing -> dispatch would never fire; don't spin
+        # up an idle pool. (shadow measures; only enforce dispatches.)
+        log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
+                 cfg.gate_mode)
     return WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
