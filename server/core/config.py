@@ -143,11 +143,18 @@ class Settings(BaseSettings):
     device_firewall_kill: bool = False
     # Comma-separated CIDRs whose X-Forwarded-For header is trusted (the reverse
     # proxy in front of us). MUST be the proxy only — never 0.0.0.0/0 — or a
-    # client can spoof its source IP. Defaults cover Docker bridge + loopback.
-    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128,172.16.0.0/12"
+    # client can spoof its source IP. Default = loopback + the compose network
+    # PINNED in docker-compose.yml (OPENNVR_DOCKER_SUBNET, 172.28.0.0/16) —
+    # deliberately NOT all of 172.16.0.0/12: on a bare-metal LAN that uses
+    # 172.16/12 for clients, the /12 default would let every such client spoof
+    # XFF and bypass the device firewall. If you changed the compose subnet or
+    # run bare-metal behind a proxy, set TRUSTED_PROXY_CIDRS to your proxy.
+    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128,172.28.0.0/16"
     # CIDRs treated as internal services (MediaMTX, KAI-C, adapters) that must
-    # never be firewalled. Defaults to the Docker bridge range + loopback.
-    internal_service_cidrs: str = "127.0.0.1/32,::1/128,172.16.0.0/12"
+    # never be firewalled. Same narrow default (loopback + pinned compose
+    # subnet) for the same reason: a broad range makes the device firewall a
+    # no-op for every client inside it.
+    internal_service_cidrs: str = "127.0.0.1/32,::1/128,172.28.0.0/16"
 
     # Application settings
     debug: bool = False  # Never enable debug in production
@@ -287,6 +294,46 @@ class Settings(BaseSettings):
     internal_api_key: str  # For adapter authentication
     kai_c_url: str = "http://localhost:8100"  # KAI-C orchestrator URL
     kai_c_ip: str = "127.0.0.1"  # KAI-C IP for whitelisting
+
+    @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
+    @classmethod
+    def validate_trust_cidrs(cls, v: str, info: ValidationInfo) -> str:
+        """The XFF/internal trust zone must stay narrow.
+
+        A /0 means every client on earth can spoof X-Forwarded-For (and the
+        device firewall gates nothing) — hard error. Anything broader than a
+        /16 (e.g. all of 172.16.0.0/12) is legal but dangerous on bare-metal
+        LANs that use the range for clients, so it warns loudly at startup.
+        """
+        import sys
+
+        for part in (v or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                net = ipaddress.ip_network(part, strict=False)
+            except ValueError:
+                raise ValueError(
+                    f"{info.field_name}: '{part}' is not a valid CIDR"
+                ) from None
+            if net.prefixlen == 0:
+                raise ValueError(
+                    f"{info.field_name} must never include '{part}': every "
+                    "client could spoof X-Forwarded-For and the device "
+                    "firewall would gate nothing. List only the proxy/"
+                    "internal network (e.g. 172.28.0.0/16)."
+                )
+            if net.version == 4 and net.prefixlen < 16:
+                print(
+                    f"[SECURITY WARNING] {info.field_name} includes the broad "
+                    f"range '{part}'. If clients on your LAN fall inside it, "
+                    "they can spoof X-Forwarded-For / bypass the device "
+                    "firewall. Prefer the exact proxy or Docker subnet "
+                    "(default 172.28.0.0/16).",
+                    file=sys.stderr,
+                )
+        return v
 
     @field_validator("secret_key", "mediamtx_secret", "internal_api_key")
     @classmethod

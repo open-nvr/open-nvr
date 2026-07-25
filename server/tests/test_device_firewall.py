@@ -98,8 +98,45 @@ def test_loopback_always_allowed_even_when_blocked(db):
 
 def test_internal_service_always_allowed(db):
     dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)
-    # Docker bridge sibling (MediaMTX/KAI-C) — must never be gated
-    assert dfw.is_allowed(db, "172.18.0.5") is True
+    # Compose-network sibling (MediaMTX/KAI-C, pinned 172.28.0.0/16) — never gated
+    assert dfw.is_allowed(db, "172.28.0.5") is True
+
+
+def test_lan_client_outside_pinned_subnet_is_gated(db):
+    """The old 172.16.0.0/12 default made the firewall a no-op for any LAN
+    that uses that space for clients. The narrowed default (pinned compose
+    subnet only) must actually gate such a client."""
+    dfw.register_authenticated_device(db, "10.0.0.10", "UA", 1)  # first device
+    assert dfw.is_allowed(db, "172.18.0.5") is False  # in /12, NOT in /16
+
+
+# --- trust-zone configuration (X-Forwarded-For / internal CIDRs) ---
+
+
+def test_trust_cidr_defaults_are_narrow():
+    for value in (settings.trusted_proxy_cidrs, settings.internal_service_cidrs):
+        assert "172.16.0.0/12" not in value
+        assert "172.28.0.0/16" in value
+
+
+def test_full_range_trust_cidr_rejected():
+    from pydantic import ValidationError
+
+    from core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(trusted_proxy_cidrs="0.0.0.0/0")
+    with pytest.raises(ValidationError):
+        Settings(internal_service_cidrs="::/0")
+    with pytest.raises(ValidationError):
+        Settings(trusted_proxy_cidrs="not-a-cidr")
+
+
+def test_broad_trust_cidr_warns_loudly(capsys):
+    from core.config import Settings
+
+    Settings(trusted_proxy_cidrs="127.0.0.1/32,172.16.0.0/12")
+    assert "SECURITY WARNING" in capsys.readouterr().err
 
 
 def test_env_kill_forces_off(db, monkeypatch):
