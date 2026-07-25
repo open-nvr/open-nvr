@@ -16,8 +16,9 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { ChevronLeft, ExternalLink } from 'lucide-react'
+import { ChevronLeft, ExternalLink, Eye } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useAuth } from '../../auth/AuthContext'
 import { Badge, EmptyState, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
 import { CameraSettingsPanel } from './CameraSettings'
@@ -44,6 +45,11 @@ type Cam = {
  * camera the common baseline. Mixed-vendor fleets are the normal case.
  */
 export function CameraDeviceConfig() {
+  const { user } = useAuth()
+  // Device settings are write-gated server-side (camera_device.write; superusers
+  // implicitly). For everyone else this console is READ-ONLY and the direct
+  // camera-portal link (full vendor admin UI) is not offered at all.
+  const canWrite = !!user?.is_superuser
   const [cameras, setCameras] = useState<Cam[]>([])
   const [selected, setSelected] = useState<Cam | null>(null)
   const [loading, setLoading] = useState(true)
@@ -107,8 +113,9 @@ export function CameraDeviceConfig() {
           {/* Direct link to the camera's own web portal — the universal way to
               reach every vendor setting OpenNVR can't (or shouldn't) drive:
               deep network config, SNMP/QoS/802.1x, storage, etc. Opens in a new
-              tab; http:// lets the camera redirect to https if it forces TLS. */}
-          {selected.ip_address && (
+              tab; http:// lets the camera redirect to https if it forces TLS.
+              Admin-only: the portal is the camera's full admin surface. */}
+          {canWrite && selected.ip_address && (
             <a
               href={`http://${selected.ip_address}`}
               target="_blank"
@@ -120,7 +127,17 @@ export function CameraDeviceConfig() {
             </a>
           )}
         </div>
-        <CameraSettingsPanel key={selected.id} camera={selected} />
+        {!canWrite && (
+          <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--panel-2)]/40 px-3 py-2 text-xs text-[var(--text-dim)]">
+            <Eye size={14} className="shrink-0" />
+            Read-only view — changing device settings requires an administrator.
+          </div>
+        )}
+        {/* fieldset[disabled] blankets every input/button in the panel; the
+            server enforces the same rule (403) on all write endpoints. */}
+        <fieldset disabled={!canWrite} className={canWrite ? '' : 'opacity-90'}>
+          <CameraSettingsPanel key={selected.id} camera={selected} />
+        </fieldset>
       </div>
     )
   }

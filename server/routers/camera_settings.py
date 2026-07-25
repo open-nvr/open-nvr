@@ -22,6 +22,13 @@ Every route resolves the camera via ``get_camera_or_403`` (ownership/superuser)
 and loads the camera's stored, encrypted credentials server-side — it never
 accepts credentials as query parameters (unlike the legacy /onvif router).
 
+Access model: GET routes are readable by any user the camera resolves for
+(owner or superuser). EVERY mutating route additionally requires the
+``camera_device.write`` RBAC permission (superusers hold it implicitly) —
+device settings are read-only for ordinary users. This covers the dangerous
+operations in particular (on-camera account create/delete, reboot, config
+export) but applies uniformly to all writes.
+
 Deliberately NO endpoint changes the camera's IP/network and NO factory-reset
 route exists — that safety property is enforced all the way down in the driver
 abstraction, not just here.
@@ -34,14 +41,19 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.database import get_db
-from core.permissions import get_camera_or_403
-from models import Camera, CameraCapability, CameraEvent
+from core.permissions import RequirePermission, get_camera_or_403
+from models import Camera, CameraCapability, CameraEvent, User
 from services.camera_drivers.capabilities import get_or_probe, probe_and_store
 from services.audit_service import write_audit_log
 from services.camera_drivers.registry import get_driver_for_camera
 from services.camera_event_manager import get_camera_event_manager
 
 router = APIRouter(prefix="/cameras", tags=["camera-settings"])
+
+# Gate for every route that CHANGES the device (or exports its secrets).
+# Superusers pass implicitly; other users need the permission granted to their
+# role. Ordinary camera owners get read-only access to device settings.
+require_device_write = RequirePermission("camera_device.write")
 
 
 class ManualSyncRequest(BaseModel):
@@ -187,6 +199,7 @@ async def get_capabilities(
 async def refresh_capabilities(
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Force a fresh capability probe (also refreshes device metadata)."""
     row = await probe_and_store(db, camera.id)
@@ -261,6 +274,7 @@ async def set_imaging(
     payload: ImagingUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Apply image settings (only provided fields; values clamped to ranges)."""
     try:
@@ -294,6 +308,7 @@ async def set_encoder(
     payload: EncoderUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Apply encoder changes to one configuration, then reconcile the MediaMTX
     stream (brief reconnect). The camera-side change stands even if the
@@ -331,6 +346,7 @@ async def set_osd(
     payload: OsdUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Toggle the date/time + channel-name overlays and set a custom text line."""
     try:
@@ -362,6 +378,7 @@ async def set_motion(
     payload: MotionUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Enable/disable motion detection and set its sensitivity."""
     try:
@@ -394,6 +411,7 @@ async def set_smart(
     payload: SmartUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Enable/disable one analytics detector and set its sensitivity."""
     try:
@@ -427,6 +445,7 @@ async def set_camera_service(
     payload: ServiceUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Enable/disable one network service on the camera."""
     try:
@@ -466,8 +485,10 @@ async def export_camera_config(
     payload: ConfigBackupRequest,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
-    """Download the camera's full configuration blob (vendor backup format)."""
+    """Download the camera's full configuration blob (vendor backup format).
+    Write-gated (``camera_device.write``): the blob can contain device secrets."""
     try:
         driver = await get_driver_for_camera(db, camera.id)
         blob = await driver.export_config(payload.secret_key)
@@ -513,6 +534,7 @@ async def set_camera_ip_filter(
     payload: IpFilterUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Write the camera's IP filter.
 
@@ -551,6 +573,7 @@ async def set_camera_cloud(
     payload: CloudUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Enable/disable the vendor P2P cloud tunnel (Hik-Connect / EZVIZ)."""
     try:
@@ -573,6 +596,7 @@ async def set_camera_cloud(
 @router.post("/{camera_id}/events/subscribe")
 async def subscribe_events(
     camera: Camera = Depends(get_camera_or_403),
+    _writer: User = Depends(require_device_write),
 ):
     """Start streaming this camera's native alarms into OpenNVR (motion/tamper).
     Ephemeral: subscriptions do not survive a server restart."""
@@ -583,6 +607,7 @@ async def subscribe_events(
 @router.post("/{camera_id}/events/unsubscribe")
 async def unsubscribe_events(
     camera: Camera = Depends(get_camera_or_403),
+    _writer: User = Depends(require_device_write),
 ):
     """Stop streaming this camera's alarms."""
     await get_camera_event_manager().stop(camera.id)
@@ -646,8 +671,10 @@ async def create_camera_user(
     payload: CameraUserCreate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
-    """Create a new on-camera account (gated; managers only)."""
+    """Create a new on-camera account. Write-gated (``camera_device.write``):
+    an on-camera Administrator account outlives OpenNVR itself."""
     try:
         driver = await get_driver_for_camera(db, camera.id)
         return (
@@ -664,8 +691,10 @@ async def delete_camera_user(
     username: str,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
-    """Delete an on-camera account. Refuses the account OpenNVR itself uses."""
+    """Delete an on-camera account. Write-gated (``camera_device.write``).
+    Refuses the account OpenNVR itself uses."""
     try:
         driver = await get_driver_for_camera(db, camera.id)
         return (await driver.delete_user(username)).to_dict()
@@ -679,8 +708,10 @@ async def delete_camera_user(
 async def reboot_camera(
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
-    """Reboot the camera (gated). Does NOT change any configuration."""
+    """Reboot the camera. Write-gated (``camera_device.write``): recording
+    drops while the device restarts. Does NOT change any configuration."""
     try:
         driver = await get_driver_for_camera(db, camera.id)
         return await driver.reboot()
@@ -710,6 +741,7 @@ async def sync_time_manual(
     payload: ManualSyncRequest,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Push this server's current UTC to the camera (fixes a wrong clock)."""
     try:
@@ -726,6 +758,7 @@ async def set_time_ntp(
     payload: NtpRequest,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
+    _writer: User = Depends(require_device_write),
 ):
     """Point the camera at an NTP server and switch it to NTP time."""
     try:

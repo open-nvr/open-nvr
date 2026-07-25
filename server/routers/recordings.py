@@ -1232,6 +1232,27 @@ async def get_day_segments(
         or "http://127.0.0.1:9996"
     ).rstrip("/")
 
+    # Live edge: the start instant of the newest on-disk file that is STILL
+    # BEING WRITTEN. VOD playback of a growing file is unreliable (its bytes
+    # shift under the player), so the UI renders everything from this instant
+    # on as LIVE and routes the user to Live View instead of a VOD session.
+    live_edge_start = None
+    try:
+        from services.hls_playback_service import HlsPlaybackService
+
+        now = datetime.now(UTC)
+        resolved = HlsPlaybackService._resolve_recording_file(
+            camera_id, now, now, db
+        )
+        if resolved is not None:
+            live_path, file_start = resolved
+            if now.timestamp() - live_path.stat().st_mtime < 60:
+                live_edge_start = (
+                    file_start.replace(tzinfo=None).isoformat() + "Z"
+                )
+    except Exception:
+        live_edge_start = None
+
     empty = {
         "segments": [],
         "camera_id": camera_id,
@@ -1241,6 +1262,7 @@ async def get_day_segments(
         "total_duration": 0,
         "segment_count": 0,
         "playback_base_url": browser_playback_base,
+        "live_edge_start": live_edge_start,
     }
 
     try:
