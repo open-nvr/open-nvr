@@ -130,6 +130,49 @@ OpenNVR runs, governs, and audits both. That is the property that keeps
 compute-gating faithful to "bring your own model" — for cameras, microscopes,
 crop surveys, weather, or robots we haven't imagined yet.
 
+## From trigger to model — routing the dispatch
+
+A trigger decides *when* to spend the expensive tier; **routing** decides *which*
+model runs. Keep them separate and both declarative — that is what keeps the
+system model-agnostic. (Implementation tracked in `FOLLOWUPS.md #10`.)
+
+**The routing map** — escalations route to adapters by a small, editable map keyed
+on the trigger / detected class, never a hardcoded `switch`:
+
+```yaml
+# illustrative, not final
+dispatch:
+  default: caption               # zero-config: person/vehicle -> caption (BLIP/moondream)
+  rules:
+    - when: {class: person},  run: [caption]   # face is opt-in (below)
+    - when: {class: vehicle}, run: [caption]   # plate is opt-in
+    # opt-in — heavier + privacy/jurisdiction-sensitive, OFF unless enabled:
+    # - when: {class: person}, run: [face]
+    # - when: {class: car},    run: [plate]
+    # a CUSTOM model is just another row, keyed on its OWN trigger:
+    - when: {trigger: scene_change}, run: [my-microscopy-adapter]
+```
+
+- **Default (zero config):** caption on `person`/`vehicle` — light, non-biometric.
+- **Opt-in rows:** `face`, `plate` — heavier and privacy/jurisdiction-sensitive, so
+  sovereign-by-default = off until an operator adds the row.
+- **Custom model = a new row**, keyed on its own trigger; its escalations run *it*
+  through KAI-C (governed) — never a core edit.
+
+**A model controls its own gating** — the same flexibility `analyze=false` gives a
+*stream*, but per *model*:
+
+| Intent | Setting |
+|---|---|
+| don't run Tier-0 on this **stream** at all | `analyze=false` (per camera) |
+| this **model** is not gated by Tier-0 (self-gates / raw stream) | `TriggerPolicy.none` |
+| this **model** runs every frame | `TriggerPolicy.always` |
+| this **model** wakes on its own cheap signal | a custom trigger (Level 1 / 2 above) |
+
+So a model author is never boxed in: *gate me on motion, on my own signal, always,
+or not at all* — and route my escalations to my own adapter. The gate core assumes
+none of it.
+
 ## Status
 
 Design-level. Tier-0 ships one trigger today — `motion` + object detection (the
