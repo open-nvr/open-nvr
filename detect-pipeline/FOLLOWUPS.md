@@ -306,7 +306,20 @@ expensive models → results), of which PR B ships the Gate + audit + measuremen
 
 ---
 
-## 11. Surface Tier-0 / gate / Tier-1 metrics in the OpenNVR app (no runbook needed)
+## 11. Surface Tier-0 / gate / Tier-1 metrics in the OpenNVR app — ✅ LANDED
+
+**Done.** Backend `detect_pipeline_metrics_url` + `services/tier0_metrics.py`
+(read-only scrape + Prometheus parser → process CPU/RAM, motion-gate ratio, gate
+escalate/suppress, Tier-1 dispatch count/latency; coarse mode label; unreachable →
+`{available:false}`, never 502) behind `GET /api/v1/ai-models/tier0-metrics`; app
+`ComputeGatedPanel` in the AI Adapters view, under the fleet strip, next to the
+adapter CPU charts. Tests: `server/tests/test_tier0_metrics.py`. **Still owed:**
+a rolling client-side sparkline (backend returns a snapshot, not a window — the
+adapter cards get their series from KAI-C's own rolling store); optional live
+escalate/suppress tally off the `opennvr.inference.tier0.<cam>.gate` NATS subject.
+Original scope below.
+
+
 
 **Why.** Today the compute-gated numbers only exist at the detect-pipeline
 `:9109/metrics` text endpoint — so validating shadow mode means curling a port or
