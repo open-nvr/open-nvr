@@ -193,6 +193,10 @@ every frame. It is **off by default** (PR A behavior unchanged); `shadow` comput
 and audits every escalate/suppress decision without enforcing (so you *measure*
 the miss rate first); `enforce` actually gates.
 
+> **Rolling it out?** Follow [`ENABLEMENT.md`](ENABLEMENT.md) — the staged
+> `off → shadow → enforce → +dispatch` path, the validation criteria, and the
+> recommended production flags once you've measured it on your hardware.
+
 - **Safety rails:** `always_analyze` (disable the gate for critical cameras),
   `critical_classes` (always escalate), a `heartbeat` pass (bound worst-case
   latency), stationary suppression, and a per-track cooldown.
