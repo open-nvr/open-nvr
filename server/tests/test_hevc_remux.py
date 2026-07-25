@@ -89,7 +89,7 @@ def _traf(track_id: int, data_offset: int, sizes: list[int], sync_first: bool) -
     return _box(b"traf", tfhd + _full(b"trun", 0, flags, payload))
 
 
-def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes]) -> bytes:
+def _init_segment() -> bytes:
     ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso5")
     mvhd = _full(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, 1000, 0) + struct.pack(">IH", 0x10000, 0x0100)
                  + b"\x00" * 10 + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
@@ -97,13 +97,16 @@ def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes]) -> bytes
     vtrak = _trak(1, b"vide", _visual_sample_entry(b"hev1"), 90000)
     atrak = _trak(2, b"soun", _audio_sample_entry(), 48000)
     mvex = _box(b"mvex", _trex(1) + _trex(2))
-    moov = _box(b"moov", mvhd + vtrak + atrak + mvex)
+    return ftyp + _box(b"moov", mvhd + vtrak + atrak + mvex)
 
-    mdat_payload = b"".join(video_samples) + b"".join(audio_samples)
+
+def _fragment(seq: int, video_samples: list[bytes], audio_samples: list[bytes]) -> bytes:
+    """One moof+mdat pair; data offsets are moof-relative so fragments can be
+    concatenated freely."""
     vsize = sum(len(s) for s in video_samples)
+    mfhd = _full(b"mfhd", 0, 0, struct.pack(">I", seq))
     # data_offset is relative to moof start; compute after we know moof size.
     # Build traf with a placeholder, then fix the video data_offset.
-    mfhd = _full(b"mfhd", 0, 0, struct.pack(">I", 1))
     vtraf = _traf(1, 0, [len(s) for s in video_samples], sync_first=True)
     ataf = _traf(2, 0, [len(s) for s in audio_samples], sync_first=True)
     moof_len = 8 + len(mfhd) + len(vtraf) + len(ataf)
@@ -112,8 +115,22 @@ def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes]) -> bytes
     vtraf = _traf(1, mdat_data_start, [len(s) for s in video_samples], sync_first=True)
     ataf = _traf(2, mdat_data_start + vsize, [len(s) for s in audio_samples], sync_first=True)
     moof = _box(b"moof", mfhd + vtraf + ataf)
-    mdat = _box(b"mdat", mdat_payload)
-    return ftyp + moov + moof + mdat
+    mdat = _box(b"mdat", b"".join(video_samples) + b"".join(audio_samples))
+    return moof + mdat
+
+
+def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes]) -> bytes:
+    return _init_segment() + _fragment(1, video_samples, audio_samples)
+
+
+def _build_fmp4_multi(*frags: tuple[list[bytes], list[bytes]]) -> bytes:
+    """Multi-fragment file: each frag is (video_samples, audio_samples).
+    Video runs are interleaved with audio bytes, so the remux maps to
+    multiple non-contiguous source runs."""
+    out = _init_segment()
+    for i, (vid, aud) in enumerate(frags, start=1):
+        out += _fragment(i, vid, aud)
+    return out
 
 
 # --- tests -----------------------------------------------------------------
@@ -151,18 +168,106 @@ def test_remux_produces_videoonly_hvc1_preserving_samples(tmp_path):
     assert hrs.probe_video_codec(dst) == "hvc1"
 
 
+# --- the virtual (cache-free) file ----------------------------------------
+
+
+def test_virtual_ranges_match_materialized_remux(tmp_path):
+    """The virtual file must be byte-for-byte what the materialized remux
+    writes — for the whole body and for arbitrary Range slices (the old
+    remux acts as the oracle for the new range-mapped reader)."""
+    src = tmp_path / "in.mp4"
+    # 3 fragments -> 3 non-contiguous video runs (audio interleaved between)
+    src.write_bytes(_build_fmp4_multi(
+        ([b"KEYFRAME_BYTES_0", b"pframe1"], [b"AUDIO_A"]),
+        ([b"KEY2", b"pframe_2_longer"], [b"AUDIO_BB", b"AUDIO_C"]),
+        ([b"KEY_THREE"], [b"D"]),
+    ))
+    dst = tmp_path / "oracle.mp4"
+    hrs.remux_to_browser_mp4(src, dst)
+    oracle = dst.read_bytes()
+
+    index = hrs.build_remux_index(src)
+    assert index.total_size == len(oracle)
+    assert len(index.runs) == 3
+    # the virtual data region is exactly the video samples, in order
+    assert oracle[len(index.header):] == (
+        b"KEYFRAME_BYTES_0" + b"pframe1" + b"KEY2" + b"pframe_2_longer" + b"KEY_THREE"
+    )
+
+    # full read
+    assert b"".join(hrs.iter_index_range(index, 0, index.total_size - 1)) == oracle
+
+    hlen = len(index.header)
+    total = index.total_size
+    ranges = [
+        (0, 0),                       # first byte
+        (total - 1, total - 1),       # last byte
+        (0, hlen - 1),                # exactly the header
+        (hlen, total - 1),            # exactly the data region
+        (hlen - 3, hlen + 3),         # straddling header/data boundary
+        (hlen + 1, hlen + 5),         # inside the data region
+        (total - 7, total - 1),       # suffix
+        (3, total - 4),               # nearly everything, odd bounds
+    ]
+    # every run boundary, straddled both ways
+    for ro in index.run_out_starts:
+        ranges.append((max(0, ro - 2), min(total - 1, ro + 2)))
+        ranges.append((ro, ro))
+    # exhaustive sweep: every (start, end) pair on a small file
+    for start in range(0, total, 7):
+        for end in range(start, total, 11):
+            ranges.append((start, end))
+    for start, end in ranges:
+        got = b"".join(hrs.iter_index_range(index, start, end))
+        assert got == oracle[start:end + 1], f"range {start}-{end} mismatch"
+
+    # tiny chunk size must not change the bytes
+    got = b"".join(hrs.iter_index_range(index, 0, total - 1, chunk=3))
+    assert got == oracle
+
+    # out-of-bounds ranges yield nothing
+    assert b"".join(hrs.iter_index_range(index, total, total + 10)) == b""
+    assert b"".join(hrs.iter_index_range(index, 5, 4)) == b""
+
+
 @pytest.mark.asyncio
-async def test_get_browser_playable_caches(tmp_path, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "recordings_base_path", str(tmp_path))
+async def test_index_rebuilds_when_source_grows(tmp_path):
+    """A still-recording file is transparently re-indexed on change — and
+    keeps exactly ONE in-RAM entry (this replaces the old disk cache that
+    grew by one full copy per size/mtime snapshot)."""
+    hrs._indexes.clear()
     src = tmp_path / "rec.mp4"
-    src.write_bytes(_build_fmp4([b"AAAA", b"BBBB"], [b"zz"]))
+    src.write_bytes(_build_fmp4([b"AAAA"], [b"zz"]))
 
-    p1 = await hrs.get_browser_playable(str(src))
-    assert p1 is not None and Path(p1).exists()
-    mtime1 = Path(p1).stat().st_mtime_ns
-    # second call returns the cached file without re-remuxing
-    p2 = await hrs.get_browser_playable(str(src))
-    assert str(p2) == str(p1)
-    assert Path(p2).stat().st_mtime_ns == mtime1
+    idx1 = await hrs.get_remux_index(str(src))
+    assert idx1 is not None
+    assert b"".join(hrs.iter_index_range(idx1, len(idx1.header), idx1.total_size - 1)) == b"AAAA"
+
+    # same content -> served from RAM (identical object)
+    assert await hrs.get_remux_index(str(src)) is idx1
+
+    # file grows (recording being written) -> rebuilt, single entry, new tail
+    src.write_bytes(_build_fmp4([b"AAAA", b"BBBB"], [b"zz"]))
+    os.utime(src, (os.stat(src).st_atime, os.stat(src).st_mtime + 2))
+    idx2 = await hrs.get_remux_index(str(src))
+    assert idx2 is not None and idx2.total_size > idx1.total_size
+    assert b"".join(hrs.iter_index_range(idx2, len(idx2.header), idx2.total_size - 1)) == b"AAAABBBB"
+    assert len(hrs._indexes) == 1
+
+    # deleted source -> None, entry dropped
+    src.unlink()
+    assert await hrs.get_remux_index(str(src)) is None
+    assert len(hrs._indexes) == 0
+
+
+@pytest.mark.asyncio
+async def test_index_lru_is_bounded(tmp_path, monkeypatch):
+    hrs._indexes.clear()
+    monkeypatch.setattr(hrs, "MAX_CACHED_INDEXES", 2)
+    for i in range(4):
+        src = tmp_path / f"rec{i}.mp4"
+        src.write_bytes(_build_fmp4([f"VID{i}".encode()], [b"zz"]))
+        assert await hrs.get_remux_index(str(src)) is not None
+    assert len(hrs._indexes) == 2
+    # newest two survive
+    assert {Path(p).name for p in hrs._indexes} == {"rec2.mp4", "rec3.mp4"}

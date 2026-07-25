@@ -124,6 +124,50 @@ def test_admin_block_then_approve(db):
     assert dfw.is_allowed(db, "10.0.0.99") is True
 
 
+# --- touch() growth caps (scanner resilience) ---
+
+
+def test_touch_throttles_repeat_writes(db, monkeypatch):
+    dfw._recent_touches.clear()
+    d1 = dfw.touch(db, "10.1.0.1", "UA")
+    assert d1 is not None and d1.attempt_count == 1
+    # Same IP hammering again inside the window -> no DB write.
+    assert dfw.touch(db, "10.1.0.1", "UA") is None
+    # Past the window it records again.
+    monkeypatch.setattr(dfw, "TOUCH_THROTTLE_SECONDS", 0.0)
+    d2 = dfw.touch(db, "10.1.0.1", "UA")
+    assert d2 is not None and d2.attempt_count == 2
+
+
+def test_touch_caps_pending_rows(db, monkeypatch):
+    from models import DeviceStatus, TrustedDevice
+
+    dfw._recent_touches.clear()
+    monkeypatch.setattr(dfw, "MAX_PENDING_DEVICES", 5)
+    for i in range(9):  # a scanner sweeping distinct source IPs
+        dfw.touch(db, f"10.2.0.{i}", "scanner")
+    pending = (
+        db.query(TrustedDevice)
+        .filter(TrustedDevice.status == DeviceStatus.pending)
+        .count()
+    )
+    assert pending <= 5
+
+
+def test_touch_cap_never_evicts_approved_or_blocked(db, monkeypatch):
+    from models import TrustedDevice
+
+    dfw._recent_touches.clear()
+    monkeypatch.setattr(dfw, "MAX_PENDING_DEVICES", 2)
+    dfw.approve(db, "10.3.0.1")
+    dfw.block(db, "10.3.0.2")
+    for i in range(6):
+        dfw.touch(db, f"10.4.0.{i}", "scanner")
+    statuses = {d.ip_address: d.status.value for d in db.query(TrustedDevice).all()}
+    assert statuses["10.3.0.1"] == "approved"
+    assert statuses["10.3.0.2"] == "blocked"
+
+
 # --- X-Forwarded-For trust (the spoofing bypass) ---
 
 

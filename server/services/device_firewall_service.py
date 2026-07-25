@@ -103,10 +103,50 @@ def get_device(db: Session, ip: str) -> TrustedDevice | None:
     )
 
 
-def touch(db: Session, ip: str, user_agent: str | None = None) -> TrustedDevice:
-    """Record that ``ip`` was seen; create it as pending if new. Returns the row."""
+# touch() write-load and table-growth caps. A port scanner hammering the API
+# must not translate into one DB write per blocked request, nor into an
+# unbounded pile of pending rows.
+TOUCH_THROTTLE_SECONDS = 30.0
+MAX_PENDING_DEVICES = 200
+_recent_touches: dict[str, float] = {}  # ip -> monotonic ts of last DB write
+
+
+def touch(db: Session, ip: str, user_agent: str | None = None) -> TrustedDevice | None:
+    """Record that ``ip`` was seen; create it as pending if new.
+
+    Throttled: repeat sightings of the same IP within ``TOUCH_THROTTLE_SECONDS``
+    skip the DB write (returns None). New pending rows are capped at
+    ``MAX_PENDING_DEVICES`` by evicting the least-recently-seen pending row, so
+    a scanner sweeping addresses can't inflate the table.
+    """
+    import time as _time
+
+    now_m = _time.monotonic()
+    last = _recent_touches.get(ip)
+    if last is not None and now_m - last < TOUCH_THROTTLE_SECONDS:
+        return None
+    if len(_recent_touches) > 4096:  # bound the throttle map itself
+        cutoff = now_m - TOUCH_THROTTLE_SECONDS
+        for k in [k for k, v in _recent_touches.items() if v < cutoff]:
+            _recent_touches.pop(k, None)
+    _recent_touches[ip] = now_m
+
     dev = get_device(db, ip)
     if dev is None:
+        pending = (
+            db.query(TrustedDevice)
+            .filter(TrustedDevice.status == DeviceStatus.pending)
+            .count()
+        )
+        if pending >= MAX_PENDING_DEVICES:
+            evict = (
+                db.query(TrustedDevice)
+                .filter(TrustedDevice.status == DeviceStatus.pending)
+                .order_by(TrustedDevice.last_seen.asc())
+                .first()
+            )
+            if evict is not None:
+                db.delete(evict)
         dev = TrustedDevice(
             ip_address=ip,
             status=DeviceStatus.pending,

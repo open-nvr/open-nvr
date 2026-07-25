@@ -16,35 +16,45 @@
 
 """
 Pure-Python HEVC recording remux — make H.265 recordings play in the browser
-WITHOUT ffmpeg, without transcoding, and without touching the camera.
+WITHOUT ffmpeg, without transcoding, and without a disk cache.
 
 Browsers decode HEVC in MSE/WebCodecs, but reject the container OpenNVR records:
 MediaMTX writes an ``hev1`` (in-band params) video track plus a raw-PCM (``ipcm``)
 audio track. MSE needs ``hvc1`` (out-of-band params, which the ``hvcC`` box
 already carries) and can't decode PCM at all — so it stalls (black screen).
 
-This service repackages the recording, sample-for-sample (NO re-encode):
-  * retag the video sample entry ``hev1`` -> ``hvc1`` (a 4-byte swap — the
-    parameter sets already live in ``hvcC``), and
-  * drop the incompatible audio track,
-producing a flat, seekable, video-only MP4 the browser plays natively.
+The browser-playable file is a deterministic rearrangement of the source: a
+small synthesized header (``ftyp`` + flat ``moov`` + ``mdat`` header) followed
+by the video sample runs copied verbatim, in order. So instead of materializing
+a second copy on disk, this service serves it as a VIRTUAL file:
 
-It is memory-safe (indexes fragments via seeks, streams sample runs — never
-loads the multi-GB file into RAM), cached (remux once per recording, on demand),
-and concurrency-locked (no double-remux under parallel playback).
+  * ``build_remux_index()`` scans only the fragment headers (never the sample
+    payloads) and produces a ``RemuxIndex``: the header bytes (a few MB, kept
+    in RAM) plus a table mapping output offsets to source-file runs;
+  * ``iter_index_range()`` answers any HTTP Range request by slicing the header
+    from RAM and streaming the mapped runs straight from the original file.
+
+The browser receives byte-for-byte what a materialized remux would contain,
+but nothing is ever written to disk. Indexes live in a small in-process LRU
+and are rebuilt (sub-second) whenever the source file changes — which also
+makes still-recording files just work: the playable tail grows with the file.
+
+``remux_to_browser_mp4()`` still materializes a real file from the same index;
+it is kept as the reference implementation (test oracle) and for tooling.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hashlib
 import os
 import struct
+from bisect import bisect_right
+from collections import OrderedDict
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from core.config import settings
 from core.logging_config import recording_logger
 
 # ---------------------------------------------------------------------------
@@ -173,14 +183,15 @@ def probe_video_codec(path: str | Path) -> str | None:
 def is_browser_incompatible_video(codec: str | None) -> bool:
     """True for video codecs the browser MSE pipeline can't play as recorded.
 
-    HEVC in the ``hev1`` flavor (what MediaMTX writes for XM/Sofia cams) is the
-    case we remux. ``hvc1`` and ``avc1`` play as-is.
+    All HEVC flavors are remuxed: ``hev1`` needs the ``hvc1`` retag, and even an
+    ``hvc1`` recording still carries the raw-PCM audio track MSE can't decode.
+    ``avc1`` (H.264) plays as-is through the byte-range HLS path.
     """
     return (codec or "") in ("hev1", "hvc1", "hevc")
 
 
 # ---------------------------------------------------------------------------
-# The remux (video-only, hev1 -> hvc1). Blocking; run via a thread.
+# The remux index: header bytes + output-offset -> source-run mapping
 # ---------------------------------------------------------------------------
 
 
@@ -192,14 +203,33 @@ def _fullbox(typ: bytes, ver: int, flags: int, payload: bytes) -> bytes:
     return _box(typ, bytes([ver]) + struct.pack(">I", flags)[1:] + payload)
 
 
-def remux_to_browser_mp4(src_path: str | Path, dst_path: str | Path) -> None:
-    """Write a flat, video-only, ``hvc1`` MP4 (no re-encode) to ``dst_path``.
+@dataclass(frozen=True)
+class RemuxIndex:
+    """The complete recipe for the browser-playable MP4 of one recording.
 
-    Streams each fragment's contiguous video run from the source — never holds
-    the whole recording in memory. Raises on structural failure (caller falls
-    back to serving the original).
+    ``header`` is the synthesized ``ftyp + moov + mdat-header`` prefix; output
+    bytes beyond it are the source file's video sample runs, in order.
+    ``run_out_starts[i]`` is the absolute OUTPUT offset where ``runs[i]``
+    begins (first entry == len(header)), enabling O(log n) range mapping.
+    """
+
+    src_path: str
+    src_size: int
+    src_mtime: int
+    header: bytes
+    runs: tuple[tuple[int, int], ...]  # (source_offset, length)
+    run_out_starts: tuple[int, ...]
+    total_size: int
+
+
+def build_remux_index(src_path: str | Path) -> RemuxIndex:
+    """Scan ``src_path`` (headers only — sample payloads are never read) and
+    build the :class:`RemuxIndex` for its flat, video-only, ``hvc1`` remux.
+
+    Raises on structural failure (caller treats the file as unplayable).
     """
     src_path = str(src_path)
+    st = os.stat(src_path)
     with open(src_path, "rb") as f:
         # -- locate moov, extract video track metadata + retagged sample entry --
         moov = None
@@ -326,129 +356,208 @@ def remux_to_browser_mp4(src_path: str | Path, dst_path: str | Path) -> None:
         if not sample_sizes:
             raise ValueError("no video samples")
 
-        total_dur = sum(sample_durs)
+    total_dur = sum(sample_durs)
 
-        # -- build moov (video-only) --
-        stsd = _fullbox(b"stsd", 0, 0, struct.pack(">I", 1) + bytes(stsd_entry))
-        stts_runs: list[list[int]] = []
-        for dur in sample_durs:
-            if stts_runs and stts_runs[-1][1] == dur:
-                stts_runs[-1][0] += 1
-            else:
-                stts_runs.append([1, dur])
-        stts = _fullbox(b"stts", 0, 0, struct.pack(">I", len(stts_runs))
-                        + b"".join(struct.pack(">II", c, d) for c, d in stts_runs))
-        stss = _fullbox(b"stss", 0, 0, struct.pack(">I", len(sync_samples))
-                        + b"".join(struct.pack(">I", n) for n in sync_samples))
-        stsz = _fullbox(b"stsz", 0, 0, struct.pack(">II", 0, len(sample_sizes))
-                        + b"".join(struct.pack(">I", s) for s in sample_sizes))
-        # all samples in one chunk (mdat is a single contiguous run of them)
-        stsc = _fullbox(b"stsc", 0, 0, struct.pack(">I", 1)
-                        + struct.pack(">III", 1, len(sample_sizes), 1))
-        stco = _fullbox(b"stco", 0, 0, struct.pack(">II", 1, 0))  # patched below
-        stbl = _box(b"stbl", stsd + stts + stss + stsc + stsz + stco)
-        vmhd = _fullbox(b"vmhd", 0, 1, struct.pack(">HHHH", 0, 0, 0, 0))
-        dref = _fullbox(b"dref", 0, 0, struct.pack(">I", 1)
-                        + _fullbox(b"url ", 0, 1, b""))
-        minf = _box(b"minf", vmhd + _box(b"dinf", dref) + stbl)
-        hdlr = _fullbox(b"hdlr", 0, 0, struct.pack(">I", 0) + b"vide"
-                        + struct.pack(">III", 0, 0, 0) + b"VideoHandler\x00")
-        mdhd = _fullbox(b"mdhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
-                        + struct.pack(">HH", 0x55C4, 0))
-        mdia = _box(b"mdia", mdhd + hdlr + minf)
-        tkhd = _fullbox(b"tkhd", 0, 7, struct.pack(">IIIII", 0, 0, 1, 0, total_dur)
-                        + b"\x00" * 8 + struct.pack(">hhhh", 0, 0, 0, 0)
-                        + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
-                        + struct.pack(">II", 0, 0))
-        trak = _box(b"trak", tkhd + mdia)
-        mvhd = _fullbox(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
-                        + struct.pack(">IH", 0x10000, 0x0100) + b"\x00" * 10
-                        + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
-                        + b"\x00" * 24 + struct.pack(">I", 2))
-        moov_out = _box(b"moov", mvhd + trak)
-        ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso2mp41hvc1")
-
-        mdat_size = sum(rl for _, rl in runs)
-        # 64-bit mdat if needed
-        if mdat_size + 8 > 0xFFFFFFFF:
-            mdat_header = struct.pack(">I", 1) + b"mdat" + struct.pack(">Q", mdat_size + 16)
+    # -- build moov (video-only) --
+    stsd = _fullbox(b"stsd", 0, 0, struct.pack(">I", 1) + bytes(stsd_entry))
+    stts_runs: list[list[int]] = []
+    for dur in sample_durs:
+        if stts_runs and stts_runs[-1][1] == dur:
+            stts_runs[-1][0] += 1
         else:
-            mdat_header = struct.pack(">I", mdat_size + 8) + b"mdat"
-        mdat_data_offset = len(ftyp) + len(moov_out) + len(mdat_header)
+            stts_runs.append([1, dur])
+    stts = _fullbox(b"stts", 0, 0, struct.pack(">I", len(stts_runs))
+                    + b"".join(struct.pack(">II", c, d) for c, d in stts_runs))
+    stss = _fullbox(b"stss", 0, 0, struct.pack(">I", len(sync_samples))
+                    + b"".join(struct.pack(">I", n) for n in sync_samples))
+    stsz = _fullbox(b"stsz", 0, 0, struct.pack(">II", 0, len(sample_sizes))
+                    + b"".join(struct.pack(">I", s) for s in sample_sizes))
+    # all samples in one chunk (mdat is a single contiguous run of them)
+    stsc = _fullbox(b"stsc", 0, 0, struct.pack(">I", 1)
+                    + struct.pack(">III", 1, len(sample_sizes), 1))
+    stco = _fullbox(b"stco", 0, 0, struct.pack(">II", 1, 0))  # patched below
+    stbl = _box(b"stbl", stsd + stts + stss + stsc + stsz + stco)
+    vmhd = _fullbox(b"vmhd", 0, 1, struct.pack(">HHHH", 0, 0, 0, 0))
+    dref = _fullbox(b"dref", 0, 0, struct.pack(">I", 1)
+                    + _fullbox(b"url ", 0, 1, b""))
+    minf = _box(b"minf", vmhd + _box(b"dinf", dref) + stbl)
+    hdlr = _fullbox(b"hdlr", 0, 0, struct.pack(">I", 0) + b"vide"
+                    + struct.pack(">III", 0, 0, 0) + b"VideoHandler\x00")
+    mdhd = _fullbox(b"mdhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
+                    + struct.pack(">HH", 0x55C4, 0))
+    mdia = _box(b"mdia", mdhd + hdlr + minf)
+    tkhd = _fullbox(b"tkhd", 0, 7, struct.pack(">IIIII", 0, 0, 1, 0, total_dur)
+                    + b"\x00" * 8 + struct.pack(">hhhh", 0, 0, 0, 0)
+                    + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+                    + struct.pack(">II", 0, 0))
+    trak = _box(b"trak", tkhd + mdia)
+    mvhd = _fullbox(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
+                    + struct.pack(">IH", 0x10000, 0x0100) + b"\x00" * 10
+                    + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+                    + b"\x00" * 24 + struct.pack(">I", 2))
+    moov_out = _box(b"moov", mvhd + trak)
+    ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso2mp41hvc1")
 
-        # patch stco -> absolute offset of the first sample byte
-        idx = moov_out.find(b"stco")
-        moov_out = (moov_out[:idx + 8 + 4]
-                    + struct.pack(">I", mdat_data_offset)
-                    + moov_out[idx + 8 + 8:])
+    mdat_size = sum(rl for _, rl in runs)
+    # 64-bit mdat if needed
+    if mdat_size + 8 > 0xFFFFFFFF:
+        mdat_header = struct.pack(">I", 1) + b"mdat" + struct.pack(">Q", mdat_size + 16)
+    else:
+        mdat_header = struct.pack(">I", mdat_size + 8) + b"mdat"
+    mdat_data_offset = len(ftyp) + len(moov_out) + len(mdat_header)
 
-        # -- stream the output --
-        tmp = str(dst_path) + ".partial"
-        with open(tmp, "wb") as out:
-            out.write(ftyp)
-            out.write(moov_out)
-            out.write(mdat_header)
-            for run_start, run_len in runs:
-                f.seek(run_start)
-                remaining = run_len
-                while remaining > 0:
-                    chunk = f.read(min(1 << 20, remaining))  # 1 MiB
-                    if not chunk:
-                        raise ValueError("truncated source while copying samples")
-                    out.write(chunk)
-                    remaining -= len(chunk)
-        os.replace(tmp, dst_path)
+    # patch stco -> absolute offset of the first sample byte
+    idx = moov_out.find(b"stco")
+    moov_out = (moov_out[:idx + 8 + 4]
+                + struct.pack(">I", mdat_data_offset)
+                + moov_out[idx + 8 + 8:])
+
+    header = ftyp + moov_out + mdat_header
+
+    run_out_starts: list[int] = []
+    out = len(header)
+    for _, rl in runs:
+        run_out_starts.append(out)
+        out += rl
+
+    return RemuxIndex(
+        src_path=os.path.abspath(src_path),
+        src_size=st.st_size,
+        src_mtime=int(st.st_mtime),
+        header=header,
+        runs=tuple(runs),
+        run_out_starts=tuple(run_out_starts),
+        total_size=out,
+    )
+
+
+def iter_index_range(
+    index: RemuxIndex, start: int, end: int, chunk: int = 64 * 1024
+) -> Iterator[bytes]:
+    """Yield the virtual file's bytes for the INCLUSIVE range [start, end].
+
+    Header bytes come from RAM; everything else is seek+read from the source
+    recording. A source truncated mid-stream (rotated/deleted) ends the body
+    short — the client re-requests and gets a clean error then.
+    """
+    if start < 0 or end >= index.total_size or start > end:
+        return
+    hlen = len(index.header)
+    pos = start
+    src: BinaryIO | None = None
+    try:
+        while pos <= end:
+            if pos < hlen:
+                upto = min(end, hlen - 1)
+                yield index.header[pos:upto + 1]
+                pos = upto + 1
+                continue
+            if src is None:
+                # opened lazily (header-only ranges never touch the source);
+                # closed in the finally below — the generator outlives a `with`
+                src = open(index.src_path, "rb")  # noqa: SIM115
+            # locate the run containing `pos`
+            i = bisect_right(index.run_out_starts, pos) - 1
+            src_off, run_len = index.runs[i]
+            within = pos - index.run_out_starts[i]
+            need = min(run_len - within, end - pos + 1)
+            src.seek(src_off + within)
+            while need > 0:
+                data = src.read(min(chunk, need))
+                if not data:
+                    recording_logger.warning(
+                        "virtual remux: source truncated mid-read: %s",
+                        index.src_path,
+                    )
+                    return
+                yield data
+                need -= len(data)
+                pos += len(data)
+    finally:
+        if src is not None:
+            src.close()
+
+
+def remux_to_browser_mp4(src_path: str | Path, dst_path: str | Path) -> None:
+    """Materialize the browser-playable MP4 to ``dst_path``.
+
+    Reference implementation of what the virtual endpoint serves (used by
+    tests as the byte-equivalence oracle, and handy for tooling/export).
+    """
+    index = build_remux_index(src_path)
+    tmp = str(dst_path) + ".partial"
+    with open(tmp, "wb") as out:
+        for data in iter_index_range(index, 0, index.total_size - 1, chunk=1 << 20):
+            out.write(data)
+    os.replace(tmp, dst_path)
 
 
 # ---------------------------------------------------------------------------
-# On-demand cache (remux once per recording, concurrency-locked)
+# In-RAM index LRU (a few MB per open recording; rebuilt when the file changes)
 # ---------------------------------------------------------------------------
 
+MAX_CACHED_INDEXES = 8
+
+_indexes: OrderedDict[str, RemuxIndex] = OrderedDict()
 _locks: dict[str, asyncio.Lock] = {}
 
 
-def _cache_dir() -> Path:
-    d = Path(settings.recordings_base_path) / ".hevc_cache"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _index_current(idx: RemuxIndex | None, st: os.stat_result) -> bool:
+    return (
+        idx is not None
+        and idx.src_size == st.st_size
+        and idx.src_mtime == int(st.st_mtime)
+    )
 
 
-def _cache_path(src_path: str) -> Path:
-    st = os.stat(src_path)
-    key = hashlib.sha1(
-        f"{os.path.abspath(src_path)}:{st.st_size}:{int(st.st_mtime)}".encode()
-    ).hexdigest()
-    return _cache_dir() / f"{key}.mp4"
+async def get_remux_index(src_path: str) -> RemuxIndex | None:
+    """Return the (cached or freshly built) :class:`RemuxIndex` for a recording.
 
-
-async def get_browser_playable(src_path: str) -> Path | None:
-    """Return a cached, browser-playable ``hvc1`` MP4 for ``src_path``.
-
-    Remuxes on first call (off the event loop), caches keyed by path+size+mtime,
-    and serializes concurrent requests so a file is remuxed only once. Returns
-    None on failure so the caller can fall back to the original file.
+    Builds off the event loop, serializes concurrent builds per file, and keeps
+    at most ``MAX_CACHED_INDEXES`` recipes in RAM. A source that changed on
+    disk (a recording still being written) is transparently re-indexed — the
+    scan touches only box headers, so this is sub-second even for hour files.
+    Returns None on failure so the caller can report the file unplayable.
     """
     src_path = os.path.abspath(src_path)
     try:
-        dst = _cache_path(src_path)
+        st = os.stat(src_path)
     except FileNotFoundError:
+        _indexes.pop(src_path, None)
         return None
-    if dst.exists() and dst.stat().st_size > 0:
-        return dst
 
+    idx = _indexes.get(src_path)
+    if _index_current(idx, st):
+        _indexes.move_to_end(src_path)
+        return idx
+
+    if len(_locks) > 512:  # drop idle locks so the dict can't grow unbounded
+        for k in [k for k, v in _locks.items() if not v.locked()]:
+            _locks.pop(k, None)
     lock = _locks.setdefault(src_path, asyncio.Lock())
     async with lock:
-        if dst.exists() and dst.stat().st_size > 0:
-            return dst
         try:
-            await asyncio.to_thread(remux_to_browser_mp4, src_path, str(dst))
-            recording_logger.info("HEVC remux cached: %s -> %s", src_path, dst.name)
-            return dst
-        except Exception as e:
-            recording_logger.error("HEVC remux failed for %s: %s", src_path, e)
-            # clean any partial
-            for p in (dst, Path(str(dst) + ".partial")):
-                with contextlib.suppress(Exception):
-                    p.unlink(missing_ok=True)
+            st = os.stat(src_path)
+        except FileNotFoundError:
+            _indexes.pop(src_path, None)
             return None
-    return None
+        idx = _indexes.get(src_path)
+        if _index_current(idx, st):
+            _indexes.move_to_end(src_path)
+            return idx
+        try:
+            idx = await asyncio.to_thread(build_remux_index, src_path)
+        except Exception as e:
+            recording_logger.error("remux index build failed for %s: %s", src_path, e)
+            _indexes.pop(src_path, None)
+            return None
+        _indexes[src_path] = idx
+        _indexes.move_to_end(src_path)
+        while len(_indexes) > MAX_CACHED_INDEXES:
+            _indexes.popitem(last=False)
+        recording_logger.info(
+            "remux index built: %s (%d runs, header %.1f KB, virtual size %.1f MB)",
+            os.path.basename(src_path), len(idx.runs),
+            len(idx.header) / 1024, idx.total_size / 1e6,
+        )
+        return idx

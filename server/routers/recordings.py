@@ -938,28 +938,28 @@ async def get_browser_playable_recording(
 ):
     """Serve an H.265 recording as a browser-playable ``hvc1`` video-only MP4.
 
-    Remuxes the resolved on-disk recording once (pure-Python, no ffmpeg, no
-    re-encode — retag hev1->hvc1 + drop PCM audio), caches it, and serves it with
-    HTTP Range support so the native <video> element seeks normally. H.264
-    recordings never hit this route (they use the HLS byte-range path).
+    The MP4 is VIRTUAL: a small in-RAM index (built sub-second, headers-only
+    scan) maps every output byte to the original recording, and each HTTP
+    Range request is answered by streaming the mapped bytes straight from the
+    source file — no ffmpeg, no re-encode, no on-disk copy. H.264 recordings
+    never hit this route (they use the HLS byte-range path).
     """
     from fastapi.responses import StreamingResponse
 
-    from services.hevc_remux_service import get_browser_playable
+    from services.hevc_remux_service import get_remux_index, iter_index_range
     from services.hls_playback_service import HlsPlaybackService
 
     session = await HlsPlaybackService.get_session(session_id)
     if not session or not session.file_path:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
-    remuxed = await get_browser_playable(session.file_path)
-    if remuxed is None:
+    index = await get_remux_index(session.file_path)
+    if index is None:
         raise HTTPException(
             status_code=500, detail="Could not prepare this recording for playback"
         )
 
-    path = Path(remuxed)
-    file_size = path.stat().st_size
+    file_size = index.total_size
     range_header = request.headers.get("range") if request else None
 
     start, end, status_code = 0, file_size - 1, 200
@@ -968,17 +968,6 @@ async def get_browser_playable_recording(
         start, end = parsed
         status_code = 206
     length = end - start + 1
-
-    def _iter_file():
-        with open(path, "rb") as fh:
-            fh.seek(start)
-            remaining = length
-            while remaining > 0:
-                data = fh.read(min(64 * 1024, remaining))
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
 
     headers = {
         "Accept-Ranges": "bytes",
@@ -990,7 +979,7 @@ async def get_browser_playable_recording(
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
 
     return StreamingResponse(
-        _iter_file(),
+        iter_index_range(index, start, end),
         status_code=status_code,
         media_type="video/mp4",
         headers=headers,

@@ -109,6 +109,9 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   // Latest segments, mirrored to a ref so the poll loop reads them without
   // re-subscribing every update.
   const segsRef = useRef<Seg[]>([])
+  // Detects 'ended' firing repeatedly at the same instant (metadata overstates
+  // the media) so onEnded can advance instead of re-loading the same clip.
+  const endedGuardRef = useRef<{ afterMs: number; count: number } | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -233,7 +236,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
    * between clips are never crossed in one stream.
    */
   const loadClip = useCallback(
-    async (clip: Seg, offsetSec: number, play: boolean) => {
+    async (clip: Seg, offsetSec: number, play: boolean, atTarget = false) => {
       const el = videoRef.current
       if (!el) return
       const token = ++loadTokenRef.current
@@ -244,6 +247,16 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       loadedClipRef.current = { startMs: clip.startMs, endMs: clip.endMs }
       setCurrentMs(clip.startMs + offsetSec * 1000)
       setBuffering(true)
+
+      // MediaMTX merges contiguous recording files into ONE listed segment, but
+      // a playback session only ever resolves the single on-disk file that
+      // contains its START time. When the seek target turns out to lie beyond
+      // that first file (detected below after metadata loads), we retry ONCE
+      // with the session anchored at the absolute target instant so the backend
+      // resolves the physical file that actually contains it.
+      const targetMs = clamp(clip.startMs + offsetSec * 1000, clip.startMs, clip.endMs - 1000)
+      const sessionStartIso = atTarget ? new Date(targetMs).toISOString() : clip.startIso
+      const sessionStartMs = atTarget ? targetMs : clip.startMs
 
       let manifestUrl: string
       // H.265 (hev1) recordings can't play through hls.js/MSE as recorded (the
@@ -257,7 +270,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       try {
         const res: any = await apiService.createHlsPlaybackSession({
           camera_id: cameraId,
-          start: clip.startIso,
+          start: sessionStartIso,
           end: new Date(clip.endMs).toISOString(),
         })
         if (token !== loadTokenRef.current) return // superseded by a newer load
@@ -276,13 +289,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         return
       }
 
+      // When the session is anchored at the target instant, the media begins AT
+      // the target — no client-side seek needed, and the window starts there.
+      if (atTarget) {
+        windowStartRef.current = sessionStartMs
+        loadedClipRef.current = { startMs: sessionStartMs, endMs: clip.endMs }
+      }
+      const startOffsetSec = atTarget ? 0 : offsetSec
+
       const startAtOffset = () => {
         if (token !== loadTokenRef.current) return
         el.playbackRate = SPEEDS[rateIdx]
         el.muted = muted
-        if (offsetSec > 0.05) {
+        if (startOffsetSec > 0.05) {
           try {
-            el.currentTime = offsetSec
+            el.currentTime = startOffsetSec
           } catch {
             /* seekable range not ready; starts at head */
           }
@@ -293,20 +314,27 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
 
       if (browserMp4Url) {
         // Native <video> playback of the server-remuxed hvc1 MP4 (H.265 path).
-        // The remuxed file is the WHOLE physical on-disk segment; the requested
-        // clip starts `fileOffsetSec` into it. Anchor the timeline at the file's
-        // start (video t=0) so wall-clock <-> video time maps correctly, and set
-        // the loaded window to the whole file so EVERY seek within it is a native
-        // HTTP-Range seek — not a session re-create + full re-download (which is
-        // what made scrubbing re-fetch the segment each time).
-        const fileStartMs = clip.startMs - fileOffsetSec * 1000
+        // The remuxed file is the WHOLE physical on-disk file resolved from the
+        // session start; it begins `fileOffsetSec` before that start. Anchor the
+        // timeline at the file's start (video t=0) so wall-clock <-> video time
+        // maps correctly, and set the loaded window to the whole file so EVERY
+        // seek within it is a native HTTP-Range seek — not a session re-create
+        // + full re-download (which is what made scrubbing re-fetch the segment
+        // each time).
+        const fileStartMs = sessionStartMs - fileOffsetSec * 1000
         windowStartRef.current = fileStartMs
-        const initialTimeSec = Math.max(0, fileOffsetSec + offsetSec)
+        const initialTimeSec = Math.max(0, (targetMs - fileStartMs) / 1000)
         el.src = browserMp4Url
         el.addEventListener(
           'loadedmetadata',
           () => {
             if (token !== loadTokenRef.current) return
+            // Target beyond this file's actual media → it lives in a LATER file
+            // of the same merged segment. Retry once, anchored at the target.
+            if (!atTarget && isFinite(el.duration) && initialTimeSec > el.duration - 0.25) {
+              loadClip(clip, offsetSec, play, true)
+              return
+            }
             loadedClipRef.current = {
               startMs: fileStartMs,
               endMs: fileStartMs + (el.duration || 0) * 1000,
@@ -315,7 +343,11 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
             el.muted = muted
             if (initialTimeSec > 0.05) {
               try {
-                el.currentTime = initialTimeSec
+                // Never seek to the exact end: an at-end start would fire
+                // 'ended' immediately and bounce.
+                el.currentTime = isFinite(el.duration)
+                  ? Math.min(initialTimeSec, Math.max(0, el.duration - 0.5))
+                  : initialTimeSec
               } catch {
                 /* seekable range not ready; starts at head */
               }
@@ -383,15 +415,26 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const onCanPlay = () => setBuffering(false)
     const onEnded = () => {
       const after = loadedClipRef.current?.endMs ?? windowStartRef.current + (el.duration || 0) * 1000
+      // Loop guard: if 'ended' keeps firing at the same instant, the segment
+      // metadata claims more footage than the media actually holds (MediaMTX
+      // durations can overstate by a few seconds). Without this, the "grown"
+      // reload below re-loads the same clip, seeks to its end, ends again —
+      // an infinite session-create/fetch loop that shows up as flickering.
+      const g = endedGuardRef.current
+      const stuck = g !== null && Math.abs(after - g.afterMs) < 300 && g.count >= 1
+      endedGuardRef.current =
+        g !== null && Math.abs(after - g.afterMs) < 300
+          ? { afterMs: g.afterMs, count: g.count + 1 }
+          : { afterMs: after, count: 0 }
       // The current clip may have grown since we loaded it (live recording) —
       // reload it from where we stopped to play into the newly-written tail.
-      const grown = segs.find((s) => s.startMs <= after && after < s.endMs - 500)
+      const grown = stuck ? undefined : segs.find((s) => s.startMs <= after && after < s.endMs - 500)
       if (grown) {
         loadClip(grown, Math.max(0, (after - grown.startMs) / 1000), true)
         return
       }
       // Otherwise advance to the next clip (skips the grey gap).
-      const next = segs.find((s) => s.startMs >= after - 500)
+      const next = segs.find((s) => s.startMs >= after + (stuck ? 300 : -500))
       if (next) loadClip(next, 0, true)
       else setIsPlaying(false)
     }
