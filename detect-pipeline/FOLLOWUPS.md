@@ -358,3 +358,31 @@ escalations vs suppressions, and expensive-call count/latency — **in the app**
 next to the existing adapter CPU charts, across gate `off → shadow → enforce`,
 without running `bench.py` or curling `/metrics`. `ENABLEMENT.md`'s manual steps
 become the *bring-up* path, not the everyday one.
+
+---
+
+## 12. Model-vs-model benchmarking — compare detectors of the same kind
+
+**Why.** Choosing between YOLOv8n / YOLO11n / YOLO26n / RF-DETR (or two builds of one
+family, FP32 vs INT8) needs the *same* aspects measured the *same* way, per model.
+
+**Split by measurement type — this is the load-bearing distinction:**
+- **Speed + output volume = live metrics (✅ landed).** Every `tier0_detector_*`
+  series is labelled by `model` (onnx basename or `DETECT_MODEL_ID`):
+  `tier0_detector_latency_seconds{model}` (pure inference time),
+  `tier0_detector_runs_total{model}`, `tier0_detections_total{label}`, plus process
+  CPU/RAM. Swap the model, replay the same input, and the two `model` series compare
+  directly — in the app's Compute-gated panel (shows the active model + inference
+  latency + top classes) or Prometheus. For the **expensive tier**, KAI-C's adapter
+  metrics already carry per-model identity + fingerprint + p50/p95/p99.
+- **Accuracy = offline, NOT a live metric.** mAP / precision-recall / miss-rate need
+  ground truth, which production doesn't have. Run each model over a **fixed labelled
+  clip corpus** via `bench.py --model-id` (tags every result row) and record the
+  accuracy beside the speed numbers. This is the #1 (detector eval) + #9c (bench
+  corpus) work and is **hardware- + data-gated** — measure on the real Pi 5 / N100
+  boxes, never invent figures.
+
+**Owed.** A committed labelled corpus + a driver that runs the candidate set and emits
+one comparison table (per model: mAP, latency/fps, CPU/RAM, cameras/box). That table
+is Paper 01's evaluation section — build once, use twice. The live metrics half is
+done; the accuracy half waits on hardware, same as the shadow→enforce validation.

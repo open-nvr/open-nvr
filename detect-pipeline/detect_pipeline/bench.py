@@ -37,6 +37,7 @@ class BenchResult:
     events: int = 0                  # unique confirmed track ids
     missed_events: int = 0           # events that never escalated
     escalations_by_reason: dict[str, int] = field(default_factory=dict)
+    model_id: str | None = None      # which model produced this run (for A/B rows)
 
     @property
     def reduction_factor(self) -> float:
@@ -50,6 +51,7 @@ class BenchResult:
 
     def as_dict(self) -> dict:
         return {
+            "model_id": self.model_id,
             "frames": self.frames,
             "baseline_calls": self.baseline_calls,
             "gated_calls": self.gated_calls,
@@ -62,8 +64,9 @@ class BenchResult:
 
     def summary(self) -> str:
         d = self.as_dict()
+        tag = f"[{d['model_id']}] " if d.get("model_id") else ""
         return (
-            f"frames={d['frames']} | expensive calls: baseline={d['baseline_calls']} "
+            f"{tag}frames={d['frames']} | expensive calls: baseline={d['baseline_calls']} "
             f"gated={d['gated_calls']}  ({d['reduction_factor']}x fewer) | "
             f"events={d['events']} missed={d['missed_events']} (miss-rate {d['miss_rate']})"
         )
@@ -137,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI
     p = argparse.ArgumentParser(prog="detect_pipeline.bench", description=__doc__)
     p.add_argument("--source", required=True, help="video file / rtsp url")
     p.add_argument("--detector", choices=["onnx", "blob", "stub"], default="blob")
-    p.add_argument("--model", default=None)
+    p.add_argument("--model", default=None, help="onnx model path")
+    p.add_argument("--model-id", default=None,
+                   help="label for this model in the output (A/B two builds of the same family)")
     p.add_argument("--fps", type=int, default=5)
     p.add_argument("--heartbeat", type=float, default=0.0)
     p.add_argument("--cooldown", type=float, default=30.0)
@@ -155,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI
     frames = VideoFileSource(args.source).stream()
     cfg = GateConfig(shadow=False, heartbeat_s=args.heartbeat, escalate_cooldown_s=args.cooldown)
     res = run_benchmark(tracks_from_source(frames, detector=det, fps=args.fps), cfg)
+    res.model_id = args.model_id or (
+        args.model.rsplit("/", 1)[-1].rsplit(".", 1)[0] if args.model else args.detector
+    )
     print(res.summary())
     print(json.dumps(res.as_dict(), indent=2))
     return 0

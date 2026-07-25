@@ -51,10 +51,17 @@ def test_render_has_type_lines_and_labels():
 # ── service-layer recorders ──
 
 @dataclass
+class _Det:
+    label: str
+
+
+@dataclass
 class _Result:
     tracks: list = field(default_factory=list)
     regions: list = field(default_factory=list)
     calibrating: bool = False
+    detections: list = field(default_factory=list)
+    detect_latency_s: float | None = None
 
 
 def test_record_frame_calibrating_vs_ran_vs_no_motion():
@@ -85,6 +92,33 @@ def test_record_gate_escalations_and_shadow_suppress():
     assert metrics.value("gate_suppressions_total", {"camera": "a", "reason": "stationary"}) == 1
     assert metrics.value("gate_shadow_would_suppress_total", {"camera": "a"}) == 1
     assert metrics.value("tier0_events_published_total", {"camera": "a"}) == 1
+    metrics.reset()
+
+
+def test_record_frame_model_label_detector_latency_and_detections():
+    metrics.reset()
+    result = _Result(
+        regions=[(0, 0, 1, 1)], tracks=[1],
+        detections=[_Det("person"), _Det("person"), _Det("car")],
+        detect_latency_s=0.02,
+    )
+    record_frame("a", result, latency_s=0.05, detector_latency_s=0.02, model="yolov8n")
+    # detector runs are model-attributable
+    assert metrics.value("tier0_detector_runs_total", {"camera": "a", "model": "yolov8n"}) == 1
+    # per-class detection volume
+    assert metrics.value("tier0_detections_total", {"camera": "a", "label": "person"}) == 2
+    assert metrics.value("tier0_detections_total", {"camera": "a", "label": "car"}) == 1
+    # pure detector latency histogram carries the model label
+    out = metrics.render()
+    assert "# TYPE tier0_detector_latency_seconds histogram" in out
+    assert 'tier0_detector_latency_seconds_count{camera="a",model="yolov8n"} 1' in out
+    metrics.reset()
+
+
+def test_record_frame_without_model_falls_back_to_camera_only():
+    metrics.reset()
+    record_frame("a", _Result(regions=[(0, 0, 1, 1)], tracks=[]))  # no model
+    assert metrics.value("tier0_detector_runs_total", {"camera": "a"}) == 1
     metrics.reset()
 
 

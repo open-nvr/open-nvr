@@ -22,6 +22,7 @@ follow-up (it needs OpenNVR-side storage, not Frigate's DB models).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -51,6 +52,12 @@ class FrameResult:
     motion_boxes: list[Box] = field(default_factory=list)
     regions: list[Box] = field(default_factory=list)
     calibrating: bool = False
+    # The frame's NMS'd detections and the pure detector time (region loop only,
+    # excluding decode/motion/track). These are the model-benchmarking signals:
+    # per-class output volume and per-model inference speed. Empty/None on frames
+    # where the detector didn't run (calibrating / no motion).
+    detections: list[Detection] = field(default_factory=list)
+    detect_latency_s: float | None = None
 
 
 def nms(dets: list[Detection], iou_threshold: float = 0.5) -> list[Detection]:
@@ -124,17 +131,23 @@ class DetectPipeline:
 
         dets: list[Detection] = []
         bgr = None
+        detect_latency_s: float | None = None
         if regions:
             bgr = to_bgr(frame.data, frame.width, frame.height)
+            _t0 = time.monotonic()
             for region in regions:
                 crop = crop_and_resize(bgr, region, self.model_size[0], self.model_size[1])
                 raws = self.detector.detect(crop)
                 dets.extend(detections_to_frame(raws, region))
             dets = nms(dets)
+            detect_latency_s = time.monotonic() - _t0   # pure detector time (this model)
 
         # bgr is passed so the tracker can retain each track's best-frame crop
         # for Tier-1 dispatch (#10); None on frames with no detections.
-        return FrameResult(self.tracker.update(dets, bgr), motion_boxes, regions, False)
+        return FrameResult(
+            self.tracker.update(dets, bgr), motion_boxes, regions, False,
+            detections=dets, detect_latency_s=detect_latency_s,
+        )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
         """Consume the frame source forever (bounded in tests by a finite source)."""

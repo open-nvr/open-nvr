@@ -86,6 +86,7 @@ class CameraWorker:
         *,
         detector: DetectorAdapter | None = None,
         model_size: int = 320,
+        model_id: str | None = None,             # detector identity for benchmarking labels
         device: str = "/dev/dri/renderD128",
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
@@ -97,6 +98,7 @@ class CameraWorker:
         self.sink = sink
         self.detector = detector or StubDetector()
         self.model_size = model_size
+        self.model_id = model_id
         self.device = device
         self._frame_source = frame_source
         self.gate = gate
@@ -154,7 +156,12 @@ class CameraWorker:
                     break
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
-                record_frame(self.spec.camera_id, result, latency_s=time.monotonic() - t0)
+                record_frame(
+                    self.spec.camera_id, result,
+                    latency_s=time.monotonic() - t0,
+                    detector_latency_s=getattr(result, "detect_latency_s", None),
+                    model=self.model_id,
+                )
                 try:
                     if self.sink.publish(self.spec.camera_id, result, frame):
                         record_published(self.spec.camera_id)   # count real publishes only
@@ -203,6 +210,7 @@ class WorkerManager:
         worker_factory: WorkerFactory | None = None,
         detector_factory: Callable[[], DetectorAdapter] | None = None,
         model_size: int = 320,
+        model_id: str | None = None,                      # detector identity (benchmark labels)
         device: str = "/dev/dri/renderD128",
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
@@ -216,6 +224,7 @@ class WorkerManager:
         # detector — cv2 detectors aren't guaranteed thread-safe to share.
         self._detector_factory = detector_factory or (lambda: StubDetector())
         self._model_size = model_size
+        self._model_id = model_id
         self._device = device
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
@@ -229,7 +238,7 @@ class WorkerManager:
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
             spec, sink, detector=self._detector_factory(),
-            model_size=self._model_size, device=self._device,
+            model_size=self._model_size, model_id=self._model_id, device=self._device,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,

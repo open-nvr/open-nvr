@@ -79,6 +79,26 @@ def test_pipeline_produces_track_from_motion_and_detection():
     assert tracker.tracks[0].best is not None
 
 
+def test_process_frame_exposes_detections_and_detector_latency():
+    # The benchmarking signals: the frame's detections + the pure detector time.
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1))
+    pipe = DetectPipeline(
+        _FakeSource(1), _FakeMotion(calibrating=False), _OneBoxDetector(), tracker,
+    )
+    result = pipe.process_frame(_frame(0))
+    assert [d.label for d in result.detections] == ["person"]
+    assert result.detect_latency_s is not None and result.detect_latency_s >= 0.0
+
+
+def test_process_frame_no_detector_latency_while_calibrating():
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1))
+    pipe = DetectPipeline(
+        _FakeSource(1), _FakeMotion(calibrating=True), _OneBoxDetector(), tracker,
+    )
+    result = pipe.process_frame(_frame(0))
+    assert result.detections == [] and result.detect_latency_s is None
+
+
 def test_pipeline_skips_detection_while_calibrating():
     calls = {"n": 0}
 

@@ -50,6 +50,14 @@ def test_env_overrides():
     assert cfg.model_size == 640
 
 
+def test_model_id_derivation_for_benchmarking():
+    # onnx default -> model file basename; explicit override wins; non-onnx -> type
+    assert config_from_env({}).model_id == "yolov8n"
+    assert config_from_env({"DETECT_ONNX_MODEL": "/w/yolo11s.onnx"}).model_id == "yolo11s"
+    assert config_from_env({"DETECT_MODEL_ID": "rfdetr-n-int8"}).model_id == "rfdetr-n-int8"
+    assert config_from_env({"DETECT_DETECTOR": "blob"}).model_id == "blob"
+
+
 def test_onnx_detector_falls_back_to_stub_when_model_missing():
     cfg = config_from_env({"DETECT_ONNX_MODEL": "/does/not/exist.onnx"})
     det = _detector_factory(cfg)()                            # must not raise

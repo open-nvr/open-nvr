@@ -216,6 +216,16 @@ The service exposes Prometheus text at `:9109/metrics` (`DETECT_METRICS_PORT`):
 show detect-pipeline CPU/RAM next to them): `tier0_process_cpu_percent`,
 `tier0_process_resident_memory_bytes` — sampled from `/proc` on each scrape (Linux).
 
+**Model-benchmarking signals** (compare two detectors of the same kind on speed +
+output): `tier0_detector_latency_seconds{camera,model}` (pure detector inference
+time — region loop only, excluding decode/motion/track), `tier0_detector_runs_total{camera,model}`,
+and `tier0_detections_total{camera,label}` (per-class output volume). `model` is the
+detector identity — the onnx model file's basename (e.g. `yolov8n`) or an explicit
+`DETECT_MODEL_ID`. Swap the model, keep the same clip, and the two `model` series are
+directly comparable. **Accuracy** (mAP / precision-recall / miss-rate) is *not* a live
+metric — production has no ground truth; get it from `bench.py --model-id` on a
+labelled clip set (see #1/#9c) and record it beside these speed numbers.
+
 **Expensive-model (Tier-1) calls** — the attributes of the AI calls the gate
 dispatches: `tier1_dispatch_total{camera,adapter}` (calls issued),
 `tier1_dispatch_errors_total{camera,adapter}`, `tier1_dispatch_dropped_total{camera,adapter}`

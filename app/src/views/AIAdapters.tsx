@@ -707,6 +707,13 @@ type Tier0MetricsResp = {
   available: boolean
   reason?: 'disabled' | 'unreachable'
   mode?: 'not_running' | 'off' | 'shadow' | 'enforce'
+  model?: string | null
+  detector?: {
+    latency_avg_ms: number | null
+    latency_p95_ms: number | null
+    detections_total: number
+    detections_by_class: Record<string, number>
+  }
   process?: { cpu_percent: number | null; memory_bytes: number | null }
   frames?: {
     total: number
@@ -803,6 +810,7 @@ function ComputeGatedPanel() {
         <Activity size={16} className="text-[var(--text-dim)]" />
         <CardTitle>Compute-gated inference</CardTitle>
         <div className="ml-auto flex items-center gap-2">
+          {d.model && <Badge variant="info"><Cpu size={12} /> {d.model}</Badge>}
           <Badge variant={mode.variant}>{mode.text}</Badge>
           {query.isFetching && <RefreshCw size={13} className="animate-spin text-[var(--text-dim)]" />}
         </div>
@@ -817,6 +825,36 @@ function ComputeGatedPanel() {
           <StatTile label="Frames" value={(f?.total ?? 0).toLocaleString()}
             sub={`${(f?.detector_runs ?? 0).toLocaleString()} ran the detector`} />
         </div>
+
+        {/* Detector model — speed + output volume, the aspects you A/B two models on */}
+        {d.detector && (
+          <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+            <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">
+              Detector model{d.model ? ` — ${d.model}` : ''}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-xs">
+              <span>
+                <span className="text-[var(--text-dim)]">inference </span>
+                <span className="font-bold tabular-nums">{formatMs(d.detector.latency_avg_ms)}</span>
+                {d.detector.latency_p95_ms != null && (
+                  <span className="text-[var(--text-dim)]"> · p95 {formatMs(d.detector.latency_p95_ms)}</span>
+                )}
+              </span>
+              <span>
+                <span className="font-bold tabular-nums">{(d.detector.detections_total ?? 0).toLocaleString()}</span>
+                <span className="text-[var(--text-dim)]"> detections</span>
+              </span>
+              {Object.entries(d.detector.detections_by_class ?? {})
+                .sort((a, b) => b[1] - a[1]).slice(0, 6)
+                .map(([label, n]) => (
+                  <span key={label} className="inline-flex items-center gap-1.5 text-[var(--text-dim)]">
+                    <i className="w-1.5 h-1.5 rounded-sm bg-[var(--accent,#5eb3f6)]" />
+                    {label} <span className="tabular-nums text-[var(--text)]">{n.toLocaleString()}</span>
+                  </span>
+                ))}
+            </div>
+          </div>
+        )}
 
         {/* Gate decisions: what got suppressed (the saving) vs escalated (the cost) */}
         <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">

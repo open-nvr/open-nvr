@@ -78,7 +78,13 @@ ENFORCE_TEXT = "\n".join([
     'tier0_frames_total{camera="cam1"} 100',
     'tier0_frames_total{camera="cam2"} 50',
     "# TYPE tier0_detector_runs_total counter",
-    'tier0_detector_runs_total{camera="cam1"} 30',
+    'tier0_detector_runs_total{camera="cam1",model="yolov8n"} 30',
+    "# TYPE tier0_detections_total counter",
+    'tier0_detections_total{camera="cam1",label="person"} 12',
+    'tier0_detections_total{camera="cam1",label="car"} 4',
+    # detector latency: count=30, sum=0.3 -> avg 10ms; all in le<=0.025 -> p95 25ms
+    _hist("tier0_detector_latency_seconds", "yolov8n",
+          {0.005: 0, 0.01: 15, 0.025: 30}, 0.3, 30),
     "# TYPE tier0_detector_skipped_total counter",
     'tier0_detector_skipped_total{camera="cam1",reason="no_motion"} 60',
     'tier0_detector_skipped_total{camera="cam1",reason="calibrating"} 10',
@@ -130,6 +136,12 @@ def test_reduce_enforce_rollup():
     assert r["tier1"]["inflight"] == 1
     assert abs(r["tier1"]["latency_avg_ms"] - 200.0) < 1e-6
     assert r["tier1"]["latency_p95_ms"] == 250.0
+    # model-benchmarking signals: active model, its inference latency, per-class volume
+    assert r["model"] == "yolov8n"
+    assert abs(r["detector"]["latency_avg_ms"] - 10.0) < 1e-6
+    assert r["detector"]["latency_p95_ms"] == 25.0
+    assert r["detector"]["detections_total"] == 16
+    assert r["detector"]["detections_by_class"] == {"person": 12, "car": 4}
 
 
 def test_mode_off_when_no_gate_metrics():

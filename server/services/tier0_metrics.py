@@ -89,6 +89,21 @@ def _sum_by_label(samples: list[Sample], name: str, label: str, value: str) -> f
     return sum(s.value for s in samples if s.name == name and s.labels.get(label) == value)
 
 
+def _sums_grouped_by(samples: list[Sample], name: str, label: str) -> dict[str, float]:
+    """Sum a counter family, grouped by one label value (e.g. detections per class)."""
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and label in s.labels:
+            out[s.labels[label]] = out.get(s.labels[label], 0.0) + s.value
+    return out
+
+
+def _dominant_label(samples: list[Sample], name: str, label: str) -> str | None:
+    """The label value carrying the most weight (e.g. the active detector model)."""
+    grouped = _sums_grouped_by(samples, name, label)
+    return max(grouped, key=grouped.get) if grouped else None
+
+
 def _hist_avg_and_p95(samples: list[Sample], name: str) -> tuple[float | None, float | None]:
     """Avg (sum/count) and a bucket-interpolated p95, in **milliseconds**.
 
@@ -138,6 +153,14 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     dispatched = _sum(samples, "tier1_dispatch_total")
     lat_avg_ms, lat_p95_ms = _hist_avg_and_p95(samples, "tier1_dispatch_latency_seconds")
 
+    # Model-benchmarking signals: which detector is active, its pure inference
+    # latency, and per-class output volume — the aspects you compare two models
+    # of the same kind on. `model` is labelled on tier0_detector_* by the pipeline.
+    model = _dominant_label(samples, "tier0_detector_runs_total", "model") \
+        or _dominant_label(samples, "tier0_detector_latency_seconds_count", "model")
+    det_avg_ms, det_p95_ms = _hist_avg_and_p95(samples, "tier0_detector_latency_seconds")
+    detections_by_class = {k: int(v) for k, v in _sums_grouped_by(samples, "tier0_detections_total", "label").items()}
+
     # Coarse mode inference (best-effort UI label, not a control signal):
     #   no frames -> not running; frames but no gate metrics -> gate off;
     #   shadow-suppress counter present -> shadow; else acting -> enforce.
@@ -153,6 +176,13 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     return {
         "available": True,
         "mode": mode,
+        "model": model,
+        "detector": {
+            "latency_avg_ms": det_avg_ms,
+            "latency_p95_ms": det_p95_ms,
+            "detections_total": int(sum(detections_by_class.values())),
+            "detections_by_class": detections_by_class,
+        },
         "process": {
             "cpu_percent": _last_gauge(samples, "tier0_process_cpu_percent"),
             "memory_bytes": _last_gauge(samples, "tier0_process_resident_memory_bytes"),

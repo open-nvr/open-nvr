@@ -53,6 +53,7 @@ class ServiceConfig:
     hwaccel: str
     device: str
     model_size: int
+    model_id: str            # detector identity for benchmarking labels (see below)
     refresh_seconds: float
     # PR B — the gate (off by default; shadow measures; enforce acts). Note:
     # `always_analyze` is deliberately NOT a global env — it is per-camera by
@@ -71,6 +72,26 @@ def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _derive_model_id(env: dict) -> str:
+    """Identity of the active detector, for benchmarking labels.
+
+    Explicit ``DETECT_MODEL_ID`` wins (set it when A/B-ing two builds of the same
+    family). Otherwise, for the onnx detector, use the model file's basename
+    (e.g. ``/app/model_weights/yolov8n.onnx`` → ``yolov8n``); else the detector
+    type. This is what labels ``tier0_detector_*`` so models are comparable.
+    """
+    explicit = (env.get("DETECT_MODEL_ID") or "").strip()
+    if explicit:
+        return explicit
+    detector = env.get("DETECT_DETECTOR", "onnx")
+    if detector == "onnx":
+        model_path = env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx")
+        base = os.path.basename(model_path)
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        return stem or "onnx"
+    return detector
+
+
 def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
@@ -85,6 +106,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
+        model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
         gate_mode=env.get("DETECT_GATE_MODE", "off").strip().lower(),
         gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
@@ -198,6 +220,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         enabled=cfg.enabled,
         detector_factory=_detector_factory(cfg),
         model_size=model_size,
+        model_id=cfg.model_id,
         device=cfg.device,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,

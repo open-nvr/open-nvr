@@ -139,19 +139,40 @@ class Metrics:
 metrics = Metrics()
 
 
-def record_frame(camera_id: str, result, *, latency_s: float | None = None) -> None:
-    """Emit Tier-0 per-frame metrics from a FrameResult (service layer)."""
+def record_frame(
+    camera_id: str,
+    result,
+    *,
+    latency_s: float | None = None,
+    detector_latency_s: float | None = None,
+    model: str | None = None,
+) -> None:
+    """Emit Tier-0 per-frame metrics from a FrameResult (service layer).
+
+    ``model`` (the active detector's identity, e.g. ``yolov8n``) labels the
+    model-attributable series so two detectors of the same kind can be compared
+    on the same dashboard: ``tier0_detector_runs_total`` and the pure
+    ``tier0_detector_latency_seconds`` (region-loop time only, excluding
+    decode/motion/track). ``tier0_detections_total{label}`` is per-class output
+    volume — another axis for a model-vs-model comparison.
+    """
     cam = {"camera": camera_id}
+    # model-attributable label set (falls back to camera-only when unknown)
+    mcam = {"camera": camera_id, "model": model} if model else cam
     metrics.inc("tier0_frames_total", cam)
     if getattr(result, "calibrating", False):
         metrics.inc("tier0_detector_skipped_total", {"camera": camera_id, "reason": "calibrating"})
     elif result.regions:
-        metrics.inc("tier0_detector_runs_total", cam)
+        metrics.inc("tier0_detector_runs_total", mcam)
     else:
         metrics.inc("tier0_detector_skipped_total", {"camera": camera_id, "reason": "no_motion"})
     metrics.gauge("tier0_tracks_active", float(len(result.tracks)), cam)
+    for det in getattr(result, "detections", None) or []:
+        metrics.inc("tier0_detections_total", {"camera": camera_id, "label": det.label})
     if latency_s is not None:
         metrics.observe("tier0_frame_latency_seconds", latency_s, cam)
+    if detector_latency_s is not None:
+        metrics.observe("tier0_detector_latency_seconds", detector_latency_s, mcam)
 
 
 def record_published(camera_id: str) -> None:
