@@ -117,7 +117,27 @@ Tier-1 VLM as visual corroboration.
 
 ---
 
-## 8. Wire consumers (camera-agent + apps) to Tier-0 events — PR B era
+## 8. Wire consumers (camera-agent + apps) to Tier-0 events — ✅ v1 LANDED
+
+**Done (v1).** The camera-agent now consumes Tier-0 instead of always re-inferring:
+- **`camera_snapshot` tool** answers count/presence ("how many cars?", "is anyone
+  at the door?") from the latest Tier-0 tracks on the event ring — **no inference**.
+  The LLM is steered to prefer it for counts/presence; `detect_objects`/`describe_camera`
+  are the fallback (live re-check / appearance).
+- **Best frame for the VLM.** The pipeline exposes each track's best crop
+  (`bestframe.py` `BestFrameStore`, served at `/best_frame` on the metrics port; the
+  Tier-0 event carries a `best` flag per track). `describe_camera` now runs the VLM on
+  that clean, already-selected best frame (`bestframe_base_url`) instead of an
+  arbitrary live grab — more accurate, cheaper — falling back to a live frame when
+  unavailable. All additive; unset config = unchanged behaviour.
+
+**Still owed:** feed the VLM a *cropped* best frame for tight single-object attribute
+questions; on-hardware validation that agents measurably shed VLM calls; extend to
+other apps/dashboards. Original scope below.
+
+---
+
+### (original) Wire consumers (camera-agent + apps) to Tier-0 events — PR B era
 
 **Context (decided).** There is **no new "shareable perception" contract.** The
 existing NATS bus + adapter contract + the `opennvr.tier0.v1` event schema (see

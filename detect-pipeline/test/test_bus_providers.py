@@ -42,6 +42,16 @@ def test_sink_publishes_tracks_as_json():
     assert payload["adapter"] == "tier0"
     assert payload["tracks"][0]["id"] == 1 and payload["tracks"][0]["label"] == "person"
     assert payload["tracks"][0]["box"] == [10, 20, 40, 80]
+    assert payload["tracks"][0]["best"] is False           # no crop retained here
+
+
+def test_payload_best_flag_true_when_crop_retained():
+    sent = []
+    sink = EventSink(lambda subj, data: sent.append(data))
+    t = _track()
+    t.best_crop = object()                                 # a retained best crop
+    sink.publish("cam-front", FrameResult(tracks=[t]), _frame())
+    assert json.loads(sent[0])["tracks"][0]["best"] is True
 
 
 def test_sink_skips_empty_by_default_but_can_publish_them():

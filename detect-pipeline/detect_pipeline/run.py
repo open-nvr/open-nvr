@@ -215,18 +215,25 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         # up an idle pool. (shadow measures; only enforce dispatches.)
         log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
                  cfg.gate_mode)
-    return WorkerManager(
+    # Best-frame store: retains each track's best crop for on-demand fetch (served
+    # on the metrics port at /best_frame). Cheap — references only, encode on fetch.
+    from .bestframe import BestFrameStore
+    best_frames = BestFrameStore()
+    manager = WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
         detector_factory=_detector_factory(cfg),
         model_size=model_size,
         model_id=cfg.model_id,
+        best_frames=best_frames,
         device=cfg.device,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
         dispatcher=dispatcher,
         router=router,
     )
+    manager.best_frames = best_frames            # expose so main() can serve it
+    return manager
 
 
 def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
@@ -277,8 +284,8 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     log.info("tier0 gate mode=%s", cfg.gate_mode)
     if cfg.metrics_port:
         from .metrics import serve_metrics
-        serve_metrics(cfg.metrics_port)
-        log.info("tier0 metrics on :%d/metrics", cfg.metrics_port)
+        serve_metrics(cfg.metrics_port, best_frames=getattr(manager, "best_frames", None))
+        log.info("tier0 metrics on :%d/metrics (+ /best_frame)", cfg.metrics_port)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

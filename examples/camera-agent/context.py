@@ -348,6 +348,22 @@ class CameraContext:
         out.sort(key=lambda e: (e.received_at, e.seq), reverse=True)
         return out
 
+    def latest_inference(
+        self, camera_id: str, *, adapter: str = "tier0"
+    ) -> EventRecord | None:
+        """The newest inference event for a camera from a given adapter, or None.
+
+        Used by ``camera_snapshot`` to answer count/presence questions from the
+        always-on Tier-0 stream with **no new inference** — the detection already
+        ran; we just read its latest result off the ring."""
+        ring = self._events.get(camera_id)
+        if not ring:
+            return None
+        for ev in reversed(ring):            # newest-first
+            if ev.adapter == adapter:
+                return ev
+        return None
+
     # ── App alert ring (app door — read/relay) ─────────────────────
 
     def record_app_alert(self, alert: AlertRecord) -> None:

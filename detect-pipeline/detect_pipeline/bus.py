@@ -43,6 +43,9 @@ def build_payload(camera_id: str, result: FrameResult, frame) -> dict:
                 "score": round(float(t.score), 4),
                 "box": list(t.box),
                 "stationary": t.stationary,
+                # a best-frame crop is retained + fetchable for this track (a
+                # consumer can pull it instead of grabbing an arbitrary live frame)
+                "best": getattr(t, "best_crop", None) is not None,
             }
             for t in result.tracks
         ],

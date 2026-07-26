@@ -94,6 +94,7 @@ class CameraWorker:
         detector: DetectorAdapter | None = None,
         model_size: int = 320,
         model_id: str | None = None,             # detector identity for benchmarking labels
+        best_frames=None,                        # shared BestFrameStore (on-demand best frame)
         device: str = "/dev/dri/renderD128",
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
@@ -106,6 +107,7 @@ class CameraWorker:
         self.detector = detector or StubDetector()
         self.model_size = model_size
         self.model_id = model_id
+        self.best_frames = best_frames
         self.device = device
         self._frame_source = frame_source
         self.gate = gate
@@ -180,6 +182,14 @@ class CameraWorker:
                     stage_latency_s=getattr(result, "stage_latency_s", None),
                     model=self.model_id,
                 )
+                # Retain each track's best crop for on-demand fetch (best-frame
+                # store) — cheap: a reference, encoded lazily only if requested.
+                if self.best_frames is not None:
+                    ts = getattr(frame, "ts", None)
+                    for tr in result.tracks:
+                        crop = getattr(tr, "best_crop", None)
+                        if crop is not None:
+                            self.best_frames.put(self.spec.camera_id, tr.id, crop, ts)
                 # Sustained fps over a ~1s window — compared to target_fps, this is
                 # the "is the box keeping up with this camera" signal.
                 win_n += 1
@@ -237,6 +247,7 @@ class WorkerManager:
         detector_factory: Callable[[], DetectorAdapter] | None = None,
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
+        best_frames=None,                                 # shared BestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
@@ -251,6 +262,7 @@ class WorkerManager:
         self._detector_factory = detector_factory or (lambda: StubDetector())
         self._model_size = model_size
         self._model_id = model_id
+        self._best_frames = best_frames
         self._device = device
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
@@ -264,7 +276,8 @@ class WorkerManager:
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
             spec, sink, detector=self._detector_factory(),
-            model_size=self._model_size, model_id=self._model_id, device=self._device,
+            model_size=self._model_size, model_id=self._model_id,
+            best_frames=self._best_frames, device=self._device,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,

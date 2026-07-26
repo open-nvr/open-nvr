@@ -45,7 +45,8 @@ def _ctx_with_camera() -> CameraContext:
 def _build_tools(ctx: CameraContext, *,
                  caption_response=None,
                  detection_response=None,
-                 recognition_response=None) -> CameraTools:
+                 recognition_response=None,
+                 best_frame_fetch=None) -> CameraTools:
     caption = AsyncMock()
     caption.infer.return_value = caption_response or {
         "result": {"caption": "a box on a doormat"}
@@ -63,6 +64,7 @@ def _build_tools(ctx: CameraContext, *,
         caption_client=caption,
         detection_client=detect,
         recognition_client=recognise,
+        best_frame_fetch=best_frame_fetch,
     )
 
 
@@ -285,3 +287,79 @@ def test_tool_definitions_with_no_cameras_has_sentinel():
     describe = next(d for d in defs if d["function"]["name"] == "describe_camera")
     enum = describe["function"]["parameters"]["properties"]["camera_id"]["enum"]
     assert enum  # non-empty
+
+
+# ── camera_snapshot: metadata from Tier-0, no inference ────────────
+
+def _record_tier0(ctx: CameraContext, camera_id: str, labels: list[str]) -> None:
+    ctx.record_event(EventRecord(
+        received_at=time.time(), camera_id=camera_id, adapter="tier0",
+        summary="tier0", raw={"tracks": [{"label": lbl} for lbl in labels]},
+    ))
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_counts_from_tier0_without_inference():
+    ctx = _ctx_with_camera()
+    _record_tier0(ctx, "front-porch", ["person", "car", "car"])
+    tools = _build_tools(ctx)
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "a person" in out and "2 cars" in out
+    # no live inference fired — the whole point of the tool
+    tools._detect.infer.assert_not_awaited()
+    tools._caption.infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_reports_when_no_tier0_data():
+    tools = _build_tools(_ctx_with_camera())
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "no live detection data" in out
+
+
+# ── describe_camera prefers Tier-0's best frame ────────────────────
+
+@pytest.mark.asyncio
+async def test_describe_uses_best_frame_when_available():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource()
+    ctx.register_frame_source("front-porch", stub)
+    fetch = AsyncMock(return_value=b"BESTFRAME")
+    tools = _build_tools(ctx, best_frame_fetch=fetch)
+    await tools.describe_camera({"camera_id": "front-porch", "question": "what colour?"})
+    # the VLM ran on the best frame, and no live grab happened
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"BESTFRAME"
+    assert stub.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_describe_falls_back_to_live_frame_when_no_best():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource(frame=b"LIVEFRAME")
+    ctx.register_frame_source("front-porch", stub)
+    fetch = AsyncMock(return_value=None)          # best frame unavailable
+    tools = _build_tools(ctx, best_frame_fetch=fetch)
+    await tools.describe_camera({"camera_id": "front-porch"})
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"LIVEFRAME"
+    assert stub.calls == 1
+
+
+# ── make_best_frame_fetch client ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_make_best_frame_fetch_maps_camera_and_handles_status():
+    from tools import make_best_frame_fetch
+    seen = {}
+
+    async def http_get(url):
+        seen["url"] = url
+        return (200, b"IMG") if "camera=7" in url else (404, b"")
+
+    fetch = make_best_frame_fetch(
+        "http://tier0:9109/", resolve_camera=lambda c: "7", http_get=http_get)
+    assert await fetch("front-porch") == b"IMG"
+    assert seen["url"] == "http://tier0:9109/best_frame?camera=7"
+
+    fetch_miss = make_best_frame_fetch(
+        "http://tier0:9109", resolve_camera=lambda c: "9", http_get=http_get)
+    assert await fetch_miss("x") is None          # 404 -> None

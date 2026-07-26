@@ -100,6 +100,10 @@ class AppConfig:
     detection_adapter: str = "yolov8"
     recognition_adapter: str = "insightface"
     caption_adapter: str = "blip"
+    # detect-pipeline metrics origin (e.g. http://tier0:9109). When set,
+    # describe_camera runs the VLM on Tier-0's best frame (/best_frame) instead of
+    # an arbitrary live grab. Unset = live grab, fully backward-compatible.
+    bestframe_base_url: str | None = None
 
     # Direct adapter URLs (streaming voice path — bypasses KAI-C in v0.1).
     whisper_url: str = "http://127.0.0.1:9003"
@@ -301,8 +305,13 @@ _DEFAULT_SYSTEM_PROMPT = (
     "to know is to call a tool.\n\n"
     "RULES:\n"
     "- For ANY question about what a camera sees, what is happening, who or "
-    "what is present, or how many of something, you MUST call detect_objects "
-    "or describe_camera BEFORE answering.\n"
+    "what is present, or how many of something, you MUST call a tool BEFORE "
+    "answering.\n"
+    "- For COUNTING or PRESENCE ('how many', 'is anyone/anything there', 'is "
+    "there a X'), PREFER camera_snapshot — it answers instantly from the "
+    "always-on detector with no new inference. Use detect_objects or "
+    "describe_camera only if camera_snapshot has no data, or the answer needs "
+    "appearance (colour, clothing, what someone is doing).\n"
     "- NEVER invent, guess, or describe what is on a camera from imagination. "
     "If you have not called a tool this turn, you do not know.\n"
     "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
@@ -329,7 +338,7 @@ DEFAULT_VOICE_GENDER = "neutral"
 # configured. First tool in each list is the "primary" (used for gating).
 SKILL_TOOLS: dict[str, list[str]] = {
     "see": ["describe_camera"],
-    "count": ["detect_objects"],
+    "count": ["detect_objects", "camera_snapshot"],
     "faces": ["recognize_faces", "enroll_face", "list_people", "forget_face"],
     "events": ["recent_events"],
     "footage": ["search_footage"],
@@ -2353,6 +2362,7 @@ def load_config(path: str | Path) -> AppConfig:
         kaic_url=str(raw["kaic_url"]),
         kaic_api_key=str(raw["kaic_api_key"]),
         opennvr_base_url=_base,
+        bestframe_base_url=(_str("bestframe_base_url", "") or None),
         detection_adapter=_str("detection_adapter", "yolov8"),
         recognition_adapter=_str("recognition_adapter", "insightface"),
         caption_adapter=_str("caption_adapter", "blip"),
@@ -2604,12 +2614,28 @@ class CameraAgentRuntime:
                     cfg.footage_index_path,
                 )
 
+        # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
+        # frame when the detect-pipeline origin is configured. Maps the agent camera
+        # id → the pipeline camera id (the OpenNVR camera id on the Tier-0 subject).
+        best_frame_fetch = None
+        if cfg.bestframe_base_url:
+            from tools import make_best_frame_fetch
+            _cam_map = {
+                cam.camera_id: str(cam.opennvr_camera_id)
+                for cam in cfg.cameras if cam.opennvr_camera_id is not None
+            }
+            best_frame_fetch = make_best_frame_fetch(
+                cfg.bestframe_base_url,
+                resolve_camera=lambda cid: _cam_map.get(cid, cid),
+            )
+
         self.tools = CameraTools(
             context=self.context,
             caption_client=self.caption_client,
             detection_client=self.detection_client,
             recognition_client=self.recognition_client,
             footage_index=self.footage_index,
+            best_frame_fetch=best_frame_fetch,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -2623,6 +2649,7 @@ class CameraAgentRuntime:
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
+            "camera_snapshot": self.tools.camera_snapshot,
             "recognize_faces": self.tools.recognize_faces,
             "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,

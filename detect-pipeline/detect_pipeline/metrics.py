@@ -238,24 +238,45 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
     _proc_prev["cpu_s"], _proc_prev["t"] = cpu_s, now
 
 
-def serve_metrics(port: int = 9109, *, registry: Metrics | None = None):  # pragma: no cover
-    """Start a background HTTP server exposing ``/metrics``. Best-effort."""
+def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
+                  best_frames=None):  # pragma: no cover
+    """Start a background HTTP server exposing ``/metrics`` (and, when a
+    ``BestFrameStore`` is given, ``/best_frame?camera=&track=``). Best-effort."""
     import http.server
     import threading as _t
+    from urllib.parse import parse_qs, urlparse
 
     reg = registry or metrics
 
     class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path.rstrip("/") not in ("/metrics", ""):
-                self.send_response(404); self.end_headers(); return
-            sample_process_metrics(reg)          # refresh CPU%/RSS on each scrape
-            body = reg.render().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4")
+        def _send(self, code, body=b"", ctype="text/plain"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if body:
+                self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/")
+            if path in ("/metrics", ""):
+                sample_process_metrics(reg)      # refresh CPU%/RSS on each scrape
+                self._send(200, reg.render().encode("utf-8"),
+                           "text/plain; version=0.0.4")
+                return
+            if path == "/best_frame" and best_frames is not None:
+                q = parse_qs(parsed.query)
+                cam = (q.get("camera") or [""])[0]
+                track = (q.get("track") or [None])[0]
+                jpeg = (best_frames.get_jpeg(cam, track) if track is not None
+                        else best_frames.latest_jpeg(cam))
+                if jpeg is None:
+                    self._send(404, b"no best frame")
+                    return
+                self._send(200, jpeg, "image/jpeg")
+                return
+            self._send(404)
 
         def log_message(self, *a):  # silence access log
             pass
