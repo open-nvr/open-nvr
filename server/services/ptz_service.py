@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -28,9 +28,10 @@ from services.onvif_digest_service import (
     fetch_profiles_digest,
     ptz_continuous_move_digest,
     ptz_stop_digest,
+    resolve_control_endpoint,
 )
 
-# Simple in-memory cache: camera_id -> {port: int, profile_token: str}
+# Simple in-memory cache: camera_id -> {scheme: str, port: int, profile_token: str}
 _PTZ_CACHE: dict[int, dict[str, Any]] = {}
 
 
@@ -39,50 +40,42 @@ class PTZService:
     async def _find_working_config(
         ip: str, username: str, password: str, camera_port: int
     ) -> dict[str, Any]:
-        """Scan ports to find a working ONVIF profile."""
-        # Prioritize camera.port (if appropriate) and standard HTTP ports
-        ports_to_try: list[int] = []
+        """Resolve the working ONVIF control endpoint + a profile token.
 
-        # If camera_port is likely HTTP/ONVIF (not RTSP), try it first
-        if camera_port and camera_port != 554:
-            ports_to_try.append(camera_port)
+        Uses the shared ``resolve_control_endpoint`` (single source of truth for
+        ports AND scheme — http or https) instead of a private, narrower port
+        list, so PTZ reaches cameras on any control port (e.g. 8088) exactly
+        like the rest of the driver layer.
+        """
+        hint = camera_port if camera_port and camera_port != 554 else None
+        scheme, port = await resolve_control_endpoint(ip, hint)
+        try:
+            profiles = await fetch_profiles_digest(
+                ip, username, password, port, scheme
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to find ONVIF profile for {ip}. Last error: {e}",
+            ) from e
 
-        # Standard ONVIF ports
-        defaults = [80, 8000, 8080, 2020]
-        for p in defaults:
-            if p not in ports_to_try:
-                ports_to_try.append(p)
+        if not profiles:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to find ONVIF profile for {ip}: no media profiles",
+            )
 
-        last_error = None
-        for port in ports_to_try:
-            try:
-                camera_logger.debug(f"PTZ: Probing port {port} for {ip}")
-                profiles = await fetch_profiles_digest(ip, username, password, port)
-                if profiles:
-                    # Prefer a profile with 'Main' in the name if available, else first one
-                    token = profiles[0].get("token", "Profile_1")
-                    for p in profiles:
-                        if "main" in str(p.get("name", "")).lower():
-                            token = p.get("token")
-                            break
+        # Prefer a profile with 'Main' in the name if available, else the first.
+        token = profiles[0].get("token", "Profile_1")
+        for p in profiles:
+            if "main" in str(p.get("name", "")).lower():
+                token = p.get("token")
+                break
 
-                    camera_logger.info(
-                        f"PTZ: Found working config at {ip}:{port} text={token}"
-                    )
-                    return {"port": port, "profile_token": token}
-            except Exception as e:
-                # camera_logger.debug(f"PTZ Probe failed for {ip}:{port}: {e}")
-                last_error = e
-                continue
-
-        # Fallback if no profiles found but maybe we can connect?
-        # Actually without a profile token we can't move.
-        # But maybe the default "Profile_1" works on port 80?
-        # We'll allow a fallback to (80, 'Profile_1') if explicitly desired, but usually strict check is better.
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to find ONVIF profile for {ip}. Last error: {last_error}",
+        camera_logger.info(
+            f"PTZ: Found working config at {scheme}://{ip}:{port} token={token}"
         )
+        return {"scheme": scheme, "port": port, "profile_token": token}
 
     @staticmethod
     def _get_cached_config(camera_id: int) -> dict[str, Any] | None:
@@ -121,7 +114,8 @@ class PTZService:
         try:
             # Attempt move
             await ptz_continuous_move_digest(
-                ip, username, password, config["profile_token"], x, y, z, config["port"]
+                ip, username, password, config["profile_token"], x, y, z,
+                config["port"], config.get("scheme", "http")
             )
             return {
                 "success": True,
@@ -152,6 +146,7 @@ class PTZService:
                     y,
                     z,
                     config["port"],
+                    config.get("scheme", "http"),
                 )
                 return {
                     "success": True,
@@ -180,7 +175,8 @@ class PTZService:
 
         try:
             await ptz_stop_digest(
-                ip, username, password, config["profile_token"], config["port"]
+                ip, username, password, config["profile_token"], config["port"],
+                config.get("scheme", "http")
             )
             return {"success": True, "camera_id": camera_id}
         except Exception:
@@ -191,7 +187,8 @@ class PTZService:
                 )
                 PTZService._update_cache(camera_id, config)
                 await ptz_stop_digest(
-                    ip, username, password, config["profile_token"], config["port"]
+                    ip, username, password, config["profile_token"], config["port"],
+                    config.get("scheme", "http")
                 )
                 return {"success": True, "camera_id": camera_id}
             except Exception as final_e:

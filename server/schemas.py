@@ -550,6 +550,11 @@ class Token(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str
+    # Device-firewall identity for THIS browser, returned only when newly
+    # issued. The client stores it and sends it back as X-Device-Token on every
+    # request; it must outlive the session (never cleared on logout). Absent
+    # when the browser already presented a known token.
+    device_token: str | None = None
 
 
 class TokenData(BaseModel):
@@ -675,56 +680,31 @@ class TurnServer(BaseModel):
     credential: str | None = Field(None, max_length=255)
 
 
-class WebRTCICE(BaseModel):
-    transport_policy: Literal["all", "relay"] = "all"
-    candidate_pool_size: int = Field(0, ge=0, le=10)
-    trickle: bool = True
-
-
-class ResolutionCap(BaseModel):
-    width: int = Field(1920, ge=160, le=7680)
-    height: int = Field(1080, ge=120, le=4320)
-
-
-class WebRTCBandwidth(BaseModel):
-    video_max_bitrate_kbps: int = Field(2500, ge=64, le=200000)
-    audio_max_bitrate_kbps: int = Field(64, ge=8, le=1024)
-    max_fps: int = Field(30, ge=1, le=240)
-    resolution_cap: ResolutionCap = ResolutionCap()
-
-
-AllowedVideoCodec = Literal["h264", "vp8", "vp9", "av1"]
-AllowedAudioCodec = Literal["opus", "pcmu", "pcma", "aac"]
-
-
-class WebRTCCodecs(BaseModel):
-    video_preferred: list[AllowedVideoCodec] = ["h264", "vp9", "vp8", "av1"]
-    audio_preferred: list[AllowedAudioCodec] = ["opus"]
-
-
 class WebRTCSettings(BaseModel):
+    """WebRTC ICE configuration — only the fields that actually affect playback.
+
+    Bandwidth/FPS/resolution/codec knobs were removed: OpenNVR plays via WHEP, a
+    receive-only consumer of whatever MediaMTX publishes, so a viewer cannot cap
+    those — the camera/MediaMTX decides. STUN/TURN/transport-policy are the real,
+    useful controls (NAT traversal for remote viewing).
+    """
+
     stun_servers: list[str] = ["stun:stun.l.google.com:19302"]
     turn_servers: list[TurnServer] = []
-    ice: WebRTCICE = WebRTCICE()
-    bandwidth: WebRTCBandwidth = WebRTCBandwidth()
-    codecs: WebRTCCodecs = WebRTCCodecs()
+    transport_policy: Literal["all", "relay"] = "all"
 
 
 class WebRTCSettingsUpdate(BaseModel):
     stun_servers: list[str] | None = None
     turn_servers: list[TurnServer] | None = None
-    ice: WebRTCICE | None = None
-    bandwidth: WebRTCBandwidth | None = None
-    codecs: WebRTCCodecs | None = None
+    transport_policy: Literal["all", "relay"] | None = None
 
 
 class WebRTCClientConfig(BaseModel):
-    """Client-friendly config for RTCPeerConnection and negotiation hints."""
+    """Client-friendly config for RTCPeerConnection init."""
 
     iceServers: list[dict[str, Any]]
     iceTransportPolicy: Literal["all", "relay"]
-    codecPreferences: dict[str, list[str]]
-    bandwidth: dict[str, Any]
 
 
 # Media Source (MediaMTX) settings schemas
@@ -894,97 +874,8 @@ class RecordingExportRequest(BaseModel):
     format: Literal["original", "zip"] = "zip"
 
 
-# General settings schemas
-class GeneralSystemSettings(BaseModel):
-    device_name: str = Field("OpenNVR", min_length=1)
-    timezone: str = Field("UTC", min_length=1)
-    ntp_enabled: bool = True
-    ntp_server: str = Field("pool.ntp.org", min_length=1)
 
 
-class GeneralNetworkSettings(BaseModel):
-    dhcp_enabled: bool = True
-    ipv4_address: str | None = None
-    ipv4_subnet_mask: str | None = None
-    ipv4_gateway: str | None = None
-    preferred_dns: str | None = None
-    alternate_dns: str | None = None
-    mtu: int = Field(1500, ge=576, le=9000)
-
-
-class GeneralAlarmSettings(BaseModel):
-    motion_alarm_enabled: bool = False
-    motion_sensitivity: int = Field(3, ge=1, le=5)
-    tamper_alarm_enabled: bool = False
-    notify_email: str | None = None
-
-
-class GeneralRs232Settings(BaseModel):
-    baud_rate: int = Field(9600, ge=110, le=115200)
-    data_bits: Literal[5, 6, 7, 8] = 8
-    stop_bits: Literal[1, 2] = 1
-    parity: Literal["none", "even", "odd"] = "none"
-
-
-class GeneralLiveViewSettings(BaseModel):
-    default_layout: Literal[
-        "1x1", "2x2", "3x3", "4x4", "1+5", "1+7", "2+8", "1+12", "4+9", "1+1+10"
-    ] = "2x2"
-    show_osd: bool = True
-    low_latency_mode: bool = False
-
-
-# Custom Window Layout schema for "More Settings" > "Window Settings"
-class CustomWindowLayout(BaseModel):
-    id: str = Field(..., min_length=1, max_length=50)  # e.g. "1+7", "2+6"
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str | None = None
-    enabled: bool = True
-    # Grid definition: list of tile positions
-    # Each tile: {row, col, rowSpan, colSpan}
-    grid_columns: int = Field(4, ge=1, le=8)  # Total columns in the grid
-    grid_rows: int = Field(4, ge=1, le=8)  # Total rows in the grid
-    tiles: list[dict[str, int]] = []  # [{row, col, rowSpan, colSpan}, ...]
-
-
-class WindowDivisionSettings(BaseModel):
-    # Built-in layouts enabled/disabled
-    layouts_enabled: dict[str, bool] = {
-        "1x1": True,
-        "2x2": True,
-        "3x3": True,
-        "4x4": True,
-        "1+5": True,
-        "1+7": True,
-        "2+8": True,
-        "1+12": True,
-        "4+9": True,
-        "1+1+10": True,
-    }
-    # Custom user-defined layouts
-    custom_layouts: list[CustomWindowLayout] = []
-    # Default layout for live view
-    default_layout: str = "2x2"
-
-
-class GeneralExceptionsSettings(BaseModel):
-    email_on_motion: bool = False
-    email_on_stream_failure: bool = True
-    webhook_url: str | None = None
-
-
-class GeneralUserSettings(BaseModel):
-    session_timeout_minutes: int = Field(30, ge=1, le=1440)
-    password_expiry_days: int = Field(90, ge=0, le=3650)
-
-
-class GeneralPosSettings(BaseModel):
-    enabled: bool = False
-    tcp_host: str = "127.0.0.1"
-    tcp_port: int = Field(9000, ge=1, le=65535)
-
-
-# Cloud settings schemas
 class CloudStreamingSettings(BaseModel):
     enabled: bool = False
     server_url: str | None = None
@@ -1231,3 +1122,25 @@ class IntegrationRead(IntegrationBase):
 
     class Config:
         from_attributes = True
+
+
+# --- Window layout preferences (Live View grid) — kept live; consumed by
+# LiveView.tsx and the More Settings > Window Settings page. ---
+class CustomWindowLayout(BaseModel):
+    id: str = Field(..., min_length=1, max_length=50)  # e.g. "1+7", "2+6"
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+    enabled: bool = True
+    grid_columns: int = Field(4, ge=1, le=8)
+    grid_rows: int = Field(4, ge=1, le=8)
+    tiles: list[dict[str, int]] = []  # [{row, col, rowSpan, colSpan}, ...]
+
+
+class WindowDivisionSettings(BaseModel):
+    layouts_enabled: dict[str, bool] = {
+        "1x1": True, "2x2": True, "3x3": True, "4x4": True,
+        "1+5": True, "1+7": True, "2+8": True, "1+12": True,
+        "4+9": True, "1+1+10": True,
+    }
+    custom_layouts: list[CustomWindowLayout] = []
+    default_layout: str = "2x2"

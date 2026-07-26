@@ -78,6 +78,15 @@ class PlaybackSession:
     file_path: str | None = None
     init_length: int = 0  # bytes [0, init_length) = ftyp+moov init segment
     byte_segments: list[dict[str, Any]] = field(default_factory=list)
+    # Video sample-entry fourcc of the resolved file (hev1/hvc1/avc1). Drives
+    # browser-compat handling: an ``hev1`` (H.265) recording is served through
+    # the pure-Python remux (see hevc_remux_service) so it plays in the browser.
+    video_codec: str | None = None
+    # Seconds from the on-disk file's start to this session window's start. The
+    # remux serves the WHOLE physical file, so the native player must offset the
+    # timeline by this to map wall-clock time <-> video time (and to seek
+    # natively across the whole file without re-loading).
+    file_offset_seconds: float = 0.0
 
 
 class HlsPlaybackService:
@@ -326,15 +335,25 @@ class HlsPlaybackService:
         if db is None:
             return
 
-        path = cls._resolve_recording_file(
+        resolved = cls._resolve_recording_file(
             camera_id, session.start_time, session.end_time, db
         )
-        if path is None:
+        if resolved is None:
             recording_logger.debug(
                 f"[HLS] No single on-disk file for camera {camera_id}; "
                 "using MediaMTX fallback"
             )
             return
+        path, file_start = resolved
+        # Seconds from the file start to the session window start (tz-safe: both
+        # are the same server-local wall clock).
+        try:
+            session.file_offset_seconds = max(
+                0.0,
+                (session.start_time.replace(tzinfo=None) - file_start).total_seconds(),
+            )
+        except Exception:
+            session.file_offset_seconds = 0.0
 
         scan = cls._scan_fmp4(path)
         if scan is None:
@@ -378,20 +397,30 @@ class HlsPlaybackService:
         session.file_path = str(path)
         session.init_length = init_length
         session.byte_segments = byte_segments
+        # Detect the video codec so the router can route H.265 recordings to the
+        # browser-remux path (H.264 keeps the fast byte-range path).
+        try:
+            from services.hevc_remux_service import probe_video_codec
+
+            session.video_codec = probe_video_codec(path)
+        except Exception:
+            session.video_codec = None
         recording_logger.info(
             f"[HLS] Indexed {path.name}: {n} fragments -> "
-            f"{len(byte_segments)} byte-range segments (init={init_length}B)"
+            f"{len(byte_segments)} byte-range segments (init={init_length}B, "
+            f"codec={session.video_codec})"
         )
 
     @classmethod
     def _resolve_recording_file(
         cls, camera_id: int, start_time: datetime, end_time: datetime, db: Any
-    ) -> Path | None:
+    ) -> tuple[Path, datetime] | None:
         """Find the single on-disk recording file that contains ``start_time``.
 
-        Returns the file whose start timestamp is the latest at or before the
-        session start (i.e. the file the session begins inside), path-checked
-        against the recordings base (V-005). Returns None if nothing matches.
+        Returns ``(path, file_start)`` — the file whose start timestamp is the
+        latest at or before the session start (i.e. the file the session begins
+        inside, and that file's naive start datetime), path-checked against the
+        recordings base (V-005). Returns None if nothing matches.
 
         Matching is done on the tz-stripped wall clock: the recording filename,
         MediaMTX's /list start (which the frontend echoes back as ``start``) and
@@ -437,7 +466,7 @@ class HlsPlaybackService:
             resolved = resolve_under_root(root, best_rel)
         except Exception:
             return None
-        return resolved if resolved.is_file() else None
+        return (resolved, best_ts) if resolved.is_file() else None
 
     @classmethod
     def _scan_fmp4(

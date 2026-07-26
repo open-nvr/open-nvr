@@ -56,6 +56,7 @@ from routers import (
     audit_logs,
     auth,
     camera_config,
+    camera_settings,
     cameras,
     internal_camera_agent,
     cloud as cloud_router,
@@ -65,7 +66,6 @@ from routers import (
     compliance,
     events as events_router,
     firmware as firmware_router,
-    general,
     integrations,
     media_source,
     mediamtx_admin,
@@ -83,6 +83,8 @@ from routers import (
     system,
     users,
     webrtc,
+    window_settings,
+    device_firewall,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -382,6 +384,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Error stopping inference tasks: {e}")
 
+    # Stop all camera event-stream subscriptions
+    try:
+        from services.camera_event_manager import get_camera_event_manager
+
+        await get_camera_event_manager().stop_all()
+        main_logger.info("All camera event subscriptions stopped")
+    except Exception as e:
+        main_logger.error(f"Error stopping camera event subscriptions: {e}")
+
     # FFmpeg-based RTSP proxy/recorder cleanup removed
 
 
@@ -422,6 +433,13 @@ app.add_middleware(
     ],  # Explicit headers
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
+
+# Device firewall — refuse API access from unapproved client IPs. Added before
+# request logging so RequestLogging (added last = outermost) still records
+# blocked attempts.
+from middleware.device_firewall import DeviceFirewallMiddleware
+
+app.add_middleware(DeviceFirewallMiddleware)
 
 # Add request logging middleware
 app.add_middleware(RequestLoggingMiddleware)
@@ -492,6 +510,7 @@ async def get_jwks():
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
+app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
@@ -500,10 +519,11 @@ app.include_router(permissions.router, prefix=settings.api_prefix)
 app.include_router(password_policy.router, prefix=settings.api_prefix)
 app.include_router(security.router, prefix=settings.api_prefix)
 app.include_router(webrtc.router, prefix=settings.api_prefix)
+app.include_router(window_settings.router, prefix=settings.api_prefix)
+app.include_router(device_firewall.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
-app.include_router(general.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(

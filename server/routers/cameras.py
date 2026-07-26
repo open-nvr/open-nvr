@@ -147,6 +147,7 @@ async def create_camera(
         )
 
         onvif_port = None
+        control_scheme = None
         # Any identity fields the resolver returns; back-filled below without
         # ever overwriting values the caller (e.g. ONVIF discovery) already set.
         identity: dict | None = None
@@ -172,6 +173,7 @@ async def create_camera(
                     ),
                 )
             onvif_port = derived.get("onvif_port")
+            control_scheme = derived.get("control_scheme")
             identity = derived
             camera_create = camera_create.model_copy(update={"rtsp_url": derived["rtsp_url"]})
         else:
@@ -197,6 +199,7 @@ async def create_camera(
             )
             if identity:
                 onvif_port = identity.get("onvif_port")
+                control_scheme = identity.get("control_scheme")
 
         if identity:
             camera_create = camera_create.model_copy(
@@ -218,12 +221,25 @@ async def create_camera(
             camera_create.username,
             camera_create.password,
             onvif_port,
+            control_scheme,
         )
 
     try:
         cam = await CameraService.create_camera(
             db=db, camera_create=camera_create, owner_id=current_user.id
         )
+
+        # Persist the ONVIF control endpoint discovered above (Hikvision http:80,
+        # Secureye/Tiandy http:8088, TLS-only devices https:…) so the driver
+        # layer never re-guesses it. Any port/scheme on any camera works because
+        # we remember what actually answered.
+        if onvif_port or control_scheme:
+            if onvif_port:
+                cam.onvif_port = onvif_port
+            if control_scheme:
+                cam.control_scheme = control_scheme
+            db.commit()
+            db.refresh(cam)
 
         _log_camera_creation_success(current_user.id, cam, request)
         _record_audit_log(db, current_user.id, cam, request)

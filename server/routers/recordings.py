@@ -774,9 +774,25 @@ async def create_hls_session(
         f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/index.m3u8"
     )
 
+    # H.265 (hev1) recordings can't play through hls.js/MSE as recorded (browser
+    # rejects the hev1 tag + PCM audio). For those, the client should use the
+    # browser-remux endpoint instead of the HLS manifest.
+    from services.hevc_remux_service import is_browser_incompatible_video
+
+    needs_remux = is_browser_incompatible_video(session.video_codec)
+    browser_mp4_url = (
+        f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/browser.mp4"
+        if needs_remux
+        else None
+    )
+
     return {
         "session_id": session.session_id,
         "manifest_url": manifest_url,
+        "browser_mp4_url": browser_mp4_url,
+        "video_codec": session.video_codec,
+        "needs_remux": needs_remux,
+        "file_offset_seconds": session.file_offset_seconds,
         "camera_id": camera_id,
         "camera_name": camera.name or f"Camera {camera_id}",
         "start": start,
@@ -909,6 +925,61 @@ async def get_hls_media(
 
     return StreamingResponse(
         _iter_file(),
+        status_code=status_code,
+        media_type="video/mp4",
+        headers=headers,
+    )
+
+
+@router.get("/playback/hls/{session_id}/browser.mp4")
+async def get_browser_playable_recording(
+    session_id: str,
+    request: Request = None,
+):
+    """Serve an H.265 recording as a browser-playable ``hvc1`` video-only MP4.
+
+    The MP4 is VIRTUAL: a small in-RAM index (built sub-second, headers-only
+    scan) maps every output byte to the original recording, and each HTTP
+    Range request is answered by streaming the mapped bytes straight from the
+    source file — no ffmpeg, no re-encode, no on-disk copy. H.264 recordings
+    never hit this route (they use the HLS byte-range path).
+    """
+    from fastapi.responses import StreamingResponse
+
+    from services.hevc_remux_service import get_remux_index, iter_index_range
+    from services.hls_playback_service import HlsPlaybackService
+
+    session = await HlsPlaybackService.get_session(session_id)
+    if not session or not session.file_path:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    index = await get_remux_index(session.file_path)
+    if index is None:
+        raise HTTPException(
+            status_code=500, detail="Could not prepare this recording for playback"
+        )
+
+    file_size = index.total_size
+    range_header = request.headers.get("range") if request else None
+
+    start, end, status_code = 0, file_size - 1, 200
+    parsed = _parse_byte_range(range_header, file_size)
+    if parsed is not None:
+        start, end = parsed
+        status_code = 206
+    length = end - start + 1
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Cache-Control": "max-age=86400",
+        "Access-Control-Allow-Origin": "*",
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    return StreamingResponse(
+        iter_index_range(index, start, end),
         status_code=status_code,
         media_type="video/mp4",
         headers=headers,
@@ -1161,6 +1232,27 @@ async def get_day_segments(
         or "http://127.0.0.1:9996"
     ).rstrip("/")
 
+    # Live edge: the start instant of the newest on-disk file that is STILL
+    # BEING WRITTEN. VOD playback of a growing file is unreliable (its bytes
+    # shift under the player), so the UI renders everything from this instant
+    # on as LIVE and routes the user to Live View instead of a VOD session.
+    live_edge_start = None
+    try:
+        from services.hls_playback_service import HlsPlaybackService
+
+        now = datetime.now(UTC)
+        resolved = HlsPlaybackService._resolve_recording_file(
+            camera_id, now, now, db
+        )
+        if resolved is not None:
+            live_path, file_start = resolved
+            if now.timestamp() - live_path.stat().st_mtime < 60:
+                live_edge_start = (
+                    file_start.replace(tzinfo=None).isoformat() + "Z"
+                )
+    except Exception:
+        live_edge_start = None
+
     empty = {
         "segments": [],
         "camera_id": camera_id,
@@ -1170,6 +1262,7 @@ async def get_day_segments(
         "total_duration": 0,
         "segment_count": 0,
         "playback_base_url": browser_playback_base,
+        "live_edge_start": live_edge_start,
     }
 
     try:

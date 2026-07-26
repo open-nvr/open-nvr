@@ -24,7 +24,7 @@ import json
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from models import SecuritySetting
 from schemas import (
@@ -113,18 +113,84 @@ async def update_webrtc_settings(
         )
     except Exception:
         pass
+
+    # Push the new ICE servers to the running MediaMTX so the media server uses
+    # the same STUN/TURN as the browser. Best-effort: MediaMTX may not be up or
+    # configured, and that must not fail the save.
+    await _apply_ice_to_mediamtx(settings_obj)
+
     return settings_obj.model_dump()
+
+
+def _mediamtx_ice_servers(settings_obj: WebRTCSettingsSchema) -> list[dict]:
+    """Convert stored STUN/TURN into MediaMTX's ``webrtcICEServers2`` shape.
+
+    Each entry is ``{url, username, password, clientOnly}``; ``clientOnly:
+    false`` means the media server uses the ICE server too (not just the
+    browser), which is the whole point. STUN uses empty credentials.
+    """
+    out: list[dict] = []
+    for s in settings_obj.stun_servers or []:
+        if s:
+            out.append(
+                {"url": s, "username": "", "password": "", "clientOnly": False}
+            )
+    for t in settings_obj.turn_servers or []:
+        if not t.url:
+            continue
+        out.append(
+            {
+                "url": t.url,
+                "username": t.username or "",
+                "password": t.credential or "",
+                "clientOnly": False,
+            }
+        )
+    return out
+
+
+async def _apply_ice_to_mediamtx(settings_obj: WebRTCSettingsSchema) -> None:
+    try:
+        from services.mediamtx_admin_service import MediaMtxAdminService
+
+        if not MediaMtxAdminService.is_configured():
+            return
+        await MediaMtxAdminService.set_webrtc_ice_servers(
+            _mediamtx_ice_servers(settings_obj)
+        )
+    except Exception:
+        # Media server unreachable / not provisioned — the browser side still
+        # has the settings; MediaMTX picks them up next reload.
+        pass
+
+
+async def _apply_stored_ice_to_mediamtx() -> None:
+    """Load the stored WebRTC settings and push them to MediaMTX. Used by the
+    MediaMTX startup hook so a restart re-applies saved STUN/TURN."""
+    from core.database import SessionLocal
+
+    with SessionLocal() as db:
+        row = _get_webrtc_row(db)
+        try:
+            val = json.loads(row.json_value or "{}")
+        except Exception:
+            val = {}
+        settings_obj = WebRTCSettingsSchema(**{**DEFAULTS, **val})
+    await _apply_ice_to_mediamtx(settings_obj)
 
 
 @router.get("/rtc-config", response_model=WebRTCClientConfig)
 async def get_client_rtc_config(
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_superuser),
+    current_user=Depends(get_current_active_user),
 ):
-    """Return a sanitized config suitable for RTCPeerConnection init and negotiation hints.
+    """ICE configuration for RTCPeerConnection, used by the live player.
 
-    Note: Currently restricted to superuser to avoid leaking TURN secrets broadly. Adjust as needed
-    if clients need this anonymously via reverse proxy.
+    Any authenticated user needs this to watch a stream, so it is not
+    superuser-gated. TURN credentials are inherently client-side — the browser
+    cannot relay through TURN without them — so restricting this endpoint would
+    break playback rather than protect the secret. Keep TURN credentials
+    short-lived if that matters for a deployment.
     """
     row = _get_webrtc_row(db)
     try:
@@ -148,15 +214,5 @@ async def get_client_rtc_config(
             ice_servers.append(entry)
     return WebRTCClientConfig(
         iceServers=ice_servers,
-        iceTransportPolicy=settings_obj.ice.transport_policy,
-        codecPreferences={
-            "video": settings_obj.codecs.video_preferred,
-            "audio": settings_obj.codecs.audio_preferred,
-        },
-        bandwidth={
-            "video_max_bitrate_kbps": settings_obj.bandwidth.video_max_bitrate_kbps,
-            "audio_max_bitrate_kbps": settings_obj.bandwidth.audio_max_bitrate_kbps,
-            "max_fps": settings_obj.bandwidth.max_fps,
-            "resolution_cap": settings_obj.bandwidth.resolution_cap.model_dump(),
-        },
+        iceTransportPolicy=settings_obj.transport_policy,
     )

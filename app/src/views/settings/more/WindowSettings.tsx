@@ -209,11 +209,16 @@ export function WindowSettings() {
       try {
         const { data } = await apiService.getWindowSettings()
         if (!mounted) return
-        // Merge with defaults in case new layouts are added
+        // Merge with defaults in case new layouts are added. Guard against a
+        // null/empty body so a transient read never crashes the whole page.
+        const safe = data ?? {}
         setSettings({
           ...defaultSettings,
-          ...data,
-          layouts_enabled: { ...defaultSettings.layouts_enabled, ...data.layouts_enabled },
+          ...safe,
+          layouts_enabled: {
+            ...defaultSettings.layouts_enabled,
+            ...(safe.layouts_enabled ?? {}),
+          },
         })
       } catch (e: any) {
         setError(e?.data?.detail || e?.message || 'Failed to load settings')
