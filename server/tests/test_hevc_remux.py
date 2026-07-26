@@ -230,6 +230,30 @@ def test_virtual_ranges_match_materialized_remux(tmp_path):
     assert b"".join(hrs.iter_index_range(index, 5, 4)) == b""
 
 
+def test_growing_file_indexes_only_completed_fragments(tmp_path):
+    """While MediaMTX writes, the final fragment is half-flushed: its header
+    already claims a size the file doesn't hold. Indexing must stop at the last
+    COMPLETE fragment — that boundary is what makes the finished part of a
+    still-recording file playable instead of the whole file being withheld."""
+    whole = _build_fmp4_multi(
+        ([b"AAAA_ONE"], [b"a"]),
+        ([b"BBBB_TWO"], [b"b"]),
+        ([b"CCCC_THREE"], [b"c"]),
+    )
+    complete = tmp_path / "complete.mp4"
+    complete.write_bytes(whole)
+    full = hrs.build_remux_index(complete)
+    assert len(full.runs) == 3
+
+    # Same file with the last fragment cut mid-write.
+    partial = tmp_path / "growing.mp4"
+    partial.write_bytes(whole[:-6])
+    grown = hrs.build_remux_index(partial)
+    assert len(grown.runs) == 2  # the half-written fragment is skipped
+    body = b"".join(hrs.iter_index_range(grown, len(grown.header), grown.total_size - 1))
+    assert body == b"AAAA_ONE" + b"BBBB_TWO"  # complete samples only, no short read
+
+
 @pytest.mark.asyncio
 async def test_index_rebuilds_when_source_grows(tmp_path):
     """A still-recording file is transparently re-indexed on change — and

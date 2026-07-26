@@ -87,6 +87,13 @@ class PlaybackSession:
     # timeline by this to map wall-clock time <-> video time (and to seek
     # natively across the whole file without re-loading).
     file_offset_seconds: float = 0.0
+    # Frozen H.265 remux recipe for this session (see hevc_remux_service).
+    # Pinned at session creation ON PURPOSE: a still-recording file grows, and
+    # re-indexing mid-playback would move every byte offset under the player —
+    # the browser would then stitch together two different versions of the same
+    # URL and stall. A session therefore serves one consistent snapshot; picking
+    # up newly finished footage happens when the client starts a new session.
+    remux_index: Any = None
 
 
 class HlsPlaybackService:
@@ -405,6 +412,23 @@ class HlsPlaybackService:
             session.video_codec = probe_video_codec(path)
         except Exception:
             session.video_codec = None
+
+        # For H.265, freeze the remux recipe NOW (see PlaybackSession.remux_index):
+        # the file may still be growing, and re-indexing mid-playback would shift
+        # every byte offset under the player.
+        try:
+            from services.hevc_remux_service import (
+                build_remux_index,
+                is_browser_incompatible_video,
+            )
+
+            if is_browser_incompatible_video(session.video_codec):
+                session.remux_index = build_remux_index(path)
+        except Exception as e:
+            session.remux_index = None
+            recording_logger.warning(
+                f"[HLS] Could not pre-index {path.name} for remux: {e}"
+            )
         recording_logger.info(
             f"[HLS] Indexed {path.name}: {n} fragments -> "
             f"{len(byte_segments)} byte-range segments (init={init_length}B, "

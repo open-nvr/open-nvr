@@ -87,7 +87,14 @@ def _read_box_header(f: BinaryIO, pos: int) -> tuple[bytes, int, int] | None:
 
 
 def _iter_top_level(f: BinaryIO):
-    """Yield (type, box_start, header_size, box_size) for each top-level box."""
+    """Yield (type, box_start, header_size, box_size) for each top-level box.
+
+    A box that runs past EOF is NOT yielded: while MediaMTX is still writing a
+    recording, the final fragment is half-flushed (its header already claims a
+    size the file doesn't hold yet). Indexing it would map samples past the end
+    of the file and truncate playback, so the scan stops at the last COMPLETE
+    box — which is exactly the "everything finished so far" boundary.
+    """
     size_total = os.fstat(f.fileno()).st_size
     pos = 0
     while pos + 8 <= size_total:
@@ -95,6 +102,8 @@ def _iter_top_level(f: BinaryIO):
         if info is None:
             break
         typ, hdr, size = info
+        if pos + size > size_total:
+            break  # still being written — treat as not there yet
         yield typ, pos, hdr, size
         pos += size
 
@@ -282,12 +291,21 @@ def build_remux_index(src_path: str | Path) -> RemuxIndex:
         sample_durs: list[int] = []
         sync_samples: list[int] = []  # 1-based indices
         runs: list[tuple[int, int]] = []  # (file_offset, run_length) video-only
-        sample_no = 0
+        file_size = os.fstat(f.fileno()).st_size
         for typ, pos, hdr, size in _iter_top_level(f):
             if typ != b"moof":
                 continue
             f.seek(pos)
             moof = f.read(size)
+            # Buffer this fragment and commit it only once its sample data is
+            # verified present. A moof is written before its mdat, so a
+            # still-recording file ends with a COMPLETE header describing bytes
+            # that have not landed yet; committing those would map samples past
+            # EOF and truncate playback mid-stream.
+            frag_sizes: list[int] = []
+            frag_durs: list[int] = []
+            frag_sync: list[int] = []
+            frag_runs: list[tuple[int, int]] = []
             for tro, trh, trs in _find_all(moof, hdr, size, b"traf"):
                 tfhd = _find(moof, tro + trh, tro + trs, (b"tfhd",))
                 to2, th2, _ts2 = tfhd
@@ -344,14 +362,24 @@ def build_remux_index(src_path: str | Path) -> RemuxIndex:
                         q += 4
                     if idx == 0 and first_flags is not None:
                         sfl = first_flags
-                    sample_no += 1
-                    sample_sizes.append(ssz)
-                    sample_durs.append(sdur)
+                    frag_sizes.append(ssz)
+                    frag_durs.append(sdur)
                     if (sfl & 0x10000) == 0:  # sync (not non-sync)
-                        sync_samples.append(sample_no)
+                        # 1-based index once this fragment is committed
+                        frag_sync.append(len(sample_sizes) + len(frag_sizes))
                     run_len += ssz
                 if run_len:
-                    runs.append((run_start, run_len))
+                    frag_runs.append((run_start, run_len))
+
+            # Commit the fragment only if every byte it describes is on disk.
+            # Otherwise the recording is still being written here: stop, and the
+            # index covers exactly the footage that has finished.
+            if any(rs + rl > file_size for rs, rl in frag_runs):
+                break
+            sample_sizes.extend(frag_sizes)
+            sample_durs.extend(frag_durs)
+            sync_samples.extend(frag_sync)
+            runs.extend(frag_runs)
 
         if not sample_sizes:
             raise ValueError("no video samples")
