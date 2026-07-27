@@ -800,7 +800,7 @@ function ComputeGatedPanel() {
     return <Skeleton className="h-40" />
   }
 
-  const mode = TIER0_MODE_LABEL[d.mode ?? 'not_running']
+  const mode = TIER0_MODE_LABEL[d.mode ?? 'not_running'] ?? TIER0_MODE_LABEL.not_running
   const f = d.frames
   const g = d.gate
   const t = d.tier1

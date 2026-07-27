@@ -25,6 +25,7 @@ deployed): the caller gets ``available=False`` and the panel simply says so.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -69,7 +70,9 @@ def parse_prometheus_text(text: str) -> list[Sample]:
         try:
             value = float(m.group("value"))
         except ValueError:
-            continue  # +Inf/NaN in gauges we don't consume
+            continue
+        if not math.isfinite(value):
+            continue  # +Inf/NaN — float() accepts these; drop so int() can't blow up
         out.append(Sample(m.group("name"), _parse_labels(m.group("labels")), value))
     return out
 
@@ -115,12 +118,19 @@ def _hist_avg_and_p95(samples: list[Sample], name: str) -> tuple[float | None, f
     if total_count <= 0:
         return None, None
     avg_ms = (total_sum / total_count) * 1000.0
-    # cumulative counts per le-bucket, summed over label sets
+    # cumulative counts per le-bucket, summed over label sets. Match `le`
+    # numerically (not as a string) so "1" / "1.0" / "1e0" all bucket correctly.
+    def _le_is(le_raw: str | None, boundary: float) -> bool:
+        try:
+            return le_raw is not None and float(le_raw) == boundary
+        except ValueError:
+            return False
+
     cum: dict[float, float] = {}
     for b in _BUCKETS:
         cum[b] = sum(
             s.value for s in samples
-            if s.name == f"{name}_bucket" and s.labels.get("le") == str(b)
+            if s.name == f"{name}_bucket" and _le_is(s.labels.get("le"), b)
         )
     target = 0.95 * total_count
     p95_ms: float | None = None
@@ -197,7 +207,10 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
         mode = "not_running"
     elif not gate_present:
         mode = "off"
-    elif shadow_suppress > 0 or (suppressions > 0 and escalations == 0 and dispatched == 0):
+    elif shadow_suppress > 0:
+        # Only the shadow-would-suppress counter reliably signals shadow. (A quiet
+        # *enforce* run can also have suppressions>0 and no escalations yet, so we
+        # must NOT infer shadow from "suppress but no dispatch".)
         mode = "shadow"
     else:
         mode = "enforce"
@@ -256,7 +269,12 @@ async def get_tier0_metrics() -> dict[str, Any]:
             resp = await client.get(url)
             resp.raise_for_status()
             text = resp.text
-    except httpx.HTTPError as e:
+    except Exception as e:  # HTTPError, InvalidURL, connect/timeout — all "not reachable"
         main_logger.debug("Tier-0 metrics unreachable at %s: %s", url, e)
         return {"available": False, "reason": "unreachable"}
-    return reduce_metrics(parse_prometheus_text(text))
+    try:
+        return reduce_metrics(parse_prometheus_text(text))
+    except Exception:
+        # A malformed metrics payload must degrade, never 500 the route.
+        main_logger.debug("Tier-0 metrics parse failed for %s", url, exc_info=True)
+        return {"available": False, "reason": "parse_error"}

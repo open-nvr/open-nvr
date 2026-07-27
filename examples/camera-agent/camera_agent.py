@@ -2614,19 +2614,22 @@ class CameraAgentRuntime:
                     cfg.footage_index_path,
                 )
 
+        # Agent camera id → pipeline camera id (the OpenNVR camera id on the Tier-0
+        # bus subject / best-frame endpoint). Used by BOTH camera_snapshot (ring
+        # lookup) and describe_camera (best-frame fetch) so they agree on the camera.
+        _cam_map = {
+            cam.camera_id: str(cam.opennvr_camera_id)
+            for cam in cfg.cameras if cam.opennvr_camera_id is not None
+        }
+        _resolve_camera = lambda cid: _cam_map.get(cid, cid)  # noqa: E731
+
         # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
-        # frame when the detect-pipeline origin is configured. Maps the agent camera
-        # id → the pipeline camera id (the OpenNVR camera id on the Tier-0 subject).
+        # frame when the detect-pipeline origin is configured.
         best_frame_fetch = None
         if cfg.bestframe_base_url:
             from tools import make_best_frame_fetch
-            _cam_map = {
-                cam.camera_id: str(cam.opennvr_camera_id)
-                for cam in cfg.cameras if cam.opennvr_camera_id is not None
-            }
             best_frame_fetch = make_best_frame_fetch(
-                cfg.bestframe_base_url,
-                resolve_camera=lambda cid: _cam_map.get(cid, cid),
+                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
             )
 
         self.tools = CameraTools(
@@ -2636,6 +2639,7 @@ class CameraAgentRuntime:
             recognition_client=self.recognition_client,
             footage_index=self.footage_index,
             best_frame_fetch=best_frame_fetch,
+            resolve_camera=_resolve_camera,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.

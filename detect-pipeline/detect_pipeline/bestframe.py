@@ -56,11 +56,14 @@ class BestFrameStore:
 
         A crop that is the *same array* as the stored one only refreshes recency (so
         we don't re-encode an unchanged best frame); a new crop resets the cache.
+        Recency/expiry always use the store's own clock — never the caller's frame
+        ``ts`` (whose epoch may differ), so expiry can't misfire. ``ts`` is accepted
+        for API symmetry but not used for expiry.
         """
         if crop_bgr is None:
             return
         key = (camera_id, str(track_id))
-        now = self._clock() if ts is None else ts
+        now = self._clock()
         with self._lock:
             e = self._d.get(key)
             if e is not None and e["crop"] is crop_bgr:
@@ -69,18 +72,29 @@ class BestFrameStore:
                 self._d[key] = {"crop": crop_bgr, "ts": now, "jpeg": None}
             self._evict_locked()
 
-    def get_jpeg(self, camera_id: str, track_id) -> bytes | None:
-        """Best frame for one track as JPEG bytes, or None. Encodes once, caches."""
-        key = (camera_id, str(track_id))
+    def _encode_cached(self, key) -> bytes | None:
+        """Return the cached JPEG for ``key``, encoding it if needed. Encoding runs
+        OUTSIDE the lock (cv2 can be slow) so it never blocks worker ``put``s."""
         with self._lock:
             e = self._d.get(key)
             if e is None or self._expired_locked(e):
                 self._d.pop(key, None)
                 return None
-            if e["jpeg"] is None:
-                e["jpeg"] = self._encode(e["crop"], self._quality)
-            e["ts"] = self._clock()               # fetch counts as a touch
-            return e["jpeg"]
+            if e["jpeg"] is not None:
+                e["ts"] = self._clock()
+                return e["jpeg"]
+            crop = e["crop"]                      # snapshot the ref; encode unlocked
+        jpeg = self._encode(crop, self._quality)
+        with self._lock:
+            e = self._d.get(key)
+            if e is not None and e["crop"] is crop:
+                e["jpeg"] = jpeg
+                e["ts"] = self._clock()
+        return jpeg
+
+    def get_jpeg(self, camera_id: str, track_id) -> bytes | None:
+        """Best frame for one track as JPEG bytes, or None. Encodes once, caches."""
+        return self._encode_cached((camera_id, str(track_id)))
 
     def latest_jpeg(self, camera_id: str) -> bytes | None:
         """Best frame for the camera's most-recently-updated track (no track id)."""
@@ -90,12 +104,7 @@ class BestFrameStore:
             for key, e in self._d.items():
                 if key[0] == camera_id and not self._expired_locked(e) and e["ts"] > best_ts:
                     best_key, best_ts = key, e["ts"]
-            if best_key is None:
-                return None
-            e = self._d[best_key]
-            if e["jpeg"] is None:
-                e["jpeg"] = self._encode(e["crop"], self._quality)
-            return e["jpeg"]
+        return self._encode_cached(best_key) if best_key is not None else None
 
     def _expired_locked(self, e: dict) -> bool:
         return (self._clock() - e["ts"]) > self._max_age_s

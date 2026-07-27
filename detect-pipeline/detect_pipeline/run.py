@@ -216,9 +216,12 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
                  cfg.gate_mode)
     # Best-frame store: retains each track's best crop for on-demand fetch (served
-    # on the metrics port at /best_frame). Cheap — references only, encode on fetch.
-    from .bestframe import BestFrameStore
-    best_frames = BestFrameStore()
+    # on the metrics port at /best_frame). Only built when there's a metrics port to
+    # serve it on — no point doing per-frame store work nothing can ever read.
+    best_frames = None
+    if cfg.metrics_port:
+        from .bestframe import BestFrameStore
+        best_frames = BestFrameStore()
     manager = WorkerManager(
         provider, sink,
         enabled=cfg.enabled,

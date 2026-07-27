@@ -63,11 +63,11 @@ detection_adapter: yolov8
 recognition_adapter: insightface
 caption_adapter: blip
 
-# Optional: detect-pipeline (Tier-0) metrics origin. When set, the agent
-# answers count/presence from the always-on detector via the camera_snapshot
-# tool (no new inference), and describe_camera runs the VLM on Tier-0's BEST
-# frame (fetched from {bestframe_base_url}/best_frame) instead of an arbitrary
-# live grab — more accurate, cheaper. Unset = live grab (unchanged).
+# Optional: detect-pipeline (Tier-0) metrics origin. When set, describe_camera
+# runs the VLM on Tier-0's BEST frame (fetched from {bestframe_base_url}/best_frame)
+# instead of an arbitrary live grab — more accurate, cheaper. Unset = live grab.
+# (The camera_snapshot tool — count/presence with no inference — is separate: it
+# reads the Tier-0 event stream and only needs nats_inference_url below.)
 # bestframe_base_url: http://tier0:9109
 
 # LLM model + sampling. Default qwen2.5:1.5b (~1GB RAM, Apache-2.0,

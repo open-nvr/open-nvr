@@ -46,7 +46,8 @@ def _build_tools(ctx: CameraContext, *,
                  caption_response=None,
                  detection_response=None,
                  recognition_response=None,
-                 best_frame_fetch=None) -> CameraTools:
+                 best_frame_fetch=None,
+                 resolve_camera=None) -> CameraTools:
     caption = AsyncMock()
     caption.infer.return_value = caption_response or {
         "result": {"caption": "a box on a doormat"}
@@ -65,6 +66,7 @@ def _build_tools(ctx: CameraContext, *,
         detection_client=detect,
         recognition_client=recognise,
         best_frame_fetch=best_frame_fetch,
+        resolve_camera=resolve_camera,
     )
 
 
@@ -315,6 +317,40 @@ async def test_camera_snapshot_reports_when_no_tier0_data():
     tools = _build_tools(_ctx_with_camera())
     out = await tools.camera_snapshot({"camera_id": "front-porch"})
     assert "no live detection data" in out
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_resolves_agent_camera_to_pipeline_id():
+    # The Tier-0 ring is keyed by the pipeline camera id ("3"); the tool is called
+    # with the agent id ("front-porch"). Without the resolver they'd never match.
+    ctx = _ctx_with_camera()
+    _record_tier0(ctx, "3", ["person"])                 # ring keyed by pipeline id
+    tools = _build_tools(ctx, resolve_camera=lambda c: "3")
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "a person" in out
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_ignores_stale_events():
+    ctx = _ctx_with_camera()
+    ctx.record_event(EventRecord(
+        received_at=time.time() - 30, camera_id="front-porch", adapter="tier0",
+        summary="old", raw={"tracks": [{"label": "person"}]},
+    ))
+    out = await _build_tools(ctx).camera_snapshot({"camera_id": "front-porch"})
+    assert "nothing detected recently" in out
+
+
+@pytest.mark.asyncio
+async def test_describe_swallows_best_frame_fetch_errors():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource(frame=b"LIVEFRAME")
+    ctx.register_frame_source("front-porch", stub)
+    boom = AsyncMock(side_effect=RuntimeError("network down"))
+    tools = _build_tools(ctx, best_frame_fetch=boom)
+    await tools.describe_camera({"camera_id": "front-porch"})   # must not raise
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"LIVEFRAME"
+    assert stub.calls == 1
 
 
 # ── describe_camera prefers Tier-0's best frame ────────────────────

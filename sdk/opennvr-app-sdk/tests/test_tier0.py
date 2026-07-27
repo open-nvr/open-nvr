@@ -42,6 +42,13 @@ def test_snapshot_is_defensive_on_junk():
     assert s.tracks == [] and s.counts == {} and s.total == 0
     assert s.describe() == ""
     assert isinstance(snapshot_from_event(None), Tier0Snapshot)  # type: ignore[arg-type]
+    # non-dict track entries are dropped, not crashed on
+    s2 = snapshot_from_event({"tracks": ["junk", 3, {"label": "person"}]})
+    assert s2.total == 1 and s2.counts == {"person": 1}
+
+
+def test_describe_counts_skips_empty_label():
+    assert describe_counts({"": 2, "car": 1}) == "a car"     # empty label ignored
 
 
 def test_describe_counts_phrasing():

@@ -190,3 +190,37 @@ def test_get_tier0_metrics_disabled_config(monkeypatch):
     monkeypatch.setattr(mod.settings, "detect_pipeline_metrics_url", "", raising=False)
     out = asyncio.run(get_tier0_metrics())
     assert out == {"available": False, "reason": "disabled"}
+
+
+def test_nan_and_inf_values_are_dropped_not_crashing():
+    # float() accepts NaN/+Inf; they must be filtered so int() casts can't blow up.
+    text = "\n".join([
+        'tier0_frames_total{camera="c"} NaN',
+        'tier0_detector_runs_total{camera="c"} +Inf',
+        'tier0_frames_total{camera="d"} 50',
+    ])
+    r = reduce_metrics(parse_prometheus_text(text))
+    assert r["available"] is True
+    assert r["frames"]["total"] == 50           # only the finite sample survived
+
+
+def test_p95_buckets_match_le_numerically_not_by_string():
+    # pipeline could render le as "1" instead of "1.0"; p95 must still resolve.
+    text = "\n".join([
+        "tier1_dispatch_latency_seconds_bucket{adapter=\"a\",le=\"0.5\"} 0",
+        "tier1_dispatch_latency_seconds_bucket{adapter=\"a\",le=\"1\"} 10",   # "1" not "1.0"
+        "tier1_dispatch_latency_seconds_bucket{adapter=\"a\",le=\"+Inf\"} 10",
+        "tier1_dispatch_latency_seconds_sum{adapter=\"a\"} 8.0",
+        "tier1_dispatch_latency_seconds_count{adapter=\"a\"} 10",
+    ])
+    r = reduce_metrics(parse_prometheus_text(text))
+    assert r["tier1"]["latency_p95_ms"] == 1000.0   # le=1s bucket, matched numerically
+
+
+def test_quiet_enforce_not_mislabelled_as_shadow():
+    # suppressions>0, no escalations/dispatch, and NO shadow counter -> enforce.
+    text = "\n".join([
+        'tier0_frames_total{camera="c"} 100',
+        'gate_suppressions_total{camera="c",reason="stationary"} 12',
+    ])
+    assert reduce_metrics(parse_prometheus_text(text))["mode"] == "enforce"

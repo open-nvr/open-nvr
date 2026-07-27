@@ -99,9 +99,12 @@ class Tier0Snapshot:
 def snapshot_from_event(payload: dict[str, Any]) -> Tier0Snapshot:
     """Parse a Tier-0 event payload (``opennvr.tier0.v1``) into a snapshot."""
     payload = payload or {}
+    # Keep only dict tracks — the payload is whatever JSON arrived on the bus, so a
+    # junk `tracks` (a string, or a list of ints) must degrade, not raise.
+    tracks = [t for t in (payload.get("tracks") or []) if isinstance(t, dict)]
     return Tier0Snapshot(
         camera_id=str(payload.get("camera_id") or ""),
-        tracks=list(payload.get("tracks") or []),
+        tracks=tracks,
         ts=payload.get("ts"),
         seq=payload.get("seq"),
     )
@@ -114,7 +117,7 @@ def describe_counts(counts: dict[str, int], *,
     plurals = irregular_plurals or _IRREGULAR_PLURALS
     parts: list[str] = []
     for label, count in sorted(counts.items()):
-        if count <= 0:
+        if count <= 0 or not label:
             continue
         if count == 1:
             article = "an" if label[:1].lower() in "aeiou" else "a"

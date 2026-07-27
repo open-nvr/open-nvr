@@ -248,11 +248,17 @@ class CameraTools:
         recognition_client: KaicAdapterClient,
         footage_index: Any = None,
         best_frame_fetch: Any = None,
+        resolve_camera: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
         self._detect = detection_client
         self._recognise = recognition_client
+        # Map the agent's camera id → the pipeline's camera id (the id on the Tier-0
+        # bus subject / best-frame endpoint). MUST match the mapping used to build
+        # best_frame_fetch, so camera_snapshot and describe_camera agree on which
+        # camera they're reading. Identity by default.
+        self._resolve_camera = resolve_camera or (lambda cid: cid)
         # Optional async callable(camera_id) -> jpeg bytes | None. When set,
         # describe_camera runs the VLM on Tier-0's BEST frame (clean, representative)
         # instead of an arbitrary live grab — more accurate and cheaper. None (or a
@@ -475,12 +481,23 @@ class CameraTools:
         clauses = [self._snapshot_one(c) for c in cams]
         return self._join_clauses(clauses)
 
+    # Tier-0 publishes a track list every frame while objects are present; it stops
+    # (no empty events) once they leave. So an event older than this means the scene
+    # is stale — treat it as "nothing there now" rather than reporting a departed
+    # object as present.
+    _SNAPSHOT_MAX_AGE_S = 10.0
+
     def _snapshot_one(self, camera_id: str) -> str:
-        event = self._ctx.latest_inference(camera_id, adapter="tier0")
+        # Resolve to the pipeline's camera id — the Tier-0 event ring is keyed by
+        # the id on the bus subject, same id the best-frame path uses.
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
         if event is None:
             # No Tier-0 stream for this camera (not analyzed, or bus not wired) —
             # say so plainly so the LLM can fall back to a live tool if it must.
             return f"{camera_id}: no live detection data (try describe_camera)"
+        if (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return f"{camera_id}: nothing detected recently (try describe_camera for a live look)"
         summary = snapshot_from_event(event.raw or {}).describe()   # SDK: counts→phrase
         if not summary:
             return f"{camera_id}: nothing detected right now"
