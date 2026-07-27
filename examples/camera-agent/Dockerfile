@@ -17,8 +17,8 @@ FROM python:3.11-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        # Pipecat's silero extra pulls torch; the slim base needs
-        # libgomp for the matmul kernels Silero uses on CPU.
+        # Pipecat's silero extra runs Silero VAD on onnxruntime (no
+        # torch); onnxruntime needs libgomp on the slim base.
         libgomp1 \
         # ffmpeg lets the agent grab a JPEG frame from an rtsp:// camera
         # (RtspFrameSource in frame_sources.py).

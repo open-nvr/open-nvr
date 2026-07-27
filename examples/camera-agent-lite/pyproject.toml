@@ -1,0 +1,41 @@
+[project]
+name = "opennvr-example-camera-agent-lite"
+version = "1.0.0"
+description = "OpenNVR camera-agent-lite example — the camera-agent pattern on a lighter stack: llama.cpp + whisper.cpp + Piper + SmolVLM adapters instead of Ollama, one small FastAPI app instead of a streaming pipeline."
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.27,<1.0",
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.6,<3.0",
+    "PyYAML>=6.0,<7.0",
+    "numpy>=1.26",
+    "psutil>=5.9",
+    # Streaming voice (/ws): Pipecat pipeline with Silero VAD (the [silero]
+    # extra is onnxruntime-only — no torch; ~70 MB total). Pinned to the same
+    # 0.0.5x series as camera-agent: serializer.py and voice.py use
+    # FrameSerializerType + the kwargs InputAudioRawFrame constructor, both
+    # reworked in 0.0.10x. Bump in lock-step with camera-agent.
+    "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
