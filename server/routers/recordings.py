@@ -61,6 +61,27 @@ from services.stream_service import _build_stream_name
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
+# How far behind "now" the playable edge of a still-recording file sits. Only the
+# unfinished tail is withheld: MediaMTX flushes fragments continuously, so
+# footage older than this is complete and plays as ordinary VOD. One minute is a
+# deliberately generous margin over the sub-second write cadence — it costs the
+# viewer nothing noticeable and leaves no chance of serving a half-written tail.
+LIVE_EDGE_LAG_SECONDS = 60
+
+
+def _live_edge_iso(
+    file_start: datetime, now: datetime, lag_seconds: int = LIVE_EDGE_LAG_SECONDS
+) -> str:
+    """The instant from which footage is treated as LIVE (not yet playable).
+
+    ``lag_seconds`` behind ``now``, but never earlier than ``file_start`` — a
+    recording that just began is live in its entirety. Both arguments are naive
+    server-local wall clock, the same basis MediaMTX names its files on; the
+    ``Z`` suffix matches what the rest of this router emits.
+    """
+    edge = max(file_start, now - timedelta(seconds=lag_seconds))
+    return edge.isoformat() + "Z"
+
 
 def _parse_byte_range(range_header: str | None, file_size: int) -> tuple[int, int] | None:
     """Parse a single HTTP ``Range: bytes=start-end`` header.
@@ -953,7 +974,10 @@ async def get_browser_playable_recording(
     if not session or not session.file_path:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
-    index = await get_remux_index(session.file_path)
+    # Prefer the snapshot frozen when the session was created: a still-recording
+    # file grows, and re-indexing mid-playback would move every byte offset under
+    # the player. Falling back to a fresh index keeps older sessions working.
+    index = session.remux_index or await get_remux_index(session.file_path)
     if index is None:
         raise HTTPException(
             status_code=500, detail="Could not prepare this recording for playback"
@@ -1232,10 +1256,13 @@ async def get_day_segments(
         or "http://127.0.0.1:9996"
     ).rstrip("/")
 
-    # Live edge: the start instant of the newest on-disk file that is STILL
-    # BEING WRITTEN. VOD playback of a growing file is unreliable (its bytes
-    # shift under the player), so the UI renders everything from this instant
-    # on as LIVE and routes the user to Live View instead of a VOD session.
+    # Live edge: the instant after which footage is NOT yet safely playable.
+    # Only the unfinished tail of a still-being-written file qualifies — the
+    # footage already flushed to it plays fine — so the edge sits
+    # LIVE_EDGE_LAG_SECONDS behind now rather than at the file's start. Anything
+    # older is served as normal VOD; the UI paints the remainder as LIVE and
+    # sends the user to Live View for it. Clamped to the file start, so a file
+    # only seconds old is entirely live.
     live_edge_start = None
     try:
         from services.hls_playback_service import HlsPlaybackService
@@ -1247,8 +1274,8 @@ async def get_day_segments(
         if resolved is not None:
             live_path, file_start = resolved
             if now.timestamp() - live_path.stat().st_mtime < 60:
-                live_edge_start = (
-                    file_start.replace(tzinfo=None).isoformat() + "Z"
+                live_edge_start = _live_edge_iso(
+                    file_start.replace(tzinfo=None), datetime.now()
                 )
     except Exception:
         live_edge_start = None
