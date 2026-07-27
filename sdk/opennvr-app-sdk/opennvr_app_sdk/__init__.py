@@ -51,6 +51,14 @@ from .frame_sources import (
 from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import Action, AlertType, AppManifest, Param, StateView
 from .state import KeyedState, StateRecord, keyed_state
+from .tier0 import (
+    BestFrameClient,
+    Tier0Snapshot,
+    describe_counts,
+    is_tier0_subject,
+    make_best_frame_fetch,
+    snapshot_from_event,
+)
 
 __version__ = "0.1.0"
 
@@ -107,4 +115,11 @@ __all__ = [
     "dict_frame_source",
     # Contract surface (§03)
     "ContractServer",
+    # Tier-0 consumption (answer from the always-on detector; reuse its best frame)
+    "Tier0Snapshot",
+    "snapshot_from_event",
+    "describe_counts",
+    "is_tier0_subject",
+    "BestFrameClient",
+    "make_best_frame_fetch",
 ]

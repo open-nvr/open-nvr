@@ -131,6 +131,13 @@ Tier-1 VLM as visual corroboration.
   arbitrary live grab — more accurate, cheaper — falling back to a live frame when
   unavailable. All additive; unset config = unchanged behaviour.
 
+**Shared, not per-app.** Both primitives live in the **App SDK**
+(`opennvr_app_sdk.tier0`: `snapshot_from_event` for counts/presence, `BestFrameClient`
+for the best frame) so every app inherits them and there's one implementation to keep
+correct — the camera-agent consumes the SDK, it doesn't own a copy. Opt-in by design
+(unset config = unchanged). Documented for app authors in the SDK's
+`docs/tier0-consumption.md`.
+
 **Still owed:** feed the VLM a *cropped* best frame for tight single-object attribute
 questions; on-hardware validation that agents measurably shed VLM calls; extend to
 other apps/dashboards. Original scope below.

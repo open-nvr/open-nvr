@@ -30,6 +30,10 @@ from typing import Any
 from adapter_clients import KaicAdapterClient
 from context import CameraContext
 from frame_sources import FrameSourceError
+# Tier-0 consumption helpers live in the App SDK so every app shares one
+# implementation (best-frame fetch + event snapshot); re-exported here so
+# ``from tools import make_best_frame_fetch`` keeps working for the agent.
+from opennvr_app_sdk import make_best_frame_fetch, snapshot_from_event  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -477,8 +481,7 @@ class CameraTools:
             # No Tier-0 stream for this camera (not analyzed, or bus not wired) —
             # say so plainly so the LLM can fall back to a live tool if it must.
             return f"{camera_id}: no live detection data (try describe_camera)"
-        tracks = (event.raw or {}).get("tracks") or []
-        summary = self._summarize_detections(tracks)   # tracks carry 'label'
+        summary = snapshot_from_event(event.raw or {}).describe()   # SDK: counts→phrase
         if not summary:
             return f"{camera_id}: nothing detected right now"
         age = max(0, int(time.time() - event.received_at))
@@ -696,32 +699,3 @@ class CameraTools:
         if len(clauses) == 1:
             return "On " + clauses[0] + "."
         return "Across " + str(len(clauses)) + " cameras — " + "; ".join(clauses) + "."
-
-
-def make_best_frame_fetch(base_url: str, *, resolve_camera=None, http_get=None):
-    """Build an async ``fetch(camera_id) -> jpeg bytes | None`` that pulls Tier-0's
-    best frame from the detect-pipeline's ``/best_frame`` endpoint.
-
-    ``base_url`` is the detect-pipeline metrics origin (e.g. ``http://tier0:9109``).
-    ``resolve_camera`` optionally maps the agent's camera id → the pipeline's camera
-    id (the id on the Tier-0 bus subject); identity by default. ``http_get`` is
-    injectable for tests: an async callable(url) -> (status, bytes).
-    """
-    base = base_url.rstrip("/")
-
-    async def _default_get(url: str):  # pragma: no cover - real network
-        import httpx
-        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
-            resp = await client.get(url)
-            return resp.status_code, resp.content
-
-    getter = http_get or _default_get
-
-    async def fetch(camera_id: str) -> bytes | None:
-        cam = resolve_camera(camera_id) if resolve_camera else camera_id
-        if not cam:
-            return None
-        status, body = await getter(f"{base}/best_frame?camera={cam}")
-        return body if status == 200 and body else None
-
-    return fetch

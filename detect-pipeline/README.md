@@ -133,16 +133,26 @@ tracks (a 5 fps stream of empty results would be bus noise — set
   "tracks": [
     { "id": 7, "label": "person", "score": 0.88,
       "box": [x1, y1, x2, y2],  // full-frame pixels
-      "stationary": false }     // settled object (the PR B gate will suppress these)
+      "stationary": false,      // settled object (the PR B gate will suppress these)
+      "best": true }            // a best-frame crop is fetchable for this track
   ]
 }
 ```
 
 This is the **stable slice consumers code against.** It is intentionally the whole
 "shareable" surface — the existing NATS bus + this schema. Apps get Tier-0's
-benefit by subscribing here; no separate perception contract is needed. Wiring
-consumers (camera-agent, apps) to consume/gate off these events is tracked for the
-PR B era in [`FOLLOWUPS.md`](FOLLOWUPS.md).
+benefit by subscribing here; no separate perception contract is needed.
+
+**Best frame.** When a track has `"best": true`, its best-frame crop (the sharpest /
+largest / most-confident frame Tier-0 already selected) is fetchable at
+`GET :<DETECT_METRICS_PORT>/best_frame?camera=<cam>&track=<id>` (JPEG; omit `&track=`
+for the camera's most-recent best). A consumer that needs to run a vision model
+should use this instead of grabbing an arbitrary live frame — more accurate, cheaper.
+
+**For app authors**, the App SDK wraps both of these (`snapshot_from_event` for
+counts/presence, `BestFrameClient` for the best frame) so they're one shared
+implementation, not per-app glue — see the SDK's
+`docs/tier0-consumption.md`. The camera-agent is the reference consumer (FOLLOWUPS #8).
 
 ## Detector
 
