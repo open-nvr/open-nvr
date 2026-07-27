@@ -149,3 +149,54 @@ def test_camera_worker_publishes_results(monkeypatch):
     assert len(sink.events) == 4
     assert all(cid == "cam-front" for cid, _ in sink.events)
     assert sink.events[-1][1] >= 1                   # a track was published
+
+
+class _RestartingFramesSource:
+    """Emits seq 0,1,2 then 0,1 — the second 0 is an ffmpeg-restart signal."""
+
+    def __init__(self):
+        self.width, self.height = W, H
+
+    def stream(self):
+        for i in (0, 1, 2, 0, 1):
+            yield Frame(bytes(frame_size_bytes(W, H)), W, H, i, float(i))
+
+
+def test_camera_worker_records_restart_and_stores_best_frame(monkeypatch):
+    import detect_pipeline.motion as motion_mod
+    from detect_pipeline.bestframe import BestFrameStore
+    from detect_pipeline.metrics import metrics
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+
+    metrics.reset()
+    store = BestFrameStore()
+    sink = _FakeSink()
+    worker = CameraWorker(
+        _spec("cam-front"), sink,
+        detector=_MotionAllDetector(), frame_source=_RestartingFramesSource(),
+        best_frames=store,
+    )
+    worker.start()
+    for _ in range(100):                             # wait for the 5 frames to drain
+        if len(sink.events) >= 5:
+            break
+        time.sleep(0.02)
+    worker.stop()
+
+    # restart detected exactly once (the seq reset back to 0)
+    assert metrics.value("tier0_worker_restarts_total", {"camera": "cam-front"}) == 1
+    # worker liveness + target fps recorded; down after stop
+    assert metrics.value("tier0_target_fps", {"camera": "cam-front"}) == 5
+    assert metrics.value("tier0_worker_up", {"camera": "cam-front"}) == 0.0
+    # a best-frame crop was retained and is fetchable as JPEG (encode path works)
+    assert len(store) >= 1
+    assert store.latest_jpeg("cam-front") is not None
+    metrics.reset()
