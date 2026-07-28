@@ -50,7 +50,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   llamacpp-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/llamacpp-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/llamacpp-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
     pull_policy: missing
     build:
       context: ../ai-adapter
@@ -77,7 +77,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   whispercpp-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/whispercpp-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/whispercpp-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
     pull_policy: missing
     build:
       context: ../ai-adapter
@@ -102,7 +102,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   pipertts-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/pipertts-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/pipertts-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
     pull_policy: missing
     build:
       context: ../ai-adapter
@@ -128,7 +128,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   smolvlm-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/smolvlm-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/smolvlm-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
     pull_policy: missing
     build:
       context: ../ai-adapter
@@ -186,10 +186,16 @@ services:
   # ──────────────────────────────────────────────────────────────
   camera-agent-lite:
     profiles: [camera-agent-lite]
+    # Pull-first from GHCR; falls back to building from this repo when the
+    # pull fails (air-gapped / unpublished tag).
+    # AGENT_TAG default is the branch tag while the camera-agent-lite branch
+    # is unmerged — flip both TAG defaults in this file to ``latest`` once
+    # it lands on main (main pushes stamp :main + :latest automatically).
+    image: ghcr.io/open-nvr/camera-agent-lite:${AGENT_TAG:-camera-agent-lite}
+    pull_policy: missing
     build:
       context: .
       dockerfile: examples/camera-agent-lite/Dockerfile
-    image: opennvr/camera-agent-lite:local-build
     container_name: opennvr_camera_agent_lite
     restart: unless-stopped
     depends_on:

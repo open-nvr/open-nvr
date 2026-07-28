@@ -103,3 +103,63 @@ async def test_roster_is_cached_within_ttl():
     await ctx.list_cameras()
     assert route.call_count == 1
     await ctx.aclose()
+
+
+# ---- name-aware resolution (small LLMs pass names, not ids) ----------------
+
+async def name_ctx(frame_file):
+    ctx = CameraContext(cameras=[
+        {"camera_id": "camera_1", "name": "sparsh", "frame_url": frame_file.as_uri()},
+        {"camera_id": "camera_2", "name": "cpplus", "frame_url": frame_file.as_uri()},
+    ])
+    await ctx.refresh()
+    return ctx
+
+
+async def test_resolve_by_name(frame_file):
+    ctx = await name_ctx(frame_file)
+    assert ctx.resolve_id("cpplus") == "camera_2"
+    assert ctx.resolve_id("CPPlus") == "camera_2"
+    assert ctx.resolve_id("sparsh") == "camera_1"
+    await ctx.aclose()
+
+
+async def test_resolve_by_id_variants(frame_file):
+    ctx = await name_ctx(frame_file)
+    assert ctx.resolve_id("camera_2") == "camera_2"
+    assert ctx.resolve_id("cam2") == "camera_2"
+    assert ctx.resolve_id("cam 2") == "camera_2"
+    assert ctx.resolve_id("2") == "camera_2"
+    assert ctx.resolve_id("nonexistent") is None
+    await ctx.aclose()
+
+
+async def test_get_frame_accepts_name(frame_file):
+    ctx = await name_ctx(frame_file)
+    frame = await ctx.get_frame("cpplus")
+    assert frame.camera_id == "camera_2"
+    await ctx.aclose()
+
+
+async def test_unknown_camera_error_lists_available(frame_file):
+    ctx = await name_ctx(frame_file)
+    with pytest.raises(CameraContextError) as exc:
+        await ctx.get_frame("garagecam")
+    msg = str(exc.value)
+    assert "camera_1 (sparsh)" in msg and "camera_2 (cpplus)" in msg
+    await ctx.aclose()
+
+
+async def test_known_names_map(frame_file):
+    ctx = await name_ctx(frame_file)
+    assert ctx.known_names() == {"sparsh": "camera_1", "cpplus": "camera_2"}
+    await ctx.aclose()
+
+
+async def test_resolve_name_ignores_spacing_and_case(frame_file):
+    # Whisper transcribes 'cpplus' as 'CP Plus'; LLMs pass it through.
+    ctx = await name_ctx(frame_file)
+    assert ctx.resolve_id("CP Plus") == "camera_2"
+    assert ctx.resolve_id("cp-plus") == "camera_2"
+    assert ctx.resolve_id("Camera 2") == "camera_2"
+    await ctx.aclose()

@@ -75,6 +75,11 @@ def _friendly_id(nvr_id: str | int) -> str:
     return f"camera_{nvr_id}"
 
 
+def _squash(s: str) -> str:
+    """Lower-case and drop every non-alphanumeric ('CP Plus' -> 'cpplus')."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
 class CameraContext:
     """Owns the camera roster and produces frames for the vision tool."""
 
@@ -192,15 +197,62 @@ class CameraContext:
         await self.refresh()
         return list(self._cams.values())
 
+    def resolve_id(self, ref: Optional[str]) -> Optional[str]:
+        """Resolve any reasonable camera reference to a canonical id.
+
+        Small LLMs routinely pass the camera NAME ('cpplus') or a variant id
+        ('cam2', '2') instead of the canonical 'camera_2', so be liberal:
+        exact id > 'camN'/'camera N'/bare number > exact name >
+        unique substring of a name (all case-insensitive)."""
+        if not ref:
+            return None
+        ref_s = str(ref).strip()
+        if ref_s in self._cams:
+            return ref_s
+        low = ref_s.lower()
+        if re.fullmatch(r"(?:cam(?:era)?[\s_-]*)?(\d+)", low):
+            cid = _friendly_id(int(_NUM_RE.search(low).group(1)))
+            if cid in self._cams:
+                return cid
+        # STT and LLMs mangle separators ('CP Plus', 'cp-plus', 'CPPlus' for a
+        # camera named 'cpplus'), so compare with spaces/punctuation stripped.
+        nref = _squash(low)
+        exact = [
+            c.camera_id for c in self._cams.values()
+            if _squash(c.name) == nref or _squash(c.camera_id) == nref
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        subs = [
+            c.camera_id for c in self._cams.values()
+            if len(nref) >= 3 and (nref in _squash(c.name) or _squash(c.name) in nref)
+        ]
+        if len(subs) == 1:
+            return subs[0]
+        return None
+
+    def _unknown(self, ref: str) -> CameraContextError:
+        # List what IS available so a tool-calling LLM can self-correct.
+        known = ", ".join(
+            f"{c.camera_id} ({c.name})" for c in self._cams.values()
+        ) or "none"
+        return CameraContextError(
+            f"unknown camera '{ref}'; available cameras: {known}", transient=False
+        )
+
     async def get_status(self, camera_id: str) -> CameraInfo:
         await self.refresh()
-        cam = self._cams.get(camera_id)
-        if cam is None:
-            raise CameraContextError(f"unknown camera '{camera_id}'", transient=False)
-        return cam
+        cid = self.resolve_id(camera_id)
+        if cid is None:
+            raise self._unknown(camera_id)
+        return self._cams[cid]
 
     def known_ids(self) -> list[str]:
         return list(self._cams)
+
+    def known_names(self) -> dict[str, str]:
+        """Lower-cased camera name -> canonical id (for the router)."""
+        return {c.name.lower(): c.camera_id for c in self._cams.values() if c.name}
 
     def default_camera(self) -> Optional[str]:
         online = [c.camera_id for c in self._cams.values() if c.state == CameraState.ONLINE]
@@ -209,11 +261,13 @@ class CameraContext:
     # ---- frames ---------------------------------------------------------- #
     async def get_frame(self, camera_id: str) -> Frame:
         await self.refresh()
+        resolved = self.resolve_id(camera_id)
+        if resolved is None:
+            raise self._unknown(camera_id)
+        camera_id = resolved
         cached = self._frame_cache.get(camera_id)
         if cached and (time.monotonic() - cached.timestamp) < self._frame_ttl:
             return cached
-        if camera_id not in self._cams:
-            raise CameraContextError(f"unknown camera '{camera_id}'", transient=False)
         source = self._sources.get(camera_id)
         if source is None:
             raise CameraContextError(f"camera '{camera_id}' has no frame source")
@@ -239,6 +293,8 @@ class CameraContext:
         """Sample the live view ``count`` times ~``interval_ms`` apart —
         best-effort coverage for temporal questions (there is no
         historical-snapshot API)."""
+        await self.refresh()
+        camera_id = self.resolve_id(camera_id) or camera_id
         frames: list[Frame] = []
         for i in range(max(1, count)):
             self._frame_cache.pop(camera_id, None)  # force a fresh fetch each sample

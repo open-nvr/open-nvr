@@ -82,7 +82,8 @@ def obj(properties: dict, required: Optional[list[str]] = None) -> dict:
     }
 
 
-CAMERA_ID = {"type": "string", "description": "Camera id, e.g. 'camera_2'."}
+CAMERA_ID = {"type": "string",
+             "description": "Camera id or name, e.g. 'camera_2' or 'porch'."}
 
 # The fixed tool catalogue. The agent is strictly conversational: it can look,
 # list, and describe — recording is always on 24/7 in OpenNVR and there are no
@@ -286,7 +287,11 @@ def register_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
 
     async def _resolve(camera_id: Optional[str]) -> str:
         if camera_id:
-            return camera_id
+            # Normalise names / id variants ('cpplus', 'cam2') to the
+            # canonical id; pass through unresolved so the frame path can
+            # raise the informative unknown-camera error.
+            await cam_ctx.refresh()
+            return cam_ctx.resolve_id(camera_id) or camera_id
         if ctx.default_camera_fn:
             d = ctx.default_camera_fn()
             if d:

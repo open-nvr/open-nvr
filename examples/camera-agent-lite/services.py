@@ -18,6 +18,7 @@ the /voice endpoint use the same instance). Behaviour:
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from adapter_clients import LlmClient, VlmClient
@@ -42,8 +43,44 @@ SYSTEM_PROMPT = (
     "invent camera observations and never claim an action succeeded unless the tool "
     "result says ok. If a tool reports an error, tell the user briefly. State "
     "uncertainty plainly. When only one camera exists and the user says 'the "
-    "camera', use it."
+    "camera', use it. You cannot act AFTER replying, so never say 'please wait', "
+    "'one moment', or promise to check something later -- call the needed tool NOW "
+    "and answer in the same turn. Never mention tool names, function calls, or "
+    "camera_id values to the user -- speak plain results only."
 )
+
+# A small model sometimes SAYS it will check ("please wait while I get that")
+# without emitting a tool call — which ends the turn with nothing done. When a
+# tool-less reply sounds like that, we nudge once and give it another round.
+_UNFINISHED_RE = re.compile(
+    r"\b(please wait|one moment|hold on|just a (moment|second)|"
+    r"let me (check|look|get|see)|i(?:'|’)?ll (check|look|get)|"
+    r"while i (get|check|look)|checking now)\b",
+    re.IGNORECASE,
+)
+NUDGE_MESSAGE = (
+    "Do not describe what you are going to do. Use your tools yourself right "
+    "now, then reply with only the final spoken answer for the user."
+)
+
+# …and sometimes it NARRATES the tool call to the user instead of making it
+# ("Call look_at_camera with camera_id 'cp2s' to see what is visible").
+# Tool names and argument names must never surface in a spoken answer.
+META_NUDGE_MESSAGE = (
+    "Never tell the user about tools, functions, or camera_id. Use the tool "
+    "yourself and reply with only the plain final answer."
+)
+
+
+def sounds_unfinished(text: str) -> bool:
+    return bool(_UNFINISHED_RE.search(text or ""))
+
+
+def mentions_tools(text: str, tool_names: list[str]) -> bool:
+    low = (text or "").lower()
+    if "camera_id" in low or "tool" in low or "function" in low:
+        return True
+    return any(name.lower() in low for name in tool_names)
 
 
 class AgentBrain:
@@ -75,9 +112,19 @@ class AgentBrain:
         self.router = IntentRouter(
             known_ids_fn=self.context.known_ids,
             default_camera_fn=self.context.default_camera,
+            known_names_fn=self.context.known_names,
             min_confidence=cfg.routing_min_confidence,
         )
         self.llm_up = False
+        # Short rolling chat history so follow-ups ("but you just said two
+        # cameras…") make sense. Kept small on purpose: every entry is
+        # re-prefilled by the CPU llama-server on the next turn.
+        self._history: list[dict] = []
+
+    def _remember(self, question: str, answer: str) -> None:
+        self._history.append({"role": "user", "content": question[:400]})
+        self._history.append({"role": "assistant", "content": (answer or "")[:400]})
+        del self._history[:-8]   # last 4 exchanges
 
     # ---- lifecycle ------------------------------------------------------- #
     async def setup(self) -> None:
@@ -122,8 +169,23 @@ class AgentBrain:
         logger.info("A: %s  (%.1fs)", answer, time.monotonic() - t0)
         return answer
 
+    def _camera_hint(self) -> str:
+        names = list(self.context.known_names())
+        return f" I have {', '.join(names)}." if names else ""
+
     async def _answer(self, text: str) -> str:
         decision = await self.router.route(text)
+        # A confident clarification ("which camera should I look at?") is a
+        # better answer than whatever a 3B model does with an ambiguous
+        # camera reference — answer it directly, with the camera names.
+        if (decision.route in ("clarification", "reject")
+                and decision.clarification
+                and decision.confidence >= 0.7):
+            answer = decision.clarification
+            if "camera" in answer.lower():
+                answer = answer + self._camera_hint()
+            self._remember(text, answer)
+            return answer
         if decision.route == "vision" and decision.camera_id:
             logger.info("route=vision camera=%s (fast-path -> look_at_camera)",
                         decision.camera_id)
@@ -133,26 +195,56 @@ class AgentBrain:
                 "temporal": decision.requires_multiple_frames,
             })
             data = result.to_model_json()
-            return data.get("answer") or data.get("error") or "I couldn't analyse that view."
+            answer = data.get("answer") or data.get("error") or "I couldn't analyse that view."
+            self._remember(text, answer)
+            return answer
         if not self.llm_up:
             # One retry per turn: the adapter may have come up since startup.
             self.llm_up = await self.llm.health()
         if self.llm_up:
-            return await self._ask_llm(text)
-        return await self._ask_deterministic(decision)
+            answer = await self._ask_llm(text)
+        else:
+            answer = await self._ask_deterministic(decision)
+        self._remember(text, answer)
+        return answer
 
     async def _ask_llm(self, text: str) -> str:
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                    *self._history,
                     {"role": "user", "content": text}]
         tools = self.registry.openai_tools()
-        for _ in range(4):  # bounded tool-calling loop
+        nudged = False
+        meta_nudged = False
+        for _ in range(6):  # bounded tool-calling loop (incl. nudge rounds)
             resp = await self.llm.chat(messages, tools=tools,
                                        temperature=self.cfg.llm_temperature,
                                        max_tokens=self.cfg.llm_max_tokens)
             msg = resp["choices"][0]["message"]
             calls = msg.get("tool_calls")
             if not calls:
-                return (msg.get("content") or "").strip() or "(no answer)"
+                content = (msg.get("content") or "").strip()
+                # "Please wait while I check…" with no tool call = a promise
+                # the model can't keep. Nudge once and let it actually do it.
+                if content and not nudged and sounds_unfinished(content):
+                    logger.info("nudging: reply promised action without a tool call (%r)",
+                                content[:80])
+                    nudged = True
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": NUDGE_MESSAGE})
+                    continue
+                # "Call look_at_camera with camera_id 'x'…" — narrating the
+                # tool instead of using it. Retry once; if it persists, give
+                # a useful clarification instead of leaking tool-speak.
+                if content and mentions_tools(content, self.registry.names()):
+                    if not meta_nudged:
+                        logger.info("nudging: reply narrated tools instead of acting (%r)",
+                                    content[:80])
+                        meta_nudged = True
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": META_NUDGE_MESSAGE})
+                        continue
+                    return ("Which camera should I look at?" + self._camera_hint())
+                return content or "(no answer)"
             messages.append(msg)
             for call in calls:
                 fn = call["function"]

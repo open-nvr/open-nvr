@@ -108,3 +108,55 @@ async def test_general_chat_routes_to_text():
 async def test_empty_input_rejected():
     d = await make_router().route("   ")
     assert d.route == "reject"
+
+
+# ---- camera-name references ------------------------------------------------
+
+NAMES = {"sparsh": "camera_1", "cpplus": "camera_2", "front door": "camera_3"}
+
+
+def make_named_router(default=None):
+    return IntentRouter(
+        known_ids_fn=lambda: ["camera_1", "camera_2", "camera_3"],
+        default_camera_fn=lambda: default,
+        known_names_fn=lambda: NAMES,
+    )
+
+
+async def test_vision_by_camera_name():
+    d = await make_named_router().route("what do you see on cpplus?")
+    assert d.route == "vision"
+    assert d.camera_id == "camera_2"
+
+
+async def test_status_by_camera_name():
+    d = await make_named_router().route("is cpplus online?")
+    assert d.route == "tool"
+    assert d.tool_call.name == "get_camera_status"
+    assert d.tool_call.args == {"camera_id": "camera_2"}
+
+
+async def test_longest_name_wins():
+    d = await make_named_router().route("is anyone at the front door?")
+    assert d.route == "vision"
+    assert d.camera_id == "camera_3"
+
+
+async def test_name_matching_is_word_bounded():
+    from routing import match_camera_name
+    # 'cpplus' must not match inside an unrelated word
+    assert match_camera_name("acpplusb is not a camera", {"cpplus": "camera_2"}) is None
+    assert match_camera_name("check CPPLUS now", {"cpplus": "camera_2"}) == "camera_2"
+
+
+async def test_vision_by_stt_split_name():
+    # STT hears 'CP Plus' for the camera named 'cpplus'.
+    d = await make_named_router().route("What do you see on camera CP Plus?")
+    assert d.route == "vision"
+    assert d.camera_id == "camera_2"
+
+
+def test_ngram_matching_still_word_bounded():
+    from routing import match_camera_name
+    assert match_camera_name("acpplusb is odd", {"cpplus": "camera_2"}) is None
+    assert match_camera_name("show cp plus now", {"cpplus": "camera_2"}) == "camera_2"

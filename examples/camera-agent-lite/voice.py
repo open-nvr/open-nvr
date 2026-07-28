@@ -260,7 +260,19 @@ class LiteLLM(LLMService):
                 return
 
             # 2) LLM tool-calling loop
-            for iteration in range(self._max_tool_iterations):
+            from services import (
+                META_NUDGE_MESSAGE,
+                NUDGE_MESSAGE,
+                mentions_tools,
+                sounds_unfinished,
+            )
+
+            tool_names = [
+                (t.get("function") or {}).get("name", "") for t in self._tools
+            ]
+            nudged = False
+            meta_nudged = False
+            for iteration in range(self._max_tool_iterations + 2):
                 response = await self._client.chat(
                     messages=messages,
                     tools=self._tools,
@@ -279,12 +291,34 @@ class LiteLLM(LLMService):
                 logger.info("voice LLM iter %d: content=%r tool_calls=%d",
                             iteration, content[:120], len(tool_calls))
 
+                if not tool_calls:
+                    # "Please wait while I check…" — speak it (natural for
+                    # voice), then nudge once so it actually checks.
+                    if content and not nudged and sounds_unfinished(content):
+                        logger.info("voice nudging: promised action without a tool call")
+                        nudged = True
+                        await self.push_frame(LLMTextFrame(content))
+                        messages.append({"role": "user", "content": NUDGE_MESSAGE})
+                        continue
+                    # "Call look_at_camera with camera_id…" — never SPEAK
+                    # tool-speak; retry silently, then degrade gracefully.
+                    if content and mentions_tools(content, tool_names):
+                        if not meta_nudged:
+                            logger.info("voice nudging: narrated tools instead of acting")
+                            meta_nudged = True
+                            messages.append({"role": "user", "content": META_NUDGE_MESSAGE})
+                            continue
+                        await self.push_frame(LLMTextFrame(
+                            "Which camera should I look at?"))
+                        return
+                    if content:
+                        await self.push_frame(LLMTextFrame(content))
+                    return
+
                 # Speak any partial reply the model emitted alongside tool
                 # calls ("Let me check…") so the user knows it's alive.
-                if content:
+                if content and not mentions_tools(content, tool_names):
                     await self.push_frame(LLMTextFrame(content))
-                if not tool_calls:
-                    return
 
                 for call in tool_calls:
                     name, result_text = await self._invoke_tool(call)

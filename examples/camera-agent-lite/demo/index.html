@@ -89,13 +89,14 @@ f.addEventListener('submit',e=>{e.preventDefault();const v=q.value.trim();if(v)a
 document.addEventListener('click',e=>{if(e.target.classList.contains('ex'))ask(e.target.textContent);});
 
 // ---- voice ----------------------------------------------------------------
-// PRIMARY: live streaming over /ws — the server runs a Pipecat pipeline
-// (Silero VAD turn detection, whisper.cpp STT, tool-calling LLM, sentence-
-// streamed Piper TTS). Mic PCM (16k int16) streams up; reply PCM (22050)
-// streams back and plays as it arrives. Raw-PCM protocol = audio only, so
-// streamed turns don't render transcripts (type to see text).
-// FALLBACK: if the WebSocket can't be established, the old record-one-
-// utterance -> POST /voice path (which does show transcripts) takes over.
+// DEFAULT: record-one-utterance -> POST /voice. The browser detects your
+// silence, posts the clip, and shows the transcript + spoken reply. Proven
+// and reliable (same flow camera-agent's demo uses for the same reason).
+// OPT-IN (?live=1): streaming over /ws — a server-side Pipecat pipeline
+// (Silero VAD, sentence-streamed TTS). Experimental: audio-only turns (the
+// raw-PCM protocol carries no transcripts) and turn-end detection is still
+// being tuned. Falls back to the default flow if the socket fails.
+const LIVE_MODE = new URLSearchParams(location.search).get('live') === '1';
 let live=false, ws=null, lctx=null, lsrc=null, lproc=null, lzero=null, lstream=null, playT=0;
 const SPEECH_RMS=0.02, START_FRAMES=2, SILENCE_HANG=1.5, MIN_AFTER_SPEECH=1.0, MAX_REC=15.0;
 let rec=false, actx, src, proc, zero, stream, chunks=[], preroll=[],
@@ -103,7 +104,8 @@ let rec=false, actx, src, proc, zero, stream, chunks=[], preroll=[],
 mic.addEventListener('click',()=>{
   if(live){ stopLive(); return; }
   if(rec){ stopVoice(true); return; }
-  startLive();                       // falls back to startVoice() on ws failure
+  if(LIVE_MODE) startLive();         // falls back to startVoice() on ws failure
+  else startVoice();
 });
 function setMic(s){ mic.className='';
   if(s==='live'){mic.classList.add('listening');vstat.textContent='live — speak anytime (tap to stop)';}

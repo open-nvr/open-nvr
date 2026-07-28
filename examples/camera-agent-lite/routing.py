@@ -123,6 +123,39 @@ class CameraReference:
     bare: bool                    # user said 'the camera' with no number
 
 
+def match_camera_name(text: str, names: dict[str, str]) -> Optional[str]:
+    """Find a camera by NAME in free text ('what do you see on cpplus?').
+    ``names`` maps lower-cased name -> canonical id. Longest name wins so
+    'front door' beats 'door'. Word-boundary matched, case-insensitive.
+
+    STT splits names unpredictably ('CP Plus' for a camera named 'cpplus'),
+    so a second pass compares punctuation-stripped word n-grams against the
+    punctuation-stripped name — whole tokens only, so a name never matches
+    inside an unrelated word."""
+    t = (text or "").lower()
+    best: Optional[str] = None
+    best_len = 0
+    for name, cid in names.items():
+        name = name.strip().lower()
+        if len(name) < 3 or len(name) <= best_len:
+            continue
+        if re.search(r"(?<![a-z0-9])" + re.escape(name) + r"(?![a-z0-9])", t):
+            best, best_len = cid, len(name)
+    if best:
+        return best
+    # n-gram pass: 'camera cp plus' -> tokens [..,'cp','plus'] -> 'cpplus'
+    tokens = re.findall(r"[a-z0-9]+", t)
+    for name, cid in sorted(names.items(), key=lambda kv: -len(kv[0])):
+        squashed = re.sub(r"[^a-z0-9]", "", name.strip().lower())
+        if len(squashed) < 3:
+            continue
+        for n in (1, 2, 3):
+            for i in range(len(tokens) - n + 1):
+                if "".join(tokens[i:i + n]) == squashed:
+                    return cid
+    return None
+
+
 def parse_camera_reference(
     text: str, known_ids: Optional[list[str]] = None
 ) -> CameraReference:
@@ -158,13 +191,14 @@ def build_tool_call(
     text: str,
     known_ids: Optional[list[str]] = None,
     default_camera: Optional[str] = None,
+    named_camera: Optional[str] = None,
 ) -> tuple[Optional[ToolCall], Optional[str]]:
     """Return (ToolCall, None) or (None, clarification_reason)."""
     args: dict = {}
 
     if tool_name in _NEEDS_CAMERA:
         ref = parse_camera_reference(text, known_ids)
-        cam = ref.camera_id or (default_camera if ref.bare else None)
+        cam = ref.camera_id or named_camera or (default_camera if ref.bare else None)
         if cam is None:
             if ref.number is not None:
                 return None, f"camera_{ref.number} is not available"
@@ -198,11 +232,13 @@ class IntentRouter:
         known_ids_fn: Callable[[], list[str]],
         default_camera_fn: Callable[[], Optional[str]],
         *,
+        known_names_fn: Callable[[], dict[str, str]] = lambda: {},
         min_confidence: float = 0.6,
         llm_router: Optional[LlmRouterFn] = None,
     ) -> None:
         self._known_ids_fn = known_ids_fn
         self._default_camera_fn = default_camera_fn
+        self._known_names_fn = known_names_fn
         self._min_confidence = min_confidence
         self._llm_router = llm_router
 
@@ -226,6 +262,7 @@ class IntentRouter:
     def _stage1(self, text: str) -> RouteDecision:
         known = self._known_ids_fn()
         default_cam = self._default_camera_fn()
+        name_cam = match_camera_name(text, self._known_names_fn())
 
         # 1) system tools (time/date/status) - unambiguous
         sys_tool = match_system(text)
@@ -235,8 +272,15 @@ class IntentRouter:
 
         # 2) explicit application commands
         cmd_tool = match_command(text)
+        # "is cpplus online?" — a status question about a NAMED camera has no
+        # literal "camera" word for the patterns above to catch.
+        if not cmd_tool and name_cam and re.search(
+            r"\b(online|offline|up|down|working|status)\b", (text or "").lower()
+        ):
+            cmd_tool = "get_camera_status"
         if cmd_tool:
-            call, clar = build_tool_call(cmd_tool, text, known, default_cam)
+            call, clar = build_tool_call(cmd_tool, text, known, default_cam,
+                                         named_camera=name_cam)
             if call is None:
                 return RouteDecision("clarification", text, confidence=0.9,
                                      clarification=clar)
@@ -245,10 +289,14 @@ class IntentRouter:
 
         # 3) vision -- requires an actual visual cue (vscore>0), not just a
         #    camera mention, so "is camera one online" doesn't hit the VLM.
+        #    A camera NAME in the text ("what do you see on cpplus") counts
+        #    like a "camera N" reference.
         vscore = vision_score(text)
         ref = parse_camera_reference(text, known)
-        cam = ref.camera_id or (default_cam if (ref.bare or vscore >= 0.66) else None)
-        if vscore > 0 and (vscore >= 0.66 or ref.number is not None or ref.bare):
+        cam = (ref.camera_id or name_cam
+               or (default_cam if (ref.bare or vscore >= 0.66) else None))
+        if vscore > 0 and (vscore >= 0.66 or ref.number is not None or ref.bare
+                           or name_cam):
             if cam is None and ref.number is not None:
                 return RouteDecision("clarification", text, confidence=0.85,
                                      clarification=f"camera_{ref.number} is not available")

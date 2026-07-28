@@ -99,17 +99,17 @@ tools** — ask it to stop recording and it will tell you it can't.
 
 ## Honesty up front
 
-* **No barge-in yet.** The streaming voice path (`/ws`, Pipecat + Silero
-  VAD) always finishes its answer before listening again —
-  `allow_interruptions` is off because the raw-PCM demo client can't send
-  proper cancel frames, so echo/noise would cancel in-flight replies
-  (camera-agent ships the same setting for the same reason). The demo also
-  gates the mic while the reply plays.
-* **Streamed turns are audio-only.** The raw-PCM wire protocol carries no
-  text frames, so live-voice turns don't render transcripts in the chat log
-  (type to see text, or use the HTTP `/voice` fallback which does return
-  the transcript). Same limitation as camera-agent's `/ws`; a production UI
-  would use `@pipecat-ai/client-js` + the protobuf serializer.
+* **The demo mic is turn-based by default.** Tap, speak, it posts the
+  utterance to `/voice` and shows the transcript + spoken reply — the same
+  reliable flow camera-agent's demo uses. The Pipecat streaming pipeline at
+  `/ws` (Silero VAD, sentence-streamed TTS) exists and is reachable with
+  `?live=1` on the demo URL, but it's experimental: turns are audio-only
+  (the raw-PCM protocol carries no transcripts) and server-side turn-end
+  detection is still being tuned. A production streaming UI would use
+  `@pipecat-ai/client-js` + the protobuf serializer.
+* **No barge-in.** Both paths finish their answer before listening again
+  (`allow_interruptions` off on `/ws` — the raw-PCM client can't send
+  proper cancel frames; camera-agent ships the same setting).
 * **Cameras must be enrolled in OpenNVR.** There is no webcam / bring-your-own
   camera path here (the full camera-agent has one). For camera-less tests, a
   static `cameras:` list with `file://` or `http(s)://` frame URLs works —
