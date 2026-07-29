@@ -1,0 +1,69 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Sample config for the camera-agent-lite example app.
+# Copy to config.yml, edit, then start the server:
+#
+#   python camera_agent.py --config config.yml
+#
+# Then visit http://localhost:9101/demo in your browser.
+#
+# NOTE: the normal way to run this example is the quickstart —
+#   examples/camera-agent-lite/quickstart.sh
+# which generates its config from config.docker.yml automatically. This file
+# is for running the agent process directly on the host against adapters you
+# started yourself (development / debugging).
+
+# ── AI adapters ─────────────────────────────────────────────────────
+# The four adapter containers this agent consumes (built from the ai-adapter
+# repo): llamacpp (Qwen2.5-3B text + tools), whispercpp (STT), pipertts (TTS),
+# smolvlm (vision). No Ollama anywhere — that's the "lite" part.
+#
+# adapter_token must match the OPENNVR_ADAPTER_TOKEN the adapters were started
+# with. In the compose overlay both sides get the stack's INTERNAL_API_KEY.
+# Leave empty only when the adapters run in dev mode (auth disabled).
+adapter_token: REPLACE_WITH_INTERNAL_API_KEY
+llm_url: http://127.0.0.1:9014
+stt_url: http://127.0.0.1:9013
+tts_url: http://127.0.0.1:9012
+vlm_url: http://127.0.0.1:9016
+
+# ── Cameras ─────────────────────────────────────────────────────────
+# Auto-discover from a running OpenNVR instance. The agent calls
+# GET <opennvr_cameras_url> (auth: X-Internal-Api-Key) and builds its roster
+# from the response — per-camera MediaMTX tap URLs with a signed token
+# embedded. No user login, no password, no refresh token, and you never
+# duplicate RTSP credentials here: OpenNVR owns the camera connection.
+#
+# Use the same INTERNAL_API_KEY you configured in OpenNVR's .env.
+opennvr_cameras_url: http://127.0.0.1:8000/api/v1/internal/camera-agent/cameras
+opennvr_api_key: REPLACE_WITH_INTERNAL_API_KEY
+
+# OR: a static camera list (used when the list is non-empty; handy for tests
+# and demos without OpenNVR). frame_url schemes: file:// http(s):// rtsp://
+# cameras:
+#   - camera_id: camera_1
+#     name: Front door
+#     role: watches the front door and porch
+#     frame_url: rtsp://user:pass@192.168.1.50:554/stream1
+
+# ── Behaviour knobs ─────────────────────────────────────────────────
+# How long to reuse a fetched frame across tool calls in a single turn.
+frame_cache_ttl_seconds: 2.0
+# Temporal questions ("did someone walk past?") sample the live view N times.
+multi_frame_count: 3
+multi_frame_interval_ms: 1000
+
+# LLM sampling — short spoken answers.
+llm_temperature: 0.3
+llm_max_tokens: 200
+stt_language: en
+
+# Below this routing confidence the agent falls back to the LLM for intent.
+routing_min_confidence: 0.6
+
+# ── Server ──────────────────────────────────────────────────────────
+agent_name: Camera Agent Lite
+listen_host: 127.0.0.1
+listen_port: 9101
+log_level: INFO
