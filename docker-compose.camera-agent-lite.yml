@@ -33,14 +33,18 @@
 #
 # Open http://localhost:9101/demo.
 #
-# ── A note on packaging maturity ───────────────────────────────
+# ── Packaging ──────────────────────────────────────────────────
 #
-# The four adapter images are published to GHCR by ai-adapter's
-# publish-images workflow (pull-first, ``pull_policy: missing``). Until a
-# publish has run — or on an air-gapped box — Compose falls back to the
-# ``build:`` stanzas, which need the ai-adapter repo checked out next to
-# open-nvr (../ai-adapter). The agent service itself ships build-from-source,
-# matching camera-agent's v0.1 posture.
+# PULL-ONLY: every image here is published to GHCR (the four adapters by
+# ai-adapter's publish-images workflow, the agent by this repo's). There
+# are deliberately NO ``build:`` stanzas — when both build and image are
+# present, Compose prefers building, which breaks on machines without an
+# ai-adapter sibling checkout. Developers iterating locally build + tag
+# explicitly, e.g.:
+#
+#   docker build -f examples/camera-agent-lite/Dockerfile \
+#     -t ghcr.io/open-nvr/camera-agent-lite:latest .
+#   (adapters: build from the ai-adapter repo root with their Dockerfiles)
 # ==========================================
 
 services:
@@ -50,11 +54,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   llamacpp-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/llamacpp-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
-    pull_policy: missing
-    build:
-      context: ../ai-adapter
-      dockerfile: adapters/llamacpp/Dockerfile
+    image: ghcr.io/open-nvr/llamacpp-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_llamacpp_adapter
     restart: unless-stopped
     environment:
@@ -77,11 +77,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   whispercpp-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/whispercpp-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
-    pull_policy: missing
-    build:
-      context: ../ai-adapter
-      dockerfile: adapters/whispercpp/Dockerfile
+    image: ghcr.io/open-nvr/whispercpp-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_whispercpp_adapter
     restart: unless-stopped
     environment:
@@ -102,11 +98,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   pipertts-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/pipertts-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
-    pull_policy: missing
-    build:
-      context: ../ai-adapter
-      dockerfile: adapters/pipertts/Dockerfile
+    image: ghcr.io/open-nvr/pipertts-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_pipertts_adapter
     restart: unless-stopped
     environment:
@@ -128,11 +120,7 @@ services:
   # ──────────────────────────────────────────────────────────────
   smolvlm-adapter:
     profiles: [camera-agent-lite]
-    image: ghcr.io/open-nvr/smolvlm-adapter:${LITE_ADAPTER_TAG:-camera-agent-lite}
-    pull_policy: missing
-    build:
-      context: ../ai-adapter
-      dockerfile: adapters/smolvlm/Dockerfile
+    image: ghcr.io/open-nvr/smolvlm-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_smolvlm_adapter
     restart: unless-stopped
     environment:
@@ -186,16 +174,8 @@ services:
   # ──────────────────────────────────────────────────────────────
   camera-agent-lite:
     profiles: [camera-agent-lite]
-    # Pull-first from GHCR; falls back to building from this repo when the
-    # pull fails (air-gapped / unpublished tag).
-    # AGENT_TAG default is the branch tag while the camera-agent-lite branch
-    # is unmerged — flip both TAG defaults in this file to ``latest`` once
-    # it lands on main (main pushes stamp :main + :latest automatically).
-    image: ghcr.io/open-nvr/camera-agent-lite:${AGENT_TAG:-camera-agent-lite}
-    pull_policy: missing
-    build:
-      context: .
-      dockerfile: examples/camera-agent-lite/Dockerfile
+    # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
+    image: ghcr.io/open-nvr/camera-agent-lite:${CORE_TAG:-latest}
     container_name: opennvr_camera_agent_lite
     restart: unless-stopped
     depends_on:
