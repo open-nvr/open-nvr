@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -25,11 +25,18 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
 
 from core.logging_config import main_logger
+
+# Single source of truth for ONVIF control ports (discovery scan, connect flow,
+# and driver registry all share it, so a new vendor port is added in one place).
+from services.onvif_digest_service import (
+    ONVIF_CANDIDATE_PORTS as _ONVIF_CANDIDATE_PORTS,
+)
 
 
 # Lazy imports for optional deps
@@ -178,24 +185,34 @@ _SOAP_ENVELOPE = """\
   </soap:Body>
 </soap:Envelope>"""
 
-_ONVIF_CANDIDATE_PORTS = (80,)
-
-
 async def probe_onvif_device(
-    ip: str, port: int = 80, timeout: float = 0.5
+    ip: str, port: int = 80, timeout: float = 0.5, scheme: str = "http"
 ) -> dict[str, Any] | None:
     """Probe a single IP:port for an ONVIF device service (no auth needed).
 
     Sends unauthenticated GetSystemDateAndTime — the one ONVIF operation
     cameras must answer without credentials.  Returns a device dict on hit,
-    None on miss / timeout.
+    None on miss / timeout.  ``verify=False`` so TLS-only cameras (self-signed
+    certs) are discovered too.
     """
-    url = f"http://{ip}:{port}/onvif/device_service"
+    url = f"{scheme}://{ip}:{port}/onvif/device_service"
     envelope = _SOAP_ENVELOPE.format(body=_ONVIF_PROBE_BODY)
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             resp = await client.post(url, content=envelope, headers=headers)
+            # Some cameras (e.g. CP Plus/Dahua with "force HTTPS") answer HTTP
+            # with a 3xx redirect to their HTTPS endpoint instead of serving
+            # ONVIF. Follow one hop to the HTTPS device_service and re-POST so the
+            # device is still discovered (and reported on its real https port).
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("location", "")
+                if loc.lower().startswith("https://"):
+                    pu = urlparse(loc)
+                    port = pu.port or 443
+                    scheme = "https"
+                    url = f"https://{pu.hostname}:{port}/onvif/device_service"
+                    resp = await client.post(url, content=envelope, headers=headers)
         # A real ONVIF device returns 200 or 401; either confirms ONVIF service presence.
         # A non-ONVIF host typically gives connection refused, 404, or non-XML.
         if resp.status_code in (200, 401) and (
@@ -204,25 +221,55 @@ async def probe_onvif_device(
             return {
                 "ip": ip,
                 "port": port,
+                "scheme": scheme,
                 "service_urls": [url],
             }
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         pass
     except Exception as exc:
-        main_logger.debug(f"probe_onvif_device {ip}:{port} unexpected: {exc}")
+        main_logger.debug(f"probe_onvif_device {scheme}://{ip}:{port} unexpected: {exc}")
     return None
+
+
+async def _tcp_open(ip: str, port: int, timeout: float = 0.5) -> bool:
+    """Cheap liveness check: can we open a TCP connection to ip:port?
+
+    A full ONVIF SOAP probe is expensive (creates an HTTP client, sends a
+    request, waits on a slow TLS handshake for https). On a /24, ~250 of the
+    254 addresses have nothing listening, so doing the SOAP probe for every
+    host×port×scheme exhausts connections/conntrack and makes real cameras get
+    missed (they lose the race once resources are saturated). Gating on a
+    millisecond-cheap TCP connect first means only OPEN ports pay the ONVIF cost.
+    """
+    writer = None
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
 
 async def scan_onvif_subnet(
     cidr: str,
     ports: tuple[int, ...] = _ONVIF_CANDIDATE_PORTS,
-    concurrency: int = 64,
+    concurrency: int = 128,
 ) -> list[dict[str, Any]]:
     """Scan a CIDR for ONVIF devices using unicast TCP probes.
 
-    Works across Docker bridge SNAT — no multicast required.  Probes each
-    host across candidate ports concurrently.  Returns a list of device dicts
-    with the same {ip, service_urls} shape as discover_onvif_devices().
+    Works across Docker bridge SNAT — no multicast required. Each host×port is
+    first checked with a cheap TCP connect; only OPEN ports get the full ONVIF
+    probe (http then https), so the scan stays fast and — crucially — doesn't
+    saturate connections/conntrack, which previously caused real cameras on
+    later addresses/ports (e.g. an ONVIF camera on 8088) to be missed. Returns a
+    list of device dicts with the {ip, scheme, service_urls} shape.
     """
     try:
         network = ipaddress.ip_network(cidr, strict=False)
@@ -231,9 +278,20 @@ async def scan_onvif_subnet(
 
     sem = asyncio.Semaphore(concurrency)
 
+    # Ports that speak TLS get an https probe; everything else gets http (and
+    # ``probe_onvif_device`` itself follows a 302 http->https for cameras that
+    # force HTTPS). ONE probe per open port — firing both schemes at each host
+    # hammered flaky embedded cameras (doomed http-on-443 / https-on-80 attempts
+    # hang and make the device drop the probe that matters), causing intermittent
+    # discovery misses.
+    tls_ports = (443, 8443)
+
     async def _bounded_probe(ip_str: str, port: int) -> dict[str, Any] | None:
         async with sem:
-            return await probe_onvif_device(ip_str, port)
+            if not await _tcp_open(ip_str, port):
+                return None  # nothing listening — skip the expensive ONVIF probe
+            scheme = "https" if port in tls_ports else "http"
+            return await probe_onvif_device(ip_str, port, timeout=2.0, scheme=scheme)
 
     tasks = [
         _bounded_probe(str(host), port)
@@ -243,14 +301,18 @@ async def scan_onvif_subnet(
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Deduplicate by IP (keep first hit per IP regardless of port)
+    # Deduplicate by IP (keep first hit per IP regardless of port/scheme)
     seen: set[str] = set()
     devices: list[dict[str, Any]] = []
     for r in results:
         if isinstance(r, dict) and r.get("ip") and r["ip"] not in seen:
             seen.add(r["ip"])
-            # Return the expected {ip, service_urls} shape; drop internal port key
-            devices.append({"ip": r["ip"], "service_urls": r["service_urls"]})
+            # Return the {ip, scheme, service_urls} shape; drop internal port key
+            devices.append({
+                "ip": r["ip"],
+                "scheme": r.get("scheme", "http"),
+                "service_urls": r["service_urls"],
+            })
     return devices
 
 

@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -171,7 +171,15 @@ class Camera(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=False)
-    port = Column(Integer, default=554)
+    port = Column(Integer, default=554)  # RTSP streaming port
+    # ONVIF/HTTP control port, discovered when the camera is added (Hikvision 80,
+    # Secureye/Tiandy 8088, others vary). Persisted so the driver layer never has
+    # to re-guess from a fixed list — works for any port on any camera.
+    onvif_port = Column(Integer, nullable=True)
+    # Control-plane URL scheme for the ONVIF/HTTP API: "http" (default) or
+    # "https" for cameras whose control API is TLS-only. Resolved with the port
+    # and persisted so a TLS-only device is reached without re-probing.
+    control_scheme = Column(String(8), nullable=True)
     username = Column(String(50), nullable=True)
     # password = Column(String(255), nullable=True)  # Legacy plaintext
     encrypted_password = Column(String(500), nullable=True)  # Store encrypted password
@@ -226,6 +234,12 @@ class Camera(Base):
     )
     config = relationship(
         "CameraConfig",
+        back_populates="camera",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    capability = relationship(
+        "CameraCapability",
         back_populates="camera",
         uselist=False,
         cascade="all, delete-orphan",
@@ -329,6 +343,70 @@ class CameraConfig(Base):
     camera = relationship("Camera", back_populates="config")
 
 
+class CameraCapability(Base):
+    """Cached snapshot of what a camera's device driver can read/drive.
+
+    Populated by a capability probe (services/camera_drivers/capabilities.py)
+    that talks to the camera over ONVIF (+ vendor APIs) and records which
+    settings areas are supported, the resolved ONVIF service endpoints, and
+    refreshed device metadata. The settings UI reads this to render only the
+    tabs/controls a given device actually supports. Semantics mirror the
+    transport-security probe on CameraConfig (result + probed_at).
+
+    Capability data is an open, nested, per-vendor document, so it lives as
+    JSON here rather than as dozens of columns on CameraConfig.
+    """
+
+    __tablename__ = "camera_capabilities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id"), nullable=False, unique=True
+    )
+
+    driver_name = Column(String(50), nullable=True)  # onvif | hikvision | ...
+    manufacturer = Column(String(100), nullable=True)
+    model = Column(String(100), nullable=True)
+    firmware_version = Column(String(100), nullable=True)
+
+    onvif_endpoints = Column(JSON, nullable=True)  # {device, media, imaging, ...}
+    supported_areas = Column(JSON, nullable=True)  # {imaging: true, ptz: false, ...}
+    capabilities = Column(JSON, nullable=True)  # nested detail (ranges/tokens)
+
+    # 'ok' | 'partial' | 'unreachable' | 'error' | 'not_probed'
+    probe_result = Column(
+        String(20), nullable=False, default="not_probed", server_default="not_probed"
+    )
+    probed_at = Column(DateTime(timezone=True), nullable=True)
+    probe_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    camera = relationship("Camera", back_populates="capability")
+
+
+class CameraEvent(Base):
+    """A camera-native alarm (motion / tamper / video-loss / IO) received from
+    the device's event stream. History store parallel to AIDetectionResult; the
+    live copy is fanned out on the in-process event bus for the dashboard."""
+
+    __tablename__ = "camera_events"
+    __table_args__ = (
+        Index("ix_camera_event_cam_time", "camera_id", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id"), nullable=False, index=True
+    )
+    event_type = Column(String(50), nullable=False)  # VMD | tamperdetection | ...
+    event_state = Column(String(20), nullable=True)  # active | inactive
+    description = Column(String(200), nullable=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Recording(Base):
     """Recording model for storing video recording metadata."""
 
@@ -428,6 +506,51 @@ class FirewallDirection(str, enum.Enum):
 class FirewallAction(str, enum.Enum):
     allow = "allow"
     deny = "deny"
+
+
+class DeviceStatus(str, enum.Enum):
+    approved = "approved"
+    pending = "pending"
+    blocked = "blocked"
+
+
+class TrustedDevice(Base):
+    """A browser known to the OpenNVR app-layer firewall.
+
+    ``approved`` may use OpenNVR; ``pending`` has logged in but awaits an admin
+    decision (blocked meanwhile); ``blocked`` is explicitly denied. The first
+    browser to authenticate on a fresh install is auto-approved so the installer
+    is never locked out.
+
+    Identity is ``device_token_hash`` — the SHA-256 of a long random token the
+    server issues at login and stores in an HttpOnly cookie (it outlives the
+    session, so logging out never costs an approval). Identity is deliberately
+    NOT the client IP: NAT collapses every device behind one address (Docker
+    Desktop's port forwarding makes all LAN clients look like the bridge
+    gateway), so an IP can neither distinguish nor reliably re-identify a
+    device. ``ip_address`` is retained as metadata for the admin UI only.
+    Granularity is therefore per browser profile: a second profile, another
+    browser, or cleared cookies enroll as a new device needing approval.
+    """
+
+    __tablename__ = "trusted_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    # Metadata ("last seen from"), NOT identity — see the class docstring.
+    ip_address = Column(String(45), nullable=True, index=True)
+    label = Column(String(100), nullable=True)
+    status = Column(
+        SAEnum(DeviceStatus), nullable=False, default=DeviceStatus.pending
+    )
+    user_agent = Column(String(400), nullable=True)
+    first_seen = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen = Column(DateTime(timezone=True), server_default=func.now())
+    attempt_count = Column(Integer, nullable=False, default=1)
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    auto_enrolled = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class FirewallRule(Base):

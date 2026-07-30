@@ -17,7 +17,7 @@
  */
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import { api, setAuthToken as apiSetToken } from '../lib/api'
+import { api, setAuthToken as apiSetToken, setDeviceToken } from '../lib/api'
 import { apiService } from '../lib/apiService'
 
 type User = {
@@ -115,6 +115,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data } = await apiService.loginJson(username, password, code)
       const token = data.access_token
       const refreshToken = data.refresh_token
+      // Device-firewall identity for this browser, returned only the first time.
+      // Stored separately from the session and kept across logout.
+      setDeviceToken(data.device_token)
       setToken(token, refreshToken)
       const me = await apiService.me()
       setState({ user: me.data, token, loading: false, error: null, setupRequired: false })

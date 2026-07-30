@@ -1,0 +1,212 @@
+# ==========================================
+# OpenNVR — camera-agent-lite overlay
+# ==========================================
+#
+# The camera-agent pattern on a lighter stack: instead of Ollama + the
+# torch-based speech/vision adapters, four SMALL native-runtime adapters
+# pulled from GHCR —
+#
+#   * llamacpp-adapter    Qwen2.5-3B-Instruct GGUF via llama.cpp (text + tools)
+#   * whispercpp-adapter  whisper.cpp base.en (STT)
+#   * pipertts-adapter    Piper (TTS)
+#   * smolvlm-adapter     SmolVLM2-2.2B via llama.cpp --mmproj (vision)
+#
+# — plus one small FastAPI agent (chat + browser-mic voice on one page).
+#
+# Model weights are NOT baked into the images. Each adapter downloads its
+# model from HuggingFace ON FIRST BOOT into its named weights volume
+# (~4.3 GB total across the four) and reuses it forever after — the same
+# runtime-download posture as camera-agent's whisper adapter and Ollama
+# model pull. Offline installs pre-populate the volumes instead (see the
+# adapter READMEs; setting OPENNVR_*_MODEL_URL="" forbids all egress).
+#
+# Quickstart (from the repo root):
+#
+#     examples/camera-agent-lite/quickstart.sh          # start
+#     examples/camera-agent-lite/quickstart.sh --down   # stop
+#
+# Or drive Compose directly:
+#
+#     docker compose -f docker-compose.yml \
+#                    -f docker-compose.camera-agent-lite.yml \
+#                    --profile camera-agent-lite up -d
+#
+# Open http://localhost:9101/demo.
+#
+# ── Packaging ──────────────────────────────────────────────────
+#
+# PULL-ONLY: every image here is published to GHCR (the four adapters by
+# ai-adapter's publish-images workflow, the agent by this repo's). There
+# are deliberately NO ``build:`` stanzas — when both build and image are
+# present, Compose prefers building, which breaks on machines without an
+# ai-adapter sibling checkout. Developers iterating locally build + tag
+# explicitly, e.g.:
+#
+#   docker build -f examples/camera-agent-lite/Dockerfile \
+#     -t ghcr.io/open-nvr/camera-agent-lite:latest .
+#   (adapters: build from the ai-adapter repo root with their Dockerfiles)
+# ==========================================
+
+services:
+  # ──────────────────────────────────────────────────────────────
+  # llama.cpp text LLM adapter — Qwen2.5-3B, tool calling. Downloads the
+  # GGUF (~2 GB) into its weights volume on first boot.
+  # ──────────────────────────────────────────────────────────────
+  llamacpp-adapter:
+    profiles: [camera-agent-lite]
+    image: ghcr.io/open-nvr/llamacpp-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_llamacpp_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - LLAMACPP_GPU_LAYERS=${LLAMACPP_GPU_LAYERS:-0}
+    volumes:
+      - opennvr_llamacpp_models:/app/models
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9014/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      # First boot = ~2 GB download + model load on CPU.
+      start_period: 600s
+      retries: 40
+
+  # ──────────────────────────────────────────────────────────────
+  # whisper.cpp STT adapter — downloads ggml-base.en (~150 MB) on first boot.
+  # ──────────────────────────────────────────────────────────────
+  whispercpp-adapter:
+    profiles: [camera-agent-lite]
+    image: ghcr.io/open-nvr/whispercpp-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_whispercpp_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    volumes:
+      - opennvr_whispercpp_models:/app/models
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9013/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  # ──────────────────────────────────────────────────────────────
+  # Piper TTS adapter — downloads the amy voice (~60 MB) on first boot.
+  # ──────────────────────────────────────────────────────────────
+  pipertts-adapter:
+    profiles: [camera-agent-lite]
+    image: ghcr.io/open-nvr/pipertts-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_pipertts_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    volumes:
+      - opennvr_pipertts_models:/app/models
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9012/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  # ──────────────────────────────────────────────────────────────
+  # SmolVLM vision adapter — a second llama.cpp instance with --mmproj.
+  # Downloads the GGUF + projector (~2 GB) on first boot.
+  # ──────────────────────────────────────────────────────────────
+  smolvlm-adapter:
+    profiles: [camera-agent-lite]
+    image: ghcr.io/open-nvr/smolvlm-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_smolvlm_adapter
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - SMOLVLM_GPU_LAYERS=${SMOLVLM_GPU_LAYERS:-0}
+    volumes:
+      - opennvr_smolvlm_models:/app/models
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9016/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      # First boot = ~2 GB download + model load on CPU.
+      start_period: 600s
+      retries: 40
+
+  # ──────────────────────────────────────────────────────────────
+  # config.yml is generated from config.docker.yml by this init container so
+  # secrets come from the repo-root .env, not the example directory.
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-lite-config-init:
+    profiles: [camera-agent-lite]
+    image: alpine:3.20
+    container_name: opennvr_camera_agent_lite_config_init
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        # busybox sed substitutes only the named variables below, leaving other
+        # ``$`` sigils untouched (no envsubst / apk fetch, which some operator
+        # ISPs filter).
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        lhost=$$(sed_esc "$${CAMERA_AGENT_LISTEN_HOST}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
+    volumes:
+      - ./examples/camera-agent-lite:/template:ro
+      - opennvr_camera_agent_lite_config:/generated
+
+  # ──────────────────────────────────────────────────────────────
+  # The agent — chat + browser-mic voice on one demo page (port 9101).
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-lite:
+    profiles: [camera-agent-lite]
+    # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
+    image: ghcr.io/open-nvr/camera-agent-lite:${CORE_TAG:-latest}
+    container_name: opennvr_camera_agent_lite
+    restart: unless-stopped
+    depends_on:
+      camera-agent-lite-config-init:
+        condition: service_completed_successfully
+      llamacpp-adapter:
+        condition: service_healthy
+      whispercpp-adapter:
+        condition: service_healthy
+      pipertts-adapter:
+        condition: service_healthy
+      smolvlm-adapter:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9101:9101"  # demo UI
+    volumes:
+      - opennvr_camera_agent_lite_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
+volumes:
+  # Per-adapter model weights — populated by each adapter's first-boot
+  # download, persisted across ``compose down`` so the download happens once.
+  opennvr_llamacpp_models:
+  opennvr_whispercpp_models:
+  opennvr_pipertts_models:
+  opennvr_smolvlm_models:
+  # Generated config.yml (mounted read-only by the agent).
+  opennvr_camera_agent_lite_config:

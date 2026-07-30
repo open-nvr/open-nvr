@@ -44,8 +44,10 @@ from urllib.parse import quote, urlparse, urlunparse
 from core.logging_config import main_logger
 from services import onvif_digest_service as ods
 
-# ONVIF HTTP control ports to try, in order (RTSP 554 is intentionally excluded).
-_ONVIF_PORTS = (80, 8000)
+# ONVIF control endpoint resolution is delegated to
+# ``onvif_digest_service.resolve_control_endpoint`` (the single source of truth
+# for candidate ports AND scheme — http/https), so a camera on any port/scheme
+# resolves the same way everywhere. No private port list here anymore.
 
 # Vendor RTSP path templates for the main stream (1-based channel 1).
 _VENDOR_TEMPLATES = {
@@ -187,7 +189,9 @@ async def _rtsp_path_works(host: str, port: int, path: str, user: str, pw: str,
 # --- resolver --------------------------------------------------------------
 
 
-def _identity_from_device_info(dev: dict[str, Any], onvif_port: int) -> dict[str, Any]:
+def _identity_from_device_info(
+    dev: dict[str, Any], onvif_port: int, scheme: str = "http"
+) -> dict[str, Any]:
     """Map an ONVIF GetDeviceInformation dict to our camera identity fields."""
     return {
         "manufacturer": dev.get("manufacturer"),
@@ -196,6 +200,7 @@ def _identity_from_device_info(dev: dict[str, Any], onvif_port: int) -> dict[str
         "serial_number": dev.get("serialnumber"),
         "hardware_id": dev.get("hardwareid"),
         "onvif_port": onvif_port,
+        "control_scheme": scheme,
     }
 
 
@@ -203,21 +208,24 @@ async def fetch_identity(
     ip: str, username: str | None, password: str | None
 ) -> dict[str, Any] | None:
     """Best-effort ONVIF GetDeviceInformation → identity dict (manufacturer, model,
-    firmware_version, serial_number, hardware_id) + the working ``onvif_port``.
+    firmware_version, serial_number, hardware_id) + the working ``onvif_port``
+    and ``control_scheme``.
 
     Used to enrich a camera's metadata even when its RTSP URL was supplied
-    manually (so identity back-fill isn't coupled to URL derivation). Returns
-    None if no ONVIF port answered. Never raises."""
+    manually (so identity back-fill isn't coupled to URL derivation). The control
+    endpoint (any port, http or https) is resolved by ``connect_and_get_profiles``.
+    Returns None if ONVIF didn't answer. Never raises."""
     username = username or ""
     password = password or ""
-    for onvif_port in _ONVIF_PORTS:
-        try:
-            info = await ods.connect_and_get_profiles(ip, username, password, onvif_port)
-        except Exception:
-            continue
-        dev = info.get("device_info") or {}
-        if dev:
-            return _identity_from_device_info(dev, onvif_port)
+    try:
+        info = await ods.connect_and_get_profiles(ip, username, password)
+    except Exception:
+        return None
+    dev = info.get("device_info") or {}
+    if dev:
+        return _identity_from_device_info(
+            dev, info.get("port", 80), info.get("scheme", "http")
+        )
     return None
 
 
@@ -230,26 +238,28 @@ async def resolve_source(
     username = username or ""
     password = password or ""
 
-    # 1. ONVIF direct-connect (also yields device identity).
-    for onvif_port in _ONVIF_PORTS:
-        try:
-            info = await ods.connect_and_get_profiles(ip, username, password, onvif_port)
-        except Exception:
-            continue
+    # 1. ONVIF direct-connect (also yields device identity). The control
+    #    endpoint (any port, http or https) is resolved inside the call.
+    try:
+        info = await ods.connect_and_get_profiles(ip, username, password)
+    except Exception:
+        info = None
+    if info:
         stream_uri = next(
             (p.get("stream_uri") for p in info.get("profiles", []) if p.get("stream_uri")),
             None,
         )
-        if not stream_uri:
-            continue
-        # ONVIF returns the URI XML-escaped (e.g. &amp;) — unescape before use.
-        stream_uri = html.unescape(stream_uri)
-        dev = info.get("device_info", {}) or {}
-        return {
-            "rtsp_url": inject_credentials(stream_uri, username, password),
-            **_identity_from_device_info(dev, onvif_port),
-            "source": "onvif",
-        }
+        if stream_uri:
+            # ONVIF returns the URI XML-escaped (e.g. &amp;) — unescape before use.
+            stream_uri = html.unescape(stream_uri)
+            dev = info.get("device_info", {}) or {}
+            return {
+                "rtsp_url": inject_credentials(stream_uri, username, password),
+                **_identity_from_device_info(
+                    dev, info.get("port", 80), info.get("scheme", "http")
+                ),
+                "source": "onvif",
+            }
 
     # 2. Vendor RTSP template + DESCRIBE probe (non-ONVIF / ONVIF-off cameras).
     for path in _FALLBACK_PATHS:
@@ -268,20 +278,28 @@ async def resolve_source(
 
 
 async def sync_camera_time(
-    ip: str, username: str, password: str, onvif_port: int | None = None
+    ip: str,
+    username: str,
+    password: str,
+    onvif_port: int | None = None,
+    control_scheme: str | None = None,
 ) -> bool:
     """Best-effort: push the server's current UTC to the camera so its clock
     (and the timestamp it burns into the video) is correct. The server itself
     is internet-time-synced by its host, so 'server UTC' is the correct time.
 
-    Uses the ONVIF SetSystemDateAndTime primitive already in mainline. Returns
-    True if a port accepted it; never raises."""
-    ports = [onvif_port] if onvif_port else list(_ONVIF_PORTS)
-    for port in ports:
-        try:
-            await ods.set_system_datetime(ip, username, password, port)
-            main_logger.info("Synced clock on camera %s (onvif:%s)", ip, port)
-            return True
-        except Exception:
-            continue
-    return False
+    Resolves the control endpoint (any port, http or https) when not supplied,
+    then uses the ONVIF SetSystemDateAndTime primitive. Returns True if the
+    camera accepted it; never raises."""
+    try:
+        scheme, port = await ods.resolve_control_endpoint(
+            ip, onvif_port, control_scheme
+        )
+    except Exception:
+        return False
+    try:
+        await ods.set_system_datetime(ip, username, password, port, scheme)
+        main_logger.info("Synced clock on camera %s (%s:%s)", ip, scheme, port)
+        return True
+    except Exception:
+        return False

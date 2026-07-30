@@ -402,6 +402,14 @@ async def mediamtx_startup_hook(
             )
         except Exception as e:
             mediamtx_logger.error(f"MediaMTX startup auto-provisioning failed: {e}")
+        # Re-apply the admin's stored STUN/TURN so a restarted MediaMTX uses the
+        # same ICE servers as the browser (not just the compile-time default).
+        try:
+            from routers.webrtc import _apply_stored_ice_to_mediamtx
+
+            await _apply_stored_ice_to_mediamtx()
+        except Exception as e:
+            mediamtx_logger.warning(f"Could not apply stored WebRTC ICE servers: {e}")
 
     # Start background task
     asyncio.create_task(run_auto_provision())

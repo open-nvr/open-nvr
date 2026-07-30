@@ -359,6 +359,12 @@ services:
       # docs/SECURITY_ARCHITECTURE.md §"RTSP encryption posture".
       - INFERENCE_USE_MEDIAMTX_TAP=${INFERENCE_USE_MEDIAMTX_TAP:-true}
       - MEDIAMTX_STREAM_PREFIX=${MEDIAMTX_STREAM_PREFIX:-cam-}
+      # XFF/internal trust zone = loopback + the compose network pinned below
+      # (follows an OPENNVR_DOCKER_SUBNET override automatically). Kept narrow
+      # on purpose: a broad range (e.g. 172.16.0.0/12) would let any LAN client
+      # inside it spoof X-Forwarded-For and bypass the device firewall.
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
+      - INTERNAL_SERVICE_CIDRS=${INTERNAL_SERVICE_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
       - NATS_URL=nats://nats:4222
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
       - HOST=${HOST:-0.0.0.0}

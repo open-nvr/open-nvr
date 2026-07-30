@@ -28,6 +28,9 @@ export interface TimelineSegment {
 interface PlaybackTimelineProps {
   /** Footage blocks (red). Everything else in the view is a grey gap. */
   segments: TimelineSegment[]
+  /** Epoch ms where the still-recording file begins. Footage at/after this is
+   *  rendered as a LIVE zone (green) — it is not reliably playable as VOD. */
+  liveEdgeMs?: number | null
   /** Visible window (epoch ms). */
   viewStart: number
   viewEnd: number
@@ -85,6 +88,7 @@ function fmtFull(ms: number): string {
 
 export function PlaybackTimeline({
   segments,
+  liveEdgeMs = null,
   viewStart,
   viewEnd,
   currentTime,
@@ -155,6 +159,21 @@ export function PlaybackTimeline({
         }),
     [segments, viewStart, viewEnd, toPct]
   )
+
+  // The LIVE zone: footage at/after the still-recording file's start. Drawn
+  // over the red blocks so the red/green boundary is the exact live edge.
+  const liveBlocks = useMemo(() => {
+    if (liveEdgeMs == null) return []
+    return segments
+      .filter((s) => s.endMs > Math.max(viewStart, liveEdgeMs) && s.startMs < viewEnd)
+      .map((s) => {
+        const from = Math.max(s.startMs, liveEdgeMs)
+        const left = toPct(from)
+        const right = toPct(Math.min(s.endMs, viewEnd))
+        return { left, width: Math.max(0.2, right - left) }
+      })
+      .filter((b) => b.width > 0)
+  }, [segments, liveEdgeMs, viewStart, viewEnd, toPct])
 
   const ticks = useMemo(() => {
     const interval = pickTickInterval(span)
@@ -268,6 +287,22 @@ export function PlaybackTimeline({
             className="absolute top-0 bottom-0"
             style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#dc2626' }}
           />
+        ))}
+
+        {/* LIVE zone (green, still recording — plays via Live View) */}
+        {liveBlocks.map((b, i) => (
+          <div
+            key={`live-${i}`}
+            className="absolute top-0 bottom-0 flex items-center overflow-hidden"
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#16a34a' }}
+          >
+            {b.width > 4 && (
+              <span className="ml-1 flex items-center gap-1 text-[9px] font-semibold text-white/90 whitespace-nowrap">
+                <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+                LIVE
+              </span>
+            )}
+          </div>
         ))}
 
         {/* Clip selection band */}

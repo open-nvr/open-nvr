@@ -117,6 +117,9 @@ class MediaMtxConfigService:
             "rtspRangeType": "clock",
             # WebRTC settings (for WHEP playback)
             "webrtcAddress": f":{settings.mediamtx_webrtc_port}",
+            # Initial fallback only. The admin's stored STUN/TURN (Settings >
+            # More Settings > WebRTC) is pushed to the running server on save and
+            # on the MediaMTX startup hook — see routers/webrtc.py.
             "webrtcICEServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
             # HLS settings (optional)
             "hlsAddress": f":{settings.mediamtx_hls_port}",

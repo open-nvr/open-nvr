@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Hls from 'hls.js'
 import {
   Play,
@@ -34,6 +35,7 @@ import {
   AlertCircle,
   Scissors,
   Download,
+  Radio,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { PlaybackTimeline, type TimelineSegment } from './PlaybackTimeline'
@@ -109,10 +111,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   // Latest segments, mirrored to a ref so the poll loop reads them without
   // re-subscribing every update.
   const segsRef = useRef<Seg[]>([])
+  // Detects 'ended' firing repeatedly at the same instant (metadata overstates
+  // the media) so onEnded can advance instead of re-loading the same clip.
+  const endedGuardRef = useRef<{ afterMs: number; count: number } | null>(null)
+  // Start of the STILL-RECORDING file (epoch ms). Footage from here on is not
+  // reliably playable as VOD (the file's bytes shift while it grows), so the
+  // console refuses to open a session there and offers Live View instead.
+  const liveEdgeRef = useRef<number | null>(null)
 
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [segs, setSegs] = useState<Seg[]>([])
+  const [liveEdgeMs, setLiveEdgeMs] = useState<number | null>(null)
+  // Shown when the user (or auto-advance) reaches the live zone.
+  const [livePrompt, setLivePrompt] = useState(false)
   // MediaMTX browser-reachable playback base + path, for clip export.
   const [base, setBase] = useState('')
   const [path, setPath] = useState('')
@@ -154,6 +167,9 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         setBase((res.data?.playback_base_url || '').replace(/\/$/, ''))
         setPath(res.data?.path || '')
         setSegs(parsed)
+        const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
+        liveEdgeRef.current = Number.isFinite(edge) ? edge : null
+        setLiveEdgeMs(liveEdgeRef.current)
 
         if (parsed.length === 0) {
           setError('No recordings found for this day.')
@@ -205,6 +221,12 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         if (stopped) return
         const parsed = parseSegments(res.data?.segments || [])
         if (parsed.length && !sameSegs(segsRef.current, parsed)) setSegs(parsed)
+        const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
+        const edgeMs = Number.isFinite(edge) ? edge : null
+        if (edgeMs !== liveEdgeRef.current) {
+          liveEdgeRef.current = edgeMs
+          setLiveEdgeMs(edgeMs)
+        }
       } catch {
         /* transient — try again next tick */
       }
@@ -233,9 +255,20 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
    * between clips are never crossed in one stream.
    */
   const loadClip = useCallback(
-    async (clip: Seg, offsetSec: number, play: boolean) => {
+    async (clip: Seg, offsetSec: number, play: boolean, atTarget = false) => {
       const el = videoRef.current
       if (!el) return
+      // LIVE-zone guard: the target instant falls inside the still-recording
+      // file. A VOD session there downloads endlessly and never plays (the
+      // file's bytes shift as it grows) — offer Live View instead.
+      const edge = liveEdgeRef.current
+      if (edge != null && clip.startMs + offsetSec * 1000 >= edge) {
+        el.pause()
+        setBuffering(false)
+        setIsPlaying(false)
+        setLivePrompt(true)
+        return
+      }
       const token = ++loadTokenRef.current
 
       teardownHls()
@@ -245,17 +278,39 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       setCurrentMs(clip.startMs + offsetSec * 1000)
       setBuffering(true)
 
+      // MediaMTX merges contiguous recording files into ONE listed segment, but
+      // a playback session only ever resolves the single on-disk file that
+      // contains its START time. When the seek target turns out to lie beyond
+      // that first file (detected below after metadata loads), we retry ONCE
+      // with the session anchored at the absolute target instant so the backend
+      // resolves the physical file that actually contains it.
+      const targetMs = clamp(clip.startMs + offsetSec * 1000, clip.startMs, clip.endMs - 1000)
+      const sessionStartIso = atTarget ? new Date(targetMs).toISOString() : clip.startIso
+      const sessionStartMs = atTarget ? targetMs : clip.startMs
+
       let manifestUrl: string
+      // H.265 (hev1) recordings can't play through hls.js/MSE as recorded (the
+      // browser rejects the hev1 tag + PCM audio). The backend flags those and
+      // exposes a server-remuxed, browser-playable hvc1 MP4 we play natively.
+      let browserMp4Url: string | null = null
+      // Seconds from the remuxed file's start to this clip's start — lets the
+      // native player map the whole physical file's timeline (so seeks across it
+      // are native, no reload).
+      let fileOffsetSec = 0
       try {
         const res: any = await apiService.createHlsPlaybackSession({
           camera_id: cameraId,
-          start: clip.startIso,
+          start: sessionStartIso,
           end: new Date(clip.endMs).toISOString(),
         })
         if (token !== loadTokenRef.current) return // superseded by a newer load
         manifestUrl = res.data?.manifest_url
         sessionIdRef.current = res.data?.session_id || null
-        if (!manifestUrl) throw new Error('No manifest returned')
+        if (res.data?.needs_remux && res.data?.browser_mp4_url) {
+          browserMp4Url = res.data.browser_mp4_url
+          fileOffsetSec = res.data.file_offset_seconds || 0
+        }
+        if (!manifestUrl && !browserMp4Url) throw new Error('No manifest returned')
       } catch {
         if (token === loadTokenRef.current) {
           setBuffering(false)
@@ -264,13 +319,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         return
       }
 
+      // When the session is anchored at the target instant, the media begins AT
+      // the target — no client-side seek needed, and the window starts there.
+      if (atTarget) {
+        windowStartRef.current = sessionStartMs
+        loadedClipRef.current = { startMs: sessionStartMs, endMs: clip.endMs }
+      }
+      const startOffsetSec = atTarget ? 0 : offsetSec
+
       const startAtOffset = () => {
         if (token !== loadTokenRef.current) return
         el.playbackRate = SPEEDS[rateIdx]
         el.muted = muted
-        if (offsetSec > 0.05) {
+        if (startOffsetSec > 0.05) {
           try {
-            el.currentTime = offsetSec
+            el.currentTime = startOffsetSec
           } catch {
             /* seekable range not ready; starts at head */
           }
@@ -279,7 +342,62 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         setBuffering(false)
       }
 
-      if (Hls.isSupported()) {
+      if (browserMp4Url) {
+        // Native <video> playback of the server-remuxed hvc1 MP4 (H.265 path).
+        // The remuxed file is the WHOLE physical on-disk file resolved from the
+        // session start; it begins `fileOffsetSec` before that start. Anchor the
+        // timeline at the file's start (video t=0) so wall-clock <-> video time
+        // maps correctly, and set the loaded window to the whole file so EVERY
+        // seek within it is a native HTTP-Range seek — not a session re-create
+        // + full re-download (which is what made scrubbing re-fetch the segment
+        // each time).
+        const fileStartMs = sessionStartMs - fileOffsetSec * 1000
+        windowStartRef.current = fileStartMs
+        const initialTimeSec = Math.max(0, (targetMs - fileStartMs) / 1000)
+        el.src = browserMp4Url
+        el.addEventListener(
+          'loadedmetadata',
+          () => {
+            if (token !== loadTokenRef.current) return
+            // Target beyond this file's actual media → it lives in a LATER file
+            // of the same merged segment. Retry once, anchored at the target.
+            if (!atTarget && isFinite(el.duration) && initialTimeSec > el.duration - 0.25) {
+              loadClip(clip, offsetSec, play, true)
+              return
+            }
+            loadedClipRef.current = {
+              startMs: fileStartMs,
+              endMs: fileStartMs + (el.duration || 0) * 1000,
+            }
+            el.playbackRate = SPEEDS[rateIdx]
+            el.muted = muted
+            if (initialTimeSec > 0.05) {
+              try {
+                // Never seek to the exact end: an at-end start would fire
+                // 'ended' immediately and bounce.
+                el.currentTime = isFinite(el.duration)
+                  ? Math.min(initialTimeSec, Math.max(0, el.duration - 0.5))
+                  : initialTimeSec
+              } catch {
+                /* seekable range not ready; starts at head */
+              }
+            }
+            if (play) el.play().catch(() => {})
+            setBuffering(false)
+          },
+          { once: true }
+        )
+        el.addEventListener(
+          'error',
+          () => {
+            if (token === loadTokenRef.current) {
+              setBuffering(false)
+              setError('Failed to play this recording.')
+            }
+          },
+          { once: true }
+        )
+      } else if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -327,15 +445,26 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const onCanPlay = () => setBuffering(false)
     const onEnded = () => {
       const after = loadedClipRef.current?.endMs ?? windowStartRef.current + (el.duration || 0) * 1000
+      // Loop guard: if 'ended' keeps firing at the same instant, the segment
+      // metadata claims more footage than the media actually holds (MediaMTX
+      // durations can overstate by a few seconds). Without this, the "grown"
+      // reload below re-loads the same clip, seeks to its end, ends again —
+      // an infinite session-create/fetch loop that shows up as flickering.
+      const g = endedGuardRef.current
+      const stuck = g !== null && Math.abs(after - g.afterMs) < 300 && g.count >= 1
+      endedGuardRef.current =
+        g !== null && Math.abs(after - g.afterMs) < 300
+          ? { afterMs: g.afterMs, count: g.count + 1 }
+          : { afterMs: after, count: 0 }
       // The current clip may have grown since we loaded it (live recording) —
       // reload it from where we stopped to play into the newly-written tail.
-      const grown = segs.find((s) => s.startMs <= after && after < s.endMs - 500)
+      const grown = stuck ? undefined : segs.find((s) => s.startMs <= after && after < s.endMs - 500)
       if (grown) {
         loadClip(grown, Math.max(0, (after - grown.startMs) / 1000), true)
         return
       }
       // Otherwise advance to the next clip (skips the grey gap).
-      const next = segs.find((s) => s.startMs >= after - 500)
+      const next = segs.find((s) => s.startMs >= after + (stuck ? 300 : -500))
       if (next) loadClip(next, 0, true)
       else setIsPlaying(false)
     }
@@ -400,6 +529,15 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const seekTo = (ms: number) => {
     const el = videoRef.current
     const c = loadedClipRef.current
+    // LIVE zone → no VOD session; offer Live View.
+    const edge = liveEdgeRef.current
+    if (edge != null && ms >= edge) {
+      el?.pause()
+      setIsPlaying(false)
+      setLivePrompt(true)
+      return
+    }
+    setLivePrompt(false)
     // Inside the loaded clip → native seek. hls.js turns this into a ranged
     // fragment fetch, so it's instant both directions.
     if (el && c && ms >= c.startMs && ms < c.endMs) {
@@ -565,9 +703,40 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
                 crossOrigin="anonymous"
                 onClick={togglePlay}
               />
-              {(loading || buffering) && (
+              {(loading || buffering) && !livePrompt && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
                   <Loader2 size={40} className="animate-spin text-[var(--accent)]" />
+                </div>
+              )}
+              {livePrompt && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+                  <div className="text-center p-6 max-w-sm">
+                    <Radio size={36} className="mx-auto mb-3 text-green-500 animate-pulse" />
+                    <p className="text-sm text-neutral-200 mb-1 font-medium">
+                      You've reached the live edge
+                    </p>
+                    <p className="text-xs text-neutral-400 mb-4">
+                      This part is still being recorded and will appear here once
+                      it's finished. Watch what's happening now in Live View.
+                    </p>
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => {
+                          navigate('/live')
+                          onClose()
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-green-600 text-white text-xs font-medium hover:opacity-90 transition-opacity"
+                      >
+                        <Radio size={13} /> Open Live View
+                      </button>
+                      <button
+                        onClick={() => setLivePrompt(false)}
+                        className="px-3 py-1.5 rounded border border-neutral-600 text-xs text-neutral-300 hover:bg-white/5 transition-colors"
+                      >
+                        Stay in playback
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </>
@@ -675,6 +844,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
           <div className="shrink-0 px-3 pt-1 pb-3 bg-[var(--panel-2)]">
             <PlaybackTimeline
               segments={timelineSegs}
+              liveEdgeMs={liveEdgeMs}
               viewStart={view.start}
               viewEnd={view.end}
               currentTime={effectiveCurrent}

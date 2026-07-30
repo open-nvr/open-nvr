@@ -1,0 +1,31 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Compose template for camera-agent-lite. The config-init container in
+# docker-compose.camera-agent-lite.yml substitutes the ${...} placeholders
+# from the stack's .env (INTERNAL_API_KEY) and writes the result to
+# /generated/config.yml — so secrets come from the repo-root .env, and this
+# example ships no .env of its own.
+
+adapter_token: ${INTERNAL_API_KEY}
+llm_url: http://llamacpp-adapter:9014
+stt_url: http://whispercpp-adapter:9013
+tts_url: http://pipertts-adapter:9012
+vlm_url: http://smolvlm-adapter:9016
+
+opennvr_cameras_url: http://opennvr-core:8000/api/v1/internal/camera-agent/cameras
+opennvr_api_key: ${INTERNAL_API_KEY}
+
+frame_cache_ttl_seconds: 2.0
+multi_frame_count: 3
+multi_frame_interval_ms: 1000
+
+llm_temperature: 0.3
+llm_max_tokens: 200
+stt_language: en
+routing_min_confidence: 0.6
+
+agent_name: Camera Agent Lite
+listen_host: ${CAMERA_AGENT_LISTEN_HOST}
+listen_port: 9101
+log_level: INFO
