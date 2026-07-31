@@ -191,6 +191,10 @@ Skipping `./start.sh up` and using bare `docker compose up -d` works too, but yo
 
 **Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options, and a [compose-file reference](DOCKER_QUICKSTART.md#compose-file-reference) explaining every compose file and when each applies.
 
+## OpenNVR Cam — your phone as a test camera
+
+**[OpenNVR Cam](https://play.google.com/store/apps/details?id=org.opennvr.cam)** (Android, on Google Play) turns your mobile into an IP camera with **ONVIF support** — the quickest way to test OpenNVR without any camera hardware: install the app, and OpenNVR discovers and streams it like any real ONVIF camera.
+
 ## Talk to your cameras
 
 The camera-agent lets you *ask* your cameras questions — all on your hardware. **One command, from the repo root:**
