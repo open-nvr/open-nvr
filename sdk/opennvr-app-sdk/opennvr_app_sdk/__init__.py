@@ -56,6 +56,7 @@ from .tier0 import (
     Tier0Snapshot,
     describe_counts,
     is_tier0_subject,
+    tier0_to_detections,
     make_best_frame_fetch,
     snapshot_from_event,
 )
@@ -120,6 +121,7 @@ __all__ = [
     "snapshot_from_event",
     "describe_counts",
     "is_tier0_subject",
+    "tier0_to_detections",
     "BestFrameClient",
     "make_best_frame_fetch",
 ]

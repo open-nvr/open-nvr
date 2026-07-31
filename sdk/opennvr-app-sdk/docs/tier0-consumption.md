@@ -101,3 +101,19 @@ The camera-agent (`examples/camera-agent`) uses both: its `camera_snapshot` tool
 answers counts/presence from `snapshot_from_event` with no inference, and
 `describe_camera` runs the VLM on `BestFrameClient`'s best frame (configured via
 `bestframe_base_url`), falling back to a live grab when none is available.
+
+## Zero-code path for detector apps: `consume_tier0`
+
+Every `DetectorApp` can consume Tier-0 without new code. Set `consume_tier0: true`
+in the app's config and the SDK bridges each Tier-0 event's `tracks` into
+contract-shaped detections (`tier0_to_detections`) — your existing
+`on_detections(camera_id, detections, event)` runs unchanged, with
+`det["bbox"]` as the usual NormalizedBBox (computed from the event's `frame`
+size) plus Tier-0 extras: `track_id`, `stationary`, `best`.
+
+It is **off by default** on purpose: an app also subscribed to a heavy adapter
+(e.g. yolov8) would otherwise see the same object twice and double-alert. Turn
+it on when Tier-0 *replaces* the heavy adapter for your app, or when you filter
+by adapter in `on_detections`. When off, Tier-0 events are ignored **and not
+counted** toward `/health` `events_seen` / `last_event_age_s`, so the
+per-frame Tier-0 stream can never mask a stalled adapter.

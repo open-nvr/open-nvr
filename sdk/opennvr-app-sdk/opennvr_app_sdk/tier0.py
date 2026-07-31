@@ -179,3 +179,52 @@ def make_best_frame_fetch(base_url: str, *, resolve_camera: ResolveCamera | None
         return await client.fetch(camera_id)
 
     return fetch
+
+
+def tier0_to_detections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Bridge a Tier-0 event's ``tracks`` into contract-shaped detections.
+
+    Lets any :class:`DetectorApp` consume the always-on Tier-0 stream with the
+    same ``on_detections`` code it already runs on adapter events: each track
+    becomes ``{label, score, bbox, track_id, stationary, best}`` where ``bbox``
+    is the contract's NormalizedBBox (x/y/w/h in 0-1), computed from the
+    track's pixel box and the event's ``frame`` size.
+
+    Defensive: a malformed track is skipped; if the event carries no frame
+    size (older detect-pipeline), ``bbox`` is omitted so bbox-free consumers
+    (counting, presence) still work while zone tests skip the track.
+    """
+    tracks = payload.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    frame = payload.get("frame") or {}
+    fw, fh = frame.get("w"), frame.get("h")
+    have_dims = (
+        isinstance(fw, (int, float)) and fw > 0
+        and isinstance(fh, (int, float)) and fh > 0
+    )
+    out: list[dict[str, Any]] = []
+    for t in tracks:
+        if not isinstance(t, dict) or not t.get("label"):
+            continue
+        det: dict[str, Any] = {
+            "label": str(t["label"]),
+            "score": t.get("score"),
+            "track_id": t.get("id"),
+            "stationary": t.get("stationary"),
+            "best": t.get("best"),
+        }
+        box = t.get("box")
+        if have_dims and isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                x1, y1, x2, y2 = (float(v) for v in box)
+                det["bbox"] = {
+                    "x": max(0.0, x1 / fw),
+                    "y": max(0.0, y1 / fh),
+                    "w": max(0.0, (x2 - x1) / fw),
+                    "h": max(0.0, (y2 - y1) / fh),
+                }
+            except (TypeError, ValueError):
+                pass
+        out.append(det)
+    return out

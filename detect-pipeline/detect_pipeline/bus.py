@@ -35,6 +35,13 @@ def build_payload(camera_id: str, result: FrameResult, frame) -> dict:
         "camera_id": camera_id,
         "seq": getattr(frame, "seq", None),
         "ts": getattr(frame, "ts", None),
+        # Frame size lets consumers normalize the pixel-space track boxes into
+        # the contract's NormalizedBBox (x/y/w/h in 0-1) — see the App SDK's
+        # tier0_to_detections bridge.
+        "frame": {
+            "w": getattr(frame, "width", None),
+            "h": getattr(frame, "height", None),
+        },
         "calibrating": result.calibrating,
         "tracks": [
             {
@@ -90,6 +97,13 @@ def build_gate_payload(camera_id: str, result, frame) -> dict:
         "camera_id": camera_id,
         "seq": getattr(frame, "seq", None),
         "ts": getattr(frame, "ts", None),
+        # Frame size lets consumers normalize the pixel-space track boxes into
+        # the contract's NormalizedBBox (x/y/w/h in 0-1) — see the App SDK's
+        # tier0_to_detections bridge.
+        "frame": {
+            "w": getattr(frame, "width", None),
+            "h": getattr(frame, "height", None),
+        },
         "shadow": result.shadow,        # True = advisory (measured, not enforced)
         "escalated": sum(1 for d in result.decisions if d.escalate),
         "suppressed": sum(1 for d in result.decisions if not d.escalate),

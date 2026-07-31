@@ -711,3 +711,31 @@ def test_action_deeply_nested_body_is_400_not_thread_death(monkeypatch):
         assert ok.status_code == 200
     finally:
         det.stop_contract_server()
+
+
+# ── Tier-0 bridge in handle_event (opt-in) ─────────────────────────
+
+def _tier0_ev() -> dict:
+    return {
+        "schema": "opennvr.tier0.v1",
+        "adapter": "tier0",
+        "camera_id": "cam-1",
+        "frame": {"w": 100, "h": 100},
+        "tracks": [{"id": 1, "label": "person", "score": 0.9,
+                    "box": [10, 10, 50, 90], "stationary": False, "best": False}],
+    }
+
+
+def test_tier0_ignored_and_not_counted_by_default():
+    det = _detector()
+    assert det.handle_event(_tier0_ev()) == []
+    # Not counted as seen: per-frame tier0 traffic must not refresh
+    # last_event_age_s for apps that don't consume it (adapter-stall masking).
+    assert det._events_seen == 0
+
+
+def test_tier0_bridged_into_on_detections_when_opted_in():
+    det = _detector(_cfg(consume_tier0=True))
+    fired = det.handle_event(_tier0_ev())
+    assert len(fired) == 1
+    assert det._events_seen == 1
