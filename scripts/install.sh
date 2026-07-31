@@ -206,8 +206,15 @@ find_example_compose() {
 }
 
 prompt_overlay_defaults() {
-    local file="$1" spec body key default current
-    while IFS= read -r spec; do
+    # Collect the specs into an array FIRST. Feeding them to the loop via
+    # `done < <(grep ...)` redirected the loop's stdin — and ask_value's
+    # plain `read` then consumed the NEXT SPEC as the "answer" instead of
+    # asking the terminal. Net effect: no prompts shown, and .env entries
+    # like LLAMACPP_GPU_LAYERS='${NGINX_BIND_HOST:-0.0.0.0}' which compose
+    # interpolates to 0.0.0.0 → the llamacpp adapter crashed on int().
+    local file="$1" spec body key default current specs=()
+    mapfile -t specs < <(grep -oE '\$\{[A-Z][A-Z0-9_]*:-[^}]+\}' "$file" | sort -u || true)
+    for spec in "${specs[@]}"; do
         [[ -n "$spec" ]] || continue
         body="${spec#\$\{}"; body="${body%\}}"
         key="${body%%:-*}"; default="${body#*:-}"
@@ -215,7 +222,7 @@ prompt_overlay_defaults() {
         [[ -n "$current" ]] && continue
         ask_value "$key" "$default"
         env_set "$key" "$REPLY"
-    done < <(grep -oE '\$\{[A-Z][A-Z0-9_]*:-[^}]+\}' "$file" | sort -u || true)
+    done
 }
 
 choose_example() {
