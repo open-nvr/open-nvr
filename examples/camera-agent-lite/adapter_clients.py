@@ -236,3 +236,147 @@ class VlmClient:
 
     async def aclose(self) -> None:
         await self._c.aclose()
+
+
+# ── OpenNVR auth delegation (auth_mode="opennvr") ──────────────────
+# Self-contained copy of camera-agent's OpennvrAuthClient (examples are
+# deliberately standalone — same reasoning as serializer.py). The agent
+# never mints or stores credentials of its own: login/refresh are thin
+# proxies to the main OpenNVR server and ``me()`` validates presented
+# bearer tokens against it. ``device_allowed()`` additionally honours
+# OpenNVR's device firewall (Settings → Firewall).
+
+
+class _ReusableClientMixin:
+    """One ``httpx.AsyncClient`` per service instance, lazily constructed."""
+
+    _timeout: float
+    _http: httpx.AsyncClient | None = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self._timeout)
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+
+class OpennvrAuthClient(_ReusableClientMixin):
+    """Auth + device-firewall delegation to the main OpenNVR server.
+
+    * :meth:`login`   → ``POST /api/v1/auth/login-json`` (passthrough).
+    * :meth:`refresh` → ``POST /api/v1/auth/refresh`` (passthrough).
+    * :meth:`me`      → ``GET /api/v1/auth/me`` — validates a bearer token,
+      cached per token (positive AND negative) for ``ttl_seconds``.
+    * :meth:`device_allowed` → ``GET /api/v1/device-firewall/status`` —
+      honours the server's device firewall.
+    """
+
+    def __init__(self, *, base_url: str, ttl_seconds: float = 60.0,
+                 timeout_seconds: float = 5.0) -> None:
+        self._root = base_url.rstrip("/")
+        self._base = f"{self._root}/api/v1/auth"
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        # token -> (checked_at_monotonic, user_payload_or_None)
+        self._cache: dict[str, tuple[float, Optional[dict]]] = {}
+        self._cache_max = 256
+        # device_token -> (checked_at_monotonic, allowed, ttl_used)
+        self._device_cache: dict[str, tuple[float, bool, float]] = {}
+        self._device_fail_ttl = 10.0   # short: enforcement resumes fast
+
+    async def login(self, username: str, password: str,
+                    totp_code: Optional[str] = None, *,
+                    device_token: Optional[str] = None,
+                    user_agent: Optional[str] = None) -> tuple[int, dict]:
+        """Proxy a login; (status, body) pass through verbatim. The browser's
+        device token + UA are forwarded so the server's device firewall
+        re-recognises the browser instead of minting a row per login."""
+        body: dict = {"username": username, "password": password}
+        if totp_code:
+            # OpenNVR's UserLogin schema names the MFA field ``code``.
+            body["code"] = totp_code
+        headers: dict = {}
+        if device_token:
+            headers["x-device-token"] = device_token
+        if user_agent:
+            headers["user-agent"] = user_agent
+        try:
+            resp = await self._client().post(f"{self._base}/login-json",
+                                             json=body, headers=headers)
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: login proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def refresh(self, refresh_token: str) -> tuple[int, dict]:
+        try:
+            resp = await self._client().post(
+                f"{self._base}/refresh", json={"refresh_token": refresh_token})
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"detail": resp.text[:200]}
+            return resp.status_code, data
+        except Exception as exc:
+            logger.warning("auth: refresh proxy failed: %s", exc)
+            return 502, {"detail": "OpenNVR server unreachable"}
+
+    async def me(self, token: str) -> Optional[dict]:
+        """Validate a bearer token → the server's user payload, or None."""
+        now = time.monotonic()
+        hit = self._cache.get(token)
+        if hit is not None and now - hit[0] < self._ttl:
+            return hit[1]
+        user: Optional[dict] = None
+        try:
+            resp = await self._client().get(
+                f"{self._base}/me",
+                headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                user = resp.json()
+        except Exception as exc:
+            logger.warning("auth: /me validation failed: %s", exc)
+        if len(self._cache) >= self._cache_max:
+            self._cache.clear()
+        self._cache[token] = (now, user)
+        return user
+
+    async def device_allowed(self, device_token: Optional[str]) -> bool:
+        """True iff OpenNVR's device firewall permits this browser.
+
+        Allowed when enforcement is off, or this device is ``approved``.
+        No token while enforcement is on ⇒ denied (recovery: /auth/login is
+        open; logging in enrolls the device and returns a fresh token).
+        FAIL-OPEN on transport errors — the server itself treats
+        enforcement-state read errors as off, and with the server down
+        ``me()`` fails too, so the bearer gate still returns 401."""
+        key = device_token or ""
+        now = time.monotonic()
+        hit = self._device_cache.get(key)
+        if hit is not None and now - hit[0] < hit[2]:
+            return hit[1]
+        allowed = True
+        ttl = self._ttl
+        try:
+            headers = {"x-device-token": device_token} if device_token else {}
+            resp = await self._client().get(
+                f"{self._root}/api/v1/device-firewall/status", headers=headers)
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("enforcement_active"):
+                allowed = data.get("status") == "approved"
+        except Exception as exc:
+            logger.warning("auth: device-firewall check failed (failing open): %s",
+                           exc)
+            ttl = self._device_fail_ttl
+        if len(self._device_cache) >= self._cache_max:
+            self._device_cache.clear()
+        self._device_cache[key] = (now, allowed, ttl)
+        return allowed

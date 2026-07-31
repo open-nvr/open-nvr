@@ -87,13 +87,16 @@ say "Profile: ${PROFILE} (Ctrl-C is safe; containers run detached)"
 
 echo
 ok "Camera agent is starting."
-printf "  Open ${GREEN}http://localhost:9100/demo${NC} and "
+printf "  Open ${GREEN}https://localhost:9100/demo${NC} and "
 if [ "$PROFILE" = "camera-agent" ]; then
   printf "click Start, then speak.\n"
 else
   printf "TYPE a question, e.g. \"how many people are at the door?\"\n"
 fi
 echo
+say "Also reachable from other LAN devices at https://<this-host-ip>:9100/demo."
+say "First visit: accept the one-time self-signed-certificate warning, then"
+say "sign in with your OpenNVR account (device-firewall approval applies too)."
 say "First boot pulls the model and warms up — give it a minute."
 say "Logs:  ${COMPOSE[*]} --profile ${PROFILE} logs -f"
 say "Stop:  examples/camera-agent/quickstart.sh --down"

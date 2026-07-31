@@ -45,3 +45,49 @@ def test_static_cameras_parse(tmp_path):
     )
     cfg = load_config(p)
     assert cfg.cameras[0]["camera_id"] == "camera_1"
+
+
+# ── auth + TLS validation ────────────────────────────────────────────────
+
+def _write(tmp_path, text):
+    p = tmp_path / "config.yml"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_auth_mode_enum_enforced(tmp_path):
+    with pytest.raises(SystemExit, match="auth_mode"):
+        load_config(_write(tmp_path, "auth_mode: banana\n"))
+
+
+def test_opennvr_mode_requires_api_url(tmp_path):
+    with pytest.raises(SystemExit, match="opennvr_api_url"):
+        load_config(_write(tmp_path, "auth_mode: opennvr\n"))
+
+
+def test_tls_pair_must_be_set_together(tmp_path):
+    with pytest.raises(SystemExit, match="set together"):
+        load_config(_write(tmp_path, "tls_certfile: /nope/cert.pem\n"))
+
+
+def test_tls_files_must_exist(tmp_path):
+    with pytest.raises(SystemExit, match="not found"):
+        load_config(_write(
+            tmp_path,
+            "tls_certfile: /nope/cert.pem\ntls_keyfile: /nope/key.pem\n"))
+
+
+def test_tls_pair_accepted_when_present(tmp_path):
+    cert = tmp_path / "c.pem"; cert.write_text("x")
+    key = tmp_path / "k.pem"; key.write_text("x")
+    cfg = load_config(_write(
+        tmp_path,
+        f"tls_certfile: {cert.as_posix()}\ntls_keyfile: {key.as_posix()}\n"))
+    assert cfg.tls_certfile == cert.as_posix()
+
+
+def test_auth_opennvr_with_url_loads(tmp_path):
+    cfg = load_config(_write(
+        tmp_path,
+        "auth_mode: opennvr\nopennvr_api_url: http://core:8000\n"))
+    assert cfg.auth_mode == "opennvr"

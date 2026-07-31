@@ -31,7 +31,7 @@
 #                    -f docker-compose.camera-agent-lite.yml \
 #                    --profile camera-agent-lite up -d
 #
-# Open http://localhost:9101/demo.
+# Open https://localhost:9101/demo.
 #
 # ── Packaging ──────────────────────────────────────────────────
 #
@@ -139,6 +139,45 @@ services:
       retries: 40
 
   # ──────────────────────────────────────────────────────────────
+  # Self-signed TLS pair for the agent's LAN-exposed listener — the exact
+  # mediamtx-certs-init pattern. OPENNVR_HOST_IP in the SAN keeps the
+  # browser warning to the same one-time accept as the main UI's cert.
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-lite-certs-init:
+    profiles: [camera-agent-lite]
+    image: alpine/openssl:3.3.2
+    entrypoint: []
+    container_name: opennvr_camera_agent_lite_certs_init
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "camera-agent-lite certs already present; skipping."
+          exit 0
+        fi
+        umask 077
+        SAN="DNS:localhost,DNS:camera-agent-lite,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-camera-agent-lite" \
+          -addext "subjectAltName=$${SAN}" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+    volumes:
+      - ./agent-certs/camera-agent-lite:/certs
+
+  # ──────────────────────────────────────────────────────────────
   # config.yml is generated from config.docker.yml by this init container so
   # secrets come from the repo-root .env, not the example directory.
   # ──────────────────────────────────────────────────────────────
@@ -181,6 +220,8 @@ services:
     depends_on:
       camera-agent-lite-config-init:
         condition: service_completed_successfully
+      camera-agent-lite-certs-init:
+        condition: service_completed_successfully
       llamacpp-adapter:
         condition: service_healthy
       whispercpp-adapter:
@@ -192,9 +233,12 @@ services:
       opennvr-core:
         condition: service_healthy
     ports:
-      - "127.0.0.1:9101:9101"  # demo UI
+      # LAN edge (https) — bind host follows nginx, so dual-NIC installs keep
+      # the agent on the management NIC. Auth: OpenNVR login + device firewall.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:9101:9101"
     volumes:
       - opennvr_camera_agent_lite_config:/app/config:ro
+      - ./agent-certs/camera-agent-lite:/certs:ro
     command:
       - --config
       - /app/config/config.yml

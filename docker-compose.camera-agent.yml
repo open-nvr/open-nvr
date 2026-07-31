@@ -27,7 +27,7 @@
 #                    --profile camera-agent up -d      # or --profile camera-agent-chat
 #
 # The Ollama model is pulled automatically on first ``up``. Open
-# http://localhost:9100/demo.
+# https://localhost:9100/demo.
 #
 # ── A note on packaging maturity ───────────────────────────────
 #
@@ -222,6 +222,45 @@ services:
   # config.yml is generated from config.docker.yml by the init container so
   # secrets come from .env, not the repo.
   # ──────────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────
+  # Self-signed TLS pair for the agent's LAN-exposed listener — the exact
+  # mediamtx-certs-init pattern. Shared by the voice and chat variants
+  # (both profiles, one cert dir; they never run simultaneously on 9100).
+  # ──────────────────────────────────────────────────────────────
+  camera-agent-certs-init:
+    profiles: [camera-agent, camera-agent-chat]
+    image: alpine/openssl:3.3.2
+    entrypoint: []
+    container_name: opennvr_camera_agent_certs_init
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "camera-agent certs already present; skipping."
+          exit 0
+        fi
+        umask 077
+        SAN="DNS:localhost,DNS:camera-agent,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
+        if [ -n "$${OPENNVR_HOST_IP}" ]; then
+          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /certs/server.key -out /certs/server.crt \
+          -subj "/CN=opennvr-camera-agent" \
+          -addext "subjectAltName=$${SAN}" \
+          -addext "basicConstraints=critical,CA:FALSE" \
+          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        chmod 0644 /certs/server.crt
+        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+    volumes:
+      - ./agent-certs/camera-agent:/certs
+
   camera-agent-config-init:
     profiles: [camera-agent]
     image: alpine:3.20
@@ -272,6 +311,8 @@ services:
     depends_on:
       camera-agent-config-init:
         condition: service_completed_successfully
+      camera-agent-certs-init:
+        condition: service_completed_successfully
       whisper-adapter:
         condition: service_healthy
       piper-adapter:
@@ -285,9 +326,12 @@ services:
       opennvr-core:
         condition: service_healthy
     ports:
-      - "127.0.0.1:9100:9100"  # demo UI
+      # LAN edge (https) — bind host follows nginx; auth: OpenNVR login +
+      # device firewall (auth_mode: opennvr in config.docker.yml).
+      - "${NGINX_BIND_HOST:-0.0.0.0}:9100:9100"
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
+      - ./agent-certs/camera-agent:/certs:ro
     command:
       - --config
       - /app/config/config.yml
@@ -346,6 +390,8 @@ services:
     depends_on:
       camera-agent-config-init-chat:
         condition: service_completed_successfully
+      camera-agent-certs-init:
+        condition: service_completed_successfully
       # Wait for the selected caption/VQA adapter to be healthy and
       # registered before the first turn (else describe_camera falls back to the
       # detector until the selected adapter comes up).
@@ -358,9 +404,11 @@ services:
       opennvr-core:
         condition: service_healthy
     ports:
-      - "127.0.0.1:9100:9100"  # demo UI (text chat)
+      # LAN edge (https) — see the voice variant's comment.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:9100:9100"
     volumes:
       - opennvr_camera_agent_config_chat:/app/config:ro
+      - ./agent-certs/camera-agent:/certs:ro
     command:
       - --config
       - /app/config/config.yml

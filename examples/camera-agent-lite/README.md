@@ -28,7 +28,7 @@ talk — Silero VAD detects your turns, replies stream back as speech).
 From the repo root:
 
 ```bash
-examples/camera-agent-lite/quickstart.sh          # start (open http://localhost:9101/demo)
+examples/camera-agent-lite/quickstart.sh          # start (open https://localhost:9101/demo)
 examples/camera-agent-lite/quickstart.sh --down   # stop
 ```
 
@@ -43,16 +43,31 @@ few minutes; later boots skip the download. Offline installs pre-populate
 the volumes (or set the adapter's `OPENNVR_*_MODEL_URL=""` to forbid any
 fetch).
 
-### No `.env`, no login, no tokens
+### How access works (two different doors)
 
-This example ships **no `.env` and needs no OpenNVR user account**. Camera
-discovery and frames come from OpenNVR's internal camera-agent endpoint
+**Agent → OpenNVR (no tokens, no `.env` in this folder):** camera discovery
+and frames come from OpenNVR's internal camera-agent endpoint
 (`GET /api/v1/internal/camera-agent/cameras`, authenticated with the stack's
 `INTERNAL_API_KEY`), which returns per-camera MediaMTX tap URLs with a signed
 token already embedded. The compose overlay injects that key from the
 repo-root `.env` into a generated `config.yml` — the same flow the
 camera-agent example uses. Frames are grabbed from the tap URL with a
 bounded one-shot `ffmpeg` call; the agent never stores camera credentials.
+
+**Browser → agent (OpenNVR login, LAN-reachable, https):** the Docker
+deployment serves **https on port 9101 on the LAN** (same bind host as
+nginx), with `auth_mode: opennvr` — the demo shows a login card and accepts
+your normal OpenNVR account (any role; lite has no mutating actions). The
+agent mints no credentials: `/auth/login` and `/auth/refresh` are thin
+proxies to the main server, so MFA and revocation stay OpenNVR's job. The
+agent also honours OpenNVR's **device firewall** (Settings → Firewall):
+when enforcement is on, only admin-approved browsers get in — an unapproved
+browser sees an "awaiting approval" card. Note each agent origin enrolls
+its own device row, so a browser may appear more than once in the admin
+list. The self-signed cert (generated into `agent-certs/` on first boot,
+SAN includes your host IP) means the same one-time browser warning as the
+main UI — and https is what makes the mic work from other devices
+(`getUserMedia` requires a secure origin).
 
 ## What it does
 
@@ -116,9 +131,12 @@ tools** — ask it to stop recording and it will tell you it can't.
   see `config.example.yml`.
 * **Temporal questions are best-effort.** "Did someone walk past?" samples the
   live view three times over ~2 s; there is no historical-frame API.
-* **Building images locally needs `ai-adapter` as a sibling checkout.** The
-  overlay is pull-first (GHCR), but if an image hasn't been published yet
-  Compose falls back to `build:` from `../ai-adapter`.
+* **The overlay is pull-only** — no `build:` stanzas (Compose prefers
+  building over pulling when both exist, which broke machines without an
+  ai-adapter checkout). Developers iterating locally build + tag explicitly:
+  `docker build -f examples/camera-agent-lite/Dockerfile -t
+  ghcr.io/open-nvr/camera-agent-lite:<tag> .` (adapters build from the
+  ai-adapter repo).
 
 ## Configure
 
@@ -149,7 +167,7 @@ Key knobs:
 ```bash
 cd examples/camera-agent-lite
 uv sync --extra dev
-uv run pytest -q      # 59 tests, no models/adapters/hardware needed (mocks)
+uv run pytest -q      # 98 tests, no models/adapters/hardware needed (mocks)
 ```
 
 Tests cover the router (vision vs command vs text, camera-reference
