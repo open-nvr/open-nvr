@@ -40,6 +40,17 @@
         border-radius:999px; color:var(--muted); cursor:pointer; font-size:13px; }
   .ex:hover { border-color:var(--accent); color:var(--txt); }
   #vstat { font-size:12px; color:var(--muted); min-width:70px; }
+  #loginOverlay { position:fixed; inset:0; background:rgba(10,14,23,.92);
+    display:flex; align-items:center; justify-content:center; z-index:100; }
+  .logincard { background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:24px; width:320px; display:flex;
+    flex-direction:column; gap:10px; }
+  .logincard h2 { margin:0 0 2px; font-size:16px; }
+  .logincard .sub { color:var(--muted); font-size:13px; margin-bottom:6px; }
+  .logincard input { width:100%; }
+  #loginErr { color:var(--rec); font-size:13px; }
+  #loginGo { background:var(--accent); color:#fff; height:40px;
+    border-radius:10px; font-size:14px; }
 </style></head>
 <body>
   <header>
@@ -65,15 +76,125 @@
     <input id="q" placeholder="Ask about your cameras…" autocomplete="off" autofocus>
     <button id="send">Send</button>
   </form>
+  <div id="loginOverlay" hidden>
+    <div class="logincard">
+      <h2>Sign in to OpenNVR</h2>
+      <div class="sub">This agent uses your OpenNVR account — any role works.</div>
+      <input id="loginUser" placeholder="Username" autocomplete="username">
+      <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
+      <input id="loginTotp" placeholder="MFA code (if enabled)" autocomplete="one-time-code">
+      <div id="loginErr" hidden></div>
+      <button id="loginGo" type="button">Sign in</button>
+    </div>
+  </div>
 <script>
 const chat=document.getElementById('chat'), f=document.getElementById('f'), q=document.getElementById('q'),
       send=document.getElementById('send'), stat=document.getElementById('stat'), dot=document.getElementById('dot'),
       mic=document.getElementById('mic'), vstat=document.getElementById('vstat');
 let voiceReady=false;
+
+// ── auth: bearer + device-token plumbing (auth_mode="opennvr") ────────────
+// Same pattern as the camera-agent demo: one fetch wrapper attaches the
+// OpenNVR bearer token + device identity to every same-origin request; a 401
+// tries ONE silent refresh before raising the login overlay. Access/refresh
+// tokens live in sessionStorage (die with the tab); the DEVICE token lives in
+// localStorage — the device row must survive tabs, or every new tab enrolls
+// another pending device in the admin's Settings → Firewall list.
+const $id=i=>document.getElementById(i);
+let _authMode="none";
+let _token=sessionStorage.getItem("agent_token")||"";
+let _refreshTok=sessionStorage.getItem("agent_refresh")||"";
+let _device=localStorage.getItem("agent_device_token")||"";
+const _rawFetch=window.fetch.bind(window);
+let _refreshing=null;
+async function _tryRefresh(){
+  if(!_refreshTok) return false;
+  if(_refreshing) return _refreshing;
+  _refreshing=(async()=>{
+    try{ const r=await _rawFetch("/auth/refresh",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({refresh_token:_refreshTok})});
+      if(!r.ok) return false;
+      const d=await r.json();
+      if(!d.access_token) return false;
+      _token=d.access_token; sessionStorage.setItem("agent_token",_token);
+      if(d.refresh_token){ _refreshTok=d.refresh_token; sessionStorage.setItem("agent_refresh",_refreshTok); }
+      return true;
+    }catch{ return false; } finally{ setTimeout(()=>{_refreshing=null;},0); }
+  })();
+  return _refreshing;
+}
+window.fetch=async function(url,opts={}){
+  const local=typeof url==="string"&&url.startsWith("/")&&!url.startsWith("/auth/");
+  const send=()=>{ const o={...opts};
+    if(local){ o.headers={...(o.headers||{})};
+      if(_token) o.headers["Authorization"]="Bearer "+_token;
+      if(_device) o.headers["X-Device-Token"]=_device; }
+    return _rawFetch(url,o); };
+  let r=await send();
+  if(r.status===401&&local&&_authMode==="opennvr"){
+    if(await _tryRefresh()) r=await send();
+    if(r.status===401) showLogin();
+  }
+  if(r.status===403&&local&&_authMode==="opennvr"){
+    try{ const d=await r.clone().json();
+      if(d&&d.error==="device_not_approved") showDeviceBlocked(); }catch{}
+  }
+  return r;
+};
+function showLogin(){ const ov=$id("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$id("loginUser"); if(u) u.focus(); } }
+function authReady(){ return _authMode!=="opennvr" || !!_token; }
+let _devBlockShown=false;
+function showDeviceBlocked(){
+  if(_devBlockShown) return; _devBlockShown=true;
+  const ov=$id("loginOverlay"); if(!ov) return; ov.hidden=false;
+  ov.firstElementChild.innerHTML='<h2>Browser awaiting approval</h2>'+
+    '<div class="sub">OpenNVR’s device firewall is on and this browser isn’t approved yet. '+
+    'Ask an admin to approve it under <b>OpenNVR → Settings → Firewall</b>, then reload. '+
+    'If you signed in before the firewall existed, sign out and in again so this browser gets a device identity.</div>'+
+    '<button id="loginGo" onclick="location.reload()">Reload</button>';
+}
+function errText(d,status){
+  const dt=d&&d.detail;
+  if(dt&&typeof dt==="object") return dt.message||dt.error||JSON.stringify(dt);
+  return dt||d.error||d.message||("Sign-in failed (HTTP "+status+")");
+}
+(function(){
+  async function doLogin(){
+    const err=$id("loginErr"), btn=$id("loginGo"); err.hidden=true;
+    btn.disabled=true; btn.textContent="Signing in…";
+    try{
+      const body={username:$id("loginUser").value.trim(),password:$id("loginPass").value};
+      const totp=$id("loginTotp").value.trim(); if(totp) body.totp_code=totp;
+      if(!body.username||!body.password){ err.textContent="Username and password are required."; err.hidden=false; return; }
+      const hdrs={"Content-Type":"application/json"};
+      if(_device) hdrs["X-Device-Token"]=_device;   // re-recognise this browser
+      const r=await _rawFetch("/auth/login",{method:"POST",headers:hdrs,body:JSON.stringify(body)});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok||!d.access_token){ err.textContent=errText(d,r.status); err.hidden=false; return; }
+      sessionStorage.setItem("agent_token",d.access_token);
+      if(d.refresh_token) sessionStorage.setItem("agent_refresh",d.refresh_token);
+      if(d.device_token) localStorage.setItem("agent_device_token",d.device_token);
+      location.reload();
+    }catch(e2){ err.textContent="Sign-in failed: "+e2.message; err.hidden=false; }
+    finally{ btn.disabled=false; btn.textContent="Sign in"; }
+  }
+  const go=$id("loginGo"); if(go) go.addEventListener("click",doLogin);
+  for(const id of ["loginUser","loginPass","loginTotp"]){ const el=$id(id);
+    if(el) el.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); }); }
+})();
+async function loadAgent(){
+  try{ const a=await (await _rawFetch("/agent")).json();
+    _authMode=a.auth_mode||"none";
+    if(_authMode==="opennvr"&&!_token) showLogin();
+  }catch{}
+}
 function add(who,text,cls){const m=document.createElement('div');m.className='msg '+cls;
   m.innerHTML='<div><div class="who">'+who+'</div><div class="bubble"></div></div>';
   m.querySelector('.bubble').textContent=text;chat.appendChild(m);chat.scrollTop=chat.scrollHeight;return m;}
-async function refresh(){try{const s=await (await fetch('/api/status')).json();
+async function refresh(){
+  if(!authReady()){ stat.textContent='sign in required'; dot.style.background='#e0a33a'; return; }
+  try{const s=await (await fetch('/api/status')).json();
   if(s.ready){const c=(s.cameras||[]).length; voiceReady=!!s.voice;
     stat.innerHTML=c+' cam'+(c==1?'':'s')+' · LLM '+(s.llm?'on':'off')+' · VLM '+(s.vlm?'on':'off')+' · voice '+(s.voice?'on':'off');
     dot.style.background=s.llm?'#43c06a':'#e0a33a'; mic.style.display=s.voice?'flex':'none';}
@@ -119,14 +240,20 @@ async function startLive(){
   catch(e){ add('agent','Microphone access was denied.','bot'); return; }
   const proto=location.protocol==='https:'?'wss':'ws';
   let opened=false;
-  try{ ws=new WebSocket(proto+'://'+location.host+'/ws'); }
+  // Auth rides the query string (WS can't send headers): same bearer token
+  // + device identity the HTTP endpoints use.
+  const wsq='/ws?token='+encodeURIComponent(_token)+'&device_token='+encodeURIComponent(_device);
+  try{ ws=new WebSocket(proto+'://'+location.host+wsq); }
   catch(e){ ws=null; startVoice(lstream); return; }
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{ opened=true; live=true; playT=0; setMic('live'); beginLiveCapture();
     add('agent','🎙 live voice on — answers are spoken. (Streamed turns don\'t show transcripts; type to chat in text.)','bot'); };
   ws.onmessage=(e)=>{ if(e.data instanceof ArrayBuffer) playPcm(e.data); };
   ws.onerror=()=>{ if(!opened){ const s=lstream; lstream=null; try{ws.close();}catch(_){} ws=null; startVoice(s); } };
-  ws.onclose=()=>{ if(opened && live) stopLive(); };
+  ws.onclose=(e)=>{
+    if(e&&e.code===4401){ stopLive(); showLogin(); return; }        // auth required
+    if(e&&e.code===4403){ stopLive(); showDeviceBlocked(); return; } // device blocked
+    if(opened && live) stopLive(); };
 }
 function beginLiveCapture(){
   lctx=new (window.AudioContext||window.webkitAudioContext)();
@@ -217,5 +344,5 @@ async function stopVoice(manual){
 function downsample(buf, from, to){ if(to>=from) return buf; const r=from/to, nl=Math.round(buf.length/r), out=new Float32Array(nl);
   for(let i=0;i<nl;i++){ const idx=i*r, i0=Math.floor(idx), i1=Math.min(i0+1,buf.length-1), fr=idx-i0; out[i]=buf[i0]*(1-fr)+buf[i1]*fr; } return out; }
 
-refresh(); setInterval(refresh,5000);
+loadAgent().then(refresh); setInterval(refresh,5000);
 </script></body></html>
