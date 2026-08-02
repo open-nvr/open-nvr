@@ -91,7 +91,11 @@ say "Profile: camera-agent-lite (Ctrl-C is safe; containers run detached)"
 
 echo
 ok "camera-agent-lite is starting."
-printf "  Open ${GREEN}http://localhost:9101/demo${NC} and type — or tap the mic and speak.\n"
+printf "  Open ${GREEN}https://localhost:9101/demo${NC} and type — or tap the mic and speak.\n"
+say "Also reachable from other LAN devices at https://<this-host-ip>:9101/demo."
+say "First visit: accept the one-time self-signed-certificate warning, then"
+say "sign in with your OpenNVR account (the agent follows OpenNVR's device"
+say "firewall too — approve new browsers under Settings → Firewall)."
 echo
 say "First boot: the adapters download ~4.3 GB of models into their volumes"
 say "and warm up — give it a few minutes. Later boots skip the download."

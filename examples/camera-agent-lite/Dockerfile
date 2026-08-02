@@ -58,8 +58,11 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 9101
 
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 --start-period=60s \
-    CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:9101/api/status', timeout=2).status_code==200 else 1)"
+# /health is the open, content-free liveness endpoint (/api/status is auth-
+# gated). uvicorn serves exactly one protocol, so probe https first (the
+# compose deployment serves TLS) and fall back to plain http (bare runs).
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
+    CMD ["python", "-c", "import httpx, sys\ndef g(u):\n    return httpx.get(u, timeout=2, verify=False).status_code == 200\nok = False\ntry:\n    ok = g('https://127.0.0.1:9101/health')\nexcept Exception:\n    try:\n        ok = g('http://127.0.0.1:9101/health')\n    except Exception:\n        pass\nsys.exit(0 if ok else 1)"]
 
 ENTRYPOINT ["python", "camera_agent.py"]
 CMD ["--config", "config.yml"]

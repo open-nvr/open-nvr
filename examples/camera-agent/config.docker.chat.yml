@@ -56,6 +56,10 @@ opennvr_api_url: http://opennvr-core:8000
 # throwaway demo only.
 auth_mode: opennvr
 
+# TLS: self-signed pair from camera-agent-certs-init (see config.docker.yml).
+tls_certfile: /certs/server.crt
+tls_keyfile: /certs/server.key
+
 nats_inference_url: nats://nats:4222
 nats_inference_token: ${INTERNAL_API_KEY}
 

@@ -25,12 +25,18 @@ USERS = {
 class _FakeAuth:
     def __init__(self):
         self.me_calls = 0
+        self.device_calls = 0
+        self.device_ok = True   # device firewall allows by default
 
     async def me(self, token):
         self.me_calls += 1
         return USERS.get(token)
 
-    async def login(self, username, password, totp_code=None):
+    async def device_allowed(self, device_token):
+        self.device_calls += 1
+        return self.device_ok
+
+    async def login(self, username, password, totp_code=None, **kw):
         if (username, password) == ("admin", "pw"):
             return 200, {"access_token": "tok-admin", "refresh_token": "r1",
                          "token_type": "bearer"}

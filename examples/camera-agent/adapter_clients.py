@@ -744,26 +744,43 @@ class OpennvrAuthClient(_ReusableClientMixin):
 
     def __init__(self, *, base_url: str, ttl_seconds: float = 60.0,
                  timeout_seconds: float = 5.0) -> None:
-        self._base = f"{base_url.rstrip('/')}/api/v1/auth"
+        self._root = base_url.rstrip("/")
+        self._base = f"{self._root}/api/v1/auth"
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
         # token -> (checked_at_monotonic, user_payload_or_None)
         self._cache: dict[str, tuple[float, dict | None]] = {}
         self._cache_max = 256   # bound: distinct tokens seen per TTL window
+        # device_token -> (checked_at_monotonic, allowed, negative_ttl_used)
+        self._device_cache: dict[str, tuple[float, bool, float]] = {}
+        self._device_fail_ttl = 10.0   # short: enforcement resumes fast after a blip
 
     async def login(self, username: str, password: str,
-                    totp_code: str | None = None) -> tuple[int, dict]:
+                    totp_code: str | None = None, *,
+                    device_token: str | None = None,
+                    user_agent: str | None = None) -> tuple[int, dict]:
         """Proxy a login. Returns (status_code, response_json) verbatim —
         the caller relays both, so setup-required / MFA / bad-credential
-        semantics stay exactly the server's."""
+        semantics stay exactly the server's.
+
+        ``device_token``/``user_agent`` are forwarded as headers so the
+        server's device firewall re-recognises this browser instead of
+        minting a fresh device row per login, and the admin's device list
+        shows the real browser UA rather than python-httpx."""
         body: dict = {"username": username, "password": password}
         if totp_code:
             # OpenNVR's UserLogin schema names the MFA field ``code`` (see
             # server/schemas.py). Sending ``totp_code`` was silently dropped by
             # Pydantic, so the server saw no code → "Invalid or missing MFA code".
             body["code"] = totp_code
+        headers: dict = {}
+        if device_token:
+            headers["x-device-token"] = device_token
+        if user_agent:
+            headers["user-agent"] = user_agent
         try:
-            resp = await self._client().post(f"{self._base}/login-json", json=body)
+            resp = await self._client().post(f"{self._base}/login-json", json=body,
+                                             headers=headers)
             try:
                 data = resp.json()
             except Exception:
@@ -809,6 +826,47 @@ class OpennvrAuthClient(_ReusableClientMixin):
             self._cache.clear()   # crude but bounded; refills within a TTL
         self._cache[token] = (now, user)
         return user
+
+    async def device_allowed(self, device_token: str | None) -> bool:
+        """True iff the server's device firewall permits this browser.
+
+        Calls the open endpoint ``GET /api/v1/device-firewall/status``
+        forwarding the browser's device token (minted at login, relayed by
+        the demo page as ``X-Device-Token``). Allowed when enforcement is
+        off, or when this device's status is ``approved`` — exact parity
+        with the server's own middleware semantics. A caller with no token
+        while enforcement is on is denied; the recovery path is
+        ``/auth/login`` (open), which enrolls the device and returns a
+        fresh token.
+
+        FAIL-OPEN on transport errors, deliberately: the server treats
+        enforcement-state read errors as "off" too, and when the server is
+        down ``me()`` fails as well, so the bearer gate still 401s — the
+        firewall check failing open never admits an unauthenticated caller.
+        Failure results are cached for only ``_device_fail_ttl`` seconds so
+        enforcement resumes quickly after a server blip."""
+        key = device_token or ""
+        now = time.monotonic()
+        hit = self._device_cache.get(key)
+        if hit is not None and now - hit[0] < hit[2]:
+            return hit[1]
+        allowed = True
+        ttl = self._ttl
+        try:
+            headers = {"x-device-token": device_token} if device_token else {}
+            resp = await self._client().get(
+                f"{self._root}/api/v1/device-firewall/status", headers=headers)
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("enforcement_active"):
+                allowed = data.get("status") == "approved"
+        except Exception as exc:
+            logger.warning("auth: device-firewall status check failed "
+                           "(failing open): %s", exc)
+            ttl = self._device_fail_ttl
+        if len(self._device_cache) >= self._cache_max:
+            self._device_cache.clear()
+        self._device_cache[key] = (now, allowed, ttl)
+        return allowed
 
 
 class OpennvrRecordingsClient(_ReusableClientMixin):

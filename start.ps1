@@ -325,8 +325,17 @@ function Show-RunningInfo {
     Write-Color "  Web UI (HTTPS) → https://localhost/" Cyan
     Write-Color "  Web UI (LAN)   → https://<this-host-ip>/" Cyan
     Write-Color "  API Docs       → http://localhost:8000/docs" Cyan
-    if ((Get-EnvVar "OPENNVR_EXAMPLE") -eq 'camera-agent') {
-        Write-Color "  Camera Agent   → http://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan
+    # If an agent example is active, surface its demo URL(s) too. The agents
+    # serve their own https on the LAN (sign in with your OpenNVR account).
+    $exProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
+    $example = Get-EnvVar "OPENNVR_EXAMPLE"
+    if ($exProfile -in @('camera-agent', 'camera-agent-chat') -or $example -eq 'camera-agent') {
+        Write-Color "  Camera Agent   → https://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan
+        Write-Color "  Camera Agent (LAN) → https://<this-host-ip>:9100/demo  (OpenNVR login)" Cyan
+    }
+    if ($exProfile -eq 'camera-agent-lite' -or $example -eq 'camera-agent-lite') {
+        Write-Color "  Camera Agent Lite → https://localhost:9101/demo  (ask your cameras - chat or voice)" Cyan
+        Write-Color "  Camera Agent Lite (LAN) → https://<this-host-ip>:9101/demo  (OpenNVR login)" Cyan
     }
     Write-Color "  First-time setup page opens automatically on first visit." DarkGray
 }

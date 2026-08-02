@@ -62,6 +62,21 @@ stt_language: en
 # Below this routing confidence the agent falls back to the LLM for intent.
 routing_min_confidence: 0.6
 
+# ── Auth (camera-agent parity) ──────────────────────────────────────
+# "none" (default) = open loopback demo — fine ONLY on 127.0.0.1.
+# "opennvr" = every data endpoint needs an OpenNVR login (any role), and
+# the browser must pass OpenNVR's device firewall when it's enforced.
+# The agent never mints tokens: /auth/login|refresh proxy to the server.
+# auth_mode: opennvr
+# opennvr_api_url: http://127.0.0.1:8000
+
+# ── TLS (LAN exposure) ──────────────────────────────────────────────
+# Both set → the agent serves https directly (required for the demo mic
+# from other devices; getUserMedia needs a secure origin). The compose
+# overlay generates + mounts a self-signed pair automatically.
+# tls_certfile: /certs/server.crt
+# tls_keyfile: /certs/server.key
+
 # ── Server ──────────────────────────────────────────────────────────
 agent_name: Camera Agent Lite
 listen_host: 127.0.0.1
