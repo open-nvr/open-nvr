@@ -14,6 +14,9 @@ Env:
   INTERNAL_API_KEY          shared secret for opennvr-core's internal endpoint
                             (the same INTERNAL_API_KEY the deployment already uses)
   NATS_URL                  e.g. nats://nats:4222 (best-effort; down != fatal)
+  NATS_TOKEN                bus auth token; defaults to INTERNAL_API_KEY (the
+                            compose broker runs with --auth $INTERNAL_API_KEY)
+  DETECT_CV_THREADS         cv2 intra-op thread cap (default 2; 0 = uncapped)
   DETECT_DETECTOR           onnx | hog | blob | stub (default onnx)
   DETECT_ONNX_BACKEND       cvdnn (default, zero-dep CPU) | ort (ONNX Runtime)
   DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.

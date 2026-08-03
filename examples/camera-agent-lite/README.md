@@ -32,6 +32,13 @@ examples/camera-agent-lite/quickstart.sh          # start (open https://localhos
 examples/camera-agent-lite/quickstart.sh --down   # stop
 ```
 
+> **Tier-0 detect-pipeline is not started by the lite quickstart.** The lite
+> models (llamacpp, smolvlm, whispercpp, piper) are fully CPU-bound, and
+> co-running the always-on detector starves them (slow, degraded answers). On
+> hardware with cores to spare, run both explicitly:
+> `docker compose --profile tier0 -f docker-compose.yml -f docker-compose.camera-agent-lite.yml up -d`
+> — the detector's `DETECT_CV_THREADS` cap (default 2) keeps it polite.
+
 The four adapter images are pulled from GHCR
 (`ghcr.io/open-nvr/{llamacpp,whispercpp,pipertts,smolvlm}-adapter`,
 published by ai-adapter's `publish-images` workflow). **Models are not baked
