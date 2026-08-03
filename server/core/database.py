@@ -76,8 +76,13 @@ def run_alembic_migrations():
             )
             return
 
-        # Create Alembic config
+        # Create Alembic config. alembic.ini's script_location is relative
+        # ("migrations"); the backend does NOT run from the server dir, so pin it
+        # to an absolute path or stamp/upgrade fail with "Path doesn't exist".
         alembic_cfg = Config(str(alembic_ini_path))
+        alembic_cfg.set_main_option(
+            "script_location", str(server_dir / "migrations")
+        )
 
         # Fast check: See if migrations are needed before running
         # This prevents hanging on command.upgrade() when DB is already up-to-date
@@ -130,11 +135,122 @@ def run_alembic_migrations():
         # This is important for development environments
 
 
-def init_db():
-    """Initialize database tables."""
-    # Run Alembic migrations first (handles schema changes)
-    run_alembic_migrations()
+def _make_alembic_config():
+    """Return the Alembic Config with an ABSOLUTE migrations path, or None if
+    alembic.ini isn't present.
 
-    # Then create any missing tables (fallback for fresh databases)
-    # This acts as a safety net if alembic fails, ensuring app can at least start
-    Base.metadata.create_all(bind=engine)
+    Pinning script_location is essential: alembic.ini ships a relative
+    ``script_location = migrations``, and the backend process does not run from
+    the server directory — so ``command.stamp``/``upgrade`` fail with
+    "Path doesn't exist: migrations" unless we resolve it to an absolute path.
+    """
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    server_dir = Path(__file__).parent.parent
+    ini = server_dir / "alembic.ini"
+    if not ini.exists():
+        main_logger.warning(
+            "alembic.ini not found at %s; schema managed by create_all only", ini
+        )
+        return None
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(server_dir / "migrations"))
+    return cfg
+
+
+def _alembic_is_initialized() -> bool:
+    """True if the DB has an ``alembic_version`` table (is Alembic-managed)."""
+    from sqlalchemy import inspect
+
+    try:
+        return inspect(engine).has_table("alembic_version")
+    except Exception as e:
+        main_logger.warning("Could not inspect DB for alembic_version: %s", e)
+        return False
+
+
+def _backfill_additive_columns() -> None:
+    """Add columns the models declare but existing tables are missing.
+
+    ``create_all`` only creates missing *tables*, never adds *columns* to tables
+    that already exist — so a DB first built by ``create_all`` at an older code
+    version never gains new columns on an image upgrade (which is exactly how a
+    stock deployment ends up missing e.g. ``cameras.control_scheme``). This
+    reconciles that for additive columns that are nullable or have a server
+    default — the only kind that can be added safely to a populated table, and
+    the kind OpenNVR's migrations add. It only ever ADDs columns; it never drops
+    or alters. Anything that needs more (NOT NULL without default, renames, data
+    backfills, indexes) is left for a real migration once the DB is baselined.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue
+        existing = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            if not (col.nullable or col.server_default is not None):
+                main_logger.warning(
+                    "Column %s.%s is missing and NOT NULL without a default; "
+                    "it needs a real migration to add safely.",
+                    table.name,
+                    col.name,
+                )
+                continue
+            try:
+                coltype = col.type.compile(dialect=engine.dialect)
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f'ALTER TABLE "{table.name}" '
+                            f'ADD COLUMN "{col.name}" {coltype}'
+                        )
+                    )
+                main_logger.info(
+                    "Backfilled missing column %s.%s (%s)", table.name, col.name, coltype
+                )
+            except Exception as e:
+                main_logger.error(
+                    "Could not backfill column %s.%s: %s", table.name, col.name, e
+                )
+
+
+def init_db():
+    """Ensure the schema is current AND Alembic-managed — self-healing across
+    both create_all-bootstrapped and Alembic-managed databases.
+
+    * Alembic-managed DB  -> apply pending migrations (then create_all as a net).
+    * create_all/fresh DB -> create tables, backfill any additive columns
+      create_all can't add, then *stamp head* so every FUTURE image upgrade
+      auto-applies its migrations (the missing piece that made upgrades silently
+      skip schema changes).
+    """
+    cfg = _make_alembic_config()
+
+    # Path 1: already Alembic-managed — migrations first (they may create tables/
+    # columns), then create_all only as a safety net for brand-new tables.
+    if cfg is not None and _alembic_is_initialized():
+        run_alembic_migrations()
+        Base.metadata.create_all(bind=engine)
+        return
+
+    # Path 2: not Alembic-managed (stock create_all deployment, or a fresh DB).
+    Base.metadata.create_all(bind=engine)  # fresh DB gets the full current schema
+    if cfg is None:
+        return
+    try:
+        _backfill_additive_columns()  # add columns older tables are missing
+        from alembic import command
+
+        command.stamp(cfg, "head")  # hand the DB to Alembic for the future
+        main_logger.info(
+            "Baselined Alembic at head — future image upgrades will auto-migrate."
+        )
+    except Exception as e:
+        main_logger.error("Alembic baseline/backfill failed: %s", e, exc_info=True)
+        # Never block startup on schema tooling.

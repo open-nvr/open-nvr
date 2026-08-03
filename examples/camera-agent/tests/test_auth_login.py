@@ -21,9 +21,10 @@ class _Resp:
 
 def _client_capturing(captured):
     class _C:
-        async def post(self, url, json=None):
+        async def post(self, url, json=None, headers=None):
             captured["url"] = url
             captured["body"] = json
+            captured["headers"] = headers or {}
             return _Resp()
     return _C()
 
@@ -83,8 +84,9 @@ def _stub_server(seen):
     """Mimics OpenNVR's /login-json exactly: MFA must arrive as ``code``.
     ``totp_code`` (the old bug) is ignored → the real 401 body."""
     class _Srv:
-        async def post(self, url, json=None):
+        async def post(self, url, json=None, headers=None):
             seen["body"] = json
+            seen["headers"] = headers or {}
             if url.endswith("/login-json"):
                 ok = (json.get("username") == "admin"
                       and json.get("password") == "pw"

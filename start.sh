@@ -711,10 +711,22 @@ print_access_urls() {
     fi
     echo -e "  Web UI (local)  → ${CYAN}https://localhost/${NC}"
     echo -e "  API Docs        → ${CYAN}https://localhost/docs${NC}"
-    # If the camera-agent example is active, surface its demo UI too.
-    if [ "$(get_env_var OPENNVR_EXAMPLE 2>/dev/null)" = "camera-agent" ]; then
-        echo -e "  Camera Agent    → ${CYAN}http://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
-    fi
+    # If an agent example is active, surface its demo URL(s) too. The agents
+    # serve their own https on the LAN (sign in with your OpenNVR account).
+    _ex_profile="$(get_env_var OPENNVR_EXAMPLE_PROFILE 2>/dev/null)"
+    _ex="$(get_env_var OPENNVR_EXAMPLE 2>/dev/null)"
+    case "${_ex_profile}:${_ex}" in
+        camera-agent:*|camera-agent-chat:*|*:camera-agent)
+            echo -e "  Camera Agent    → ${CYAN}https://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
+            echo -e "  Camera Agent (LAN) → ${CYAN}https://<server-ip>:9100/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
+            ;;
+    esac
+    case "${_ex_profile}:${_ex}" in
+        camera-agent-lite:*|*:camera-agent-lite)
+            echo -e "  Camera Agent Lite → ${CYAN}https://localhost:9101/demo${NC}  ${GRAY}(ask your cameras — chat or voice)${NC}"
+            echo -e "  Camera Agent Lite (LAN) → ${CYAN}https://<server-ip>:9101/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
+            ;;
+    esac
     echo ""
     echo -e "  ${YELLOW}First visit:${NC} the browser will warn about a self-signed"
     echo -e "  certificate. Click ${WHITE}Advanced → Accept the risk${NC}. The cert is"

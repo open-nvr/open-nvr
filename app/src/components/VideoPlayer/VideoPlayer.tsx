@@ -24,6 +24,7 @@ import {
   useImperativeHandle,
   useCallback,
 } from 'react'
+import { apiService } from '../../lib/apiService'
 import Hls from 'hls.js'
 import { VideoControls } from './VideoControls'
 import { AlertCircle } from 'lucide-react'
@@ -220,8 +221,32 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       setError(null)
 
       try {
+        // ICE servers come from Settings > More Settings > WebRTC. Falling back
+        // to a public STUN keeps playback working if that read fails, but a
+        // deployment with TURN configured needs the server's list to traverse
+        // NAT at all — so this must not stay hardcoded.
+        let iceServers: RTCIceServer[] = [
+          { urls: ['stun:stun.l.google.com:19302'] },
+        ]
+        let policy: RTCIceTransportPolicy | undefined
+        let poolSize: number | undefined
+        try {
+          const { data } = await apiService.getWebRTCClientConfig()
+          if (Array.isArray(data?.iceServers) && data.iceServers.length) {
+            iceServers = data.iceServers
+          }
+          if (data?.iceTransportPolicy) policy = data.iceTransportPolicy
+          if (typeof data?.iceCandidatePoolSize === 'number') {
+            poolSize = data.iceCandidatePoolSize
+          }
+        } catch {
+          // keep the fallback
+        }
+
         const pc = new RTCPeerConnection({
-          iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
+          iceServers,
+          ...(policy ? { iceTransportPolicy: policy } : {}),
+          ...(poolSize !== undefined ? { iceCandidatePoolSize: poolSize } : {}),
         })
         pcRef.current = pc
 

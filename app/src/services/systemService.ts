@@ -98,4 +98,17 @@ export const systemService = {
   // AI
   checkKaiCHealth: () => api.get('/api/v1/ai-models/health'),
   getCapabilities: () => api.get('/api/v1/ai-models/capabilities'),
+
+  // Device firewall (app-layer access control)
+  listTrustedDevices: () => api.get('/api/v1/device-firewall/devices'),
+  setFirewallEnforcement: (active: boolean) =>
+    api.put('/api/v1/device-firewall/enforcement', { active }),
+  // Devices are addressed by their row id: identity is the server-issued device
+  // cookie, and many browsers share one IP behind NAT.
+  approveDevice: (id: number, label?: string) =>
+    api.post(`/api/v1/device-firewall/devices/${id}/approve`, { label }),
+  blockDevice: (id: number) =>
+    api.post(`/api/v1/device-firewall/devices/${id}/block`),
+  deleteDevice: (id: number) =>
+    api.delete(`/api/v1/device-firewall/devices/${id}`),
 }

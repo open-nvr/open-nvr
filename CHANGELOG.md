@@ -6,6 +6,99 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-31
+
+### Added
+
+- **Multi-vendor camera configuration console.** View and change camera
+  settings straight from the OpenNVR UI instead of each camera's own web
+  page. Vendor drivers (ONVIF, Hikvision, Dahua, CP Plus) are picked
+  automatically by probing the camera; the native CGI driver covers 24
+  image settings plus smart features, events, and services. Device
+  settings live in their own section (out of the camera tab) with a
+  camera picker, capability tabs, and an IP allowlist. A "Camera web
+  page" link opens the camera's own UI for anything a driver doesn't
+  cover yet.
+- **Universal camera discovery.** Discovery now finds cameras however
+  they're configured: probes the common ONVIF ports (8000 / 8080 / 8088 /
+  2020 / 8899) instead of just 80, works over both http and https
+  (including cameras that force HTTPS), TCP-prechecks the subnet so a
+  busy /24 scan doesn't miss slow cameras, auto-resolves and remembers
+  each camera's control port, and extracts deep ONVIF capabilities (OSD,
+  motion, smart features, events, users, storage, reboot) for any brand.
+  New native driver for Xiongmai-based cameras — the board inside many
+  budget and OEM brands.
+- **H.265 (HEVC) recordings play in the browser.** Recordings from H.265
+  cameras are remuxed on the fly to a browser-playable MP4 — pure
+  Python, no ffmpeg. Seeking uses HTTP Range reads inside the already-
+  loaded file, so scrubbing doesn't re-download anything, and the whole
+  file's timeline is seekable. The remux is cache-free with growth caps
+  so it can't fill the disk. A file that is still being recorded now
+  plays up to its last minute instead of being unavailable until the
+  camera finishes writing it.
+- **Device firewall with trust-on-first-use.** A browser or device must
+  be approved once before it can use the app. Identity is a hashed,
+  server-issued token (sent as a request header), so two devices behind
+  the same NAT router don't inherit each other's approval and approvals
+  survive logout.
+- **camera-agent-lite example.** The camera-agent voice + chat demo
+  rebuilt on fully local llama.cpp / whisper.cpp / Piper / SmolVLM
+  adapters — no Ollama and no `.env` editing; adapter config derives
+  from `INTERNAL_API_KEY`; demo on port 9101. The compose overlay is
+  pull-only from GHCR, with image versions pinned via `ADAPTER_TAG` and
+  `CORE_TAG` in `.env`.
+- **Agent demos reachable from the LAN, behind login.** Both camera-agent
+  demos are now published on the LAN over HTTPS with self-signed agent
+  certificates, gated by the OpenNVR login and the device firewall. The
+  start banner prints the agent demo URLs whenever an agent profile is
+  active.
+- **Small-LLM hardening for the camera agent.** Camera names are resolved
+  even when speech-to-text mangles them, the agent no longer emits
+  tool-speak or "please wait" dead-ends, and conversations keep a
+  rolling chat history. The demo mic works over plain HTTP first.
+
+### Changed
+
+- Settings are reorganized into **Camera** and **NVR** scopes; the dead
+  "General" section is gone. WebRTC settings (STUN / TURN / transport
+  policy) are now actually wired through to MediaMTX.
+- Device-setting writes are RBAC-gated — viewers can look, only
+  operators/admins can change.
+- Clicking a recording that is still being written routes to Live View
+  instead of a player that could never reach the end.
+- CI publishes `camera-agent` and `camera-agent-lite` images to GHCR.
+
+### Fixed
+
+- **Image upgrades no longer strand the database.** On boot the server
+  backfills newly added columns and stamps the Alembic migration head,
+  so a container upgraded from an older image migrates itself — no
+  manual `alembic upgrade` needed. The Alembic script path is pinned
+  absolute so this works from inside the container.
+- HEVC playback no longer flickers or loops at the end of a recording.
+- The login overlay could get stuck on screen after signing in
+  (a CSS `display:flex` rule beat the `[hidden]` attribute).
+- The device firewall no longer locks out every browser — the device
+  token is sent as a header rather than a cookie.
+- The device-settings camera picker read the camera list from the wrong
+  response field and showed nothing.
+- Removed an orphaned settings model that broke pytest test collection.
+
+### Security
+
+- Proxy-header trust (`X-Forwarded-For` / internal CIDRs) is narrowed to
+  the pinned Docker subnet, so a spoofed header from the LAN can't
+  impersonate an internal service.
+- Agent demo pages require an OpenNVR login and an approved device —
+  they are never exposed unauthenticated.
+
+### Documentation
+
+- README: animated hero demo of the camera agent answering questions
+  about real CCTV footage with live detections; opening section
+  rewritten so searches for ONVIF / RTSP / self-hosted NVR / object
+  detection actually find the project.
+
 ## [0.1.0] — 2026-07-14
 
 First public release. The architecture has been redesigned around three
@@ -1548,5 +1641,6 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/open-nvr/open-nvr/releases/tag/v0.1.0

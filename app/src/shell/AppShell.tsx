@@ -17,6 +17,7 @@
  */
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
+import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
 import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
@@ -261,6 +262,7 @@ export function AppShell() {
           </ErrorBoundary>
         </main>
       </div>
+      <DeviceBlockedOverlay />
     </div>
   )
 }

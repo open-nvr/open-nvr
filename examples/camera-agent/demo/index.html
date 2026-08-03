@@ -699,6 +699,10 @@
     let _authMode="none";
     let _token=sessionStorage.getItem("agent_token")||"";
     let _refreshTok=sessionStorage.getItem("agent_refresh")||"";
+    // Device identity for OpenNVR's device firewall (Settings → Firewall).
+    // localStorage, NOT sessionStorage: the device row must survive tabs, or
+    // every new tab enrolls another pending device in the admin's list.
+    let _device=localStorage.getItem("agent_device_token")||"";
     const _rawFetch=window.fetch.bind(window);
     let _refreshing=null;
     async function _tryRefresh(){
@@ -721,15 +725,36 @@
     window.fetch=async function(url,opts={}){
       const local=typeof url==="string"&&url.startsWith("/")&&!url.startsWith("/auth/");
       const send=()=>{ const o={...opts};
-        if(local&&_token) o.headers={...(o.headers||{}),"Authorization":"Bearer "+_token};
+        if(local){ o.headers={...(o.headers||{})};
+          if(_token) o.headers["Authorization"]="Bearer "+_token;
+          if(_device) o.headers["X-Device-Token"]=_device; }
         return _rawFetch(url,o); };
       let r=await send();
       if(r.status===401&&local&&_authMode==="opennvr"){
         if(await _tryRefresh()) r=await send();
         if(r.status===401) showLogin();
       }
+      if(r.status===403&&local&&_authMode==="opennvr"){
+        try{ const d=await r.clone().json();
+          if(d&&d.error==="device_not_approved") showDeviceBlocked(); }catch{}
+      }
       return r;
     };
+    // Device-firewall denial: this browser is enrolled but not yet approved.
+    // Reuse the login card with different copy; no retry loop — the operator
+    // approves the device in OpenNVR → Settings → Firewall, then reloads.
+    let _devBlockShown=false;
+    function showDeviceBlocked(){
+      if(_devBlockShown) return; _devBlockShown=true;
+      const ov=$("loginOverlay"); if(!ov) return;
+      ov.hidden=false;
+      const card=ov.firstElementChild||ov;
+      card.innerHTML='<div style="font-weight:600;margin-bottom:8px">This browser is awaiting approval</div>'+
+        '<div style="font-size:13px;line-height:1.5">OpenNVR’s device firewall is on and this browser isn’t approved yet. '+
+        'Ask an admin to approve it under <b>OpenNVR → Settings → Firewall</b>, then reload this page. '+
+        'If you signed in before the firewall existed, sign out and in again so this browser gets a device identity.</div>'+
+        '<button onclick="location.reload()" style="margin-top:12px">Reload</button>';
+    }
     function showLogin(){ const ov=$("loginOverlay"); if(ov&&ov.hidden){ ov.hidden=false; const u=$("loginUser"); if(u) u.focus(); } }
     // True when gated endpoints can be called: auth off, or we hold a token.
     // The rail pollers check this so they don't spam 401s behind the login.
@@ -751,12 +776,18 @@
         const body={username:$("loginUser").value.trim(),password:$("loginPass").value};
         const totp=$("loginTotp").value.trim(); if(totp) body.totp_code=totp;
         if(!body.username||!body.password){ err.textContent="Username and password are required."; err.hidden=false; return; }
-        try{ const r=await _rawFetch("/auth/login",{method:"POST",
-            headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        try{ const hdrs={"Content-Type":"application/json"};
+          // Send our existing device identity so the server re-recognises
+          // this browser instead of minting a new device row per login.
+          if(_device) hdrs["X-Device-Token"]=_device;
+          const r=await _rawFetch("/auth/login",{method:"POST",
+            headers:hdrs,body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
           if(!r.ok||!d.access_token){ err.textContent=errText(d,r.status); err.hidden=false; return; }
           sessionStorage.setItem("agent_token",d.access_token);
           if(d.refresh_token) sessionStorage.setItem("agent_refresh",d.refresh_token);
+          // The server returns device_token only when newly minted.
+          if(d.device_token) localStorage.setItem("agent_device_token",d.device_token);
           location.reload();   // clean re-boot with the token attached
         }catch(e2){ err.textContent="Sign-in failed: "+e2.message; err.hidden=false; }
       }

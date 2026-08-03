@@ -26,6 +26,7 @@ import { usePermissions } from '../hooks/usePermissions'
 import { Unplug } from 'lucide-react'
 import { AddCameraDialog } from './LiveView'
 import { QrScanner } from '../components/QrScanner'
+import { Modal } from '../components/Modal'
 
 type Camera = {
   id: number
@@ -98,6 +99,10 @@ export function Cameras() {
   const [editing, setEditing] = useState<Camera | null>(null)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
+  // Dedicated to the edit form. Previously the Update button was bound to the
+  // shared `loading` flag, which the camera-list effect also sets — a refresh
+  // in flight left the button disabled and looking broken.
+  const [saving, setSaving] = useState(false)
   const [scanQr, setScanQr] = useState(false)
 
   const [form, setForm] = useState<CameraForm>({
@@ -221,7 +226,7 @@ export function Cameras() {
     e.preventDefault()
     if (!editing) return
     try {
-      setLoading(true)
+      setSaving(true)
       const payload: any = {
         name: form.name,
         description: form.description || null,
@@ -246,7 +251,7 @@ export function Cameras() {
     } catch (e: any) {
       showError(e?.data?.detail || e?.message || 'Failed to update camera')
     } finally {
-      setLoading(false)
+      setSaving(false)
     }
   }
 
@@ -600,52 +605,60 @@ export function Cameras() {
 
       {/* Edit Camera Dialog */}
       {canManageCameras && showEditDialog && editing && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Edit Camera: {editing.name}</h3>
-            <form onSubmit={onUpdate} className="grid grid-cols-2 gap-3">
+        <Modal
+          open={showEditDialog}
+          title={`Edit camera — ${editing.name}`}
+          onClose={closeEditDialog}
+          widthClassName="w-[640px]"
+        >
+          <form onSubmit={onUpdate} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Name">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+                <input className={EDIT_INPUT} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
               </Field>
-              <Field label="IP Address">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} required />
+              <Field label="IP address">
+                <input className={EDIT_INPUT} value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} required />
               </Field>
               <Field label="Port">
-                <input type="number" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} min={1} max={65535} />
-              </Field>
-              <Field label="RTSP URL">
-                <div className="flex gap-2">
-                  <input className="flex-1 bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
-                  <button type="button" className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded text-xs whitespace-nowrap" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">Scan QR</button>
-                </div>
-              </Field>
-              <Field label="Substream URL">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
+                <input type="number" className={EDIT_INPUT} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} min={1} max={65535} />
               </Field>
               <Field label="Username">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+                <input className={EDIT_INPUT} value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
               </Field>
               <Field label="Password">
-                <input type="password" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Leave blank to keep existing" />
+                <input type="password" className={EDIT_INPUT} value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Leave blank to keep existing" />
               </Field>
               <Field label="Location">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.location || ''} onChange={(e) => setForm({ ...form, location: e.target.value })} />
+                <input className={EDIT_INPUT} value={form.location || ''} onChange={(e) => setForm({ ...form, location: e.target.value })} />
               </Field>
               <Field label="VLAN">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.vlan || ''} onChange={(e) => setForm({ ...form, vlan: e.target.value })} />
+                <input className={EDIT_INPUT} value={form.vlan || ''} onChange={(e) => setForm({ ...form, vlan: e.target.value })} />
               </Field>
               <Field label="Description">
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+                <input className={EDIT_INPUT} value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
               </Field>
-              <label className="flex items-center gap-2 mt-2">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
-              </label>
-              <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={closeEditDialog}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Updating...' : 'Update'}</button>
+            </div>
+
+            <Field label="RTSP URL">
+              <div className="flex gap-2">
+                <input className={`flex-1 ${EDIT_INPUT}`} value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
+                <button type="button" className="px-3 py-2 border border-[var(--border)] bg-[var(--panel-2)] rounded text-xs whitespace-nowrap" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">Scan QR</button>
               </div>
-            </form>
-          </div>
+            </Field>
+            <Field label="Substream URL">
+              <input className={EDIT_INPUT} value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
+            </Field>
+
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
+            </label>
+
+            <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-4">
+              <button type="button" className="px-4 py-2 border border-[var(--border)] bg-[var(--panel-2)] rounded" onClick={closeEditDialog}>Cancel</button>
+              <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded disabled:opacity-60" disabled={saving}>{saving ? 'Updating…' : 'Update camera'}</button>
+            </div>
+          </form>
+
           {scanQr && (
             <QrScanner
               title="Scan the QR from the OpenNVR Cam app"
@@ -653,11 +666,14 @@ export function Cameras() {
               onClose={() => setScanQr(false)}
             />
           )}
-        </div>
+        </Modal>
       )}
     </section>
   )
 }
+
+const EDIT_INPUT =
+  'bg-[var(--panel-2)] border border-[var(--border)] px-3 py-2 rounded text-sm'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

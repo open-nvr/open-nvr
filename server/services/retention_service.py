@@ -125,12 +125,21 @@ class RetentionService:
                 f"protect_flagged={protect_flagged}, min_free_space_gb={min_free_space_gb}"
             )
 
+            # Bounded-growth housekeeping (camera events, device registry,
+            # remux cache) runs regardless of the recording retention policy.
+            aux = RetentionService.cleanup_auxiliary(db, retention_days)
+
             # If retention_days is 0, keep all recordings (unless min_free_space is triggered)
             if retention_days == 0 and not min_free_space_gb:
                 recording_logger.info(
                     "Retention policy: Keep all recordings indefinitely"
                 )
-                return {"deleted_files": 0, "deleted_records": 0, "freed_space_mb": 0}
+                return {
+                    "deleted_files": 0,
+                    "deleted_records": 0,
+                    "freed_space_mb": 0,
+                    **aux,
+                }
 
             # Get recordings base path
             base_path = Path(get_effective_recordings_base_path(db))
@@ -183,6 +192,7 @@ class RetentionService:
                     stats["deleted_records"] += stats_space["deleted_records"]
                     stats["freed_space_mb"] += stats_space["freed_space_mb"]
 
+            stats.update(aux)
             recording_logger.info(f"Retention cleanup completed: {stats}")
             return stats
 
@@ -199,6 +209,96 @@ class RetentionService:
         finally:
             if close_db:
                 db.close()
+
+    # Growth caps for auxiliary stores. Age applies first; the row caps are a
+    # backstop against event/scanner storms inside the retention window.
+    CAMERA_EVENTS_MAX_ROWS = 200_000
+    CAMERA_EVENTS_FALLBACK_DAYS = 90  # used when recordings are kept forever
+    PENDING_DEVICE_MAX_AGE_DAYS = 30
+
+    @staticmethod
+    def cleanup_auxiliary(db: Session, retention_days: int) -> dict[str, Any]:
+        """Prune the unbounded-growth side stores (best-effort, never raises).
+
+        - ``camera_events``: drop rows older than the recording retention window
+          (or ``CAMERA_EVENTS_FALLBACK_DAYS`` when recordings are kept forever),
+          then enforce a hard row cap.
+        - ``trusted_devices``: drop *pending* rows not seen for
+          ``PENDING_DEVICE_MAX_AGE_DAYS`` (approved/blocked rows are kept —
+          they encode admin decisions).
+        - legacy ``.hevc_cache`` dir: removed entirely (H.265 remuxes are now
+          served virtually from an in-RAM index — nothing is cached on disk).
+        """
+        stats: dict[str, Any] = {
+            "deleted_camera_events": 0,
+            "deleted_pending_devices": 0,
+            "hevc_cache_removed": 0,
+        }
+        from models import CameraEvent, DeviceStatus, TrustedDevice
+
+        try:
+            days = retention_days if retention_days > 0 else (
+                RetentionService.CAMERA_EVENTS_FALLBACK_DAYS
+            )
+            cutoff = datetime.now(UTC) - timedelta(days=days)
+            n = (
+                db.query(CameraEvent)
+                .filter(CameraEvent.created_at < cutoff)
+                .delete(synchronize_session=False)
+            )
+            # Hard cap: keep only the newest CAMERA_EVENTS_MAX_ROWS rows.
+            total = db.query(CameraEvent).count()
+            over = total - RetentionService.CAMERA_EVENTS_MAX_ROWS
+            if over > 0:
+                cap_id = (
+                    db.query(CameraEvent.id)
+                    .order_by(CameraEvent.id.desc())
+                    .offset(RetentionService.CAMERA_EVENTS_MAX_ROWS)
+                    .limit(1)
+                    .scalar()
+                )
+                if cap_id is not None:
+                    n += (
+                        db.query(CameraEvent)
+                        .filter(CameraEvent.id <= cap_id)
+                        .delete(synchronize_session=False)
+                    )
+            db.commit()
+            stats["deleted_camera_events"] = n
+        except Exception as e:
+            db.rollback()
+            recording_logger.warning(f"camera_events prune failed: {e}")
+
+        try:
+            cutoff = datetime.now(UTC) - timedelta(
+                days=RetentionService.PENDING_DEVICE_MAX_AGE_DAYS
+            )
+            n = (
+                db.query(TrustedDevice)
+                .filter(
+                    TrustedDevice.status == DeviceStatus.pending,
+                    TrustedDevice.last_seen < cutoff,
+                )
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+            stats["deleted_pending_devices"] = n
+        except Exception as e:
+            db.rollback()
+            recording_logger.warning(f"trusted_devices prune failed: {e}")
+
+        try:
+            legacy = Path(get_effective_recordings_base_path(db)) / ".hevc_cache"
+            if legacy.is_dir():
+                shutil.rmtree(legacy, ignore_errors=True)
+                stats["hevc_cache_removed"] = 1
+                recording_logger.info(
+                    "Removed legacy .hevc_cache dir (remux is now cache-free)"
+                )
+        except Exception as e:
+            recording_logger.warning(f"legacy hevc cache removal failed: {e}")
+
+        return stats
 
     @staticmethod
     def _cleanup_by_age(

@@ -50,6 +50,8 @@ on:
       - "kai-c/**"
       - "app/**"
       - "docker-entrypoint.sh"
+      - "examples/camera-agent/**"
+      - "examples/camera-agent-lite/**"
       - "supervisord.conf"
       - ".github/workflows/publish-images.yml"
   workflow_dispatch:
@@ -240,3 +242,71 @@ jobs:
           done
           echo "::error::opennvr-core never reached /health within 3 minutes." >&2
           exit 1
+
+  # ------------------------------------------------------------------
+  # Example agent apps (work item C + PR #168): the camera-agent and
+  # camera-agent-lite images. Same trigger/tag policy as opennvr-core:
+  # every branch push publishes :<branch> + :sha-<short>; main/release
+  # tags publish :latest. PRs build without pushing.
+  # ------------------------------------------------------------------
+  build-and-push-agents:
+    name: ${{ matrix.agent.image }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One agent failing must not cancel the other's build.
+      fail-fast: false
+      matrix:
+        agent:
+          - { dir: examples/camera-agent,      image: camera-agent }
+          - { dir: examples/camera-agent-lite, image: camera-agent-lite }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/${{ matrix.agent.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Same :latest policy as opennvr-core — tracks main + release tags.
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR ${{ matrix.agent.image }}
+            org.opencontainers.image.description=OpenNVR ${{ matrix.agent.image }} example app (built from ${{ matrix.agent.dir }})
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.vendor=OpenNVR
+            org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/${{ matrix.agent.dir }}/README.md
+
+      - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        uses: docker/build-push-action@v5
+        with:
+          # Repo root context — both Dockerfiles COPY from the repo root
+          # (see the build instructions at the top of each Dockerfile).
+          context: .
+          file: ${{ matrix.agent.dir }}/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.agent.image }}
+          cache-to: type=gha,scope=${{ matrix.agent.image }},mode=max

@@ -1,0 +1,178 @@
+# OpenNVR Camera Agent **Lite** — example app
+
+**Ask your cameras, on a shoestring.** The same "agent grounded in live
+camera feeds via tool calling" pattern as the
+[camera-agent example](../camera-agent/), rebuilt on a deliberately lighter
+stack:
+
+| | camera-agent | camera-agent-lite (this) |
+|---|---|---|
+| LLM runtime | Ollama (`qwen2.5:1.5b`) | **llama.cpp** (Qwen2.5-3B-Instruct GGUF) |
+| STT | faster-whisper adapter | **whisper.cpp** adapter (`base.en`) |
+| TTS | Piper adapter | Piper adapter (same) |
+| Vision | YOLOv8 / BLIP / InsightFace via KAI-C | **SmolVLM2-2.2B** (llama.cpp `--mmproj`) |
+| Voice | Pipecat pipeline at `/ws` + HTTP `/converse` | Same Pipecat pipeline at `/ws` + HTTP `/voice` fallback |
+| Adapter containers | torch-based (YOLO/BLIP/InsightFace/faster-whisper) | all llama.cpp-family + onnx, **torch-free** |
+| Extra services | KAI-C proxy, NATS events | none — agent talks to the 4 adapters directly |
+
+(Pipecat's Silero VAD runs on onnxruntime — no torch — so keeping it costs
+the agent image ~70 MB, not gigabytes. The real weight difference is in the
+adapter containers.)
+
+Everything still runs locally on CPU — no cloud round-trip, no GPU. One demo
+page does both **chat** (type, read) and **voice** (tap the mic and just
+talk — Silero VAD detects your turns, replies stream back as speech).
+
+### Run it
+
+From the repo root:
+
+```bash
+examples/camera-agent-lite/quickstart.sh          # start (open https://localhost:9101/demo)
+examples/camera-agent-lite/quickstart.sh --down   # stop
+```
+
+The four adapter images are pulled from GHCR
+(`ghcr.io/open-nvr/{llamacpp,whispercpp,pipertts,smolvlm}-adapter`,
+published by ai-adapter's `publish-images` workflow). **Models are not baked
+into the images**: each adapter downloads its own weights from HuggingFace on
+first boot into a persisted Docker volume (~4.3 GB across the four) and
+reuses them forever after — the same runtime-download posture as
+camera-agent's whisper adapter and Ollama model pull. Give the first boot a
+few minutes; later boots skip the download. Offline installs pre-populate
+the volumes (or set the adapter's `OPENNVR_*_MODEL_URL=""` to forbid any
+fetch).
+
+### How access works (two different doors)
+
+**Agent → OpenNVR (no tokens, no `.env` in this folder):** camera discovery
+and frames come from OpenNVR's internal camera-agent endpoint
+(`GET /api/v1/internal/camera-agent/cameras`, authenticated with the stack's
+`INTERNAL_API_KEY`), which returns per-camera MediaMTX tap URLs with a signed
+token already embedded. The compose overlay injects that key from the
+repo-root `.env` into a generated `config.yml` — the same flow the
+camera-agent example uses. Frames are grabbed from the tap URL with a
+bounded one-shot `ffmpeg` call; the agent never stores camera credentials.
+
+**Browser → agent (OpenNVR login, LAN-reachable, https):** the Docker
+deployment serves **https on port 9101 on the LAN** (same bind host as
+nginx), with `auth_mode: opennvr` — the demo shows a login card and accepts
+your normal OpenNVR account (any role; lite has no mutating actions). The
+agent mints no credentials: `/auth/login` and `/auth/refresh` are thin
+proxies to the main server, so MFA and revocation stay OpenNVR's job. The
+agent also honours OpenNVR's **device firewall** (Settings → Firewall):
+when enforcement is on, only admin-approved browsers get in — an unapproved
+browser sees an "awaiting approval" card. Note each agent origin enrolls
+its own device row, so a browser may appear more than once in the admin
+list. The self-signed cert (generated into `agent-certs/` on first boot,
+SAN includes your host IP) means the same one-time browser warning as the
+main UI — and https is what makes the mic work from other devices
+(`getUserMedia` requires a secure origin).
+
+## What it does
+
+```
+┌───────────────┐  /ws (streaming voice: raw 16 kHz PCM both ways)
+│  Browser tab  │  /ask (typed chat) · /voice (HTTP voice fallback)
+│  /demo page   │ ────────────────────────────────┐
+└───────────────┘                                 ▼
+                                  ┌────────────────────────────────────┐
+                                  │ FastAPI agent (camera_agent.py)    │
+                                  │  /ws: Pipecat pipeline per session │
+                                  │   Silero VAD → whispercpp STT →    │
+                                  │   router fast-path / llamacpp LLM  │
+                                  │   (5 tools) → pipertts, sentence-  │
+                                  │   streamed                         │
+                                  └───────────────┬────────────────────┘
+                                                  │ look_at_camera →
+                                  ┌───────────────┴────────────────────┐
+                                  │ OpenNVR roster (internal API key)  │
+                                  │  → MediaMTX tap URL → ffmpeg frame │
+                                  │  → smolvlm adapter (vision answer) │
+                                  └────────────────────────────────────┘
+```
+
+The text model never sees pixels. To answer a visual question it calls the
+`look_at_camera` tool, which fetches one frame and runs the VLM — and
+clearly-visual questions ("what's happening on camera two?") skip the LLM
+entirely via a deterministic router, which is both faster and more reliable
+than trusting a 3B model to pick the right tool.
+
+The agent is **strictly conversational**: five tools
+(`look_at_camera`, `list_cameras`, `get_camera_status`, `current_time`,
+`system_status`), no memory, no web access. Recording in OpenNVR is always
+on (24/7, mandatory), so there are deliberately **no recording-control
+tools** — ask it to stop recording and it will tell you it can't.
+
+## Try these
+
+* "What's happening on camera one?"
+* "Is anyone at the door?"
+* "Is camera two online?"
+* "List cameras"
+* "What time is it?"
+
+## Honesty up front
+
+* **The demo mic is turn-based by default.** Tap, speak, it posts the
+  utterance to `/voice` and shows the transcript + spoken reply — the same
+  reliable flow camera-agent's demo uses. The Pipecat streaming pipeline at
+  `/ws` (Silero VAD, sentence-streamed TTS) exists and is reachable with
+  `?live=1` on the demo URL, but it's experimental: turns are audio-only
+  (the raw-PCM protocol carries no transcripts) and server-side turn-end
+  detection is still being tuned. A production streaming UI would use
+  `@pipecat-ai/client-js` + the protobuf serializer.
+* **No barge-in.** Both paths finish their answer before listening again
+  (`allow_interruptions` off on `/ws` — the raw-PCM client can't send
+  proper cancel frames; camera-agent ships the same setting).
+* **Cameras must be enrolled in OpenNVR.** There is no webcam / bring-your-own
+  camera path here (the full camera-agent has one). For camera-less tests, a
+  static `cameras:` list with `file://` or `http(s)://` frame URLs works —
+  see `config.example.yml`.
+* **Temporal questions are best-effort.** "Did someone walk past?" samples the
+  live view three times over ~2 s; there is no historical-frame API.
+* **The overlay is pull-only** — no `build:` stanzas (Compose prefers
+  building over pulling when both exist, which broke machines without an
+  ai-adapter checkout). Developers iterating locally build + tag explicitly:
+  `docker build -f examples/camera-agent-lite/Dockerfile -t
+  ghcr.io/open-nvr/camera-agent-lite:<tag> .` (adapters build from the
+  ai-adapter repo).
+
+## Configure
+
+The quickstart generates its config from [config.docker.yml](config.docker.yml).
+For running the agent directly on the host (development), copy
+[config.example.yml](config.example.yml) to `config.yml` and:
+
+```bash
+cd examples/camera-agent-lite
+uv sync
+uv run python camera_agent.py --config config.yml
+```
+
+Key knobs:
+
+| Field | Default | Effect |
+|---|---|---|
+| `adapter_token` | — | Bearer token for the four adapters (= `INTERNAL_API_KEY`; empty only if adapters run in dev mode). |
+| `llm_url` / `stt_url` / `tts_url` / `vlm_url` | `127.0.0.1:9014/9013/9012/9016` | Where the llamacpp / whispercpp / pipertts / smolvlm adapters live. |
+| `opennvr_cameras_url` + `opennvr_api_key` | — | Auto-discover cameras from OpenNVR (internal endpoint, no user login). |
+| `cameras` | `[]` | Static roster instead: `{camera_id, name, role, frame_url}` with `file://`, `http(s)://`, or `rtsp://` URLs. |
+| `frame_cache_ttl_seconds` | `2.0` | Reuse one camera's frame across tool calls in a single turn. |
+| `llm_max_tokens` | `200` | Keep spoken answers short. |
+| `routing_min_confidence` | `0.6` | Below this the deterministic router defers to the LLM. |
+
+## Tests
+
+```bash
+cd examples/camera-agent-lite
+uv sync --extra dev
+uv run pytest -q      # 98 tests, no models/adapters/hardware needed (mocks)
+```
+
+Tests cover the router (vision vs command vs text, camera-reference
+parsing), tool schema validation and unknown-tool rejection, the tool
+handlers against a static file camera, the camera roster (internal-key auth,
+caching, error surfaces), frame-source scheme dispatch and credential
+redaction, config loading, and the brain's three answer paths (vision
+fast-path, LLM tool loop, deterministic degradation when the LLM is down).
