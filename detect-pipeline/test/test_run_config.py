@@ -138,3 +138,21 @@ def test_build_manager_honours_disabled():
     mgr = build_manager(cfg, EventSink(lambda s, d: None))
     mgr.reconcile()                                # disabled -> no discovery, no workers
     assert mgr.running_ids() == set()
+
+
+# ── NATS connect options (token auth against the compose broker) ────
+
+def test_nats_options_include_token_and_bounded_reconnects():
+    from detect_pipeline.run import _nats_connect_options
+
+    opts = _nats_connect_options("nats://nats:4222", "sekret")
+    assert opts["servers"] == ["nats://nats:4222"]
+    assert opts["token"] == "sekret"
+    assert opts["max_reconnect_attempts"] == 10
+
+
+def test_nats_options_omit_token_when_absent():
+    from detect_pipeline.run import _nats_connect_options
+
+    opts = _nats_connect_options("nats://nats:4222", None)
+    assert "token" not in opts

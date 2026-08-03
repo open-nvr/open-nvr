@@ -239,7 +239,27 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     return manager
 
 
-def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
+def _nats_connect_options(nats_url: str, token: str | None) -> dict:
+    """kwargs for ``nats.connect`` against the compose broker.
+
+    The bus runs with token auth (``--auth $INTERNAL_API_KEY`` in
+    docker-compose) — connecting without the token is an Authorization
+    Violation and the reconnect loop spams the log while every publish is
+    silently dropped. Reuse the same INTERNAL_API_KEY the service already
+    holds for opennvr-core. Bounded reconnects keep a genuinely
+    misconfigured broker from error-looping forever.
+    """
+    opts: dict = {
+        "servers": [nats_url],
+        "name": "opennvr-tier0",
+        "max_reconnect_attempts": 10,
+    }
+    if token:
+        opts["token"] = token
+    return opts
+
+
+def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: no cover - needs a broker
     """Return (publish_fn, close_fn). Best-effort: NATS down never breaks a worker."""
     if not nats_url:
         return (lambda subject, data: None), (lambda: None)
@@ -253,7 +273,9 @@ def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
     def _serve():
         asyncio.set_event_loop(loop)
         try:
-            box["nc"] = loop.run_until_complete(nats.connect(nats_url))
+            box["nc"] = loop.run_until_complete(
+                nats.connect(**_nats_connect_options(nats_url, token))
+            )
             log.info("connected to NATS at %s", nats_url)
         except Exception:
             log.warning("NATS connect failed at %s; publishing disabled", nats_url)
@@ -293,7 +315,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
              cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
 
-    publish, close = _make_publisher(cfg.nats_url)
+    publish, close = _make_publisher(cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key)
     manager = build_manager(cfg, EventSink(publish), gate_sink=GateEventSink(publish))
     log.info("tier0 gate mode=%s", cfg.gate_mode)
     if cfg.metrics_port:
