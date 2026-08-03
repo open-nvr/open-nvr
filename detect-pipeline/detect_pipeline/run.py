@@ -279,8 +279,19 @@ def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
 def main() -> int:  # pragma: no cover - integration entrypoint
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = config_from_env(os.environ)
-    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s)",
-             cfg.enabled, cfg.detector, cfg.hwaccel)
+    # Cap OpenCV's intra-op threads. cv2.dnn defaults to every core, which
+    # starves CPU-bound co-tenants (llama.cpp/whisper.cpp in the lite stack)
+    # far more than it helps a 320px detector. 0 disables the cap.
+    threads = int(os.environ.get("DETECT_CV_THREADS", "2") or 0)
+    if threads > 0:
+        try:
+            import cv2
+
+            cv2.setNumThreads(threads)
+        except Exception:  # cv2 optional (stub/hog detectors)
+            pass
+    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
+             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
 
     publish, close = _make_publisher(cfg.nats_url)
     manager = build_manager(cfg, EventSink(publish), gate_sink=GateEventSink(publish))
