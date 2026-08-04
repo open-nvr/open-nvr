@@ -14,6 +14,9 @@ Env:
   INTERNAL_API_KEY          shared secret for opennvr-core's internal endpoint
                             (the same INTERNAL_API_KEY the deployment already uses)
   NATS_URL                  e.g. nats://nats:4222 (best-effort; down != fatal)
+  NATS_TOKEN                bus auth token; defaults to INTERNAL_API_KEY (the
+                            compose broker runs with --auth $INTERNAL_API_KEY)
+  DETECT_CV_THREADS         cv2 intra-op thread cap (default 2; 0 = uncapped)
   DETECT_DETECTOR           onnx | hog | blob | stub (default onnx)
   DETECT_ONNX_BACKEND       cvdnn (default, zero-dep CPU) | ort (ONNX Runtime)
   DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.
@@ -239,7 +242,27 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     return manager
 
 
-def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
+def _nats_connect_options(nats_url: str, token: str | None) -> dict:
+    """kwargs for ``nats.connect`` against the compose broker.
+
+    The bus runs with token auth (``--auth $INTERNAL_API_KEY`` in
+    docker-compose) — connecting without the token is an Authorization
+    Violation and the reconnect loop spams the log while every publish is
+    silently dropped. Reuse the same INTERNAL_API_KEY the service already
+    holds for opennvr-core. Bounded reconnects keep a genuinely
+    misconfigured broker from error-looping forever.
+    """
+    opts: dict = {
+        "servers": [nats_url],
+        "name": "opennvr-tier0",
+        "max_reconnect_attempts": 10,
+    }
+    if token:
+        opts["token"] = token
+    return opts
+
+
+def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: no cover - needs a broker
     """Return (publish_fn, close_fn). Best-effort: NATS down never breaks a worker."""
     if not nats_url:
         return (lambda subject, data: None), (lambda: None)
@@ -253,7 +276,9 @@ def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
     def _serve():
         asyncio.set_event_loop(loop)
         try:
-            box["nc"] = loop.run_until_complete(nats.connect(nats_url))
+            box["nc"] = loop.run_until_complete(
+                nats.connect(**_nats_connect_options(nats_url, token))
+            )
             log.info("connected to NATS at %s", nats_url)
         except Exception:
             log.warning("NATS connect failed at %s; publishing disabled", nats_url)
@@ -279,10 +304,21 @@ def _make_publisher(nats_url: str | None):  # pragma: no cover - needs a broker
 def main() -> int:  # pragma: no cover - integration entrypoint
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = config_from_env(os.environ)
-    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s)",
-             cfg.enabled, cfg.detector, cfg.hwaccel)
+    # Cap OpenCV's intra-op threads. cv2.dnn defaults to every core, which
+    # starves CPU-bound co-tenants (llama.cpp/whisper.cpp in the lite stack)
+    # far more than it helps a 320px detector. 0 disables the cap.
+    threads = int(os.environ.get("DETECT_CV_THREADS", "2") or 0)
+    if threads > 0:
+        try:
+            import cv2
 
-    publish, close = _make_publisher(cfg.nats_url)
+            cv2.setNumThreads(threads)
+        except Exception:  # cv2 optional (stub/hog detectors)
+            pass
+    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
+             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
+
+    publish, close = _make_publisher(cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key)
     manager = build_manager(cfg, EventSink(publish), gate_sink=GateEventSink(publish))
     log.info("tier0 gate mode=%s", cfg.gate_mode)
     if cfg.metrics_port:

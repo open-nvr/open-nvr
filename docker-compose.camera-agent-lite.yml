@@ -48,6 +48,16 @@
 # ==========================================
 
 services:
+
+  # ── Tier-0 stays opt-in under the lite stack ─────────────────────
+  # The lite family (llamacpp 3B, smolvlm 2.2B, whispercpp, piper) is entirely
+  # CPU-bound; per-camera decode + detection sharing those cores collapses
+  # token throughput (QA: "extremely slow, answers degraded"). Moving the
+  # detect-pipeline behind a profile means the lite quickstart does not start
+  # it; run `docker compose --profile tier0 ...` to have both — with
+  # DETECT_CV_THREADS (default 2) keeping the detector polite.
+  detect-pipeline:
+    profiles: [tier0]
   # ──────────────────────────────────────────────────────────────
   # llama.cpp text LLM adapter — Qwen2.5-3B, tool calling. Downloads the
   # GGUF (~2 GB) into its weights volume on first boot.

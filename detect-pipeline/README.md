@@ -86,7 +86,11 @@ the owner of the single camera connection), runs Tier-0 per camera, and publishe
 detections to the existing `opennvr.inference.tier0.<camera_id>.completed` NATS
 subjects. It changes nothing about ingest, recording, or serving.
 
-**On by default.** Disable without a redeploy:
+**On by default** in the full stack. The camera-agent-lite overlay puts this
+service behind the `tier0` compose profile instead — the lite family is fully
+CPU-bound and co-running an uncapped detector starves it — so the lite
+quickstart does not start Tier-0; add `--profile tier0` to run both.
+Disable without a redeploy:
 
 ```bash
 # .env
@@ -100,13 +104,18 @@ DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static
 DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
 DETECT_GATE_COOLDOWN_S=30         # re-escalate the same track at most once per N seconds
 DETECT_METRICS_PORT=9109          # Prometheus /metrics (0 to disable)
+DETECT_CV_THREADS=2               # cv2 intra-op thread cap (0 = uncapped); compose also
+                                  # exports OMP_NUM_THREADS with the same value
 DETECT_DISPATCH_KAIC_URL=         # set to enable Tier-1 dispatch (#10); empty = off
 DETECT_DISPATCH_TASK=caption      # default task for routed adapters
 # always_analyze is per-camera (gate config), deliberately not a global env.
 ```
 
 Entrypoint: `opennvr-tier0` (`detect_pipeline.run:main`). NATS is best-effort —
-a broker outage never stops a worker.
+a broker outage never stops a worker — but it **must authenticate**: the compose
+bus runs with `--auth $INTERNAL_API_KEY`, and the publisher connects with that
+token (override with `NATS_TOKEN`). An unauthenticated connect is rejected
+(`Authorization Violation`) and every event is dropped.
 
 ## Event schema (what it publishes)
 
