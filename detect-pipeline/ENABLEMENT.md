@@ -1,11 +1,15 @@
 # Enabling compute-gated inference — rollout runbook
 
-Everything ships **off by default** so it can never regress a deployment. This is
-the staged path to actually *get the benefit* (fewer expensive inferences, more
-cameras per box) — and the settings to lock in once you've validated it on your
-own hardware. **Never enable straight to `enforce` — measure in `shadow` first.**
+Behavior-changing pieces ship **off by default** so they can never regress a
+deployment; the gate itself ships in **`shadow`** (measure-only — it audits
+every escalate/suppress decision, runs no expensive model, changes nothing),
+so the app's Compute-gated panel shows your would-save numbers from day one.
+This is the staged path to actually *get the benefit* (fewer expensive
+inferences, more cameras per box) — and the settings to lock in once you've
+validated it on your own hardware. **Never jump straight to `enforce` —
+read your shadow data first.**
 
-## The ladder: `off → shadow → enforce → +dispatch`
+## The ladder: `off → shadow (default) → enforce → +dispatch`
 
 ### 0. `off` (default) — Tier-0 only
 ```
@@ -15,7 +19,7 @@ DETECT_GATE_MODE=off
 Always-on detection + events on the bus. No gating. This is where you confirm
 Tier-0 itself runs at target fps on your hardware.
 
-### 1. `shadow` — measure, risk-free
+### 1. `shadow` (the shipped default) — measure, risk-free
 ```
 DETECT_GATE_MODE=shadow
 DETECT_METRICS_PORT=9109

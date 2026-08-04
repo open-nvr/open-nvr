@@ -104,12 +104,17 @@ def test_hog_detector_falls_back_to_stub_when_unavailable(monkeypatch):
     assert det.detect(np.zeros((8, 8, 3), np.uint8)) == []    # degraded to stub
 
 
-def test_gate_defaults_off():
+def test_gate_defaults_shadow():
     from detect_pipeline.run import _gate_factory
     cfg = config_from_env({})
-    assert cfg.gate_mode == "off"          # PR A behavior unchanged by default
+    # shadow by default: measure-only (audits escalate/suppress, runs no
+    # expensive model) so deployments accumulate would-save data from day
+    # one. Behavior-changing enforcement remains opt-in.
+    assert cfg.gate_mode == "shadow"
     assert cfg.metrics_port == 9109
-    assert _gate_factory(cfg) is None       # no gate when off
+    assert _gate_factory(cfg) is not None   # shadow builds a (measure-only) gate
+    cfg_off = config_from_env({"DETECT_GATE_MODE": "off"})
+    assert _gate_factory(cfg_off) is None   # off still means no gate at all
 
 
 def test_gate_factory_shadow_and_enforce():

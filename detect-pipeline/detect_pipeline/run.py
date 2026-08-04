@@ -111,7 +111,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
-        gate_mode=env.get("DETECT_GATE_MODE", "off").strip().lower(),
+        gate_mode=env.get("DETECT_GATE_MODE", "shadow").strip().lower(),
         gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),

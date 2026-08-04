@@ -90,7 +90,8 @@ subjects. It changes nothing about ingest, recording, or serving.
 service behind the `tier0` compose profile instead — the lite family is fully
 CPU-bound and co-running an uncapped detector starves it — so the lite
 quickstart does not start Tier-0; add `--profile tier0` to run both.
-Disable without a redeploy:
+**To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
+the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 
 ```bash
 # .env
@@ -99,7 +100,7 @@ DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)
 DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
-DETECT_GATE_MODE=off              # off (default) | shadow (measure) | enforce (act) — PR B
+DETECT_GATE_MODE=shadow           # shadow (default: measure only) | off | enforce (act) — see ENABLEMENT.md
 DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static scenes
 DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
 DETECT_GATE_COOLDOWN_S=30         # re-escalate the same track at most once per N seconds
