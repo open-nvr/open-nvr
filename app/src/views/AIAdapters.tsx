@@ -739,6 +739,13 @@ type Tier0MetricsResp = {
     latency_avg_ms: number | null
     latency_p95_ms: number | null
   }
+  promotion?: {
+    override: 'off' | 'shadow' | 'enforce' | null
+    shadow_since: string | null
+    shadow_days: number | null
+    would_save_ratio: number | null
+    ready: boolean
+  }
 }
 
 function useTier0Metrics() {
@@ -773,6 +780,95 @@ function StatTile({ label, value, sub, warn }: { label: string; value: string; s
 function formatPct(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—'
   return `${Math.round(v * 100)}%`
+}
+
+/**
+ * Guided promotion — shadow's evidence becomes a one-click decision.
+ *
+ * Three states: collecting (shadow, < 7 days — doubles as the in-product
+ * explainer of what Tier-0 is doing), ready (evidence + Enable button),
+ * enforcing (live savings + always-visible revert). The server owns the
+ * thresholds (promotion_evidence); this renders them. Enforcement is a
+ * product decision, so Enable talks to a superuser-gated endpoint — other
+ * users see the evidence without the button doing anything for them.
+ */
+function PromotionCard({ d }: { d: Tier0MetricsResp }) {
+  const { showSuccess, showError } = useSnackbar()
+  const queryClient = useQueryClient()
+  const promo = d.promotion
+  const setGate = useMutation({
+    mutationFn: async (mode: 'shadow' | 'enforce') => {
+      await apiService.setTier0Gate(mode)
+      return mode
+    },
+    onSuccess: (mode) => {
+      showSuccess(
+        mode === 'enforce'
+          ? 'Enforcement enabled — the pipeline applies it within ~30s'
+          : 'Reverted to shadow (measure-only)'
+      )
+      queryClient.invalidateQueries({ queryKey: ['tier0-metrics'] })
+    },
+    onError: (e) => showError(extractApiError(e, 'Failed to change gate mode')),
+  })
+
+  if (!promo) return null
+
+  // enforcing (by override or by env) — show live savings + the way back
+  if (d.mode === 'enforce') {
+    const g = d.gate
+    return (
+      <div className="border border-emerald-700/50 bg-emerald-600/10 rounded p-3 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <span>
+            <ShieldCheck size={14} className="inline mr-1.5 text-emerald-400" />
+            Enforcement is on — {(g?.suppressions ?? 0).toLocaleString()} expensive
+            looks skipped so far.
+          </span>
+          <Button variant="ghost" className="text-xs shrink-0"
+            disabled={setGate.isPending}
+            onClick={() => setGate.mutate('shadow')}>
+            Revert to shadow
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  if (d.mode !== 'shadow') return null
+
+  // ready — the recommendation with evidence
+  if (promo.ready) {
+    return (
+      <div className="border border-[var(--accent,#5eb3f6)]/60 bg-[var(--accent,#5eb3f6)]/10 rounded p-3 text-sm space-y-2">
+        <div>
+          <Info size={14} className="inline mr-1.5" />
+          Shadow data ({promo.shadow_days?.toFixed(0)} days): enforcement would
+          have skipped <strong>{formatPct(promo.would_save_ratio)}</strong> of
+          expensive model calls. Critical classes (e.g. person) always escalate.
+        </div>
+        <Button variant="primary" disabled={setGate.isPending}
+          onClick={() => setGate.mutate('enforce')}>
+          {setGate.isPending ? 'Enabling…' : 'Enable enforcement'}
+        </Button>
+      </div>
+    )
+  }
+
+  // collecting — progress doubles as the in-product Tier-0 explainer
+  const days = promo.shadow_days ?? 0
+  return (
+    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3 text-xs text-[var(--text-dim)]">
+      Measuring in shadow — day {Math.max(1, Math.ceil(days))} of 7. The gate is
+      auditing every escalate/suppress decision without acting; once a week of
+      data shows meaningful savings, you can enable enforcement here with one
+      click.
+      {promo.would_save_ratio != null && (
+        <> So far it would skip <strong className="text-[var(--text)]">{formatPct(promo.would_save_ratio)}</strong> of
+        expensive calls.</>
+      )}
+    </div>
+  )
 }
 
 function ComputeGatedPanel() {
@@ -824,6 +920,7 @@ function ComputeGatedPanel() {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        <PromotionCard d={d} />
         {/* Operator health — is it running, and is the box keeping up with the cameras? */}
         {d.health && (d.health.workers_total > 0 || d.health.restarts_total > 0) && (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">

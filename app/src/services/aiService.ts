@@ -51,6 +51,9 @@ export const aiService = {
     api.get(`/api/v1/ai-models/adapters/${encodeURIComponent(name)}/metrics`),
   getTier0Metrics: () =>
     api.get('/api/v1/ai-models/tier0-metrics'),
+  getTier0Gate: () => api.get('/api/v1/ai-models/tier0-gate'),
+  setTier0Gate: (mode: 'off' | 'shadow' | 'enforce') =>
+    api.put('/api/v1/ai-models/tier0-gate', { mode }),
 
   // Adapter permission approval (AI Adapter Contract v1 governance).
   getAdapterPermissions: (name: string) =>
