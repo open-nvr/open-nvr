@@ -287,6 +287,15 @@ services:
       # Read-only mount of the shared yolov8 weights volume (built by
       # yolov8-weights-init) — same model as the yolov8-adapter.
       - opennvr_yolov8_weights:/app/model_weights:ro
+    # Function-based health: /health is 503 when the service is a zombie —
+    # model degraded to stub, bus unauthenticated, or no frames flowing —
+    # not merely when the process is dead. See detect_pipeline/health.py.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:9109/health', timeout=3); sys.exit(0 if r.status==200 else 1)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
     # For VAAPI/QSV hardware decode, pass the render node through and set
     # DETECT_HWACCEL=vaapi in .env (uncomment):
     # devices:

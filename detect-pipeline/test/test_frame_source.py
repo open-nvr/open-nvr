@@ -100,3 +100,58 @@ def test_command_delegates_to_preset_builder():
     assert cmd[0] == "ffmpeg"
     assert "rtsp://h:8554/cam_sub" in cmd
     assert "-vf" in cmd
+
+
+# ── fruitless-restart give-up (expired-ticket zombie) ──────────────
+
+class _EmptyProc:
+    """ffmpeg that exits immediately with no output (401 on a dead ticket)."""
+    def __init__(self):
+        import io
+        self.stdout = io.BytesIO(b"")
+    def poll(self): return 0
+    def wait(self, timeout=None): return 0
+    def terminate(self): pass
+    def kill(self): pass
+
+
+def test_gives_up_after_consecutive_fruitless_restarts():
+    from detect_pipeline.frame_source import FrameSource
+
+    spawns = []
+    src = FrameSource(
+        "rtsp://cam/dead-ticket", width=4, height=4, fps=5,
+        spawn=lambda cmd: (spawns.append(1), _EmptyProc())[1],
+        max_fruitless_restarts=3, _sleep=lambda s: None,
+    )
+    frames = list(src.stream())
+    assert frames == []
+    # exactly max_fruitless_restarts spawns, then it ends (worker dies →
+    # manager reconcile resurrects it with a FRESH tap URL)
+    assert len(spawns) == 3
+
+
+def test_fruitless_counter_resets_after_a_good_cycle():
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    class _OneFrameProc:
+        def __init__(self):
+            import io
+            self.stdout = io.BytesIO(b"\x00" * frame_size_bytes(4, 4))
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+        def terminate(self): pass
+        def kill(self): pass
+
+    # good, empty, good, empty, empty, empty -> gives up only after the 3
+    # consecutive empties at the end
+    plan = [_OneFrameProc(), _EmptyProc(), _OneFrameProc(),
+            _EmptyProc(), _EmptyProc(), _EmptyProc()]
+    it = iter(plan)
+    src = FrameSource(
+        "rtsp://cam/flaky", width=4, height=4, fps=5,
+        spawn=lambda cmd: next(it),
+        max_fruitless_restarts=3, _sleep=lambda s: None,
+    )
+    frames = list(src.stream())
+    assert len(frames) == 2

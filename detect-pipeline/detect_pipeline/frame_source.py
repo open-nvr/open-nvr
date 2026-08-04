@@ -110,6 +110,7 @@ class FrameSource:
         codec: str = "h264",
         spawn: SpawnFn | None = None,
         max_restarts: int | None = None,
+        max_fruitless_restarts: int = 5,
         backoff_seconds: float = 1.0,
         _sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -123,6 +124,12 @@ class FrameSource:
         self._spawn = spawn or _default_spawn
         # None = restart forever (production); an int caps restarts (tests).
         self.max_restarts = max_restarts
+        # Consecutive restarts that produced ZERO frames before ending the
+        # stream. A dead credential (expired signed tap URL) makes ffmpeg exit
+        # instantly forever — restarting with the same URL can never recover.
+        # Giving up ends the worker, and the manager's next reconcile
+        # resurrects it with a FRESH tap URL from the provider.
+        self.max_fruitless_restarts = max_fruitless_restarts
         self.backoff_seconds = backoff_seconds
         self._sleep = _sleep
 
@@ -138,14 +145,35 @@ class FrameSource:
         )
 
     def stream(self) -> Iterator[Frame]:
-        """Yield frames forever, restarting ffmpeg on exit (bounded in tests)."""
+        """Yield frames until the source is unrecoverable.
+
+        Restarts ffmpeg on exit (camera/stream drops are normal). Ends the
+        stream after ``max_fruitless_restarts`` consecutive restarts that
+        produced no frames at all — the signature of a dead credential (e.g.
+        an expired signed tap URL), which no amount of restarting with the
+        same URL can fix. The caller's worker then exits and the reconcile
+        loop resurrects it with a freshly resolved URL.
+        """
         restarts = 0
+        fruitless = 0
         while True:
             proc = self._spawn(self.command())
+            got_frame = False
             try:
-                yield from read_frames(proc.stdout, self.width, self.height)
+                for frame in read_frames(proc.stdout, self.width, self.height):
+                    got_frame = True
+                    yield frame
             finally:
                 _terminate(proc)
+            fruitless = 0 if got_frame else fruitless + 1
+            if fruitless >= self.max_fruitless_restarts:
+                log.error(
+                    "frame source for %s: %d consecutive restarts with no frames "
+                    "(dead stream or expired ticket) — giving up so the worker "
+                    "is resurrected with a fresh URL",
+                    self.rtsp_url, fruitless,
+                )
+                return
             if self.max_restarts is not None and restarts >= self.max_restarts:
                 return
             restarts += 1

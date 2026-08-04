@@ -148,6 +148,7 @@ def record_frame(
     stage_latency_s: dict[str, float] | None = None,
     model: str | None = None,
 ) -> None:
+    _last_frame_wall[camera_id] = time.time()
     """Emit Tier-0 per-frame metrics from a FrameResult (service layer).
 
     ``model`` (the active detector's identity, e.g. ``yolov8n``) labels the
@@ -176,6 +177,26 @@ def record_frame(
         metrics.observe("tier0_detector_latency_seconds", detector_latency_s, mcam)
     for stage, secs in (stage_latency_s or {}).items():
         metrics.observe("tier0_stage_latency_seconds", secs, {"camera": camera_id, "stage": stage})
+
+
+# Wall-clock time of the most recent processed frame per camera — the "are
+# frames actually flowing" signal /health uses. Module-level like ``metrics``.
+_last_frame_wall: dict[str, float] = {}
+
+
+def newest_frame_age_s(now: float | None = None) -> float | None:
+    """Age in seconds of the newest frame across all cameras (None = none yet)."""
+    if not _last_frame_wall:
+        return None
+    now = time.time() if now is None else now
+    return max(0.0, now - max(_last_frame_wall.values()))
+
+
+def record_mainstream_fallback(camera_id: str, active: bool) -> None:
+    """Gauge: 1 while Tier-0 decodes a high-resolution main stream for this
+    camera (no usable substream) — the expensive path the README warns about."""
+    metrics.gauge("tier0_mainstream_fallback", 1.0 if active else 0.0,
+                  {"camera": camera_id})
 
 
 def record_published(camera_id: str) -> None:
@@ -239,7 +260,7 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
 
 
 def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
-                  best_frames=None):  # pragma: no cover
+                  best_frames=None, health_fn=None):  # pragma: no cover
     """Start a background HTTP server exposing ``/metrics`` (and, when a
     ``BestFrameStore`` is given, ``/best_frame?camera=&track=``). Best-effort."""
     import http.server
@@ -264,6 +285,15 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
                 sample_process_metrics(reg)      # refresh CPU%/RSS on each scrape
                 self._send(200, reg.render().encode("utf-8"),
                            "text/plain; version=0.0.4")
+                return
+            if path == "/health":
+                import json as _json
+                if health_fn is None:
+                    self._send(200, b'{"status":"ok"}', "application/json")
+                    return
+                ok, detail = health_fn()
+                body = _json.dumps(detail, indent=1).encode("utf-8")
+                self._send(200 if ok else 503, body, "application/json")
                 return
             if path == "/best_frame" and best_frames is not None:
                 q = parse_qs(parsed.query)

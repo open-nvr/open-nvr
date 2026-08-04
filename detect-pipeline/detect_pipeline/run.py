@@ -263,9 +263,12 @@ def _nats_connect_options(nats_url: str, token: str | None) -> dict:
 
 
 def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: no cover - needs a broker
-    """Return (publish_fn, close_fn). Best-effort: NATS down never breaks a worker."""
+    """Return (publish_fn, close_fn, connected_fn).
+
+    Best-effort: NATS down never breaks a worker — but ``connected_fn`` feeds
+    /health so "down" is VISIBLE instead of silently dropping events."""
     if not nats_url:
-        return (lambda subject, data: None), (lambda: None)
+        return (lambda subject, data: None), (lambda: None), (lambda: False)
     import asyncio
 
     import nats
@@ -298,7 +301,11 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
     def close() -> None:
         loop.call_soon_threadsafe(loop.stop)
 
-    return publish, close
+    def connected() -> bool:
+        nc = box.get("nc")
+        return bool(nc is not None and not getattr(nc, "is_closed", False))
+
+    return publish, close, connected
 
 
 def main() -> int:  # pragma: no cover - integration entrypoint
@@ -318,13 +325,60 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
              cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
 
-    publish, close = _make_publisher(cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key)
+    publish, close, nats_connected = _make_publisher(
+        cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key
+    )
     manager = build_manager(cfg, EventSink(publish), gate_sink=GateEventSink(publish))
-    log.info("tier0 gate mode=%s", cfg.gate_mode)
+
+    # Probe the detector factory ONCE so /health (and the log) can tell the
+    # truth about degradation: requested onnx but got the stub means the model
+    # is missing/broken — the container would otherwise sit "healthy" while
+    # detecting nothing (the exact zombie QA found).
+    detector_actual = type(_detector_factory(cfg)()).__name__
+    from .health import HealthState, evaluate as health_evaluate
+    from .metrics import newest_frame_age_s
+    hstate = HealthState(
+        enabled=cfg.enabled,
+        detector_requested=cfg.detector,
+        detector_actual=detector_actual,
+        nats_configured=bool(cfg.nats_url),
+        nats_connected=nats_connected,
+        workers_running=lambda: len(manager.running_ids()),
+        newest_frame_age_s=newest_frame_age_s,
+    )
+
+    # Effective config — one truthful block. Half of every support/QA thread
+    # was "what state is it in"; this answers it at startup and at /health.
+    log.info(
+        "tier0 effective config:\n"
+        "  enabled            = %s\n"
+        "  detector           = %s (loaded: %s)\n"
+        "  onnx backend       = %s  providers = %s\n"
+        "  hwaccel            = %s\n"
+        "  gate mode          = %s\n"
+        "  tier1 dispatch     = %s\n"
+        "  event bus          = %s\n"
+        "  metrics/health     = %s\n"
+        "  cv threads         = %s",
+        cfg.enabled,
+        cfg.detector, detector_actual,
+        cfg.onnx_backend, cfg.onnx_providers or "(default)",
+        cfg.hwaccel,
+        cfg.gate_mode,
+        cfg.dispatch_kaic_url or "off",
+        cfg.nats_url or "unconfigured",
+        f":{cfg.metrics_port}/metrics,/health,/best_frame" if cfg.metrics_port else "off",
+        threads or "uncapped",
+    )
+
     if cfg.metrics_port:
         from .metrics import serve_metrics
-        serve_metrics(cfg.metrics_port, best_frames=getattr(manager, "best_frames", None))
-        log.info("tier0 metrics on :%d/metrics (+ /best_frame)", cfg.metrics_port)
+        serve_metrics(
+            cfg.metrics_port,
+            best_frames=getattr(manager, "best_frames", None),
+            health_fn=lambda: health_evaluate(hstate),
+        )
+        log.info("tier0 metrics on :%d/metrics (+ /health, /best_frame)", cfg.metrics_port)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

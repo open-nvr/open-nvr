@@ -90,6 +90,16 @@ subjects. It changes nothing about ingest, recording, or serving.
 service behind the `tier0` compose profile instead — the lite family is fully
 CPU-bound and co-running an uncapped detector starves it — so the lite
 quickstart does not start Tier-0; add `--profile tier0` to run both.
+**Why is my CPU high? → configure the substream.** Tier-0 decodes each
+camera's *substream* (a low-res second stream every mainstream camera
+provides). If a camera has no substream configured, Tier-0 falls back to
+decoding the full main stream — that is the difference between ~0.3 and ~2
+CPU cores per camera, and decode (not detection) is where the cost lives.
+The service warns per camera at startup and exposes
+`tier0_mainstream_fallback{camera=...}` on `/metrics` whenever it is on the
+expensive path. Fix: set the camera's substream URL in OpenNVR (Camera
+settings), or lower the main stream's resolution.
+
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 

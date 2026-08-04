@@ -37,6 +37,7 @@ from .metrics import (
     record_frame,
     record_gate,
     record_processing_fps,
+    record_mainstream_fallback,
     record_published,
     record_worker_restart,
     record_worker_state,
@@ -152,6 +153,21 @@ class CameraWorker:
         except Exception:
             log.exception("tier0 %s: could not open source", self.spec.camera_id)
             return
+        # Substream guard: Tier-0 is designed to decode a LOW-RES substream.
+        # Decoding a high-res main stream (no substream configured for this
+        # camera) is the expensive path — the difference between ~0.3 and ~2
+        # CPU cores. Say so loudly and expose it as a gauge so the panel and
+        # the README's "why is my CPU high" section can point at it.
+        mainstream = (w or 0) * (h or 0) > 1280 * 720
+        record_mainstream_fallback(self.spec.camera_id, mainstream)
+        if mainstream:
+            log.warning(
+                "tier0 %s: decoding a %dx%d stream — this looks like a MAIN "
+                "stream (no substream configured). Configure the camera's "
+                "substream to cut Tier-0's CPU cost by ~5x "
+                "(see detect-pipeline/README.md).",
+                self.spec.camera_id, w, h,
+            )
         motion = MotionDetector((h, w), MotionConfig())
         tracker = Tracker((h, w), TrackConfig(fps=self.spec.fps))
         pipe = DetectPipeline(
