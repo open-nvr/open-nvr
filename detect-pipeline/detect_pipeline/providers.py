@@ -71,3 +71,30 @@ def _to_spec(c: dict) -> CameraSpec:
         fps=int(c.get("fps", 5)),
         hwaccel=c.get("hwaccel", "cpu"),
     )
+
+
+DETECT_CONFIG_PATH = "/api/v1/internal/camera-agent/detect-config"
+
+
+def fetch_detect_config(
+    base_url: str,
+    api_key: str | None = None,
+    *,
+    opener=None,
+    timeout: float = 5.0,
+) -> dict | None:
+    """Fetch the managed Tier-0 config override from core (guided promotion).
+
+    Returns e.g. ``{"gate_mode": "enforce"}`` — ``gate_mode: None`` means "no
+    override, follow env". Any failure returns None (caller keeps current
+    settings; this must never disturb the pipeline)."""
+    _opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(f"{base_url.rstrip('/')}{DETECT_CONFIG_PATH}")
+    if api_key:
+        req.add_header("X-Internal-Api-Key", api_key)
+    try:
+        with _opener(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        log.debug("detect-config fetch failed", exc_info=True)
+        return None

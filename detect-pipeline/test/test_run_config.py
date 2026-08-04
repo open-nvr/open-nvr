@@ -161,3 +161,62 @@ def test_nats_options_omit_token_when_absent():
 
     opts = _nats_connect_options("nats://nats:4222", None)
     assert "token" not in opts
+
+
+# ── guided promotion: managed gate-mode override ────────────────────
+
+def test_fetch_detect_config_parses_and_authenticates():
+    import io
+    import json as _json
+    from detect_pipeline.providers import fetch_detect_config
+
+    seen = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def opener(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["key"] = req.get_header("X-internal-api-key")
+        return _Resp(_json.dumps({"gate_mode": "enforce"}).encode())
+
+    conf = fetch_detect_config("http://core:8000", "sekret", opener=opener)
+    assert conf == {"gate_mode": "enforce"}
+    assert seen["url"].endswith("/api/v1/internal/camera-agent/detect-config")
+    assert seen["key"] == "sekret"
+
+
+def test_fetch_detect_config_failure_returns_none():
+    from detect_pipeline.providers import fetch_detect_config
+
+    def opener(req, timeout=None):
+        raise OSError("core down")
+
+    assert fetch_detect_config("http://core:8000", "k", opener=opener) is None
+
+
+def test_apply_gate_change_stops_workers_and_swaps_factory():
+    from detect_pipeline.service import WorkerManager
+
+    class _FakeWorker:
+        def __init__(self): self.stopped = False
+        def start(self): pass
+        def stop(self): self.stopped = True
+        def is_alive(self): return not self.stopped
+
+    class _Provider:
+        def list_cameras(self): return []
+
+    made = []
+    mgr = WorkerManager(_Provider(), sink=None,
+                        worker_factory=lambda spec, sink: _FakeWorker())
+    w = _FakeWorker()
+    mgr._workers["cam1"] = w
+
+    new_factory = lambda: "new-gate"  # noqa: E731
+    mgr.apply_gate_change(new_factory, dispatcher="d", router="r")
+    assert w.stopped                       # all workers recycled
+    assert mgr.running_ids() == set()      # next reconcile rebuilds them
+    assert mgr._gate_factory is new_factory
+    assert mgr._dispatcher == "d" and mgr._router == "r"

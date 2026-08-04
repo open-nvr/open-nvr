@@ -384,8 +384,45 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
+    # Guided promotion: the admin's gate-mode choice lives in core's DB
+    # (set from the Compute-gated panel). Poll it on the same tick as camera
+    # reconcile and apply changes live — no redeploy. Env stays the bootstrap
+    # default; a DB override wins once set.
+    effective_mode = cfg.gate_mode
+
+    def _poll_gate_override() -> None:
+        nonlocal effective_mode, cfg
+        from dataclasses import replace
+
+        from .providers import fetch_detect_config
+
+        conf = fetch_detect_config(cfg.core_url, cfg.api_key)
+        if not conf:
+            return
+        override = (conf.get("gate_mode") or "").strip().lower()
+        if not override or override == effective_mode:
+            return
+        log.info("tier0 gate mode change (managed): %s -> %s", effective_mode, override)
+        cfg = replace(cfg, gate_mode=override)
+        dispatcher = router = None
+        if override == "enforce" and cfg.dispatch_kaic_url:
+            from .dispatch import DispatchRouter, KaicDispatcher
+
+            dispatcher = KaicDispatcher(
+                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task
+            )
+            router = DispatchRouter()
+            log.info("tier1 dispatch enabled -> %s (task=%s)",
+                     cfg.dispatch_kaic_url, cfg.dispatch_task)
+        manager.apply_gate_change(_gate_factory(cfg), dispatcher=dispatcher, router=router)
+        effective_mode = override
+
     try:
         while not stop.is_set():
+            try:
+                _poll_gate_override()
+            except Exception:
+                log.exception("gate-override poll failed; keeping current mode")
             try:
                 manager.reconcile()
             except Exception:

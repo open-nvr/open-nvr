@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.database import get_db
-from models import Camera
+from models import Camera, SecuritySetting
 from services.stream_service import _build_stream_name
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,31 @@ def _require_internal_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal api key",
         )
+
+
+GATE_MODE_KEY = "detect_gate_mode"
+SHADOW_SINCE_KEY = "detect_shadow_since"
+_VALID_GATE_MODES = ("off", "shadow", "enforce")
+
+
+@router.get("/detect-config")
+async def get_detect_config(
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Effective Tier-0 gate override for the detect-pipeline.
+
+    The pipeline polls this on its reconcile tick (guided promotion: an admin
+    flips shadow->enforce in the UI; the pipeline applies it live, no
+    redeploy). ``gate_mode: null`` means "no override — follow your env".
+    """
+    row = (
+        db.query(SecuritySetting)
+        .filter(SecuritySetting.key == GATE_MODE_KEY)
+        .first()
+    )
+    mode = (row.json_value or "").strip().lower() if row else ""
+    return {"gate_mode": mode if mode in _VALID_GATE_MODES else None}
 
 
 def _mint_mediamtx_jwt() -> str | None:

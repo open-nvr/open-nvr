@@ -302,6 +302,21 @@ class WorkerManager:
     def running_ids(self) -> set[str]:
         return set(self._workers)
 
+    def apply_gate_change(self, gate_factory, *, dispatcher=None, router=None) -> None:
+        """Swap the gate (and optionally Tier-1 dispatch) for ALL workers.
+
+        Used by guided promotion: the admin flips shadow->enforce in the UI
+        and the pipeline applies it live. Gates are stateful per camera, so
+        the only correct swap is stop-everything — the next reconcile tick
+        rebuilds every worker with the new factory. A few seconds of gap on
+        an explicit admin action is fine; a redeploy is not."""
+        self._gate_factory = gate_factory
+        if dispatcher is not None:
+            self._dispatcher = dispatcher
+        if router is not None:
+            self._router = router
+        self._stop_all()
+
     def reconcile(self) -> None:
         """Start workers for new analyze-enabled cameras, stop the rest."""
         if not self.enabled:

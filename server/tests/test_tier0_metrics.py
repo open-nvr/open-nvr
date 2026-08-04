@@ -224,3 +224,50 @@ def test_quiet_enforce_not_mislabelled_as_shadow():
         'gate_suppressions_total{camera="c",reason="stationary"} 12',
     ])
     assert reduce_metrics(parse_prometheus_text(text))["mode"] == "enforce"
+
+
+# ── guided promotion: gate-mode setting endpoints ───────────────────
+
+from datetime import datetime, timedelta, timezone
+
+from services.tier0_metrics import promotion_evidence
+
+
+def _shadow_data(esc=20, would=80):
+    return {"mode": "shadow", "gate": {"escalations": esc, "shadow_would_suppress": would}}
+
+
+def test_promotion_ready_after_a_week_of_meaningful_savings():
+    since = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    p = promotion_evidence(_shadow_data(), override=None, shadow_since_iso=since)
+    assert p["ready"] is True
+    assert p["would_save_ratio"] == 0.8
+    assert p["shadow_days"] >= 7.9
+
+
+def test_promotion_not_ready_before_seven_days():
+    since = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    p = promotion_evidence(_shadow_data(), override=None, shadow_since_iso=since)
+    assert p["ready"] is False
+
+
+def test_promotion_not_ready_when_savings_are_marginal():
+    since = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    p = promotion_evidence(_shadow_data(esc=95, would=5), override=None,
+                           shadow_since_iso=since)
+    assert p["ready"] is False          # 5% would-save is not worth the risk
+    assert p["would_save_ratio"] == 0.05
+
+
+def test_promotion_never_ready_outside_shadow_mode():
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    data = {"mode": "enforce", "gate": {"escalations": 1, "shadow_would_suppress": 99}}
+    p = promotion_evidence(data, override="enforce", shadow_since_iso=since)
+    assert p["ready"] is False
+
+
+def test_promotion_handles_no_data_gracefully():
+    p = promotion_evidence({"mode": "shadow", "gate": {}}, override=None,
+                           shadow_since_iso=None)
+    assert p == {"override": None, "shadow_since": None, "shadow_days": None,
+                 "would_save_ratio": None, "ready": False}

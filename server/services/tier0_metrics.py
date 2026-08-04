@@ -278,3 +278,45 @@ async def get_tier0_metrics() -> dict[str, Any]:
         # A malformed metrics payload must degrade, never 500 the route.
         main_logger.debug("Tier-0 metrics parse failed for %s", url, exc_info=True)
         return {"available": False, "reason": "parse_error"}
+
+
+def promotion_evidence(
+    data: dict[str, Any],
+    *,
+    override: str | None,
+    shadow_since_iso: str | None,
+    now=None,
+    min_days: float = 7.0,
+    min_ratio: float = 0.2,
+) -> dict[str, Any]:
+    """Pure rollup -> promotion recommendation (guided promotion card).
+
+    ``ready`` iff the pipeline is in shadow, shadow has run >= ``min_days``,
+    and the would-save ratio is >= ``min_ratio``. All inputs explicit so this
+    is trivially testable; the route supplies the DB-stored override and
+    shadow-since timestamp.
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    shadow_days = None
+    if shadow_since_iso:
+        try:
+            shadow_days = (now - datetime.fromisoformat(shadow_since_iso)).total_seconds() / 86400.0
+        except ValueError:
+            shadow_days = None
+    gate = data.get("gate") or {}
+    esc = gate.get("escalations") or 0
+    would = gate.get("shadow_would_suppress") or 0
+    ratio = (would / (esc + would)) if (esc + would) > 0 else None
+    return {
+        "override": override,
+        "shadow_since": shadow_since_iso or None,
+        "shadow_days": None if shadow_days is None else round(shadow_days, 2),
+        "would_save_ratio": None if ratio is None else round(ratio, 3),
+        "ready": bool(
+            data.get("mode") == "shadow"
+            and shadow_days is not None and shadow_days >= min_days
+            and ratio is not None and ratio >= min_ratio
+        ),
+    }
