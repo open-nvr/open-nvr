@@ -1299,9 +1299,10 @@
       if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
     function _evDot(sev){ return (sev==="critical"||sev==="high")?"#e5695b"
       :(sev==="medium"||sev==="warn")?"#f6c453":"var(--muted)"; }
-    async function loadEvents(){
+    async function loadEvents(data){
       if(!authReady())return;
-      try{ const r=await fetch("/events"); if(!r.ok) return;
+      if(data){ _events=data.events||[]; }
+      else try{ const r=await fetch("/events"); if(!r.ok) return;
         _events=(await r.json()).events||[]; }catch{ return; }
       renderEventsCard(); }
     // On a camera's screen the rail feed scopes to THAT camera (with a
@@ -1562,8 +1563,8 @@
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
-      if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
-      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500);
+      if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500);
     }
     function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
@@ -1574,7 +1575,7 @@
       addMsg("The agent stopped listening after a quiet spell. Tap Talk to chat again.","sys"); }
 
     // ── tasks ──
-    async function pollTasks(){ if(!authReady())return; let tasks; try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
+    async function pollTasks(data){ if(!authReady())return; let tasks; if(data){ tasks=data.tasks||[]; } else try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
       for(const t of tasks){ if((t.status==="done"||t.status==="error")&&knownTasks[t.id]!==t.status){
         const msg=`Done with task #${t.id}: ${t.result||"no result"}`; addMsg(msg,"agent"); playChime("done"); await announce(msg); }
         knownTasks[t.id]=t.status; }
@@ -1592,7 +1593,7 @@
         if(d.audio_b64){ speaking=true; setAvatar("speaking"); await playWav(d.audio_b64); speaking=false; if(sessionActive)setAvatar("listening"); } }catch{} }
 
     // ── monitors ──
-    async function pollMonitors(){ if(!authReady())return; let data; try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
+    async function pollMonitors(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
       for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
@@ -1609,7 +1610,7 @@
     async function stopMonitor(id){ try{ await fetch("/monitors/"+id,{method:"DELETE"}); }catch{} pollMonitors(); }
 
     // ── scheduled reports ──
-    async function pollReports(){ if(!authReady())return; let data; try{ data=await (await fetch("/reports")).json(); }catch{ return; }
+    async function pollReports(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/reports")).json(); }catch{ return; }
       for(const rep of (data.reports||[])){ if(!seenReports[rep.id]){ seenReports[rep.id]=true;
         addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
       renderReports(data.schedules||[]); }
@@ -1629,7 +1630,7 @@
       alarmbarEl.classList.add("chime"); alarmTextEl.textContent=text; alarmbarEl.hidden=false;
       if(_chimeHideT) clearTimeout(_chimeHideT);
       _chimeHideT=setTimeout(()=>{ if(!alarmRinging){ alarmbarEl.hidden=true; } alarmbarEl.classList.remove("chime"); },5000); }
-    async function pollAlarms(){ if(!authReady())return; let data; try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
+    async function pollAlarms(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/alarms")).json(); }catch{ return; }
       for(const e of (data.events||[])){ if(!seenAlarmEvents[e.id]){ seenAlarmEvents[e.id]=true;
         addMsg("Alarm: "+e.text,"agent");
         if(e.ring==="chime"){ playChime("bell"); flashChime(e.text); } } }
@@ -1660,7 +1661,39 @@
     async function disarmAlarm(id){ try{ await fetch("/alarms/"+id,{method:"DELETE"});}catch{} pollAlarms(); }
     async function addAlarm(body){ ensureOutputAudio();
       try{ await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); addMsg(`Armed alarm: ${body.name}.`,"sys"); }catch{}
-      if(!alarmTimer) alarmTimer=setInterval(pollAlarms,2500); pollAlarms(); }
+      if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500); pollAlarms(); }
+
+    // ── live updates (WebSocket push; HTTP polling is the fallback) ──
+    // One socket replaces the /tasks /monitors /reports /events /alarms
+    // polls. The server pushes each endpoint's payload keyed by panel, only
+    // when state changes. The poll timers stay armed but no-op while the
+    // socket is live, so a drop resumes polling with no extra wiring.
+    let _updWs=null,_updLive=false,_updBackoff=1500;
+    function connectUpdates(){
+      if(_updWs) return;
+      if(!authReady()){ setTimeout(connectUpdates,1500); return; }
+      let ws;
+      try{
+        const q=new URLSearchParams();
+        if(_token) q.set("token",_token);
+        if(_device) q.set("device_token",_device);
+        ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/updates?"+q.toString());
+      }catch{ setTimeout(connectUpdates,_updBackoff); return; }
+      _updWs=ws;
+      ws.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch{ return; }
+        _updLive=true; _updBackoff=1500;
+        if(d.tasks) pollTasks(d.tasks);
+        if(d.monitors) pollMonitors(d.monitors);
+        if(d.reports) pollReports(d.reports);
+        if(d.events) loadEvents(d.events);
+        if(d.alarms) pollAlarms(d.alarms); };
+      ws.onclose=()=>{ _updWs=null; _updLive=false;
+        _updBackoff=Math.min(_updBackoff*2,15000);
+        setTimeout(connectUpdates,_updBackoff); };
+      ws.onerror=()=>{ try{ws.close();}catch{} };
+    }
+    function pollAllHttp(){ if(_updLive) return; pollTasks();pollMonitors();pollReports();loadEvents(); }
+    function pollAlarmsHttp(){ if(_updLive) return; pollAlarms(); }
 
     // ── wiring ──
     silenceBtn.addEventListener("click", ackAlarms);
@@ -1910,7 +1943,7 @@
           if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
           addMsg(d.message||("Watching for "+target+"."),"sys");
           ti.value=""; f.hidden=true; add.classList.remove("open");
-          pollMonitors(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
+          pollMonitors(); if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
         }catch(err){ addMsg("Couldn't start the watch: "+err.message,"sys"); } }
       if(go) go.addEventListener("click", start);
       if(ti) ti.addEventListener("keydown",e=>{ if(e.key==="Enter") start(); }); })();
@@ -1930,7 +1963,7 @@
           addMsg(d.message||("Scheduled: "+body.name),"sys");
           qi.value=""; $("reportName").value=""; $("reportAt").value=""; $("reportEvery").value="";
           f.hidden=true; add.classList.remove("open");
-          pollReports(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS);
+          pollReports(); if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
         }catch(err){ addMsg("Couldn't schedule the report: "+err.message,"sys"); } }
       if(go) go.addEventListener("click", schedule);
       if(qi) qi.addEventListener("keydown",e=>{ if(e.key==="Enter") schedule(); }); })();
@@ -1941,7 +1974,7 @@
       async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
         try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
           if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
-            pollTasks(); if(!pollTimer) pollTimer=setInterval(()=>{pollTasks();pollMonitors();pollReports();loadEvents();},POLL_MS); }
+            pollTasks(); if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS); }
           else { const d=await r.json().catch(()=>({})); addMsg("Task failed: "+(d.error||("HTTP "+r.status)),"sys"); }
         }catch(err){ addMsg("Task failed: "+err.message,"sys"); } }
       if(run) run.addEventListener("click", go);
@@ -1951,10 +1984,10 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); loadEvents(); } });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(openDeepLinkedCamera); loadNotify(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
     setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
-    alarmTimer = setInterval(pollAlarms, 2500);   // alarms ring even before Talk
+    alarmTimer = setInterval(pollAlarmsHttp, 2500);   // alarms ring even before Talk
   </script>
 </body>
 </html>

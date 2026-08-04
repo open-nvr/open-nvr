@@ -4901,6 +4901,63 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "timings_ms": timings, "invoked": True, "armed": armed,
         })
 
+    @app.websocket("/updates")
+    async def _updates_ws(websocket: WebSocket) -> None:
+        """Push channel for the demo page's status panels (tasks, monitors,
+        reports, events, alarms) — one connection instead of five HTTP polls
+        every 2-3s. Sends the SAME payload each GET endpoint returns, keyed by
+        panel, and only when the state actually changed. The page falls back
+        to HTTP polling whenever this socket is unavailable, so the GET
+        endpoints stay the source of truth."""
+        # WebSockets bypass the HTTP auth middleware — token + device identity
+        # arrive as query params and are checked here (same gate as /ws).
+        if runtime.cfg.auth_mode == "opennvr":
+            _dev = websocket.query_params.get("device_token") or None
+            if runtime.auth and not await runtime.auth.device_allowed(_dev):
+                await websocket.close(code=4403)   # 4403 = device blocked
+                return
+            _tok = websocket.query_params.get("token", "")
+            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            if _user is None:
+                await websocket.close(code=4401)   # 4401 = auth required
+                return
+        await websocket.accept()
+        last: str | None = None
+        try:
+            while True:
+                alarms = runtime.alarms.list()
+                payload = {
+                    "tasks": {"tasks": runtime.tasks.list()},
+                    "monitors": {
+                        "monitors": runtime.monitors.list(),
+                        "notifications": runtime.monitors.notifications(),
+                    },
+                    "reports": {
+                        "schedules": runtime.reports.list(),
+                        "reports": runtime.reports.reports(),
+                    },
+                    "events": {"events": runtime.events_feed()},
+                    "alarms": {
+                        "alarms": alarms,
+                        "events": runtime.alarms.events(),
+                        # Mirror GET /alarms exactly (active-check rationale there).
+                        "ringing": any(a["triggered"] and a["active"] for a in alarms),
+                        "ringing_kind": ("siren" if any(
+                            a["triggered"] and a["active"] and a.get("ring") != "pulse"
+                            for a in alarms) else ("pulse" if any(
+                                a["triggered"] and a["active"] for a in alarms) else None)),
+                    },
+                }
+                text = json.dumps(payload, default=str)
+                if text != last:
+                    await websocket.send_text(text)
+                    last = text
+                await asyncio.sleep(2.0)
+        except Exception:
+            # Disconnect (or send on a closed socket) ends the loop; the page
+            # reconnects with backoff and polls in the meantime.
+            return
+
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:
         # The ``websocket: WebSocket`` annotation is REQUIRED — without it
