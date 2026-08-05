@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Trash2, UserPlus, UserCog, X } from 'lucide-react'
+import { Trash2, UserCheck, UserPlus, UserCog, X } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
@@ -63,8 +63,9 @@ export function UsersManager() {
   const [editing, setEditing] = useState<User | null>(null)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
-  const [deleting, setDeleting] = useState<User | null>(null)
-  const [deleteCode, setDeleteCode] = useState('')
+  // Delete and activate both require the admin's TOTP code, confirmed in one dialog.
+  const [confirmAction, setConfirmAction] = useState<{ kind: 'delete' | 'activate'; user: User } | null>(null)
+  const [mfaCode, setMfaCode] = useState('')
 
   const [form, setForm] = useState<UserForm>({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '' })
   const [roles, setRoles] = useState<Role[]>([])
@@ -153,20 +154,24 @@ export function UsersManager() {
     }
   }
 
-  const onDelete = async (e: React.FormEvent) => {
+  const onConfirmAction = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!deleting) return
+    if (!confirmAction) return
     try {
       setLoading(true)
       setError(null)
-      await apiService.deleteUser(deleting.id, deleteCode.trim())
-      setDeleting(null)
-      setDeleteCode('')
+      if (confirmAction.kind === 'delete') {
+        await apiService.deleteUser(confirmAction.user.id, mfaCode.trim())
+      } else {
+        await apiService.activateUser(confirmAction.user.id, mfaCode.trim())
+      }
+      setConfirmAction(null)
+      setMfaCode('')
       const { data } = await apiService.getUsers({ skip, limit, active_only: activeOnly })
       setUsers(data.users)
       setTotal(data.total ?? 0)
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to delete user'))
+      setError(extractApiError(e, confirmAction.kind === 'delete' ? 'Failed to delete user' : 'Failed to activate user'))
     } finally {
       setLoading(false)
     }
@@ -309,8 +314,8 @@ export function UsersManager() {
                       {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </label>
-                  <label className="flex items-center gap-2 mt-5 text-sm" title={me?.id === editing.id ? 'You cannot deactivate your own account' : undefined}>
-                    <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} disabled={me?.id === editing.id} /> Active
+                  <label className="flex items-center gap-2 mt-5 text-sm" title={me?.id === editing.id ? 'You cannot deactivate your own account' : !editing.is_active ? 'Use the Activate button to reactivate (requires MFA code)' : undefined}>
+                    <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} disabled={me?.id === editing.id || !editing.is_active} /> Active
                   </label>
                 </div>
               </div>
@@ -323,27 +328,30 @@ export function UsersManager() {
         </div>
       )}
 
-      {/* Delete User Dialog */}
-      {deleting && (
+      {/* Delete / Activate confirmation dialog (both MFA-gated) */}
+      {confirmAction && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-md shadow-xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between p-4 border-b border-neutral-700">
-              <h3 className="font-semibold flex items-center gap-2 text-red-400">
-                <Trash2 size={18} />
-                Delete User
+              <h3 className={`font-semibold flex items-center gap-2 ${confirmAction.kind === 'delete' ? 'text-red-400' : 'text-green-400'}`}>
+                {confirmAction.kind === 'delete' ? <Trash2 size={18} /> : <UserCheck size={18} />}
+                {confirmAction.kind === 'delete' ? 'Delete User' : 'Activate User'}
               </h3>
-              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setDeleting(null); setDeleteCode(''); setError(null) }}>
+              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setConfirmAction(null); setMfaCode(''); setError(null) }}>
                 <X size={18} />
               </button>
             </div>
-            <form onSubmit={onDelete} className="flex flex-col flex-1 min-h-0">
+            <form onSubmit={onConfirmAction} className="flex flex-col flex-1 min-h-0">
               <div className="p-4 overflow-auto flex-1 space-y-4">
                 {error && (
                   <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
                 )}
                 <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 text-sm">
-                  You are about to delete <span className="font-semibold">{deleting.username}</span> ({deleting.email}).
-                  They will no longer be able to log in.
+                  {confirmAction.kind === 'delete' ? (
+                    <>You are about to delete <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email}). They will no longer be able to log in.</>
+                  ) : (
+                    <>You are about to reactivate <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email}). They will be able to log in again.</>
+                  )}
                 </div>
                 <label className="flex flex-col gap-1">
                   <span className="text-xs text-[var(--text-dim)]">Your MFA code *</span>
@@ -354,8 +362,8 @@ export function UsersManager() {
                     maxLength={6}
                     className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm tracking-widest"
                     placeholder="123456"
-                    value={deleteCode}
-                    onChange={(e) => setDeleteCode(e.target.value.replace(/\D/g, ''))}
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ''))}
                     autoFocus
                     required
                   />
@@ -363,8 +371,10 @@ export function UsersManager() {
                 </label>
               </div>
               <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setDeleting(null); setDeleteCode(''); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50" disabled={loading || deleteCode.length !== 6}>{loading ? 'Deleting...' : 'Delete User'}</button>
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setConfirmAction(null); setMfaCode(''); setError(null) }}>Cancel</button>
+                <button type="submit" className={`px-4 py-2 text-sm text-white disabled:opacity-50 ${confirmAction.kind === 'delete' ? 'bg-red-600 hover:bg-red-700' : 'bg-green-700 hover:bg-green-800'}`} disabled={loading || mfaCode.length !== 6}>
+                  {confirmAction.kind === 'delete' ? (loading ? 'Deleting...' : 'Delete User') : (loading ? 'Activating...' : 'Activate User')}
+                </button>
               </div>
             </form>
           </div>
@@ -389,12 +399,20 @@ export function UsersManager() {
                 <td className="p-2">{u.username}</td>
                 <td className="p-2">{u.email}</td>
                 <td className="p-2">{roles.find(r => r.id === u.role_id)?.name ?? u.role_id}</td>
-                <td className="p-2">{u.is_active ? 'Yes' : 'No'}</td>
+                <td className="p-2">
+                  <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded ${u.is_active ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-400'}`}>
+                    {u.is_active ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
                 <td className="p-2">{u.is_superuser ? 'Yes' : 'No'}</td>
                 <td className="p-2 space-x-2">
                   <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => startEdit(u)}>Edit</button>
-                  {me?.id !== u.id && (
-                    <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => { setDeleting(u); setDeleteCode(''); setError(null) }}>Delete</button>
+                  {u.is_active ? (
+                    me?.id !== u.id && (
+                      <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => { setConfirmAction({ kind: 'delete', user: u }); setMfaCode(''); setError(null) }}>Delete</button>
+                    )
+                  ) : (
+                    <button className="px-2 py-1 border border-green-800 bg-green-900/30 text-green-400" onClick={() => { setConfirmAction({ kind: 'activate', user: u }); setMfaCode(''); setError(null) }}>Activate</button>
                   )}
                 </td>
               </tr>

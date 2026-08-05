@@ -214,3 +214,48 @@ def test_deactivating_another_user_via_update_still_works(env):
     assert resp.status_code == 200, resp.text
     env.db.expire_all()
     assert env.db.get(User, env.victim.id).is_active is False
+
+
+def _deactivate_victim(env):
+    victim = env.db.get(User, env.victim.id)
+    victim.is_active = False
+    env.db.commit()
+
+
+def test_activate_requires_valid_code(env):
+    _deactivate_victim(env)
+    resp = env.client.post(
+        f"/api/v1/users/{env.victim.id}/activate", headers=_auth("admin")
+    )
+    assert resp.status_code == 401
+    resp = env.client.post(
+        f"/api/v1/users/{env.victim.id}/activate",
+        headers={**_auth("admin"), "X-MFA-Code": "000000"},
+    )
+    assert resp.status_code == 401
+    env.db.expire_all()
+    assert env.db.get(User, env.victim.id).is_active is False
+
+
+def test_activate_with_valid_code_succeeds(env):
+    _deactivate_victim(env)
+    resp = env.client.post(
+        f"/api/v1/users/{env.victim.id}/activate",
+        headers={**_auth("admin"), "X-MFA-Code": _code(env)},
+    )
+    assert resp.status_code == 200, resp.text
+    env.db.expire_all()
+    assert env.db.get(User, env.victim.id).is_active is True
+
+
+def test_update_cannot_bypass_mfa_gated_reactivation(env):
+    _deactivate_victim(env)
+    resp = env.client.put(
+        f"/api/v1/users/{env.victim.id}",
+        json={"is_active": True},
+        headers=_auth("admin"),
+    )
+    assert resp.status_code == 400
+    assert "MFA" in resp.json()["detail"]
+    env.db.expire_all()
+    assert env.db.get(User, env.victim.id).is_active is False
