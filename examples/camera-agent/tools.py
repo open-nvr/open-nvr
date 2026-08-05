@@ -24,11 +24,16 @@ metadata + the event ring.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from adapter_clients import KaicAdapterClient
 from context import CameraContext
 from frame_sources import FrameSourceError
+# Tier-0 consumption helpers live in the App SDK so every app shares one
+# implementation (best-frame fetch + event snapshot); re-exported here so
+# ``from tools import make_best_frame_fetch`` keeps working for the agent.
+from opennvr_app_sdk import make_best_frame_fetch, snapshot_from_event  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +99,35 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "camera_snapshot",
+                "description": (
+                    "Count objects or check presence on one camera, several, or "
+                    "all — from the always-on detection stream, WITHOUT running a "
+                    "new inference (instant, no model call). PREFER this for "
+                    "counting and presence: 'how many people/cars?', 'is anyone "
+                    "at the door?', 'is there a package?'. Use describe_camera "
+                    "only when the answer needs appearance (colour, clothing, "
+                    "what someone is doing)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
+                    },
+                    "required": ["camera_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "detect_objects",
                 "description": (
                     "Detect and count objects (people, cars, packages, "
-                    "animals) on one camera, several, or all of them. Use for "
+                    "animals) on one camera, several, or all of them, by running "
+                    "a FRESH detection. Prefer camera_snapshot for counts when it "
+                    "has data; use this when you need a live re-check. Use for "
                     "'is there a package?' / 'how many people across all cameras?'."
                 ),
                 "parameters": {
@@ -217,11 +247,23 @@ class CameraTools:
         detection_client: KaicAdapterClient,
         recognition_client: KaicAdapterClient,
         footage_index: Any = None,
+        best_frame_fetch: Any = None,
+        resolve_camera: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
         self._detect = detection_client
         self._recognise = recognition_client
+        # Map the agent's camera id → the pipeline's camera id (the id on the Tier-0
+        # bus subject / best-frame endpoint). MUST match the mapping used to build
+        # best_frame_fetch, so camera_snapshot and describe_camera agree on which
+        # camera they're reading. Identity by default.
+        self._resolve_camera = resolve_camera or (lambda cid: cid)
+        # Optional async callable(camera_id) -> jpeg bytes | None. When set,
+        # describe_camera runs the VLM on Tier-0's BEST frame (clean, representative)
+        # instead of an arbitrary live grab — more accurate and cheaper. None (or a
+        # miss) falls back to the live frame, so behaviour is unchanged without it.
+        self._best_frame_fetch = best_frame_fetch
         # Optional read-only FootageIndex (footage_index.FootageIndex).
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
@@ -244,14 +286,30 @@ class CameraTools:
         clauses = [await self._describe_one(c, question) for c in cams]
         return self._join_clauses(clauses)
 
-    async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
+    async def _best_frame(self, camera_id: str) -> bytes | None:
+        """Tier-0's best frame for the camera as JPEG, or None. Best-effort —
+        any failure returns None so the caller falls back to a live grab."""
+        if self._best_frame_fetch is None:
+            return None
         try:
-            frame = await self._ctx.get_frame(camera_id)
-        except LookupError:
-            return f"{camera_id} is not configured"
-        except FrameSourceError as exc:
-            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
-            return f"{camera_id} appears to be offline"
+            return await self._best_frame_fetch(camera_id)
+        except Exception:
+            logger.debug("best-frame fetch failed for %s; using live frame",
+                         camera_id, exc_info=True)
+            return None
+
+    async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
+        # Prefer Tier-0's best frame (clean, already-selected) over an arbitrary
+        # live grab; fall back to a live frame when no best frame is available.
+        frame = await self._best_frame(camera_id)
+        if frame is None:
+            try:
+                frame = await self._ctx.get_frame(camera_id)
+            except LookupError:
+                return f"{camera_id} is not configured"
+            except FrameSourceError as exc:
+                logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
+                return f"{camera_id} appears to be offline"
         # Prefer a real scene caption / VQA answer when the caption adapter is
         # available. Send the task explicitly for symmetry with
         # recognize_faces and so the wire shape is legible in audit logs.
@@ -411,6 +469,40 @@ class CameraTools:
         if not detections:
             return f"{camera_id}: no objects"
         return f"{camera_id}: {self._summarize_detections(detections)}"
+
+    # ── camera_snapshot (metadata from Tier-0, no inference) ────────
+
+    async def camera_snapshot(self, args: dict[str, Any]) -> str:
+        """Answer count/presence from the always-on Tier-0 detection stream —
+        no new inference. Reads the latest published tracks off the event ring."""
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [self._snapshot_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    # Tier-0 publishes a track list every frame while objects are present; it stops
+    # (no empty events) once they leave. So an event older than this means the scene
+    # is stale — treat it as "nothing there now" rather than reporting a departed
+    # object as present.
+    _SNAPSHOT_MAX_AGE_S = 10.0
+
+    def _snapshot_one(self, camera_id: str) -> str:
+        # Resolve to the pipeline's camera id — the Tier-0 event ring is keyed by
+        # the id on the bus subject, same id the best-frame path uses.
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
+        if event is None:
+            # No Tier-0 stream for this camera (not analyzed, or bus not wired) —
+            # say so plainly so the LLM can fall back to a live tool if it must.
+            return f"{camera_id}: no live detection data (try describe_camera)"
+        if (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return f"{camera_id}: nothing detected recently (try describe_camera for a live look)"
+        summary = snapshot_from_event(event.raw or {}).describe()   # SDK: counts→phrase
+        if not summary:
+            return f"{camera_id}: nothing detected right now"
+        age = max(0, int(time.time() - event.received_at))
+        return f"{camera_id}: {summary} (from live detection {age}s ago)"
 
     # ── recognize_faces ────────────────────────────────────────────
 

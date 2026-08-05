@@ -76,11 +76,19 @@ def sounds_unfinished(text: str) -> bool:
     return bool(_UNFINISHED_RE.search(text or ""))
 
 
+# Whole words only: a substring check flagged natural replies like
+# "I am functioning well" ("function") and threw away correct answers.
+_TOOL_SPEAK_RE = re.compile(r"\b(camera_id|tools?|functions?)\b")
+
+
 def mentions_tools(text: str, tool_names: list[str]) -> bool:
     low = (text or "").lower()
-    if "camera_id" in low or "tool" in low or "function" in low:
+    if _TOOL_SPEAK_RE.search(low):
         return True
-    return any(name.lower() in low for name in tool_names)
+    return any(
+        re.search(r"\b" + re.escape(name.lower()) + r"\b", low)
+        for name in tool_names
+    )
 
 
 class AgentBrain:

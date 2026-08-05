@@ -54,6 +54,34 @@ audited interface:
   This is how the `examples/` apps (intrusion, loitering, LPR, …) work without
   touching the core.
 
+## Compute-gated inference (Tier-0 → agents/apps)
+
+The inference plane runs a **two-tier, compute-gated** pipeline so AI stays
+affordable on modest hardware (Raspberry Pi 5 / Intel N100) without changing how
+cameras are recorded or served.
+
+![OpenNVR end-to-end flow: cameras → MediaMTX → Tier-0 detect-pipeline → NATS bus → gated expensive models (KAI-C governed) → camera-agent and apps](images/compute-gated-flow.svg)
+
+- **Tier 0 — `detect-pipeline` (shipped, always-on, cheap).** Pulls a MediaMTX
+  substream tap and runs `motion → region → cheap ONNX detect → track →
+  best-frame` per camera, publishing structured events to the **existing** bus:
+  `opennvr.inference.tier0.<camera>.completed` (`opennvr.tier0.v1`). Detection runs
+  through a pluggable backend — `cv2.dnn` (zero-dep CPU) or ONNX Runtime
+  (OpenVINO / TensorRT / CoreML on the same model).
+- **The gate (next).** Reads Tier-0 events and runs the **expensive** frame-models
+  (VLM caption, face, plate) **once, on the best frame** — governed and audited by
+  KAI-C (including the *non-events*: "didn't run because score < threshold").
+- **Consumers (camera-agent + apps).** Subscribe to the same bus — **no new
+  contract**; the bus + schema *is* the API. A large class of questions ("is anyone
+  at the door?", "how many cars?") is answered straight from Tier-0 metadata with
+  **no expensive-model call**.
+
+**In scope:** frame/stream models only (detectors, VLM, face, plate). **Out of
+scope:** STT (Whisper), TTS (Piper), and the reasoning LLM — they process
+voice/text, not camera frames (the LLM still benefits indirectly: fewer, cleaner
+VLM calls). **Recording is never gated.** Every stage is additive and can be
+disabled without touching the rest of the stack.
+
 ## Request lifecycle (web)
 
 ```

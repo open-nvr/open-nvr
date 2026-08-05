@@ -1,0 +1,56 @@
+[project]
+name = "detect-pipeline"
+version = "0.0.1"
+description = "OpenNVR Tier-0 detection pipeline (compute-gated inference)"
+requires-python = ">=3.11"
+dependencies = [
+    # Tier-0 CV: motion detection + (later) region math operate on numpy luma
+    # arrays. Headless OpenCV — no GUI/GTK deps, correct for a server component.
+    "numpy>=1.26",
+    # OpenCV 4.x AND 5.x are both supported: the full suite passes on 5.0.0
+    # (imgproc + cv2.dnn.blobFromImage/NMSBoxes all verified), and the default
+    # ONNX detector uses cv2.dnn.readNetFromONNX (in the main wheel on both), with
+    # ENGINE_AUTO falling back to the classic engine if the new one can't load a
+    # model. The <6 is normal major-version hygiene (guard the next unreleased
+    # major), NOT a block on 5.x. Note: HOG is gone on 5 (moved to opencv_contrib)
+    # — that's why the default detector is ONNX and 'hog' is 4.x-only.
+    # TODO: smoke-test real yolov8n.onnx inference on 5.0's new engine on a host.
+    "opencv-python-headless>=4.9,<6",
+]
+
+[project.optional-dependencies]
+# The container service also needs a NATS client to publish detections.
+service = [
+    "nats-py>=2.6",
+]
+# Optional ONNX Runtime backend (DETECT_ONNX_BACKEND=ort / --backend ort). The
+# default detector runs on cv2.dnn with no extra install; install this for the
+# faster/accelerator-capable path. For accelerators install the matching wheel
+# INSTEAD of plain onnxruntime — they conflict — and select the provider:
+#   Intel N100 / iGPU / NPU : pip install onnxruntime-openvino
+#                             DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider
+#   Nvidia / Jetson         : pip install onnxruntime-gpu
+#                             DETECT_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider
+# Coral (EdgeTPU) and Hailo are separate backends (own model format + SDK), not
+# ORT providers — tracked as follow-ups / the KAI-C accelerator adapter.
+onnxruntime = [
+    "onnxruntime>=1.17",
+]
+
+[project.scripts]
+opennvr-tier0 = "detect_pipeline.run:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["detect_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

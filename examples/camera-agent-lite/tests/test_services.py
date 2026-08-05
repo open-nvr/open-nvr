@@ -180,6 +180,20 @@ def test_sounds_unfinished_patterns():
     assert not sounds_unfinished("Camera one is online and recording.")
 
 
+def test_mentions_tools_whole_words_only():
+    from services import mentions_tools
+    names = ["look_at_camera", "list_cameras", "current_time"]
+    # Real tool-speak is caught.
+    assert mentions_tools("Call look_at_camera with camera_id 'x'.", names)
+    assert mentions_tools("Use the tool to check.", names)
+    assert mentions_tools("I would make a function call here.", names)
+    # Natural language sharing a stem must NOT be flagged — "I am functioning
+    # well" was discarded by the substring check and replaced with an error.
+    assert not mentions_tools("I am functioning well, my health is good.", names)
+    assert not mentions_tools("Everything is functional today.", names)
+    assert not mentions_tools("The current time is 17:35.", names)
+
+
 @pytest.fixture
 def brain2(tmp_path, monkeypatch):
     """Two named cameras, no default — the ambiguous-camera setup."""

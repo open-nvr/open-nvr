@@ -100,6 +100,12 @@ class Detector(ContractMixin, NatsSubscriberMixin):
         self._config = config
         self._dispatcher = dispatcher
         self._clock = clock or (lambda: _dt.datetime.now(_dt.timezone.utc))
+        # Opt-in Tier-0 consumption (see docs/tier0-consumption.md): when
+        # True, tier0 events are bridged into contract-shaped detections and
+        # flow through on_detections like any adapter event. Off by default:
+        # an app also subscribed to a heavy adapter would otherwise process
+        # the same object twice (double alerts).
+        self.consume_tier0: bool = bool(getattr(config, "consume_tier0", False))
         self._stop_event = asyncio.Event()
         self._nc: Any = None
         # This detector emits alerts AS this app. The identity is scoped
@@ -168,14 +174,33 @@ class Detector(ContractMixin, NatsSubscriberMixin):
         # Contract counters (spec §03): every decoded event counts as
         # "seen" — /health's last_event_age_s is stall detection for
         # the pipe, not a per-shape metric.
+        is_tier0 = (
+            isinstance(event, dict)
+            and (
+                event.get("schema") == "opennvr.tier0.v1"
+                or event.get("adapter") == "tier0"
+            )
+        )
+        if is_tier0 and not self.consume_tier0:
+            # Not counted as "seen": tier0 publishes per-frame, and letting it
+            # refresh last_event_age_s would mask a stalled adapter for apps
+            # that don't consume tier0 at all.
+            return []
         self._contract_note_event()
         if not isinstance(event, dict):
             return []
         camera_id = event.get("camera_id")
         if not camera_id:
             return []
-        result = event.get("result") or {}
-        detections = result.get("detections") if isinstance(result, dict) else None
+        if is_tier0:
+            from .tier0 import tier0_to_detections
+
+            detections: Any = tier0_to_detections(event)
+        else:
+            result = event.get("result") or {}
+            detections = (
+                result.get("detections") if isinstance(result, dict) else None
+            )
         if not isinstance(detections, list):
             return []
 

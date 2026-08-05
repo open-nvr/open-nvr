@@ -302,10 +302,8 @@ services:
 
   camera-agent:
     profiles: [camera-agent]
-    build:
-      context: .
-      dockerfile: examples/camera-agent/Dockerfile
-    image: opennvr/camera-agent:local-build
+    # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
+    image: ghcr.io/open-nvr/camera-agent:${CORE_TAG:-latest}
     container_name: opennvr_camera_agent
     restart: unless-stopped
     depends_on:
