@@ -66,6 +66,7 @@ class UserService:
                     last_name=user_create.last_name,
                     is_active=user_create.is_active,
                     password_set=True,  # Normal user creation has password set
+                    mfa_enabled=False,  # User enrolls TOTP at first login (MFA wall)
                     role_id=user_create.role_id,
                 )
                 db.add(db_user)

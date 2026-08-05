@@ -246,6 +246,32 @@ def _enroll_device(db, request, response, user_id: int | None) -> str | None:
         return None
 
 
+def _mfa_login_required(db: Session, user: User) -> bool:
+    """Whether this login must present a TOTP code.
+
+    Accounts can carry mfa_enabled=True without a secret (rows created before
+    the default changed, or a provisioned bootstrap admin). No valid code can
+    exist for them, so demanding one locks the account forever. Normalize the
+    flag to False so the client shows the MFA-setup wall after this password
+    login; /auth/mfa/verify turns it back on once enrollment completes.
+    """
+    if user.mfa_enabled and not user.mfa_secret:
+        user.mfa_enabled = False
+        db.add(user)
+        db.commit()
+        auth_logger.log_action(
+            "auth.mfa_enrollment_pending",
+            user_id=user.id,
+            message=(
+                f"User {user.username} flagged for MFA without an enrolled "
+                "secret; allowing password login, enrollment enforced on client"
+            ),
+            extra_data={"username": user.username},
+        )
+        return False
+    return user.mfa_enabled
+
+
 @router.post("/login", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -363,7 +389,7 @@ async def login_for_access_token(
             },
         )
 
-    if user.mfa_enabled:
+    if _mfa_login_required(db, user):
         auth_logger.log_action(
             "auth.login_mfa_required",
             user_id=user.id,
@@ -480,7 +506,7 @@ async def login_with_json(
             },
         )
 
-    if user.mfa_enabled:
+    if _mfa_login_required(db, user):
         if not user_credentials.code or not verify_totp_code(
             user.mfa_secret, user_credentials.code
         ):
