@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+import { UserPlus, UserCog, X } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
@@ -207,41 +208,55 @@ export function UsersManager() {
 
       {/* Create User Dialog */}
       {showCreateDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Add New User</h3>
-            <form onSubmit={onCreate} className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Username</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Email</span>
-                <input type="email" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">First Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.first_name || ''} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Last Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.last_name || ''} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Password</span>
-                <input type="password" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} />
-                <span className="text-xs text-[var(--text-dim)]">At least 8 characters, with an uppercase letter, a lowercase letter, and a number.</span>
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Role</span>
-                <select className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.role_id} onChange={(e) => setForm({ ...form, role_id: Number(e.target.value) })} required>
-                  {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                </select>
-              </label>
-              {error && <div className="col-span-2 text-sm text-red-400">{error}</div>}
-              <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Creating...' : 'Create User'}</button>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-lg shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
+              <h3 className="font-semibold flex items-center gap-2">
+                <UserPlus size={18} />
+                Add New User
+              </h3>
+              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={onCreate} className="flex flex-col flex-1 min-h-0">
+              <div className="p-4 overflow-auto flex-1 space-y-4">
+                {error && (
+                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
+                )}
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Username *</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" placeholder="e.g., jsmith" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Email *</span>
+                    <input type="email" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" placeholder="user@example.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">First Name</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.first_name || ''} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Last Name</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.last_name || ''} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Password *</span>
+                    <input type="password" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} />
+                    <span className="text-[10px] text-[var(--text-dim)]">At least 8 characters, with an uppercase letter, a lowercase letter, and a number.</span>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Role *</span>
+                    <select className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.role_id} onChange={(e) => setForm({ ...form, role_id: Number(e.target.value) })} required>
+                      {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Creating...' : 'Create User'}</button>
               </div>
             </form>
           </div>
@@ -250,39 +265,53 @@ export function UsersManager() {
 
       {/* Edit User Dialog */}
       {showEditDialog && editing && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Edit User: {editing.username}</h3>
-            <form onSubmit={onUpdate} className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Username</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded opacity-50" value={form.username} disabled />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Email</span>
-                <input type="email" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">First Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.first_name || ''} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Last Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.last_name || ''} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Role</span>
-                <select className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.role_id} onChange={(e) => setForm({ ...form, role_id: Number(e.target.value) })} required>
-                  {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                </select>
-              </label>
-              <label className="flex items-center gap-2 mt-6">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
-              </label>
-              {error && <div className="col-span-2 text-sm text-red-400">{error}</div>}
-              <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Updating...' : 'Update User'}</button>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-lg shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
+              <h3 className="font-semibold flex items-center gap-2">
+                <UserCog size={18} />
+                Edit User: {editing.username}
+              </h3>
+              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={onUpdate} className="flex flex-col flex-1 min-h-0">
+              <div className="p-4 overflow-auto flex-1 space-y-4">
+                {error && (
+                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
+                )}
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Username</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm opacity-50" value={form.username} disabled />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Email *</span>
+                    <input type="email" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">First Name</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.first_name || ''} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Last Name</span>
+                    <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.last_name || ''} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-[var(--text-dim)]">Role *</span>
+                    <select className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.role_id} onChange={(e) => setForm({ ...form, role_id: Number(e.target.value) })} required>
+                      {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 mt-5 text-sm">
+                    <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Updating...' : 'Update User'}</button>
               </div>
             </form>
           </div>
