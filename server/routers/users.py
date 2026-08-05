@@ -19,10 +19,10 @@ Users router for user management operations.
 Handles CRUD operations for users with proper authentication and authorization.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user, get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser, verify_totp_code
 from core.database import get_db
 from core.logging_config import main_logger
 from models import Permission, User
@@ -131,6 +131,12 @@ def update_user(
     request: Request = None,
 ):
     """Update user information (superuser only)."""
+    # Deactivating yourself is the same lockout as self-deletion (issue #176).
+    if user_id == current_user.id and user_update.is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account.",
+        )
     user = UserService.update_user(db=db, user_id=user_id, user_update=user_update)
     if not user:
         raise HTTPException(
@@ -162,8 +168,31 @@ def delete_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superuser),
     request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
 ):
-    """Delete a user (soft delete, superuser only)."""
+    """Delete a user (soft delete, superuser only).
+
+    Requires the caller's current TOTP code in the X-MFA-Code header, and a
+    user can never delete their own account — a soft-deleted user cannot log
+    in, so self-deletion bricks single-admin deployments (issue #176).
+    """
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own account.",
+        )
+
+    if not current_user.mfa_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Set up MFA before deleting users.",
+        )
+    if not mfa_code or not verify_totp_code(current_user.mfa_secret, mfa_code):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing MFA code.",
+        )
+
     success = UserService.delete_user(db=db, user_id=user_id)
     if not success:
         raise HTTPException(
