@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 
 type Role = {
@@ -61,7 +62,7 @@ export function RolesManager() {
         setRoles(list)
         setTotal((res.data && (res.data as any).total) ? (res.data as any).total : list.length)
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load roles')
+        setError(extractApiError(e, 'Failed to load roles'))
       } finally {
         setLoading(false)
       }
@@ -77,11 +78,13 @@ export function RolesManager() {
     setShowCreateDialog(true)
     setEditing(null)
     resetForm()
+    setError(null)
   }
 
   const startEdit = (r: Role) => {
     setEditing(r)
     setShowCreateDialog(false)
+    setError(null)
     setForm({ name: r.name, description: r.description || '' })
     setShowEditDialog(true)
   }
@@ -103,7 +106,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to create role')
+      setError(extractApiError(e, 'Failed to create role'))
     } finally {
       setLoading(false)
     }
@@ -121,7 +124,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to update role')
+      setError(extractApiError(e, 'Failed to update role'))
     } finally {
       setLoading(false)
     }
@@ -135,7 +138,7 @@ export function RolesManager() {
       await apiService.deleteRole(r.id)
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete role')
+      setError(extractApiError(e, 'Failed to delete role'))
     } finally {
       setLoading(false)
     }
@@ -173,8 +176,9 @@ export function RolesManager() {
                 <span className="text-[var(--text-dim)]">Description</span>
                 <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
               </label>
+              {error && <div className="text-sm text-red-400">{error}</div>}
               <div className="flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm() }}>Cancel</button>
+                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Creating...' : 'Create Role'}</button>
               </div>
             </form>
@@ -196,8 +200,9 @@ export function RolesManager() {
                 <span className="text-[var(--text-dim)]">Description</span>
                 <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
               </label>
+              {error && <div className="text-sm text-red-400">{error}</div>}
               <div className="flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm() }}>Cancel</button>
+                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Updating...' : 'Update Role'}</button>
               </div>
             </form>

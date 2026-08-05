@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 
 type User = {
@@ -82,7 +83,7 @@ export function UsersManager() {
   const rolesRes = await apiService.getRoles()
   setRoles((rolesRes.data && (rolesRes.data as any).roles) ? (rolesRes.data as any).roles : (Array.isArray(rolesRes.data) ? rolesRes.data : []))
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load users')
+        setError(extractApiError(e, 'Failed to load users'))
       } finally {
         setLoading(false)
       }
@@ -113,7 +114,7 @@ export function UsersManager() {
   setUsers(data.users)
   setTotal(data.total ?? 0)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to create user')
+      setError(extractApiError(e, 'Failed to create user'))
     } finally {
       setLoading(false)
     }
@@ -143,7 +144,7 @@ export function UsersManager() {
   setUsers(data.users)
   setTotal(data.total ?? 0)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to update user')
+      setError(extractApiError(e, 'Failed to update user'))
     } finally {
       setLoading(false)
     }
@@ -159,7 +160,7 @@ export function UsersManager() {
       setUsers(data.users)
       setTotal(data.total)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete user')
+      setError(extractApiError(e, 'Failed to delete user'))
     } finally {
       setLoading(false)
     }
@@ -168,6 +169,7 @@ export function UsersManager() {
   const startEdit = (u: User) => {
     setEditing(u)
     setShowCreateDialog(false)
+    setError(null)
     setForm({
       username: u.username,
       email: u.email,
@@ -197,7 +199,7 @@ export function UsersManager() {
           <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
             {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
           </select>
-          <button className="px-2 py-1 bg-[var(--accent)] text-white rounded" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>Add User</button>
+          <button className="px-2 py-1 bg-[var(--accent)] text-white rounded" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm(); setError(null) }}>Add User</button>
         </div>
       </div>
 
@@ -228,6 +230,7 @@ export function UsersManager() {
               <label className="flex flex-col gap-1">
                 <span className="text-[var(--text-dim)]">Password</span>
                 <input type="password" className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} />
+                <span className="text-xs text-[var(--text-dim)]">At least 8 characters, with an uppercase letter, a lowercase letter, and a number.</span>
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[var(--text-dim)]">Role</span>
@@ -235,8 +238,9 @@ export function UsersManager() {
                   {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                 </select>
               </label>
+              {error && <div className="col-span-2 text-sm text-red-400">{error}</div>}
               <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm() }}>Cancel</button>
+                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Creating...' : 'Create User'}</button>
               </div>
             </form>
@@ -275,8 +279,9 @@ export function UsersManager() {
               <label className="flex items-center gap-2 mt-6">
                 <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
               </label>
+              {error && <div className="col-span-2 text-sm text-red-400">{error}</div>}
               <div className="col-span-2 flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm() }}>Cancel</button>
+                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Updating...' : 'Update User'}</button>
               </div>
             </form>

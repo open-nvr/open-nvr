@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 
 type Role = { id: number; name: string; description?: string }
@@ -54,7 +55,7 @@ export function PermissionsManager() {
           setSelectedRoleId(rolesList[0].id)
         }
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load roles/permissions')
+        setError(extractApiError(e, 'Failed to load roles/permissions'))
       } finally {
         setLoading(false)
       }
@@ -71,7 +72,7 @@ export function PermissionsManager() {
         const list = (res.data && (res.data as any).permissions) ? (res.data as any).permissions : (Array.isArray(res.data) ? res.data : [])
         setAssignedIds(list.map((p: Permission) => p.id))
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load role permissions')
+        setError(extractApiError(e, 'Failed to load role permissions'))
       } finally {
         setLoading(false)
       }
@@ -89,7 +90,7 @@ export function PermissionsManager() {
       setError(null)
       await apiService.setRolePermissions(selectedRoleId, assignedIds)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save permissions')
+      setError(extractApiError(e, 'Failed to save permissions'))
     } finally {
       setLoading(false)
     }

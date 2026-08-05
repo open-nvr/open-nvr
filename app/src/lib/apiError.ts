@@ -23,7 +23,11 @@ function toStringSafe(v: unknown): string {
   if (v == null) return ''
   if (typeof v === 'string') return v
   if (Array.isArray(v)) return v.map(toStringSafe).filter(Boolean).join(', ')
-  if (typeof v === 'object' && typeof (v as { msg?: unknown }).msg === 'string') return (v as { msg: string }).msg
+  // Pydantic v2 prefixes custom-validator messages with "Value error, " /
+  // "Assertion error, " — strip it so users see just the human message.
+  if (typeof v === 'object' && typeof (v as { msg?: unknown }).msg === 'string') {
+    return (v as { msg: string }).msg.replace(/^(Value|Assertion) error, /, '')
+  }
   try {
     return JSON.stringify(v)
   } catch {
