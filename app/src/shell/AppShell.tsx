@@ -238,7 +238,7 @@ export function AppShell() {
 
       <div className="flex">
         {/* Sidebar */}
-  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} sticky top-16 self-start h-[calc(100vh-4rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
+  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
           {/* Fixed header: toggle + pinned items never scroll away; its bottom
               border is the clip line for the scrollable nav below */}
           <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
@@ -284,7 +284,7 @@ export function AppShell() {
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!collapsed}
                   >
-                    <span>{group.label}</span>
+                    <span className="truncate whitespace-nowrap">{group.label}</span>
                     <ChevronDown size={16} className={`flex-shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
                   </button>
                   {!collapsed && (
@@ -304,7 +304,7 @@ export function AppShell() {
         </aside>
 
         {/* Main content — boundary keyed by route so navigating away resets a crash */}
-        <main className="flex-1 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
+        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
@@ -324,7 +324,7 @@ function SideLink({ to, label, icon, collapsed }: { to: string; label: string; i
       className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-2.5 py-1 rounded text-sm ${isActive ? 'bg-[color-mix(in_oklab,var(--accent)_15%,transparent)] text-[var(--accent)] font-medium' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
     >
       <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">{icon}</span>
-      <span className={`${collapsed ? 'hidden' : 'inline'}`}>{label}</span>
+      <span className={`${collapsed ? 'hidden' : 'inline'} truncate whitespace-nowrap`}>{label}</span>
     </NavLink>
   )
 }
