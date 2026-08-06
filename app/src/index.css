@@ -103,24 +103,35 @@ body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antial
   outline-offset: 1px;
 }
 
-/* Sidebar scrollbars: hidden by default, visible on hover or while scrolling */
+/* Sidebar scrollbar: constant thin gutter (no layout shift); themed thumb
+   fades in on hover or while scrolling */
 .sidebar-scroll {
-  scrollbar-width: none; /* Firefox */
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: transparent transparent;
+}
+.sidebar-scroll:hover,
+.sidebar-scroll.is-scrolling {
+  scrollbar-color: color-mix(in oklab, var(--text-dim) 40%, transparent) transparent;
 }
 .sidebar-scroll::-webkit-scrollbar {
-  width: 0px; /* Chrome/Safari hide */
-  height: 0px;
+  width: 6px;
+  height: 6px;
 }
-.sidebar-scroll:hover::-webkit-scrollbar,
-.sidebar-scroll.is-scrolling::-webkit-scrollbar {
-  width: 8px;
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
 }
 .sidebar-scroll:hover::-webkit-scrollbar-thumb,
 .sidebar-scroll.is-scrolling::-webkit-scrollbar-thumb {
-  background-color: rgba(148, 163, 184, 0.4); /* slate-400/40 */
-  border-radius: 4px;
+  background-color: color-mix(in oklab, var(--text-dim) 40%, transparent);
 }
-.sidebar-scroll:hover { scrollbar-width: thin; }
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--text-dim) 60%, transparent);
+}
 
 /* Snackbar slide-in animation */
 @keyframes slide-in-right {
