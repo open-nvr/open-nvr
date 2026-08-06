@@ -80,7 +80,11 @@ class User(Base):
     password_set = Column(
         Boolean, default=False
     )  # Track if initial password setup is complete
-    mfa_enabled = Column(Boolean, default=True)  # MFA enabled by default for security
+    # True only once the user has enrolled a TOTP secret (/auth/mfa/verify).
+    # New accounts start False; the client blocks app access until enrollment
+    # completes (MFA wall), so MFA is still mandatory — just set up by the
+    # account owner on first login, not assumed at creation.
+    mfa_enabled = Column(Boolean, default=False)
 
     # Store encrypted MFA secret
     encrypted_mfa_secret = Column(String(500), nullable=True)
