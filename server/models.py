@@ -390,6 +390,37 @@ class CameraCapability(Base):
     camera = relationship("Camera", back_populates="capability")
 
 
+class TimelineEvent(Base):
+    """Canonical event & evidence store (RFC-0001 Challenge 1) — one row per
+    object VISIT (a Tier-0 track lifecycle), alarm, or app alert.
+
+    The question-shaped store: "who came between 3 and 4pm?" is a range scan
+    here, each row carrying its best-frame evidence JPEG (selected at capture
+    time — the sharpest look Tier-0 had at the object) and, later, the
+    recording anchor and LPR plate text. All producers share this table; apps
+    query it instead of keeping private stores."""
+
+    __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_cam_start", "camera_id", "started_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    source = Column(String(30), nullable=False)        # tier0 | camera | app | adapter
+    event_type = Column(String(30), nullable=False)    # track | alarm | alert
+    label = Column(String(60), nullable=True, index=True)
+    score = Column(Float, nullable=True)
+    track_id = Column(String(40), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    recording_ref = Column(String(500), nullable=True)
+    evidence_path = Column(String(500), nullable=True)
+    plate_text = Column(String(32), nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class CameraEvent(Base):
     """A camera-native alarm (motion / tamper / video-loss / IO) received from
     the device's event stream. History store parallel to AIDetectionResult; the

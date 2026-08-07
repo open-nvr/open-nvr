@@ -10,11 +10,14 @@ passwords or requiring an operator login token.
 
 from __future__ import annotations
 
+import binascii
 import logging
 import secrets
+from datetime import datetime
 from urllib.parse import quote as urlquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -39,6 +42,67 @@ def _require_internal_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal api key",
         )
+
+
+class TrackEventIn(BaseModel):
+    """One finished object visit, posted by the detect-pipeline at track end."""
+
+    camera_id: int
+    label: str
+    score: float | None = None
+    track_id: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    stationary: bool | None = None
+    # Best-frame crop (JPEG, base64). Optional: a visit with no retained crop
+    # is still history worth keeping.
+    evidence_jpeg_b64: str | None = None
+
+
+@router.post("/events", status_code=201)
+async def ingest_track_event(
+    payload: TrackEventIn,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Canonical-store ingest (RFC-0001 C1): persist a visit + its evidence.
+
+    Called by the detect-pipeline when a track ends — the moment its best
+    frame is final. Idempotent enough for retries: identical evidence
+    content-addresses to the same file; duplicate rows are tolerated and
+    cheap to de-dup at query time via (camera_id, track_id, started_at).
+    """
+    camera = db.query(Camera).filter(Camera.id == payload.camera_id).first()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="unknown camera_id")
+
+    evidence_rel = None
+    if payload.evidence_jpeg_b64:
+        import base64
+
+        from services.evidence_store import save_evidence_jpeg
+
+        try:
+            evidence_rel = save_evidence_jpeg(
+                base64.b64decode(payload.evidence_jpeg_b64, validate=True)
+            )
+        except (ValueError, binascii.Error) as e:
+            raise HTTPException(status_code=422, detail=f"bad evidence: {e}")
+
+    from services.timeline_service import record_track_visit
+
+    row = record_track_visit(
+        db,
+        camera_id=payload.camera_id,
+        label=payload.label,
+        started_at=payload.started_at,
+        ended_at=payload.ended_at,
+        score=payload.score,
+        track_id=payload.track_id,
+        stationary=payload.stationary,
+        evidence_path=evidence_rel,
+    )
+    return {"id": row.id, "evidence_path": evidence_rel}
 
 
 GATE_MODE_KEY = "detect_gate_mode"

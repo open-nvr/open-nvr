@@ -59,6 +59,7 @@ from routers import (
     camera_settings,
     cameras,
     internal_camera_agent,
+    timeline_events,
     cloud as cloud_router,
     cloud_inference,
     cloud_providers,
@@ -512,6 +513,7 @@ app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
 app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
+app.include_router(timeline_events.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)
