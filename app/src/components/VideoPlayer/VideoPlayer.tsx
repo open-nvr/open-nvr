@@ -123,6 +123,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [error, setError] = useState<string | null>(null)
     const [showControls, setShowControls] = useState(true)
     const hideControlsTimeout = useRef<number | null>(null)
+    // Real aspect ratio of the incoming stream (width/height), read from the
+    // video metadata. null until known (or after the source is torn down).
+    const [videoAspect, setVideoAspect] = useState<number | null>(null)
 
     const isLive = mode === 'live'
 
@@ -635,6 +638,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [])
 
+    // Track the stream's true aspect ratio. 'resize' fires when the decoded
+    // frame size changes mid-stream (e.g. adaptive HLS level switch); 'emptied'
+    // resets it when the source is torn down.
+    useEffect(() => {
+      const el = videoRef.current
+      if (!el) return
+      const update = () => {
+        setVideoAspect(el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : null)
+      }
+      update()
+      el.addEventListener('loadedmetadata', update)
+      el.addEventListener('resize', update)
+      el.addEventListener('emptied', update)
+      return () => {
+        el.removeEventListener('loadedmetadata', update)
+        el.removeEventListener('resize', update)
+        el.removeEventListener('emptied', update)
+      }
+    }, [])
+
     // Fullscreen change listener
     useEffect(() => {
       const onFullscreenChange = () => {
@@ -800,10 +823,25 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     return (
       <div
         ref={containerRef}
-        className={`relative bg-black overflow-hidden group flex items-center justify-center ${className}`}
+        className={`relative bg-[var(--bg-2)] overflow-hidden group flex items-center justify-center ${className}`}
+        style={{ containerType: 'size' }}
         tabIndex={0}
         onDoubleClick={handleDoubleClick}
       >
+        {/* Content box — the largest rectangle matching the stream's real
+            aspect ratio that fits the container (100cqh = container height).
+            The video fills it exactly, and every overlay anchored to it
+            (title, LIVE badge, controls) hugs the actual feed. Residual space
+            around it shows the app panel background, not black bars. Until
+            the aspect is known the box just fills the container. */}
+        <div
+          className="relative bg-black"
+          style={
+            videoAspect
+              ? { aspectRatio: String(videoAspect), width: `min(100%, calc(100cqh * ${videoAspect}))` }
+              : { width: '100%', height: '100%' }
+          }
+        >
         {/* Title overlay */}
         {title && (
           <div className="absolute top-2 left-2 z-10 text-sm text-white/90 bg-black/50 px-2 py-0.5 rounded">
@@ -819,26 +857,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           </div>
         )}
 
-        {/* Fixed 16:9 frame — locks the stream into a letterboxed/pillarboxed
-            box so a non-16:9 source never distorts the layout. In fullscreen the
-            container fills the (possibly non-16:9) screen, so cap the frame to the
-            largest 16:9 area that fits the viewport and center it. */}
-        <div
-          className={`relative w-full h-full ${
-            isFullscreen ? 'max-w-[177.78vh] max-h-[56.25vw]' : ''
-          }`}
-        >
-          {/* Video element */}
-          <video
-            ref={videoRef}
-            className="w-full h-full object-contain"
-            playsInline
-            muted={isMuted}
-            autoPlay={autoPlay}
-            crossOrigin="anonymous"
-            preload={mode === 'playback' ? 'metadata' : 'auto'}
-          />
-        </div>
+        {/* Video element — the content box already matches its aspect ratio,
+            so object-contain leaves no internal bars once metadata is known */}
+        <video
+          ref={videoRef}
+          className="block w-full h-full object-contain"
+          playsInline
+          muted={isMuted}
+          autoPlay={autoPlay}
+          crossOrigin="anonymous"
+          preload={mode === 'playback' ? 'metadata' : 'auto'}
+        />
 
         {/* Loading overlay */}
         {isLoading && (
@@ -912,6 +941,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             onStreamTypeChange={isLive ? handleStreamTypeChange : undefined}
             availableStreamTypes={availableStreamTypes}
           />
+        </div>
         </div>
       </div>
     )
