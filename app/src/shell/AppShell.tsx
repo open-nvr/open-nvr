@@ -183,7 +183,7 @@ export function AppShell() {
   return (
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
   {/* Top white header (sticky) */}
-  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-16 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
+  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
         <Link to="/" className="font-semibold inline-flex items-center gap-2">
           <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
         </Link>
@@ -234,13 +234,13 @@ export function AppShell() {
             {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
             <span className="hidden md:inline">Fullscreen</span>
           </button>
-          <span className="opacity-90">{new Date().toLocaleString()}</span>
+          <LiveClock />
         </div>
       </header>
 
       <div className="flex">
         {/* Sidebar */}
-  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
+  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-12 self-start h-[calc(100vh-3rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
           {/* Fixed header: toggle + pinned items never scroll away; its bottom
               border is the clip line for the scrollable nav below */}
           <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
@@ -306,7 +306,7 @@ export function AppShell() {
         </aside>
 
         {/* Main content — boundary keyed by route so navigating away resets a crash */}
-        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
+        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-3rem)]">
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
@@ -315,6 +315,15 @@ export function AppShell() {
       <DeviceBlockedOverlay />
     </div>
   )
+}
+
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="opacity-90 tabular-nums">{now.toLocaleString()}</span>
 }
 
 function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {
