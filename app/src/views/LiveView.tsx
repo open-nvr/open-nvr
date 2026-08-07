@@ -21,6 +21,7 @@ import { apiService } from '../lib/apiService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
 import { 
@@ -838,7 +839,9 @@ function ToolbarContents({
   onToggleFullscreen: () => void
 }) {
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
-  
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  useClickOutside(dropdownRef, layoutDropdownOpen, () => setLayoutDropdownOpen(false))
+
   return (
     <>
       <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={onOpenMenu}>
@@ -860,7 +863,7 @@ function ToolbarContents({
           )
         })}
         {/* More layouts dropdown */}
-        <div className="relative">
+        <div className="relative" ref={dropdownRef}>
           <button 
             className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1"
             onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}

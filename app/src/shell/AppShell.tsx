@@ -21,6 +21,7 @@ import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
 import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
@@ -120,6 +121,8 @@ export function AppShell() {
   const { user, logout } = useAuth()
   const { hasPermission } = usePermissions()
   const [menuOpen, setMenuOpen] = useState(false)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
+  useClickOutside(accountMenuRef, menuOpen, () => setMenuOpen(false))
   const { theme, toggleTheme } = useTheme()
   const sidebarRef = useRef<HTMLDivElement>(null)
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
@@ -207,7 +210,7 @@ export function AppShell() {
               <span className="hidden md:inline">Live</span>
             </Link>
           )}
-          <div className="relative">
+          <div className="relative" ref={accountMenuRef}>
             <button
               className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
               onClick={() => setMenuOpen((s) => !s)}
