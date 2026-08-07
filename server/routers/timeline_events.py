@@ -82,6 +82,10 @@ async def list_events(
     rows = query_events(
         db, camera_id=camera_id, label=label, source=source,
         from_=from_, to=to, limit=limit,
+        # Camera data is owner-scoped everywhere in OpenNVR; history and
+        # evidence photos are the MOST sensitive camera data, so the same
+        # rule applies here. Superusers see the fleet.
+        owner_id=None if current_user.is_superuser else current_user.id,
     )
     return {"events": [_serialize(e) for e in rows], "count": len(rows)}
 
@@ -95,6 +99,11 @@ async def get_event_evidence(
     """The visit's best-frame JPEG — the sharpest look Tier-0 had at it."""
     e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
     if e is None or not e.evidence_path:
+        raise HTTPException(status_code=404, detail="no evidence for this event")
+    from services.timeline_service import can_access_event
+
+    if not can_access_event(db, e, user=current_user):
+        # 404, not 403: don't confirm the event exists on someone else's camera.
         raise HTTPException(status_code=404, detail="no evidence for this event")
     from services.evidence_store import resolve_evidence
 

@@ -29,7 +29,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from models import TimelineEvent
+from models import Camera, TimelineEvent
 
 
 def record_track_visit(
@@ -72,10 +72,19 @@ def query_events(
     from_: datetime | None = None,
     to: datetime | None = None,
     limit: int = 100,
+    owner_id: int | None = None,
 ) -> list[TimelineEvent]:
-    """Newest-first visits/alarms/alerts intersecting [from, to)."""
+    """Newest-first visits/alarms/alerts intersecting [from, to).
+
+    ``owner_id`` scopes results to that user's cameras — the same ownership
+    rule every camera route enforces. Pass None ONLY for superusers.
+    """
     limit = max(1, min(500, limit))
     q = db.query(TimelineEvent)
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
     if camera_id is not None:
         q = q.filter(TimelineEvent.camera_id == camera_id)
     if label:
@@ -92,3 +101,11 @@ def query_events(
             | ((TimelineEvent.ended_at.is_(None)) & (TimelineEvent.started_at >= from_))
         )
     return q.order_by(TimelineEvent.started_at.desc()).limit(limit).all()
+
+
+def can_access_event(db: Session, event: TimelineEvent, *, user) -> bool:
+    """Ownership check for a single event — mirrors get_camera_or_403."""
+    if getattr(user, "is_superuser", False):
+        return True
+    cam = db.query(Camera).filter(Camera.id == event.camera_id).first()
+    return bool(cam and cam.owner_id == user.id)

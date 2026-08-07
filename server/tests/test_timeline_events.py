@@ -160,3 +160,36 @@ def test_evidence_resolver_refuses_traversal(tmp_path, monkeypatch):
     (tmp_path / "secret.txt").write_text("no")
     assert evidence_store.resolve_evidence("../secret.txt") is None
     assert evidence_store.resolve_evidence("nope/missing.jpg") is None
+
+
+# ── ownership scoping (cameras are owner-scoped; so is their history) ─
+
+def test_query_scoped_to_owners_cameras(db):
+    from models import User as _User
+    other = _User(username="o", email="o@t.io", hashed_password="x",
+                  role_id=db.query(Role).first().id)
+    db.add(other)
+    db.commit()
+    other_cam = Camera(name="their-gate", ip_address="10.0.0.8", port=80,
+                       owner_id=other.id)
+    db.add(other_cam)
+    db.commit()
+    _visit(db, start_min=1)                       # mine
+    _visit(db, start_min=2, cam=other_cam.id)     # theirs
+
+    owner_id = db.query(Camera).filter(Camera.id == db.cam_id).first().owner_id
+    mine = query_events(db, owner_id=owner_id)
+    assert [r.camera_id for r in mine] == [db.cam_id]
+    fleet = query_events(db)                      # superuser path (no scope)
+    assert len(fleet) == 2
+
+
+def test_can_access_event_mirrors_ownership(db):
+    from types import SimpleNamespace
+
+    from services.timeline_service import can_access_event
+    row = _visit(db, start_min=1)
+    owner_id = db.query(Camera).filter(Camera.id == db.cam_id).first().owner_id
+    assert can_access_event(db, row, user=SimpleNamespace(id=owner_id, is_superuser=False))
+    assert not can_access_event(db, row, user=SimpleNamespace(id=owner_id + 99, is_superuser=False))
+    assert can_access_event(db, row, user=SimpleNamespace(id=0, is_superuser=True))
