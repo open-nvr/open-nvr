@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useAuth } from '../auth/AuthContext'
@@ -32,6 +32,8 @@ type NavItem = {
   icon: React.ReactNode
   /** key into NAV_PERMISSIONS; null-valued entries are always visible */
   perm: keyof typeof NAV_PERMISSIONS
+  /** exact-match highlighting — set when a sibling route extends this path */
+  end?: boolean
 }
 
 type NavGroup = {
@@ -52,7 +54,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
       { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
-      { to: '/playback', label: 'Recordings', icon: <Play size={16} />, perm: '/playback' },
+      { to: '/playback/sync', label: 'Recordings', icon: <MonitorPlay size={16} />, perm: '/playback/sync' },
       { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
     ],
   },
@@ -253,7 +255,7 @@ export function AppShell() {
             {pinnedGroups.map((group) => (
               <div key={group.key} className="mt-2 space-y-0.5">
                 {group.items.map((item) => (
-                  <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                  <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
                 ))}
               </div>
             ))}
@@ -267,7 +269,7 @@ export function AppShell() {
                 return (
                   <div key={group.key} className="mb-2 pb-2 border-b border-[var(--border)] last:border-b-0 space-y-0.5">
                     {group.items.map((item) => (
-                      <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed />
+                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed />
                     ))}
                   </div>
                 )
@@ -290,7 +292,7 @@ export function AppShell() {
                   {!collapsed && (
                     <div className="pl-3 py-1 space-y-0.5">
                       {group.items.map((item) => (
-                        <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} />
+                        <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
                       ))}
                     </div>
                   )}
@@ -315,11 +317,11 @@ export function AppShell() {
   )
 }
 
-function SideLink({ to, label, icon, collapsed }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean }) {
+function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {
   return (
     <NavLink
       to={to}
-      end={to === '/'}
+      end={end || to === '/'}
       title={collapsed ? label : undefined}
       className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-2.5 py-1 rounded text-sm ${isActive ? 'bg-[color-mix(in_oklab,var(--accent)_15%,transparent)] text-[var(--accent)] font-medium' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
     >

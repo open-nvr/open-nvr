@@ -124,6 +124,7 @@ export const NAV_PERMISSIONS = {
   '/': null, // Dashboard - always visible
   '/live': 'live.view',
   '/playback': 'recordings.view',
+  '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',
   '/rbac': 'users.view',
   '/byok': 'byok.manage',
