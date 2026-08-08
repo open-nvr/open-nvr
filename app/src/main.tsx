@@ -36,6 +36,7 @@ import { MFAVerify } from './views/MFAVerify'
 const Dashboard = lazy(() => import('./views/Dashboard').then((m) => ({ default: m.Dashboard })))
 const LiveView = lazy(() => import('./views/LiveView').then((m) => ({ default: m.LiveView })))
 const PlaybackView = lazy(() => import('./views/PlaybackView').then((m) => ({ default: m.PlaybackView })))
+const SyncPlayback = lazy(() => import('./views/SyncPlayback').then((m) => ({ default: m.SyncPlayback })))
 const Cameras = lazy(() => import('./views/Cameras').then((m) => ({ default: m.Cameras })))
 const Settings = lazy(() => import('./views/Settings').then((m) => ({ default: m.Settings })))
 const Events = lazy(() => import('./views/Events').then((m) => ({ default: m.Events })))
@@ -96,6 +97,7 @@ const router = createBrowserRouter([
           { index: true, element: <Dashboard /> },
           { path: 'live', element: <LiveView /> },
           { path: 'playback', element: <PlaybackView /> },
+          { path: 'playback/sync', element: <SyncPlayback /> },
           { path: 'cameras', element: <Cameras /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },

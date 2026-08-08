@@ -21,6 +21,7 @@ import { apiService } from '../lib/apiService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
 import { 
@@ -194,7 +195,7 @@ export function LiveView() {
   const [currentLayout, setCurrentLayout] = useState<string>('3x3')
   const [windowSettings, setWindowSettings] = useState<WindowSettings | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
   // FS toolbar visibility on bottom hover
@@ -354,6 +355,32 @@ export function LiveView() {
   
   const layoutDef = getLayoutDef()
 
+  // Fit the grid to the available area while keeping every cell 16:9: the
+  // largest cell size is computed from the container's width AND height, so
+  // videos fill their tiles edge-to-edge (overlays sit on the feed, not on
+  // pillarbox bars) and the toolbar below stays on screen.
+  const [gridSize, setGridSize] = useState<{ w: number; h: number } | null>(null)
+  const GRID_GAP = 8 // matches the grid's Tailwind gap-2
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const compute = () => {
+      const cols = layoutDef.gridCols
+      const rows = layoutDef.gridRows
+      const availW = el.clientWidth - GRID_GAP * (cols - 1)
+      const availH = el.clientHeight - GRID_GAP * (rows - 1)
+      const cellW = Math.max(0, Math.min(availW / cols, (availH / rows) * (16 / 9)))
+      setGridSize({
+        w: cellW * cols + GRID_GAP * (cols - 1),
+        h: cellW * (9 / 16) * rows + GRID_GAP * (rows - 1),
+      })
+    }
+    compute()
+    const ro = new ResizeObserver(compute)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [layoutDef.gridCols, layoutDef.gridRows])
+
   // Load window settings on mount
   useEffect(() => {
     apiService.getWindowSettings().then(({ data }) => {
@@ -428,64 +455,11 @@ export function LiveView() {
   const availableLayouts = getAvailableLayouts()
 
   return (
-    <section className="space-y-3">
-      <header className="flex items-center gap-2">
+    // Fixed viewport-height layout: header + grid + toolbar must all fit
+    // without a page scrollbar. 3rem = app header, 2rem = main's p-4.
+    <section className="flex flex-col gap-2 h-[calc(100vh-5rem)]">
+      <header className="flex-shrink-0 flex items-center gap-2">
         <h1 className="text-lg font-semibold">Live View</h1>
-        <div className="ml-auto flex items-center gap-1">
-          {/* Quick layout buttons for common layouts */}
-          {['1x1', '2x2', '3x3', '4x4'].map((layoutId) => {
-            const layout = PREDEFINED_LAYOUTS[layoutId]
-            if (!layout) return null
-            const isEnabled = !windowSettings || windowSettings.layouts_enabled[layoutId] !== false
-            if (!isEnabled) return null
-            return (
-              <button
-                key={layoutId}
-                className={`px-2 py-1 text-xs border ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-neutral-700'}`}
-                onClick={() => setCurrentLayout(layoutId)}
-                title={layout.name}
-              >
-                {layout.name}
-              </button>
-            )
-          })}
-          {/* Layout dropdown for special layouts */}
-          <div className="relative">
-            <button
-              className="px-2 py-1 text-xs border bg-[var(--panel-2)] border-neutral-700 inline-flex items-center gap-1"
-              onClick={() => setLayoutMenuOpen(!layoutMenuOpen)}
-            >
-              <Grid size={12} />
-              <span className="hidden sm:inline">More</span>
-              <ChevronDown size={12} />
-            </button>
-            {layoutMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-[var(--panel)] border border-neutral-700 shadow-lg min-w-[180px]">
-                {availableLayouts.map(layout => (
-                  <button
-                    key={layout.id}
-                    className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--panel-2)] flex items-center justify-between ${currentLayout === layout.id ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : ''}`}
-                    onClick={() => { setCurrentLayout(layout.id); setLayoutMenuOpen(false) }}
-                  >
-                    <span>{layout.name}</span>
-                    <span className="text-[var(--text-dim)]">{layout.tiles} cameras</span>
-                  </button>
-                ))}
-                <div className="border-t border-neutral-700 px-3 py-2">
-                  <button
-                    className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
-                    onClick={() => {
-                      setLayoutMenuOpen(false)
-                      ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
-                    }}
-                  >
-                    ⚙ Configure Layouts...
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
       </header>
 
       <DndContext 
@@ -494,16 +468,18 @@ export function LiveView() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
+        <div ref={containerRef} className="flex-1 min-h-0 flex items-center justify-center">
         <div
           ref={gridRef}
-          className="grid gap-2 relative content-start"
+          className="grid gap-2 relative"
           style={{
             gridTemplateColumns: `repeat(${layoutDef.gridCols}, minmax(0, 1fr))`,
-            // Rows are sized to the tiles' own 16:9 aspect (see Tile) instead of
-            // stretching to fill viewport height. `content-start` disables grid's
-            // default `align-content: stretch`, which would otherwise stretch the
-            // auto rows to fill the container and make tiles taller than 16:9.
-            gridTemplateRows: `repeat(${layoutDef.gridRows}, auto)`,
+            gridTemplateRows: `repeat(${layoutDef.gridRows}, minmax(0, 1fr))`,
+            // Fullscreen: the browser sizes the fullscreen element to the
+            // screen. Otherwise use the fitted 16:9-cell size (see effect).
+            ...(isFullscreen || !gridSize
+              ? { width: '100%', height: '100%' }
+              : { width: gridSize.w, height: gridSize.h }),
           }}
         >
           {layoutDef.tiles.map((tile, i) => {
@@ -570,7 +546,8 @@ export function LiveView() {
           {/* Menu overlay inside fullscreen so it appears over the live view */}
           {isFullscreen && menuOpen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
         </div>
-        
+        </div>
+
         {/* Drag overlay - small tile preview centered on cursor */}
         <DragOverlay dropAnimation={null} modifiers={[centerOnCursor]}>
           {activeDragId ? (() => {
@@ -602,7 +579,7 @@ export function LiveView() {
 
       {/* Bottom toolbar (normal mode) */}
       {!isFullscreen && (
-        <div className="mt-2">
+        <div className="flex-shrink-0">
           <div className="flex items-center gap-2 bg-[var(--bg-2)] border border-neutral-700 p-2 text-xs">
             <ToolbarContents 
               currentLayout={currentLayout}
@@ -740,10 +717,10 @@ function Tile({
   
   return (
     <div className="flex flex-col bg-[var(--bg-2)] border border-neutral-700 relative overflow-hidden h-full">
-      {/* Video container — fixed 16:9 frame. Width comes from the grid column;
-          height is locked to 16:9 by aspect-video (no flex-1 stretch, which would
-          let the tile grow taller than 16:9 and letterbox the stream unevenly). */}
-      <div className="aspect-video relative w-full overflow-hidden">
+      {/* Video container — fills the grid cell. Width comes from the grid
+          column and height from the 1fr row, so the whole layout fits the
+          viewport; object-contain letter/pillarboxes the stream inside. */}
+      <div className="relative w-full flex-1 min-h-0 overflow-hidden">
         {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO CAMERA</div>}
         {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
 
@@ -862,7 +839,9 @@ function ToolbarContents({
   onToggleFullscreen: () => void
 }) {
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
-  
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  useClickOutside(dropdownRef, layoutDropdownOpen, () => setLayoutDropdownOpen(false))
+
   return (
     <>
       <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={onOpenMenu}>
@@ -884,7 +863,7 @@ function ToolbarContents({
           )
         })}
         {/* More layouts dropdown */}
-        <div className="relative">
+        <div className="relative" ref={dropdownRef}>
           <button 
             className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1"
             onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}
@@ -903,6 +882,17 @@ function ToolbarContents({
                   {layout.name} ({layout.tiles})
                 </button>
               ))}
+              <div className="border-t border-neutral-700 px-3 py-2">
+                <button
+                  className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
+                  onClick={() => {
+                    setLayoutDropdownOpen(false)
+                    ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
+                  }}
+                >
+                  ⚙ Configure Layouts...
+                </button>
+              </div>
             </div>
           )}
         </div>

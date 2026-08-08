@@ -17,6 +17,7 @@
  */
 
 import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
@@ -34,6 +35,7 @@ import {
   PlayCircle,
   Unplug,
   Upload,
+  MonitorPlay,
 } from 'lucide-react'
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
@@ -383,6 +385,14 @@ export function PlaybackView() {
         )}
         
         <div className="flex items-center gap-2 ml-auto">
+          <Link
+            to="/playback/sync"
+            className="px-4 py-1.5 border border-[var(--border)] text-sm flex items-center gap-2 text-[var(--text)] hover:bg-[var(--panel-2)] transition-colors"
+            title="Synchronized multi-camera playback with calendar"
+          >
+            <MonitorPlay size={14} className="text-[var(--accent)]" />
+            Multi-Cam Playback
+          </Link>
           <button
             onClick={loadData}
             disabled={loading}

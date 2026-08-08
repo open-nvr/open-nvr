@@ -109,7 +109,10 @@ class HlsPlaybackService:
     # Configuration
     SEGMENT_DURATION: float = 5.0  # Target segment duration in seconds
     SESSION_TTL_SECONDS: int = 7200  # 2 hours default session lifetime
-    MAX_SESSIONS_PER_USER: int = 10  # Prevent session leaks
+    # Prevent session leaks. Sized for the synchronized multi-camera playback
+    # grid: up to 4 tiles each holding one live session, plus churn headroom
+    # while tiles cross clip boundaries (old sessions are deleted async).
+    MAX_SESSIONS_PER_USER: int = 24
     CLEANUP_INTERVAL: int = 300  # Cleanup expired sessions every 5 minutes
 
     # In-memory session storage (use Redis in production for scaling)

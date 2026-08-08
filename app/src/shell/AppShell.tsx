@@ -18,9 +18,10 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
@@ -32,6 +33,8 @@ type NavItem = {
   icon: React.ReactNode
   /** key into NAV_PERMISSIONS; null-valued entries are always visible */
   perm: keyof typeof NAV_PERMISSIONS
+  /** exact-match highlighting — set when a sibling route extends this path */
+  end?: boolean
 }
 
 type NavGroup = {
@@ -52,7 +55,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
       { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
-      { to: '/playback', label: 'Recordings', icon: <Play size={16} />, perm: '/playback' },
+      { to: '/playback/sync', label: 'Recordings', icon: <MonitorPlay size={16} />, perm: '/playback/sync' },
       { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
     ],
   },
@@ -118,6 +121,8 @@ export function AppShell() {
   const { user, logout } = useAuth()
   const { hasPermission } = usePermissions()
   const [menuOpen, setMenuOpen] = useState(false)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
+  useClickOutside(accountMenuRef, menuOpen, () => setMenuOpen(false))
   const { theme, toggleTheme } = useTheme()
   const sidebarRef = useRef<HTMLDivElement>(null)
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
@@ -181,7 +186,7 @@ export function AppShell() {
   return (
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
   {/* Top white header (sticky) */}
-  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-16 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
+  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
         <Link to="/" className="font-semibold inline-flex items-center gap-2">
           <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
         </Link>
@@ -205,7 +210,7 @@ export function AppShell() {
               <span className="hidden md:inline">Live</span>
             </Link>
           )}
-          <div className="relative">
+          <div className="relative" ref={accountMenuRef}>
             <button
               className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
               onClick={() => setMenuOpen((s) => !s)}
@@ -232,13 +237,13 @@ export function AppShell() {
             {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
             <span className="hidden md:inline">Fullscreen</span>
           </button>
-          <span className="opacity-90">{new Date().toLocaleString()}</span>
+          <LiveClock />
         </div>
       </header>
 
       <div className="flex">
         {/* Sidebar */}
-  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
+  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-12 self-start h-[calc(100vh-3rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
           {/* Fixed header: toggle + pinned items never scroll away; its bottom
               border is the clip line for the scrollable nav below */}
           <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
@@ -253,7 +258,7 @@ export function AppShell() {
             {pinnedGroups.map((group) => (
               <div key={group.key} className="mt-2 space-y-0.5">
                 {group.items.map((item) => (
-                  <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                  <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
                 ))}
               </div>
             ))}
@@ -267,7 +272,7 @@ export function AppShell() {
                 return (
                   <div key={group.key} className="mb-2 pb-2 border-b border-[var(--border)] last:border-b-0 space-y-0.5">
                     {group.items.map((item) => (
-                      <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed />
+                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed />
                     ))}
                   </div>
                 )
@@ -290,7 +295,7 @@ export function AppShell() {
                   {!collapsed && (
                     <div className="pl-3 py-1 space-y-0.5">
                       {group.items.map((item) => (
-                        <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} />
+                        <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
                       ))}
                     </div>
                   )}
@@ -304,7 +309,7 @@ export function AppShell() {
         </aside>
 
         {/* Main content — boundary keyed by route so navigating away resets a crash */}
-        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
+        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-3rem)]">
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
@@ -315,11 +320,20 @@ export function AppShell() {
   )
 }
 
-function SideLink({ to, label, icon, collapsed }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean }) {
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="opacity-90 tabular-nums">{now.toLocaleString()}</span>
+}
+
+function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {
   return (
     <NavLink
       to={to}
-      end={to === '/'}
+      end={end || to === '/'}
       title={collapsed ? label : undefined}
       className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-2.5 py-1 rounded text-sm ${isActive ? 'bg-[color-mix(in_oklab,var(--accent)_15%,transparent)] text-[var(--accent)] font-medium' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
     >
