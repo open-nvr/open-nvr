@@ -6,6 +6,73 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-08-12
+
+### Added
+
+- **Tier-0 detection pipeline.** A new `detect-pipeline` service that runs
+  an always-on, CPU-cheap analysis loop per camera — hardware-accelerated
+  ffmpeg decode, improved motion detection, a lean size-aware object
+  tracker, and attribute-aware best-frame selection — and gates the
+  expensive AI model so it only runs when something worth analyzing
+  happens. Ships as a compose service **on by default in shadow mode**
+  (observe and collect evidence, enforce nothing) from
+  `ghcr.io/open-nvr/detect-pipeline`, pinned via `CORE_TAG`. Highlights:
+  - Pluggable detector backends: ONNX YOLOv8 via OpenCV `cv2.dnn` by
+    default, ONNX Runtime optional (`DETECT_ONNX_BACKEND`). OpenCV 5
+    supported.
+  - The gate publishes Tier-0 events to NATS (token-authenticated) and
+    discovers cameras via the existing internal endpoint — no server
+    changes needed.
+  - **Tier-1 dispatch**: gate escalations run the gated model through
+    KAI-C with declarative, model-agnostic routing (flag-gated off by
+    default). Gate mode is a managed setting — the pipeline obeys the UI,
+    live.
+  - **Guided promotion card** in the UI: go from shadow-mode evidence to
+    enforcement in one click, with a best-frame VLM check on by default.
+  - Metrics end to end: compute-gated (Tier-0) metrics in the AI Adapters
+    view, model-attributable detector metrics for model-vs-model
+    benchmarking, per-stage latency, operator keeping-up health, process
+    CPU/RAM, and a benchmark harness. Demo polling replaced with a
+    `/updates` WebSocket push.
+  - Adapter SDK: opt-in `consume_tier0` helpers bridge Tier-0 into any
+    DetectorApp.
+  - CI builds and publishes the image and runs the pipeline's 100+ test
+    suite on every push.
+- **Synchronized multi-camera playback.** New Sync Playback screen plays
+  several cameras side by side on one shared timeline, with a recording
+  calendar for picking the day and per-tile playback controls.
+- **MFA enrollment wall.** Users without enrolled MFA can log in with
+  their password and are then walked through TOTP enrollment before
+  reaching the app — no more locked-out accounts, no unenrolled ones
+  either.
+
+### Changed
+
+- Sidebar revamped: compact layout, icon-only collapse toggle, larger
+  collapsible group headers, pinned NVR items, themed thin scrollbar.
+- Live view, top bar, and the recording/playback screen polished.
+- RBAC user/role dialogs restyled to match the Add Camera dialog, and
+  RBAC screens now show readable validation messages instead of crashing
+  on 422 responses.
+
+### Fixed
+
+- Opening the camera menu no longer distorts the page layout, and
+  dropdown menus close when clicking outside them.
+- Tier-0 operational hardening: workers can no longer become silent
+  zombies, the NATS publisher authenticates against the token-auth
+  broker, the pipeline no longer starves the lite agent's CPU-bound
+  models, and the gate heartbeat anchors to the first frame instead of
+  firing immediately.
+
+### Security
+
+- Deleting, deactivating, or reactivating a user requires the admin's
+  MFA code via an in-app confirm dialog — and the check is enforced
+  server-side, so a direct API call can't bypass it. Self-deletion and
+  self-deactivation are blocked outright.
+
 ## [0.1.1] — 2026-07-31
 
 ### Added
@@ -1641,6 +1708,7 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/open-nvr/open-nvr/releases/tag/v0.1.0
