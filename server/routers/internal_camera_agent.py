@@ -16,7 +16,7 @@ import secrets
 from datetime import datetime
 from urllib.parse import quote as urlquote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -62,6 +62,7 @@ class TrackEventIn(BaseModel):
 @router.post("/events", status_code=201)
 async def ingest_track_event(
     payload: TrackEventIn,
+    background: BackgroundTasks,
     _: None = Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
@@ -126,6 +127,13 @@ async def ingest_track_event(
             .first()
         )
         return {"id": existing.id if existing else None, "duplicate": True}
+    # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
+    # frame (background — never on the ingest path). Best-effort: no adapter,
+    # no plate, no problem.
+    from services.plate_enrichment import enrich_event_plate, wants_plate
+
+    if wants_plate(row.label, evidence_rel, settings.events_plate_enrichment):
+        background.add_task(enrich_event_plate, row.id)
     return {"id": row.id, "evidence_path": evidence_rel}
 
 
@@ -133,6 +141,7 @@ async def ingest_track_event(
 async def internal_list_events(
     camera_id: int | None = None,
     label: str | None = None,
+    plate: str | None = None,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = 100,
@@ -147,7 +156,7 @@ async def internal_list_events(
     """
     from services.timeline_service import query_events
 
-    rows = query_events(db, camera_id=camera_id, label=label,
+    rows = query_events(db, camera_id=camera_id, label=label, plate=plate,
                         from_=from_, to=to, limit=limit)
     return {
         "events": [
@@ -159,6 +168,7 @@ async def internal_list_events(
                 "started_at": e.started_at.isoformat() if e.started_at else None,
                 "ended_at": e.ended_at.isoformat() if e.ended_at else None,
                 "stationary": (e.payload or {}).get("stationary"),
+                "plate_text": e.plate_text,
                 "has_evidence": bool(e.evidence_path),
             }
             for e in rows

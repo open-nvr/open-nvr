@@ -405,6 +405,7 @@ async def test_make_best_frame_fetch_maps_camera_and_handles_status():
 
 class _FakeEvent:
     def __init__(self, id, camera_id=3, label="person", has_evidence=True,
+                 plate_text=None,
                  started_at="2026-08-12T15:12:04+00:00",
                  ended_at="2026-08-12T15:14:11+00:00"):
         self.id = id
@@ -414,6 +415,7 @@ class _FakeEvent:
         self.started_at = started_at
         self.ended_at = ended_at
         self.stationary = False
+        self.plate_text = plate_text
         self.has_evidence = has_evidence
 
 
@@ -494,3 +496,12 @@ def test_search_history_failure_is_not_reported_as_empty(anyio_backend=None):
     out = asyncio.run(tools.search_history({"label": "person"}))
     assert "couldn't check" in out
     assert "No person visits" not in out
+
+
+def test_search_history_speaks_plates(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient([_FakeEvent(1, label="car", plate_text="KA01AB1234")])
+    tools = _history_tools(ec)
+    out = asyncio.run(tools.search_history({"label": "car", "plate": "KA01"}))
+    assert "plate KA01AB1234" in out
+    assert ec.searches[0]["plate"] == "KA01"
