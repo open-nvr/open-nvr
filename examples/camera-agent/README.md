@@ -110,12 +110,19 @@ runs only the tools needed to answer (one frame from one camera,
 not all of them), and tells you. It's deliberately a SMALL agent,
 not "AGI for cameras":
 
-* The model has five tools, no general-purpose memory, no web
-  access. It can describe what it sees, count objects, recognise
-  faces, look back at recent inference events, and — when a
-  footage-search index is configured (`footage_index_path`) — search
-  the recorded past in natural language ("did a red truck come by the
-  dock earlier?") via the `search_footage` tool.
+* The model has a small fixed toolset, no web access. It can
+  describe what it sees, count objects, recognise faces, look back at
+  recent inference events, and — when a footage-search index is
+  configured (`footage_index_path`) — search keyframes via
+  `search_footage`.
+* **It has a memory.** When the server API origin is configured
+  (`opennvr_base_url`), the `search_history` tool reads the platform's
+  canonical event store: every past visit of every detected object,
+  each with its best photo. "Did anyone come between 3 and 4?" →
+  "I remember 3 person visits: 15:12–15:14 …" — and for people it
+  face-matches the kept photos and names anyone recognised. No extra
+  configuration: it rides the same INTERNAL_API_KEY the agent already
+  holds.
 * It can't drive cameras (pan-tilt-zoom), can't arm / disarm
   anything, can't speak first. Strictly conversational.
 * Latency is "homelab-fine, not real-time" — expect 3-6 seconds

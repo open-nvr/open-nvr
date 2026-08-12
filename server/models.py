@@ -403,6 +403,10 @@ class TimelineEvent(Base):
     __tablename__ = "events"
     __table_args__ = (
         Index("ix_events_cam_start", "camera_id", "started_at"),
+        # One visit = one (camera, track, start): ingest retries are
+        # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
+        Index("uq_events_visit", "camera_id", "track_id", "started_at",
+              unique=True),
     )
 
     id = Column(Integer, primary_key=True, index=True)

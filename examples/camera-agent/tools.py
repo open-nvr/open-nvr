@@ -198,6 +198,43 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "search_history",
+                "description": (
+                    "Search the NVR's MEMORY: past visits of people, cars, "
+                    "dogs — any detected object — each with the best photo "
+                    "kept. Use for 'did anyone come between 3 and 4pm?', "
+                    "'which cars entered today?', 'was a dog here yesterday?'. "
+                    "For people it also face-matches the kept photos and "
+                    "names anyone recognised."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "What to look for: person, car, truck, dog, … (default person).",
+                        },
+                        "start_time": {
+                            "type": "string",
+                            "description": "Window start, ISO 8601 (e.g. 2026-08-12T15:00). Omit for open start.",
+                        },
+                        "end_time": {
+                            "type": "string",
+                            "description": "Window end, ISO 8601. Omit for 'until now'.",
+                        },
+                        "camera_id": _camera_prop,
+                        "identify_faces": {
+                            "type": "boolean",
+                            "description": "For person searches: face-match the kept photos (default true).",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the cameras. "
@@ -249,6 +286,7 @@ class CameraTools:
         footage_index: Any = None,
         best_frame_fetch: Any = None,
         resolve_camera: Any = None,
+        events_client: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
@@ -267,6 +305,10 @@ class CameraTools:
         # Optional read-only FootageIndex (footage_index.FootageIndex).
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
+        # Optional SDK EventsClient — the platform's memory (canonical event
+        # store). Powers search_history: past visits with best-frame evidence,
+        # optionally face-matched. None = tool reports history isn't enabled.
+        self._events = events_client
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
@@ -647,6 +689,109 @@ class CameraTools:
         return "Found in recorded footage:\n" + "\n".join(lines)
 
     # ── Helpers ────────────────────────────────────────────────────
+
+    # ── search_history (canonical event store — RFC-0001 C1) ──────
+
+    async def search_history(self, args: dict[str, Any]) -> str:
+        """Answer "who/what came between X and Y?" from the events store.
+
+        Reads remembered visits (one row per object's stay, with its best
+        photo). For person queries it can face-match the evidence crops via
+        the recognition adapter — "yes, I saw Priya at 15:12" — capped at a
+        few crops so a busy window can't stall the conversation.
+        """
+        if self._events is None:
+            return ("History isn't enabled on this deployment "
+                    "(events store not configured).")
+        label = str(args.get("label") or "person").strip().lower()
+        start = args.get("start_time")
+        end = args.get("end_time")
+        camera_arg = args.get("camera_id")
+        camera_id = None
+        if camera_arg not in (None, "", "all", "__any__"):
+            cam = str(camera_arg)
+            if not self._ctx.known_camera(cam):
+                return f"ERROR: unknown camera '{cam}'."
+            # The store keys visits by the server-side camera id (same id the
+            # internal endpoint returns) — resolve like best-frame does.
+            resolved = self._resolve_camera(cam)
+            try:
+                camera_id = int(resolved)
+            except (TypeError, ValueError):
+                return f"ERROR: camera '{cam}' has no server-side id."
+        try:
+            events = await self._events.search(
+                label=label, camera_id=camera_id, start=start, end=end, limit=25
+            )
+        except Exception:
+            logger.warning("search_history: events store unreachable")
+            return "The history store is unreachable right now."
+        if not events:
+            window = self._window_phrase(start, end)
+            return f"No {label} visits remembered{window}."
+
+        clauses = []
+        for e in events[:10]:
+            t0 = self._clock_phrase(e.started_at)
+            t1 = self._clock_phrase(e.ended_at)
+            span = f"{t0}–{t1}" if t1 and t1 != t0 else t0
+            clauses.append(
+                f"{span} on camera {e.camera_id}"
+                + (" (photo kept)" if e.has_evidence else "")
+            )
+        summary = (f"I remember {len(events)} {label} visit(s)"
+                   f"{self._window_phrase(start, end)}: " + "; ".join(clauses) + ".")
+
+        # Face-match the evidence for person questions (best-effort, capped).
+        if label == "person" and bool(args.get("identify_faces", True)):
+            names = await self._identify_visit_faces(events)
+            if names:
+                summary += " Recognised: " + ", ".join(sorted(names)) + "."
+        return summary
+
+    async def _identify_visit_faces(self, events, cap: int = 4) -> set:
+        names: set = set()
+        checked = 0
+        for e in events:
+            if checked >= cap:
+                break
+            if not e.has_evidence:
+                continue
+            crop = await self._events.evidence(e.id)
+            if not crop:
+                continue
+            checked += 1
+            try:
+                response = await self._recognise.infer(
+                    frame_jpeg=crop, extra={"task": "face_recognition"}
+                )
+            except Exception:
+                logger.warning("search_history: recognition adapter unavailable")
+                break
+            result = response.get("result") or {}
+            if result.get("recognized"):
+                names.add(str(result.get("name") or result.get("person_id") or "someone"))
+        return names
+
+    @staticmethod
+    def _clock_phrase(iso: str | None) -> str:
+        if not iso:
+            return "?"
+        try:
+            from datetime import datetime as _dt
+            return _dt.fromisoformat(iso).strftime("%H:%M")
+        except ValueError:
+            return iso
+
+    @staticmethod
+    def _window_phrase(start, end) -> str:
+        if start and end:
+            return f" between {start} and {end}"
+        if start:
+            return f" since {start}"
+        if end:
+            return f" before {end}"
+        return " (all time)"
 
     def _require_camera(self, args: dict[str, Any]) -> str:
         camera_id = args.get("camera_id")

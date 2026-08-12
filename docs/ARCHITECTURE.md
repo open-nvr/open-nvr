@@ -82,6 +82,31 @@ voice/text, not camera frames (the LLM still benefits indirectly: fewer, cleaner
 VLM calls). **Recording is never gated.** Every stage is additive and can be
 disabled without touching the rest of the stack.
 
+## The memory plane (canonical event & evidence store)
+
+Sensing without memory answers only "what is happening *now*". The **events
+store** (RFC-0001 Challenge 1) is the platform's memory: one `events` table in
+core, **one row per object visit** (a Tier-0 track lifecycle — person, car,
+anything the detector knows), each carrying the **best-frame photo** selected
+at capture time, content-addressed under `<recordings>/.evidence/`.
+
+```
+tier0 track ends ──POST──▶ core /internal/camera-agent/events ──▶ events row + JPEG
+                                                                        │
+users:  GET /api/v1/events?label=car&from=…&to=…  (owner-scoped)  ◀─────┤
+agents: SDK EventsClient → search_history tool                    ◀─────┘
+        ("did anyone come between 3 and 4?" → visits + face-matched names)
+```
+
+Rules that keep it sane: **per-visit grain** (never per-frame — "which cars
+today" returns visits, not 4,000 detections of one parked car); **junk never
+persists** (confirmed tracks ≥ 1 s only); **detection never blocks on
+history** (bounded queue, best-effort posts); **overlap time semantics** (the
+14:58–15:03 visit counts for "3–4pm"); **ingest is idempotent**
+(`uq_events_visit`). Camera-native alarms (`camera_events`) and app alerts
+converge onto this table in later phases — one timeline, and apps stop
+writing private history stores.
+
 ## Request lifecycle (web)
 
 ```

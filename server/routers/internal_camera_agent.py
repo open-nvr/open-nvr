@@ -16,7 +16,7 @@ import secrets
 from datetime import datetime
 from urllib.parse import quote as urlquote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -80,8 +80,13 @@ async def ingest_track_event(
     if payload.evidence_jpeg_b64:
         import base64
 
-        from services.evidence_store import save_evidence_jpeg
+        from services.evidence_store import MAX_EVIDENCE_BYTES, save_evidence_jpeg
 
+        # Reject oversized payloads BEFORE decoding: base64 is 4/3 the raw
+        # size, so anything beyond that bound can't be a valid crop and
+        # shouldn't cost us the decode allocation.
+        if len(payload.evidence_jpeg_b64) > (MAX_EVIDENCE_BYTES * 4) // 3 + 8:
+            raise HTTPException(status_code=422, detail="evidence too large")
         try:
             evidence_rel = save_evidence_jpeg(
                 base64.b64decode(payload.evidence_jpeg_b64, validate=True)
@@ -89,20 +94,97 @@ async def ingest_track_event(
         except (ValueError, binascii.Error) as e:
             raise HTTPException(status_code=422, detail=f"bad evidence: {e}")
 
+    from sqlalchemy.exc import IntegrityError
+
     from services.timeline_service import record_track_visit
 
-    row = record_track_visit(
-        db,
-        camera_id=payload.camera_id,
-        label=payload.label,
-        started_at=payload.started_at,
-        ended_at=payload.ended_at,
-        score=payload.score,
-        track_id=payload.track_id,
-        stationary=payload.stationary,
-        evidence_path=evidence_rel,
-    )
+    try:
+        row = record_track_visit(
+            db,
+            camera_id=payload.camera_id,
+            label=payload.label,
+            started_at=payload.started_at,
+            ended_at=payload.ended_at,
+            score=payload.score,
+            track_id=payload.track_id,
+            stationary=payload.stationary,
+            evidence_path=evidence_rel,
+        )
+    except IntegrityError:
+        # Retry raced an earlier success — the visit already exists
+        # (uq_events_visit). Idempotent: report the existing row.
+        db.rollback()
+        from models import TimelineEvent
+
+        existing = (
+            db.query(TimelineEvent)
+            .filter(
+                TimelineEvent.camera_id == payload.camera_id,
+                TimelineEvent.track_id == (payload.track_id or "")[:40],
+                TimelineEvent.started_at == payload.started_at,
+            )
+            .first()
+        )
+        return {"id": existing.id if existing else None, "duplicate": True}
     return {"id": row.id, "evidence_path": evidence_rel}
+
+
+@router.get("/events")
+async def internal_list_events(
+    camera_id: int | None = None,
+    label: str | None = None,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = 100,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Event-store read for trusted internal components (the camera agents).
+
+    Same OVERLAP query the user API serves, fleet-wide: the agent is a
+    platform component like tier0, not a per-user browser session — its
+    answers are already scoped by which cameras it is configured to see.
+    """
+    from services.timeline_service import query_events
+
+    rows = query_events(db, camera_id=camera_id, label=label,
+                        from_=from_, to=to, limit=limit)
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "camera_id": e.camera_id,
+                "label": e.label,
+                "score": e.score,
+                "started_at": e.started_at.isoformat() if e.started_at else None,
+                "ended_at": e.ended_at.isoformat() if e.ended_at else None,
+                "stationary": (e.payload or {}).get("stationary"),
+                "has_evidence": bool(e.evidence_path),
+            }
+            for e in rows
+        ]
+    }
+
+
+@router.get("/events/{event_id}/evidence")
+async def internal_event_evidence(
+    event_id: int,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The visit's best-frame JPEG, for agent-side face match / VLM looks."""
+    from fastapi.responses import FileResponse
+
+    from models import TimelineEvent
+    from services.evidence_store import resolve_evidence
+
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.evidence_path:
+        raise HTTPException(status_code=404, detail="no evidence")
+    path = resolve_evidence(e.evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence missing")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 GATE_MODE_KEY = "detect_gate_mode"
