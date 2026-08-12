@@ -51,6 +51,7 @@ from .frame_sources import (
 from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import Action, AlertType, AppManifest, Param, StateView
 from .state import KeyedState, StateRecord, keyed_state
+from .events import EventsClient, StoredEvent
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -120,6 +121,8 @@ __all__ = [
     "Tier0Snapshot",
     "snapshot_from_event",
     "describe_counts",
+    "EventsClient",
+    "StoredEvent",
     "is_tier0_subject",
     "tier0_to_detections",
     "BestFrameClient",

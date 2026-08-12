@@ -399,3 +399,98 @@ async def test_make_best_frame_fetch_maps_camera_and_handles_status():
     fetch_miss = make_best_frame_fetch(
         "http://tier0:9109", resolve_camera=lambda c: "9", http_get=http_get)
     assert await fetch_miss("x") is None          # 404 -> None
+
+
+# ── search_history (canonical event store, RFC-0001 C1) ─────────────
+
+class _FakeEvent:
+    def __init__(self, id, camera_id=3, label="person", has_evidence=True,
+                 started_at="2026-08-12T15:12:04+00:00",
+                 ended_at="2026-08-12T15:14:11+00:00"):
+        self.id = id
+        self.camera_id = camera_id
+        self.label = label
+        self.score = 0.9
+        self.started_at = started_at
+        self.ended_at = ended_at
+        self.stationary = False
+        self.has_evidence = has_evidence
+
+
+class _FakeEventsClient:
+    def __init__(self, events, crops=None):
+        self._events = events
+        self._crops = crops or {}
+        self.searches = []
+
+    async def search(self, **kw):
+        self.searches.append(kw)
+        return self._events
+
+    async def evidence(self, event_id):
+        return self._crops.get(event_id)
+
+
+class _FakeRecogniser:
+    def __init__(self, by_crop):
+        self._by = by_crop
+
+    async def infer(self, frame_jpeg=None, extra=None):
+        name = self._by.get(frame_jpeg)
+        if name:
+            return {"result": {"recognized": True, "name": name}}
+        return {"result": {}}
+
+
+def _history_tools(events_client, recogniser=None):
+    from unittest.mock import AsyncMock
+    stub = AsyncMock()
+    stub.infer.return_value = {"result": {}}
+    return CameraTools(
+        context=_ctx_with_camera(),
+        caption_client=stub,
+        detection_client=stub,
+        recognition_client=recogniser or stub,
+        events_client=events_client,
+    )
+
+
+def test_search_history_reports_visits_and_names(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient(
+        [_FakeEvent(1), _FakeEvent(2, has_evidence=False)],
+        crops={1: b"crop-1"},
+    )
+    tools = _history_tools(ec, _FakeRecogniser({b"crop-1": "Priya"}))
+    out = asyncio.run(tools.search_history({
+        "label": "person",
+        "start_time": "2026-08-12T15:00", "end_time": "2026-08-12T16:00",
+    }))
+    assert "2 person visit(s)" in out
+    assert "photo kept" in out          # times are spoken in LOCAL tz (host-dependent)
+    assert "Recognised: Priya" in out
+    assert ec.searches[0]["label"] == "person"
+
+
+def test_search_history_without_store_or_matches(anyio_backend=None):
+    import asyncio
+    tools = _history_tools(None)
+    assert "isn't enabled" in asyncio.run(tools.search_history({}))
+    ec = _FakeEventsClient([])
+    tools2 = _history_tools(ec)
+    out = asyncio.run(tools2.search_history({"label": "car"}))
+    assert "No car visits" in out
+
+
+def test_search_history_failure_is_not_reported_as_empty(anyio_backend=None):
+    # Store down / rejected query must NOT sound like "nobody came".
+    import asyncio
+
+    class _DownClient:
+        async def search(self, **kw):
+            return None
+
+    tools = _history_tools(_DownClient())
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "couldn't check" in out
+    assert "No person visits" not in out

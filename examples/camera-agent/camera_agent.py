@@ -320,6 +320,10 @@ _DEFAULT_SYSTEM_PROMPT = (
     "always-on detector with no new inference. Use detect_objects or "
     "describe_camera only if camera_snapshot has no data, or the answer needs "
     "appearance (colour, clothing, what someone is doing).\n"
+    "- For questions about the PAST ('did anyone come between 3 and 4?', "
+    "'which cars entered today?', 'was a dog here yesterday?') call "
+    "search_history — the NVR remembers every visit with a photo and can "
+    "name recognised people.\n"
     "- NEVER invent, guess, or describe what is on a camera from imagination. "
     "If you have not called a tool this turn, you do not know.\n"
     "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
@@ -348,7 +352,7 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "see": ["describe_camera"],
     "count": ["detect_objects", "camera_snapshot"],
     "faces": ["recognize_faces", "enroll_face", "list_people", "forget_face"],
-    "events": ["recent_events"],
+    "events": ["recent_events", "search_history"],
     "footage": ["search_footage"],
     "alarm": ["create_alarm", "stop_alarm"],
     "watch": ["create_monitor", "stop_monitor"],
@@ -2655,6 +2659,22 @@ class CameraAgentRuntime:
                 cfg.bestframe_base_url, resolve_camera=_resolve_camera,
             )
 
+        # Events store (the platform's memory, RFC-0001 C1): built whenever the
+        # server API origin is configured — same origin + INTERNAL_API_KEY chain
+        # the app door uses. Shared primitive from the SDK (Challenge-3 rule).
+        events_client = None
+        if cfg.opennvr_api_url:
+            import os as _os
+
+            from opennvr_app_sdk import EventsClient
+            events_client = EventsClient(
+                cfg.opennvr_api_url,
+                cfg.opennvr_api_key
+                or cfg.kaic_api_key
+                or _os.environ.get("INTERNAL_API_KEY", ""),
+            )
+            logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+
         self.tools = CameraTools(
             context=self.context,
             caption_client=self.caption_client,
@@ -2663,6 +2683,7 @@ class CameraAgentRuntime:
             footage_index=self.footage_index,
             best_frame_fetch=best_frame_fetch,
             resolve_camera=_resolve_camera,
+            events_client=events_client,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -2680,6 +2701,7 @@ class CameraAgentRuntime:
             "recognize_faces": self.tools.recognize_faces,
             "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,
+            "search_history": self.tools.search_history,
             "create_background_task": self._handle_create_task,
             "create_monitor": self._handle_create_monitor,
             "stop_monitor": self._handle_stop_monitor,

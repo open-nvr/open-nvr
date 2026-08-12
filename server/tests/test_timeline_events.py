@@ -193,3 +193,22 @@ def test_can_access_event_mirrors_ownership(db):
     assert can_access_event(db, row, user=SimpleNamespace(id=owner_id, is_superuser=False))
     assert not can_access_event(db, row, user=SimpleNamespace(id=owner_id + 99, is_superuser=False))
     assert can_access_event(db, row, user=SimpleNamespace(id=0, is_superuser=True))
+
+
+# ── ingest idempotency (uq_events_visit) ────────────────────────────
+
+def test_duplicate_visit_rejected_by_unique_index(db):
+    import pytest as _pytest
+    from sqlalchemy.exc import IntegrityError
+
+    _visit(db, start_min=5, end_min=7, track_id="9")
+    with _pytest.raises(IntegrityError):
+        _visit(db, start_min=5, end_min=7, track_id="9")
+    db.rollback()
+
+
+def test_null_track_ids_never_collide(db):
+    # alarm/alert rows (no track) must not be blocked by the visit index
+    _visit(db, start_min=5, track_id=None)
+    _visit(db, start_min=5, track_id=None)   # no raise
+    assert len(query_events(db)) == 2
