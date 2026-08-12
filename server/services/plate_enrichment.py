@@ -37,6 +37,14 @@ from typing import Any
 
 logger = logging.getLogger("plate_enrichment")
 
+# Burst guard: a convoy of vehicles finishing tracks together must not fan
+# out into unbounded concurrent OCR calls against the adapter. Two in
+# flight, the rest queue on the semaphore — enrichment is background work
+# with no latency SLA, so waiting is free.
+import asyncio as _asyncio
+
+_OCR_CONCURRENCY = _asyncio.Semaphore(2)
+
 # COCO vehicle classes worth an OCR attempt.
 VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle"}
 
@@ -95,18 +103,25 @@ async def enrich_event_plate(event_id: int) -> None:
 
         import httpx
 
-        payload = build_infer_payload(task=PLATE_TASK, jpeg_bytes=jpeg, params={})
+        # camera_id threaded through so KAI-C's audit row and NATS subject
+        # attribute this OCR call to the right camera (same convention as
+        # process_inference's governed path).
+        payload = build_infer_payload(
+            task=PLATE_TASK, jpeg_bytes=jpeg,
+            params={"camera_id": str(row.camera_id)},
+        )
         try:
-            async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
-                resp = await client.post(
-                    f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
-                    json=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                        "X-Internal-Api-Key": settings.internal_api_key or "",
-                    },
-                )
+            async with _OCR_CONCURRENCY:
+                async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                    resp = await client.post(
+                        f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                            "X-Internal-Api-Key": settings.internal_api_key or "",
+                        },
+                    )
         except httpx.HTTPError as e:
             logger.debug("plate enrichment: KAI-C unreachable for event %s: %s",
                          event_id, e)
