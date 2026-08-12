@@ -102,6 +102,7 @@ class CameraWorker:
         gate_sink=None,                          # publishes gate decisions (audit)
         dispatcher=None,                         # Tier-1 dispatch (#10); shared, thread-safe
         router=None,                             # escalation → adapter routing
+        visit_poster=None,                       # events store: post finished visits (RFC-0001 C1)
     ) -> None:
         self.spec = spec
         self.sink = sink
@@ -115,6 +116,7 @@ class CameraWorker:
         self.gate_sink = gate_sink
         self.dispatcher = dispatcher
         self.router = router
+        self.visit_poster = visit_poster
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -168,6 +170,8 @@ class CameraWorker:
                 "(see detect-pipeline/README.md).",
                 self.spec.camera_id, w, h,
             )
+        from .events_poster import VisitLifecycle
+        lifecycle = VisitLifecycle(self.spec.camera_id)
         motion = MotionDetector((h, w), MotionConfig())
         tracker = Tracker((h, w), TrackConfig(fps=self.spec.fps))
         pipe = DetectPipeline(
@@ -206,6 +210,13 @@ class CameraWorker:
                         crop = getattr(tr, "best_crop", None)
                         if crop is not None:
                             self.best_frames.put(self.spec.camera_id, tr.id, crop, ts)
+                # Visit lifecycle: when a track id vanishes, that visit is over
+                # and its best frame is final — exactly the moment it becomes
+                # history in the canonical event store. Non-blocking: finished
+                # visits go to the poster's bounded queue.
+                if self.visit_poster is not None:
+                    for visit in lifecycle.observe(result.tracks, time.time()):
+                        self.visit_poster.submit(visit)
                 # Sustained fps over a ~1s window — compared to target_fps, this is
                 # the "is the box keeping up with this camera" signal.
                 win_n += 1
@@ -223,6 +234,10 @@ class CameraWorker:
         except Exception:
             log.exception("tier0 %s: worker loop crashed", self.spec.camera_id)
         finally:
+            # Worker stopping: whatever is still live is a finished visit too.
+            if self.visit_poster is not None:
+                for visit in lifecycle.flush():
+                    self.visit_poster.submit(visit)
             record_worker_state(self.spec.camera_id, False)
             log.info("tier0 %s: stopped", self.spec.camera_id)
 
@@ -269,6 +284,7 @@ class WorkerManager:
         gate_sink=None,
         dispatcher=None,                                  # Tier-1 dispatch (#10), shared
         router=None,
+        visit_poster=None,                                # events store (RFC-0001 C1), shared
     ) -> None:
         self.provider = provider
         self.sink = sink
@@ -286,6 +302,7 @@ class WorkerManager:
         # The dispatcher is thread-safe (semaphore + pool) → shared across workers.
         self._dispatcher = dispatcher
         self._router = router
+        self._visit_poster = visit_poster
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
 
@@ -297,6 +314,7 @@ class WorkerManager:
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,
+            visit_poster=self._visit_poster,
         )
 
     def running_ids(self) -> set[str]:

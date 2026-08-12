@@ -69,6 +69,7 @@ class ServiceConfig:
     # #10 Tier-1 dispatch — off unless a KAI-C URL is set; only fires in enforce.
     dispatch_kaic_url: str
     dispatch_task: str
+    visits_enabled: bool = True
 
 
 def _truthy(v: str) -> bool:
@@ -112,6 +113,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
         gate_mode=env.get("DETECT_GATE_MODE", "shadow").strip().lower(),
+        visits_enabled=_truthy(env.get("DETECT_VISITS_ENABLED", "true")),
         gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),
@@ -225,6 +227,13 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     if cfg.metrics_port:
         from .bestframe import BestFrameStore
         best_frames = BestFrameStore()
+    # Events store (RFC-0001 C1): post finished visits + best-frame evidence
+    # to core. Best-effort by design — core down loses history, not detection.
+    visit_poster = None
+    if cfg.visits_enabled and cfg.core_url:
+        from .events_poster import VisitPoster
+        visit_poster = VisitPoster(cfg.core_url, cfg.api_key)
+        visit_poster.start()
     manager = WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
@@ -237,6 +246,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         gate_sink=gate_sink,
         dispatcher=dispatcher,
         router=router,
+        visit_poster=visit_poster,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     return manager
@@ -359,6 +369,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         "  tier1 dispatch     = %s\n"
         "  event bus          = %s\n"
         "  metrics/health     = %s\n"
+        "  visit persistence  = %s\n"
         "  cv threads         = %s",
         cfg.enabled,
         cfg.detector, detector_actual,
@@ -368,6 +379,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         cfg.dispatch_kaic_url or "off",
         cfg.nats_url or "unconfigured",
         f":{cfg.metrics_port}/metrics,/health,/best_frame" if cfg.metrics_port else "off",
+        "on (events store)" if cfg.visits_enabled else "off",
         threads or "uncapped",
     )
 
