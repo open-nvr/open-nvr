@@ -37,11 +37,16 @@ def test_search_builds_url_and_parses():
     assert len(rows) == 1 and rows[0].id == 42 and rows[0].has_evidence
 
 
-def test_search_degrades_to_empty_on_failure():
+def test_search_returns_none_on_failure_not_empty():
+    # None = "couldn't check"; [] = "nothing came". Different answers.
     async def boom(url, headers):
         raise OSError("core down")
     c = EventsClient("http://core:8000", None, http_get=boom)
-    assert asyncio.run(c.search(label="car")) == []
+    assert asyncio.run(c.search(label="car")) is None
+    c2, _calls = _client([(422, b"bad range")])
+    assert asyncio.run(c2.search(label="car")) is None
+    c3, _calls = _client([(200, b'{"events": []}')])
+    assert asyncio.run(c3.search(label="car")) == []
 
 
 def test_evidence_roundtrip_and_miss():

@@ -77,9 +77,13 @@ class EventsClient:
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 50,
-    ) -> list[StoredEvent]:
-        """Visits overlapping [start, end), newest first. Empty on any error —
-        a memory lookup failing must degrade an answer, not crash an agent."""
+    ) -> list[StoredEvent] | None:
+        """Visits overlapping [start, end), newest first.
+
+        Returns ``[]`` for a genuinely empty window and ``None`` on ANY
+        failure (transport, auth, or a rejected query) — the caller must be
+        able to say "nothing came" and "I couldn't check" differently; in a
+        security product those are different answers."""
         params: dict[str, Any] = {"limit": limit}
         if label:
             params["label"] = label
@@ -93,11 +97,11 @@ class EventsClient:
         try:
             status, body = await self._get(url, self._headers)
             if status != 200:
-                return []
+                return None
             import json
             rows = json.loads(body.decode("utf-8")).get("events", [])
         except Exception:
-            return []
+            return None
         out = []
         for r in rows:
             try:

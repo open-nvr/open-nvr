@@ -467,7 +467,7 @@ def test_search_history_reports_visits_and_names(anyio_backend=None):
         "start_time": "2026-08-12T15:00", "end_time": "2026-08-12T16:00",
     }))
     assert "2 person visit(s)" in out
-    assert "15:12" in out and "photo kept" in out
+    assert "photo kept" in out          # times are spoken in LOCAL tz (host-dependent)
     assert "Recognised: Priya" in out
     assert ec.searches[0]["label"] == "person"
 
@@ -480,3 +480,17 @@ def test_search_history_without_store_or_matches(anyio_backend=None):
     tools2 = _history_tools(ec)
     out = asyncio.run(tools2.search_history({"label": "car"}))
     assert "No car visits" in out
+
+
+def test_search_history_failure_is_not_reported_as_empty(anyio_backend=None):
+    # Store down / rejected query must NOT sound like "nobody came".
+    import asyncio
+
+    class _DownClient:
+        async def search(self, **kw):
+            return None
+
+    tools = _history_tools(_DownClient())
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "couldn't check" in out
+    assert "No person visits" not in out

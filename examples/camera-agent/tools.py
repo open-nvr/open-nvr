@@ -216,11 +216,11 @@ def build_tool_definitions(
                         },
                         "start_time": {
                             "type": "string",
-                            "description": "Window start, ISO 8601 (e.g. 2026-08-12T15:00). Omit for open start.",
+                            "description": "Window start, ISO 8601 WITH timezone offset (e.g. 2026-08-12T15:00:00+05:30). Omit for open start.",
                         },
                         "end_time": {
                             "type": "string",
-                            "description": "Window end, ISO 8601. Omit for 'until now'.",
+                            "description": "Window end, ISO 8601 with timezone offset. Omit for 'until now'.",
                         },
                         "camera_id": _camera_prop,
                         "identify_faces": {
@@ -724,8 +724,13 @@ class CameraTools:
                 label=label, camera_id=camera_id, start=start, end=end, limit=25
             )
         except Exception:
-            logger.warning("search_history: events store unreachable")
-            return "The history store is unreachable right now."
+            events = None
+        if events is None:
+            # Failure is NOT an empty window: "nothing came" and "I couldn't
+            # check" must be different answers in a security product.
+            logger.warning("search_history: events store unreachable or query rejected")
+            return ("I couldn't check the history just now (store unreachable "
+                    "or the time range wasn't understood) — please try again.")
         if not events:
             window = self._window_phrase(start, end)
             return f"No {label} visits remembered{window}."
@@ -775,11 +780,16 @@ class CameraTools:
 
     @staticmethod
     def _clock_phrase(iso: str | None) -> str:
+        """UTC-stored timestamp → the agent host's LOCAL clock time for
+        speech ("15:12" must mean the listener's 15:12, not UTC's)."""
         if not iso:
             return "?"
         try:
             from datetime import datetime as _dt
-            return _dt.fromisoformat(iso).strftime("%H:%M")
+            t = _dt.fromisoformat(iso)
+            if t.tzinfo is not None:
+                t = t.astimezone()
+            return t.strftime("%H:%M")
         except ValueError:
             return iso
 
