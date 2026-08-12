@@ -57,6 +57,7 @@ class StoredEvent:
     started_at: str | None
     ended_at: str | None
     stationary: bool | None
+    plate_text: str | None
     has_evidence: bool
 
 
@@ -74,6 +75,7 @@ class EventsClient:
         *,
         label: str | None = None,
         camera_id: int | None = None,
+        plate: str | None = None,
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 50,
@@ -89,6 +91,8 @@ class EventsClient:
             params["label"] = label
         if camera_id is not None:
             params["camera_id"] = camera_id
+        if plate:
+            params["plate"] = plate
         if start is not None:
             params["from"] = start.isoformat() if isinstance(start, datetime) else start
         if end is not None:
@@ -110,6 +114,7 @@ class EventsClient:
                     label=r.get("label"), score=r.get("score"),
                     started_at=r.get("started_at"), ended_at=r.get("ended_at"),
                     stationary=r.get("stationary"),
+                    plate_text=r.get("plate_text"),
                     has_evidence=bool(r.get("has_evidence")),
                 ))
             except (KeyError, TypeError, ValueError):

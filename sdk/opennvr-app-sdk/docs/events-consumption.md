@@ -21,6 +21,10 @@ for v in visits:
 
 # The visit's best-frame JPEG (input for face match / LPR / VLM):
 jpeg = await events.evidence(visits[0].id)
+
+# "When was the car with plate KA01... here?" — vehicle visits are
+# OCR-enriched at ingest (fast_plate_ocr, best-effort); substring match:
+hits = await events.search(label="car", plate="KA01")
 ```
 
 Semantics you can rely on:

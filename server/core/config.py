@@ -297,6 +297,9 @@ class Settings(BaseSettings):
     # detect-pipeline Tier-0 Prometheus /metrics (compute-gated inference).
     # Polled read-only for the app's Compute-gated panel; empty disables it.
     detect_pipeline_metrics_url: str = "http://localhost:9109"
+    # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
+    # and store plate_text on the event row. Best-effort; off = rows only.
+    events_plate_enrichment: bool = True
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod

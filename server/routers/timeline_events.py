@@ -65,6 +65,7 @@ async def list_events(
     camera_id: int | None = None,
     label: str | None = None,
     source: str | None = None,
+    plate: str | None = None,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = 100,
@@ -80,7 +81,7 @@ async def list_events(
     from services.timeline_service import query_events
 
     rows = query_events(
-        db, camera_id=camera_id, label=label, source=source,
+        db, camera_id=camera_id, label=label, source=source, plate=plate,
         from_=from_, to=to, limit=limit,
         # Camera data is owner-scoped everywhere in OpenNVR; history and
         # evidence photos are the MOST sensitive camera data, so the same

@@ -227,6 +227,10 @@ def build_tool_definitions(
                             "type": "boolean",
                             "description": "For person searches: face-match the kept photos (default true).",
                         },
+                        "plate": {
+                            "type": "string",
+                            "description": "Vehicle searches: find visits whose read plate contains this text, e.g. 'KA01' or '1234'.",
+                        },
                     },
                     "required": [],
                 },
@@ -704,6 +708,7 @@ class CameraTools:
             return ("History isn't enabled on this deployment "
                     "(events store not configured).")
         label = str(args.get("label") or "person").strip().lower()
+        plate = args.get("plate")
         start = args.get("start_time")
         end = args.get("end_time")
         camera_arg = args.get("camera_id")
@@ -721,7 +726,8 @@ class CameraTools:
                 return f"ERROR: camera '{cam}' has no server-side id."
         try:
             events = await self._events.search(
-                label=label, camera_id=camera_id, start=start, end=end, limit=25
+                label=label, camera_id=camera_id, plate=plate,
+                start=start, end=end, limit=25,
             )
         except Exception:
             events = None
@@ -740,8 +746,9 @@ class CameraTools:
             t0 = self._clock_phrase(e.started_at)
             t1 = self._clock_phrase(e.ended_at)
             span = f"{t0}–{t1}" if t1 and t1 != t0 else t0
+            plate_bit = f", plate {e.plate_text}" if getattr(e, "plate_text", None) else ""
             clauses.append(
-                f"{span} on camera {e.camera_id}"
+                f"{span} on camera {e.camera_id}{plate_bit}"
                 + (" (photo kept)" if e.has_evidence else "")
             )
         summary = (f"I remember {len(events)} {label} visit(s)"
