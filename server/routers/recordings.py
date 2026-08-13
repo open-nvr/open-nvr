@@ -170,7 +170,7 @@ async def queue_cloud_upload_for_day(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera:
+    if not camera or not _authorize_camera(camera, user_obj):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     rows = (
@@ -334,6 +334,47 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
         db.commit()
         db.refresh(row)
     return row
+
+
+def _owned_cameras_query(db: Session, user: "User"):
+    """Active cameras the user may see: their own, or all for a superuser.
+
+    Recordings and their playback are the most sensitive camera data — same
+    owner-scoping rule as every camera route and the events store (#221)."""
+    from models import Camera
+
+    q = db.query(Camera).filter(Camera.is_active == True)  # noqa: E712
+    if not getattr(user, "is_superuser", False):
+        q = q.filter(Camera.owner_id == user.id)
+    return q
+
+
+def _authorize_camera(camera, user) -> bool:
+    """True iff ``user`` may access ``camera``'s recordings (superuser or owner)."""
+    if camera is None:
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    return camera.owner_id == user.id
+
+
+def _camera_for_path(db: Session, path: str, user) -> "object | None":
+    """Resolve a MediaMTX path (cam-<id> / cam-<ip>) back to a camera the user
+    is allowed to see. Returns None if it doesn't resolve to an owned camera —
+    callers must 403/404 so a path can't be used to reach another owner's
+    recordings."""
+    for cam in _owned_cameras_query(db, user).all():
+        if _build_stream_name(settings.mediamtx_stream_prefix, cam.id, cam.ip_address) == path:
+            return cam
+    return None
+
+
+def _media_cors_headers() -> dict:
+    """ACAO for media responses. The old ``*`` let any origin read recording
+    media; scope to the configured app origins (same-origin needs no header,
+    but hls.js cross-tab / configured fronts do)."""
+    origins = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
+    return {"Access-Control-Allow-Origin": origins[0]} if origins else {}
 
 
 async def _authenticate_request(request: Request, db: Session) -> User | None:
@@ -561,6 +602,12 @@ async def recording_status(
     current_user=Depends(get_current_user),
 ):
     """Get recording status for a camera."""
+    # Owner-scope (#221): don't reveal another owner's camera recording state.
+    camera = (
+        db.query(Camera).filter(Camera.id == camera_id, Camera.is_active == True).first()
+    )
+    if not camera or not _authorize_camera(camera, current_user):
+        raise HTTPException(status_code=404, detail="Camera not found")
     try:
         status = await MediaMtxAdminService.get_recording_status(camera_id, db)
         return {
@@ -606,6 +653,11 @@ async def list_recordings(
     ):
         raise HTTPException(status_code=400, detail="Invalid path format")
 
+    # Owner-scope: the path must resolve to a camera this user may see (#221) —
+    # 404 (not 403) so a path can't confirm another owner's camera exists.
+    if _camera_for_path(db, path, user_obj) is None:
+        raise HTTPException(status_code=404, detail="No recordings for this path")
+
     try:
         url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
         response = http_client.get(url, timeout=10)
@@ -649,7 +701,8 @@ async def list_recording_cameras(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()
+    # Owner-scoped: a user only sees recordings for cameras they own (#221).
+    cameras = _owned_cameras_query(db, user_obj).all()
     result = []
 
     for cam in cameras:
@@ -704,6 +757,11 @@ async def get_playback_url(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    # Owner-scope (#221): this endpoint hands out the browser-fetchable clip
+    # URL, so the requested path must belong to a camera the user may see.
+    if _camera_for_path(db, path, user_obj) is None:
+        raise HTTPException(status_code=404, detail="No recordings for this path")
+
     # Build the playback URL the BROWSER fetches — use the external fallback
     # chain (the browser can't reach the Docker-internal mediamtx host; the
     # external URL is nginx-TLS-fronted). Mirrors streams.py's pattern.
@@ -756,7 +814,11 @@ async def create_hls_session(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera:
+    if not camera or not _authorize_camera(camera, user_obj):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    # Owner-scope (#221): creating a session is the gateway to the capability
+    # media URLs, so a non-owner must not be able to mint one. 404, not 403.
+    if not _authorize_camera(camera, user_obj):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     # Parse time range
@@ -853,7 +915,7 @@ async def get_hls_manifest(
         media_type="application/vnd.apple.mpegurl",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Access-Control-Allow-Origin": "*",
+            **_media_cors_headers(),
         },
     )
 
@@ -882,7 +944,7 @@ async def get_hls_init_segment(
     return Response(
         content=init_data,
         media_type="video/mp4",
-        headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"},
+        headers={"Cache-Control": "max-age=3600", **_media_cors_headers()},
     )
 
 
@@ -943,7 +1005,7 @@ async def get_hls_media(
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Cache-Control": "max-age=86400",
-        "Access-Control-Allow-Origin": "*",
+        **_media_cors_headers(),
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
@@ -1001,7 +1063,7 @@ async def get_browser_playable_recording(
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Cache-Control": "max-age=86400",
-        "Access-Control-Allow-Origin": "*",
+        **_media_cors_headers(),
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
@@ -1043,7 +1105,7 @@ async def get_hls_segment(
         media_type="video/mp4",
         headers={
             "Cache-Control": "max-age=86400",  # Cache segments for 24h
-            "Access-Control-Allow-Origin": "*",
+            **_media_cors_headers(),
         },
     )
 
@@ -1127,7 +1189,7 @@ async def get_today_segments(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera:
+    if not camera or not _authorize_camera(camera, user_obj):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     path = _build_stream_name(
@@ -1242,7 +1304,7 @@ async def get_day_segments(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera:
+    if not camera or not _authorize_camera(camera, user_obj):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     # Default to today (UTC) — same basis MediaMTX labels its segment starts on.
