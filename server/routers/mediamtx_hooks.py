@@ -33,7 +33,6 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import requests
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 

@@ -353,7 +353,11 @@ async def lifespan(app: FastAPI):
     #     disk pressure within the hour. (The heavy rglob is made incremental/
     #     indexed in the recordings-source-of-truth work; hourly is the safe
     #     stopgap.)
-    _RETENTION_INTERVAL_S = 60 * 60  # was 24h
+    # Configurable for big estates where even the off-loop walk is heavy;
+    # floor of 5 min prevents foot-gun values.
+    _RETENTION_INTERVAL_S = max(
+        300, int(os.environ.get("RETENTION_CLEANUP_INTERVAL_S", str(60 * 60)))
+    )
 
     async def background_retention_cleanup():
         """Background task for retention + disk-pressure cleanup (hourly)."""

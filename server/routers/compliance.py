@@ -134,10 +134,17 @@ async def get_compliance_summary(
             # Fetch recordings (still need for total_recordings count)
             if settings.mediamtx_playback_url:
                 try:
+                    import asyncio
+
                     import requests as http_client
 
                     url = f"{settings.mediamtx_playback_url}/list?path={stream_name}"
-                    resp = http_client.get(url, timeout=0.5)
+                    # #221: sync GET inside an async handler, per camera in a
+                    # loop — 0.5s x N cameras of frozen event loop when
+                    # MediaMTX is slow. Run it off-loop.
+                    resp = await asyncio.to_thread(
+                        lambda: http_client.get(url, timeout=0.5)
+                    )
                     if resp.status_code == 200:
                         segs = resp.json()
                         if segs:

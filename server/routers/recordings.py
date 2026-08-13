@@ -309,7 +309,7 @@ async def get_cloud_upload_status(
     return status
 
 
-def _check_mediamtx_available() -> bool:
+async def _check_mediamtx_available() -> bool:
     """Check if MediaMTX playback server is available."""
     if not settings.mediamtx_playback_url:  # url-internal-ok: guard check on backend-side config, never returned to browser
         return False
@@ -326,7 +326,7 @@ def _check_mediamtx_available() -> bool:
         # configured' on every probe (#218's log noise). Any HTTP answer
         # (200/404/401/...) means the playback server is up — which is all
         # this check ever asserted.
-        response = http_client.get(
+        response = await _mediamtx_get(
             f"{settings.mediamtx_playback_url}/", timeout=2  # url-internal-ok: server-side health probe to mediamtx playback server
         )
         return response.status_code in (200, 400, 401, 404, 500)
@@ -672,7 +672,7 @@ async def list_recording_cameras(
         )
         try:
             url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-            response = http_client.get(url, timeout=5)
+            response = await _mediamtx_get(url, timeout=5)
 
             if response.status_code == 200:
                 recordings = response.json()
@@ -1502,7 +1502,7 @@ async def list_recordings_by_date(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Check if MediaMTX is available
-    mediamtx_available = _check_mediamtx_available()
+    mediamtx_available = await _check_mediamtx_available()
 
     # Get cameras to query
     if camera_id:
@@ -1609,7 +1609,7 @@ async def get_recording_stats(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     cameras = db.query(Camera).filter(Camera.is_active == True).all()
-    mediamtx_available = _check_mediamtx_available()
+    mediamtx_available = await _check_mediamtx_available()
 
     total_recordings = 0  # Camera-days
     total_duration = 0
@@ -1622,7 +1622,7 @@ async def get_recording_stats(
             )
             try:
                 url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=5)
+                response = await _mediamtx_get(url, timeout=5)
 
                 if response.status_code == 200:
                     segments = response.json()
@@ -1900,7 +1900,7 @@ async def get_recording_sessions_for_ai(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Check if MediaMTX is available
-    mediamtx_available = _check_mediamtx_available()
+    mediamtx_available = await _check_mediamtx_available()
 
     # Get cameras to query
     if camera_id:
