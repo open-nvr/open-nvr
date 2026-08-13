@@ -182,6 +182,20 @@ class Settings(BaseSettings):
     # RECORDING_SEGMENT_SECONDS. Default 3600 (1h) to match the MediaMTX
     # pathDefaults `recordSegmentDuration: 1h` — keep them in sync.
     recording_segment_seconds: int = 3600
+    # On-disk recording layout (how MediaMTX names recording files/dirs).
+    #   nested    (default): <camera>/%Y/%m/%d/%H/%M/%S  — current behaviour
+    #   date-hour          : <camera>/%Y-%m-%d/%H/%M      — one folder per day,
+    #                        per hour; pair with recording_segment_seconds=60
+    #                        for one-minute clips (matches the shape many NVRs and VMS systems use so
+    #                        external tools can address files by path).
+    #   flat               : <camera>/%Y-%m-%d_%H-%M-%S
+    #   custom             : use recording_path_template verbatim.
+    # Time tokens follow the MediaMTX container's timezone (set TZ for local
+    # time; UTC by default) — see the recordings layout doc.
+    recording_layout: str = "nested"
+    # Only when recording_layout=custom. {camera} is the stream path; the rest
+    # are MediaMTX strftime tokens (%Y %m %d %H %M %S %f ...).
+    recording_path_template: str | None = None
 
     # MediaMTX service URLs (internal - for backend to MediaMTX communication)
     mediamtx_hls_url: str | None = "http://localhost:8888"  # HLS streaming endpoint

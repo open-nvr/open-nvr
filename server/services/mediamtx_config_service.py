@@ -32,6 +32,29 @@ class MediaMtxConfigService:
     """Service for generating MediaMTX configuration."""
 
     @staticmethod
+    @staticmethod
+    def recording_path_template(camera_token: str = "%path") -> str:
+        """The recordPath suffix (after the recordings base) for the configured
+        on-disk layout. ``camera_token`` is MediaMTX's ``%path`` or an explicit
+        stream name. Default ('nested') preserves the historical layout, so
+        existing deployments see no change."""
+        layout = (settings.recording_layout or "nested").strip().lower()
+        if layout == "custom" and settings.recording_path_template:
+            return settings.recording_path_template.replace("{camera}", camera_token)
+        presets = {
+            # historical default — unchanged
+            "nested": f"{camera_token}/%Y/%m/%d/%H/%M/%S",
+            # One folder per day + per hour; clips named by minute-second so
+            # they're path-addressable AND collision-safe (a bare %M filename
+            # would OVERWRITE an earlier clip if two segments ever start in the
+            # same minute — a reconnect or a <60s segment). The file still sits
+            # in the HH folder; retrieval is "the clip whose start <= T".
+            "date-hour": f"{camera_token}/%Y-%m-%d/%H/%M-%S",
+            "flat": f"{camera_token}/%Y-%m-%d_%H-%M-%S",
+        }
+        return presets.get(layout, presets["nested"])
+
+    @staticmethod
     def generate_webhook_config(base_url: str) -> dict[str, Any]:
         """Generate webhook configuration for MediaMTX.
 
@@ -82,7 +105,7 @@ class MediaMtxConfigService:
 
         return {
             "record": True,
-            "recordPath": f"{base_path}/{stream_name}/%Y/%m/%d/%H/%M/%S",
+            "recordPath": f"{base_path}/" + MediaMtxConfigService.recording_path_template(stream_name),
             "recordFormat": "mp4",  # or "ts" for transport stream
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",  # Keep recordings for 30 days
@@ -102,7 +125,7 @@ class MediaMtxConfigService:
             "api": True,
             "apiAddress": f":{settings.mediamtx_api_port}",
             # Recording settings
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/" + MediaMtxConfigService.recording_path_template("%path"),
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",  # 30 days
@@ -145,7 +168,7 @@ class MediaMtxConfigService:
             "rtspTransport": "tcp",
             # Recording settings (disabled by default, enabled per camera)
             "record": False,
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/" + MediaMtxConfigService.recording_path_template("%path"),
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
             "recordDeleteAfter": "720h",
@@ -359,6 +382,7 @@ paths: {}
         webhook_token = settings.mediamtx_webhook_token or "your-secure-webhook-token"
         webhook_base = f"{application_base_url}{settings.api_prefix}/mediamtx"
         base_path = get_effective_recordings_base_path()
+        _rec_layout = MediaMtxConfigService.recording_path_template("%path")
 
         yaml_content = f"""# MediaMTX Configuration for OpenNVR NVR
 # Generated automatically with startup hooks for camera auto-provisioning
@@ -406,7 +430,7 @@ pathDefaults:
   
   # Recording settings (disabled by default, enabled per camera)
   record: no
-  recordPath: {base_path}/%path/%Y/%m/%d/%H-%M-%S-%f
+  recordPath: {base_path}/{_rec_layout}
   recordFormat: fmp4
   recordSegmentDuration: {settings.recording_segment_seconds}s
   recordDeleteAfter: 168h  # 7 days
