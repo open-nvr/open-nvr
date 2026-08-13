@@ -812,9 +812,16 @@ def test_startup_hook_retries_instead_of_dying_once(monkeypatch):
     }.items():
         monkeypatch.setenv(_k, os.environ.get(_k) or _v)
 
-    from services.mediamtx_config_service import MediaMtxConfigService
+    import services.mediamtx_config_service as mcs
 
-    content = MediaMtxConfigService.generate_complete_mediamtx_yml(
+    # The recordings base path is a DB-backed setting; this test is about
+    # the generated YAML, not the database — stub it so the test needs no
+    # DB (CI's server job has no postgres for this module).
+    monkeypatch.setattr(
+        mcs, "get_effective_recordings_base_path", lambda: "/recordings"
+    )
+
+    content = mcs.MediaMtxConfigService.generate_complete_mediamtx_yml(
         "http://opennvr_core:8000"
     )
     parsed = _yaml.safe_load(content)
