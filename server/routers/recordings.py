@@ -34,7 +34,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
+import asyncio
 import requests as http_client
+
+
+async def _mediamtx_get(url: str, *, timeout: int = 10):
+    """Run a blocking MediaMTX metadata GET off the event loop.
+
+    These are synchronous ``requests`` calls; issued directly inside an
+    ``async def`` (as they were) each one froze the WHOLE event loop for up
+    to ``timeout`` seconds — stalling every other request, including live
+    video byte-ranges (issue #221). asyncio.to_thread moves the blocking
+    call to a worker thread so the loop keeps serving. Response handling is
+    unchanged (.json()/.status_code)."""
+    return await asyncio.to_thread(lambda: http_client.get(url, timeout=timeout))
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -608,7 +622,7 @@ async def list_recordings(
 
     try:
         url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
+        response = await _mediamtx_get(url, timeout=10)
 
         if response.status_code != 200:
             return {
@@ -1145,7 +1159,7 @@ async def get_today_segments(
 
     try:
         url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
+        response = await _mediamtx_get(url, timeout=10)
 
         if response.status_code != 200:
             return {
@@ -1298,7 +1312,7 @@ async def get_day_segments(
 
     try:
         url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
+        response = await _mediamtx_get(url, timeout=10)
         if response.status_code != 200:
             return empty
 
@@ -1512,7 +1526,7 @@ async def list_recordings_by_date(
             )
             try:
                 url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=10)
+                response = await _mediamtx_get(url, timeout=10)
 
                 if response.status_code == 200:
                     segments = response.json()
@@ -1908,7 +1922,7 @@ async def get_recording_sessions_for_ai(
             )
             try:
                 url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=10)
+                response = await _mediamtx_get(url, timeout=10)
 
                 if response.status_code == 200:
                     segments = response.json()

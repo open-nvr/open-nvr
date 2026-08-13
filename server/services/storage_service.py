@@ -440,21 +440,22 @@ class StorageService:
             "segment_seconds": store.segment_seconds,
         }
 
-        # Get disk usage if possible
+        # Get disk usage if possible.
+        # NB: os.statvfs() returns a 10-field struct, NOT (total, used, free) —
+        # the old unpack raised ValueError on every Linux call and was swallowed,
+        # so disk usage was never reported and the disk-full guard was blind
+        # (issue #221). shutil.disk_usage() returns a proper (total, used, free)
+        # named tuple and works on Linux AND Windows.
         try:
             if root.exists():
-                total, used, free = (
-                    os.statvfs(str(root)) if hasattr(os, "statvfs") else (0, 0, 0)
-                )
-                if total == 0:  # Windows fallback
-                    import shutil
+                import shutil
 
-                    total, used, free = shutil.disk_usage(str(root))
+                usage = shutil.disk_usage(str(root))
                 info.update(
                     {
-                        "disk_total": total,
-                        "disk_used": used,
-                        "disk_free": free,
+                        "disk_total": usage.total,
+                        "disk_used": usage.used,
+                        "disk_free": usage.free,
                     }
                 )
         except Exception as e:

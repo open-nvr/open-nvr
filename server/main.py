@@ -342,27 +342,37 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_mediamtx_provisioning())
 
-    # Start retention cleanup scheduler
+    # Start retention cleanup scheduler.
+    #
+    # Two #221 hotfixes here:
+    #  1) cleanup_old_recordings() is synchronous and does filesystem walks —
+    #     running it directly on the event loop froze all request handling.
+    #     asyncio.to_thread moves it to a worker thread.
+    #  2) it ran at most once every 24h, so a disk near full would fill and
+    #     RECORDING WOULD STOP before the next check. Running hourly catches
+    #     disk pressure within the hour. (The heavy rglob is made incremental/
+    #     indexed in the recordings-source-of-truth work; hourly is the safe
+    #     stopgap.)
+    _RETENTION_INTERVAL_S = 60 * 60  # was 24h
+
     async def background_retention_cleanup():
-        """Background task for daily retention cleanup."""
+        """Background task for retention + disk-pressure cleanup (hourly)."""
         try:
             from services.retention_service import retention_service
 
-            # Wait a bit before first cleanup (allow system to fully start)
-            await asyncio.sleep(60)  # Wait 60 seconds after startup
-
-            main_logger.info("Starting retention cleanup scheduler (runs daily)")
+            await asyncio.sleep(60)  # let the system finish starting
+            main_logger.info("Starting retention cleanup scheduler (runs hourly)")
 
             while True:
                 try:
-                    main_logger.info("Running scheduled retention cleanup...")
-                    stats = retention_service.cleanup_old_recordings()
+                    stats = await asyncio.to_thread(
+                        retention_service.cleanup_old_recordings
+                    )
                     main_logger.info(f"Retention cleanup completed: {stats}")
                 except Exception as e:
                     main_logger.error(f"Retention cleanup failed: {e}", exc_info=True)
 
-                # Wait 24 hours before next cleanup
-                await asyncio.sleep(24 * 60 * 60)
+                await asyncio.sleep(_RETENTION_INTERVAL_S)
         except Exception as e:
             main_logger.error(f"Retention cleanup scheduler failed: {e}", exc_info=True)
 
