@@ -788,3 +788,39 @@ def test_cert_script_is_idempotent() -> None:
         assert crt.read_bytes() != first_crt_bytes, (
             "cert script did not regenerate under --force"
         )
+
+
+# ── #218 related: startup hook must survive core booting after MediaMTX ─
+
+def test_startup_hook_retries_instead_of_dying_once(monkeypatch):
+    """The runOnInit hook is the ONLY thing that re-provisions cameras after
+    a MediaMTX restart. A single un-retried curl meant 'could not resolve
+    host: opennvr_core' -> zero cameras until manual restart (#218's log).
+    The generated config must retry with backoff and fail LOUDLY."""
+    import secrets as _secrets
+
+    import yaml as _yaml
+    from cryptography.fernet import Fernet as _Fernet
+
+    # This module's earlier tests pop core.config from sys.modules, so the
+    # import below may reconstruct Settings — give it valid secrets.
+    for _k, _v in {
+        "SECRET_KEY": _secrets.token_urlsafe(48),
+        "MEDIAMTX_SECRET": _secrets.token_hex(32),
+        "INTERNAL_API_KEY": _secrets.token_urlsafe(48),
+        "CREDENTIAL_ENCRYPTION_KEY": _Fernet.generate_key().decode(),
+    }.items():
+        monkeypatch.setenv(_k, os.environ.get(_k) or _v)
+
+    from services.mediamtx_config_service import MediaMtxConfigService
+
+    content = MediaMtxConfigService.generate_complete_mediamtx_yml(
+        "http://opennvr_core:8000"
+    )
+    parsed = _yaml.safe_load(content)
+    hook = parsed["runOnInit"]
+    assert hook.startswith("sh -c"), "hook must be a shell loop, not a bare curl"
+    assert "seq 1 60" in hook and "sleep 5" in hook, "bounded retry with backoff"
+    assert "startup/hook" in hook and "opennvr_core" in hook
+    assert "FAILED after 60 attempts" in hook, "final give-up must be loud"
+    assert parsed["runOnInitRestart"] is False

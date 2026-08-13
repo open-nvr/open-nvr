@@ -307,10 +307,14 @@ def _check_mediamtx_available() -> bool:
         # - 401: JWT auth required (server is running!)
         # - 404: path not found
         # - 500: server error
+        # Probe the server root, NOT /list?path=__health__: listing a
+        # nonexistent path made MediaMTX log 'ERR path __health__ is not
+        # configured' on every probe (#218's log noise). Any HTTP answer
+        # (200/404/401/...) means the playback server is up — which is all
+        # this check ever asserted.
         response = http_client.get(
-            f"{settings.mediamtx_playback_url}/list?path=__health__", timeout=2  # url-internal-ok: server-side health probe to mediamtx admin API
+            f"{settings.mediamtx_playback_url}/", timeout=2  # url-internal-ok: server-side health probe to mediamtx playback server
         )
-        # Any response means the server is responding (including 401 for JWT auth)
         return response.status_code in (200, 400, 401, 404, 500)
     except Exception:
         return False
