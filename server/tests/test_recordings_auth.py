@@ -104,11 +104,17 @@ def test_shared_camera_via_can_view_is_authorized():
 
 def test_camera_for_path_only_resolves_owned():
     s, ua, ub, cam_a, cam_b = _db()
-    from services.stream_service import _build_stream_name
-    from core.config import settings
+    # Build the expected path from the EXACT references _camera_for_path uses
+    # (rec's own settings + stream-name fn), not fresh imports — otherwise a
+    # prior test that reloaded core.config makes the two settings instances
+    # diverge and the paths won't match (test-ordering flake, not a bug).
+    def _path(cam):
+        return rec._build_stream_name(
+            rec.settings.mediamtx_stream_prefix, cam.id, cam.ip_address
+        )
 
-    path_a = _build_stream_name(settings.mediamtx_stream_prefix, cam_a.id, cam_a.ip_address)
-    path_b = _build_stream_name(settings.mediamtx_stream_prefix, cam_b.id, cam_b.ip_address)
+    path_a = _path(cam_a)
+    path_b = _path(cam_b)
     # owner A resolves their own path, not B's
     assert rec._camera_for_path(s, path_a, ua) is not None
     assert rec._camera_for_path(s, path_b, ua) is None
