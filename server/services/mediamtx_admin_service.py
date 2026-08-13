@@ -994,6 +994,11 @@ class MediaMtxAdminService:
 
             # Path was deleted between the add-conflict and this replace —
             # add it instead of failing.
+            # NB: substring match on MediaMTX's error text (same style as the
+            # "already exists" checks). If a MediaMTX upgrade rewords it, the
+            # fallback quietly stops matching — which degrades SAFELY (the
+            # error is surfaced and the old path keeps running), but check
+            # these strings when bumping the MediaMTX image.
             error_text = str(result.get("details", {}).get("error", "")).lower()
             if result.get("status") == "error" and "not found" in error_text:
                 return await MediaMtxAdminService.provision_path(

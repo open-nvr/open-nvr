@@ -25,6 +25,24 @@ conflict through POST /config/paths/replace/{name}, a single config
 transaction. These tests pin that behavior.
 """
 
+import os
+import secrets
+import sys
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+
+_HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_HERE))
+# Standard test-module env bootstrap (see test_device_firewall.py): lets this
+# file run STANDALONE (pytest tests/test_provision_replace.py) instead of
+# depending on an alphabetically-earlier module having built Settings first.
+os.environ.setdefault("DATABASE_URL", "sqlite:///./_mtx_test.db")
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
+os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
 import pytest
 
 from services.mediamtx_admin_service import MediaMtxAdminService
