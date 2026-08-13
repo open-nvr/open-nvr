@@ -170,7 +170,7 @@ async def queue_cloud_upload_for_day(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera or not _authorize_camera(camera, user_obj):
+    if not camera or not _authorize_camera(camera, user_obj, db):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     rows = (
@@ -336,26 +336,56 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
     return row
 
 
-def _owned_cameras_query(db: Session, user: "User"):
-    """Active cameras the user may see: their own, or all for a superuser.
+def _viewable_cameras_query(db: Session, user: "User"):
+    """Active cameras the user may see: superuser -> all; otherwise cameras
+    they OWN or have been granted can_view on.
 
-    Recordings and their playback are the most sensitive camera data — same
-    owner-scoping rule as every camera route and the events store (#221)."""
-    from models import Camera
+    Mirrors the exact model cameras.py uses to list cameras (owner_id OR a
+    CameraPermission.can_view grant) — recordings must not be stricter than
+    live view, or a user shared a camera could watch it live but not its
+    recordings (#221)."""
+    from models import Camera, CameraPermission
 
     q = db.query(Camera).filter(Camera.is_active == True)  # noqa: E712
-    if not getattr(user, "is_superuser", False):
-        q = q.filter(Camera.owner_id == user.id)
-    return q
+    if getattr(user, "is_superuser", False):
+        return q
+    permitted = (
+        db.query(CameraPermission.camera_id)
+        .filter(CameraPermission.user_id == user.id, CameraPermission.can_view == True)  # noqa: E712
+        .subquery()
+    )
+    return q.filter(
+        (Camera.owner_id == user.id) | (Camera.id.in_(permitted))
+    )
 
 
-def _authorize_camera(camera, user) -> bool:
-    """True iff ``user`` may access ``camera``'s recordings (superuser or owner)."""
+# Back-compat alias (older call sites) -> viewable set.
+_owned_cameras_query = _viewable_cameras_query
+
+
+def _authorize_camera(camera, user, db: "Session | None" = None) -> bool:
+    """True iff ``user`` may access ``camera``'s recordings: superuser, owner,
+    or a can_view grant (grant check needs ``db``)."""
     if camera is None:
         return False
     if getattr(user, "is_superuser", False):
         return True
-    return camera.owner_id == user.id
+    if camera.owner_id == getattr(user, "id", None):
+        return True
+    if db is not None:
+        from models import CameraPermission
+
+        grant = (
+            db.query(CameraPermission)
+            .filter(
+                CameraPermission.user_id == user.id,
+                CameraPermission.camera_id == camera.id,
+                CameraPermission.can_view == True,  # noqa: E712
+            )
+            .first()
+        )
+        return grant is not None
+    return False
 
 
 def _camera_for_path(db: Session, path: str, user) -> "object | None":
@@ -606,7 +636,7 @@ async def recording_status(
     camera = (
         db.query(Camera).filter(Camera.id == camera_id, Camera.is_active == True).first()
     )
-    if not camera or not _authorize_camera(camera, current_user):
+    if not camera or not _authorize_camera(camera, current_user, db):
         raise HTTPException(status_code=404, detail="Camera not found")
     try:
         status = await MediaMtxAdminService.get_recording_status(camera_id, db)
@@ -814,11 +844,11 @@ async def create_hls_session(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera or not _authorize_camera(camera, user_obj):
+    if not camera or not _authorize_camera(camera, user_obj, db):
         raise HTTPException(status_code=404, detail="Camera not found")
     # Owner-scope (#221): creating a session is the gateway to the capability
     # media URLs, so a non-owner must not be able to mint one. 404, not 403.
-    if not _authorize_camera(camera, user_obj):
+    if not _authorize_camera(camera, user_obj, db):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     # Parse time range
@@ -1189,7 +1219,7 @@ async def get_today_segments(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera or not _authorize_camera(camera, user_obj):
+    if not camera or not _authorize_camera(camera, user_obj, db):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     path = _build_stream_name(
@@ -1304,7 +1334,7 @@ async def get_day_segments(
         .filter(Camera.id == camera_id, Camera.is_active == True)
         .first()
     )
-    if not camera or not _authorize_camera(camera, user_obj):
+    if not camera or not _authorize_camera(camera, user_obj, db):
         raise HTTPException(status_code=404, detail="Camera not found")
 
     # Default to today (UTC) — same basis MediaMTX labels its segment starts on.

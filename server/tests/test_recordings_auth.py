@@ -46,7 +46,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 import routers.recordings as rec  # noqa: E402
 from core.database import Base  # noqa: E402
-from models import Camera, Role, User  # noqa: E402
+from models import Camera, CameraPermission, Role, User  # noqa: E402
 
 _ADMIN = SimpleNamespace(id=1, is_superuser=True)
 
@@ -71,19 +71,35 @@ def _db():
 
 def test_owned_cameras_query_scopes_to_owner():
     s, ua, ub, cam_a, cam_b = _db()
-    a_ids = [c.id for c in rec._owned_cameras_query(s, ua).all()]
+    a_ids = [c.id for c in rec._viewable_cameras_query(s, ua).all()]
     assert a_ids == [cam_a.id]
     # superuser sees all
     su = SimpleNamespace(id=99, is_superuser=True)
-    assert len(rec._owned_cameras_query(s, su).all()) == 2
+    assert len(rec._viewable_cameras_query(s, su).all()) == 2
 
 
 def test_authorize_camera_owner_and_superuser():
     s, ua, ub, cam_a, cam_b = _db()
-    assert rec._authorize_camera(cam_a, ua) is True
-    assert rec._authorize_camera(cam_a, ub) is False          # other owner
-    assert rec._authorize_camera(cam_a, SimpleNamespace(id=0, is_superuser=True)) is True
-    assert rec._authorize_camera(None, ua) is False
+    assert rec._authorize_camera(cam_a, ua, s) is True
+    assert rec._authorize_camera(cam_a, ub, s) is False          # other owner
+    assert rec._authorize_camera(cam_a, SimpleNamespace(id=0, is_superuser=True), s) is True
+    assert rec._authorize_camera(None, ua, s) is False
+
+
+def test_shared_camera_via_can_view_is_authorized():
+    """A user granted can_view on someone else's camera must see its
+    recordings too — recordings must not be stricter than live view (#221)."""
+    s, ua, ub, cam_a, cam_b = _db()
+    # grant user A view access to user B's camera
+    s.add(CameraPermission(user_id=ua.id, camera_id=cam_b.id, can_view=True))
+    s.commit()
+    assert rec._authorize_camera(cam_b, ua, s) is True
+    ids = sorted(c.id for c in rec._viewable_cameras_query(s, ua).all())
+    assert ids == sorted([cam_a.id, cam_b.id])
+    # a revoked / can_view=False grant does NOT authorize
+    s.add(CameraPermission(user_id=ub.id, camera_id=cam_a.id, can_view=False))
+    s.commit()
+    assert rec._authorize_camera(cam_a, ub, s) is False
 
 
 def test_camera_for_path_only_resolves_owned():
