@@ -1,0 +1,45 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# Release-pin verification (issue #212's failure class).
+#
+# A fresh install is `docker compose pull` of whatever .env.example pins —
+# if any pinned ghcr.io/open-nvr image:tag doesn't exist, the very first
+# user command dies. This gate makes that unmergeable/untaggable: it
+# resolves every image reference in the compose files against the
+# .env.example pins and asks GHCR whether each one is pullable.
+#
+# Runs on: PRs touching pins/compose (catch drift before merge), release
+# tags (the last line of defense — fails the release if an image is
+# missing), pushes to main touching the same files, and manual dispatch.
+
+name: release-pins
+
+on:
+  pull_request:
+    paths:
+      - ".env.example"
+      - "docker-compose*.yml"
+      - "scripts/verify_release_pins.py"
+      - ".github/workflows/release-pins.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".env.example"
+      - "docker-compose*.yml"
+      - "scripts/verify_release_pins.py"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-pins:
+    name: pinned images exist on GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify every pinned image is pullable
+        run: python3 scripts/verify_release_pins.py
