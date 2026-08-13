@@ -24,7 +24,7 @@ def test_search_builds_url_and_parses():
         {"id": 42, "camera_id": 3, "label": "person", "score": 0.91,
          "started_at": "2026-08-12T15:12:04+00:00",
          "ended_at": "2026-08-12T15:14:11+00:00",
-         "stationary": False, "has_evidence": True},
+         "stationary": False, "plate_text": None, "has_evidence": True},
         {"junk": "row is skipped, not fatal"},
     ]}).encode()
     c, calls = _client([(200, body)])

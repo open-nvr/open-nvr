@@ -212,3 +212,30 @@ def test_null_track_ids_never_collide(db):
     _visit(db, start_min=5, track_id=None)
     _visit(db, start_min=5, track_id=None)   # no raise
     assert len(query_events(db)) == 2
+
+
+# ── PR-C: plate enrichment ──────────────────────────────────────────
+
+def test_plate_filter_substring_normalized(db):
+    row = _visit(db, start_min=1, label="car", track_id="p1")
+    row.plate_text = "KA01AB1234"
+    db.commit()
+    _visit(db, start_min=2, label="car", track_id="p2")
+    assert [r.id for r in query_events(db, plate="ka01 ab")] == [row.id]
+    assert [r.id for r in query_events(db, plate="1234")] == [row.id]
+    assert query_events(db, plate="ZZ99") == []
+
+
+def test_extract_plate_and_wants_plate():
+    from services.plate_enrichment import extract_plate, wants_plate
+
+    ok = {"result": {"plate_text": "ka 01 ab 1234", "accepted": True}}
+    assert extract_plate(ok) == "KA01AB1234"
+    assert extract_plate({"result": {"plate_text": "X", "accepted": False}}) is None
+    assert extract_plate({"result": {}}) is None
+    assert extract_plate(None) is None
+
+    assert wants_plate("car", "ab/x.jpg") is True
+    assert wants_plate("person", "ab/x.jpg") is False
+    assert wants_plate("car", None) is False
+    assert wants_plate("car", "ab/x.jpg", enabled=False) is False

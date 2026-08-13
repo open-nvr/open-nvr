@@ -73,6 +73,7 @@ def query_events(
     to: datetime | None = None,
     limit: int = 100,
     owner_id: int | None = None,
+    plate: str | None = None,
 ) -> list[TimelineEvent]:
     """Newest-first visits/alarms/alerts intersecting [from, to).
 
@@ -91,6 +92,11 @@ def query_events(
         q = q.filter(TimelineEvent.label == label.strip().lower())
     if source:
         q = q.filter(TimelineEvent.source == source)
+    if plate:
+        # Normalized like the writer (uppercase, no spaces); substring match
+        # so "1234" finds KA01AB1234 — how people actually recall plates.
+        norm = "".join(plate.split()).upper()
+        q = q.filter(TimelineEvent.plate_text.ilike(f"%{norm}%"))
     if to is not None:
         q = q.filter(TimelineEvent.started_at < to)
     if from_ is not None:
