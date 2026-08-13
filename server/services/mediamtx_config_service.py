@@ -272,7 +272,7 @@ paths: {}
             "critical_setup": {
                 "startup_hook": {
                     "description": "Essential for automatic camera provisioning after MediaMTX restarts",
-                    "config": f'runOnInit: curl -X GET "{application_base_url}{settings.api_prefix}/mediamtx/startup/hook?delay=5&t={webhook_token}"',
+                    "config": "runOnInit: " + 'sh -c \'for i in $(seq 1 60); do curl -fsS -X GET "{url}" && exit 0; echo "[startup-hook] core not reachable (attempt $i/60); retrying in 5s" >&2; sleep 5; done; echo "[startup-hook] FAILED after 60 attempts — cameras are NOT provisioned; restart mediamtx or fix connectivity" >&2\''.format(url=f"{application_base_url}{settings.api_prefix}/mediamtx/startup/hook?delay=5&t={webhook_token}"),
                     "importance": "Without this, cameras won't be re-provisioned automatically after MediaMTX restart",
                 }
             },
@@ -371,7 +371,11 @@ api: yes
 apiAddress: :9997
 
 # Startup hook - CRITICAL for automatic camera provisioning after restart
-runOnInit: curl -X GET "{webhook_base}/startup/hook?delay=5&t={webhook_token}"
+# Retries for ~5 min: in compose, MediaMTX often starts before core's DNS/API
+# is up — a single un-retried curl here meant ZERO cameras provisioned until
+# someone restarted MediaMTX (#218's log). Loud on every failure and on final
+# give-up, so the failure mode is a log line, never a silent empty NVR.
+runOnInit: sh -c 'for i in $(seq 1 60); do curl -fsS -X GET "{webhook_base}/startup/hook?delay=5&t={webhook_token}" && exit 0; echo "[startup-hook] core not reachable (attempt $i/60); retrying in 5s" >&2; sleep 5; done; echo "[startup-hook] FAILED after 60 attempts — cameras are NOT provisioned; restart mediamtx or fix connectivity" >&2'
 runOnInitRestart: no
 
 # RTSP settings
