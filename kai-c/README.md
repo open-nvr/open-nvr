@@ -2,6 +2,11 @@
 
 KAI-C is the middleware layer between the OpenNVR NVR backend and the AI Adapters engine. The backend never talks to AIAdapters directly — KAI-C handles routing, URL management, authentication, response standardization, **audit logging, sovereignty enforcement, and fingerprint-drift detection**.
 
+> **Design direction:** the target architecture for KAI-C — control plane
+> with capability tokens, no proxy in the inference data path — is specified
+> in [DESIGN.md](DESIGN.md) (decision record: RFC-0001, Challenge 2). This
+> README documents the CURRENT v2.x behaviour.
+
 ## v2.0 — registry, audit, and the trust contract
 
 As of v2.0 KAI-C is the registry and audit layer per §11 of the [AI Adapter Contract v1](../docs/AI_ADAPTER_CONTRACT.md). It still works as a thin proxy for the legacy endpoints; the new behaviour is layered on top.
