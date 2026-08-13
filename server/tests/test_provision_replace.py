@@ -201,3 +201,116 @@ async def test_replace_path_enforces_policy_before_http(monkeypatch):
             config={"source_url": "rtsp://192.168.0.103:554/stream"},
             transport_security="rtsps_required",
         )
+
+
+@pytest.mark.asyncio
+async def test_replace_skips_when_config_unchanged(monkeypatch):
+    """Identical config must be a true no-op: no replace POST, no config
+    reload, no stream blip — repeat provisions become free."""
+    posts = {"n": 0}
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url, **kw):
+            class _R:
+                is_success = True
+
+                def json(self):
+                    # exactly what _map_conf produces for this config
+                    return {"source": "rtsp://192.168.0.103:554/stream",
+                            "extra_mediamtx_default": "untouched"}
+
+            return _R()
+
+        async def post(self, *a, **kw):
+            posts["n"] += 1
+            raise AssertionError("replace POSTed despite unchanged config")
+
+    import services.mediamtx_admin_service as mam
+
+    monkeypatch.setattr(mam.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(
+        MediaMtxAdminService, "is_configured", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(
+        MediaMtxAdminService, "_base",
+        staticmethod(lambda: "http://stub.mediamtx.invalid"),
+    )
+
+    result = await MediaMtxAdminService.replace_path(
+        camera_id=3,
+        camera_ip="192.168.0.103",
+        config={"source_url": "rtsp://192.168.0.103:554/stream"},
+    )
+    assert posts["n"] == 0
+    assert result.get("status") == "ok"
+    assert result.get("unchanged") is True
+
+
+@pytest.mark.asyncio
+async def test_replace_proceeds_when_config_differs(monkeypatch):
+    """A changed source URL must still replace (the blip is then necessary)."""
+    posts = {"n": 0}
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url, **kw):
+            class _R:
+                is_success = True
+
+                def json(self):
+                    return {"source": "rtsp://OLD-URL:554/stream"}
+
+            return _R()
+
+        async def post(self, url, **kw):
+            posts["n"] += 1
+
+            class _R:
+                status_code = 200
+                is_success = True
+
+                def json(self):
+                    return {}
+
+                @property
+                def text(self):
+                    return "{}"
+
+            return _R()
+
+    import services.mediamtx_admin_service as mam
+
+    monkeypatch.setattr(mam.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(
+        MediaMtxAdminService, "is_configured", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(
+        MediaMtxAdminService, "_base",
+        staticmethod(lambda: "http://stub.mediamtx.invalid"),
+    )
+
+    result = await MediaMtxAdminService.replace_path(
+        camera_id=3,
+        camera_ip="192.168.0.103",
+        config={"source_url": "rtsp://192.168.0.103:554/stream"},
+    )
+    assert posts["n"] == 1
+    assert result.get("status") == "ok"
+    assert not result.get("unchanged")

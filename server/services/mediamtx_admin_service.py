@@ -746,7 +746,10 @@ class MediaMtxAdminService:
                 transport_security=transport_security,
             )
             if result.get("status") == "ok":
-                result["action"] = "rtsp_stream_replaced"
+                result["action"] = (
+                    "rtsp_stream_unchanged" if result.get("unchanged")
+                    else "rtsp_stream_replaced"
+                )
             else:
                 result["action"] = "replace_failed"
 
@@ -987,6 +990,38 @@ class MediaMtxAdminService:
 
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                # Idempotence guard: a replace triggers a config reload and
+                # restarts the path's source — a visible stream/recording blip.
+                # If the running config already matches everything we'd set,
+                # skip the replace entirely: identical re-provisions (repeat
+                # clicks, reconciles with unchanged URLs) become true no-ops.
+                # Best-effort — any failure here just falls through to the
+                # replace, which is always correct.
+                try:
+                    cur = await client.get(
+                        MediaMtxAdminService._base() + f"/config/paths/get/{name}",
+                        headers=MediaMtxAdminService._headers(),
+                    )
+                    if cur.is_success:
+                        current = cur.json()
+                        if isinstance(current, dict) and all(
+                            current.get(k) == v for k, v in payload.items()
+                        ):
+                            mediamtx_logger.log_action(
+                                "mediamtx.replace_path_skipped_unchanged",
+                                camera_id=camera_id,
+                                message=f"MediaMTX path config unchanged; replace skipped: {name}",
+                                extra_data={"path": name},
+                            )
+                            return {
+                                "status": "ok",
+                                "path": name,
+                                "http_status": 200,
+                                "unchanged": True,
+                                "details": {"message": "config unchanged; no reload, no stream interruption"},
+                            }
+                except Exception:  # pragma: no cover - optimization only
+                    pass
                 resp = await client.post(
                     url, json=payload, headers=MediaMtxAdminService._headers()
                 )
