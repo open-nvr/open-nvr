@@ -22,12 +22,13 @@ on:
       - "docker-compose*.yml"
       - "scripts/verify_release_pins.py"
       - ".github/workflows/release-pins.yml"
+  # NB: no ``paths`` filter on push — GitHub applies push path filters to
+  # both branches AND tags (see publish-images.yml's identical warning), so
+  # a release tag on a commit that doesn't touch the pins would silently
+  # skip the exact run that matters most. The script takes seconds; running
+  # it on every main push and every tag is cheaper than one broken install.
   push:
     branches: [main]
-    paths:
-      - ".env.example"
-      - "docker-compose*.yml"
-      - "scripts/verify_release_pins.py"
     tags:
       - "v*"
   workflow_dispatch:

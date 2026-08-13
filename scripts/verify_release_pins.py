@@ -47,7 +47,9 @@ def load_env_pins(path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        pins[key.strip()] = value.split("#", 1)[0].strip()
+        value = value.split("#", 1)[0].strip()
+        # CORE_TAG="0.1.2" and CORE_TAG=0.1.2 must pin identically.
+        pins[key.strip()] = value.strip('"').strip("'")
     return pins
 
 
@@ -105,6 +107,14 @@ def main() -> int:
         if not resolved.startswith(GHCR_PREFIX):
             continue  # upstream image; not this release's job
         image, _, tag = resolved.partition(":")
+        if not tag and "${" in raw:
+            # ${VAR} with no default and no pin: compose would render an
+            # empty tag and docker pull would fail — do NOT mask it as
+            # :latest; name it as a broken pin.
+            checked += 1
+            print(f"  [MISSING] {image}:<unpinned>    (from {raw})")
+            failures.append(f"{image}: unpinned variable in {raw}")
+            continue
         tag = tag or "latest"
         checked += 1
         exists = ghcr_manifest_exists(image, tag)
