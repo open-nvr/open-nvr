@@ -1186,8 +1186,11 @@ export function AddCameraDialog({
       })
       const newCameraId = response?.data?.id
       
-      // Auto-provision to MediaMTX
-      if (newCameraId) {
+      // The server already auto-provisions on create; only retry from here
+      // if that didn't stick (e.g. MediaMTX was briefly unreachable).
+      // Unconditionally re-provisioning an already-provisioned camera forces
+      // a path replace that can drop the stream it just started.
+      if (newCameraId && response?.data?.mediamtx_provisioned !== true) {
         try {
           await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
         } catch (e) {
@@ -1228,8 +1231,11 @@ export function AddCameraDialog({
       })
       const newCameraId = response?.data?.id
       
-      // Auto-provision to MediaMTX
-      if (newCameraId) {
+      // The server already auto-provisions on create; only retry from here
+      // if that didn't stick (e.g. MediaMTX was briefly unreachable).
+      // Unconditionally re-provisioning an already-provisioned camera forces
+      // a path replace that can drop the stream it just started.
+      if (newCameraId && response?.data?.mediamtx_provisioned !== true) {
         try {
           await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
         } catch (e) {

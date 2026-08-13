@@ -99,6 +99,8 @@ def test_provision_substream_adds_on_demand_path(monkeypatch):
 
     class _Resp:
         status_code = 200
+        is_success = True
+        text = "{}"
 
     class _Client:
         async def __aenter__(self): return self
@@ -132,6 +134,8 @@ def test_provision_substream_prefers_stored_url(monkeypatch):
 
     class _Resp:
         status_code = 200
+        is_success = True
+        text = "{}"
 
     class _Client:
         async def __aenter__(self): return self
@@ -151,6 +155,47 @@ def test_provision_substream_prefers_stored_url(monkeypatch):
 
     assert len(posts) == 1
     assert posts[0][1]["source"] == "rtsp://1.2.3.4:554/vendor/lowres"
+
+
+def test_provision_substream_replaces_on_conflict(monkeypatch):
+    # A sub that already exists is refreshed in place via /replace so a
+    # changed substream URL/transport actually takes effect — mirrors the
+    # atomic replace flow of the main path (no delete window).
+    mod = mmadmin
+    MediaMtxAdminService = mmadmin.MediaMtxAdminService
+    posts: list[tuple[str, dict]] = []
+
+    class _ConflictResp:
+        status_code = 400
+        is_success = False
+        text = '{"error": "path already exists"}'
+
+    class _OkResp:
+        status_code = 200
+        is_success = True
+        text = "{}"
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            posts.append((url, json))
+            return _ConflictResp() if "/add/" in url else _OkResp()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(MediaMtxAdminService, "_base", staticmethod(lambda: "http://mtx/v3"))
+    monkeypatch.setattr(MediaMtxAdminService, "_headers", staticmethod(lambda: {}))
+    monkeypatch.setattr(mod.settings, "mediamtx_stream_prefix", "cam-")
+    monkeypatch.setattr(mod.settings, "mediamtx_path_mode", "id", raising=False)
+
+    cfg = {"source_url": "rtsp://1.2.3.4:554/Streaming/Channels/101",
+           "rtsp_transport": "tcp"}
+    asyncio.run(MediaMtxAdminService._provision_substream(1, "1.2.3.4", cfg))
+
+    assert len(posts) == 2
+    assert posts[0][0].endswith("/config/paths/add/cam-1-sub")
+    assert posts[1][0].endswith("/config/paths/replace/cam-1-sub")
+    assert posts[1][1]["source"] == "rtsp://1.2.3.4:554/Streaming/Channels/102"
 
 
 def test_provision_substream_skips_when_not_derivable(monkeypatch):

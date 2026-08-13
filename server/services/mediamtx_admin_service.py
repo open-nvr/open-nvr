@@ -730,28 +730,25 @@ class MediaMtxAdminService:
             camera_id, camera_ip, config, transport_security=transport_security
         )
 
-        # If path already exists, try to unprovision and re-provision
+        # If path already exists, atomically replace its configuration.
+        # NOTE: this used to be unprovision + re-provision, i.e. two config
+        # reloads with a window where the path didn't exist at all — a re-add
+        # that lost the race with MediaMTX's listener reload left the camera
+        # with NO path (no live view, no recording) until manual repair.
         if (
             result.get("status") == "error"
             and result.get("details", {}).get("error") == "path already exists"
         ):
-            # First, unprovision the existing path
-            unprovision_result = await MediaMtxAdminService.unprovision_path(
-                camera_id, camera_ip
+            result = await MediaMtxAdminService.replace_path(
+                camera_id,
+                camera_ip,
+                config,
+                transport_security=transport_security,
             )
-
-            # Then try to provision again
-            if unprovision_result.get("status") == "ok":
-                result = await MediaMtxAdminService.provision_path(
-                    camera_id,
-                    camera_ip,
-                    config,
-                    transport_security=transport_security,
-                )
+            if result.get("status") == "ok":
                 result["action"] = "rtsp_stream_replaced"
             else:
-                result["action"] = "unprovision_failed"
-                result["unprovision_result"] = unprovision_result
+                result["action"] = "replace_failed"
 
         if result.get("status") == "ok":
             if "action" not in result:
@@ -950,6 +947,118 @@ class MediaMtxAdminService:
             }
 
     @staticmethod
+    async def replace_path(
+        camera_id: int,
+        camera_ip: str,
+        config: dict[str, Any],
+        *,
+        transport_security: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace a path's whole configuration.
+
+        POST /config/paths/replace/{name} is a single config transaction in
+        MediaMTX, so unlike unprovision + provision there is no window where
+        the path is absent — a failure leaves the previous configuration
+        running instead of leaving the camera with no path at all. Falls back
+        to a plain add if the path vanished in the meantime (concurrent
+        unprovision).
+        """
+        # Same enforcement gate as provision_path: refuse before any HTTP.
+        if transport_security is not None:
+            from services.transport_probe_service import enforce_transport_policy
+
+            enforce_transport_policy(
+                transport_security,
+                config.get("source_url") if isinstance(config, dict) else None,
+                camera_id=camera_id,
+            )
+
+        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
+
+        if not MediaMtxAdminService.is_configured():
+            return {
+                "status": "no_admin_api",
+                "path": name,
+                "details": {"message": "mediamtx_admin_api not configured; no-op"},
+            }
+
+        url = MediaMtxAdminService._base() + f"/config/paths/replace/{name}"
+        payload = MediaMtxAdminService._map_conf(config)
+
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.post(
+                    url, json=payload, headers=MediaMtxAdminService._headers()
+                )
+            result = MediaMtxAdminService._to_result(name, resp)
+
+            # Path was deleted between the add-conflict and this replace —
+            # add it instead of failing.
+            error_text = str(result.get("details", {}).get("error", "")).lower()
+            if result.get("status") == "error" and "not found" in error_text:
+                return await MediaMtxAdminService.provision_path(
+                    camera_id,
+                    camera_ip,
+                    config,
+                    transport_security=transport_security,
+                )
+
+            if result.get("status") == "ok":
+                mediamtx_logger.log_action(
+                    "mediamtx.replace_path_success",
+                    camera_id=camera_id,
+                    message=f"MediaMTX path replaced in place: {name}",
+                    extra_data={
+                        "path": name,
+                        "http_status": result.get("http_status"),
+                    },
+                )
+                # Keep the agent substream in sync with the (possibly new)
+                # source URL. Best-effort, same contract as provision_path.
+                if settings.agent_live_use_substream:
+                    try:
+                        await MediaMtxAdminService._provision_substream(
+                            camera_id, camera_ip, config
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        mediamtx_logger.warning(
+                            f"substream refresh raised for {name}; main path unaffected",
+                            extra={"camera_id": camera_id, "path": name,
+                                   "action": "mediamtx.substream_provision_error"},
+                        )
+            else:
+                mediamtx_logger.error(
+                    f"MediaMTX path replace failed: {name}",
+                    extra={
+                        "camera_id": camera_id,
+                        "path": name,
+                        "http_status": result.get("http_status"),
+                        "result": result,
+                        "action": "mediamtx.replace_path_failed",
+                    },
+                )
+
+            return result
+
+        except Exception as e:
+            mediamtx_logger.error(
+                f"MediaMTX path replace error: {name}",
+                extra={
+                    "camera_id": camera_id,
+                    "path": name,
+                    "url": url,
+                    "error_type": type(e).__name__,
+                    "action": "mediamtx.replace_path_exception",
+                },
+                exc_info=True,
+            )
+            return {
+                "status": "error",
+                "path": name,
+                "details": {"error": str(e), "error_type": type(e).__name__},
+            }
+
+    @staticmethod
     async def _provision_substream(
         camera_id: int, camera_ip: str, config: dict[str, Any]
     ) -> None:
@@ -990,6 +1099,14 @@ class MediaMtxAdminService:
             resp = await client.post(
                 url, json=payload, headers=MediaMtxAdminService._headers()
             )
+            # Sub already provisioned by an earlier add — refresh it in place
+            # so a changed substream URL/transport actually takes effect.
+            if not resp.is_success and "already exists" in resp.text:
+                resp = await client.post(
+                    MediaMtxAdminService._base() + f"/config/paths/replace/{sub}",
+                    json=payload,
+                    headers=MediaMtxAdminService._headers(),
+                )
         mediamtx_logger.log_action(
             "mediamtx.substream_provisioned",
             camera_id=camera_id,
