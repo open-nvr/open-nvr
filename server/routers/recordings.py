@@ -848,19 +848,33 @@ async def export_clip(
     q = urlencode({"path": path, "start": start, "duration": duration})
     src = f"{settings.mediamtx_playback_url}/get?{q}"  # url-internal-ok: core->mediamtx on the bridge
 
+    # Open the upstream and check its status BEFORE committing to a 200 +
+    # attachment. Otherwise a MediaMTX failure (no footage for the range,
+    # server down) would arrive AFTER the browser already thinks the download
+    # succeeded — a silent 0-byte/truncated .mp4. Probing first lets us return
+    # a real error the UI can show.
+    client = httpx.AsyncClient(timeout=None)
+    stream_cm = client.stream("GET", src)
+    try:
+        upstream = await stream_cm.__aenter__()
+    except httpx.HTTPError as e:
+        await client.aclose()
+        recording_logger.warning("clip export: MediaMTX unreachable for %s: %s", path, e)
+        raise HTTPException(status_code=502, detail="Playback server unreachable")
+    if upstream.status_code != 200:
+        code = upstream.status_code
+        await stream_cm.__aexit__(None, None, None)
+        await client.aclose()
+        recording_logger.warning("clip export: MediaMTX /get returned %s for %s", code, path)
+        raise HTTPException(status_code=404, detail="No recording for this time range")
+
     async def _stream():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", src) as upstream:
-                if upstream.status_code != 200:
-                    # can't raise mid-StreamingResponse; end the stream, the
-                    # client sees a truncated/empty download and the log has why
-                    main_logger.warning(
-                        "clip export: MediaMTX /get returned %s for %s",
-                        upstream.status_code, path,
-                    )
-                    return
-                async for chunk in upstream.aiter_bytes(64 * 1024):
-                    yield chunk
+        try:
+            async for chunk in upstream.aiter_bytes(64 * 1024):
+                yield chunk
+        finally:
+            await stream_cm.__aexit__(None, None, None)
+            await client.aclose()
 
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{path}_{start}")
     return StreamingResponse(

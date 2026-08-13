@@ -126,8 +126,9 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const [liveEdgeMs, setLiveEdgeMs] = useState<number | null>(null)
   // Shown when the user (or auto-advance) reaches the live zone.
   const [livePrompt, setLivePrompt] = useState(false)
-  // MediaMTX browser-reachable playback base + path, for clip export.
-  const [base, setBase] = useState('')
+  // Recording path for the loaded camera/day (used by clip export, which now
+  // goes through the authenticated core proxy — no browser-reachable MediaMTX
+  // URL is needed).
   const [path, setPath] = useState('')
 
   const [dayStart, setDayStart] = useState(0)
@@ -164,7 +165,6 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         if (cancelled) return
         const parsed = parseSegments(res.data?.segments || [])
 
-        setBase((res.data?.playback_base_url || '').replace(/\/$/, ''))
         setPath(res.data?.path || '')
         setSegs(parsed)
         const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
@@ -589,7 +589,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     new Date(ms).toISOString().replace('T', '_').replace(/[:.]/g, '-').slice(0, 19)
 
   const exportClip = async () => {
-    if (!selection || selection.outMs <= selection.inMs || !base || !path) return
+    if (!selection || selection.outMs <= selection.inMs || !path) return
     setExporting(true)
     try {
       const startIso = new Date(selection.inMs).toISOString()

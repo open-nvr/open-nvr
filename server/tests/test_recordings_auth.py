@@ -178,3 +178,72 @@ def test_export_endpoint_is_owner_scoped():
         assert False, "expected 404 for non-owner"
     except HTTPException as e:
         assert e.status_code == 404
+
+
+
+def test_export_fails_loudly_when_mediamtx_has_no_footage():
+    """A non-200 from MediaMTX must surface as an HTTP error BEFORE the
+    StreamingResponse commits a 200 — otherwise the browser saves a silent
+    truncated/empty .mp4 (peer-review catch)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    s, ua, ub, cam_a, cam_b = _db()
+    path_a = rec._build_stream_name(
+        rec.settings.mediamtx_stream_prefix, cam_a.id, cam_a.ip_address
+    )
+
+    class _Upstream:
+        status_code = 404
+
+        async def aiter_bytes(self, n):  # pragma: no cover - not reached
+            if False:
+                yield b""
+
+    class _StreamCM:
+        async def __aenter__(self):
+            return _Upstream()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def stream(self, *a, **k):
+            return _StreamCM()
+
+        async def aclose(self):
+            pass
+
+    import services  # noqa: F401  (ensure package import path)
+    import routers.recordings as _rec
+
+    async def _call():
+        req = SimpleNamespace(headers={"authorization": "Bearer x"})
+        orig_auth = _rec._authenticate_request
+
+        async def _auth(_req, _db):
+            return ua
+
+        _rec._authenticate_request = _auth
+        import httpx as _httpx
+        orig_client = _httpx.AsyncClient
+        _httpx.AsyncClient = _Client
+        try:
+            return await _rec.export_clip(
+                path=path_a, start="2026-08-13T10:00:00Z", duration=5.0,
+                request=req, db=s,
+            )
+        finally:
+            _rec._authenticate_request = orig_auth
+            _httpx.AsyncClient = orig_client
+
+    try:
+        asyncio.run(_call())
+        assert False, "expected an HTTP error, not a 200 stream"
+    except HTTPException as e:
+        assert e.status_code == 404
