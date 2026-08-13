@@ -126,3 +126,55 @@ def test_camera_for_path_only_resolves_owned():
 def test_media_cors_is_not_wildcard():
     h = rec._media_cors_headers()
     assert h.get("Access-Control-Allow-Origin") != "*"
+
+
+# ── clip export is authenticated + owner-scoped (no direct MediaMTX) ─
+
+def test_sanitize_mediamtx_path_rejects_traversal():
+    import pytest
+    from fastapi import HTTPException
+
+    for bad in ["", "../etc", "/abs", "a:b", "a\\b"]:
+        with pytest.raises(HTTPException) as ei:
+            rec._sanitize_mediamtx_path(bad)
+        assert ei.value.status_code == 400
+    rec._sanitize_mediamtx_path("cam-3")  # good: no raise
+
+
+def test_export_endpoint_is_owner_scoped():
+    """export_clip must 404 a path that isn't an owned camera — same gate as
+    the rest of the recordings surface (the frontend no longer touches
+    MediaMTX directly)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    s, ua, ub, cam_a, cam_b = _db()
+    path_b = rec._build_stream_name(
+        rec.settings.mediamtx_stream_prefix, cam_b.id, cam_b.ip_address
+    )
+
+    async def _call(user):
+        req = SimpleNamespace(headers={"authorization": "Bearer x"})
+        # bypass token verification; we're testing the ownership gate
+        orig = rec._authenticate_request
+
+        async def _auth(_req, _db):
+            return user
+
+        rec._authenticate_request = _auth
+        try:
+            return await rec.export_clip(
+                path=path_b, start="2026-08-13T10:00:00Z", duration=5.0,
+                request=req, db=s,
+            )
+        finally:
+            rec._authenticate_request = orig
+
+    # user A cannot export user B's camera → 404
+    try:
+        asyncio.run(_call(ua))
+        assert False, "expected 404 for non-owner"
+    except HTTPException as e:
+        assert e.status_code == 404

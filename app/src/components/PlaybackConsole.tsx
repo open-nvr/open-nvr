@@ -594,10 +594,11 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     try {
       const startIso = new Date(selection.inMs).toISOString()
       const durationSec = Math.max(1, (selection.outMs - selection.inMs) / 1000)
-      const url = `${base}/get?path=${path}&start=${encodeURIComponent(startIso)}&duration=${durationSec}`
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const blob = await res.blob()
+      // #221: export through the authenticated, owner-scoped core endpoint
+      // (it streams from MediaMTX internally) instead of fetching MediaMTX's
+      // /get directly with no credential.
+      const res = await apiService.exportRecordingClip(path, startIso, durationSec)
+      const blob = res.data as Blob
       const href = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = href

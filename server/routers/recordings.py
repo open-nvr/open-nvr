@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
+import re
 import requests as http_client
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -399,6 +400,17 @@ def _camera_for_path(db: Session, path: str, user) -> "object | None":
     return None
 
 
+def _sanitize_mediamtx_path(path: str) -> None:
+    """Reject path-traversal / injection against MediaMTX. Raises 400."""
+    if (
+        not path
+        or ".." in path
+        or path.startswith("/")
+        or any(c in path for c in [":", "\\"])
+    ):
+        raise HTTPException(status_code=400, detail="Invalid path format")
+
+
 def _media_cors_headers() -> dict:
     """ACAO for media responses. The old ``*`` let any origin read recording
     media; scope to the configured app origins (same-origin needs no header,
@@ -673,15 +685,8 @@ async def list_recordings(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Sanitize path to prevent traversal attacks against MediaMTX
-    # Force alphanumeric and dashes/underscores only for camera path
-    if (
-        not path
-        or ".." in path
-        or path.startswith("/")
-        or any(c in path for c in [":", "\\"])
-    ):
-        raise HTTPException(status_code=400, detail="Invalid path format")
+    # Sanitize path to prevent traversal / injection against MediaMTX.
+    _sanitize_mediamtx_path(path)
 
     # Owner-scope: the path must resolve to a camera this user may see (#221) —
     # 404 (not 403) so a path can't confirm another owner's camera exists.
@@ -809,6 +814,63 @@ async def get_playback_url(
 # =============================================================================
 # HLS VOD Playback - Backend-generated manifests with 5s segments
 # =============================================================================
+
+
+@router.get("/playback/export")
+async def export_clip(
+    path: str = Query(..., description="Camera path (e.g., cam-57)"),
+    start: str = Query(..., description="Clip start, ISO 8601"),
+    duration: float = Query(..., gt=0, le=3600, description="Clip length in seconds (<= 1h)"),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Authenticated, owner-scoped clip export (#221).
+
+    The browser used to fetch MediaMTX's /get directly through nginx with NO
+    credential — anyone reaching the proxy could pull any recording. Export now
+    goes through core: authenticate, verify the caller may see this camera, then
+    STREAM the clip from MediaMTX's INTERNAL address (never exposed to the
+    browser) so nothing is buffered whole in server memory.
+    """
+    import httpx
+    from fastapi.responses import StreamingResponse
+    from urllib.parse import urlencode
+
+    user_obj = await _authenticate_request(request, db)
+    if not user_obj:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    _sanitize_mediamtx_path(path)
+    if _camera_for_path(db, path, user_obj) is None:
+        raise HTTPException(status_code=404, detail="No recordings for this path")
+    if not settings.mediamtx_playback_url:
+        raise HTTPException(status_code=503, detail="Playback server not configured")
+
+    q = urlencode({"path": path, "start": start, "duration": duration})
+    src = f"{settings.mediamtx_playback_url}/get?{q}"  # url-internal-ok: core->mediamtx on the bridge
+
+    async def _stream():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", src) as upstream:
+                if upstream.status_code != 200:
+                    # can't raise mid-StreamingResponse; end the stream, the
+                    # client sees a truncated/empty download and the log has why
+                    main_logger.warning(
+                        "clip export: MediaMTX /get returned %s for %s",
+                        upstream.status_code, path,
+                    )
+                    return
+                async for chunk in upstream.aiter_bytes(64 * 1024):
+                    yield chunk
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{path}_{start}")
+    return StreamingResponse(
+        _stream(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}.mp4"',
+            **_media_cors_headers(),
+        },
+    )
 
 
 @router.get("/playback/hls")

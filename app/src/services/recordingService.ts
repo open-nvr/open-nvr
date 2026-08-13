@@ -42,6 +42,13 @@ export const recordingService = {
   getPlaybackUrl: (path: string, start: string, duration: number) => {
     return api.get('/api/v1/recordings/playback/url', { params: { path, start, duration } })
   },
+  // #221: authenticated, owner-scoped clip export. Returns the mp4 as a blob;
+  // the JWT rides the api client, and core streams from MediaMTX internally.
+  exportRecordingClip: (path: string, start: string, duration: number) =>
+    api.get('/api/v1/recordings/playback/export', {
+      params: { path, start, duration },
+      responseType: 'blob',
+    }),
   getTodaySegments: (cameraId: number) => api.get(`/api/v1/recordings/today/${cameraId}`),
   // Raw per-clip segments for a camera on a given day (YYYY-MM-DD). Powers the
   // DVR playback timeline (footage/gap blocks + wall-clock seeking).
