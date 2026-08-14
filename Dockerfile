@@ -126,6 +126,7 @@ RUN find /app -name ".env" -type f -delete 2>/dev/null || true && \
 # Create non-root user for better security (optional but recommended)
 RUN useradd -m -u 1000 opennvr && \
     mkdir -p /app/logs && \
+    mkdir -p /app/keys && \
     mkdir -p /app/AI-adapters/AIAdapters/frames && \
     chown -R opennvr:opennvr /app
 # Note: Do NOT switch to USER opennvr here - entrypoint needs root to fix permissions

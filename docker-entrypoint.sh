@@ -9,6 +9,13 @@ if [ -d "/app/AI-adapters/AIAdapters/frames" ]; then
     chown -R opennvr:opennvr /app/AI-adapters/AIAdapters/frames 2>/dev/null || true
 fi
 
+# The opennvr_jwt_keys volume may be mounted with root ownership on first
+# use — the backend (running as opennvr) must be able to write the
+# MediaMTX signing keypair there.
+if [ -d "/app/keys" ]; then
+    chown -R opennvr:opennvr /app/keys 2>/dev/null || true
+fi
+
 # ──────────────────────────────────────────────────────────────────────
 # ISSUE-29: Surface the first-time setup token banner to docker logs.
 # ──────────────────────────────────────────────────────────────────────
