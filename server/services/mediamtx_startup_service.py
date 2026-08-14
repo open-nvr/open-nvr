@@ -423,8 +423,14 @@ class MediaMtxStartupService:
                 if config.recording_path:
                     recording_path = config.recording_path
                 else:
+                    # %path (NOT a literal cam-<id>): a literal camera dir made
+                    # _normalize_record_path append the missing %path AFTER the
+                    # timestamp, nesting every clip in its own directory with a
+                    # name the timeline parser can't read.
+                    from services.recording_paths import NEW_LAYOUT_RECORD_PATH
+
                     base_path = get_effective_recordings_base_path(db)
-                    recording_path = f"{base_path}/cam-{camera.id}/%Y-%m-%d/%H/%M-%S-%f"
+                    recording_path = f"{base_path}/{NEW_LAYOUT_RECORD_PATH}"
                 provision_config["recording"] = {
                     "enabled": True,
                     "path": recording_path,
