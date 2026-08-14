@@ -90,6 +90,10 @@ services:
         FROM curlimages/curl:8.10.1
         USER root
         WORKDIR /
+        # tzdata is required for TZ=<IANA name> to take effect — without it the
+        # Go runtime silently falls back to UTC and recording directories get
+        # named in UTC while opennvr_core parses them in the configured zone.
+        RUN apk add --no-cache tzdata
         # Clear any inherited CMD so it isn't passed to mediamtx as a config arg.
         CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
