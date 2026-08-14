@@ -21,6 +21,7 @@ import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
+import { useRecordingsByDate } from '../lib/queries'
 import {
   Calendar,
   Play,
@@ -116,42 +117,43 @@ export function PlaybackView() {
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
+  // Latest status for the poll loop (avoids re-subscribing the effect).
+  const statusRef = useRef<CloudUploadStatus | null>(null)
+  useEffect(() => {
+    statusRef.current = cloudUploadStatus
+  }, [cloudUploadStatus])
   const [cloudUploadConfigured, setCloudUploadConfigured] = useState(true)
   const [queueingDayKey, setQueueingDayKey] = useState<string | null>(null)
   const [queuedDayKey, setQueuedDayKey] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  // Load recordings grouped by camera and date
-  const loadData = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      if (token) api.setToken(token)
-
-      const recordingsRes = await apiService.getRecordingsByDate()
-      
-      setCameras(recordingsRes.data?.cameras || [])
-      setTotalRecordings(recordingsRes.data?.total_recordings || 0)
-      setTotalDuration(recordingsRes.data?.total_duration || 0)
-      setMediamtxAvailable(recordingsRes.data?.mediamtx_available !== false)
-      
-      // Auto-expand first camera if only one exists
-      if (recordingsRes.data?.cameras?.length === 1) {
-        setExpandedCameras(new Set([recordingsRes.data.cameras[0].camera_id]))
-      }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load recordings')
-      showError('Failed to load recordings')
-    } finally {
-      setLoading(false)
-    }
-  }, [token, showError])
+  // Load recordings grouped by camera and date — react-query: shared with
+  // SyncPlayback/Dashboard, cached across navigations.
+  const overviewQuery = useRecordingsByDate()
+  const loadData = useCallback(() => overviewQuery.refetch(), [overviewQuery.refetch])
 
   useEffect(() => {
-    if (!authLoading) {
-      loadData()
+    const data = overviewQuery.data
+    if (!data) {
+      if (overviewQuery.error) {
+        setError((overviewQuery.error as any)?.message || 'Failed to load recordings')
+        setLoading(false)
+      } else {
+        setLoading(overviewQuery.isPending)
+      }
+      return
     }
-  }, [authLoading, loadData])
+    setError(null)
+    setCameras((data.cameras as any) || [])
+    setTotalRecordings(data.total_recordings || 0)
+    setTotalDuration((data as any).total_duration || 0)
+    setMediamtxAvailable(data.mediamtx_available !== false)
+    // Auto-expand first camera if only one exists
+    if (data.cameras?.length === 1) {
+      setExpandedCameras(new Set([(data.cameras[0] as any).camera_id]))
+    }
+    setLoading(false)
+  }, [overviewQuery.data, overviewQuery.error, overviewQuery.isPending])
 
   useEffect(() => {
     if (!user?.is_superuser) return
@@ -180,7 +182,11 @@ export function PlaybackView() {
         // Non-blocking UI: keep playback usable even if status polling fails.
       } finally {
         if (!stopped && keepGoing) {
-          timer = setTimeout(poll, 3000)
+          // Fast polling only while an upload is actually moving; a quiet
+          // queue gets a slow heartbeat instead of a request every 3s.
+          const s = statusRef.current
+          const busy = !!s && (s.queue_size > 0 || (s as any).worker_running)
+          timer = setTimeout(poll, busy ? 3000 : 30000)
         }
       }
     }

@@ -316,66 +316,9 @@ class StorageService:
 
         items: list[dict[str, Any]] = []
 
-        def _match_time(p: Path) -> datetime | None:
-            """Extract timestamp from file path pattern.
-
-            Handles two formats:
-            - Old: cam-XX/YYYY/MM/DD/HH-MM-SS-ffffff.mp4
-            - New: cam-XX/YYYY/MM/DD/HH-MM-SS-ffffff/cam-XX.mp4
-            """
-            try:
-                parts = p.parts
-                if len(parts) < 4:
-                    return None
-
-                # Check if this is the new format (file inside timestamp folder)
-                parent_name = parts[-2]
-                filename = parts[-1].split(".")[0]
-
-                # New format: parent folder is timestamp (HH-MM-SS-ffffff)
-                if "-" in parent_name and len(parent_name.split("-")) >= 3:
-                    time_parts = parent_name.split("-")
-                    if len(time_parts) >= 3 and time_parts[0].isdigit():
-                        # New format detected
-                        yyyy = parts[-5]
-                        mm = parts[-4]
-                        dd = parts[-3]
-                        hh, mi, ss = time_parts[0], time_parts[1], time_parts[2]
-                        dt = datetime(
-                            int(yyyy),
-                            int(mm),
-                            int(dd),
-                            int(hh),
-                            int(mi),
-                            int(ss),
-                            tzinfo=UTC,
-                        )
-                        return dt
-
-                # Old format: filename is timestamp (HH-MM-SS-ffffff.mp4)
-                yyyy = parts[-4]
-                mm = parts[-3]
-                dd = parts[-2]
-                hms = filename
-
-                if "-" in hms:
-                    time_parts = hms.split("-")
-                    if len(time_parts) >= 3:
-                        hh, mi, ss = time_parts[0], time_parts[1], time_parts[2]
-                        dt = datetime(
-                            int(yyyy),
-                            int(mm),
-                            int(dd),
-                            int(hh),
-                            int(mi),
-                            int(ss),
-                            tzinfo=UTC,
-                        )
-                        return dt
-
-                return None
-            except Exception:
-                return None
+        # Timestamp parsing is shared with the webhook/reconciler/playback so
+        # every consumer agrees on layouts and timezone conventions.
+        from services.recording_paths import iter_recording_files, parse_recording_time
 
         cam_dirs: list[Path] = []
         if camera_id is not None:
@@ -388,40 +331,38 @@ class StorageService:
                         cam_dirs.append(d)
 
         for cdir in cam_dirs:
-            if not cdir.exists():
-                continue
-            # Walk year/month/day structure
-            for year in sorted([p for p in cdir.glob("*/") if p.is_dir()]):
-                for month in sorted([p for p in year.glob("*/") if p.is_dir()]):
-                    for day in sorted([p for p in month.glob("*/") if p.is_dir()]):
-                        # Find MP4 files - check both direct files and files in timestamp subfolders
-                        all_files = list(day.glob("*.mp4")) + list(day.glob("*/*.mp4"))
-                        for f in sorted(all_files, key=lambda x: str(x)):
-                            ts = _match_time(f)
-                            if start and (not ts or ts < start):
-                                continue
-                            if end and (not ts or ts > end):
-                                continue
-                            try:
-                                st = f.stat()
-                                size = st.st_size
-                                # Skip zero-byte files (failed/in-progress)
-                                if not size:
-                                    continue
-                            except Exception:
-                                size = None
+            # All layouts (legacy year/month/day and new date/hour) via the
+            # shared bounded recursive walk.
+            for f in iter_recording_files(cdir):
+                try:
+                    st = f.stat()
+                    size = st.st_size
+                    # Skip zero-byte files (failed/in-progress)
+                    if not size:
+                        continue
+                    mtime = st.st_mtime
+                except Exception:
+                    size = None
+                    mtime = None
 
-                            rel = os.path.relpath(f, root)
-                            rel_posix = rel.replace("\\", "/")
-                            items.append(
-                                {
-                                    "camera": cdir.name,
-                                    "relpath": rel_posix,
-                                    "size": size,
-                                    "start_time": ts.isoformat() if ts else None,
-                                    "url": f"{settings.api_prefix}/recordings/raw?rel={quote(rel_posix)}",
-                                }
-                            )
+                ts = parse_recording_time(f, mtime=mtime)
+                if start and (not ts or ts < start):
+                    continue
+                if end and (not ts or ts > end):
+                    continue
+
+                rel = os.path.relpath(f, root)
+                rel_posix = rel.replace("\\", "/")
+                # NOTE: no "url" field — the /recordings/raw route
+                # it used to point at never existed (always 404).
+                items.append(
+                    {
+                        "camera": cdir.name,
+                        "relpath": rel_posix,
+                        "size": size,
+                        "start_time": ts.isoformat() if ts else None,
+                    }
+                )
 
         # Sort by time desc
         items.sort(key=lambda x: x.get("start_time") or "", reverse=True)
@@ -440,16 +381,15 @@ class StorageService:
             "segment_seconds": store.segment_seconds,
         }
 
-        # Get disk usage if possible
+        # Get disk usage if possible. shutil.disk_usage works on every
+        # platform; the old os.statvfs branch unpacked a 10-field struct into
+        # 3 names, raised on Linux, and the error was swallowed — so disk
+        # usage was silently never reported there.
         try:
             if root.exists():
-                total, used, free = (
-                    os.statvfs(str(root)) if hasattr(os, "statvfs") else (0, 0, 0)
-                )
-                if total == 0:  # Windows fallback
-                    import shutil
+                import shutil
 
-                    total, used, free = shutil.disk_usage(str(root))
+                total, used, free = shutil.disk_usage(str(root))
                 info.update(
                     {
                         "disk_total": total,

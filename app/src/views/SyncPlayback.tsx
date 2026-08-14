@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Play,
   Pause,
@@ -37,7 +37,9 @@ import {
   Film,
   Video,
 } from 'lucide-react'
-import { apiService } from '../lib/apiService'
+import { warmHls } from '../lib/loadHls'
+import { useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
+import { localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
 import { useSnackbar } from '../components/Snackbar'
 import { RecordingCalendar } from '../components/RecordingCalendar'
 import { MultiCamTimeline, type TimelineRow } from '../components/MultiCamTimeline'
@@ -91,9 +93,8 @@ function parseSegments(raw: RawSegment[]): TimelineSegment[] {
     .sort((a, b) => a.startMs - b.startMs)
 }
 
-/** The recordings API groups days by UTC — the day window must match it. */
-const utcDayStart = (date: string) => Date.parse(`${date}T00:00:00Z`)
-const todayUtcKey = () => new Date().toISOString().slice(0, 10)
+// Day windows are LOCAL days (midnight -> midnight in the browser's zone),
+// matching the API's local-day grouping — see lib/time.ts.
 
 function formatDuration(seconds: number) {
   const hours = Math.floor(seconds / 3600)
@@ -120,11 +121,23 @@ export function SyncPlayback() {
   const { showError } = useSnackbar()
   const stageRef = useRef<HTMLDivElement>(null)
 
+  // Download the hls.js chunk while the overview request is in flight — the
+  // tiles will need it the moment segments land.
+  useEffect(() => {
+    warmHls()
+  }, [])
+
   // ---- Overview: which cameras have recordings on which days ---------------
-  const [overview, setOverview] = useState<OverviewCamera[] | null>(null)
-  const [overviewLoading, setOverviewLoading] = useState(true)
-  const [overviewError, setOverviewError] = useState<string | null>(null)
-  const [mediamtxAvailable, setMediamtxAvailable] = useState(true)
+  // react-query: cached across navigations (Dashboard -> Recordings renders
+  // instantly from cache), deduped across concurrent mounts.
+  const overviewQuery = useRecordingsByDate()
+  const overview = (overviewQuery.data?.cameras as OverviewCamera[] | undefined) ?? null
+  const overviewLoading = overviewQuery.isPending
+  const overviewError = overviewQuery.error
+    ? (overviewQuery.error as any)?.message || 'Failed to load recordings'
+    : null
+  const mediamtxAvailable = overviewQuery.data?.mediamtx_available !== false
+  const loadOverview = overviewQuery.refetch
 
   // ---- Selection -----------------------------------------------------------
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -149,11 +162,6 @@ export function SyncPlayback() {
       return !o
     })
 
-  // ---- Per-camera day segments ---------------------------------------------
-  const [segsByCam, setSegsByCam] = useState<Record<number, TimelineSegment[]>>({})
-  const [liveEdges, setLiveEdges] = useState<Record<number, number | null>>({})
-  const [segsLoading, setSegsLoading] = useState(false)
-
   // ---- Transport (the shared master clock) ---------------------------------
   const [masterMs, setMasterMs] = useState(0)
   const [playing, setPlaying] = useState(false)
@@ -169,33 +177,13 @@ export function SyncPlayback() {
     masterMsRef.current = masterMs
   }, [masterMs])
 
-  const dayStart = selectedDate ? utcDayStart(selectedDate) : 0
-  const dayEnd = dayStart + 24 * 3600_000
+  const dayStart = selectedDate ? localDayStart(selectedDate) : 0
+  const dayEnd = selectedDate ? localDayEnd(selectedDate) : 0
   const dayBoundsRef = useRef({ start: dayStart, end: dayEnd })
   dayBoundsRef.current = { start: dayStart, end: dayEnd }
 
   // Marks masterMs/view as initialized for the current day.
   const dateInitRef = useRef<string | null>(null)
-
-  // ---- Load overview -------------------------------------------------------
-  const loadOverview = useCallback(async () => {
-    setOverviewLoading(true)
-    setOverviewError(null)
-    try {
-      const res: any = await apiService.getRecordingsByDate()
-      const cams: OverviewCamera[] = res.data?.cameras || []
-      setOverview(cams)
-      setMediamtxAvailable(res.data?.mediamtx_available !== false)
-    } catch (e: any) {
-      setOverviewError(e?.message || 'Failed to load recordings')
-    } finally {
-      setOverviewLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    loadOverview()
-  }, [loadOverview])
 
   // Default selection once the overview lands: latest day with footage, and
   // the first few cameras that recorded that day.
@@ -217,45 +205,55 @@ export function SyncPlayback() {
     return s
   }, [overview])
 
-  const recForDate = useCallback(
-    (cam: OverviewCamera, date: string | null) => (date ? cam.recordings.find((r) => r.date === date) : undefined),
-    []
-  )
+  // O(1) lookups instead of scanning every camera's recordings array on
+  // every render (the checklist used to do that 4x/second on clock ticks).
+  const recByCamDate = useMemo(() => {
+    const m = new Map<number, Map<string, DailyRecording>>()
+    for (const c of overview || []) {
+      const dm = new Map<string, DailyRecording>()
+      for (const r of c.recordings) dm.set(r.date, r)
+      m.set(c.camera_id, dm)
+    }
+    return m
+  }, [overview])
 
   // ---- Fetch segments for the selected cameras/day -------------------------
-  useEffect(() => {
-    if (!selectedDate || selectedIds.length === 0) {
-      setSegsByCam({})
-      setLiveEdges({})
-      return
-    }
-    let cancelled = false
-    const fetchAll = async (initial: boolean) => {
-      if (initial) setSegsLoading(true)
-      const results = await Promise.all(
-        selectedIds.map(async (id) => {
-          try {
-            const res: any = await apiService.getSegments(id, selectedDate)
-            const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
-            return { id, segs: parseSegments(res.data?.segments || []), edge: Number.isFinite(edge) ? edge : null }
-          } catch {
-            return { id, segs: [] as TimelineSegment[], edge: null }
-          }
-        })
-      )
-      if (cancelled) return
-      setSegsByCam(Object.fromEntries(results.map((r) => [r.id, r.segs])))
-      setLiveEdges(Object.fromEntries(results.map((r) => [r.id, r.edge])))
-      if (initial) setSegsLoading(false)
-    }
-    fetchAll(true)
-    // Live-follow on today's footage: the red blocks keep growing.
-    const iv = selectedDate === todayUtcKey() ? setInterval(() => fetchAll(false), 15_000) : null
-    return () => {
-      cancelled = true
-      if (iv) clearInterval(iv)
-    }
-  }, [selectedDate, selectedIds])
+  // One react-query per camera+day. Polling (today only) is handled by the
+  // hook; structural sharing keeps unchanged responses referentially stable,
+  // so a poll tick that changes nothing invalidates nothing downstream —
+  // the old hand-rolled loop replaced every array on every tick and re-fired
+  // every tile's follow loop.
+  const segQueries = useSegmentsForCameras(selectedIds, selectedDate, { poll: true })
+
+  // Fixed-length deps (MAX_TILES = 4) keep the hook contract while still
+  // recomputing only when a query's (structurally shared) data changes.
+  const segData0 = segQueries[0]?.data
+  const segData1 = segQueries[1]?.data
+  const segData2 = segQueries[2]?.data
+  const segData3 = segQueries[3]?.data
+
+  const segsByCam = useMemo(() => {
+    const datas = [segData0, segData1, segData2, segData3]
+    const out: Record<number, TimelineSegment[]> = {}
+    selectedIds.forEach((id, i) => {
+      out[id] = parseSegments((datas[i]?.segments as RawSegment[]) || [])
+    })
+    return out
+  }, [selectedIds, segData0, segData1, segData2, segData3])
+
+  const liveEdges = useMemo(() => {
+    const datas = [segData0, segData1, segData2, segData3]
+    const out: Record<number, number | null> = {}
+    selectedIds.forEach((id, i) => {
+      const raw = datas[i]?.live_edge_start
+      const edge = raw ? Date.parse(raw) : NaN
+      out[id] = Number.isFinite(edge) ? edge : null
+    })
+    return out
+  }, [selectedIds, segData0, segData1, segData2, segData3])
+
+  const segsLoading =
+    selectedIds.length > 0 && segQueries.some((q) => q.isPending)
 
   // Union of all selected cameras' footage — used for snapping, gap skipping
   // and picking the day's starting instant.
@@ -345,21 +343,24 @@ export function SyncPlayback() {
     })
   }
 
-  const toggleCamera = (id: number) => {
-    setSelectedIds((prev) => {
-      if (prev.includes(id)) {
-        const next = prev.filter((x) => x !== id)
-        if (activeId === id) setActiveId(next[0] ?? null)
-        return next
-      }
-      if (prev.length >= MAX_TILES) {
-        showError(`Up to ${MAX_TILES} cameras can play together`)
-        return prev
-      }
-      if (activeId == null) setActiveId(id)
-      return [...prev, id]
-    })
-  }
+  const toggleCamera = useCallback(
+    (id: number) => {
+      setSelectedIds((prev) => {
+        if (prev.includes(id)) {
+          const next = prev.filter((x) => x !== id)
+          setActiveId((a) => (a === id ? next[0] ?? null : a))
+          return next
+        }
+        if (prev.length >= MAX_TILES) {
+          showError(`Up to ${MAX_TILES} cameras can play together`)
+          return prev
+        }
+        setActiveId((a) => (a == null ? id : a))
+        return [...prev, id]
+      })
+    },
+    [showError]
+  )
 
   const seekTo = (ms: number) => {
     setMasterMs(clamp(ms, dayStart, dayEnd - 1))
@@ -432,16 +433,10 @@ export function SyncPlayback() {
   const activeCam = selectedCams.find((c) => c.camera_id === activeId)
 
   // ---- Render --------------------------------------------------------------
-  if (overviewLoading) {
-    return (
-      <div className="bg-[var(--panel-2)] border border-[var(--border)] p-8 text-center">
-        <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
-        <p className="text-[var(--text-dim)]">Loading recordings…</p>
-      </div>
-    )
-  }
-
-  if (overviewError || !overview || overview.length === 0) {
+  // While the overview loads, the page frame renders immediately with
+  // skeletons in the data slots (no full-page spinner: first useful paint
+  // must not wait on the slowest API call).
+  if (!overviewLoading && (overviewError || !overview || overview.length === 0)) {
     return (
       <div className="space-y-4">
         <PageTitle />
@@ -451,7 +446,7 @@ export function SyncPlayback() {
           <p className="text-sm text-[var(--text-dim)] mt-1">
             {overviewError ? 'Try refreshing.' : 'Recordings will appear here once cameras start recording.'}
           </p>
-          <button onClick={loadOverview} className="btn-primary btn mt-4">
+          <button onClick={() => loadOverview()} className="btn-primary btn mt-4">
             Refresh
           </button>
         </div>
@@ -499,7 +494,12 @@ export function SyncPlayback() {
             gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
           }}
         >
-          {selectedCams.length === 0 ? (
+          {overviewLoading ? (
+            <div className="border border-[var(--border)] bg-[var(--panel-2)] animate-pulse flex flex-col items-center justify-center gap-2 py-16 text-[var(--text-dim)]">
+              <Loader2 size={22} className="animate-spin text-[var(--accent)]" />
+              <span className="text-sm">Loading recordings…</span>
+            </div>
+          ) : selectedCams.length === 0 ? (
             <div className="border border-dashed border-[var(--border)] flex flex-col items-center justify-center gap-2 py-16 text-[var(--text-dim)]">
               <Video size={28} className="opacity-50" />
               <span className="text-sm">Select cameras from the panel to start playback</span>
@@ -628,36 +628,15 @@ export function SyncPlayback() {
               {selectedIds.length}/{MAX_TILES}
             </span>
           </div>
-          <div className="overflow-y-auto sidebar-scroll max-h-64 lg:max-h-none">
-            {overview.map((cam) => {
-              const rec = recForDate(cam, selectedDate)
-              const checked = selectedIds.includes(cam.camera_id)
-              const disabled = !rec && !checked
-              return (
-                <button
-                  key={cam.camera_id}
-                  onClick={() => !disabled && toggleCamera(cam.camera_id)}
-                  disabled={disabled}
-                  title={rec ? `${formatDuration(rec.total_duration)} recorded` : 'No recordings on this date'}
-                  className={`w-full flex items-center gap-2 px-2.5 py-1 text-[13px] text-left transition-colors ${
-                    disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[var(--panel)]'
-                  } ${cam.camera_id === activeId ? 'text-[var(--accent)]' : ''}`}
-                >
-                  <span
-                    className={`shrink-0 w-4 h-4 border flex items-center justify-center ${
-                      checked ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--text-dim)]'
-                    }`}
-                  >
-                    {checked && <Check size={12} className="text-white" />}
-                  </span>
-                  <span className="truncate flex-1">{cam.camera_name}</span>
-                  <span className="shrink-0 text-[10px] font-mono text-[var(--text-dim)]">
-                    {rec ? formatDuration(rec.total_duration) : '—'}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
+          <CameraChecklist
+            overview={overview}
+            overviewLoading={overviewLoading}
+            recByCamDate={recByCamDate}
+            selectedDate={selectedDate}
+            selectedIds={selectedIds}
+            activeId={activeId}
+            onToggle={toggleCamera}
+          />
         </div>
       </aside>
       )}
@@ -673,6 +652,69 @@ function PageTitle() {
     </h1>
   )
 }
+
+/**
+ * Camera checkbox list. Memoized so master-clock ticks (which re-render the
+ * parent 4x/second) never touch it — its props only change on data load,
+ * date/selection change, or toggle.
+ */
+const CameraChecklist = memo(function CameraChecklist({
+  overview,
+  overviewLoading,
+  recByCamDate,
+  selectedDate,
+  selectedIds,
+  activeId,
+  onToggle,
+}: {
+  overview: OverviewCamera[] | null
+  overviewLoading: boolean
+  recByCamDate: Map<number, Map<string, DailyRecording>>
+  selectedDate: string | null
+  selectedIds: number[]
+  activeId: number | null
+  onToggle: (id: number) => void
+}) {
+  return (
+    <div className="overflow-y-auto sidebar-scroll max-h-64 lg:max-h-none">
+      {overviewLoading &&
+        Array.from({ length: 5 }, (_, i) => (
+          <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 animate-pulse">
+            <span className="w-4 h-4 bg-[var(--panel)]" />
+            <span className="h-3 flex-1 bg-[var(--panel)]" />
+          </div>
+        ))}
+      {(overview || []).map((cam) => {
+        const rec = selectedDate ? recByCamDate.get(cam.camera_id)?.get(selectedDate) : undefined
+        const checked = selectedIds.includes(cam.camera_id)
+        const disabled = !rec && !checked
+        return (
+          <button
+            key={cam.camera_id}
+            onClick={() => !disabled && onToggle(cam.camera_id)}
+            disabled={disabled}
+            title={rec ? `${formatDuration(rec.total_duration)} recorded` : 'No recordings on this date'}
+            className={`w-full flex items-center gap-2 px-2.5 py-1 text-[13px] text-left transition-colors ${
+              disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[var(--panel)]'
+            } ${cam.camera_id === activeId ? 'text-[var(--accent)]' : ''}`}
+          >
+            <span
+              className={`shrink-0 w-4 h-4 border flex items-center justify-center ${
+                checked ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--text-dim)]'
+              }`}
+            >
+              {checked && <Check size={12} className="text-white" />}
+            </span>
+            <span className="truncate flex-1">{cam.camera_name}</span>
+            <span className="shrink-0 text-[10px] font-mono text-[var(--text-dim)]">
+              {rec ? formatDuration(rec.total_duration) : '—'}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+})
 
 function IconBtn({
   title,

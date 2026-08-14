@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TimelineSegment } from './PlaybackTimeline'
 
 export interface TimelineRow {
@@ -73,6 +73,87 @@ function fmtFull(ms: number): string {
     hour12: false,
   })
 }
+
+/**
+ * One camera's track row. Memoized: the parent re-renders at 4Hz for the
+ * playhead, but a row's segment blocks only change on zoom/pan/data change —
+ * with stable props (react-query keeps unchanged segment arrays referentially
+ * identical), the memo skips all of that DOM work on every clock tick.
+ */
+const TrackRow = memo(function TrackRow({
+  row,
+  viewStart,
+  viewEnd,
+  rowH,
+  active,
+  onRowClick,
+}: {
+  row: TimelineRow
+  viewStart: number
+  viewEnd: number
+  rowH: string
+  active: boolean
+  onRowClick?: (id: number) => void
+}) {
+  const span = Math.max(1, viewEnd - viewStart)
+  const toPct = (ms: number) => clamp(((ms - viewStart) / span) * 100, 0, 100)
+
+  const blocks = useMemo(
+    () =>
+      row.segments
+        .filter((s) => s.endMs > viewStart && s.startMs < viewEnd)
+        .map((s) => {
+          const left = toPct(s.startMs)
+          return { left, width: Math.max(0.15, toPct(s.endMs) - left) }
+        }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [row.segments, viewStart, viewEnd]
+  )
+
+  const liveBlocks = useMemo(() => {
+    if (row.liveEdgeMs == null) return []
+    return row.segments
+      .filter((s) => s.endMs > Math.max(viewStart, row.liveEdgeMs!) && s.startMs < viewEnd)
+      .map((s) => {
+        const from = Math.max(s.startMs, row.liveEdgeMs!)
+        const left = toPct(from)
+        return { left, width: Math.max(0.15, toPct(Math.min(s.endMs, viewEnd)) - left) }
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row.segments, row.liveEdgeMs, viewStart, viewEnd])
+
+  return (
+    <div className="flex items-center">
+      <button
+        onClick={() => onRowClick?.(row.id)}
+        title={row.name}
+        className={`w-16 sm:w-28 shrink-0 pr-2 text-right text-[10px] truncate leading-none ${
+          active
+            ? 'text-[var(--accent)] font-semibold'
+            : 'text-[var(--text-dim)] hover:text-[var(--text)]'
+        }`}
+      >
+        {row.name}
+      </button>
+      <div className={`flex-1 relative ${rowH} bg-neutral-800 overflow-hidden`}>
+        {blocks.map((b, i) => (
+          <div
+            key={i}
+            className="absolute top-0 bottom-0"
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#dc2626' }}
+          />
+        ))}
+        {liveBlocks.map((b, i) => (
+          <div
+            key={`live-${i}`}
+            className="absolute top-0 bottom-0"
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#16a34a' }}
+          />
+        ))}
+      </div>
+    </div>
+  )
+})
 
 /**
  * CP-Plus-style multi-camera timeline: one shared time axis, one track row per
@@ -213,49 +294,15 @@ export function MultiCamTimeline({
       <div className="relative">
         <div className="space-y-0.5">
           {rows.map((row) => (
-            <div key={row.id} className="flex items-center">
-              <button
-                onClick={() => onRowClick?.(row.id)}
-                title={row.name}
-                className={`w-16 sm:w-28 shrink-0 pr-2 text-right text-[10px] truncate leading-none ${
-                  row.id === activeId
-                    ? 'text-[var(--accent)] font-semibold'
-                    : 'text-[var(--text-dim)] hover:text-[var(--text)]'
-                }`}
-              >
-                {row.name}
-              </button>
-              <div className={`flex-1 relative ${rowH} bg-neutral-800 overflow-hidden`}>
-                {row.segments
-                  .filter((s) => s.endMs > viewStart && s.startMs < viewEnd)
-                  .map((s, i) => {
-                    const left = toPct(s.startMs)
-                    const width = Math.max(0.15, toPct(s.endMs) - left)
-                    return (
-                      <div
-                        key={i}
-                        className="absolute top-0 bottom-0"
-                        style={{ left: `${left}%`, width: `${width}%`, background: '#dc2626' }}
-                      />
-                    )
-                  })}
-                {row.liveEdgeMs != null &&
-                  row.segments
-                    .filter((s) => s.endMs > Math.max(viewStart, row.liveEdgeMs!) && s.startMs < viewEnd)
-                    .map((s, i) => {
-                      const from = Math.max(s.startMs, row.liveEdgeMs!)
-                      const left = toPct(from)
-                      const width = Math.max(0.15, toPct(Math.min(s.endMs, viewEnd)) - left)
-                      return (
-                        <div
-                          key={`live-${i}`}
-                          className="absolute top-0 bottom-0"
-                          style={{ left: `${left}%`, width: `${width}%`, background: '#16a34a' }}
-                        />
-                      )
-                    })}
-              </div>
-            </div>
+            <TrackRow
+              key={row.id}
+              row={row}
+              viewStart={viewStart}
+              viewEnd={viewEnd}
+              rowH={rowH}
+              active={row.id === activeId}
+              onRowClick={onRowClick}
+            />
           ))}
 
           {/* Tick marks row */}

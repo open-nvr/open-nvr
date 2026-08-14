@@ -179,9 +179,25 @@ class Settings(BaseSettings):
 
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
-    # RECORDING_SEGMENT_SECONDS. Default 3600 (1h) to match the MediaMTX
-    # pathDefaults `recordSegmentDuration: 1h` — keep them in sync.
-    recording_segment_seconds: int = 3600
+    # RECORDING_SEGMENT_SECONDS. Default 60 (1-minute clips) to match the
+    # MediaMTX pathDefaults `recordSegmentDuration: 60s` — keep them in sync.
+    # Short clips give minute-granular retention, cheap per-file indexing,
+    # and a precise timeline; playback sessions span many clips (Phase 4).
+    recording_segment_seconds: int = 60
+
+    # IANA timezone name (e.g. "Asia/Kolkata") governing how NEW-LAYOUT
+    # recording paths (cam-N/YYYY-MM-DD/HH/MM-SS-ffffff.mp4) are interpreted.
+    # None = the process's local timezone (the TZ env var, which docker-compose
+    # also passes to MediaMTX so both sides name/parse identically). Legacy
+    # layouts (cam-N/YYYY/MM/DD/...) are always parsed as UTC — they were
+    # written while the containers ran UTC.
+    recording_timezone: str | None = None
+
+    # Serve recording listings/timelines from the recordings DB index (fast,
+    # SQL-backed) instead of per-request MediaMTX /list fan-outs. The MediaMTX
+    # path remains as automatic fallback for cameras with no indexed rows, and
+    # this flag is the instant rollback switch for the cutover.
+    use_db_recordings_index: bool = True
 
     # MediaMTX service URLs (internal - for backend to MediaMTX communication)
     mediamtx_hls_url: str | None = "http://localhost:8888"  # HLS streaming endpoint

@@ -55,7 +55,7 @@ class MediaMtxStartupService:
 
             # Build path defaults payload with recording path
             # Use %path to include stream name in path
-            record_path = f"{base_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+            record_path = f"{base_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
 
             payload = {
                 "recordPath": record_path,
@@ -424,7 +424,7 @@ class MediaMtxStartupService:
                     recording_path = config.recording_path
                 else:
                     base_path = get_effective_recordings_base_path(db)
-                    recording_path = f"{base_path}/cam-{camera.id}/%Y/%m/%d/%H-%M-%S-%f"
+                    recording_path = f"{base_path}/cam-{camera.id}/%Y-%m-%d/%H/%M-%S-%f"
                 provision_config["recording"] = {
                     "enabled": True,
                     "path": recording_path,

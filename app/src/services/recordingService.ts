@@ -17,6 +17,7 @@
  */
 
 import { api } from '../lib/api'
+import { browserTz, localDayEnd, localDayStart } from '../lib/time'
 
 export const recordingService = {
   // Playback
@@ -24,7 +25,8 @@ export const recordingService = {
   // bearer token in the Authorization header. We deliberately do NOT pass the
   // JWT as a ?token= query param (it would leak into access logs/history).
   getRecordingsByDate: (cameraId?: number) => {
-    const params: Record<string, any> = {}
+    // tz: day buckets are the BROWSER'S local days (midnight -> midnight).
+    const params: Record<string, any> = { tz: browserTz() }
     if (cameraId) params.camera_id = cameraId
     return api.get('/api/v1/recordings/list', { params })
   },
@@ -42,11 +44,19 @@ export const recordingService = {
   getPlaybackUrl: (path: string, start: string, duration: number) => {
     return api.get('/api/v1/recordings/playback/url', { params: { path, start, duration } })
   },
-  getTodaySegments: (cameraId: number) => api.get(`/api/v1/recordings/today/${cameraId}`),
-  // Raw per-clip segments for a camera on a given day (YYYY-MM-DD). Powers the
-  // DVR playback timeline (footage/gap blocks + wall-clock seeking).
-  getSegments: (cameraId: number, date?: string) =>
-    api.get(`/api/v1/recordings/segments/${cameraId}`, { params: date ? { date } : {} }),
+  // Continuous recording segments for a camera on a given LOCAL day
+  // (YYYY-MM-DD). Powers the DVR playback timeline (footage/gap blocks +
+  // wall-clock seeking). The browser computes local midnight -> next local
+  // midnight explicitly so the server never has to guess the day boundary.
+  getSegments: (cameraId: number, date?: string) => {
+    const params: Record<string, any> = { tz: browserTz() }
+    if (date) {
+      params.date = date
+      params.start = new Date(localDayStart(date)).toISOString()
+      params.end = new Date(localDayEnd(date)).toISOString()
+    }
+    return api.get(`/api/v1/recordings/segments/${cameraId}`, { params })
+  },
 
   // HLS VOD
   createHlsPlaybackSession: (params: { camera_id: number; start: string; end: string }) => {
@@ -55,6 +65,16 @@ export const recordingService = {
   deleteHlsPlaybackSession: (sessionId: string) => {
     return api.delete(`/api/v1/recordings/playback/hls/${sessionId}`)
   },
+
+  // Clip export: mint a short-lived single-use ticket (authenticated), then
+  // navigate an <a> at the returned download_url — the backend streams the
+  // clip to disk, so nothing is buffered in browser memory.
+  createClipExportTicket: (params: {
+    camera_id: number
+    start: string
+    duration: number
+    filename?: string
+  }) => api.post('/api/v1/recordings/export/ticket', undefined, { params }),
 
   // Cloud upload
   queueCloudUploadForDay: (cameraId: number, date: string) => {

@@ -82,10 +82,10 @@ class MediaMtxConfigService:
 
         return {
             "record": True,
-            "recordPath": f"{base_path}/{stream_name}/%Y/%m/%d/%H/%M/%S",
+            "recordPath": f"{base_path}/{stream_name}/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",  # or "ts" for transport stream
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",  # Keep recordings for 30 days
+            "recordDeleteAfter": "0s",  # backend owns retention
         }
 
     @staticmethod
@@ -102,10 +102,10 @@ class MediaMtxConfigService:
             "api": True,
             "apiAddress": f":{settings.mediamtx_api_port}",
             # Recording settings
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/%path/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",  # 30 days
+            "recordDeleteAfter": "0s",  # backend owns retention
             # Performance settings
             "readTimeout": "10s",
             "writeTimeout": "10s",
@@ -145,10 +145,10 @@ class MediaMtxConfigService:
             "rtspTransport": "tcp",
             # Recording settings (disabled by default, enabled per camera)
             "record": False,
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/%path/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",
+            "recordDeleteAfter": "0s",
             # Webhook settings
             **{k: v for k, v in webhook_config.items() if v is not None},
             # Playback settings
@@ -406,10 +406,10 @@ pathDefaults:
   
   # Recording settings (disabled by default, enabled per camera)
   record: no
-  recordPath: {base_path}/%path/%Y/%m/%d/%H-%M-%S-%f
+  recordPath: {base_path}/%path/%Y-%m-%d/%H/%M-%S-%f
   recordFormat: fmp4
   recordSegmentDuration: {settings.recording_segment_seconds}s
-  recordDeleteAfter: 168h  # 7 days
+  recordDeleteAfter: 0s  # backend owns retention
   
   # Webhook integration for recording events
   runOnRecordSegmentCreate: curl -X GET "{webhook_base}/hooks/segment-create?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&t={webhook_token}"

@@ -25,7 +25,8 @@ import {
   useCallback,
 } from 'react'
 import { apiService } from '../../lib/apiService'
-import Hls from 'hls.js'
+import type Hls from 'hls.js'
+import { loadHls } from '../../lib/loadHls'
 import { VideoControls } from './VideoControls'
 import { AlertCircle } from 'lucide-react'
 
@@ -310,7 +311,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     }, [whepUrl, mediamtxToken, onError])
 
     // Setup HLS
-    const setupHLS = useCallback(() => {
+    const setupHLS = useCallback(async () => {
       if (!hlsUrl || !videoRef.current) return
       setIsLoading(true)
       setError(null)
@@ -321,7 +322,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
       // Build HLS URL with JWT token as query parameter (MediaMTX requirement)
       // MediaMTX accepts JWT tokens via ?jwt=<token> query param
-      const hlsUrlWithToken = mediamtxToken 
+      const hlsUrlWithToken = mediamtxToken
         ? `${hlsUrl}${hlsUrl.includes('?') ? '&' : '?'}jwt=${mediamtxToken}`
         : hlsUrl
 
@@ -333,8 +334,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return
       }
 
-      // HLS.js
-      if (Hls.isSupported()) {
+      // HLS.js (lazy-loaded chunk)
+      const Hls = await loadHls().catch(() => null)
+      if (!videoRef.current) return // unmounted while the chunk loaded
+      if (Hls?.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -461,7 +464,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     }, [mp4Url, isMuted, autoPlay])
 
     // Setup HLS VOD playback (for recordings via backend-generated manifest)
-    const setupHLSPlayback = useCallback(() => {
+    const setupHLSPlayback = useCallback(async () => {
       if (!hlsPlaybackUrl || !videoRef.current) return
       setIsLoading(true)
       setError(null)
@@ -476,7 +479,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       // that reports canPlayType('...mpegurl') as playable) over-fetch byte-range
       // VOD with open-ended ranges, redundantly streaming toward EOF. So only
       // fall back to native HLS when hls.js isn't available (iOS Safari).
-      if (Hls.isSupported()) {
+      const Hls = await loadHls().catch(() => null)
+      if (!videoRef.current) return // unmounted while the chunk loaded
+      if (Hls?.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,

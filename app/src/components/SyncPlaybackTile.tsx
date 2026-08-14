@@ -17,9 +17,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import Hls from 'hls.js'
+import type Hls from 'hls.js'
 import { CameraOff, Loader2, Radio, AlertCircle, Volume2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { loadHls } from '../lib/loadHls'
 import type { TimelineSegment } from './PlaybackTimeline'
 
 interface SyncPlaybackTileProps {
@@ -65,6 +66,8 @@ export function SyncPlaybackTile({
 }: SyncPlaybackTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
+  // The lazily-loaded hls.js module (see lib/loadHls); null until resolved.
+  const hlsLibRef = useRef<typeof Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   // Only the latest load token wins; superseded async loads no-op.
   const loadTokenRef = useRef(0)
@@ -137,11 +140,17 @@ export function SyncPlaybackTile({
       let browserMp4Url: string | null = null
       let fileOffsetSec = 0
       try {
-        const res: any = await apiService.createHlsPlaybackSession({
-          camera_id: cameraId,
-          start: new Date(anchorMs).toISOString(),
-          end: new Date(seg.endMs).toISOString(),
-        })
+        // Kick the hls.js chunk download in parallel with the session create;
+        // both are needed before playback can start.
+        const [res, HlsLib] = (await Promise.all([
+          apiService.createHlsPlaybackSession({
+            camera_id: cameraId,
+            start: new Date(anchorMs).toISOString(),
+            end: new Date(seg.endMs).toISOString(),
+          }),
+          loadHls().catch(() => null),
+        ])) as [any, typeof Hls | null]
+        hlsLibRef.current = HlsLib
         if (token !== loadTokenRef.current) return
         manifestUrl = res.data?.manifest_url
         sessionIdRef.current = res.data?.session_id || null
@@ -199,8 +208,9 @@ export function SyncPlaybackTile({
           },
           { once: true }
         )
-      } else if (Hls.isSupported()) {
-        const hls = new Hls({
+      } else if (hlsLibRef.current?.isSupported()) {
+        const HlsLib = hlsLibRef.current
+        const hls = new HlsLib({
           enableWorker: true,
           lowLatencyMode: false,
           backBufferLength: 10,
@@ -210,7 +220,7 @@ export function SyncPlaybackTile({
         hlsRef.current = hls
         hls.loadSource(manifestUrl)
         hls.attachMedia(el)
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        hls.on(HlsLib.Events.MANIFEST_PARSED, () => {
           if (token !== loadTokenRef.current) return
           windowRef.current = { startMs: anchorMs, endMs: seg.endMs }
           onReady()
@@ -219,17 +229,17 @@ export function SyncPlaybackTile({
         // covers the physical file containing its anchor, which can be shorter
         // than the listed (merged) segment. Crossing that boundary then simply
         // triggers the next anchored session.
-        hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => {
+        hls.on(HlsLib.Events.LEVEL_LOADED, (_evt, data) => {
           if (token !== loadTokenRef.current) return
           const dur = data?.details?.totalduration
           if (dur && windowRef.current) {
             windowRef.current = { startMs: anchorMs, endMs: anchorMs + dur * 1000 }
           }
         })
-        hls.on(Hls.Events.ERROR, (_evt, data) => {
+        hls.on(HlsLib.Events.ERROR, (_evt, data) => {
           if (!data.fatal) return
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
-          else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad()
+          if (data.type === HlsLib.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
+          else if (data.type === HlsLib.ErrorTypes.NETWORK_ERROR) hls.startLoad()
         })
       } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
         el.src = manifestUrl

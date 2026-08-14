@@ -270,12 +270,14 @@ pathDefaults:
   #
   # Recording enabled but only accessible via backend
 
+  # One-minute clips in local-time-named hour directories; keep in sync with
+  # the backend's RECORDING_SEGMENT_SECONDS (see mediamtx.yml for rationale).
   record: yes
   recordPath:
   recordFormat: fmp4
   recordPartDuration: 1s
   recordMaxPartSize: 50M
-  recordSegmentDuration: 1h
+  recordSegmentDuration: 60s
   recordDeleteAfter: 0s
 
   ###############################################

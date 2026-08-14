@@ -293,11 +293,11 @@ async def enable_recording(
     # Create recording configuration payload
     recording_config = {
         "record": True,
-        "recordPath": f"{base_path}/cam-{camera_id}/%Y/%m/%d/%H-%M-%S-%f",
+        "recordPath": f"{base_path}/cam-{camera_id}/%Y-%m-%d/%H/%M-%S-%f",
         "recordFormat": "mp4",
         "recordPartDuration": part_duration,
         "recordSegmentDuration": duration,
-        "recordDeleteAfter": "168h",  # 7 days default
+        "recordDeleteAfter": "0s",  # backend owns retention (retention_service)
     }
 
     return await MediaMtxAdminService.patch_path(

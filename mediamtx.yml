@@ -282,12 +282,19 @@ pathDefaults:
   #
   # Recording enabled but only accessible via backend
 
+  # Layout: cam-<id>/YYYY-MM-DD/HH/MM-SS-ffffff.mp4 — LOCAL-time-named
+  # (MediaMTX expands the pattern in the process TZ; docker-compose passes
+  # the same TZ to the backend so both sides parse identically), one-minute
+  # clips grouped in hour directories. 1-minute segments give minute-granular
+  # retention and a precise timeline; playback stitches them into seamless
+  # sessions server-side. Keep recordSegmentDuration in sync with the
+  # backend's RECORDING_SEGMENT_SECONDS.
   record: yes
   recordPath:
   recordFormat: fmp4
   recordPartDuration: 1s
   recordMaxPartSize: 50M
-  recordSegmentDuration: 1h
+  recordSegmentDuration: 60s
   recordDeleteAfter: 0s
 
   ###############################################

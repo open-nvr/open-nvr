@@ -25,7 +25,9 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      injectRegister: 'auto',
+      // Registered manually after window 'load' (see main.tsx) instead of a
+      // parser-blocking <script src="/registerSW.js"> injected into <head>.
+      injectRegister: null,
       includeAssets: ['opennvr-icon.svg','opennvr-logo.svg'],
       manifest: {
         name: 'OpenNVR',
@@ -44,10 +46,24 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-        // Increase default 2MiB limit to allow larger assets
+        // Precache ONLY the app shell (index.html + icons). The old
+        // '**/*.{js,css,...}' pattern precached every route chunk (~2MB)
+        // on first load, competing for bandwidth with the requests the
+        // current page was actually waiting on. Hashed /assets/* files are
+        // immutable, so they runtime-cache on first use instead.
+        globPatterns: ['index.html', '*.{ico,svg}', 'pwa-*.png', 'maskable-icon-*.png'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         navigateFallback: '/index.html',
+        runtimeCaching: [
+          {
+            urlPattern: /\/assets\/.*\.(?:js|css|woff2?)$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'assets-v1',
+              expiration: { maxEntries: 200, maxAgeSeconds: 30 * 24 * 3600 },
+            },
+          },
+        ],
       },
       devOptions: {
         enabled: true,

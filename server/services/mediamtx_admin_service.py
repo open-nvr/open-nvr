@@ -246,10 +246,12 @@ class MediaMtxAdminService:
         """
         val = (path_value or "").strip()
         if not val:
-            # Get user-configured or default recording path
+            # Get user-configured or default recording path. Layout:
+            # cam-<id>/YYYY-MM-DD/HH/MM-SS-ffffff.mp4, local-time-named
+            # (see services.recording_paths).
             host_path = get_effective_recordings_base_path()
             container_path = get_mediamtx_recording_path(host_path)
-            return f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+            return f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
         # ensure %path
         if "%path" not in val:
             if not val.endswith("/"):
@@ -264,10 +266,10 @@ class MediaMtxAdminService:
             if "%f" not in val:
                 val += "-%f"
             return val
-        # append time suffix with %f
+        # append time suffix with %f (current date/hour layout)
         if not val.endswith("/"):
             val += "/"
-        val += "%Y/%m/%d/%H-%M-%S-%f"
+        val += "%Y-%m-%d/%H/%M-%S-%f"
         return val
 
     @staticmethod
@@ -715,7 +717,7 @@ class MediaMtxAdminService:
                 # Get user-configured recording path and convert to container path
                 host_path = get_effective_recordings_base_path()
                 container_path = get_mediamtx_recording_path(host_path)
-                final_recording_path = f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+                final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
 
             config["recording"] = {
                 "enabled": True,
@@ -1225,11 +1227,11 @@ class MediaMtxAdminService:
             # Create recording configuration payload
             recording_config = {
                 "record": True,
-                "recordPath": f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f",
+                "recordPath": f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f",
                 "recordFormat": "fmp4",
                 "recordPartDuration": part_duration,
                 "recordSegmentDuration": duration,
-                "recordDeleteAfter": "168h",  # 7 days default
+                "recordDeleteAfter": "0s",  # backend owns retention (retention_service)
             }
 
             return await MediaMtxAdminService.patch_path(

@@ -447,9 +447,21 @@ class CameraEvent(Base):
 
 
 class Recording(Base):
-    """Recording model for storing video recording metadata."""
+    """One recorded segment file — the indexed source of truth for listings.
+
+    Fed by the MediaMTX segment-complete webhook and converged with the
+    filesystem by the recording reconciler. ``start_time``/``end_time`` are
+    tz-aware UTC derived from the segment filename (never wall-clock at
+    webhook receipt). ``(camera_id, file_path)`` is unique so webhook retries
+    and reconciler overlap upsert instead of duplicating.
+    """
 
     __tablename__ = "recordings"
+    __table_args__ = (
+        Index("ix_recordings_camera_start", "camera_id", "start_time"),
+        Index("uq_recordings_camera_file", "camera_id", "file_path", unique=True),
+        Index("ix_recordings_start_time", "start_time"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String(255), nullable=False)
@@ -461,9 +473,16 @@ class Recording(Base):
     end_time = Column(DateTime(timezone=True), nullable=True)
     is_processed = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Video codec tag recorded at segment-complete (e.g. 'h264', 'hevc') so
+    # playback can pick the H.265 remux path without probing the file.
+    codec = Column(String(20), nullable=True)
+    # Flagged recordings survive retention (protect_flagged).
+    is_flagged = Column(Boolean, nullable=False, default=False, server_default="false")
+    # How the row entered the index: 'webhook' | 'reconciler'.
+    source = Column(String(10), nullable=True)
 
     camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
-    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     camera = relationship("Camera", back_populates="recordings")
     created_by = relationship("User", back_populates="recordings")

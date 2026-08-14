@@ -20,8 +20,9 @@
 // these instead of calling apiService in a useEffect, so concurrent mounts
 // share one request and one cache entry.
 
-import { QueryClient, useQuery } from '@tanstack/react-query'
+import { QueryClient, useQueries, useQuery } from '@tanstack/react-query'
 import { apiService } from './apiService'
+import { todayLocalKey } from './time'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -59,10 +60,70 @@ export function useRecordingsByDate() {
     queryFn: async () => {
       const { data } = await apiService.getRecordingsByDate()
       return data as {
-        cameras?: { camera_name?: string; recordings?: { date: string; total_duration?: number }[] }[]
+        cameras?: {
+          camera_id?: number
+          camera_name?: string
+          recordings?: { date: string; total_duration?: number }[]
+        }[]
         total_recordings?: number
+        mediamtx_available?: boolean
       }
     },
+  })
+}
+
+export type SegmentsResponse = {
+  segments?: { start: string; duration: number; playback_url?: string }[]
+  live_edge_start?: string | null
+  camera_id?: number
+}
+
+/**
+ * Per-camera timeline segments for one LOCAL day.
+ *
+ * The RAW response is what's cached: react-query's structural sharing keeps
+ * it referentially stable when the server returns identical data, so a poll
+ * tick that changes nothing re-renders nothing (this is what killed the old
+ * "fresh objects every 15s invalidate the world" cascade). Parse to
+ * timeline shapes with useMemo on the consumer side.
+ */
+export function useCameraSegments(
+  cameraId: number,
+  date: string | null,
+  opts: { poll?: boolean; pollMs?: number } = {}
+) {
+  const polling = !!opts.poll && date === todayLocalKey()
+  return useQuery({
+    queryKey: ['segments', cameraId, date],
+    enabled: cameraId > 0 && !!date,
+    queryFn: async () => {
+      const { data } = await apiService.getSegments(cameraId, date || undefined)
+      return data as SegmentsResponse
+    },
+    // Only today's timeline grows; historical days never change.
+    refetchInterval: polling ? opts.pollMs ?? 15_000 : false,
+    staleTime: polling ? 5_000 : 60_000,
+  })
+}
+
+/** Multi-camera variant for the sync playback grid (one query per camera). */
+export function useSegmentsForCameras(
+  cameraIds: number[],
+  date: string | null,
+  opts: { poll?: boolean; pollMs?: number } = {}
+) {
+  const polling = !!opts.poll && date === todayLocalKey()
+  return useQueries({
+    queries: cameraIds.map((id) => ({
+      queryKey: ['segments', id, date],
+      enabled: id > 0 && !!date,
+      queryFn: async () => {
+        const { data } = await apiService.getSegments(id, date || undefined)
+        return data as SegmentsResponse
+      },
+      refetchInterval: polling ? opts.pollMs ?? 15_000 : (false as const),
+      staleTime: polling ? 5_000 : 60_000,
+    })),
   })
 }
 

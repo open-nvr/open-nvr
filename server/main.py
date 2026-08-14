@@ -356,7 +356,11 @@ async def lifespan(app: FastAPI):
             while True:
                 try:
                     main_logger.info("Running scheduled retention cleanup...")
-                    stats = retention_service.cleanup_old_recordings()
+                    # Worker thread: the sweep does file I/O and batched DB
+                    # deletes — it must never block the event loop.
+                    stats = await asyncio.to_thread(
+                        retention_service.cleanup_old_recordings
+                    )
                     main_logger.info(f"Retention cleanup completed: {stats}")
                 except Exception as e:
                     main_logger.error(f"Retention cleanup failed: {e}", exc_info=True)
@@ -367,6 +371,65 @@ async def lifespan(app: FastAPI):
             main_logger.error(f"Retention cleanup scheduler failed: {e}", exc_info=True)
 
     asyncio.create_task(background_retention_cleanup())
+
+    # Disk-pressure loop: a near-full disk cannot wait for the daily sweep —
+    # MediaMTX simply fails to write once space runs out. Every 5 minutes:
+    # one cheap disk_usage check, and only when below min_free_space_gb an
+    # oldest-first batched purge (with hysteresis) in a worker thread.
+    async def background_disk_pressure():
+        try:
+            from services.retention_service import retention_service
+
+            await asyncio.sleep(120)
+            while True:
+                try:
+                    stats = await asyncio.to_thread(
+                        retention_service.check_disk_pressure
+                    )
+                    if stats:
+                        main_logger.warning(f"Disk-pressure purge: {stats}")
+                except Exception as e:
+                    main_logger.error(f"Disk pressure check failed: {e}", exc_info=True)
+                await asyncio.sleep(5 * 60)
+        except Exception as e:
+            main_logger.error(f"Disk pressure scheduler failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_disk_pressure())
+
+    # Recording-health watchdog: surfaces "camera silently stopped recording"
+    # as a camera event within minutes instead of being discovered days later.
+    async def background_recording_watchdog():
+        try:
+            from services.recording_watchdog import (
+                CHECK_INTERVAL_SECONDS,
+                check_recording_health,
+            )
+
+            await asyncio.sleep(180)  # let cameras provision + first segments land
+            while True:
+                try:
+                    await asyncio.to_thread(check_recording_health)
+                except Exception as e:
+                    main_logger.error(f"Recording watchdog failed: {e}", exc_info=True)
+                await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        except Exception as e:
+            main_logger.error(f"Recording watchdog scheduler failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_recording_watchdog())
+
+    # Recordings-index reconciler: startup backfill of the recordings table
+    # from the on-disk archive, then a periodic recent-window convergence
+    # pass. Keeps the DB (the listing/timeline source of truth) honest even
+    # across backend downtime and manual file deletion.
+    async def background_recording_reconciler():
+        try:
+            from services.recording_reconciler import run_reconciler_loop
+
+            await run_reconciler_loop()
+        except Exception as e:
+            main_logger.error(f"Recording reconciler failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_recording_reconciler())
 
     # FFmpeg-based RTSP proxy/recorder startup removed
 
@@ -393,6 +456,14 @@ async def lifespan(app: FastAPI):
         main_logger.info("All camera event subscriptions stopped")
     except Exception as e:
         main_logger.error(f"Error stopping camera event subscriptions: {e}")
+
+    # Close the shared MediaMTX async HTTP client
+    try:
+        from services import mediamtx_client
+
+        await mediamtx_client.aclose()
+    except Exception as e:
+        main_logger.error(f"Error closing MediaMTX client: {e}")
 
     # FFmpeg-based RTSP proxy/recorder cleanup removed
 
@@ -434,6 +505,14 @@ app.add_middleware(
     ],  # Explicit headers
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
+
+# Compress text responses (JSON, HTML, JS/CSS when served by uvicorn directly).
+# Selective: media-plane paths (HLS byte-ranges, clip export) pass through
+# untouched — video is already compressed and gzipping it wastes CPU on the
+# hottest request path.
+from middleware.compression import SelectiveGZipMiddleware
+
+app.add_middleware(SelectiveGZipMiddleware, minimum_size=1024)
 
 # Device firewall — refuse API access from unapproved client IPs. Added before
 # request logging so RequestLogging (added last = outermost) still records
@@ -572,11 +651,23 @@ FRONTEND_DIST = os.path.join(BASE_DIR, "app", "dist")
 if os.path.exists(FRONTEND_DIST):
     main_logger.info(f"Serving frontend from {FRONTEND_DIST}")
 
-    # Mount /assets explicitly (Vite default output folder)
+    # Mount /assets explicitly (Vite default output folder). Vite emits
+    # content-hashed filenames, so these are immutable: tell the browser to
+    # cache them for a year and never revalidate. A new deploy changes the
+    # hash, which changes the URL, so stale caches can't survive an update.
+    class ImmutableStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope):
+            response = await super().get_response(path, scope)
+            if response.status_code == 200:
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            return response
+
     if os.path.exists(os.path.join(FRONTEND_DIST, "assets")):
         app.mount(
             "/assets",
-            StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")),
+            ImmutableStaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")),
             name="assets",
         )
 
@@ -604,8 +695,14 @@ if os.path.exists(FRONTEND_DIST):
 
         # 3. If no file found (or the path escaped the build dir), and it's not
         #    an API route, assume it's a client-side route
-        #    (e.g. /dashboard, /login) -> Serve index.html
-        return FileResponse(os.path.join(dist_root, "index.html"))
+        #    (e.g. /dashboard, /login) -> Serve index.html.
+        #    no-cache (revalidate, not "never store") so a new deploy's
+        #    index.html — and with it the new hashed asset URLs — is picked
+        #    up immediately.
+        return FileResponse(
+            os.path.join(dist_root, "index.html"),
+            headers={"Cache-Control": "no-cache"},
+        )
 
 else:
     main_logger.warning(
