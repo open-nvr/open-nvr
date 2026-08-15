@@ -917,17 +917,35 @@ async def export_clip(
     client = mediamtx_client.get_client()
     httpx_timeout = _httpx.Timeout(30.0, read=600.0)
 
+    # Probe the upstream status BEFORE committing a response: open the stream,
+    # read the status code, and only then hand the (still-open) body to
+    # StreamingResponse. Checking status inside the generator would already
+    # have sent a 200 + attachment header, turning an upstream failure into a
+    # silent, zero-byte "clip.mp4" download instead of a real error.
+    req = client.build_request("GET", url, params=params, timeout=httpx_timeout)
+    try:
+        resp = await client.send(req, stream=True)
+    except Exception as e:
+        recording_logger.warning(f"Clip export: MediaMTX unreachable: {e}")
+        raise HTTPException(
+            status_code=502, detail="Recording source unavailable"
+        )
+
+    if resp.status_code != 200:
+        status = resp.status_code
+        await resp.aclose()
+        recording_logger.warning(f"Clip export: MediaMTX returned {status}")
+        raise HTTPException(
+            status_code=502 if status >= 500 else 404,
+            detail="Clip not available for the requested range",
+        )
+
     async def _stream():
-        async with client.stream(
-            "GET", url, params=params, timeout=httpx_timeout
-        ) as resp:
-            if resp.status_code != 200:
-                recording_logger.warning(
-                    f"Clip export: MediaMTX returned {resp.status_code}"
-                )
-                return
+        try:
             async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
                 yield chunk
+        finally:
+            await resp.aclose()
 
     return StreamingResponse(
         _stream(),
