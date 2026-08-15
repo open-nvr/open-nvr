@@ -694,13 +694,17 @@ const CameraChecklist = memo(function CameraChecklist({
             onClick={() => !disabled && onToggle(cam.camera_id)}
             disabled={disabled}
             title={rec ? `${formatDuration(rec.total_duration)} recorded` : 'No recordings on this date'}
-            className={`w-full flex items-center gap-2 px-2.5 py-1 text-[13px] text-left transition-colors ${
+            className={`group w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-left transition-colors border-l-2 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--accent)] ${
+              cam.camera_id === activeId ? 'border-l-[var(--accent)] text-[var(--accent)]' : 'border-l-transparent'
+            } ${checked ? 'bg-[var(--accent)]/10' : ''} ${
               disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[var(--panel)]'
-            } ${cam.camera_id === activeId ? 'text-[var(--accent)]' : ''}`}
+            }`}
           >
             <span
-              className={`shrink-0 w-4 h-4 border flex items-center justify-center ${
-                checked ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--text-dim)]'
+              className={`shrink-0 w-4 h-4 border flex items-center justify-center transition-colors ${
+                checked
+                  ? 'bg-[var(--accent)] border-[var(--accent)]'
+                  : `border-[var(--border)] ${disabled ? '' : 'group-hover:border-[var(--accent)]/60'}`
               }`}
             >
               {checked && <Check size={12} className="text-white" />}

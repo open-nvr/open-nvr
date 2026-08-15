@@ -275,16 +275,27 @@ export function MultiCamTimeline({
 
   return (
     <div className={`select-none ${className}`}>
-      {/* Playhead time readout (aligned to the track column) */}
+      {/* Readout strip above the tracks: playhead chip normally, hover chip
+          while pointing. Only one shows at a time so they can never collide,
+          and neither ever covers the tracks or tick labels. */}
       <div className="flex">
         <div className="w-16 sm:w-28 shrink-0" />
         <div className="flex-1 h-4 relative text-[10px] font-mono">
-          {currentVisible && (
+          {currentVisible && hoverMs == null && (
             <span
               className="absolute -translate-x-1/2 px-1 bg-[var(--accent)] text-white whitespace-nowrap z-10"
-              style={{ left: `${currentPct}%` }}
+              style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
             >
               {fmtFull(currentTime)}
+            </span>
+          )}
+          {hoverMs != null && (
+            <span
+              className="pointer-events-none absolute -translate-x-1/2 z-20 px-1.5 bg-black/90 border border-white/15 text-white whitespace-nowrap"
+              style={{ left: `clamp(3.5rem, ${toPct(hoverMs)}%, calc(100% - 3.5rem))` }}
+            >
+              {fmtFull(hoverMs)}
+              {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
             </span>
           )}
         </div>
@@ -336,21 +347,12 @@ export function MultiCamTimeline({
             />
           ))}
 
-          {/* Hover guide + tooltip */}
+          {/* Hover guide (time chip lives in the readout strip above) */}
           {hoverMs != null && (
-            <>
-              <div
-                className="absolute top-0 bottom-3.5 w-px bg-white/40 pointer-events-none"
-                style={{ left: `${toPct(hoverMs)}%` }}
-              />
-              <div
-                className="pointer-events-none absolute -top-1 z-20 px-1.5 py-0.5 bg-black/85 text-white text-[10px] font-mono whitespace-nowrap -translate-x-1/2"
-                style={{ left: `${toPct(hoverMs)}%` }}
-              >
-                {fmtFull(hoverMs)}
-                {hoverInGap && <span className="text-neutral-400 ml-1">· no recording</span>}
-              </div>
-            </>
+            <div
+              className="absolute top-0 bottom-3.5 w-px bg-white/40 pointer-events-none"
+              style={{ left: `${toPct(hoverMs)}%` }}
+            />
           )}
 
           {/* Playhead spanning all rows */}

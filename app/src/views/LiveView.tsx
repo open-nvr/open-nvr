@@ -24,7 +24,7 @@ import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { useCameraStatus } from '../hooks/useCameraStatus'
-import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
+import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, Loader2, CheckCircle, AlertCircle, Expand, Scan } from 'lucide-react'
 import { 
   DndContext, 
   DragOverlay, 
@@ -199,10 +199,8 @@ export function LiveView() {
   const containerRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
-  // FS toolbar visibility on bottom hover
+  // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
-  const isOverToolbarRef = useRef(false)
-  const hideTimer = useRef<number | null>(null)
   const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string}>>([])
   
   // Camera display order - array of camera IDs in display sequence
@@ -216,6 +214,22 @@ export function LiveView() {
     }
   })
   
+  // Grid sizing mode, persisted per browser. Fill (default) stretches cells
+  // to use the whole area (feeds letterbox inside against the panel bg);
+  // Fit keeps strict 16:9 cells centered.
+  const [fillMode, setFillMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('liveview-grid-mode') !== 'fit'
+    } catch {
+      return true
+    }
+  })
+  const toggleFillMode = () => setFillMode(prev => {
+    const next = !prev
+    try { localStorage.setItem('liveview-grid-mode', next ? 'fill' : 'fit') } catch { /* private mode */ }
+    return next
+  })
+
   // Drag state for overlay
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   
@@ -398,36 +412,9 @@ export function LiveView() {
     loadCameras()
   }, [])
 
+  // Reset the toolbar when entering/leaving fullscreen so it never starts open.
   useEffect(() => {
-    const el = gridRef.current
-    if (!el || !isFullscreen) return
-
-    const onMouseMove = (e: MouseEvent) => {
-      const viewportHeight = window.innerHeight
-      const fromBottom = viewportHeight - e.clientY
-      const threshold = 80
-      if (fromBottom <= threshold) {
-        // Near bottom edge -> show toolbar
-        if (hideTimer.current) {
-          window.clearTimeout(hideTimer.current)
-          hideTimer.current = null
-        }
-        setFsToolbarVisible(true)
-      } else if (!isOverToolbarRef.current) {
-        // Away from bottom and not over toolbar -> hide after short delay
-        if (hideTimer.current) window.clearTimeout(hideTimer.current)
-        hideTimer.current = window.setTimeout(() => setFsToolbarVisible(false), 600)
-      }
-    }
-
-    el.addEventListener('mousemove', onMouseMove)
-    return () => {
-      el.removeEventListener('mousemove', onMouseMove)
-      if (hideTimer.current) window.clearTimeout(hideTimer.current)
-      hideTimer.current = null
-      setFsToolbarVisible(false)
-      isOverToolbarRef.current = false
-    }
+    setFsToolbarVisible(false)
   }, [isFullscreen])
   
   // Get all available layouts (enabled predefined + enabled custom)
@@ -459,8 +446,18 @@ export function LiveView() {
     // Fixed viewport-height layout: header + grid + toolbar must all fit
     // without a page scrollbar. 3rem = app header, 2rem = main's p-4.
     <section className="flex flex-col gap-2 h-[calc(100vh-5rem)]">
-      <header className="flex-shrink-0 flex items-center gap-2">
-        <h1 className="text-lg font-semibold">Live View</h1>
+      {/* Header doubles as the toolbar — one row of chrome instead of two */}
+      <header className="flex-shrink-0 flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
+        <h1 className="text-lg font-semibold whitespace-nowrap mr-2">Live View</h1>
+        <ToolbarContents
+          currentLayout={currentLayout}
+          setCurrentLayout={setCurrentLayout}
+          availableLayouts={availableLayouts}
+          onOpenMenu={() => setMenuOpen(true)}
+          onToggleFullscreen={toggleFs}
+          fillMode={fillMode}
+          onToggleFillMode={toggleFillMode}
+        />
       </header>
 
       <DndContext 
@@ -476,9 +473,10 @@ export function LiveView() {
           style={{
             gridTemplateColumns: `repeat(${layoutDef.gridCols}, minmax(0, 1fr))`,
             gridTemplateRows: `repeat(${layoutDef.gridRows}, minmax(0, 1fr))`,
-            // Fullscreen: the browser sizes the fullscreen element to the
-            // screen. Otherwise use the fitted 16:9-cell size (see effect).
-            ...(isFullscreen || !gridSize
+            // Fullscreen and Fill mode: take the whole container (cells may
+            // deviate from 16:9; the player letterboxes internally). Fit mode
+            // uses the fitted 16:9-cell size (see effect).
+            ...(isFullscreen || fillMode || !gridSize
               ? { width: '100%', height: '100%' }
               : { width: gridSize.w, height: gridSize.h }),
           }}
@@ -515,33 +513,30 @@ export function LiveView() {
               </div>
             )
           })}
-          {/* Fullscreen hover toolbar overlay */}
+          {/* Fullscreen toolbar overlay — opened via the bottom-center handle
+              so it never pops up over the bottom tiles' own controls */}
           {isFullscreen && (
-            <div className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-all duration-200 ${fsToolbarVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'}`}>
-              <div
-                className="pointer-events-auto mt-2 flex items-center gap-2 bg-[var(--bg-2)] border border-neutral-700 p-2 text-xs"
-                onMouseEnter={() => {
-                  if (hideTimer.current) {
-                    window.clearTimeout(hideTimer.current)
-                    hideTimer.current = null
-                  }
-                  isOverToolbarRef.current = true
-                  setFsToolbarVisible(true)
-                }}
-                onMouseLeave={() => {
-                  isOverToolbarRef.current = false
-                  if (hideTimer.current) window.clearTimeout(hideTimer.current)
-                  hideTimer.current = window.setTimeout(() => setFsToolbarVisible(false), 500)
-                }}
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-40 flex flex-col items-center">
+              <button
+                className="pointer-events-auto flex items-center justify-center w-12 h-5 bg-black/50 hover:bg-black/80 text-white/60 hover:text-white transition-colors"
+                onClick={() => setFsToolbarVisible((v) => !v)}
+                title={fsToolbarVisible ? 'Hide toolbar' : 'Show toolbar'}
               >
-                <ToolbarContents 
-                  currentLayout={currentLayout}
-                  setCurrentLayout={setCurrentLayout}
-                  availableLayouts={availableLayouts}
-                  onOpenMenu={() => setMenuOpen(true)} 
-                  onToggleFullscreen={toggleFs} 
-                />
-              </div>
+                {fsToolbarVisible ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+              </button>
+              {fsToolbarVisible && (
+                <div className="pointer-events-auto self-stretch flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
+                  <ToolbarContents
+                    currentLayout={currentLayout}
+                    setCurrentLayout={setCurrentLayout}
+                    availableLayouts={availableLayouts}
+                    onOpenMenu={() => setMenuOpen(true)}
+                    onToggleFullscreen={toggleFs}
+                    dropUp
+                    showFitToggle={false}
+                  />
+                </div>
+              )}
             </div>
           )}
           {/* Menu overlay inside fullscreen so it appears over the live view */}
@@ -578,22 +573,7 @@ export function LiveView() {
         </DragOverlay>
       </DndContext>
 
-      {/* Bottom toolbar (normal mode) */}
-      {!isFullscreen && (
-        <div className="flex-shrink-0">
-          <div className="flex items-center gap-2 bg-[var(--bg-2)] border border-neutral-700 p-2 text-xs">
-            <ToolbarContents 
-              currentLayout={currentLayout}
-              setCurrentLayout={setCurrentLayout}
-              availableLayouts={availableLayouts}
-              onOpenMenu={() => setMenuOpen(true)} 
-              onToggleFullscreen={toggleFs} 
-            />
-          </div>
-        </div>
-      )}
-
-  {menuOpen && !isFullscreen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
+      {menuOpen && !isFullscreen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
     </section>
   )
 }
@@ -662,6 +642,11 @@ function Tile({
   const playerRef = useRef<VideoPlayerHandle>(null)
   const [ptzOpen, setPtzOpen] = useState(false)
   const [showCameraDialog, setShowCameraDialog] = useState(false)
+
+  // Close the PTZ pad when the tile's camera changes.
+  useEffect(() => {
+    setPtzOpen(false)
+  }, [assignedCameraId])
   // Backend-pushed connectivity: `status` drives the offline overlay;
   // `version` bumps on each recovery, re-running the URL fetch below (fresh
   // 60-min stream token) and remounting the player so the stream resumes
@@ -725,7 +710,7 @@ function Tile({
   }
   
   return (
-    <div className="flex flex-col bg-[var(--bg-2)] border border-neutral-700 relative overflow-hidden h-full">
+    <div className="flex flex-col bg-[var(--bg-2)] border border-[var(--border)] relative overflow-hidden h-full">
       {/* Video container — fills the grid cell. Width comes from the grid
           column and height from the 1fr row, so the whole layout fits the
           viewport; object-contain letter/pillarboxes the stream inside. */}
@@ -750,6 +735,26 @@ function Tile({
               autoPlay
               muted
               onSnapshot={handleSnapshot}
+              onTogglePtz={() => setPtzOpen((s) => !s)}
+              ptzActive={ptzOpen}
+              overlay={ptzOpen && cameraId ? (
+                /* Mini PTZ pad — rendered inside the player so it survives
+                   the player element going fullscreen; sits above the
+                   controls bar (~72px incl. gradient) */
+                <div className="absolute left-2 bottom-20 z-30 bg-black/80 p-2 border border-[var(--border)] text-[10px]">
+                  <div className="grid grid-cols-3 gap-1">
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&uarr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-red-500/30" onClick={() => setPtzOpen(false)}>Close</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
+                    <div />
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Minus size={12} /></button>
+                  </div>
+                </div>
+              ) : null}
               className="w-full h-full"
             />
           ) : (
@@ -785,32 +790,7 @@ function Tile({
           </div>
         )}
 
-        {/* Mini PTZ pad */}
-        {ptzOpen && cameraId && (
-          <div className="absolute left-2 bottom-16 z-30 bg-black/80 p-2 border border-neutral-700 text-[10px] rounded">
-            <div className="grid grid-cols-3 gap-1">
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&uarr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-red-500/30" onClick={() => setPtzOpen(false)}>Close</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
-              <div />
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Minus size={12} /></button>
-            </div>
-          </div>
-        )}
 
-        {/* PTZ toggle button - floating */}
-        {cameraId && hasLink && (
-          <button 
-            className="absolute left-2 bottom-2 z-30 px-2 py-1 bg-black/60 hover:bg-black/80 border border-neutral-700 rounded text-[10px] flex items-center gap-1 transition-colors"
-            onClick={() => setPtzOpen((s) => !s)}
-          >
-            <Move size={12} /> PTZ
-          </button>
-        )}
       </div>
 
       {/* Camera Selection/Add Dialog */}
@@ -852,12 +832,21 @@ function ToolbarContents({
   availableLayouts,
   onOpenMenu,
   onToggleFullscreen,
+  dropUp = false,
+  fillMode,
+  onToggleFillMode,
+  showFitToggle = true,
 }: {
   currentLayout: string
   setCurrentLayout: (layout: string) => void
   availableLayouts: Array<{ id: string; name: string; tiles: number }>
   onOpenMenu: () => void
   onToggleFullscreen: () => void
+  /** Layout dropdown direction: up when the bar sits at the bottom (fullscreen). */
+  dropUp?: boolean
+  fillMode?: boolean
+  onToggleFillMode?: () => void
+  showFitToggle?: boolean
 }) {
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -865,18 +854,18 @@ function ToolbarContents({
 
   return (
     <>
-      <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={onOpenMenu}>
+      <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={onOpenMenu}>
         <Grid size={14} /> Menu
       </button>
       <div className="ml-auto flex items-center gap-1">
-        {/* Quick layout buttons */}
+        {/* Quick layout buttons — collapse into the dropdown below md */}
         {['1x1', '2x2', '3x3', '4x4'].map((layoutId) => {
           const available = availableLayouts.find(l => l.id === layoutId)
           if (!available) return null
           return (
-            <button 
-              key={layoutId} 
-              className={`px-2 py-1 border ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-neutral-700'}`} 
+            <button
+              key={layoutId}
+              className={`px-2 py-1 border hidden md:inline-flex ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
               onClick={() => setCurrentLayout(layoutId)}
             >
               {available.name}
@@ -885,15 +874,15 @@ function ToolbarContents({
         })}
         {/* More layouts dropdown */}
         <div className="relative" ref={dropdownRef}>
-          <button 
-            className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1"
+          <button
+            className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1"
             onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}
           >
             <Grid size={14} />
             <ChevronDown size={12} />
           </button>
           {layoutDropdownOpen && (
-            <div className="absolute right-0 bottom-full mb-1 z-50 bg-[var(--panel)] border border-neutral-700 shadow-lg min-w-[160px]">
+            <div className={`absolute right-0 z-50 bg-[var(--panel)] border border-[var(--border)] shadow-lg min-w-[160px] ${dropUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
               {availableLayouts.map(layout => (
                 <button
                   key={layout.id}
@@ -903,7 +892,7 @@ function ToolbarContents({
                   {layout.name} ({layout.tiles})
                 </button>
               ))}
-              <div className="border-t border-neutral-700 px-3 py-2">
+              <div className="border-t border-[var(--border)] px-3 py-2">
                 <button
                   className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
                   onClick={() => {
@@ -917,7 +906,18 @@ function ToolbarContents({
             </div>
           )}
         </div>
-        <button className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
+        {/* Fit/Fill toggle (hidden in fullscreen, which always fills) */}
+        {showFitToggle && onToggleFillMode && (
+          <button
+            className={`px-2 py-1 border inline-flex items-center gap-1 ${fillMode ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
+            onClick={onToggleFillMode}
+            title={fillMode ? 'Fill: grid uses all available space' : 'Fit: strict 16:9 cells, centered'}
+          >
+            {fillMode ? <Expand size={14} /> : <Scan size={14} />}
+            <span className="hidden sm:inline">{fillMode ? 'Fill' : 'Fit'}</span>
+          </button>
+        )}
+        <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
           <Maximize size={14} />
           <span className="hidden sm:inline">Fullscreen</span>
         </button>

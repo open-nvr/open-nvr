@@ -257,12 +257,13 @@ export function PlaybackTimeline({
 
   return (
     <div ref={wrapRef} className={`relative select-none ${className}`}>
-      {/* Playhead time readout */}
+      {/* Playhead time readout — hidden while hovering so it can never
+          collide with the hover time chip that shares this strip */}
       <div className="h-5 relative text-[11px] font-mono">
-        {currentVisible && (
+        {currentVisible && hoverMs == null && (
           <span
             className="absolute -translate-x-1/2 px-1 rounded bg-[var(--accent)] text-white whitespace-nowrap"
-            style={{ left: `${currentPct}%` }}
+            style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
           >
             {fmtFull(currentTime)}
           </span>
@@ -357,14 +358,14 @@ export function PlaybackTimeline({
         ))}
       </div>
 
-      {/* Hover tooltip */}
+      {/* Hover tooltip — lives in the readout strip, clamped to the edges */}
       {hoverMs != null && (
         <div
-          className="pointer-events-none absolute top-0 z-20 px-1.5 py-0.5 rounded bg-black/85 text-white text-[10px] font-mono whitespace-nowrap"
-          style={{ left: hoverX, transform: 'translate(-50%, -1.2rem)' }}
+          className="pointer-events-none absolute top-0 z-20 px-1.5 py-0.5 bg-black/90 border border-white/15 text-white text-[10px] font-mono whitespace-nowrap"
+          style={{ left: `clamp(3.5rem, ${hoverX}px, calc(100% - 3.5rem))`, transform: 'translate(-50%, -0.15rem)' }}
         >
           {fmtFull(hoverMs)}
-          {hoverInGap && <span className="text-neutral-400 ml-1">· no recording</span>}
+          {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
         </div>
       )}
     </div>

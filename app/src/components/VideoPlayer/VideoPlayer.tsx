@@ -64,6 +64,12 @@ export interface VideoPlayerProps {
   onError?: (error: string) => void
   /** Callback when HLS playback fails (to trigger fallback) */
   onHlsPlaybackError?: () => void
+  /** Present only when the camera supports PTZ; toggles the PTZ pad */
+  onTogglePtz?: () => void
+  ptzActive?: boolean
+  /** Extra overlay rendered inside the player (e.g. the PTZ pad) — kept
+      inside so it stays visible when the player element goes fullscreen */
+  overlay?: React.ReactNode
 }
 
 export interface VideoPlayerHandle {
@@ -93,6 +99,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       onSnapshot,
       onError,
       onHlsPlaybackError,
+      onTogglePtz,
+      ptzActive = false,
+      overlay,
     },
     ref
   ) {
@@ -136,6 +145,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // Real aspect ratio of the incoming stream (width/height), read from the
     // video metadata. null until known (or after the source is torn down).
     const [videoAspect, setVideoAspect] = useState<number | null>(null)
+    // Title chip fades to half opacity after a few seconds so it stops
+    // competing with the camera's burned-in OSD; tile hover restores it
+    // purely via CSS (group-hover), so there are no re-renders on hover.
+    const [titleDimmed, setTitleDimmed] = useState(false)
+    useEffect(() => {
+      const t = window.setTimeout(() => setTitleDimmed(true), 4000)
+      return () => window.clearTimeout(t)
+    }, [])
 
     const isLive = mode === 'live'
 
@@ -936,17 +953,23 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
               : { width: '100%', height: '100%' }
           }
         >
-        {/* Title overlay */}
+        {/* Title overlay — transparent top-center label (clear of the corner
+            OSD burn-ins), legible via text shadow instead of a scrim */}
         {title && (
-          <div className="absolute top-2 left-2 z-10 text-sm text-white/90 bg-black/50 px-2 py-0.5 rounded">
+          <div
+            className={`absolute top-1.5 left-1/2 -translate-x-1/2 z-10 max-w-[60%] truncate text-sm leading-tight font-medium text-white/90 px-1.5 py-0.5 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)] transition-opacity duration-700 group-hover:opacity-100 ${
+              titleDimmed ? 'opacity-50' : 'opacity-100'
+            }`}
+          >
             {title}
           </div>
         )}
 
-        {/* Live indicator */}
+        {/* Live indicator — transparent: glowing dot + shadowed text so it
+            doesn't overshadow the stream like the old solid red chip */}
         {isLive && !error && (
-          <div className="absolute top-2 right-2 z-10 flex items-center gap-1.5 text-xs bg-red-600/90 text-white px-2 py-0.5 rounded">
-            <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 text-[10px] font-semibold tracking-wider text-red-400 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
+            <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse [box-shadow:0_0_5px_rgba(239,68,68,0.9)]" />
             LIVE
           </div>
         )}
@@ -1037,8 +1060,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             onRefresh={isLive ? handleRefresh : undefined}
             onStreamTypeChange={isLive ? handleStreamTypeChange : undefined}
             availableStreamTypes={availableStreamTypes}
+            onTogglePtz={onTogglePtz}
+            ptzActive={ptzActive}
           />
         </div>
+
+        {/* Caller-provided overlay (PTZ pad etc.) — anchored to the feed box */}
+        {overlay}
         </div>
       </div>
     )
