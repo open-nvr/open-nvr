@@ -75,26 +75,48 @@ def camera_has_rows(db: Session, camera_id: int) -> bool:
 
 
 def merge_contiguous(
-    rows: list[tuple[datetime, float | None]],
+    rows: list[tuple],
     tolerance: float = MERGE_TOLERANCE_SECONDS,
 ) -> list[dict[str, Any]]:
-    """Merge sorted (start_time, duration) clip rows into continuous segments.
+    """Merge sorted clip rows into continuous WALL-CLOCK segments.
 
-    Returns ``[{"start": datetime, "duration": float}, ...]``.
+    Each row is ``(start_time, duration, end_time)``. ``end_time`` is the
+    wall-clock end of the clip (see
+    ``routers.mediamtx_hooks.compute_segment_end_time``): a camera whose
+    delivered fps trails its nominal fps produces a "60s" media clip that
+    actually covers ~72 real seconds, so contiguity/gap detection MUST use the
+    wall-clock end — using ``start + media_duration`` fabricated the phantom
+    10-15s gaps between back-to-back clips reported in #229. ``duration`` (the
+    media/playable length) is only a fallback for rows written before
+    ``end_time`` existed (e.g. legacy or reconciler rows with NULL end_time).
+
+    Returns ``[{"start": datetime, "duration": float}, ...]`` where each
+    ``duration`` is the wall-clock span of the merged run, so adjacent clips
+    touch on the timeline instead of leaving a gap.
     """
     merged: list[dict[str, Any]] = []
-    for start, duration in rows:
+    for row in rows:
+        start = row[0]
+        dur = float(row[1] or 0.0)
+        end = row[2] if len(row) > 2 else None
         if start.tzinfo is None:
             start = start.replace(tzinfo=UTC)
-        dur = float(duration or 0.0)
+        if end is not None and end.tzinfo is None:
+            end = end.replace(tzinfo=UTC)
+        # Wall-clock end: the stored end_time, else the media-duration fallback.
+        clip_end = end if end is not None else start + timedelta(seconds=dur)
+        if clip_end < start:
+            clip_end = start
         if merged:
             prev = merged[-1]
             prev_end = prev["start"] + timedelta(seconds=prev["duration"])
             if (start - prev_end).total_seconds() <= tolerance:
-                new_end = max(prev_end, start + timedelta(seconds=dur))
+                new_end = max(prev_end, clip_end)
                 prev["duration"] = (new_end - prev["start"]).total_seconds()
                 continue
-        merged.append({"start": start, "duration": dur})
+        merged.append(
+            {"start": start, "duration": (clip_end - start).total_seconds()}
+        )
     return merged
 
 
@@ -109,7 +131,7 @@ def day_segments(
     One indexed range query on (camera_id, start_time); merging is O(rows).
     """
     rows = (
-        db.query(Recording.start_time, Recording.duration)
+        db.query(Recording.start_time, Recording.duration, Recording.end_time)
         .filter(
             Recording.camera_id == camera_id,
             Recording.start_time >= start_utc,
