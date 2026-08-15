@@ -144,7 +144,9 @@ class CameraStatusService:
         except Exception:
             main_logger.exception("Failed to publish camera_status event")
 
-        self._persist(camera_id, online, occurred_at)
+        # Persist off the event loop: a blocking DB commit here would stall
+        # every other async task (the pattern this overhaul removed elsewhere).
+        await asyncio.to_thread(self._persist, camera_id, online, occurred_at)
         main_logger.info(
             "Camera %s (%s) is %s [%s]",
             camera_id, camera_name, "online" if online else "offline", reason,
