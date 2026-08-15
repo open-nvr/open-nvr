@@ -68,6 +68,40 @@ def validate_segment_path(segment_path: str) -> str:
 router = APIRouter(prefix="/mediamtx", tags=["mediamtx", "hooks"])  # mounted at /api/v1
 
 
+def compute_segment_end_time(
+    start_time: datetime,
+    duration_sec: float | None,
+    mtime: float | None,
+) -> datetime:
+    """Wall-clock-anchored end of a completed segment.
+
+    ``start_time + duration`` alone is a MEDIA-clock end. Cameras whose RTP
+    timestamps run slower than real time (counter-stamped frames: delivered
+    fps below the declared fps) produce segments whose media duration
+    under-counts the wall time they actually cover — a "60s" segment can
+    span 72 real seconds, and media-clock ends left phantom 10-15s gaps
+    before each next segment on an otherwise continuous recording.
+
+    The file's mtime is the wall-clock instant the last byte landed (the
+    webhook fires right after MediaMTX closes the file), so it bounds the
+    segment's real coverage: take the later of the two ends. The mtime is
+    only trusted up to 2x the media duration so a bogus one (copied file,
+    host clock jump) can't smear a segment across hours. ``duration``
+    stays the true playable length — only timeline placement changes.
+    """
+    media_end = (
+        start_time + timedelta(seconds=duration_sec)
+        if duration_sec and duration_sec > 0
+        else start_time
+    )
+    if mtime is None:
+        return media_end
+    wall_end = datetime.fromtimestamp(mtime, tz=UTC)
+    if duration_sec and duration_sec > 0:
+        wall_end = min(wall_end, start_time + timedelta(seconds=2 * duration_sec))
+    return max(media_end, wall_end)
+
+
 # NOTE: the old apply_faststart_to_segment ffmpeg pass is GONE, deliberately.
 # fMP4 already carries ftyp+moov at the file head — "faststart" is a
 # progressive-MP4 concept that bought nothing here. Worse, the remux emitted a
@@ -203,11 +237,7 @@ async def hook_segment_complete(
             if start_time is None:
                 # Unrecognized name: fall back to receipt-time minus duration.
                 start_time = datetime.now(UTC) - timedelta(seconds=duration_sec or 0)
-            end_time = (
-                start_time + timedelta(seconds=duration_sec)
-                if duration_sec and duration_sec > 0
-                else start_time
-            )
+            end_time = compute_segment_end_time(start_time, duration_sec, mtime)
 
             # Codec, read once here (cheap: only the moov box, which fMP4
             # keeps at the file head) so playback never has to probe.
@@ -227,6 +257,27 @@ async def hook_segment_complete(
             idx = norm_path.lower().find("/recordings/")
             if idx >= 0:
                 relative_path = norm_path[idx + len("/recordings/"):]
+
+            # A wall-clock end can overshoot the next segment's open instant
+            # by the part-flush lag (a second or two of mtime trailing the
+            # handoff). Clamp the PREVIOUS segment's end_time back to this
+            # segment's start so the timeline never overlaps; commits with
+            # the upsert below.
+            prev = (
+                db.query(Recording)
+                .filter(
+                    Recording.camera_id == cam.id,
+                    Recording.start_time < start_time,
+                )
+                .order_by(Recording.start_time.desc())
+                .first()
+            )
+            if prev is not None and prev.end_time is not None:
+                prev_end = prev.end_time
+                if prev_end.tzinfo is None:
+                    prev_end = prev_end.replace(tzinfo=UTC)
+                if prev_end > start_time:
+                    prev.end_time = start_time
 
             # Upsert on (camera_id, file_path): webhook retries and reconciler
             # overlap must never duplicate. Portable get-then-write; the unique
