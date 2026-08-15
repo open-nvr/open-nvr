@@ -358,6 +358,34 @@ def _require_camera_view(user: User, camera: Camera, db: Session) -> None:
         )
 
 
+def _viewable_active_cameras(db: Session, user: User) -> list[Camera]:
+    """Active cameras the user may view (superuser: all; else owner or granted).
+
+    Used by the listing endpoints so one user can never enumerate another
+    owner's cameras.
+    """
+    cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+    return [c for c in cameras if _can_view_camera(user, c, db)]
+
+
+def _camera_for_playback_path(db: Session, path: str) -> Camera | None:
+    """Resolve a MediaMTX playback path (``cam-57`` or ``cam-192_168_1_9``) to
+    its Camera by rebuilding each active camera's canonical path.
+
+    Rebuilding (not parsing) works for both id- and ip-based path modes.
+    Returns ``None`` when no active camera owns the path.
+    """
+    for cam in db.query(Camera).filter(Camera.is_active == True).all():  # noqa: E712
+        if (
+            _build_stream_name(
+                settings.mediamtx_stream_prefix, cam.id, cam.ip_address
+            )
+            == path
+        ):
+            return cam
+    return None
+
+
 async def _authenticate_request(request: Request, db: Session) -> User | None:
     """Authenticate a request from the Authorization: Bearer header.
 
@@ -628,6 +656,12 @@ async def list_recordings(
     ):
         raise HTTPException(status_code=400, detail="Invalid path format")
 
+    # Authorize: the path must resolve to a camera this user may view.
+    camera = _camera_for_playback_path(db, path)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
+
     recordings = await mediamtx_client.list_segments(path, timeout=10.0)
     if recordings is None:
         return {"recordings": [], "error": "MediaMTX list unavailable"}
@@ -660,7 +694,8 @@ async def list_recording_cameras(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()
+    # Only cameras this user may view — never the whole estate.
+    cameras = _viewable_active_cameras(db, user_obj)
     result = []
 
     path_by_cam = {
@@ -708,6 +743,12 @@ async def get_playback_url(
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Authorize: the path must resolve to a camera this user may view.
+    camera = _camera_for_playback_path(db, path)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
 
     # Build the playback URL the BROWSER fetches — use the external fallback
     # chain (the browser can't reach the Docker-internal mediamtx host; the
@@ -2173,15 +2214,19 @@ async def get_recording_sessions_for_ai(
     # Check if MediaMTX is available
     mediamtx_available = await _check_mediamtx_available()
 
-    # Get cameras to query
+    # Get cameras to query — scoped to what this user may view.
     if camera_id:
-        cameras = (
+        camera = (
             db.query(Camera)
             .filter(Camera.id == camera_id, Camera.is_active == True)
-            .all()
+            .first()
         )
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        _require_camera_view(user_obj, camera, db)
+        cameras = [camera]
     else:
-        cameras = db.query(Camera).filter(Camera.is_active == True).all()
+        cameras = _viewable_active_cameras(db, user_obj)
 
     result = []
 
