@@ -433,6 +433,32 @@ class HlsPlaybackService:
         return out
 
     @classmethod
+    def _stored_codec(
+        cls, camera_id: int, first_start: datetime, db: Any
+    ) -> str | None:
+        """The codec recorded for the session's first clip, or None.
+
+        Populated by the segment-complete webhook via the same
+        ``probe_video_codec`` used at playback, so the value is directly
+        comparable. NULL for reconciler/legacy rows -> caller probes.
+        """
+        try:
+            from models import Recording
+
+            return (
+                db.query(Recording.codec)
+                .filter(
+                    Recording.camera_id == camera_id,
+                    Recording.start_time == first_start,
+                )
+                .order_by(Recording.start_time.asc())
+                .limit(1)
+                .scalar()
+            )
+        except Exception:
+            return None
+
+    @classmethod
     def _attach_byte_index(
         cls,
         session: PlaybackSession,
@@ -463,13 +489,20 @@ class HlsPlaybackService:
         # H.265 remux is per-file, so an HEVC session is truncated to its
         # first clip (the client's boundary logic opens the next one).
         first_path = rows[0][0]
+        first_start = rows[0][1]
         try:
             from services.hevc_remux_service import (
                 is_browser_incompatible_video,
                 probe_video_codec,
             )
 
-            session.video_codec = probe_video_codec(first_path)
+            # Prefer the codec recorded at segment-complete (same probe, same
+            # fourcc vocabulary) — a webhook-indexed row carries it, so we skip
+            # re-opening the file. Reconciler/legacy rows have NULL codec; fall
+            # back to probing the first clip.
+            session.video_codec = cls._stored_codec(
+                camera_id, first_start, db
+            ) or probe_video_codec(first_path)
             needs_remux = is_browser_incompatible_video(session.video_codec)
         except Exception:
             session.video_codec = None
