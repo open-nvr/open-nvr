@@ -16,7 +16,6 @@ import os
 import secrets
 import sys
 import time
-import types as _types
 from pathlib import Path
 
 import pytest
@@ -33,17 +32,11 @@ os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
 os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
-_lm = _types.ModuleType("core.logging_config")
+# A sibling test (test_segment_end_time) registers a stub 'core.logging_config'
+# in sys.modules via setdefault; drop it so the REAL module loads before we
+# import server code that does `from core.logging_config import recording_logger`.
+sys.modules.pop("core.logging_config", None)
 
-
-class _L:
-    def __getattr__(self, _n):
-        return lambda *a, **k: None
-
-
-_lm.__getattr__ = lambda _n: _L()
-_lm.setup_logging = lambda *a, **k: None
-sys.modules.setdefault("core.logging_config", _lm)
 
 import routers.recordings as rr  # noqa: E402
 

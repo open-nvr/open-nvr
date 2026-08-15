@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import secrets
 import sys
-import types as _types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,24 +26,28 @@ os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
 os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
-_lm = _types.ModuleType("core.logging_config")
+# A sibling test (test_segment_end_time) registers a stub 'core.logging_config'
+# in sys.modules via setdefault; drop it so the REAL module loads before we
+# import server code that does `from core.logging_config import recording_logger`.
+sys.modules.pop("core.logging_config", None)
 
-
-class _L:
-    def __getattr__(self, _n):
-        return lambda *a, **k: None
-
-
-_lm.__getattr__ = lambda _n: _L()
-_lm.setup_logging = lambda *a, **k: None
-sys.modules.setdefault("core.logging_config", _lm)
 
 from services.recording_watchdog import _still_stalled_on_disk  # noqa: E402
 
-# tz must not depend on settings load order (settings is a frozen singleton):
-import services.recording_paths as _rp  # noqa: E402
-from datetime import timezone as _pytz  # noqa: E402
-_rp.get_recording_tz = lambda: _pytz.utc
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _force_utc_recording_tz(monkeypatch):
+    """Pin the recording tz to UTC for these path-layout tests, restored after
+    each test — never a global mutation that leaks into the rest of the suite.
+    """
+    from datetime import timezone
+
+    import services.recording_paths as rp
+
+    monkeypatch.setattr(rp, "get_recording_tz", lambda: timezone.utc)
 
 
 def _touch(p: Path):
