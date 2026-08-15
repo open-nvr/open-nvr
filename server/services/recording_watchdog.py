@@ -31,12 +31,15 @@ events do and are pruned by the normal retention housekeeping.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import func
 
 from core.database import SessionLocal
 from core.logging_config import recording_logger
 from models import Camera, CameraEvent, Recording
+from services.recording_paths import find_latest_recording_file
+from services.storage_service import get_effective_recordings_base_path
 
 EVENT_TYPE = "recording_stalled"
 
@@ -46,6 +49,25 @@ STALL_THRESHOLD_SECONDS = 4 * 60
 GRACE_PERIOD_SECONDS = 5 * 60
 
 CHECK_INTERVAL_SECONDS = 2 * 60
+
+
+def _still_stalled_on_disk(
+    camera_id: int, root, threshold: datetime, now: datetime
+) -> bool:
+    """Filesystem cross-check for a suspected stall.
+
+    The recordings table is webhook-fed; a webhook lag while recording
+    continues would look like a stall. Return True only if the disk also has
+    no clip newer than ``threshold`` (scans just the current/previous hour
+    dir, so it is cheap). On any error, fall back to trusting the DB verdict.
+    """
+    if root is None:
+        return True
+    try:
+        fs_latest = find_latest_recording_file(camera_id, root, now)
+    except Exception:
+        return True
+    return fs_latest is None or fs_latest[1] < threshold
 
 
 def check_recording_health() -> dict[str, int]:
@@ -58,6 +80,11 @@ def check_recording_health() -> dict[str, int]:
     db = SessionLocal()
     try:
         cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+
+        try:
+            root = Path(get_effective_recordings_base_path(db))
+        except Exception:
+            root = None
 
         # Newest segment per camera — one grouped, indexed query.
         latest_rows = dict(
@@ -81,6 +108,9 @@ def check_recording_health() -> dict[str, int]:
             if latest is not None and latest.tzinfo is None:
                 latest = latest.replace(tzinfo=UTC)
             is_stalled = latest is None or latest < threshold
+            # Don't alarm on a webhook lag: confirm against the filesystem.
+            if is_stalled:
+                is_stalled = _still_stalled_on_disk(cam.id, root, threshold, now)
 
             # Current alarm state = the most recent stall event's state.
             last_event = (
