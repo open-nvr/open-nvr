@@ -245,16 +245,38 @@ class MediaMtxAdminService:
         If missing, append required segments safely.
         """
         val = (path_value or "").strip()
-        if not val:
-            # Get user-configured or default recording path
+
+        def _canonical() -> str:
+            # Layout: cam-<id>/YYYY-MM-DD/HH/MM-SS-ffffff.mp4, local-time-
+            # named (see services.recording_paths.NEW_LAYOUT_RECORD_PATH).
             host_path = get_effective_recordings_base_path()
             container_path = get_mediamtx_recording_path(host_path)
-            return f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
-        # ensure %path
+            return f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
+
+        if not val:
+            return _canonical()
+
+        has_time = "%s" in val or all(
+            tok in val for tok in ("%Y", "%m", "%d", "%H", "%M", "%S")
+        )
+
+        # Missing %path. If the value ALREADY ends in a time template, blindly
+        # appending %path would put the camera name AFTER the timestamp —
+        # every clip nested in its own directory with a filename the timeline
+        # parser can't read (the exact bug that shipped once). Refuse to
+        # guess: rebuild the canonical layout instead.
         if "%path" not in val:
+            if has_time:
+                mediamtx_logger.warning(
+                    "recordPath %r has a time template but no %%path — "
+                    "rebuilding as the canonical layout instead of appending",
+                    path_value,
+                )
+                return _canonical()
             if not val.endswith("/"):
                 val += "/"
             val += "%path"
+
         # ensure time placeholder
         if "%s" in val:
             return val
@@ -264,10 +286,10 @@ class MediaMtxAdminService:
             if "%f" not in val:
                 val += "-%f"
             return val
-        # append time suffix with %f
+        # append time suffix with %f (current date/hour layout)
         if not val.endswith("/"):
             val += "/"
-        val += "%Y/%m/%d/%H-%M-%S-%f"
+        val += "%Y-%m-%d/%H/%M-%S-%f"
         return val
 
     @staticmethod
@@ -715,7 +737,7 @@ class MediaMtxAdminService:
                 # Get user-configured recording path and convert to container path
                 host_path = get_effective_recordings_base_path()
                 container_path = get_mediamtx_recording_path(host_path)
-                final_recording_path = f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+                final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
 
             config["recording"] = {
                 "enabled": True,
@@ -1225,11 +1247,11 @@ class MediaMtxAdminService:
             # Create recording configuration payload
             recording_config = {
                 "record": True,
-                "recordPath": f"{container_path}/%path/%Y/%m/%d/%H-%M-%S-%f",
+                "recordPath": f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f",
                 "recordFormat": "fmp4",
                 "recordPartDuration": part_duration,
                 "recordSegmentDuration": duration,
-                "recordDeleteAfter": "168h",  # 7 days default
+                "recordDeleteAfter": "0s",  # backend owns retention (retention_service)
             }
 
             return await MediaMtxAdminService.patch_path(

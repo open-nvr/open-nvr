@@ -33,10 +33,20 @@ import { MFAVerify } from './views/MFAVerify'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
 // monolithic bundle. Auth/MFA stay eager: they gate first paint.
-const Dashboard = lazy(() => import('./views/Dashboard').then((m) => ({ default: m.Dashboard })))
-const LiveView = lazy(() => import('./views/LiveView').then((m) => ({ default: m.LiveView })))
-const PlaybackView = lazy(() => import('./views/PlaybackView').then((m) => ({ default: m.PlaybackView })))
-const SyncPlayback = lazy(() => import('./views/SyncPlayback').then((m) => ({ default: m.SyncPlayback })))
+//
+// Importers for the heaviest/most-visited routes are hoisted to named consts
+// so the warm-up below can start their chunk download in parallel with the
+// auth bootstrap (dynamic import is cached: lazy() reuses the in-flight
+// fetch, so nothing is downloaded twice).
+const importDashboard = () => import('./views/Dashboard')
+const importLiveView = () => import('./views/LiveView')
+const importPlaybackView = () => import('./views/PlaybackView')
+const importSyncPlayback = () => import('./views/SyncPlayback')
+
+const Dashboard = lazy(() => importDashboard().then((m) => ({ default: m.Dashboard })))
+const LiveView = lazy(() => importLiveView().then((m) => ({ default: m.LiveView })))
+const PlaybackView = lazy(() => importPlaybackView().then((m) => ({ default: m.PlaybackView })))
+const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.SyncPlayback })))
 const Cameras = lazy(() => import('./views/Cameras').then((m) => ({ default: m.Cameras })))
 const Settings = lazy(() => import('./views/Settings').then((m) => ({ default: m.Settings })))
 const Events = lazy(() => import('./views/Events').then((m) => ({ default: m.Events })))
@@ -60,6 +70,27 @@ const Cloud = lazy(() => import('./views/Cloud').then((m) => ({ default: m.Cloud
 const OnvifTools = lazy(() => import('./views/OnvifTools').then((m) => ({ default: m.OnvifTools })))
 const Register = lazy(() => import('./views/Register').then((m) => ({ default: m.Register })))
 const FirstTimeSetup = lazy(() => import('./views/FirstTimeSetup').then((m) => ({ default: m.FirstTimeSetup })))
+
+// Warm the chunk for the route the user is actually loading, immediately at
+// module evaluation — long before auth resolves and the router mounts. Then
+// idle-prefetch the other top routes so in-app navigation is instant.
+const routeWarmups: Array<[RegExp, () => Promise<unknown>]> = [
+  [/^\/playback\/sync/, importSyncPlayback],
+  [/^\/playback/, importPlaybackView],
+  [/^\/live/, importLiveView],
+  [/^\/$/, importDashboard],
+]
+try {
+  const path = window.location.pathname
+  const match = routeWarmups.find(([re]) => re.test(path))
+  if (match) match[1]().catch(() => {})
+  const idle = (window as any).requestIdleCallback ?? ((fn: () => void) => setTimeout(fn, 2000))
+  idle(() => {
+    for (const [, importer] of routeWarmups) importer().catch(() => {})
+  })
+} catch {
+  /* warm-up is best-effort */
+}
 
 function RouteFallback() {
   return <div className="p-4 text-sm text-[var(--text-dim)]">Loading…</div>
@@ -145,7 +176,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </ErrorBoundary>
 )
 
-  // Service worker registration is handled by vite-plugin-pwa (injectRegister: 'auto')
+// Service worker: registered manually AFTER window 'load' so registration
+// (and Workbox's precache pass) never competes with first-paint requests.
+window.addEventListener('load', () => {
+  import('virtual:pwa-register')
+    .then(({ registerSW }) => registerSW({ immediate: true }))
+    .catch(() => {
+      /* PWA support unavailable (e.g. dev without plugin) — app works without it */
+    })
+})
 
   // Expose a simple navigate function for non-routed components (menu overlay)
   ; (window as any).routerNavigate = (path: string) => {

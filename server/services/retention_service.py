@@ -192,6 +192,11 @@ class RetentionService:
                     stats["deleted_records"] += stats_space["deleted_records"]
                     stats["freed_space_mb"] += stats_space["freed_space_mb"]
 
+            # Evidence JPEGs age out with the recordings.
+            stats["deleted_evidence"] = RetentionService.cleanup_evidence(
+                db, retention_days
+            )
+
             stats.update(aux)
             recording_logger.info(f"Retention cleanup completed: {stats}")
             return stats
@@ -300,126 +305,206 @@ class RetentionService:
 
         return stats
 
+    # Batched deletion: bounds transaction size and lets the disk-usage check
+    # run once per batch instead of once per file.
+    DELETE_BATCH_SIZE = 500
+    # Free-space hysteresis: once below the threshold, delete until we're this
+    # far ABOVE it, so the pressure loop doesn't thrash at the boundary.
+    FREE_SPACE_HYSTERESIS_GB = 5.0
+
+    @staticmethod
+    def _delete_rows_batch(
+        db: Session, base_path: Path, rows: list, stats: dict[str, Any]
+    ) -> None:
+        """Delete a batch of Recording rows and their files (+ empty dirs)."""
+        for row in rows:
+            try:
+                file_path = base_path / row.file_path
+                size_mb = 0.0
+                try:
+                    size_mb = file_path.stat().st_size / (1024**2)
+                except OSError:
+                    pass
+                if file_path.exists():
+                    if RetentionService._delete_file_safely(file_path):
+                        stats["deleted_files"] += 1
+                        stats["freed_space_mb"] += size_mb
+                        RetentionService._delete_empty_directories(
+                            base_path, file_path
+                        )
+                db.delete(row)
+                stats["deleted_records"] += 1
+            except Exception as e:
+                recording_logger.error(f"Error deleting recording {row.id}: {e}")
+        db.commit()
+
     @staticmethod
     def _cleanup_by_age(
         db: Session, base_path: Path, cutoff_time: datetime, protect_flagged: bool
     ) -> dict[str, Any]:
-        """Delete recordings older than cutoff_time."""
+        """Delete recordings older than cutoff_time.
+
+        DB-driven: one indexed query per batch on ``start_time`` (the old
+        version rglob'd the whole tree and ran an unindexed leading-wildcard
+        LIKE per file). ``protect_flagged`` is enforced for real against the
+        ``is_flagged`` column.
+        """
         stats = {"deleted_files": 0, "deleted_records": 0, "freed_space_mb": 0}
 
-        # Walk through all recording files
-        for file_path in base_path.rglob("*.mp4"):
-            try:
-                # Get file modification time
-                mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=UTC)
+        while True:
+            q = db.query(Recording).filter(Recording.start_time < cutoff_time)
+            if protect_flagged:
+                q = q.filter(Recording.is_flagged == False)  # noqa: E712
+            rows = (
+                q.order_by(Recording.start_time.asc())
+                .limit(RetentionService.DELETE_BATCH_SIZE)
+                .all()
+            )
+            if not rows:
+                break
+            RetentionService._delete_rows_batch(db, base_path, rows, stats)
+            if len(rows) < RetentionService.DELETE_BATCH_SIZE:
+                break
 
-                if mtime < cutoff_time:
-                    file_size_mb = file_path.stat().st_size / (1024**2)
+        # Orphan sweep: on-disk files older than the cutoff with NO DB row
+        # (pre-migration stragglers, files landed while the DB was down and
+        # not yet reconciled). The filesystem walk only runs for this slow
+        # path — never per-file DB queries.
+        try:
+            from services.recording_paths import (
+                iter_recording_files,
+                parse_recording_time,
+            )
 
-                    # Check if file should be protected
-                    # Try to find corresponding DB record
-                    rel_path = str(file_path.relative_to(base_path))
-                    db_record = (
-                        db.query(Recording)
-                        .filter(
-                            (Recording.file_path == str(file_path))
-                            | (Recording.file_path.like(f"%{file_path.name}%"))
-                        )
-                        .first()
-                    )
-
-                    # Skip if flagged and protect_flagged is enabled
-                    if protect_flagged and db_record:
-                        # Note: Recording model doesn't have a flagged field yet
-                        # If you add one later, check it here:
-                        # if db_record.is_flagged:
-                        #     continue
-                        pass
-
-                    # Delete the file
-                    if RetentionService._delete_file_safely(file_path):
+            known = {
+                r[0]
+                for r in db.query(Recording.file_path)
+                .filter(Recording.start_time < cutoff_time + timedelta(days=1))
+                .all()
+            }
+            for cam_dir in base_path.iterdir():
+                if not cam_dir.is_dir() or not cam_dir.name.startswith("cam-"):
+                    continue
+                for f in iter_recording_files(cam_dir):
+                    try:
+                        st = f.stat()
+                    except OSError:
+                        continue
+                    ts = parse_recording_time(f, mtime=st.st_mtime)
+                    if ts is None or ts >= cutoff_time:
+                        continue
+                    rel = str(f.relative_to(base_path)).replace("\\", "/")
+                    if rel in known:
+                        continue
+                    if RetentionService._delete_file_safely(f):
                         stats["deleted_files"] += 1
-                        stats["freed_space_mb"] += file_size_mb
+                        stats["freed_space_mb"] += st.st_size / (1024**2)
+                        RetentionService._delete_empty_directories(base_path, f)
+        except Exception as e:
+            recording_logger.warning(f"Orphan sweep failed: {e}")
 
-                        # Delete DB record if exists
-                        if db_record:
-                            db.delete(db_record)
-                            stats["deleted_records"] += 1
-
-                        # Clean up empty directories
-                        RetentionService._delete_empty_directories(base_path, file_path)
-
-            except Exception as e:
-                recording_logger.error(f"Error processing file {file_path}: {e}")
-
-        # Commit DB changes
-        db.commit()
         return stats
 
     @staticmethod
     def _cleanup_by_space(
         db: Session, base_path: Path, min_free_space_gb: float, protect_flagged: bool
     ) -> dict[str, Any]:
-        """Delete oldest recordings until free space threshold is met."""
+        """Delete oldest recordings until free space clears the threshold.
+
+        DB-driven oldest-first batches; ``shutil.disk_usage`` runs once per
+        BATCH (the old version called it per file after two full ``rglob``
+        passes). Deletes until threshold + hysteresis so the 5-minute
+        pressure loop doesn't thrash at the boundary.
+        """
         stats = {"deleted_files": 0, "deleted_records": 0, "freed_space_mb": 0}
+        target_gb = min_free_space_gb + RetentionService.FREE_SPACE_HYSTERESIS_GB
 
-        # Get all recording files sorted by modification time (oldest first)
-        files: list[tuple[Path, float, float]] = []  # (path, mtime, size_mb)
-        for file_path in base_path.rglob("*.mp4"):
-            try:
-                stat = file_path.stat()
-                mtime = stat.st_mtime
-                size_mb = stat.st_size / (1024**2)
-                files.append((file_path, mtime, size_mb))
-            except Exception as e:
-                recording_logger.error(f"Error stat'ing file {file_path}: {e}")
+        while True:
+            free_gb = RetentionService._get_disk_free_space_gb(str(base_path))
+            if free_gb >= target_gb:
+                break
 
-        # Sort by modification time (oldest first)
-        files.sort(key=lambda x: x[1])
-
-        # Delete oldest files until we have enough free space
-        for file_path, _, size_mb in files:
-            try:
-                # Check current free space
-                free_space_gb = RetentionService._get_disk_free_space_gb(str(base_path))
-                if free_space_gb >= min_free_space_gb:
-                    break  # We have enough free space now
-
-                # Check if file should be protected
-                rel_path = str(file_path.relative_to(base_path))
-                db_record = (
-                    db.query(Recording)
-                    .filter(
-                        (Recording.file_path == str(file_path))
-                        | (Recording.file_path.like(f"%{file_path.name}%"))
-                    )
-                    .first()
+            q = db.query(Recording)
+            if protect_flagged:
+                q = q.filter(Recording.is_flagged == False)  # noqa: E712
+            rows = (
+                q.order_by(Recording.start_time.asc())
+                .limit(RetentionService.DELETE_BATCH_SIZE)
+                .all()
+            )
+            if not rows:
+                recording_logger.warning(
+                    "Disk pressure: no more deletable recordings "
+                    f"(free={free_gb:.1f}GB < target={target_gb:.1f}GB)"
                 )
+                break
+            RetentionService._delete_rows_batch(db, base_path, rows, stats)
 
-                # Skip if flagged and protect_flagged is enabled
-                if protect_flagged and db_record:
-                    # Note: Add flagged check here if field is added
-                    pass
-
-                # Delete the file
-                if RetentionService._delete_file_safely(file_path):
-                    stats["deleted_files"] += 1
-                    stats["freed_space_mb"] += size_mb
-
-                    # Delete DB record if exists
-                    if db_record:
-                        db.delete(db_record)
-                        stats["deleted_records"] += 1
-
-                    # Clean up empty directories
-                    RetentionService._delete_empty_directories(base_path, file_path)
-
-            except Exception as e:
-                recording_logger.error(f"Error deleting file {file_path}: {e}")
-
-        # Commit DB changes
-        db.commit()
         return stats
+
+    # Evidence JPEGs share the recordings volume under .evidence/ but the old
+    # retention only globbed *.mp4 — they accumulated forever.
+    @staticmethod
+    def cleanup_evidence(db: Session, retention_days: int) -> int:
+        """Delete .evidence/ JPEGs older than the retention window."""
+        if retention_days <= 0:
+            return 0
+        deleted = 0
+        try:
+            evidence_dir = Path(get_effective_recordings_base_path(db)) / ".evidence"
+            if not evidence_dir.is_dir():
+                return 0
+            cutoff = datetime.now(UTC).timestamp() - retention_days * 86400
+            for f in evidence_dir.rglob("*.jpg"):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        deleted += 1
+                except OSError:
+                    continue
+        except Exception as e:
+            recording_logger.warning(f"Evidence purge failed: {e}")
+        return deleted
+
+    @staticmethod
+    def check_disk_pressure(db: Session = None) -> dict[str, Any] | None:
+        """Fast free-space check + oldest-first purge when below threshold.
+
+        Called every few minutes (see main.py) — a near-full disk cannot wait
+        for the daily sweep. Cheap when there's nothing to do: one settings
+        read and one ``disk_usage`` call.
+        """
+        close_db = False
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        try:
+            settings_dict = RetentionService._get_retention_settings(db)
+            min_free = settings_dict.get("min_free_space_gb")
+            if not min_free:
+                return None
+            base_path = Path(get_effective_recordings_base_path(db))
+            if not base_path.exists():
+                return None
+            free_gb = RetentionService._get_disk_free_space_gb(str(base_path))
+            if free_gb >= min_free:
+                return None
+            recording_logger.warning(
+                f"Disk pressure: {free_gb:.1f}GB free < {min_free}GB threshold — "
+                "purging oldest recordings"
+            )
+            return RetentionService._cleanup_by_space(
+                db,
+                base_path,
+                min_free,
+                settings_dict.get("protect_flagged", True),
+            )
+        except Exception as e:
+            recording_logger.error(f"Disk pressure check failed: {e}", exc_info=True)
+            return None
+        finally:
+            if close_db:
+                db.close()
 
 
 # Singleton instance

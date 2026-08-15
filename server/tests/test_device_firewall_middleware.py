@@ -79,8 +79,11 @@ def env(monkeypatch):
 
     mw = _load_middleware()
 
-    # StaticPool + one connection: the middleware opens its OWN session, and a
-    # plain :memory: engine would hand it a separate, empty database.
+    # StaticPool + one connection: the firewall opens its OWN session, and a
+    # plain :memory: engine would hand it a separate, empty database. The
+    # middleware no longer touches the DB itself — it delegates to the
+    # service's TTL-cached helpers — so patch the service's session factory
+    # and reset its decision cache between tests.
     eng = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -88,7 +91,8 @@ def env(monkeypatch):
     )
     Base.metadata.create_all(eng)
     session_factory = sessionmaker(bind=eng)
-    monkeypatch.setattr(mw, "SessionLocal", session_factory)
+    monkeypatch.setattr(dfw, "_new_session", lambda: session_factory())
+    dfw.invalidate_decision_cache()
 
     # Trust the proxy so X-Forwarded-For is honored, mirroring the nginx setup.
     client_ip._trusted_proxy_nets.cache_clear()
@@ -113,6 +117,7 @@ def env(monkeypatch):
         yield _types.SimpleNamespace(app=app, db=db, settings=settings)
     finally:
         db.close()
+        dfw.invalidate_decision_cache()
         client_ip._trusted_proxy_nets.cache_clear()
         client_ip._internal_nets.cache_clear()
 

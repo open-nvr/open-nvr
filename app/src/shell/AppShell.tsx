@@ -26,6 +26,7 @@ import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { CameraStatusProvider } from '../hooks/useCameraStatus'
 
 type NavItem = {
   to: string
@@ -184,6 +185,7 @@ export function AppShell() {
   }
 
   return (
+    <CameraStatusProvider>
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
   {/* Top white header (sticky) */}
   <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
@@ -317,6 +319,7 @@ export function AppShell() {
       </div>
       <DeviceBlockedOverlay />
     </div>
+    </CameraStatusProvider>
   )
 }
 

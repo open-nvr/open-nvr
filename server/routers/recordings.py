@@ -28,13 +28,13 @@ This router provides:
 - Proxy to MediaMTX playback server (with auth)
 """
 
+import asyncio
 import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
-import requests as http_client
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -51,7 +51,9 @@ from schemas import (
     RecordingStorageSettings,
 )
 from services.mediamtx_admin_service import MediaMtxAdminService
+from services import mediamtx_client
 from services.cloud_recording_service import CloudRecordingService
+from services.retention_service import RetentionService
 from services.storage_service import (
     RecordingPathError,
     safe_recording_path,
@@ -75,12 +77,14 @@ def _live_edge_iso(
     """The instant from which footage is treated as LIVE (not yet playable).
 
     ``lag_seconds`` behind ``now``, but never earlier than ``file_start`` — a
-    recording that just began is live in its entirety. Both arguments are naive
-    server-local wall clock, the same basis MediaMTX names its files on; the
-    ``Z`` suffix matches what the rest of this router emits.
+    recording that just began is live in its entirety. Accepts tz-aware
+    datetimes (preferred; emitted as proper UTC) or the legacy naive-UTC pair
+    (emitted with a bare ``Z`` suffix, matching the old behaviour).
     """
     edge = max(file_start, now - timedelta(seconds=lag_seconds))
-    return edge.isoformat() + "Z"
+    if edge.tzinfo is None:
+        return edge.isoformat() + "Z"
+    return edge.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _parse_byte_range(range_header: str | None, file_size: int) -> tuple[int, int] | None:
@@ -295,29 +299,13 @@ async def get_cloud_upload_status(
     return status
 
 
-def _check_mediamtx_available() -> bool:
-    """Check if MediaMTX playback server is available."""
-    if not settings.mediamtx_playback_url:  # url-internal-ok: guard check on backend-side config, never returned to browser
-        return False
-    try:
-        # Quick health check - just try to connect
-        # MediaMTX returns various status codes:
-        # - 200: valid path with recordings
-        # - 400: invalid request
-        # - 401: JWT auth required (server is running!)
-        # - 404: path not found
-        # - 500: server error
-        # Probe the server root, NOT /list?path=__health__: listing a
-        # nonexistent path made MediaMTX log 'ERR path __health__ is not
-        # configured' on every probe (#218's log noise). Any HTTP answer
-        # (200/404/401/...) means the playback server is up — which is all
-        # this check ever asserted.
-        response = http_client.get(
-            f"{settings.mediamtx_playback_url}/", timeout=2  # url-internal-ok: server-side health probe to mediamtx playback server
-        )
-        return response.status_code in (200, 400, 401, 404, 500)
-    except Exception:
-        return False
+async def _check_mediamtx_available() -> bool:
+    """Check if MediaMTX playback server is available.
+
+    Async + TTL-cached (see services.mediamtx_client): the old version ran a
+    blocking ``requests.get`` on the event loop for every listing request.
+    """
+    return await mediamtx_client.check_available()
 
 
 # =============================================================================
@@ -334,6 +322,68 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
         db.commit()
         db.refresh(row)
     return row
+
+
+def _can_view_camera(user: User, camera: Camera, db: Session) -> bool:
+    """Camera-level view permission for recordings/playback.
+
+    Mirrors the ownership rule the camera routes enforce (superuser bypass,
+    else owner), extended with CameraPermission.can_view grants. Cameras with
+    no owner (legacy rows) stay visible to any authenticated user — matching
+    their pre-existing behaviour instead of suddenly locking them away.
+    """
+    if getattr(user, "is_superuser", False):
+        return True
+    owner_id = getattr(camera, "owner_id", None)
+    if owner_id is None or owner_id == user.id:
+        return True
+    from models import CameraPermission
+
+    return (
+        db.query(CameraPermission.id)
+        .filter(
+            CameraPermission.user_id == user.id,
+            CameraPermission.camera_id == camera.id,
+            CameraPermission.can_view == True,  # noqa: E712
+        )
+        .first()
+        is not None
+    )
+
+
+def _require_camera_view(user: User, camera: Camera, db: Session) -> None:
+    if not _can_view_camera(user, camera, db):
+        raise HTTPException(
+            status_code=403, detail="Not permitted to view this camera"
+        )
+
+
+def _viewable_active_cameras(db: Session, user: User) -> list[Camera]:
+    """Active cameras the user may view (superuser: all; else owner or granted).
+
+    Used by the listing endpoints so one user can never enumerate another
+    owner's cameras.
+    """
+    cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+    return [c for c in cameras if _can_view_camera(user, c, db)]
+
+
+def _camera_for_playback_path(db: Session, path: str) -> Camera | None:
+    """Resolve a MediaMTX playback path (``cam-57`` or ``cam-192_168_1_9``) to
+    its Camera by rebuilding each active camera's canonical path.
+
+    Rebuilding (not parsing) works for both id- and ip-based path modes.
+    Returns ``None`` when no active camera owns the path.
+    """
+    for cam in db.query(Camera).filter(Camera.is_active == True).all():  # noqa: E712
+        if (
+            _build_stream_name(
+                settings.mediamtx_stream_prefix, cam.id, cam.ip_address
+            )
+            == path
+        ):
+            return cam
+    return None
 
 
 async def _authenticate_request(request: Request, db: Session) -> User | None:
@@ -416,7 +466,7 @@ async def get_storage(
 
 async def _sync_storage_to_mediamtx(db: Session, effective_path: str) -> dict:
     """Sync storage settings to MediaMTX."""
-    new_record_path = f"{effective_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+    new_record_path = f"{effective_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
     result = {"mediamtx_record_path": new_record_path}
 
     try:
@@ -606,34 +656,29 @@ async def list_recordings(
     ):
         raise HTTPException(status_code=400, detail="Invalid path format")
 
-    try:
-        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
+    # Authorize: the path must resolve to a camera this user may view.
+    camera = _camera_for_playback_path(db, path)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
 
-        if response.status_code != 200:
-            return {
-                "recordings": [],
-                "error": f"MediaMTX returned {response.status_code}",
-            }
+    recordings = await mediamtx_client.list_segments(path, timeout=10.0)
+    if recordings is None:
+        return {"recordings": [], "error": "MediaMTX list unavailable"}
 
-        recordings = response.json()
-
-        # Returned to the browser, so use the external fallback chain
-        # (matches get_playback_url / get_playback_config).
-        browser_playback_base = (
-            settings.mediamtx_external_playback_url
-            or settings.mediamtx_playback_url
-            or "http://127.0.0.1:9996"
-        )
-        return {
-            "recordings": recordings,
-            "count": len(recordings),
-            "playback_base_url": browser_playback_base,
-            "path": path,
-        }
-    except Exception as e:
-        recording_logger.error(f"Failed to list recordings: {e}")
-        return {"recordings": [], "error": str(e)}
+    # Returned to the browser, so use the external fallback chain
+    # (matches get_playback_url / get_playback_config).
+    browser_playback_base = (
+        settings.mediamtx_external_playback_url
+        or settings.mediamtx_playback_url
+        or "http://127.0.0.1:9996"
+    )
+    return {
+        "recordings": recordings,
+        "count": len(recordings),
+        "playback_base_url": browser_playback_base,
+        "path": path,
+    }
 
 
 @router.get("/playback/cameras")
@@ -649,41 +694,36 @@ async def list_recording_cameras(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()
+    # Only cameras this user may view — never the whole estate.
+    cameras = _viewable_active_cameras(db, user_obj)
     result = []
 
-    for cam in cameras:
-        path = _build_stream_name(
+    path_by_cam = {
+        cam.id: _build_stream_name(
             settings.mediamtx_stream_prefix, cam.id, cam.ip_address
         )
-        try:
-            url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-            response = http_client.get(url, timeout=5)
+        for cam in cameras
+    }
+    listings = await mediamtx_client.list_segments_many(
+        list(path_by_cam.values()), timeout=5.0
+    )
 
-            if response.status_code == 200:
-                recordings = response.json()
-                if recordings:
-                    total_duration = sum(r.get("duration", 0) for r in recordings)
-                    result.append(
-                        {
-                            "camera_id": cam.id,
-                            "camera_name": cam.name or f"Camera {cam.id}",
-                            "path": path,
-                            "recording_count": len(recordings),
-                            "total_duration": total_duration,
-                            "earliest": recordings[0].get("start")
-                            if recordings
-                            else None,
-                            "latest": recordings[-1].get("start")
-                            if recordings
-                            else None,
-                        }
-                    )
-        except Exception as e:
-            recording_logger.error(
-                f"Error processing recordings for camera path {path}: {e}"
+    for cam in cameras:
+        path = path_by_cam[cam.id]
+        recordings = listings.get(path)
+        if recordings:
+            total_duration = sum(r.get("duration", 0) for r in recordings)
+            result.append(
+                {
+                    "camera_id": cam.id,
+                    "camera_name": cam.name or f"Camera {cam.id}",
+                    "path": path,
+                    "recording_count": len(recordings),
+                    "total_duration": total_duration,
+                    "earliest": recordings[0].get("start") if recordings else None,
+                    "latest": recordings[-1].get("start") if recordings else None,
+                }
             )
-            pass
 
     return {"cameras": result, "count": len(result)}
 
@@ -704,6 +744,12 @@ async def get_playback_url(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    # Authorize: the path must resolve to a camera this user may view.
+    camera = _camera_for_playback_path(db, path)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
+
     # Build the playback URL the BROWSER fetches — use the external fallback
     # chain (the browser can't reach the Docker-internal mediamtx host; the
     # external URL is nginx-TLS-fronted). Mirrors streams.py's pattern.
@@ -716,6 +762,199 @@ async def get_playback_url(
     playback_url = f"{playback_base.rstrip('/')}/get?{urlencode(params)}"
 
     return {"url": playback_url, "path": path, "start": start, "duration": duration}
+
+
+# =============================================================================
+# Flag protection — flagged recordings survive retention (protect_flagged)
+# =============================================================================
+
+
+@router.put("/flag")
+async def set_recording_flag(
+    camera_id: int = Query(..., description="Camera ID"),
+    start: str = Query(..., description="Range start (ISO 8601)"),
+    end: str = Query(..., description="Range end (ISO 8601)"),
+    flagged: bool = Query(..., description="Set or clear the protection flag"),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Flag (or unflag) every recording clip in a time range.
+
+    Flagged clips are skipped by retention's age and disk-pressure sweeps
+    while ``protect_flagged`` is enabled — this is what makes "keep this
+    incident's footage" survive the retention window.
+    """
+    from datetime import datetime
+
+    from models import Recording
+
+    user_obj = await _authenticate_request(request, db)
+    if not user_obj:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
+
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start/end format")
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="End must be after start")
+
+    updated = (
+        db.query(Recording)
+        .filter(
+            Recording.camera_id == camera_id,
+            Recording.start_time >= start_dt,
+            Recording.start_time < end_dt,
+        )
+        .update({Recording.is_flagged: flagged}, synchronize_session=False)
+    )
+    db.commit()
+    return {"camera_id": camera_id, "flagged": flagged, "updated_clips": updated}
+
+
+# =============================================================================
+# Authenticated clip export (streams through the backend)
+# =============================================================================
+
+# One-time export tickets: minted by an authenticated POST, consumed by the
+# browser's <a href> download (which cannot carry an Authorization header).
+# In-memory is fine — a ticket lives seconds and downloads are single-process.
+_EXPORT_TICKET_TTL_SECONDS = 300
+_export_tickets: dict[str, dict] = {}
+
+
+@router.post("/export/ticket")
+async def create_export_ticket(
+    camera_id: int = Query(..., description="Camera ID"),
+    start: str = Query(..., description="Clip start (RFC3339)"),
+    duration: float = Query(..., gt=0, le=4 * 3600, description="Clip length (s)"),
+    filename: str | None = Query(default=None, description="Download filename"),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Mint a short-lived, single-use ticket for a clip download."""
+    import time as _time
+    import uuid as _uuid
+
+    user_obj = await _authenticate_request(request, db)
+    if not user_obj:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    camera = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.is_active == True)
+        .first()
+    )
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
+
+    # Sanitize the download filename (header-injection / path chars).
+    safe_name = "clip.mp4"
+    if filename:
+        cleaned = "".join(
+            c for c in filename if c.isalnum() or c in ("-", "_", ".")
+        ).strip(".")
+        if cleaned:
+            safe_name = cleaned if cleaned.endswith(".mp4") else f"{cleaned}.mp4"
+
+    # Purge expired tickets opportunistically.
+    now = _time.time()
+    for t in [t for t, v in _export_tickets.items() if v["expires"] < now]:
+        _export_tickets.pop(t, None)
+
+    ticket = _uuid.uuid4().hex
+    _export_tickets[ticket] = {
+        "expires": now + _EXPORT_TICKET_TTL_SECONDS,
+        "path": _build_stream_name(
+            settings.mediamtx_stream_prefix, camera.id, camera.ip_address
+        ),
+        "start": start,
+        "duration": duration,
+        "filename": safe_name,
+    }
+    return {
+        "ticket": ticket,
+        "download_url": f"{settings.api_prefix}/recordings/export?ticket={ticket}",
+        "expires_in_seconds": _EXPORT_TICKET_TTL_SECONDS,
+    }
+
+
+@router.get("/export")
+async def export_clip(
+    ticket: str = Query(..., description="Export ticket"),
+):
+    """Stream a recording clip to the browser as a file download.
+
+    The whole clip is STREAMED (chunked) from MediaMTX through the backend to
+    the browser's disk — never buffered in browser memory (the old client-side
+    export blob was multi-GB for long clips) and never fetched from an
+    unauthenticated port.
+    """
+    import time as _time
+
+    from fastapi.responses import StreamingResponse
+
+    entry = _export_tickets.pop(ticket, None)  # single-use
+    if not entry or entry["expires"] < _time.time():
+        raise HTTPException(status_code=403, detail="Invalid or expired ticket")
+
+    url = f"{settings.mediamtx_playback_url}/get"  # url-internal-ok: server-side clip fetch from mediamtx playback server
+    params = {
+        "path": entry["path"],
+        "start": entry["start"],
+        "duration": str(entry["duration"]),
+    }
+
+    import httpx as _httpx
+
+    client = mediamtx_client.get_client()
+    httpx_timeout = _httpx.Timeout(30.0, read=600.0)
+
+    # Probe the upstream status BEFORE committing a response: open the stream,
+    # read the status code, and only then hand the (still-open) body to
+    # StreamingResponse. Checking status inside the generator would already
+    # have sent a 200 + attachment header, turning an upstream failure into a
+    # silent, zero-byte "clip.mp4" download instead of a real error.
+    req = client.build_request("GET", url, params=params, timeout=httpx_timeout)
+    try:
+        resp = await client.send(req, stream=True)
+    except Exception as e:
+        recording_logger.warning(f"Clip export: MediaMTX unreachable: {e}")
+        raise HTTPException(
+            status_code=502, detail="Recording source unavailable"
+        )
+
+    if resp.status_code != 200:
+        status = resp.status_code
+        await resp.aclose()
+        recording_logger.warning(f"Clip export: MediaMTX returned {status}")
+        raise HTTPException(
+            status_code=502 if status >= 500 else 404,
+            detail="Clip not available for the requested range",
+        )
+
+    async def _stream():
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
+                yield chunk
+        finally:
+            await resp.aclose()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # =============================================================================
@@ -758,6 +997,7 @@ async def create_hls_session(
     )
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
 
     # Parse time range
     try:
@@ -852,8 +1092,9 @@ async def get_hls_manifest(
         content=manifest,
         media_type="application/vnd.apple.mpegurl",
         headers={
+            # Same-origin only: no ACAO wildcard — a leaked session id
+            # must not be usable cross-origin from an arbitrary site.
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -882,35 +1123,14 @@ async def get_hls_init_segment(
     return Response(
         content=init_data,
         media_type="video/mp4",
-        headers={"Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"},
+        headers={"Cache-Control": "max-age=3600"},
     )
 
 
-@router.get("/playback/hls/{session_id}/media")
-async def get_hls_media(
-    session_id: str,
-    request: Request = None,
-):
-    """
-    Serve byte ranges of the single on-disk recording file (fast-seek path).
-
-    The byte-range HLS manifest points its init segment and every media
-    segment at this endpoint; hls.js requests each as an HTTP Range, so a seek
-    is a direct ranged read from disk with no MediaMTX re-scan.
-
-    Security: session_id acts as the auth token (same as the other playback
-    routes). The file was resolved under the recordings base at session
-    creation (V-005), so no request-supplied path reaches the filesystem here.
-    """
+def _serve_file_ranges(path: Path, request: Request | None):
+    """Range-request file serving shared by the HLS media endpoints."""
     from fastapi.responses import StreamingResponse
 
-    from services.hls_playback_service import HlsPlaybackService
-
-    session = await HlsPlaybackService.get_session(session_id)
-    if not session or not session.file_path:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
-    path = Path(session.file_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Recording file not available")
 
@@ -943,7 +1163,6 @@ async def get_hls_media(
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Cache-Control": "max-age=86400",
-        "Access-Control-Allow-Origin": "*",
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
@@ -954,6 +1173,59 @@ async def get_hls_media(
         media_type="video/mp4",
         headers=headers,
     )
+
+
+@router.get("/playback/hls/{session_id}/media")
+async def get_hls_media(
+    session_id: str,
+    request: Request = None,
+):
+    """
+    Serve byte ranges of the session's FIRST on-disk clip file (legacy path).
+
+    Kept for older manifests; new multi-file manifests address clips as
+    ``media/{n}`` (see get_hls_media_file).
+
+    Security: session_id acts as the auth token (same as the other playback
+    routes). The file was resolved under the recordings base at session
+    creation (V-005), so no request-supplied path reaches the filesystem here.
+    """
+    from services.hls_playback_service import HlsPlaybackService
+
+    session = await HlsPlaybackService.get_session(session_id)
+    if not session or not session.file_path:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    return _serve_file_ranges(Path(session.file_path), request)
+
+
+@router.get("/playback/hls/{session_id}/media/{file_index}")
+async def get_hls_media_file(
+    session_id: str,
+    file_index: int,
+    request: Request = None,
+):
+    """
+    Serve byte ranges of one clip file in the session's playback window.
+
+    The multi-file byte-range manifest addresses each contiguous clip as
+    ``media/{n}``; hls.js fetches init segments and media segments as HTTP
+    Ranges against it, so playback crosses clip boundaries with zero session
+    churn and every seek is a single ranged read.
+
+    Security: session_id is the auth token; the file list was resolved under
+    the recordings base at session creation (V-005) — ``file_index`` selects
+    from that frozen list, no request-supplied path reaches the filesystem.
+    """
+    from services.hls_playback_service import HlsPlaybackService
+
+    session = await HlsPlaybackService.get_session(session_id)
+    if not session or not session.files:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if file_index < 0 or file_index >= len(session.files):
+        raise HTTPException(status_code=404, detail="No such file in session")
+
+    return _serve_file_ranges(Path(session.files[file_index].path), request)
 
 
 @router.get("/playback/hls/{session_id}/browser.mp4")
@@ -1001,7 +1273,6 @@ async def get_browser_playable_recording(
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Cache-Control": "max-age=86400",
-        "Access-Control-Allow-Origin": "*",
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
@@ -1043,7 +1314,6 @@ async def get_hls_segment(
         media_type="video/mp4",
         headers={
             "Cache-Control": "max-age=86400",  # Cache segments for 24h
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -1104,131 +1374,38 @@ async def get_playback_config(
     }
 
 
-@router.get("/today/{camera_id}")
-async def get_today_segments(
-    camera_id: int,
-    request: Request = None,
-    db: Session = Depends(get_db),
-):
-    """
-    Get today's recording segments for a specific camera.
-    Used for DVR-style timeline scrubbing in live view.
-    Returns segments with start times and durations for timeline visualization.
-    """
-    from datetime import datetime
-    from urllib.parse import quote
-
-    user_obj = await _authenticate_request(request, db)
-    if not user_obj:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    camera = (
-        db.query(Camera)
-        .filter(Camera.id == camera_id, Camera.is_active == True)
-        .first()
-    )
-    if not camera:
-        raise HTTPException(status_code=404, detail="Camera not found")
-
-    path = _build_stream_name(
-        settings.mediamtx_stream_prefix, camera.id, camera.ip_address
-    )
-
-    # The LIST call below stays internal (backend is the caller), but every URL
-    # returned TO THE BROWSER uses the external fallback chain. Locked by
-    # test_url_fallback_chain.py.
-    browser_playback_base = (
-        settings.mediamtx_external_playback_url
-        or settings.mediamtx_playback_url
-        or "http://127.0.0.1:9996"
-    ).rstrip("/")
-
-    try:
-        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
-
-        if response.status_code != 200:
-            return {
-                "segments": [],
-                "camera_id": camera_id,
-                "path": path,
-                "today": datetime.now().strftime("%Y-%m-%d"),
-            }
-
-        all_segments = response.json()
-        if not all_segments:
-            return {
-                "segments": [],
-                "camera_id": camera_id,
-                "path": path,
-                "today": datetime.now().strftime("%Y-%m-%d"),
-            }
-
-        # Filter to today's segments only
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_segments = []
-
-        for seg in all_segments:
-            start_str = seg.get("start", "")
-            if not start_str:
-                continue
-            try:
-                dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                if dt.strftime("%Y-%m-%d") == today:
-                    # Add playback URL for this segment — uses the
-                    # external base so the browser can actually reach it.
-                    encoded_start = quote(start_str, safe="")
-                    seg["playback_url"] = (
-                        f"{browser_playback_base}/get?path={path}&start={encoded_start}&duration={seg.get('duration', 300)}"
-                    )
-                    today_segments.append(seg)
-            except Exception:
-                continue
-
-        # Sort by start time
-        today_segments.sort(key=lambda s: s.get("start", ""))
-
-        # Calculate total duration
-        total_duration = sum(s.get("duration", 0) for s in today_segments)
-
-        # Build a "play from here to live" URL helper
-        first_start = today_segments[0].get("start") if today_segments else None
-
-        return {
-            "segments": today_segments,
-            "camera_id": camera_id,
-            "camera_name": camera.name or f"Camera {camera_id}",
-            "path": path,
-            "today": today,
-            "total_duration": total_duration,
-            "segment_count": len(today_segments),
-            "first_start": first_start,
-            "playback_base_url": browser_playback_base,
-        }
-    except Exception as e:
-        recording_logger.error(
-            f"Failed to get today's segments for camera {camera_id}: {e}"
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/segments/{camera_id}")
 async def get_day_segments(
     camera_id: int,
     date: str | None = Query(
-        default=None, description="Day in YYYY-MM-DD (UTC). Defaults to today."
+        default=None,
+        description="Day in YYYY-MM-DD (interpreted in `tz`). Defaults to today.",
+    ),
+    start: str | None = Query(
+        default=None, description="Explicit range start (ISO 8601), overrides date"
+    ),
+    end: str | None = Query(
+        default=None, description="Explicit range end (ISO 8601), overrides date"
+    ),
+    tz: str | None = Query(
+        default=None,
+        description="IANA timezone for interpreting `date` (default: server local)",
     ),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
     """
-    Get the raw per-clip recording segments for a camera on a given day.
+    Get the continuous recording segments for a camera on a given day.
 
     Unlike ``/list`` (which aggregates a whole day into one entry), this returns
-    every continuous MediaMTX recording as its own segment with an absolute
+    every continuous recording run as its own segment with an absolute
     ``start``, ``duration`` and a browser-reachable ``playback_url``. The DVR
     playback timeline uses this to draw footage/gap blocks and to seek to any
     wall-clock instant via ``playback_base_url``/``path``.
+
+    The day window is LOCAL midnight → next local midnight (in ``tz``), or the
+    explicit ``start``/``end`` instants when provided. Served from the
+    recordings DB index; falls back to MediaMTX for unindexed cameras.
     """
     from datetime import datetime
     from urllib.parse import quote
@@ -1244,9 +1421,32 @@ async def get_day_segments(
     )
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
 
-    # Default to today (UTC) — same basis MediaMTX labels its segment starts on.
-    target_date = date or datetime.now(UTC).strftime("%Y-%m-%d")
+    from services.recording_query_service import (
+        camera_has_rows,
+        day_segments,
+        local_day_bounds,
+        resolve_query_tz,
+    )
+
+    query_tz = resolve_query_tz(tz)
+
+    # Resolve the requested window: explicit instants win, else the LOCAL day.
+    range_start: datetime | None = None
+    range_end: datetime | None = None
+    if start and end:
+        try:
+            range_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            range_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start/end format")
+    target_date = date or datetime.now(query_tz).strftime("%Y-%m-%d")
+    if range_start is None or range_end is None:
+        try:
+            range_start, range_end = local_day_bounds(target_date, query_tz)
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=400, detail="Invalid date format")
 
     path = _build_stream_name(
         settings.mediamtx_stream_prefix, camera.id, camera.ip_address
@@ -1267,20 +1467,30 @@ async def get_day_segments(
     # older is served as normal VOD; the UI paints the remainder as LIVE and
     # sends the user to Live View for it. Clamped to the file start, so a file
     # only seconds old is entirely live.
+    #
+    # Resolution globs only the current/previous hour directories (see
+    # find_latest_recording_file) instead of walking the whole archive, and
+    # runs off the event loop.
     live_edge_start = None
     try:
-        from services.hls_playback_service import HlsPlaybackService
+        from pathlib import Path as _Path
+
+        from services.recording_paths import find_latest_recording_file
+        from services.storage_service import get_effective_recordings_base_path
 
         now = datetime.now(UTC)
-        resolved = HlsPlaybackService._resolve_recording_file(
-            camera_id, now, now, db
-        )
-        if resolved is not None:
-            live_path, file_start = resolved
+        root = _Path(get_effective_recordings_base_path(db))
+
+        def _resolve_live_edge():
+            latest = find_latest_recording_file(camera_id, root, now)
+            if latest is None:
+                return None
+            live_path, file_start = latest
             if now.timestamp() - live_path.stat().st_mtime < 60:
-                live_edge_start = _live_edge_iso(
-                    file_start.replace(tzinfo=None), datetime.now()
-                )
+                return _live_edge_iso(file_start, now)
+            return None
+
+        live_edge_start = await asyncio.to_thread(_resolve_live_edge)
     except Exception:
         live_edge_start = None
 
@@ -1296,14 +1506,47 @@ async def get_day_segments(
         "live_edge_start": live_edge_start,
     }
 
+    def _seg_payload(start_iso: str, duration: float) -> dict:
+        encoded_start = quote(start_iso, safe="")
+        return {
+            "start": start_iso,
+            "duration": duration,
+            "playback_url": (
+                f"{browser_playback_base}/get?path={path}"
+                f"&start={encoded_start}&duration={duration}"
+            ),
+        }
+
     try:
-        url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-        response = http_client.get(url, timeout=10)
-        if response.status_code != 200:
+        # Primary: the recordings DB index — one indexed range query, clips
+        # merged into continuous segments server-side.
+        if settings.use_db_recordings_index and camera_has_rows(db, camera_id):
+            merged = day_segments(db, camera_id, range_start, range_end)
+            segments = [
+                _seg_payload(
+                    m["start"].astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    m["duration"],
+                )
+                for m in merged
+            ]
+            result = dict(empty)
+            result["segments"] = segments
+            result["total_duration"] = sum(m["duration"] for m in merged)
+            result["segment_count"] = len(segments)
+            return result
+
+        # Fallback (unindexed camera / flag off): date-bounded MediaMTX query.
+        # A one-hour margin catches segments spanning the window start.
+        all_segments = await mediamtx_client.list_segments(
+            path,
+            start=range_start - timedelta(hours=1),
+            end=range_end,
+            timeout=10.0,
+        )
+        if all_segments is None:
             return empty
 
-        all_segments = response.json() or []
-        day_segments = []
+        fallback_segments = []
         for seg in all_segments:
             start_str = seg.get("start", "")
             if not start_str:
@@ -1312,29 +1555,17 @@ async def get_day_segments(
                 dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
             except Exception:
                 continue
-            # Match the UTC date basis used by /list's day grouping so the
-            # timeline shows exactly the clips behind the card the user clicked.
-            if dt.strftime("%Y-%m-%d") != target_date:
+            if dt < range_start or dt >= range_end:
                 continue
+            fallback_segments.append(_seg_payload(start_str, seg.get("duration", 0)))
 
-            duration = seg.get("duration", 0)
-            encoded_start = quote(start_str, safe="")
-            day_segments.append(
-                {
-                    "start": start_str,
-                    "duration": duration,
-                    "playback_url": (
-                        f"{browser_playback_base}/get?path={path}"
-                        f"&start={encoded_start}&duration={duration}"
-                    ),
-                }
-            )
-
-        day_segments.sort(key=lambda s: s.get("start", ""))
+        fallback_segments.sort(key=lambda s: s.get("start", ""))
         result = dict(empty)
-        result["segments"] = day_segments
-        result["total_duration"] = sum(s.get("duration", 0) for s in day_segments)
-        result["segment_count"] = len(day_segments)
+        result["segments"] = fallback_segments
+        result["total_duration"] = sum(
+            s.get("duration", 0) for s in fallback_segments
+        )
+        result["segment_count"] = len(fallback_segments)
         return result
     except Exception as e:
         recording_logger.error(
@@ -1475,20 +1706,27 @@ def _group_filesystem_recordings_by_date(
 @router.get("/list")
 async def list_recordings_by_date(
     camera_id: int | None = Query(default=None, description="Filter by camera ID"),
+    tz: str | None = Query(
+        default=None,
+        description="IANA timezone for day grouping (default: server local)",
+    ),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
     """
-    List recordings grouped by camera and date.
+    List recordings grouped by camera and LOCAL date (in ``tz``).
     Returns user-friendly recording counts (1 recording = 1 day per camera).
-    Falls back to filesystem listing if MediaMTX is unavailable.
+
+    Served from the recordings DB index (one aggregate query); cameras with
+    no indexed rows fall back to MediaMTX, and the whole endpoint falls back
+    to MediaMTX/filesystem when the index is disabled.
     """
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Check if MediaMTX is available
-    mediamtx_available = _check_mediamtx_available()
+    # Check if MediaMTX is available (async + TTL-cached)
+    mediamtx_available = await _check_mediamtx_available()
 
     # Get cameras to query
     if camera_id:
@@ -1500,47 +1738,126 @@ async def list_recordings_by_date(
     else:
         cameras = db.query(Camera).filter(Camera.is_active == True).all()
 
+    # Camera-level scoping: non-superusers only list cameras they may view.
+    cameras = [c for c in cameras if _can_view_camera(user_obj, c, db)]
+
     result = []
     total_recordings = 0
     total_duration = 0
 
-    if mediamtx_available:
-        # Use MediaMTX playback server (preferred - accurate durations)
+    # ---- Primary path: recordings DB index --------------------------------
+    if settings.use_db_recordings_index:
+        from services.recording_query_service import day_summaries, resolve_query_tz
+
+        query_tz = resolve_query_tz(tz)
+        browser_playback_base = (
+            settings.mediamtx_external_playback_url
+            or settings.mediamtx_playback_url
+            or "http://127.0.0.1:9996"
+        ).rstrip("/")
+
+        summaries = day_summaries(db, [c.id for c in cameras], query_tz)
+        unindexed = [c for c in cameras if c.id not in summaries]
+
         for cam in cameras:
+            days = summaries.get(cam.id)
+            if not days:
+                continue
             path = _build_stream_name(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
-            try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=10)
-
-                if response.status_code == 200:
-                    segments = response.json()
-                    if segments:
-                        # Group by date
-                        daily_recordings = _group_segments_by_date(segments, path)
-
-                        cam_duration = sum(
-                            d["total_duration"] for d in daily_recordings
-                        )
-
-                        result.append(
-                            {
-                                "camera_id": cam.id,
-                                "camera_name": cam.name or f"Camera {cam.id}",
-                                "path": path,
-                                "recording_count": len(daily_recordings),
-                                "total_duration": cam_duration,
-                                "recordings": daily_recordings,
-                            }
-                        )
-
-                        total_recordings += len(daily_recordings)
-                        total_duration += cam_duration
-            except Exception as e:
-                recording_logger.error(
-                    f"Failed to get recordings for camera {cam.id}: {e}"
+            daily_recordings = []
+            cam_duration = 0.0
+            for d in days:
+                first_iso = (
+                    d["first_start"].astimezone(UTC).isoformat().replace("+00:00", "Z")
                 )
+                from urllib.parse import quote as _quote
+
+                daily_recordings.append(
+                    {
+                        "date": d["date"],
+                        "total_duration": d["total_duration"],
+                        "segment_count": d["segment_count"],
+                        "first_start": first_iso,
+                        "playback_url": (
+                            f"{browser_playback_base}/get?path={path}"
+                            f"&start={_quote(first_iso, safe='')}"
+                            f"&duration={d['total_duration']}"
+                        ),
+                    }
+                )
+                cam_duration += d["total_duration"]
+
+            result.append(
+                {
+                    "camera_id": cam.id,
+                    "camera_name": cam.name or f"Camera {cam.id}",
+                    "path": path,
+                    "recording_count": len(daily_recordings),
+                    "total_duration": cam_duration,
+                    "recordings": daily_recordings,
+                }
+            )
+            total_recordings += len(daily_recordings)
+            total_duration += cam_duration
+
+        # Bootstrap fallback: cameras not indexed yet (fresh migration, the
+        # reconciler hasn't caught up) still list via MediaMTX.
+        if unindexed and mediamtx_available:
+            cameras = unindexed
+        else:
+            return {
+                "cameras": result,
+                "total_recordings": total_recordings,
+                "total_duration": total_duration,
+                "total_cameras": len(result),
+                "mediamtx_available": mediamtx_available,
+            }
+
+    if mediamtx_available:
+        # Use MediaMTX playback server (preferred - accurate durations).
+        # Parallel, date-bounded fan-out: one concurrent request per camera
+        # (semaphore-capped) limited to the retention window, instead of the
+        # old sequential full-history fetch that froze the event loop for up
+        # to cameras × 10s.
+        retention_days = RetentionService._get_retention_settings(db).get(
+            "retention_days", 30
+        )
+        window_start = datetime.now(UTC) - timedelta(days=retention_days + 1)
+
+        path_by_cam = {
+            cam.id: _build_stream_name(
+                settings.mediamtx_stream_prefix, cam.id, cam.ip_address
+            )
+            for cam in cameras
+        }
+        listings = await mediamtx_client.list_segments_many(
+            list(path_by_cam.values()), start=window_start, timeout=10.0
+        )
+
+        for cam in cameras:
+            path = path_by_cam[cam.id]
+            segments = listings.get(path)
+            if not segments:
+                continue
+            # Group by date
+            daily_recordings = _group_segments_by_date(segments, path)
+            cam_duration = sum(d["total_duration"] for d in daily_recordings)
+
+            result.append(
+                {
+                    "camera_id": cam.id,
+                    "camera_name": cam.name or f"Camera {cam.id}",
+                    "path": path,
+                    "recording_count": len(daily_recordings),
+                    "total_duration": cam_duration,
+                    "recordings": daily_recordings,
+                }
+            )
+
+            total_recordings += len(daily_recordings)
+            total_duration += cam_duration
     else:
         # Fallback to filesystem listing
         recording_logger.warning(
@@ -1552,9 +1869,10 @@ async def list_recordings_by_date(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
             try:
-                # Use storage service to list recordings from filesystem
-                fs_data = storage_service.list_recordings(
-                    db, camera_id=cam.id, limit=10000
+                # Use storage service to list recordings from filesystem —
+                # a full directory walk, so keep it off the event loop.
+                fs_data = await asyncio.to_thread(
+                    storage_service.list_recordings, db, cam.id, None, None, 10000
                 )
                 items = fs_data.get("items", [])
 
@@ -1595,35 +1913,61 @@ async def get_recording_stats(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     cameras = db.query(Camera).filter(Camera.is_active == True).all()
-    mediamtx_available = _check_mediamtx_available()
+    cameras = [c for c in cameras if _can_view_camera(user_obj, c, db)]
+    mediamtx_available = await _check_mediamtx_available()
 
     total_recordings = 0  # Camera-days
     total_duration = 0
     cameras_with_recordings = 0
 
+    # ---- Primary path: recordings DB index (one aggregate query) -----------
+    if settings.use_db_recordings_index:
+        from services.recording_query_service import day_summaries, resolve_query_tz
+
+        summaries = day_summaries(
+            db, [c.id for c in cameras], resolve_query_tz(None)
+        )
+        if summaries or not mediamtx_available:
+            for days in summaries.values():
+                total_recordings += len(days)
+                total_duration += sum(d["total_duration"] for d in days)
+                cameras_with_recordings += 1
+            return {
+                "total_recordings": total_recordings,
+                "total_duration": total_duration,
+                "total_duration_formatted": _format_duration(total_duration),
+                "cameras_with_recordings": cameras_with_recordings,
+                "total_cameras": len(cameras),
+                "mediamtx_available": mediamtx_available,
+            }
+
     if mediamtx_available:
-        for cam in cameras:
-            path = _build_stream_name(
+        retention_days = RetentionService._get_retention_settings(db).get(
+            "retention_days", 30
+        )
+        window_start = datetime.now(UTC) - timedelta(days=retention_days + 1)
+
+        path_by_cam = {
+            cam.id: _build_stream_name(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
-            try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=5)
+            for cam in cameras
+        }
+        listings = await mediamtx_client.list_segments_many(
+            list(path_by_cam.values()), start=window_start, timeout=5.0
+        )
 
-                if response.status_code == 200:
-                    segments = response.json()
-                    if segments:
-                        daily_recordings = _group_segments_by_date(segments, path)
-                        total_recordings += len(daily_recordings)
-                        total_duration += sum(
-                            d["total_duration"] for d in daily_recordings
-                        )
-                        cameras_with_recordings += 1
-            except Exception as e:
-                recording_logger.warning(
-                    f"Failed to fetch playback stats for camera {cam.id}: {e}"
+        for cam in cameras:
+            segments = listings.get(path_by_cam[cam.id])
+            if segments:
+                daily_recordings = _group_segments_by_date(
+                    segments, path_by_cam[cam.id]
                 )
-                pass
+                total_recordings += len(daily_recordings)
+                total_duration += sum(
+                    d["total_duration"] for d in daily_recordings
+                )
+                cameras_with_recordings += 1
     else:
         # Fallback to filesystem listing
         for cam in cameras:
@@ -1631,8 +1975,8 @@ async def get_recording_stats(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
             try:
-                fs_data = storage_service.list_recordings(
-                    db, camera_id=cam.id, limit=10000
+                fs_data = await asyncio.to_thread(
+                    storage_service.list_recordings, db, cam.id, None, None, 10000
                 )
                 items = fs_data.get("items", [])
                 if items:
@@ -1886,81 +2230,94 @@ async def get_recording_sessions_for_ai(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Check if MediaMTX is available
-    mediamtx_available = _check_mediamtx_available()
+    mediamtx_available = await _check_mediamtx_available()
 
-    # Get cameras to query
+    # Get cameras to query — scoped to what this user may view.
     if camera_id:
-        cameras = (
+        camera = (
             db.query(Camera)
             .filter(Camera.id == camera_id, Camera.is_active == True)
-            .all()
+            .first()
         )
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        _require_camera_view(user_obj, camera, db)
+        cameras = [camera]
     else:
-        cameras = db.query(Camera).filter(Camera.is_active == True).all()
+        cameras = _viewable_active_cameras(db, user_obj)
 
     result = []
 
     if mediamtx_available:
-        # Use MediaMTX playback server (preferred - accurate durations)
-        for cam in cameras:
-            path = _build_stream_name(
+        # Use MediaMTX playback server (preferred - accurate durations).
+        # Parallel, retention-bounded fan-out (see /list for rationale).
+        retention_days = RetentionService._get_retention_settings(db).get(
+            "retention_days", 30
+        )
+        window_start = datetime.now(UTC) - timedelta(days=retention_days + 1)
+
+        path_by_cam = {
+            cam.id: _build_stream_name(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
             )
+            for cam in cameras
+        }
+        listings = await mediamtx_client.list_segments_many(
+            list(path_by_cam.values()), start=window_start, timeout=10.0
+        )
+
+        for cam in cameras:
+            segments = listings.get(path_by_cam[cam.id])
+            if not segments:
+                continue
             try:
-                url = f"{settings.mediamtx_playback_url}/list?path={path}"  # url-internal-ok: server-side LIST call to mediamtx admin API
-                response = http_client.get(url, timeout=10)
+                # Group segments by date first
+                from collections import defaultdict
 
-                if response.status_code == 200:
-                    segments = response.json()
-                    if segments:
-                        # Group segments by date first
-                        from collections import defaultdict
-                        from datetime import datetime
+                by_date = defaultdict(list)
+                for seg in segments:
+                    start_str = seg.get("start", "")
+                    if not start_str:
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(
+                            start_str.replace("Z", "+00:00")
+                        )
+                        date_key = dt.strftime("%Y-%m-%d")
+                        by_date[date_key].append(seg)
+                    except Exception:
+                        continue
 
-                        by_date = defaultdict(list)
-                        for seg in segments:
-                            start_str = seg.get("start", "")
-                            if not start_str:
-                                continue
-                            try:
-                                dt = datetime.fromisoformat(
-                                    start_str.replace("Z", "+00:00")
-                                )
-                                date_key = dt.strftime("%Y-%m-%d")
-                                by_date[date_key].append(seg)
-                            except Exception:
-                                continue
+                # For each date, create sessions
+                dates = []
+                for date_key in sorted(by_date.keys(), reverse=True):
+                    day_segments = by_date[date_key]
+                    sessions = _group_segments_into_sessions(
+                        day_segments, camera_id=cam.id
+                    )
 
-                        # For each date, create sessions
-                        dates = []
-                        for date_key in sorted(by_date.keys(), reverse=True):
-                            day_segments = by_date[date_key]
-                            sessions = _group_segments_into_sessions(
-                                day_segments, camera_id=cam.id
-                            )
+                    if sessions:
+                        total_duration = sum(
+                            s["duration_seconds"] for s in sessions
+                        )
+                        dates.append(
+                            {
+                                "date": date_key,
+                                "session_count": len(sessions),
+                                "total_duration_seconds": total_duration,
+                                "sessions": sessions,
+                            }
+                        )
 
-                            if sessions:
-                                total_duration = sum(
-                                    s["duration_seconds"] for s in sessions
-                                )
-                                dates.append(
-                                    {
-                                        "date": date_key,
-                                        "session_count": len(sessions),
-                                        "total_duration_seconds": total_duration,
-                                        "sessions": sessions,
-                                    }
-                                )
-
-                        if dates:
-                            result.append(
-                                {
-                                    "camera_id": cam.id,
-                                    "camera_name": cam.name or f"Camera {cam.id}",
-                                    "camera_location": getattr(cam, "location", None),
-                                    "dates": dates,
-                                }
-                            )
+                if dates:
+                    result.append(
+                        {
+                            "camera_id": cam.id,
+                            "camera_name": cam.name or f"Camera {cam.id}",
+                            "camera_location": getattr(cam, "location", None),
+                            "dates": dates,
+                        }
+                    )
             except Exception as e:
                 recording_logger.error(
                     f"Failed to get sessions for camera {cam.id}: {e}"
@@ -1979,9 +2336,10 @@ async def get_recording_sessions_for_ai(
 
         for cam in cameras:
             try:
-                # Use storage service to list recordings from filesystem
-                fs_data = storage_service.list_recordings(
-                    db, camera_id=cam.id, limit=10000
+                # Use storage service to list recordings from filesystem —
+                # a full directory walk, so keep it off the event loop.
+                fs_data = await asyncio.to_thread(
+                    storage_service.list_recordings, db, cam.id, None, None, 10000
                 )
                 items = fs_data.get("items", [])
 

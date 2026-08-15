@@ -57,6 +57,7 @@ from core.logging_config import main_logger
 EVENT_INFERENCE_RESULT = "inference_result"
 EVENT_INFERENCE_ERROR = "inference_error"
 EVENT_CAMERA_EVENT = "camera_event"
+EVENT_CAMERA_STATUS = "camera_status"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -210,6 +211,22 @@ async def publish_inference_result(
         "model_id": model_id,
         "task": task,
         "payload": payload,
+    })
+
+
+async def publish_camera_status(
+    *,
+    camera_id: int,
+    status: str,
+    payload: dict[str, Any],
+) -> None:
+    """Publish a camera connectivity transition (online/offline) so live UIs
+    can react instantly (offline overlays, auto-resume of live streams)."""
+    await get_event_bus().publish({
+        "event_type": EVENT_CAMERA_STATUS,
+        "camera_id": camera_id,
+        "task": "connection",
+        "payload": {"status": status, **payload},
     })
 
 

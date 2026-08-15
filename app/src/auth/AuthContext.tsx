@@ -67,34 +67,36 @@ function buildErrorMessage(payload: any, fallback: string): string {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({ user: null, token: null, loading: true, error: null, setupRequired: false })
+  // Read the saved token synchronously so the very first render already has
+  // it and the /me request can start immediately.
+  const [state, setState] = useState<AuthState>(() => {
+    const saved = localStorage.getItem(TOKEN_KEY)
+    if (saved) apiSetToken(saved)
+    return { user: null, token: saved, loading: true, error: null, setupRequired: false }
+  })
 
-  // Check for first-time setup requirement on mount
+  // Bootstrap: check-setup and /me used to run serially, blanking the app for
+  // two full round-trips. Fire both concurrently; setup_required still wins.
   useEffect(() => {
-    const checkSetup = async () => {
-      try {
-        const { data } = await apiService.checkSetup()
-        if (data.setup_required) {
-          setState((s) => ({ ...s, setupRequired: true, loading: false }))
-          return
-        }
-      } catch (e) {
-        // If check fails, continue with normal auth flow
+    const bootstrap = async () => {
+      const saved = localStorage.getItem(TOKEN_KEY)
+      const [setupRes, meRes] = await Promise.allSettled([
+        apiService.checkSetup(),
+        saved ? apiService.me() : Promise.reject(new Error('no token')),
+      ])
+
+      if (setupRes.status === 'fulfilled' && setupRes.value.data.setup_required) {
+        setState((s) => ({ ...s, setupRequired: true, loading: false }))
+        return
       }
 
-      // Load token from storage
-      const saved = localStorage.getItem(TOKEN_KEY)
-      if (saved) {
-        apiSetToken(saved)
-        setState((s) => ({ ...s, token: saved }))
-        apiService.me()
-          .then(({ data }) => setState((s) => ({ ...s, user: data, loading: false })))
-          .catch(() => setState((s) => ({ ...s, loading: false })))
+      if (meRes.status === 'fulfilled') {
+        setState((s) => ({ ...s, user: meRes.value.data, loading: false }))
       } else {
         setState((s) => ({ ...s, loading: false }))
       }
     }
-    checkSetup()
+    bootstrap()
   }, [])
 
   const setToken = useCallback((token: string | null, refreshToken?: string | null) => {

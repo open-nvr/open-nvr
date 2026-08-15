@@ -290,14 +290,20 @@ async def enable_recording(
     # Use effective path from database (user setting) or settings fallback
     base_path = get_effective_recordings_base_path(db)
 
-    # Create recording configuration payload
+    # Create recording configuration payload. %path (not a literal cam-<id>)
+    # so the layout matches pathDefaults exactly — see recording_paths.py.
+    from services.recording_paths import NEW_LAYOUT_RECORD_PATH
+
     recording_config = {
         "record": True,
-        "recordPath": f"{base_path}/cam-{camera_id}/%Y/%m/%d/%H-%M-%S-%f",
-        "recordFormat": "mp4",
+        "recordPath": f"{base_path}/{NEW_LAYOUT_RECORD_PATH}",
+        # fmp4, NOT progressive mp4: the byte-range playback path indexes
+        # moof/mdat fragments — a progressive file silently degrades every
+        # clip to the MediaMTX proxy fallback.
+        "recordFormat": "fmp4",
         "recordPartDuration": part_duration,
         "recordSegmentDuration": duration,
-        "recordDeleteAfter": "168h",  # 7 days default
+        "recordDeleteAfter": "0s",  # backend owns retention (retention_service)
     }
 
     return await MediaMtxAdminService.patch_path(

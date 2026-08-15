@@ -35,6 +35,7 @@ app/node_modules/
 venv/
 .venv/
 server/venv/
+server/.venv/
 kai-c/venv/
 AI-adapters/AIAdapters/venv/
 __pycache__/

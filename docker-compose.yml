@@ -90,6 +90,10 @@ services:
         FROM curlimages/curl:8.10.1
         USER root
         WORKDIR /
+        # tzdata is required for TZ=<IANA name> to take effect — without it the
+        # Go runtime silently falls back to UTC and recording directories get
+        # named in UTC while opennvr_core parses them in the configured zone.
+        RUN apk add --no-cache tzdata
         # Clear any inherited CMD so it isn't passed to mediamtx as a config arg.
         CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
@@ -119,6 +123,11 @@ services:
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
     environment:
+      # Local timezone: MediaMTX expands recordPath timestamps in process-
+      # local time, so segment directories are named in this TZ. MUST match
+      # opennvr_core's TZ (both read the same ${TZ}) — the backend parses the
+      # names with the same zone. E.g. TZ=Asia/Kolkata. Default UTC.
+      - TZ=${TZ:-UTC}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
@@ -325,6 +334,9 @@ services:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
     environment:
+      # Must match the mediamtx service's TZ — recording directories are
+      # named in local time and parsed with the same zone.
+      - TZ=${TZ:-UTC}
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - MEDIAMTX_BASE_URL=http://mediamtx:8889
       - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
