@@ -29,6 +29,7 @@ import logging
 import os
 import pathlib
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -144,6 +145,25 @@ def _verify_hook_token(request: Request) -> bool:
     return False
 
 
+def _camera_from_path(db: Session, path: str) -> Camera | None:
+    """Map a MediaMTX path name back to a Camera row.
+
+    Path may be like "cam-<id>" (id mode) or "cam-<ip with _ for .>" (ip
+    mode); id form first, then one indexed ip lookup.
+    """
+    if not path.lower().startswith("cam-"):
+        return None
+    tag = path.split("-", 1)[1]
+    try:
+        return db.query(Camera).filter(Camera.id == int(tag)).first()
+    except ValueError:
+        return (
+            db.query(Camera)
+            .filter(Camera.ip_address == tag.replace("_", "."))
+            .first()
+        )
+
+
 # ---- Webhook endpoints ----
 
 
@@ -169,6 +189,53 @@ async def hook_segment_create(
     }
 
 
+async def _handle_path_status_hook(
+    request: Request, path: str, db: Session, online: bool
+) -> dict[str, Any]:
+    if not _verify_hook_token(request):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    from services.stream_service import SUBSTREAM_SUFFIX
+
+    # Substreams mirror the main path's source; __startup__ is the provisioning
+    # sentinel path. Neither represents a camera of its own.
+    if path == "__startup__" or path.endswith(SUBSTREAM_SUFFIX):
+        return {"status": "ignored", "path": path}
+
+    cam = _camera_from_path(db, path)
+    if cam is None:
+        return {"status": "unknown_path", "path": path}
+
+    from services.camera_status_service import get_camera_status_service
+
+    await get_camera_status_service().handle_signal(
+        camera_id=cam.id,
+        camera_name=cam.name or f"Camera {cam.id}",
+        path=path,
+        online=online,
+        reason="hook",
+    )
+    return {"status": "ok", "path": path}
+
+
+@router.get("/hooks/path-ready")
+async def hook_path_ready(
+    request: Request,
+    path: str = Query(..., description="MediaMTX path name (MTX_PATH)"),
+    db: Session = Depends(get_db),
+):
+    return await _handle_path_status_hook(request, path, db, online=True)
+
+
+@router.get("/hooks/path-not-ready")
+async def hook_path_not_ready(
+    request: Request,
+    path: str = Query(..., description="MediaMTX path name (MTX_PATH)"),
+    db: Session = Depends(get_db),
+):
+    return await _handle_path_status_hook(request, path, db, online=False)
+
+
 @router.get("/hooks/segment-complete")
 async def hook_segment_complete(
     request: Request,
@@ -189,20 +256,8 @@ async def hook_segment_complete(
 
     from models import Recording
 
-    # Try to map path to camera by our naming convention.
-    # Path may be like "cam-<id>" (id mode) or "cam-<ip with _ for .>" (ip mode).
-    cam: Camera | None = None
-    if path.lower().startswith("cam-"):
-        tag = path.split("-", 1)[1]
-        try:
-            cam = db.query(Camera).filter(Camera.id == int(tag)).first()
-        except ValueError:
-            # ip mode: one indexed lookup instead of scanning every camera row.
-            cam = (
-                db.query(Camera)
-                .filter(Camera.ip_address == tag.replace("_", "."))
-                .first()
-            )
+    # Best-effort; if not found, we still accept the webhook
+    cam = _camera_from_path(db, path)
 
     # Parse duration
     duration_sec: float | None = None

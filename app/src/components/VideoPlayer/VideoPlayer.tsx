@@ -124,6 +124,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [error, setError] = useState<string | null>(null)
     const [showControls, setShowControls] = useState(true)
     const hideControlsTimeout = useRef<number | null>(null)
+    // Bounded auto-reconnect (live mode). Covers stream drops the backend
+    // can't push an event for (e.g. a network blip between this browser and
+    // MediaMTX). Refs, not state, so the setup callbacks' event handlers can
+    // use them without creating dependency cycles.
+    const retryCountRef = useRef(0)
+    const retryTimerRef = useRef<number | null>(null)
+    const disconnectGraceRef = useRef<number | null>(null)
+    const restartRef = useRef<() => void>(() => {})
+    const [isReconnecting, setIsReconnecting] = useState(false)
     // Real aspect ratio of the incoming stream (width/height), read from the
     // video metadata. null until known (or after the source is torn down).
     const [videoAspect, setVideoAspect] = useState<number | null>(null)
@@ -186,7 +195,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const cleanup = useCallback(() => {
       // Clear any existing error state
       setError(null)
-      
+
+      // Cancel pending auto-reconnect timers
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+      if (disconnectGraceRef.current) {
+        clearTimeout(disconnectGraceRef.current)
+        disconnectGraceRef.current = null
+      }
+
       // Cleanup HLS
       if (hlsInstanceRef.current) {
         hlsInstanceRef.current.destroy()
@@ -194,6 +213,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
       // Cleanup WebRTC
       if (pcRef.current) {
+        // Detach the handler first: an intentional close must not look like a
+        // connection drop and trigger an auto-retry.
+        pcRef.current.onconnectionstatechange = null
         pcRef.current.getSenders().forEach((s) => {
           try {
             if (s.track) s.track.stop()
@@ -217,6 +239,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         el.load()
       }
     }, [])
+
+    // Schedule a bounded, exponentially backed-off restart of the live
+    // stream: 2s, 4s, 8s, 16s, 30s — then give up into the manual-retry
+    // error overlay. Success paths reset the counter.
+    const MAX_AUTO_RETRIES = 5
+    const scheduleAutoRetry = useCallback((failMessage: string) => {
+      if (mode !== 'live') {
+        setError(failMessage)
+        setIsLoading(false)
+        return
+      }
+      if (retryTimerRef.current) return // one pending retry at a time
+      if (retryCountRef.current >= MAX_AUTO_RETRIES) {
+        setIsReconnecting(false)
+        setError(failMessage)
+        setIsLoading(false)
+        return
+      }
+      const delay = Math.min(2000 * 2 ** retryCountRef.current, 30000)
+      retryCountRef.current += 1
+      setIsReconnecting(true)
+      setError(null)
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null
+        restartRef.current()
+      }, delay)
+    }, [mode])
 
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
@@ -272,9 +321,28 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           if (pc.connectionState === 'connected') {
             setIsLoading(false)
             setError(null)
-          } else if (pc.connectionState === 'failed') {
-            setError('WebRTC connection failed')
-            setIsLoading(false)
+            setIsReconnecting(false)
+            retryCountRef.current = 0
+            if (disconnectGraceRef.current) {
+              clearTimeout(disconnectGraceRef.current)
+              disconnectGraceRef.current = null
+            }
+          } else if (
+            pc.connectionState === 'failed' ||
+            pc.connectionState === 'closed'
+          ) {
+            scheduleAutoRetry('WebRTC connection failed')
+          } else if (pc.connectionState === 'disconnected') {
+            // 'disconnected' can self-heal; give ICE a short grace period
+            // before tearing down and reconnecting.
+            if (!disconnectGraceRef.current) {
+              disconnectGraceRef.current = window.setTimeout(() => {
+                disconnectGraceRef.current = null
+                if (pcRef.current === pc && pc.connectionState !== 'connected') {
+                  scheduleAutoRetry('WebRTC connection lost')
+                }
+              }, 5000)
+            }
           }
         }
 
@@ -304,11 +372,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       } catch (e: any) {
         const msg = e?.message || 'WebRTC setup failed'
-        setError(msg)
-        setIsLoading(false)
         onError?.(msg)
+        if (msg === 'Camera offline') {
+          // The path doesn't exist server-side — retrying won't help; the
+          // camera-status event remounts the player when it comes back.
+          setError(msg)
+          setIsLoading(false)
+        } else {
+          scheduleAutoRetry(msg)
+        }
       }
-    }, [whepUrl, mediamtxToken, onError])
+    }, [whepUrl, mediamtxToken, onError, scheduleAutoRetry])
 
     // Setup HLS
     const setupHLS = useCallback(async () => {
@@ -363,6 +437,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setIsLoading(false)
           setError(null) // Clear any previous errors
+          setIsReconnecting(false)
+          retryCountRef.current = 0
           if (autoPlay) {
             el.play().catch(() => {
               el.muted = true
@@ -373,6 +449,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
         hls.on(Hls.Events.FRAG_LOADED, () => {
           setError(null) // Clear error on successful fragment load
+          setIsReconnecting(false)
+          retryCountRef.current = 0
           if (el.paused && autoPlay) el.play().catch(() => {})
         })
 
@@ -382,14 +460,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             const msg = `HLS Error: ${data.details}`
             setIsLoading(false)
             onError?.(msg)
-            
+
             // Auto-recover from errors
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               console.log('[HLS] Attempting media error recovery...')
               hls.recoverMediaError()
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // Full restart with backoff (a bare startLoad() retry keeps
+              // failing while MediaMTX is briefly unreachable).
               console.log('[HLS] Attempting network error recovery...')
-              setTimeout(() => hls.startLoad(), 1000)
+              scheduleAutoRetry(msg)
             } else {
               setError(msg)
             }
@@ -399,7 +479,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         setError('HLS not supported')
         setIsLoading(false)
       }
-    }, [hlsUrl, mediamtxToken, isMuted, autoPlay, onError])
+    }, [hlsUrl, mediamtxToken, isMuted, autoPlay, onError, scheduleAutoRetry])
 
     // Setup MP4 playback with optimized loading for fast start
     const setupMP4 = useCallback(() => {
@@ -761,13 +841,22 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         console.error('[VideoPlayer] Snapshot failed:', err)
       }
     }
-    const handleRefresh = () => {
+    const restartStream = () => {
       cleanup()
       if (streamType === 'webrtc' && whepUrl) {
         setupWebRTC()
       } else if (streamType === 'hls' && hlsUrl) {
         setupHLS()
       }
+    }
+    // Auto-retries go through the ref so scheduleAutoRetry (defined before
+    // the setup callbacks) always calls the current stream config.
+    restartRef.current = restartStream
+    const handleRefresh = () => {
+      // Manual retry: start the auto-retry budget over.
+      retryCountRef.current = 0
+      setIsReconnecting(false)
+      restartStream()
     }
     const handleStreamTypeChange = (type: 'webrtc' | 'hls') => {
       if (type !== streamType) {
@@ -874,10 +963,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           preload={mode === 'playback' ? 'metadata' : 'auto'}
         />
 
-        {/* Loading overlay */}
-        {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+        {/* Loading / reconnecting overlay */}
+        {(isLoading || isReconnecting) && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
             <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            {isReconnecting && (
+              <div className="text-xs text-white/80">Reconnecting…</div>
+            )}
           </div>
         )}
 

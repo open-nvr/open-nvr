@@ -23,6 +23,7 @@ import { QrScanner } from '../components/QrScanner'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
+import { useCameraStatus } from '../hooks/useCameraStatus'
 import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
 import { 
   DndContext, 
@@ -661,12 +662,17 @@ function Tile({
   const playerRef = useRef<VideoPlayerHandle>(null)
   const [ptzOpen, setPtzOpen] = useState(false)
   const [showCameraDialog, setShowCameraDialog] = useState(false)
+  // Backend-pushed connectivity: `status` drives the offline overlay;
+  // `version` bumps on each recovery, re-running the URL fetch below (fresh
+  // 60-min stream token) and remounting the player so the stream resumes
+  // without any user action.
+  const { status: connectivity, version: streamVersion } = useCameraStatus(assignedCameraId)
 
   useEffect(() => {
     let alive = true
     // Use assigned camera if provided, otherwise no camera
-    const camera = assignedCameraId 
-      ? availableCameras.find(c => c.id === assignedCameraId) 
+    const camera = assignedCameraId
+      ? availableCameras.find(c => c.id === assignedCameraId)
       : null
     if (camera) {
       setCameraId(camera.id)
@@ -675,12 +681,15 @@ function Tile({
         try {
           const { data } = await apiService.getStreamUrls(camera.id)
           if (!alive) return
-          setUrls({ 
-            whep: data.urls?.webrtc, 
+          setUrls({
+            whep: data.urls?.webrtc,
             hls: data.urls?.hls,
             token: data.token
           })
-        } catch {}
+        } catch {
+          // Show NO LINK instead of silently keeping stale URLs/token.
+          if (alive) setUrls(null)
+        }
       })()
     } else {
       setCameraId(null)
@@ -688,7 +697,7 @@ function Tile({
       setUrls(null)
     }
     return () => { alive = false }
-  }, [assignedCameraId, availableCameras])
+  }, [assignedCameraId, availableCameras, streamVersion])
 
   const hasLink = !!urls?.whep || !!urls?.hls
   const displayName = cameraName || `Camera ${cameraId || index + 1}`
@@ -730,6 +739,7 @@ function Tile({
         <div className="absolute inset-0">
           {hasLink ? (
             <VideoPlayer
+              key={`${cameraId}-${streamVersion}`}
               ref={playerRef}
               mode="live"
               whepUrl={urls?.whep}
@@ -763,6 +773,17 @@ function Tile({
             </div>
           )}
         </div>
+
+        {/* Offline overlay — driven by backend camera_status events. Clears
+            itself (and the player restarts via the key above) when the
+            camera comes back; no user interaction needed. */}
+        {cameraId && connectivity === 'offline' && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
+            <AlertCircle size={24} className="text-yellow-400" />
+            <div className="text-xs uppercase tracking-wide text-yellow-300">Camera offline</div>
+            <div className="text-[11px] text-[var(--text-dim)]">Waiting for camera to reconnect…</div>
+          </div>
+        )}
 
         {/* Mini PTZ pad */}
         {ptzOpen && cameraId && (

@@ -399,9 +399,9 @@ pathDefaults:
   runOnDemandCloseAfter: 10s
   runOnUnDemand:
 
-  runOnReady:
+  runOnReady: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/api/v1/mediamtx/hooks/path-ready?path=$MTX_PATH"'
   runOnReadyRestart: no
-  runOnNotReady:
+  runOnNotReady: 'curl -X GET -H "X-MTX-Secret: ${MEDIAMTX_SECRET}" "http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/api/v1/mediamtx/hooks/path-not-ready?path=$MTX_PATH"'
 
   runOnRead:
   runOnReadRestart: no

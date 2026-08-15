@@ -51,9 +51,10 @@ class MediaMtxConfigService:
         return {
             "runOnRecordSegmentCreate": f"{webhook_base}/segment-create{token_param}",
             "runOnRecordSegmentComplete": f"{webhook_base}/segment-complete{token_param}",
-            # Add other hooks as needed
-            "runOnReady": None,  # Can be configured later
-            "runOnNotReady": None,
+            # Camera online/offline signals for the connectivity tracker
+            # (services.camera_status_service)
+            "runOnReady": f"{webhook_base}/path-ready{token_param}",
+            "runOnNotReady": f"{webhook_base}/path-not-ready{token_param}",
             "runOnRead": None,
             "runOnReadRemove": None,
             "runOnPublish": None,
@@ -414,6 +415,11 @@ pathDefaults:
   # Webhook integration for recording events
   runOnRecordSegmentCreate: curl -X GET "{webhook_base}/hooks/segment-create?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&t={webhook_token}"
   runOnRecordSegmentComplete: curl -X GET "{webhook_base}/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION&t={webhook_token}"
+
+  # Camera online/offline signals (drive live-view alerts and auto-recovery)
+  runOnReady: curl -X GET "{webhook_base}/hooks/path-ready?path=$MTX_PATH&t={webhook_token}"
+  runOnReadyRestart: no
+  runOnNotReady: curl -X GET "{webhook_base}/hooks/path-not-ready?path=$MTX_PATH&t={webhook_token}"
 
 ###############################################
 # Paths - Camera streams will be provisioned automatically via API

@@ -431,6 +431,21 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_recording_reconciler())
 
+    # Start camera connectivity reconciler — safety net for the MediaMTX
+    # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
+    # either process). The loop delays its first pass internally so startup
+    # provisioning can settle.
+    try:
+        from services.camera_status_service import get_camera_status_service
+
+        camera_status_task = asyncio.create_task(
+            get_camera_status_service().reconcile_loop()
+        )
+        main_logger.info("Camera status reconciler started")
+    except Exception as e:
+        camera_status_task = None
+        main_logger.error(f"Failed to start camera status reconciler: {e}")
+
     # FFmpeg-based RTSP proxy/recorder startup removed
 
     yield
@@ -464,6 +479,10 @@ async def lifespan(app: FastAPI):
         await mediamtx_client.aclose()
     except Exception as e:
         main_logger.error(f"Error closing MediaMTX client: {e}")
+
+    # Stop the camera connectivity reconciler
+    if camera_status_task is not None:
+        camera_status_task.cancel()
 
     # FFmpeg-based RTSP proxy/recorder cleanup removed
 
