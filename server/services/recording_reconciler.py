@@ -44,7 +44,11 @@ from pathlib import Path
 from core.database import SessionLocal
 from core.logging_config import recording_logger
 from models import Camera, Recording
-from services.recording_paths import iter_recording_files, parse_recording_time
+from services.recording_paths import (
+    iter_recording_files,
+    iter_recording_files_between,
+    parse_recording_time,
+)
 from services.storage_service import get_effective_recordings_base_path
 
 # A file whose mtime is this recent may still be written by MediaMTX — skip
@@ -71,8 +75,17 @@ def reconcile_camera(
     now = time.time()
 
     # -- Disk side ----------------------------------------------------------
+    # Full history on the startup backfill; only the window's date dirs on
+    # periodic passes — a whole-tree rglob every 15 min is needless I/O on a
+    # large archive.
+    if window_start is None:
+        disk_iter = iter_recording_files(cam_dir)
+    else:
+        disk_iter = iter_recording_files_between(
+            camera_id, root, window_start, datetime.now(UTC)
+        )
     on_disk: dict[str, tuple[Path, datetime, int]] = {}
-    for f in iter_recording_files(cam_dir):
+    for f in disk_iter:
         try:
             st = f.stat()
         except OSError:

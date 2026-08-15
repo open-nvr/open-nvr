@@ -175,6 +175,53 @@ def iter_recording_files(camera_dir: Path):
     yield from camera_dir.rglob("*.mp4")
 
 
+def iter_recording_files_between(
+    camera_id: int, root: Path, start_utc: datetime, end_utc: datetime
+):
+    """Yield .mp4 files whose directory can hold recordings in
+    [start_utc, end_utc], scanning only the relevant date dirs — not the whole
+    camera tree.
+
+    Covers the new local-named layout (``cam-<id>/YYYY-MM-DD/HH/``) and both
+    legacy UTC-named layouts (``cam-<id>/YYYY/MM/DD/``). A one-day margin on
+    each end absorbs the timezone offset and clips that began just before the
+    window; the caller still filters exact timestamps.
+    """
+    cam_dir = root / f"cam-{int(camera_id)}"
+    if not cam_dir.exists():
+        return
+    tz = get_recording_tz()
+    lo = start_utc - timedelta(days=1)
+    hi = end_utc + timedelta(days=1)
+    seen: set[Path] = set()
+
+    # New layout: local-named day dirs (cam-<id>/YYYY-MM-DD/HH/*.mp4).
+    d = lo.astimezone(tz).date()
+    last = hi.astimezone(tz).date()
+    while d <= last:
+        day_dir = cam_dir / d.strftime("%Y-%m-%d")
+        if day_dir.is_dir():
+            for file in day_dir.glob("*/*.mp4"):
+                if file not in seen:
+                    seen.add(file)
+                    yield file
+        d += timedelta(days=1)
+
+    # Legacy layouts: UTC-named YYYY/MM/DD day dirs (flat + nested).
+    du = lo.date()
+    lastu = hi.date()
+    while du <= lastu:
+        legacy_day = cam_dir / du.strftime("%Y") / du.strftime("%m") / du.strftime("%d")
+        if legacy_day.is_dir():
+            for file in list(legacy_day.glob("*.mp4")) + list(
+                legacy_day.glob("*/*.mp4")
+            ):
+                if file not in seen:
+                    seen.add(file)
+                    yield file
+        du += timedelta(days=1)
+
+
 def find_latest_recording_file(
     camera_id: int, root: Path, now_utc: datetime | None = None
 ) -> tuple[Path, datetime] | None:
