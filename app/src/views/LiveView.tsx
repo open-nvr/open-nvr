@@ -1024,6 +1024,13 @@ export function AddCameraDialog({
   const [discovering, setDiscovering] = useState(false)
   const [discoveredCameras, setDiscoveredCameras] = useState<Array<{ip: string, name?: string, manufacturer?: string}>>([])
   const [selectedCamera, setSelectedCamera] = useState<{ip: string, name?: string} | null>(null)
+
+  // Scan range info & override ("scan once" vs "save as Camera LAN")
+  const [scanInfo, setScanInfo] = useState<{cidrs: string[], source: string} | null>(null)
+  const [suggestedCidrs, setSuggestedCidrs] = useState<string[]>([])
+  const [showRangePanel, setShowRangePanel] = useState(false)
+  const [rangeInput, setRangeInput] = useState('')
+  const [savingRange, setSavingRange] = useState(false)
   
   // Authentication step
   const [authStep, setAuthStep] = useState(false)
@@ -1052,27 +1059,51 @@ export function AddCameraDialog({
     rtsp_url: '',
   })
 
-  // Discover cameras on network via ONVIF
-  const handleDiscover = async () => {
+  // Discover cameras on network via ONVIF. `overrideCidr` scans that range
+  // once without touching the saved Camera LAN.
+  const handleDiscover = async (overrideCidr?: string) => {
     setDiscovering(true)
     setError(null)
     setDiscoveredCameras([])
-    
+
     try {
-      const response = await apiService.onvifDiscover()
-      const devices = response?.data?.devices || []
+      const response = await apiService.onvifDiscover(overrideCidr ? { cidr: overrideCidr } : undefined)
+      const data = response?.data || {}
+      const devices = data.devices || []
+      setScanInfo({ cidrs: data.scan_cidrs || [], source: data.source || 'configured' })
+      setSuggestedCidrs(data.suggested_cidrs || [])
       setDiscoveredCameras(devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         name: d.name || d.model || `Camera`,
         manufacturer: d.manufacturer || d.mfr || ''
       })))
-      if (devices.length === 0) {
-        setError('No ONVIF cameras found on network. Try manual entry.')
-      }
     } catch (e: any) {
       setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
     } finally {
       setDiscovering(false)
+    }
+  }
+
+  // Persist a new primary Camera LAN subnet, then rescan with it. Unlike a
+  // one-off scan this moves the boundary cameras can be connected/added on.
+  const handleSaveRangeAndScan = async () => {
+    const cidrVal = rangeInput.trim()
+    if (!cidrVal) return
+    setSavingRange(true)
+    setError(null)
+    try {
+      const cur = await apiService.getCameraLAN()
+      const settings = cur?.data?.settings || {}
+      await apiService.updateCameraLAN({
+        interface_name: settings.interface_name || 'eth0',
+        subnet_cidr: cidrVal,
+      })
+      setShowRangePanel(false)
+      await handleDiscover()
+    } catch (e: any) {
+      setError(e?.data?.detail || e?.message || 'Failed to update Camera LAN.')
+    } finally {
+      setSavingRange(false)
     }
   }
   
@@ -1343,14 +1374,69 @@ export function AddCameraDialog({
                 </span>
                 <button
                   className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
-                  onClick={handleDiscover}
+                  onClick={() => handleDiscover()}
                   disabled={discovering}
                 >
                   {discovering ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
                   {discovering ? 'Scanning...' : 'Rescan'}
                 </button>
               </div>
-              
+
+              {scanInfo && scanInfo.cidrs.length > 0 && (
+                <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
+                  <span>
+                    {discovering ? 'Scanning' : 'Scanned'} {scanInfo.cidrs.join(', ')}
+                    {' · '}
+                    {scanInfo.source === 'override' ? 'one-off range'
+                      : scanInfo.source === 'auto-detected' ? 'auto-detected'
+                      : 'from Camera LAN settings'}
+                  </span>
+                  <button
+                    className="underline hover:text-[var(--accent)]"
+                    onClick={() => {
+                      setShowRangePanel(v => !v)
+                      if (!showRangePanel) setRangeInput(scanInfo.cidrs[0] || '')
+                    }}
+                  >
+                    Change
+                  </button>
+                </div>
+              )}
+
+              {showRangePanel && (
+                <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 space-y-2">
+                  <input
+                    className="w-full px-2 py-1.5 text-sm bg-[var(--panel)] border border-neutral-600 focus:border-[var(--accent)] outline-none"
+                    placeholder="e.g. 192.168.1.0/24"
+                    value={rangeInput}
+                    onChange={(e) => setRangeInput(e.target.value)}
+                    disabled={discovering || savingRange}
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)]"
+                      onClick={() => handleDiscover(rangeInput.trim())}
+                      disabled={discovering || savingRange || !rangeInput.trim()}
+                    >
+                      Scan once
+                    </button>
+                    <button
+                      className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
+                      onClick={handleSaveRangeAndScan}
+                      disabled={discovering || savingRange || !rangeInput.trim()}
+                    >
+                      {savingRange && <Loader2 size={12} className="animate-spin" />}
+                      Save as Camera LAN & scan
+                    </button>
+                  </div>
+                  <div className="text-xs text-[var(--text-dim)]">
+                    Saving updates the Camera LAN — it defines which network cameras can be
+                    reached on. "Scan once" only looks there; cameras found outside the saved
+                    Camera LAN can't be added until it's updated.
+                  </div>
+                </div>
+              )}
+
               <div className="max-h-60 overflow-auto space-y-2">
                 {discovering && discoveredCameras.length === 0 && (
                   <div className="text-center py-8">
@@ -1358,10 +1444,27 @@ export function AddCameraDialog({
                     <div className="text-sm text-[var(--text-dim)]">Discovering ONVIF cameras...</div>
                   </div>
                 )}
-                
+
                 {!discovering && discoveredCameras.length === 0 && (
-                  <div className="text-center py-8 text-sm text-[var(--text-dim)]">
-                    No cameras found. Try Manual entry.
+                  <div className="text-center py-8 text-sm text-[var(--text-dim)] space-y-2">
+                    <div>
+                      No cameras found{scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}.
+                    </div>
+                    {suggestedCidrs.length > 0 && (
+                      <div className="space-y-1">
+                        <div>This host also appears to be on:</div>
+                        {suggestedCidrs.map((s) => (
+                          <button
+                            key={s}
+                            className="block mx-auto px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)]"
+                            onClick={() => { setRangeInput(s); handleDiscover(s) }}
+                          >
+                            Scan {s}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div>Or check the range above, or use Manual entry.</div>
                   </div>
                 )}
                 
