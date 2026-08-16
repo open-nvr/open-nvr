@@ -85,3 +85,29 @@ subnet (configurable via `OPENNVR_DOCKER_SUBNET`).
 It deliberately does **not** accept generic RFC1918 — an `adapter-vm.internal`
 resolving to `192.168.1.50` on a peer host would violate "all inference on THIS
 box". Control: V-022.
+
+## Recording identity markers (surviving a DB wipe)
+
+Camera directories on disk are named only by the numeric id (`cam-<id>`), and
+that id is a DB sequence that restarts at 1 on a fresh database. So after a DB
+wipe + camera re-add, the first camera would silently inherit another camera's
+entire archive — the reconciler's startup backfill would index it all under
+the new camera with zero warnings.
+
+Defense (`server/services/camera_identity.py`): every camera has a stable
+`cameras.uuid`, stamped into `<recordings>/cam-<X>/.camera-identity.json`.
+The reconciler, the segment webhook and camera provisioning all verify the
+marker before indexing. Unmarked pre-upgrade dirs are adopted iff no file
+predates the camera row's `created_at` (a normal upgrade adopts everything
+automatically; post-wipe inheritance can't). Conflicted or ownerless trees
+are MOVED — never deleted — to `<recordings>/orphaned/`, where Settings →
+Recording lists them for re-attach or explicit deletion. The `orphaned/`
+directory itself is the registry (no DB rows), so orphan state survives the
+very DB wipes it exists for. The ownerless scan is skipped while the cameras
+table is empty, so booting against a misconfigured/fresh `DATABASE_URL` can
+never mass-quarantine a healthy tree.
+
+File-safety invariant: orphaned footage is deleted only by the explicit admin
+Delete action or by `retention_days` aging (0 = keep forever); the
+space-pressure purge never touches it. **`.camera-identity.json` files are
+load-bearing — preserve them when copying or restoring recording archives.**

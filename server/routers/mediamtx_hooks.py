@@ -259,6 +259,24 @@ async def hook_segment_complete(
     # Best-effort; if not found, we still accept the webhook
     cam = _camera_from_path(db, path)
 
+    # Identity gate (TTL-cached): after a DB wipe the id sequence restarts,
+    # so the camera this path resolves to may not own the directory the
+    # segment landed in. A conflicted segment must be neither indexed NOR
+    # cloud-mirrored — both would attribute another camera's footage to this
+    # one. Fail closed: on any error, skip indexing (the reconciler is the
+    # authoritative pass and will converge).
+    identity_ok = True
+    if cam:
+        try:
+            from services.camera_identity import verify_segment_identity
+            from services.storage_service import get_effective_recordings_base_path
+
+            root = pathlib.Path(get_effective_recordings_base_path(db))
+            identity_ok = verify_segment_identity(cam, path, root)
+        except Exception as e:
+            faststart_logger.error(f"Identity check failed for path {path}: {e}")
+            identity_ok = False
+
     # Parse duration
     duration_sec: float | None = None
     if segment_duration:
@@ -270,7 +288,7 @@ async def hook_segment_complete(
             duration_sec = None
 
     recording_id: int | None = None
-    if cam:
+    if cam and identity_ok:
         try:
             file_size = None
             mtime = None
@@ -386,7 +404,7 @@ async def hook_segment_complete(
     try:
         from services.cloud_recording_service import CloudRecordingService
 
-        if segment_path and os.path.exists(segment_path):
+        if segment_path and os.path.exists(segment_path) and identity_ok:
             # Build relative path under Recordings root
             def _extract_rel(full_path: str) -> str:
                 if not full_path:

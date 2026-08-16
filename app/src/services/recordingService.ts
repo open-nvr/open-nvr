@@ -89,4 +89,15 @@ export const recordingService = {
   updateRecordingStorage: (payload: any) => api.put('/api/v1/recordings/storage', payload),
   getRecordingRetention: () => api.get('/api/v1/recordings/retention'),
   updateRecordingRetention: (payload: any) => api.put('/api/v1/recordings/retention', payload),
+
+  // Orphaned (quarantined) recording trees — footage that could not be
+  // positively attributed to a current camera after a DB rebuild. Superuser.
+  getRecordingOrphans: () => api.get('/api/v1/recordings/orphans'),
+  attachRecordingOrphan: (orphanId: string, cameraId: number) =>
+    api.post(`/api/v1/recordings/orphans/${encodeURIComponent(orphanId)}/attach`, {
+      camera_id: cameraId,
+    }),
+  deleteRecordingOrphan: (orphanId: string) =>
+    api.delete(`/api/v1/recordings/orphans/${encodeURIComponent(orphanId)}`),
+  rescanRecordingOrphans: () => api.post('/api/v1/recordings/orphans/rescan'),
 }

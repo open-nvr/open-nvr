@@ -104,6 +104,34 @@ class CameraService:
             db.commit()
             db.refresh(db_camera)
 
+            # Identity-protect the recordings directory BEFORE provisioning
+            # (i.e. before MediaMTX can write the first segment): if this
+            # camera's numeric id inherits a pre-existing directory that
+            # belonged to a different camera (DB wipe + re-add), the old tree
+            # is quarantined to orphaned/ and a clean, stamped dir takes its
+            # place. Best-effort: a failure here must never block camera
+            # creation (the reconciler repeats the same protection).
+            try:
+                from services.camera_identity import protect_camera_dir
+
+                classification = protect_camera_dir(db, db_camera, "provision")
+                if classification == "conflict":
+                    camera_logger.log_action(
+                        "camera.recordings_dir_quarantined",
+                        message=(
+                            f"Pre-existing recordings for camera id {db_camera.id} "
+                            "belonged to a different camera and were moved to "
+                            "orphaned/ (recoverable in Settings -> Recording)"
+                        ),
+                        user_id=owner_id,
+                        camera_id=db_camera.id,
+                    )
+            except Exception:
+                camera_logger.error(
+                    f"Recording-dir identity protection failed for camera {db_camera.id}",
+                    exc_info=True,
+                )
+
             # Auto-provision if RTSP URL is present
             if db_camera.rtsp_url:
                 try:

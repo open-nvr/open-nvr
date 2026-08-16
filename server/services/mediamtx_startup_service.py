@@ -148,6 +148,21 @@ class MediaMtxStartupService:
                 )
 
                 for camera, config in cameras:
+                    # Identity-protect the recordings dir before (re)enabling
+                    # recording: quarantines a tree this camera does not own
+                    # (DB wipe + id reuse) and stamps its identity marker.
+                    try:
+                        from services.camera_identity import protect_camera_dir
+
+                        await asyncio.to_thread(
+                            protect_camera_dir, db, camera, "provision"
+                        )
+                    except Exception:
+                        mediamtx_logger.error(
+                            f"Recording-dir identity protection failed for "
+                            f"camera {camera.id}",
+                            exc_info=True,
+                        )
                     camera_result = (
                         await MediaMtxStartupService._provision_camera_with_retry(
                             db, camera, config, max_retries, retry_delay

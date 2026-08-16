@@ -44,12 +44,25 @@ from pathlib import Path
 from core.database import SessionLocal
 from core.logging_config import recording_logger
 from models import Camera, Recording
+from services.camera_identity import (
+    ADOPTABLE,
+    CONFLICT,
+    REASON_NO_OWNER,
+    camera_for_path_name,
+    classify_dir,
+    has_recording_files,
+    quarantine_dir,
+    read_marker,
+    resolve_conflict,
+    stamp_marker,
+)
 from services.recording_paths import (
     iter_recording_files,
     iter_recording_files_between,
     parse_recording_time,
 )
 from services.storage_service import get_effective_recordings_base_path
+from services.stream_service import SUBSTREAM_SUFFIX
 
 # A file whose mtime is this recent may still be written by MediaMTX — skip
 # it; the webhook (or the next pass) will pick it up once it's closed.
@@ -73,6 +86,20 @@ def reconcile_camera(
     """
     cam_dir = root / f"cam-{int(camera_id)}"
     now = time.time()
+
+    # Identity gate: never index a directory this camera does not positively
+    # own. A DB wipe restarts the id sequence, so a re-added camera would
+    # otherwise silently inherit (and index) another camera's archive.
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if camera is not None:
+        classification, reason = classify_dir(cam_dir, camera)
+        if classification == CONFLICT:
+            if not resolve_conflict(cam_dir, root, camera, reason, "reconciler"):
+                # Quarantine deferred (e.g. open file handle on Windows) —
+                # skip indexing entirely this pass; retried next pass.
+                return 0, 0
+        elif classification == ADOPTABLE:
+            stamp_marker(cam_dir, camera, "reconciler")
 
     # -- Disk side ----------------------------------------------------------
     # Full history on the startup backfill; only the window's date dirs on
@@ -165,6 +192,69 @@ def reconcile_camera(
     return inserted, deleted
 
 
+def quarantine_ownerless_dirs(db, root: Path) -> int:
+    """Move recording dirs that belong to NO camera into ``orphaned/``.
+
+    Without this, directories whose old numeric id was never reused after a
+    DB wipe stay invisible forever (never indexed, never listed, space only
+    reclaimable by age). Quarantining makes them visible in the orphans UI.
+
+    Guards:
+    * EMPTY cameras table -> skip entirely. A boot against a misconfigured
+      or freshly-created DATABASE_URL must not mass-quarantine a healthy
+      tree (the later reboot against the real DB would then let stale-row
+      deletion purge the whole recordings index).
+    * A dir whose marker uuid matches an EXISTING camera is not ownerless —
+      its expected path name merely changed (e.g. ip edit in ip mode).
+    * Substream dirs and dirs with no recording files are left alone.
+    """
+    if db.query(Camera.id).first() is None:
+        recording_logger.warning(
+            "Ownerless-dir scan skipped: cameras table is empty. If this "
+            "database is fresh but recordings exist on disk, re-add cameras "
+            "and the scan will resume protecting/quarantining on the next "
+            "reconciler pass."
+        )
+        return 0
+
+    quarantined = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.is_dir() or not entry.name.startswith("cam-"):
+            continue
+        if entry.name.endswith(SUBSTREAM_SUFFIX):
+            continue
+        try:
+            if camera_for_path_name(db, entry.name) is not None:
+                continue  # owned; identity handled in reconcile_camera
+            marker, _corrupt = read_marker(entry)
+            if marker and marker.get("camera_uuid"):
+                match = (
+                    db.query(Camera)
+                    .filter(Camera.uuid == marker["camera_uuid"])
+                    .first()
+                )
+                if match is not None:
+                    recording_logger.warning(
+                        f"Dir {entry.name} resolves to no camera by name but "
+                        f"its marker belongs to camera {match.id} "
+                        f"({match.name}); leaving it in place"
+                    )
+                    continue
+            if not has_recording_files(entry):
+                continue
+            if quarantine_dir(entry, root, REASON_NO_OWNER, marker, "reconciler"):
+                quarantined += 1
+        except Exception as e:
+            recording_logger.error(
+                f"Ownerless scan failed for {entry.name}: {e}", exc_info=True
+            )
+    return quarantined
+
+
 def reconcile_all(window_start: datetime | None) -> tuple[int, int]:
     """Reconcile every camera. Runs in a worker thread (own DB session)."""
     total_ins = 0
@@ -183,6 +273,12 @@ def reconcile_all(window_start: datetime | None) -> tuple[int, int]:
                 recording_logger.error(
                     f"Reconciler failed for camera {cid}: {e}", exc_info=True
                 )
+        try:
+            n = quarantine_ownerless_dirs(db, Path(root))
+            if n:
+                recording_logger.warning(f"Quarantined {n} ownerless recording dir(s)")
+        except Exception as e:
+            recording_logger.error(f"Ownerless-dir scan failed: {e}", exc_info=True)
     finally:
         db.close()
     return total_ins, total_del
