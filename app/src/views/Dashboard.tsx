@@ -26,8 +26,19 @@ import { isMediaMtxHealthy } from '../lib/mtxHealth'
 import { Card, CardHeader, CardTitle, CardContent, Badge, Button, Skeleton, ErrorCard, StatusDot } from '../components/ui'
 import { extractApiError } from '../lib/apiError'
 import { useCameras, useRecordingsByDate, useSuricataStats, type CameraItem } from '../lib/queries'
+import { formatDuration, localDayStart, todayLocalKey } from '../lib/time'
 
 type RecordingItem = { start_time?: string | null; id: number; camera?: string; relpath?: string; url?: string; size?: number }
+
+/** "Today" / "Sat, Aug 15" for a local YYYY-MM-DD date key. */
+function fmtDay(date: string): string {
+  if (date === todayLocalKey()) return 'Today'
+  return new Date(localDayStart(date)).toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+}
 
 type MediaMtxStatus = {
   camera_id: number
@@ -129,7 +140,9 @@ export function Dashboard() {
     }
     return dailyRecs
   }, [recsQuery.data])
-  const recsTotal = recsQuery.data?.total_recordings ?? 0
+  // total_recordings is a camera-day count (1 per camera per day) — misleading
+  // as a KPI, so the tile shows total footage duration instead.
+  const recsDuration = recsQuery.data?.total_duration ?? 0
   const recsErr = recsQuery.isError ? extractApiError(recsQuery.error, 'Failed to load recordings') : null
   const loadingRecs = recsQuery.isPending
 
@@ -220,6 +233,21 @@ export function Dashboard() {
       .map(([day, count]) => ({ day, count }))
   }, [recs])
 
+  // Per-camera recording availability for the breakdown table.
+  const recsByCamera = useMemo(() => {
+    return (recsQuery.data?.cameras || []).map((c) => {
+      const days = c.recordings ?? []
+      const latest = days.reduce((m, r) => (r.date > m ? r.date : m), '')
+      return {
+        id: c.camera_id ?? 0,
+        name: c.camera_name || `Camera ${c.camera_id}`,
+        days: days.length,
+        duration: c.total_duration ?? days.reduce((s, r) => s + (r.total_duration || 0), 0),
+        latest: latest || null,
+      }
+    })
+  }, [recsQuery.data])
+
   const camerasByStatus = useMemo(() => {
     const agg = { online: 0, degraded: 0, offline: 0, error: 0 }
     for (const c of cams || []) {
@@ -270,8 +298,8 @@ export function Dashboard() {
           <KpiCard
             icon={<HardDrive size={18} />}
             label="Recordings"
-            value={recsTotal}
-            help="Stored recordings (database)"
+            value={formatDuration(recsDuration)}
+            help={`Footage from ${recsByCamera.filter((c) => c.days > 0).length} of ${camsTotal} cameras`}
             onClick={() => navigate('/playback')}
           />
         )}
@@ -353,6 +381,67 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Per-camera recording availability */}
+      <Card>
+        <CardHeader>
+          <HardDrive size={16} className="text-[var(--text-dim)]" />
+          <CardTitle>Recordings by camera</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {loadingRecs ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-9" />
+              ))}
+            </div>
+          ) : recsErr ? (
+            <ErrorCard title="Recordings" message={recsErr} onRetry={() => recsQuery.refetch()} />
+          ) : recsByCamera.length === 0 ? (
+            <div className="text-sm text-[var(--text-dim)]">No recordings yet</div>
+          ) : (
+            <div className="overflow-x-auto border border-neutral-700 rounded">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[var(--text-dim)] border-b border-neutral-700 bg-[var(--panel-2)]">
+                    <th className="py-2 px-3 font-medium">Camera</th>
+                    <th className="py-2 pr-4 font-medium">Recorded footage</th>
+                    <th className="py-2 pr-4 font-medium">Days</th>
+                    <th className="py-2 pr-4 font-medium">Latest</th>
+                    <th className="py-2 pr-4" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {recsByCamera.map((c) => (
+                    <tr key={c.id} className="border-b border-neutral-800 last:border-b-0">
+                      <td className="py-2 px-3 text-[var(--text)] font-medium">{c.name}</td>
+                      <td className="py-2 pr-4 text-[var(--text)]">
+                        {c.days > 0 ? (
+                          formatDuration(c.duration)
+                        ) : (
+                          <span className="text-[var(--text-dim)]">No recordings</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-[var(--text-dim)]">{c.days > 0 ? c.days : '—'}</td>
+                      <td className="py-2 pr-4 text-[var(--text-dim)]">{c.latest ? fmtDay(c.latest) : '—'}</td>
+                      <td className="py-2 pr-4 text-right">
+                        {c.days > 0 && (
+                          <Link
+                            to="/playback"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--panel)] text-xs"
+                          >
+                            <Play size={12} /> Browse
+                          </Link>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* System & Network Monitoring (moved below Cameras by status) */}
       <SystemNetworkMonitoring />

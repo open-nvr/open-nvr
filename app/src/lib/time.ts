@@ -52,6 +52,16 @@ export function localDateKey(t: Date | number): string {
   return `${y}-${m}-${day}`
 }
 
+/** Human-readable footage duration: "46h 12m", or "32m" under an hour. */
+export function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  if (hours > 0) {
+    return `${hours}h ${mins}m`
+  }
+  return `${mins}m`
+}
+
 /** The browser's IANA timezone name, sent to the API for day grouping. */
 export function browserTz(): string {
   try {
