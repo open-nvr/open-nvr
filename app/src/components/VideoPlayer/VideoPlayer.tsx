@@ -141,6 +141,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const retryTimerRef = useRef<number | null>(null)
     const disconnectGraceRef = useRef<number | null>(null)
     const restartRef = useRef<() => void>(() => {})
+    // Slow, unbounded poll while the WHEP path 404s (path missing
+    // server-side, e.g. a MediaMTX restart raced the backend's
+    // re-provisioning). Separate from the bounded fast-retry budget: the
+    // offline overlay stays up while probe attempts run.
+    const offlinePollTimerRef = useRef<number | null>(null)
+    const offlinePollingRef = useRef(false)
     const [isReconnecting, setIsReconnecting] = useState(false)
     // Real aspect ratio of the incoming stream (width/height), read from the
     // video metadata. null until known (or after the source is torn down).
@@ -210,8 +216,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
     // Cleanup function
     const cleanup = useCallback(() => {
-      // Clear any existing error state
-      setError(null)
+      // Clear any existing error state — except mid-offline-poll, where the
+      // overlay must not flash off while a probe attempt tears down/rebuilds.
+      if (!offlinePollingRef.current) setError(null)
 
       // Cancel pending auto-reconnect timers
       if (retryTimerRef.current) {
@@ -221,6 +228,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       if (disconnectGraceRef.current) {
         clearTimeout(disconnectGraceRef.current)
         disconnectGraceRef.current = null
+      }
+      if (offlinePollTimerRef.current) {
+        clearTimeout(offlinePollTimerRef.current)
+        offlinePollTimerRef.current = null
       }
 
       // Cleanup HLS
@@ -261,6 +272,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // stream: 2s, 4s, 8s, 16s, 30s — then give up into the manual-retry
     // error overlay. Success paths reset the counter.
     const MAX_AUTO_RETRIES = 5
+    const OFFLINE_POLL_INTERVAL_MS = 10000
     const scheduleAutoRetry = useCallback((failMessage: string) => {
       if (mode !== 'live') {
         setError(failMessage)
@@ -287,8 +299,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
       if (!whepUrl || !videoRef.current) return
-      setIsLoading(true)
-      setError(null)
+      if (!offlinePollingRef.current) {
+        setIsLoading(true)
+        setError(null)
+      }
 
       try {
         // ICE servers come from Settings > More Settings > WebRTC. Falling back
@@ -327,6 +341,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           const [stream] = ev.streams
           if (videoRef.current && stream) {
             // Clear any existing error when we get a valid stream
+            offlinePollingRef.current = false
             setError(null)
             videoRef.current.srcObject = stream
             videoRef.current.play().catch(() => {})
@@ -337,6 +352,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         pc.onconnectionstatechange = () => {
           if (pc.connectionState === 'connected') {
             setIsLoading(false)
+            offlinePollingRef.current = false
             setError(null)
             setIsReconnecting(false)
             retryCountRef.current = 0
@@ -391,11 +407,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         const msg = e?.message || 'WebRTC setup failed'
         onError?.(msg)
         if (msg === 'Camera offline') {
-          // The path doesn't exist server-side — retrying won't help; the
-          // camera-status event remounts the player when it comes back.
+          // The path doesn't exist server-side — e.g. a MediaMTX restart and
+          // this WHEP attempt raced the backend's re-provisioning. The
+          // camera-status event remounts the player when the backend notices,
+          // but an outage shorter than its offline debounce never emits one,
+          // so also poll on a slow cadence until the path comes back.
           setError(msg)
           setIsLoading(false)
+          offlinePollingRef.current = true
+          if (!offlinePollTimerRef.current) {
+            offlinePollTimerRef.current = window.setTimeout(() => {
+              offlinePollTimerRef.current = null
+              restartRef.current()
+            }, OFFLINE_POLL_INTERVAL_MS)
+          }
         } else {
+          // Any non-404 failure leaves offline-poll mode for the bounded
+          // fast-retry path.
+          offlinePollingRef.current = false
           scheduleAutoRetry(msg)
         }
       }
@@ -870,13 +899,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // the setup callbacks) always calls the current stream config.
     restartRef.current = restartStream
     const handleRefresh = () => {
-      // Manual retry: start the auto-retry budget over.
+      // Manual retry: start the auto-retry budget over and show the normal
+      // loading UX rather than the frozen offline overlay.
       retryCountRef.current = 0
+      offlinePollingRef.current = false
       setIsReconnecting(false)
       restartStream()
     }
     const handleStreamTypeChange = (type: 'webrtc' | 'hls') => {
       if (type !== streamType) {
+        offlinePollingRef.current = false
         cleanup()
         setStreamType(type)
       }
