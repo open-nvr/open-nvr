@@ -21,7 +21,6 @@ Supports both WS-Security (via onvif-zeep) and HTTP Digest authentication.
 HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
-import asyncio
 import ipaddress
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -30,6 +29,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
+from core.logging_config import main_logger
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnet,
@@ -51,7 +51,7 @@ from services.onvif_service import (
     ptz_continuous_move,
     ptz_presets,
     ptz_stop,
-    scan_onvif_subnet,
+    scan_onvif_subnets,
 )
 
 router = APIRouter(tags=["onvif"])
@@ -157,23 +157,32 @@ async def discover(
                 ),
             )
 
-    # Scan all subnets in parallel, deduplicate by IP
-    try:
-        results_per_subnet = await asyncio.gather(
-            *[scan_onvif_subnet(c) for c in scan_cidrs],
-            return_exceptions=True,
+    # Drop unparseable configured CIDRs instead of failing the whole scan
+    # (user-supplied ones were already validated above).
+    valid_cidrs: list[str] = []
+    for c in scan_cidrs:
+        try:
+            ipaddress.ip_network(c, strict=False)
+            valid_cidrs.append(c)
+        except ValueError:
+            main_logger.warning(f"Skipping invalid Camera LAN CIDR {c!r} in discovery scan")
+    if not valid_cidrs:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid subnet to scan; check the Camera LAN settings.",
         )
+
+    # One call scans all subnets under a single shared concurrency bound —
+    # per-subnet parallel scans would multiply the connect burst and wedge the
+    # container's NAT path (see scan_onvif_subnets).
+    try:
+        devices = await scan_onvif_subnets(valid_cidrs)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-    seen_ips: set[str] = set()
-    devices: list[dict] = []
-    for result in results_per_subnet:
-        if isinstance(result, list):
-            for d in result:
-                if d.get("ip") and d["ip"] not in seen_ips:
-                    seen_ips.add(d["ip"])
-                    devices.append(d)
+    seen_ips: set[str] = {d["ip"] for d in devices}
+    scan_cidrs = valid_cidrs
 
     # Best-effort multicast fallback (works only in host-mode or on native LAN)
     try:
