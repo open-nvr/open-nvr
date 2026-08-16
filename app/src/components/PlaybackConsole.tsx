@@ -632,6 +632,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     setView({ start, end: start + span })
   }
 
+  // Edge auto-scroll while scrubbing: shift the window, keep the span (and
+  // the active zoom preset). Returning the same object when clamped-unchanged
+  // avoids re-render churn at the day boundaries.
+  const panBy = useCallback(
+    (deltaMs: number) => {
+      setView((v) => {
+        const span = v.end - v.start
+        if (span <= 0) return v
+        const start = clamp(v.start + deltaMs, dayStart, Math.max(dayStart, dayEnd - span))
+        return start === v.start ? v : { start, end: start + span }
+      })
+    },
+    [dayStart, dayEnd]
+  )
+
   // Continuous wheel zoom, anchored so the time under the cursor stays fixed.
   const zoomAt = useCallback(
     (anchorMs: number, factor: number) => {
@@ -850,6 +865,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
               onSeek={seekTo}
               onScrubPreview={setPreviewMs}
               onZoomAt={zoomAt}
+              onPan={panBy}
               mode={clipMode ? 'clip' : 'seek'}
               selection={clipMode ? selection : null}
               onSelectionChange={setSelection}

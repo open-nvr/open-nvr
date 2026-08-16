@@ -388,6 +388,21 @@ export function SyncPlayback() {
     setView({ start, end: start + span })
   }
 
+  // Edge auto-scroll while scrubbing: shift the window, keep the span (and
+  // the active zoom preset). Returning the same object when clamped-unchanged
+  // avoids re-render churn at the day boundaries.
+  const panBy = useCallback(
+    (deltaMs: number) => {
+      setView((v) => {
+        const span = v.end - v.start
+        if (span <= 0) return v
+        const start = clamp(v.start + deltaMs, dayStart, Math.max(dayStart, dayEnd - span))
+        return start === v.start ? v : { start, end: start + span }
+      })
+    },
+    [dayStart, dayEnd]
+  )
+
   const zoomAt = useCallback(
     (anchorMs: number, factor: number) => {
       setZoomIdx(-1)
@@ -590,6 +605,7 @@ export function SyncPlayback() {
                 onSeek={seekTo}
                 onScrubPreview={setPreviewMs}
                 onZoomAt={zoomAt}
+                onPan={panBy}
                 activeId={activeId}
                 onRowClick={setActiveId}
               />

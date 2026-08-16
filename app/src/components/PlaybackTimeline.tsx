@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
 
 export interface TimelineSegment {
   /** epoch ms */
@@ -43,6 +44,9 @@ interface PlaybackTimelineProps {
   /** Wheel zoom: `anchorMs` is the time under the cursor (kept fixed), `factor`
    *  < 1 zooms in (shrinks the visible span), > 1 zooms out. */
   onZoomAt?: (anchorMs: number, factor: number) => void
+  /** Pan the visible window by deltaMs (parent clamps to the day). Enables
+   *  edge auto-scroll while scrubbing or painting a clip selection. */
+  onPan?: (deltaMs: number) => void
   /** 'seek' (default): drag scrubs. 'clip': drag paints an export selection. */
   mode?: 'seek' | 'clip'
   /** Current clip selection (epoch ms), shown as a highlighted band. */
@@ -95,6 +99,7 @@ export function PlaybackTimeline({
   onSeek,
   onScrubPreview,
   onZoomAt,
+  onPan,
   mode = 'seek',
   selection,
   onSelectionChange,
@@ -102,6 +107,7 @@ export function PlaybackTimeline({
 }: PlaybackTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const lastXRef = useRef(0)
   const selAnchorRef = useRef<number | null>(null)
   const [dragging, setDragging] = useState(false)
   const [hoverMs, setHoverMs] = useState<number | null>(null)
@@ -207,30 +213,46 @@ export function PlaybackTimeline({
     setHoverMs(xToMs(clientX))
   }
 
-  const handleDown = (e: React.MouseEvent) => {
+  const autoPan = useEdgeAutoPan({ rectRef: trackRef, spanMs: span, onPan })
+
+  // Pointer capture keeps the drag alive (and the seek committable) even when
+  // the pointer leaves the track — routine while edge auto-panning. Clip drags
+  // also feed onScrubPreview so the parent's auto-follow (suppressed while a
+  // preview is active) can't recenter the window against the pan.
+  const handleDown = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
+    e.currentTarget.setPointerCapture(e.pointerId)
     setDragging(true)
+    lastXRef.current = e.clientX
+    autoPan.onDragStart(e.clientX)
     setHover(e.clientX)
     if (mode === 'clip') {
       const t = xToMs(e.clientX)
       selAnchorRef.current = t
       onSelectionChange?.({ inMs: t, outMs: t })
+      onScrubPreview?.(t)
     } else {
       onScrubPreview?.(snap(xToMs(e.clientX)))
     }
   }
-  const handleMove = (e: React.MouseEvent) => {
+  const handleMove = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
+    lastXRef.current = e.clientX
     setHover(e.clientX)
     if (!dragging) return
+    autoPan.onDragMove(e.clientX)
     if (mode === 'clip' && selAnchorRef.current != null) {
       const t = xToMs(e.clientX)
       const a = selAnchorRef.current
       onSelectionChange?.({ inMs: Math.min(a, t), outMs: Math.max(a, t) })
+      onScrubPreview?.(t)
     } else if (mode === 'seek') {
       onScrubPreview?.(snap(xToMs(e.clientX)))
     }
   }
-  const handleUp = (e: React.MouseEvent) => {
+  const handleUp = (e: React.PointerEvent) => {
     if (!dragging) return
+    autoPan.onDragEnd()
     setDragging(false)
     if (mode === 'clip') {
       const a = selAnchorRef.current
@@ -238,18 +260,45 @@ export function PlaybackTimeline({
       const t = xToMs(e.clientX)
       if (a == null || Math.abs(t - a) < 1000) onSelectionChange?.(null) // a click clears
       else onSelectionChange?.({ inMs: Math.min(a, t), outMs: Math.max(a, t) })
+      onScrubPreview?.(null)
     } else {
       onSeek(snap(xToMs(e.clientX)))
       onScrubPreview?.(null)
     }
   }
+  // With capture, pointerleave still fires when the pointer exits the bounds —
+  // it must only clear the hover chip, never cancel an active drag.
   const handleLeave = () => {
-    setHoverMs(null)
-    if (dragging) {
-      setDragging(false)
-      if (mode === 'seek') onScrubPreview?.(null)
-    }
+    if (!dragging) setHoverMs(null)
   }
+  const handleCancel = () => {
+    if (!dragging) return
+    autoPan.onDragEnd()
+    setDragging(false)
+    setHoverMs(null)
+    if (mode === 'clip') {
+      selAnchorRef.current = null
+      onSelectionChange?.(null)
+    }
+    onScrubPreview?.(null)
+  }
+
+  // While auto-panning the pointer holds still, so no pointermove fires —
+  // re-derive the drag target from the moving window instead. During a drag
+  // the window only moves via onPan (auto-follow is suppressed by the preview).
+  useEffect(() => {
+    if (!dragging) return
+    setHover(lastXRef.current)
+    if (mode === 'clip' && selAnchorRef.current != null) {
+      const t = xToMs(lastXRef.current)
+      const a = selAnchorRef.current
+      onSelectionChange?.({ inMs: Math.min(a, t), outMs: Math.max(a, t) })
+      onScrubPreview?.(t)
+    } else if (mode === 'seek') {
+      onScrubPreview?.(snap(xToMs(lastXRef.current)))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewStart, viewEnd])
 
   const currentPct = toPct(currentTime)
   const currentVisible = currentTime >= viewStart && currentTime <= viewEnd
@@ -273,13 +322,14 @@ export function PlaybackTimeline({
       {/* Track */}
       <div
         ref={trackRef}
-        className={`relative h-9 bg-neutral-800 overflow-hidden rounded-sm ${
+        className={`relative h-9 bg-neutral-800 overflow-hidden rounded-sm touch-none ${
           mode === 'clip' ? 'cursor-crosshair' : 'cursor-pointer'
         }`}
-        onMouseDown={handleDown}
-        onMouseMove={handleMove}
-        onMouseUp={handleUp}
-        onMouseLeave={handleLeave}
+        onPointerDown={handleDown}
+        onPointerMove={handleMove}
+        onPointerUp={handleUp}
+        onPointerLeave={handleLeave}
+        onPointerCancel={handleCancel}
       >
         {/* Footage (red) */}
         {blocks.map((b, i) => (
