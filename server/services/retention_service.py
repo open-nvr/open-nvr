@@ -173,6 +173,13 @@ class RetentionService:
                 stats["deleted_records"] += stats_age["deleted_records"]
                 stats["freed_space_mb"] += stats_age["freed_space_mb"]
 
+                # Quarantined footage ages out under the same policy.
+                stats_orphans = RetentionService._cleanup_orphans_by_age(
+                    base_path, cutoff_time
+                )
+                stats["deleted_files"] += stats_orphans["deleted_files"]
+                stats["freed_space_mb"] += stats_orphans["freed_space_mb"]
+
             # Phase 2: Free space cleanup (if needed)
             if min_free_space_gb:
                 free_space_gb = RetentionService._get_disk_free_space_gb(str(base_path))
@@ -382,8 +389,29 @@ class RetentionService:
                 .filter(Recording.start_time < cutoff_time + timedelta(days=1))
                 .all()
             }
+            from services.camera_identity import (
+                camera_for_path_name,
+                read_marker,
+            )
+
             for cam_dir in base_path.iterdir():
                 if not cam_dir.is_dir() or not cam_dir.name.startswith("cam-"):
+                    continue
+                # Only sweep dirs POSITIVELY owned by a live camera. An
+                # ownerless dir (post-DB-wipe leftover) or a dir whose
+                # identity marker belongs to a different camera must not be
+                # aged away here — the reconciler quarantines those into
+                # orphaned/, where they stay recoverable and age out under
+                # the explicit orphan step instead.
+                owner = camera_for_path_name(db, cam_dir.name)
+                if owner is None:
+                    continue
+                marker, _corrupt = read_marker(cam_dir)
+                if (
+                    marker is not None
+                    and owner.uuid
+                    and marker.get("camera_uuid") != owner.uuid
+                ):
                     continue
                 for f in iter_recording_files(cam_dir):
                     try:
@@ -403,6 +431,52 @@ class RetentionService:
         except Exception as e:
             recording_logger.warning(f"Orphan sweep failed: {e}")
 
+        return stats
+
+    @staticmethod
+    def _cleanup_orphans_by_age(
+        base_path: Path, cutoff_time: datetime
+    ) -> dict[str, Any]:
+        """Age out quarantined footage under ``orphaned/``.
+
+        Same ``retention_days`` cutoff as live recordings (0 = keep forever —
+        this method is only called with a real cutoff). This and the explicit
+        admin DELETE endpoint are the ONLY code paths allowed to delete
+        orphaned footage; the space-pressure pass deliberately never touches
+        it. A fully-emptied quarantine tree (no .mp4 left) is removed
+        entirely, dotfiles included.
+        """
+        stats = {"deleted_files": 0, "freed_space_mb": 0}
+        try:
+            from services.camera_identity import ORPHANED_DIR_NAME
+            from services.recording_paths import (
+                iter_recording_files,
+                parse_recording_time,
+            )
+
+            orphan_root = base_path / ORPHANED_DIR_NAME
+            if not orphan_root.is_dir():
+                return stats
+            for tree in orphan_root.iterdir():
+                if not tree.is_dir():
+                    continue
+                for f in iter_recording_files(tree):
+                    try:
+                        st = f.stat()
+                    except OSError:
+                        continue
+                    ts = parse_recording_time(f, mtime=st.st_mtime)
+                    if ts is None or ts >= cutoff_time:
+                        continue
+                    if RetentionService._delete_file_safely(f):
+                        stats["deleted_files"] += 1
+                        stats["freed_space_mb"] += st.st_size / (1024**2)
+                        RetentionService._delete_empty_directories(orphan_root, f)
+                # Fully aged out -> drop the (now footage-free) tree.
+                if next(iter(tree.rglob("*.mp4")), None) is None:
+                    shutil.rmtree(tree, ignore_errors=True)
+        except Exception as e:
+            recording_logger.warning(f"Orphan aging failed: {e}")
         return stats
 
     @staticmethod

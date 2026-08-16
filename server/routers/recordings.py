@@ -728,6 +728,27 @@ async def list_recording_cameras(
     return {"cameras": result, "count": len(result)}
 
 
+def _identity_conflict(db: Session, camera: Camera) -> bool:
+    """True when the camera's on-disk dir is marked as ANOTHER camera's.
+
+    Covers the window between a DB wipe + re-add and the reconciler's
+    quarantine: filesystem/MediaMTX-derived playback must not serve the
+    conflicted tree as this camera's footage. Blocking I/O — call via
+    asyncio.to_thread from async handlers.
+    """
+    try:
+        from pathlib import Path as _IdPath
+
+        from services.camera_identity import dir_conflicts_with_camera
+        from services.storage_service import get_effective_recordings_base_path
+
+        return dir_conflicts_with_camera(
+            camera, _IdPath(get_effective_recordings_base_path(db))
+        )
+    except Exception:
+        return False
+
+
 @router.get("/playback/url")
 async def get_playback_url(
     path: str = Query(..., description="Camera path (e.g., cam-57)"),
@@ -749,6 +770,9 @@ async def get_playback_url(
     if camera is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     _require_camera_view(user_obj, camera, db)
+
+    if await asyncio.to_thread(_identity_conflict, db, camera):
+        raise HTTPException(status_code=404, detail="Recording unavailable")
 
     # Build the playback URL the BROWSER fetches — use the external fallback
     # chain (the browser can't reach the Docker-internal mediamtx host; the
@@ -1452,6 +1476,13 @@ async def get_day_segments(
         settings.mediamtx_stream_prefix, camera.id, camera.ip_address
     )
 
+    # Identity guard: when this camera's on-disk directory carries another
+    # camera's identity marker (the window between a DB wipe + re-add and the
+    # reconciler's quarantine), nothing filesystem/MediaMTX-derived may be
+    # served as this camera's footage. The DB-index path stays usable — its
+    # rows only exist for identity-verified segments.
+    dir_conflict = await asyncio.to_thread(_identity_conflict, db, camera)
+
     # The LIST call stays internal; every URL handed to the browser uses the
     # external fallback chain (matches the other playback routes).
     browser_playback_base = (
@@ -1473,6 +1504,8 @@ async def get_day_segments(
     # runs off the event loop.
     live_edge_start = None
     try:
+        if dir_conflict:
+            raise RuntimeError("dir identity conflict; skip filesystem live edge")
         from pathlib import Path as _Path
 
         from services.recording_paths import find_latest_recording_file
@@ -1537,6 +1570,8 @@ async def get_day_segments(
 
         # Fallback (unindexed camera / flag off): date-bounded MediaMTX query.
         # A one-hour margin catches segments spanning the window start.
+        if dir_conflict:
+            return empty
         all_segments = await mediamtx_client.list_segments(
             path,
             start=range_start - timedelta(hours=1),

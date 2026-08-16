@@ -18,21 +18,72 @@
 
 import { useState, useEffect } from 'react'
 import { apiService } from '../../lib/apiService'
-import { Save, FolderOpen, Clock, Shield, HardDrive } from 'lucide-react'
+import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw } from 'lucide-react'
 import { useSnackbar } from '../../components/Snackbar'
+
+interface OrphanIdentity {
+    camera_uuid?: string | null
+    camera_id?: number | null
+    camera_name?: string | null
+    ip_address?: string | null
+}
+
+interface OrphanTree {
+    id: string
+    original_dir?: string | null
+    reason?: string | null
+    quarantined_at?: string | null
+    identity?: OrphanIdentity | null
+    file_count: number
+    total_bytes: number
+    earliest?: string | null
+    latest?: string | null
+    suggested_camera_id?: number | null
+}
+
+interface CameraOption {
+    id: number
+    name?: string | null
+    ip_address?: string | null
+}
+
+function formatBytes(bytes: number): string {
+    if (!bytes) return '0 B'
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+    return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+function formatDay(iso?: string | null): string {
+    if (!iso) return '?'
+    try {
+        return new Date(iso).toLocaleDateString()
+    } catch {
+        return iso
+    }
+}
 
 export function RecordingSettings() {
     const { showError, showSuccess } = useSnackbar()
     const [loading, setLoading] = useState(false)
     const [path, setPath] = useState('')
-    
+
     // Retention settings
     const [retentionDays, setRetentionDays] = useState(30)
     const [protectFlagged, setProtectFlagged] = useState(true)
     const [minFreeSpace, setMinFreeSpace] = useState<number | ''>('')
 
+    // Orphaned (quarantined) recording trees — superuser only; the card is
+    // hidden entirely when the list is empty or the API refuses access.
+    const [orphans, setOrphans] = useState<OrphanTree[]>([])
+    const [orphansAvailable, setOrphansAvailable] = useState(false)
+    const [cameras, setCameras] = useState<CameraOption[]>([])
+    const [attachTarget, setAttachTarget] = useState<Record<string, number | ''>>({})
+    const [orphanBusy, setOrphanBusy] = useState<string | null>(null)
+
     useEffect(() => {
         loadSettings()
+        loadOrphans()
     }, [])
 
     const loadSettings = async () => {
@@ -43,7 +94,7 @@ export function RecordingSettings() {
                 apiService.getRecordingRetention()
             ])
             setPath(storageRes.data.root_path || storageRes.data.recordings_base_path || '')
-            
+
             // Load retention settings
             const retention = retentionRes.data
             setRetentionDays(retention.retention_days ?? 30)
@@ -53,6 +104,87 @@ export function RecordingSettings() {
             showError(e?.message || 'Failed to load recording settings')
         } finally {
             setLoading(false)
+        }
+    }
+
+    const loadOrphans = async () => {
+        try {
+            const [orphanRes, cameraRes] = await Promise.all([
+                apiService.getRecordingOrphans(),
+                apiService.getCameras({}),
+            ])
+            const items: OrphanTree[] = orphanRes.data?.items || []
+            setOrphans(items)
+            setOrphansAvailable(true)
+            const cams: CameraOption[] = (cameraRes.data?.items || cameraRes.data || [])
+            setCameras(Array.isArray(cams) ? cams : [])
+            // Pre-select the suggested camera in each row's picker.
+            const pre: Record<string, number | ''> = {}
+            for (const o of items) pre[o.id] = o.suggested_camera_id ?? ''
+            setAttachTarget(pre)
+        } catch {
+            // Non-superuser (403) or older backend — keep the card hidden.
+            setOrphansAvailable(false)
+        }
+    }
+
+    const handleAttach = async (orphan: OrphanTree) => {
+        const camId = attachTarget[orphan.id]
+        if (camId === '' || camId === undefined) {
+            showError('Pick a camera to attach this footage to')
+            return
+        }
+        const cam = cameras.find((c) => c.id === camId)
+        const ok = window.confirm(
+            `Attach ${orphan.file_count} recording file(s) (${formatDay(orphan.earliest)} – ${formatDay(orphan.latest)}, ${formatBytes(orphan.total_bytes)}) to camera "${cam?.name || camId}"?\n\nThe footage will appear in that camera's playback timeline.`
+        )
+        if (!ok) return
+        try {
+            setOrphanBusy(orphan.id)
+            const res = await apiService.attachRecordingOrphan(orphan.id, camId as number)
+            if (res.data?.fully_merged === false) {
+                showSuccess(
+                    `Attached with ${res.data.skipped_files?.length ?? 0} file(s) skipped (name collisions) — the remainder stays listed`
+                )
+            } else {
+                showSuccess(`Footage attached (${res.data?.indexed_rows ?? 0} clips indexed)`)
+            }
+            await loadOrphans()
+        } catch (e: any) {
+            showError(e?.response?.data?.detail || e?.message || 'Attach failed')
+        } finally {
+            setOrphanBusy(null)
+        }
+    }
+
+    const handleDeleteOrphan = async (orphan: OrphanTree) => {
+        const ok = window.confirm(
+            `Permanently delete ${orphan.file_count} recording file(s) (${formatBytes(orphan.total_bytes)}) from "${orphan.id}"?\n\nThis cannot be undone.`
+        )
+        if (!ok) return
+        try {
+            setOrphanBusy(orphan.id)
+            await apiService.deleteRecordingOrphan(orphan.id)
+            showSuccess('Orphaned footage deleted')
+            await loadOrphans()
+        } catch (e: any) {
+            showError(e?.response?.data?.detail || e?.message || 'Delete failed')
+        } finally {
+            setOrphanBusy(null)
+        }
+    }
+
+    const handleRescan = async () => {
+        try {
+            setOrphanBusy('__rescan__')
+            const res = await apiService.rescanRecordingOrphans()
+            const n = res.data?.quarantined ?? 0
+            showSuccess(n ? `Rescan quarantined ${n} tree(s)` : 'Rescan found nothing new')
+            await loadOrphans()
+        } catch (e: any) {
+            showError(e?.response?.data?.detail || e?.message || 'Rescan failed')
+        } finally {
+            setOrphanBusy(null)
         }
     }
 
@@ -220,6 +352,114 @@ export function RecordingSettings() {
                     </button>
                 </div>
             </form>
+
+            {/* Orphaned recordings — quarantined footage that could not be
+                attributed to a current camera (e.g. after a database rebuild).
+                Hidden when empty or when the user is not a superuser. */}
+            {orphansAvailable && orphans.length > 0 && (
+                <div className="mt-8 bg-[var(--panel)] border border-amber-700/50 rounded-lg p-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-medium flex items-center gap-2">
+                            <Archive size={20} className="text-amber-500" />
+                            Orphaned Recordings
+                        </h3>
+                        <button
+                            onClick={handleRescan}
+                            disabled={orphanBusy !== null}
+                            className="px-3 py-1.5 text-sm border border-neutral-700 rounded hover:border-[var(--accent)] disabled:opacity-50 flex items-center gap-2"
+                        >
+                            <RefreshCw size={14} className={orphanBusy === '__rescan__' ? 'animate-spin' : ''} />
+                            Rescan
+                        </button>
+                    </div>
+                    <p className="text-sm text-[var(--text-dim)] mb-4">
+                        This footage was found on disk but could not be matched to a current camera
+                        (usually after the database was rebuilt and cameras were re-added). It is safe
+                        on disk and ages out with the normal retention policy. Attach each tree to the
+                        camera it belongs to, or delete it.
+                    </p>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="text-left text-[var(--text-dim)] border-b border-neutral-800">
+                                    <th className="py-2 pr-4">Previous identity</th>
+                                    <th className="py-2 pr-4">Footage</th>
+                                    <th className="py-2 pr-4">Reason</th>
+                                    <th className="py-2 pr-4">Attach to</th>
+                                    <th className="py-2"></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {orphans.map((o) => (
+                                    <tr key={o.id} className="border-b border-neutral-800/50 align-middle">
+                                        <td className="py-3 pr-4">
+                                            <div className="font-medium">
+                                                {o.identity?.camera_name || o.original_dir || o.id}
+                                            </div>
+                                            <div className="text-xs text-[var(--text-dim)]">
+                                                {o.identity?.ip_address ? `IP ${o.identity.ip_address} · ` : ''}
+                                                {o.original_dir || o.id}
+                                            </div>
+                                        </td>
+                                        <td className="py-3 pr-4 whitespace-nowrap">
+                                            <div>{o.file_count} files · {formatBytes(o.total_bytes)}</div>
+                                            <div className="text-xs text-[var(--text-dim)]">
+                                                {formatDay(o.earliest)} – {formatDay(o.latest)}
+                                            </div>
+                                        </td>
+                                        <td className="py-3 pr-4 text-xs text-[var(--text-dim)] whitespace-nowrap">
+                                            {o.reason === 'no-owner' && 'No matching camera'}
+                                            {o.reason === 'uuid-mismatch' && 'Belonged to a different camera'}
+                                            {o.reason === 'predates-camera' && 'Predates the current camera'}
+                                            {!o.reason && 'Unknown'}
+                                        </td>
+                                        <td className="py-3 pr-4">
+                                            <select
+                                                value={attachTarget[o.id] ?? ''}
+                                                onChange={(e) =>
+                                                    setAttachTarget((prev) => ({
+                                                        ...prev,
+                                                        [o.id]: e.target.value === '' ? '' : parseInt(e.target.value),
+                                                    }))
+                                                }
+                                                className="px-2 py-1.5 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none"
+                                            >
+                                                <option value="">Select camera…</option>
+                                                {cameras.map((c) => (
+                                                    <option key={c.id} value={c.id}>
+                                                        {c.name || `Camera ${c.id}`}
+                                                        {c.id === o.suggested_camera_id ? ' (suggested)' : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </td>
+                                        <td className="py-3 whitespace-nowrap">
+                                            <div className="flex items-center gap-2 justify-end">
+                                                <button
+                                                    onClick={() => handleAttach(o)}
+                                                    disabled={orphanBusy !== null || attachTarget[o.id] === '' || attachTarget[o.id] === undefined}
+                                                    className="px-3 py-1.5 text-sm bg-[var(--accent)] text-white rounded hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-1.5"
+                                                >
+                                                    <Link2 size={14} />
+                                                    {orphanBusy === o.id ? 'Working…' : 'Attach'}
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteOrphan(o)}
+                                                    disabled={orphanBusy !== null}
+                                                    className="px-3 py-1.5 text-sm border border-red-800 text-red-400 rounded hover:bg-red-950/40 disabled:opacity-50 flex items-center gap-1.5"
+                                                >
+                                                    <Trash2 size={14} />
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

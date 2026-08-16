@@ -333,6 +333,10 @@ services:
     volumes:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
+      # MediaMTX JWT signing keypair — persisted so the kid survives
+      # container recreates; otherwise MediaMTX keeps serving its cached
+      # JWKS and rejects every stream token until it is restarted.
+      - opennvr_jwt_keys:/app/keys
     environment:
       # Must match the mediamtx service's TZ — recording directories are
       # named in local time and parsed with the same zone.
@@ -509,3 +513,7 @@ volumes:
   # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``
   # to force a re-download (e.g., after the weights URL changes).
   opennvr_yolov8_weights:
+  # MediaMTX JWT RSA keypair (private key never leaves opennvr-core).
+  # Rotate by removing the volume with core stopped, then restart
+  # mediamtx so it refetches the JWKS.
+  opennvr_jwt_keys:

@@ -73,6 +73,7 @@ from routers import (
     mediamtx_hooks,
     network as network_router,
     onvif as onvif_router,
+    orphaned_recordings,
     password_policy,
     permissions,
     recordings,
@@ -137,6 +138,21 @@ async def lifespan(app: FastAPI):
         main_logger.info("Database initialized successfully")
     except Exception as e:
         main_logger.error(f"Database initialization failed: {e}", exc_info=True)
+
+    # Camera uuid backstop: create_all-bootstrapped databases skip the
+    # Alembic backfill, and every identity check (markers, quarantine,
+    # webhook gate) keys off cameras.uuid — fill any missing before the
+    # reconciler/provisioning tasks start.
+    try:
+        db = SessionLocal()
+        try:
+            from services.camera_identity import ensure_camera_uuids
+
+            ensure_camera_uuids(db)
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Camera uuid backfill failed: {e}", exc_info=True)
 
     # Seed defaults (roles, permissions, admin user) and ensure admin user exists
     try:
@@ -626,6 +642,7 @@ app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
+app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(
     onvif_router.router,
     prefix=settings.api_prefix,

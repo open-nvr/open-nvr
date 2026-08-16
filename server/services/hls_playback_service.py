@@ -254,10 +254,40 @@ class HlsPlaybackService:
         # Generate session ID
         session_id = str(uuid.uuid4())
 
+        # Identity guard: when the camera's on-disk dir is marked as another
+        # camera's (post-DB-wipe window before the reconciler quarantines),
+        # NEITHER the byte-range path nor the MediaMTX proxy may serve it —
+        # both read the conflicted tree straight off disk.
+        conflicted = False
+        if db is not None:
+            try:
+                from models import Camera as _Camera
+                from services.camera_identity import dir_conflicts_with_camera
+                from services.storage_service import (
+                    get_effective_recordings_base_path,
+                )
+
+                cam = db.query(_Camera).filter(_Camera.id == camera_id).first()
+                if cam is not None:
+                    conflicted = await asyncio.to_thread(
+                        dir_conflicts_with_camera,
+                        cam,
+                        Path(get_effective_recordings_base_path(db)),
+                    )
+            except Exception:
+                conflicted = False
+
         # Query MediaMTX for segment info
-        segments, total_duration = await cls._fetch_segments(
-            camera_path, start_time, end_time
-        )
+        if conflicted:
+            recording_logger.warning(
+                f"[HLS] Camera {camera_id}: dir identity conflict — serving "
+                "empty session instead of another camera's footage"
+            )
+            segments, total_duration = [], 0.0
+        else:
+            segments, total_duration = await cls._fetch_segments(
+                camera_path, start_time, end_time
+            )
 
         # Create session
         session = PlaybackSession(
@@ -279,9 +309,10 @@ class HlsPlaybackService:
         # the MediaMTX proxy path (byte_segments stays empty). Runs off the event
         # loop since it does blocking file I/O.
         try:
-            await asyncio.to_thread(
-                cls._attach_byte_index, session, camera_id, db, total_duration
-            )
+            if not conflicted:
+                await asyncio.to_thread(
+                    cls._attach_byte_index, session, camera_id, db, total_duration
+                )
         except Exception as e:
             recording_logger.warning(
                 f"[HLS] Byte-range indexing failed, using MediaMTX fallback: {e}"
@@ -657,6 +688,21 @@ class HlsPlaybackService:
             resolve_under_root,
             storage_service,
         )
+
+        # Identity guard: this filesystem fallback bypasses the recordings
+        # index, so it must not serve a directory whose marker belongs to a
+        # different camera (post-DB-wipe window before quarantine).
+        try:
+            from models import Camera as _Camera
+            from services.camera_identity import dir_conflicts_with_camera
+
+            cam = db.query(_Camera).filter(_Camera.id == camera_id).first()
+            if cam is not None and dir_conflicts_with_camera(
+                cam, Path(get_effective_recordings_base_path(db))
+            ):
+                return None
+        except Exception:
+            pass
 
         start_naive = start_time.replace(tzinfo=None)
 

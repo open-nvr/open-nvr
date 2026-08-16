@@ -172,6 +172,20 @@ class Camera(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    # Stable identity that survives a DB wipe/rebuild (the numeric id is a
+    # sequence that restarts at 1 on a fresh DB). Stamped into each camera's
+    # on-disk recordings directory (.camera-identity.json) so footage can
+    # never be silently re-attributed to a different camera that later reuses
+    # the same numeric id. Nullable at the DB level only so the additive
+    # column self-heal can add it to old create_all databases; code always
+    # populates it (default here + ensure_camera_uuids at startup).
+    uuid = Column(
+        String(36),
+        nullable=True,
+        unique=True,
+        index=True,
+        default=lambda: str(uuid.uuid4()),
+    )
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=False)
