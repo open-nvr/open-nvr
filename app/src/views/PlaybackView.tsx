@@ -16,12 +16,13 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import { useRecordingsByDate } from '../lib/queries'
+import { formatDuration } from '../lib/time'
 import {
   Calendar,
   Play,
@@ -98,9 +99,14 @@ export function PlaybackView() {
   const [cameras, setCameras] = useState<CameraWithRecordings[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [totalRecordings, setTotalRecordings] = useState(0)
   const [totalDuration, setTotalDuration] = useState(0)
   const [mediamtxAvailable, setMediamtxAvailable] = useState(true)
+
+  // Distinct local calendar days that have any footage, across all cameras.
+  const daysWithFootage = useMemo(
+    () => new Set(cameras.flatMap((c) => (c.recordings ?? []).map((r) => r.date))).size,
+    [cameras]
+  )
 
   // Expanded cameras (accordion style)
   const [expandedCameras, setExpandedCameras] = useState<Set<number>>(new Set())
@@ -145,8 +151,7 @@ export function PlaybackView() {
     }
     setError(null)
     setCameras((data.cameras as any) || [])
-    setTotalRecordings(data.total_recordings || 0)
-    setTotalDuration((data as any).total_duration || 0)
+    setTotalDuration(data.total_duration || 0)
     setMediamtxAvailable(data.mediamtx_available !== false)
     // Auto-expand first camera if only one exists
     if (data.cameras?.length === 1) {
@@ -336,15 +341,6 @@ export function PlaybackView() {
   }
 
   // Format helpers
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const mins = Math.floor((seconds % 3600) / 60)
-    if (hours > 0) {
-      return `${hours}h ${mins}m`
-    }
-    return `${mins}m`
-  }
-
   const formatDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split('-')
     const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day))
@@ -377,7 +373,7 @@ export function PlaybackView() {
           <div className="flex items-center gap-4 text-sm text-[var(--text-dim)]">
             <span className="flex items-center gap-1.5">
               <Film size={14} />
-              {totalRecordings} recording{totalRecordings !== 1 ? 's' : ''}
+              {daysWithFootage} day{daysWithFootage !== 1 ? 's' : ''} with footage
             </span>
             <span className="flex items-center gap-1.5">
               <Clock size={14} />

@@ -93,33 +93,75 @@ async def test_resolve_control_endpoint_trusts_hint_first(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_subnet_scan_gates_onvif_probe_on_tcp_precheck(monkeypatch):
-    """Regression: the /24 scan must TCP-precheck each host:port and only run the
-    expensive ONVIF probe on OPEN ports — otherwise thousands of dead-IP SOAP
-    probes saturate connections and real cameras (e.g. one on 8088) get missed."""
+async def test_subnet_scan_liveness_first_and_probe_only_open_ports(monkeypatch):
+    """Regression: the /24 scan must be liveness-first — dead IPs get ONLY the
+    cheap liveness pair (not the full candidate-port sweep), because the old
+    host×port flood (~2000 SYNs at concurrency 128) wedged the Docker-Desktop
+    NAT path for ~13s and made cameras vanish from back-to-back scans. A live
+    host that answers RST ("closed") on the liveness ports but serves ONVIF on
+    a high port (8088) must still be swept and found, and the expensive ONVIF
+    probe must run only on OPEN ports."""
     from services import onvif_service as osvc
 
+    camera = "192.168.1.108"  # RSTs 80/443, serves ONVIF on 8088
+    gated: list[tuple[str, int]] = []
     probed: list[tuple[str, int]] = []
-    open_ports = {("192.168.1.108", 8088)}  # only this host:port is "open"
 
-    async def fake_tcp_open(ip, port, timeout=0.5):
-        return (ip, port) in open_ports
+    async def fake_tcp_state(ip, port, timeout=osvc._GATE_TIMEOUT):
+        gated.append((ip, port))
+        if ip == camera:
+            return "open" if port == 8088 else "closed"
+        return "dead"
 
     async def fake_probe(ip, port, timeout=0.5, scheme="http"):
         probed.append((ip, port))
-        if (ip, port) in open_ports and scheme == "http":
+        if (ip, port) == (camera, 8088) and scheme == "http":
             return {"ip": ip, "port": port, "scheme": scheme,
                     "service_urls": [f"http://{ip}:{port}/onvif/device_service"]}
         return None
 
-    monkeypatch.setattr(osvc, "_tcp_open", fake_tcp_open)
+    monkeypatch.setattr(osvc, "_tcp_state", fake_tcp_state)
     monkeypatch.setattr(osvc, "probe_onvif_device", fake_probe)
 
     devices = await osvc.scan_onvif_subnet("192.168.1.104/29")
-    assert devices == [{"ip": "192.168.1.108", "scheme": "http",
-                        "service_urls": ["http://192.168.1.108:8088/onvif/device_service"]}]
-    # The ONVIF probe ran ONLY for the open port, never for the dead IPs.
-    assert all(p == ("192.168.1.108", 8088) for p in probed)
+    assert devices == [{"ip": camera, "scheme": "http",
+                        "service_urls": [f"http://{camera}:8088/onvif/device_service"]}]
+    # The ONVIF probe ran ONLY for the open port, never for closed/dead ones.
+    assert all(p == (camera, 8088) for p in probed)
+    # Dead hosts got only the liveness pair; the camera got the full sweep.
+    for ip, port in gated:
+        if ip != camera:
+            assert port in osvc._LIVENESS_PORTS, (
+                f"dead host {ip} was gated on non-liveness port {port}"
+            )
+    assert {p for i, p in gated if i == camera} == set(osvc._ONVIF_CANDIDATE_PORTS)
+
+
+@pytest.mark.asyncio
+async def test_subnet_scan_retries_flaky_onvif_probe(monkeypatch):
+    """A camera whose first probe is dropped (flaky embedded stack / NAT-path
+    loss) must still be discovered via the single retry."""
+    from services import onvif_service as osvc
+
+    camera = "192.168.1.105"
+    attempts: list[int] = []
+
+    async def fake_tcp_state(ip, port, timeout=osvc._GATE_TIMEOUT):
+        return "open" if (ip, port) == (camera, 80) else "dead"
+
+    async def fake_probe(ip, port, timeout=0.5, scheme="http"):
+        attempts.append(port)
+        if len(attempts) == 1:
+            return None  # first attempt dropped
+        return {"ip": ip, "port": port, "scheme": scheme,
+                "service_urls": [f"http://{ip}:{port}/onvif/device_service"]}
+
+    monkeypatch.setattr(osvc, "_tcp_state", fake_tcp_state)
+    monkeypatch.setattr(osvc, "probe_onvif_device", fake_probe)
+
+    devices = await osvc.scan_onvif_subnet("192.168.1.104/30")
+    assert [d["ip"] for d in devices] == [camera]
+    assert attempts == [80, 80]  # one retry, same port
 
 
 def test_single_unified_port_list():

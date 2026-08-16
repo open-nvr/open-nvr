@@ -217,6 +217,21 @@ export function SyncPlayback() {
     return m
   }, [overview])
 
+  // Footage recorded on the selected day: total seconds + cameras that have any.
+  const dayTotal = useMemo(() => {
+    if (!selectedDate) return { seconds: 0, cams: 0 }
+    let seconds = 0
+    let cams = 0
+    for (const c of overview || []) {
+      const rec = recByCamDate.get(c.camera_id)?.get(selectedDate)
+      if (rec) {
+        seconds += rec.total_duration || 0
+        cams++
+      }
+    }
+    return { seconds, cams }
+  }, [overview, recByCamDate, selectedDate])
+
   // ---- Fetch segments for the selected cameras/day -------------------------
   // One react-query per camera+day. Polling (today only) is handled by the
   // hook; structural sharing keeps unchanged responses referentially stable,
@@ -388,6 +403,21 @@ export function SyncPlayback() {
     setView({ start, end: start + span })
   }
 
+  // Edge auto-scroll while scrubbing: shift the window, keep the span (and
+  // the active zoom preset). Returning the same object when clamped-unchanged
+  // avoids re-render churn at the day boundaries.
+  const panBy = useCallback(
+    (deltaMs: number) => {
+      setView((v) => {
+        const span = v.end - v.start
+        if (span <= 0) return v
+        const start = clamp(v.start + deltaMs, dayStart, Math.max(dayStart, dayEnd - span))
+        return start === v.start ? v : { start, end: start + span }
+      })
+    },
+    [dayStart, dayEnd]
+  )
+
   const zoomAt = useCallback(
     (anchorMs: number, factor: number) => {
       setZoomIdx(-1)
@@ -472,6 +502,15 @@ export function SyncPlayback() {
           <span className="text-sm text-[var(--text-dim)]">
             {selectedCams.length} camera{selectedCams.length !== 1 ? 's' : ''}
           </span>
+          {selectedDate && dayTotal.cams > 0 && (
+            <span
+              className="inline-flex items-center gap-1.5 text-sm text-[var(--text-dim)]"
+              title={`Recorded on this day across ${dayTotal.cams} camera${dayTotal.cams !== 1 ? 's' : ''}`}
+            >
+              <Film size={14} className="text-[var(--accent)]" />
+              {formatDuration(dayTotal.seconds)} recorded
+            </span>
+          )}
           {!mediamtxAvailable && (
             <span className="text-sm text-amber-400">Playback server offline — playback unavailable</span>
           )}
@@ -590,6 +629,7 @@ export function SyncPlayback() {
                 onSeek={seekTo}
                 onScrubPreview={setPreviewMs}
                 onZoomAt={zoomAt}
+                onPan={panBy}
                 activeId={activeId}
                 onRowClick={setActiveId}
               />

@@ -18,6 +18,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TimelineSegment } from './PlaybackTimeline'
+import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
 
 export interface TimelineRow {
   id: number
@@ -38,6 +39,9 @@ interface MultiCamTimelineProps {
   onScrubPreview?: (ms: number | null) => void
   /** Wheel zoom anchored at the cursor. factor < 1 zooms in. */
   onZoomAt?: (anchorMs: number, factor: number) => void
+  /** Pan the visible window by deltaMs (parent clamps to the day). Enables
+   *  edge auto-scroll while scrubbing. */
+  onPan?: (deltaMs: number) => void
   /** Camera id whose row label is highlighted (audio/selection focus). */
   activeId?: number | null
   onRowClick?: (id: number) => void
@@ -169,11 +173,13 @@ export function MultiCamTimeline({
   onSeek,
   onScrubPreview,
   onZoomAt,
+  onPan,
   activeId = null,
   onRowClick,
   className = '',
 }: MultiCamTimelineProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
+  const lastXRef = useRef(0)
   const [dragging, setDragging] = useState(false)
   const [hoverMs, setHoverMs] = useState<number | null>(null)
 
@@ -244,28 +250,58 @@ export function MultiCamTimeline({
     return () => el.removeEventListener('wheel', handler)
   }, [onZoomAt, viewStart, span])
 
-  const handleDown = (e: React.MouseEvent) => {
+  const autoPan = useEdgeAutoPan({ rectRef: overlayRef, spanMs: span, onPan })
+
+  // Pointer capture keeps the drag alive (and the seek committable) even when
+  // the pointer leaves the overlay — routine while edge auto-panning.
+  const handleDown = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
+    e.currentTarget.setPointerCapture(e.pointerId)
     setDragging(true)
+    lastXRef.current = e.clientX
+    autoPan.onDragStart(e.clientX)
     setHoverMs(xToMs(e.clientX))
     onScrubPreview?.(snap(xToMs(e.clientX)))
   }
-  const handleMove = (e: React.MouseEvent) => {
+  const handleMove = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
+    lastXRef.current = e.clientX
     setHoverMs(xToMs(e.clientX))
-    if (dragging) onScrubPreview?.(snap(xToMs(e.clientX)))
+    if (dragging) {
+      autoPan.onDragMove(e.clientX)
+      onScrubPreview?.(snap(xToMs(e.clientX)))
+    }
   }
-  const handleUp = (e: React.MouseEvent) => {
+  const handleUp = (e: React.PointerEvent) => {
     if (!dragging) return
+    autoPan.onDragEnd()
     setDragging(false)
     onSeek(snap(xToMs(e.clientX)))
     onScrubPreview?.(null)
   }
+  // With capture, pointerleave still fires when the pointer exits the bounds —
+  // it must only clear the hover chip, never cancel an active drag.
   const handleLeave = () => {
-    setHoverMs(null)
-    if (dragging) {
-      setDragging(false)
-      onScrubPreview?.(null)
-    }
+    if (!dragging) setHoverMs(null)
   }
+  const handleCancel = () => {
+    if (!dragging) return
+    autoPan.onDragEnd()
+    setDragging(false)
+    setHoverMs(null)
+    onScrubPreview?.(null)
+  }
+
+  // While auto-panning the pointer holds still, so no pointermove fires —
+  // re-derive the preview from the moving window instead. During a drag the
+  // window only moves via onPan (auto-follow is suppressed by the preview).
+  useEffect(() => {
+    if (!dragging) return
+    const ms = xToMs(lastXRef.current)
+    setHoverMs(ms)
+    onScrubPreview?.(snap(ms))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewStart, viewEnd])
 
   const currentPct = toPct(currentTime)
   const currentVisible = currentTime >= viewStart && currentTime <= viewEnd
@@ -332,11 +368,12 @@ export function MultiCamTimeline({
         {/* Interactive overlay spanning every track row (not the labels) */}
         <div
           ref={overlayRef}
-          className="absolute inset-y-0 left-16 sm:left-28 right-0 cursor-pointer"
-          onMouseDown={handleDown}
-          onMouseMove={handleMove}
-          onMouseUp={handleUp}
-          onMouseLeave={handleLeave}
+          className="absolute inset-y-0 left-16 sm:left-28 right-0 cursor-pointer touch-none"
+          onPointerDown={handleDown}
+          onPointerMove={handleMove}
+          onPointerUp={handleUp}
+          onPointerLeave={handleLeave}
+          onPointerCancel={handleCancel}
         >
           {/* Tick guides */}
           {ticks.map((t, i) => (

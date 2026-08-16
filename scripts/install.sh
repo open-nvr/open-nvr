@@ -89,6 +89,24 @@ detect_platform() {
     ok "Detected $PLATFORM (Docker bridge mode)"
 }
 
+# Best-effort IANA timezone of this host, used as the default for the TZ
+# prompt. Containers never inherit the host's zone on their own, so whatever
+# the operator confirms here must be written to .env explicitly.
+detect_timezone() {
+    local tz=""
+    if command -v timedatectl >/dev/null 2>&1; then
+        tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    fi
+    if [[ -z "$tz" && -f /etc/timezone ]]; then
+        tz=$(cat /etc/timezone 2>/dev/null || true)
+    fi
+    if [[ -z "$tz" && -L /etc/localtime ]]; then
+        tz=$(readlink /etc/localtime 2>/dev/null || true)
+        tz="${tz##*zoneinfo/}"
+    fi
+    printf '%s' "${tz:-UTC}"
+}
+
 check_prerequisites() {
     command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker, then re-run."
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required. Update Docker and re-run."
@@ -191,6 +209,13 @@ prepare_environment() {
     configure_value RECORDINGS_PATH "Recordings folder on this machine" "$DEFAULT_RECORDINGS" \
         "Host directory where recorded video segments are written." "yes" \
         "Created automatically if it does not exist yet."
+    configure_value TZ "Timezone (IANA name)" "$(detect_timezone)" \
+        "Timezone used to name recording folders and align the playback timeline." "yes" \
+        "Auto-detected from this machine; the recorder and backend containers both use it."
+    local tz_value
+    tz_value=$(env_get TZ)
+    [[ "$tz_value" == "UTC" || "$tz_value" == */* ]] || \
+        warn "'$tz_value' does not look like an IANA timezone (e.g. Asia/Kolkata); the containers will fall back to UTC if it is invalid"
 
     mkdir -p "$(env_get RECORDINGS_PATH)" 2>/dev/null || warn "Could not create the recordings directory; Docker will try"
 }

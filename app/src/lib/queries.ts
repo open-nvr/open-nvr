@@ -63,9 +63,16 @@ export function useRecordingsByDate() {
         cameras?: {
           camera_id?: number
           camera_name?: string
-          recordings?: { date: string; total_duration?: number }[]
+          /** Number of local days with footage for this camera. */
+          recording_count?: number
+          /** This camera's total footage duration in seconds. */
+          total_duration?: number
+          recordings?: { date: string; total_duration?: number; segment_count?: number }[]
         }[]
+        /** Camera-day count (1 per camera per local day) — not a file count. */
         total_recordings?: number
+        /** Total footage duration in seconds across all cameras. */
+        total_duration?: number
         mediamtx_available?: boolean
       }
     },
