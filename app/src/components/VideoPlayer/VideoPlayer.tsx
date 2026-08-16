@@ -62,6 +62,10 @@ export interface VideoPlayerProps {
   onSnapshot?: (dataUrl: string) => void
   /** Callback on error */
   onError?: (error: string) => void
+  /** Live mode: a stream request was rejected as unauthorized — the
+      mediamtxToken has expired. The parent owns the token, so it must
+      refetch stream URLs; the changed token prop re-runs setup here. */
+  onAuthExpired?: () => void
   /** Callback when HLS playback fails (to trigger fallback) */
   onHlsPlaybackError?: () => void
   /** Present only when the camera supports PTZ; toggles the PTZ pad */
@@ -98,6 +102,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       className = '',
       onSnapshot,
       onError,
+      onAuthExpired,
       onHlsPlaybackError,
       onTogglePtz,
       ptzActive = false,
@@ -147,6 +152,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // offline overlay stays up while probe attempts run.
     const offlinePollTimerRef = useRef<number | null>(null)
     const offlinePollingRef = useRef(false)
+    // Via a ref so the setup callbacks don't take the parent's callback
+    // identity as a dependency — an unstable identity would tear down and
+    // rebuild the stream on every parent render.
+    const onAuthExpiredRef = useRef(onAuthExpired)
+    onAuthExpiredRef.current = onAuthExpired
     const [isReconnecting, setIsReconnecting] = useState(false)
     // Real aspect ratio of the incoming stream (width/height), read from the
     // video metadata. null until known (or after the source is torn down).
@@ -397,6 +407,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           if (resp.status === 404) {
             throw new Error('Camera offline')
           }
+          // MediaMTX rejects an expired/invalid stream JWT with 400/401 on
+          // the WHEP POST (observed: 400 for "token is expired"). Retrying
+          // with the same token can never succeed, so ask the parent for a
+          // fresh one — the changed token prop re-runs setup. The bounded
+          // auto-retry below still runs as a fallback for non-auth 400s.
+          if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
+            onAuthExpiredRef.current?.()
+          }
           throw new Error(`WHEP connection failed: ${resp.status}`)
         }
 
@@ -512,6 +530,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
               console.log('[HLS] Attempting media error recovery...')
               hls.recoverMediaError()
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // An expired stream JWT surfaces here as a 400/401 on the
+              // manifest/fragment request — same recovery as the WHEP path:
+              // a fresh token from the parent, since retrying with the
+              // stale one can never succeed.
+              const code = data.response?.code
+              if (code === 400 || code === 401 || code === 403) {
+                onAuthExpiredRef.current?.()
+              }
               // Full restart with backoff (a bare startLoad() retry keeps
               // failing while MediaMTX is briefly unreachable).
               console.log('[HLS] Attempting network error recovery...')

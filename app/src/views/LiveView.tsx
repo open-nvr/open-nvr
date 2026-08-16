@@ -16,7 +16,7 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
@@ -652,6 +652,19 @@ function Tile({
   // 60-min stream token) and remounting the player so the stream resumes
   // without any user action.
   const { status: connectivity, version: streamVersion } = useCameraStatus(assignedCameraId)
+  // Bumped when the player reports an auth-rejected stream request — the
+  // 60-min token expired mid-session (e.g. a stream hiccup hours in; the
+  // backend never saw the camera go offline, so streamVersion won't bump).
+  // Re-runs the URL fetch below for a fresh token. Throttled so a
+  // persistent non-auth 400 can't hammer the token endpoint.
+  const [tokenVersion, setTokenVersion] = useState(0)
+  const lastTokenRefreshRef = useRef(0)
+  const handleAuthExpired = useCallback(() => {
+    const now = Date.now()
+    if (now - lastTokenRefreshRef.current < 10000) return
+    lastTokenRefreshRef.current = now
+    setTokenVersion((v) => v + 1)
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -682,7 +695,7 @@ function Tile({
       setUrls(null)
     }
     return () => { alive = false }
-  }, [assignedCameraId, availableCameras, streamVersion])
+  }, [assignedCameraId, availableCameras, streamVersion, tokenVersion])
 
   const hasLink = !!urls?.whep || !!urls?.hls
   const displayName = cameraName || `Camera ${cameraId || index + 1}`
@@ -730,6 +743,7 @@ function Tile({
               whepUrl={urls?.whep}
               hlsUrl={urls?.hls}
               mediamtxToken={urls?.token}
+              onAuthExpired={handleAuthExpired}
               title={displayName}
               preferredStreamType="webrtc"
               autoPlay
