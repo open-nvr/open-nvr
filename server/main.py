@@ -400,6 +400,7 @@ async def lifespan(app: FastAPI):
     # oldest-first batched purge (with hysteresis) in a worker thread.
     async def background_disk_pressure():
         try:
+            from services.event_bus_service import publish_system_alert
             from services.retention_service import retention_service
 
             await asyncio.sleep(120)
@@ -410,6 +411,25 @@ async def lifespan(app: FastAPI):
                     )
                     if stats:
                         main_logger.warning(f"Disk-pressure purge: {stats}")
+                        # The purge thread persisted the SystemEvent rows;
+                        # publish the live bus copy from async context.
+                        await publish_system_alert(
+                            alert_type="disk_pressure_purge",
+                            state=None,
+                            severity="critical" if stats.get("exhausted")
+                            else "warning",
+                            payload={
+                                "description": (
+                                    "Disk pressure purge deleted "
+                                    f"{stats.get('deleted_files', 0)} files"
+                                ),
+                                **{
+                                    k: v
+                                    for k, v in stats.items()
+                                    if isinstance(v, (int, float, bool))
+                                },
+                            },
+                        )
                 except Exception as e:
                     main_logger.error(f"Disk pressure check failed: {e}", exc_info=True)
                 await asyncio.sleep(5 * 60)
@@ -418,19 +438,57 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_disk_pressure())
 
+    # Host resource monitor: CPU/RAM/disk sampling + edge-triggered alerts
+    # (system_events + live bus). 15s cadence; work runs in a worker thread.
+    async def background_system_monitor():
+        try:
+            from services.system_monitor_service import (
+                SAMPLE_INTERVAL_SECONDS,
+                STARTUP_DELAY_SECONDS,
+                get_system_monitor,
+            )
+
+            monitor = get_system_monitor()
+            await asyncio.sleep(STARTUP_DELAY_SECONDS)
+            main_logger.info("Starting system resource monitor (15s cadence)")
+            while True:
+                try:
+                    await monitor.run_once()
+                except Exception as e:
+                    main_logger.error(f"System monitor pass failed: {e}", exc_info=True)
+                await asyncio.sleep(SAMPLE_INTERVAL_SECONDS)
+        except Exception as e:
+            main_logger.error(f"System monitor scheduler failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_system_monitor())
+
     # Recording-health watchdog: surfaces "camera silently stopped recording"
     # as a camera event within minutes instead of being discovered days later.
     async def background_recording_watchdog():
         try:
+            from services.event_bus_service import publish_camera_event
             from services.recording_watchdog import (
                 CHECK_INTERVAL_SECONDS,
+                EVENT_TYPE as STALL_EVENT_TYPE,
                 check_recording_health,
             )
 
             await asyncio.sleep(180)  # let cameras provision + first segments land
             while True:
                 try:
-                    await asyncio.to_thread(check_recording_health)
+                    result = await asyncio.to_thread(check_recording_health)
+                    # Publish stall/recovery transitions live — the DB row
+                    # alone only surfaces on the next manual page load.
+                    for t in result.get("transitions", []):
+                        await publish_camera_event(
+                            camera_id=t["camera_id"],
+                            event_type=STALL_EVENT_TYPE,
+                            payload={
+                                "state": t["event_state"],
+                                "description": t["description"],
+                                "camera_name": t.get("camera_name"),
+                            },
+                        )
                 except Exception as e:
                     main_logger.error(f"Recording watchdog failed: {e}", exc_info=True)
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)

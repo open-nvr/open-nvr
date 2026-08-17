@@ -898,6 +898,28 @@ class RecordingRetentionSettings(BaseModel):
     retention_days: int | None = Field(30, ge=0, le=3650)
     protect_flagged: bool = True
     min_free_space_gb: int | None = Field(None, ge=1, le=100000)
+    # Under disk pressure, also purge quarantined orphaned/ footage after all
+    # indexed recordings are exhausted. Off by default: quarantine is meant to
+    # stay recoverable (see retention_service._cleanup_orphans_by_age).
+    purge_orphaned_under_pressure: bool = False
+
+
+class SystemMonitoringSettings(BaseModel):
+    """Host resource monitoring + alert thresholds (security_settings key
+    ``system_monitoring``). None disables the individual threshold."""
+
+    enabled: bool = True
+    cpu_percent_threshold: int | None = Field(90, ge=1, le=100)
+    memory_percent_threshold: int | None = Field(90, ge=1, le=100)
+    # CPU/RAM must stay above threshold this long before an alert raises.
+    sustained_seconds: int = Field(120, ge=15, le=3600)
+    disk_min_free_gb: float | None = Field(None, ge=1)
+    disk_used_percent_threshold: int | None = Field(90, ge=1, le=100)
+    # Alerts clear at threshold minus this (plus sustained window), so a
+    # metric hovering at the boundary doesn't flap.
+    resolve_hysteresis_percent: int = Field(5, ge=1, le=20)
+    notify_integrations: bool = False
+    renotify_cooldown_minutes: int = Field(60, ge=0)
 
 
 class RecordingExportRequest(BaseModel):

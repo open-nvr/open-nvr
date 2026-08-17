@@ -20,6 +20,7 @@ import { useState, useEffect } from 'react'
 import { apiService } from '../../lib/apiService'
 import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw } from 'lucide-react'
 import { useSnackbar } from '../../components/Snackbar'
+import { UsageBar } from '../../components/ui/stats'
 
 interface OrphanIdentity {
     camera_uuid?: string | null
@@ -72,6 +73,11 @@ export function RecordingSettings() {
     const [retentionDays, setRetentionDays] = useState(30)
     const [protectFlagged, setProtectFlagged] = useState(true)
     const [minFreeSpace, setMinFreeSpace] = useState<number | ''>('')
+    const [purgeOrphaned, setPurgeOrphaned] = useState(false)
+
+    // Disk usage of the effective recordings volume (absent on older
+    // backends or stat failure — the gauge is simply hidden then).
+    const [diskInfo, setDiskInfo] = useState<{ total: number; used: number; free: number } | null>(null)
 
     // Orphaned (quarantined) recording trees — superuser only; the card is
     // hidden entirely when the list is empty or the API refuses access.
@@ -94,12 +100,19 @@ export function RecordingSettings() {
                 apiService.getRecordingRetention()
             ])
             setPath(storageRes.data.root_path || storageRes.data.recordings_base_path || '')
+            const s = storageRes.data
+            setDiskInfo(
+                s.disk_total != null && s.disk_used != null && s.disk_free != null
+                    ? { total: s.disk_total, used: s.disk_used, free: s.disk_free }
+                    : null
+            )
 
             // Load retention settings
             const retention = retentionRes.data
             setRetentionDays(retention.retention_days ?? 30)
             setProtectFlagged(retention.protect_flagged ?? true)
             setMinFreeSpace(retention.min_free_space_gb ?? '')
+            setPurgeOrphaned(retention.purge_orphaned_under_pressure ?? false)
         } catch (e: any) {
             showError(e?.message || 'Failed to load recording settings')
         } finally {
@@ -208,7 +221,8 @@ export function RecordingSettings() {
             const payload = {
                 retention_days: retentionDays,
                 protect_flagged: protectFlagged,
-                min_free_space_gb: minFreeSpace === '' ? null : minFreeSpace
+                min_free_space_gb: minFreeSpace === '' ? null : minFreeSpace,
+                purge_orphaned_under_pressure: purgeOrphaned
             }
             await apiService.updateRecordingRetention(payload)
             showSuccess('Retention settings saved successfully')
@@ -259,6 +273,23 @@ export function RecordingSettings() {
                                 <strong>Local:</strong> Use relative (./recordings) or absolute path (D:/Recordings). Directory will be auto-created.
                             </p>
                         </div>
+
+                        {diskInfo && diskInfo.total > 0 && (
+                            <div>
+                                <div className="flex items-baseline justify-between text-sm mb-1.5">
+                                    <span className="font-medium">Disk usage</span>
+                                    <span className="text-[var(--text-dim)]">
+                                        {formatBytes(diskInfo.free)} free of {formatBytes(diskInfo.total)} ({Math.round((diskInfo.used / diskInfo.total) * 100)}% used)
+                                    </span>
+                                </div>
+                                <UsageBar
+                                    used={diskInfo.used}
+                                    total={diskInfo.total}
+                                    warnAt={minFreeSpace !== '' ? Math.max(0, 1 - (2 * minFreeSpace * 1024 ** 3) / diskInfo.total) : 0.8}
+                                    critAt={minFreeSpace !== '' ? Math.max(0, 1 - (minFreeSpace * 1024 ** 3) / diskInfo.total) : 0.9}
+                                />
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -338,6 +369,26 @@ export function RecordingSettings() {
                                 Leave empty to disable this feature.
                             </p>
                         </div>
+
+                        {/* Purge quarantined footage under pressure */}
+                        <div className="flex items-center gap-3">
+                            <input
+                                type="checkbox"
+                                id="purge-orphaned"
+                                checked={purgeOrphaned}
+                                onChange={(e) => setPurgeOrphaned(e.target.checked)}
+                                className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-neutral-700 rounded focus:ring-[var(--accent)]"
+                            />
+                            <label htmlFor="purge-orphaned" className="text-sm font-medium flex items-center gap-2">
+                                <Archive size={16} className="text-[var(--accent)]" />
+                                Purge Quarantined Footage Under Disk Pressure
+                            </label>
+                        </div>
+                        <p className="text-xs text-[var(--text-dim)] ml-7">
+                            When the free-space purge runs out of regular recordings, also delete quarantined
+                            footage from the orphaned/ folder (oldest first). Off by default — quarantined footage
+                            is normally kept recoverable.
+                        </p>
                     </div>
                 </div>
 

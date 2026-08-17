@@ -70,10 +70,17 @@ def _still_stalled_on_disk(
     return fs_latest is None or fs_latest[1] < threshold
 
 
-def check_recording_health() -> dict[str, int]:
-    """One watchdog pass. Runs in a worker thread (own DB session)."""
+def check_recording_health() -> dict:
+    """One watchdog pass. Runs in a worker thread (own DB session).
+
+    Returns counts plus the per-camera state transitions of this pass, so the
+    async caller (main.py) can publish them on the live event bus — a thread
+    can't publish, and without the bus copy a stall only surfaces on the next
+    manual page load.
+    """
     stalled = 0
     recovered = 0
+    transitions: list[dict] = []
     now = datetime.now(UTC)
     threshold = now - timedelta(seconds=STALL_THRESHOLD_SECONDS)
 
@@ -126,16 +133,23 @@ def check_recording_health() -> dict[str, int]:
 
             if is_stalled and not alarm_active:
                 last_str = latest.isoformat() if latest else "never"
+                description = f"No new recording segment since {last_str}"
                 db.add(
                     CameraEvent(
                         camera_id=cam.id,
                         event_type=EVENT_TYPE,
                         event_state="active",
-                        description=f"No new recording segment since {last_str}",
+                        description=description,
                         occurred_at=now,
                     )
                 )
                 stalled += 1
+                transitions.append({
+                    "camera_id": cam.id,
+                    "camera_name": cam.name,
+                    "event_state": "active",
+                    "description": description,
+                })
                 recording_logger.warning(
                     f"Recording stalled on camera {cam.id} "
                     f"({cam.name or 'unnamed'}): last segment {last_str}"
@@ -151,6 +165,12 @@ def check_recording_health() -> dict[str, int]:
                     )
                 )
                 recovered += 1
+                transitions.append({
+                    "camera_id": cam.id,
+                    "camera_name": cam.name,
+                    "event_state": "inactive",
+                    "description": "Recording resumed",
+                })
                 recording_logger.info(
                     f"Recording recovered on camera {cam.id} ({cam.name or 'unnamed'})"
                 )
@@ -158,7 +178,10 @@ def check_recording_health() -> dict[str, int]:
         db.commit()
     except Exception as e:
         db.rollback()
+        # The commit failed -> the CameraEvent rows were rolled back; don't
+        # publish transitions that never persisted.
+        transitions = []
         recording_logger.error(f"Recording watchdog pass failed: {e}", exc_info=True)
     finally:
         db.close()
-    return {"stalled": stalled, "recovered": recovered}
+    return {"stalled": stalled, "recovered": recovered, "transitions": transitions}

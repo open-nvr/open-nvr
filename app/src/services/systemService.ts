@@ -28,6 +28,15 @@ export const systemService = {
   systemShutdown: () => api.post('/api/v1/system/shutdown', ''),
   systemReboot: () => api.post('/api/v1/system/reboot', ''),
 
+  // Host resource monitoring (CPU / RAM / recordings-volume disk)
+  getSystemResources: () => api.get('/api/v1/system/resources'),
+  getSystemResourcesHistory: (params: { minutes?: number } = {}) =>
+    api.get('/api/v1/system/resources/history', { params }),
+  getSystemEvents: (params: { limit?: number; event_type?: string; include_camera_alerts?: boolean } = {}) =>
+    api.get('/api/v1/system/events', { params }),
+  getMonitoringSettings: () => api.get('/api/v1/system/monitoring-settings'),
+  updateMonitoringSettings: (payload: any) => api.put('/api/v1/system/monitoring-settings', payload),
+
   // Suricata
   getSuricataEveLogs: (params: { limit?: number; skip?: number; only_alerts?: boolean } = {}) =>
     api.get('/api/v1/suricata/logs/eve', { params }),
