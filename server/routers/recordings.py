@@ -1002,6 +1002,123 @@ async def export_clip(
 
 
 # =============================================================================
+# Frame-at-timestamp — one JPEG from recorded footage at a past instant
+# =============================================================================
+
+def _clip_for_instant(db: Session, camera_id: int, at_dt: datetime):
+    """The recording row whose clip contains ``at_dt`` for this camera, or None.
+
+    The containing clip is the one with the greatest ``start_time <= at``; we
+    then confirm ``at`` falls before its end (with a little slack for the
+    part-flush lag at clip boundaries). Indexed by (camera_id, start_time).
+    """
+    from models import Recording
+
+    clip = (
+        db.query(Recording)
+        .filter(Recording.camera_id == camera_id, Recording.start_time <= at_dt)
+        .order_by(Recording.start_time.desc())
+        .first()
+    )
+    if clip is None:
+        return None
+    clip_end = clip.end_time
+    if clip_end is not None:
+        if clip_end.tzinfo is None:
+            clip_end = clip_end.replace(tzinfo=UTC)
+        if at_dt > clip_end + timedelta(seconds=2):
+            return None  # `at` falls in a gap after this clip
+    return clip
+
+
+def _extract_recording_frame(
+    path: str, offset_seconds: float, timeout: float = 15.0
+) -> bytes | None:
+    """One JPEG frame at ``offset_seconds`` into a recording file via ffmpeg.
+
+    Blocking — call through ``asyncio.to_thread``. Input-seek (before -i) is
+    fast and keyframe-accurate, fine for a ~60s clip. Returns None on failure.
+    """
+    import subprocess
+
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "error",
+        "-ss", f"{max(0.0, offset_seconds):.3f}",
+        "-i", path,
+        "-frames:v", "1", "-q:v", "3", "-f", "image2", "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return proc.stdout
+
+
+@router.get("/frame")
+async def get_recording_frame(
+    camera_id: int = Query(..., description="Camera ID"),
+    at: str = Query(..., description="Wall-clock instant (ISO 8601) to extract a frame at"),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """One JPEG frame from recorded footage at a past instant.
+
+    Powers "what was happening at 3:14pm" — a caller (e.g. the camera agent's
+    describe_window) samples a few of these across a window. Authenticated and
+    owner-scoped like every recording route.
+    """
+    from services.storage_service import (
+        get_effective_recordings_base_path,
+        resolve_under_root,
+    )
+
+    user_obj = await _authenticate_request(request, db)
+    if not user_obj:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    camera = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.is_active == True)  # noqa: E712
+        .first()
+    )
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    _require_camera_view(user_obj, camera, db)
+
+    try:
+        at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid 'at' timestamp")
+    if at_dt.tzinfo is None:
+        at_dt = at_dt.replace(tzinfo=UTC)
+
+    clip = _clip_for_instant(db, camera_id, at_dt)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="No recording at that time")
+    clip_start = clip.start_time
+    if clip_start.tzinfo is None:
+        clip_start = clip_start.replace(tzinfo=UTC)
+
+    root = Path(get_effective_recordings_base_path(db))
+    try:
+        file_path = resolve_under_root(root, clip.file_path)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Recording file unavailable")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Recording file unavailable")
+
+    offset = max(0.0, (at_dt - clip_start).total_seconds())
+    jpeg = await asyncio.to_thread(_extract_recording_frame, str(file_path), offset)
+    if not jpeg:
+        raise HTTPException(status_code=502, detail="Could not extract frame")
+    return Response(
+        content=jpeg, media_type="image/jpeg",
+        headers={"Cache-Control": "max-age=86400"},
+    )
+
+
+# =============================================================================
 # HLS VOD Playback - Backend-generated manifests with 5s segments
 # =============================================================================
 
