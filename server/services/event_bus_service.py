@@ -58,6 +58,7 @@ EVENT_INFERENCE_RESULT = "inference_result"
 EVENT_INFERENCE_ERROR = "inference_error"
 EVENT_CAMERA_EVENT = "camera_event"
 EVENT_CAMERA_STATUS = "camera_status"
+EVENT_SYSTEM_ALERT = "system_alert"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -243,4 +244,21 @@ async def publish_camera_event(
         "camera_id": camera_id,
         "task": event_type,
         "payload": payload,
+    })
+
+
+async def publish_system_alert(
+    *,
+    alert_type: str,
+    state: str | None,
+    severity: str,
+    payload: dict[str, Any],
+) -> None:
+    """Publish a host-level alert (disk/CPU/RAM/purge). Carries no camera_id,
+    so camera-filtered subscribers correctly never see it while unfiltered
+    dashboard sockets do (see _Subscriber.matches)."""
+    await get_event_bus().publish({
+        "event_type": EVENT_SYSTEM_ALERT,
+        "task": alert_type,
+        "payload": {"state": state, "severity": severity, **payload},
     })

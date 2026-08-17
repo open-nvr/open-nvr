@@ -38,12 +38,46 @@ const CameraStatusContext = createContext<CameraStatusState>({ statuses: {}, ver
 
 interface CameraStatusEvent {
   event_type?: string
+  task?: string
   camera_id?: number
+  timestamp?: number
   payload?: {
     status?: string
     camera_name?: string
+    state?: string | null
+    severity?: string
+    description?: string
+    [key: string]: unknown
   }
 }
+
+/** One live system-level alert (host resources / retention / recording). */
+export interface SystemAlertEvent {
+  /** Synthetic client id for list keys/dedup (timestamp + type). */
+  id: string
+  alert_type: string
+  state: string | null
+  severity: string
+  description: string
+  camera_id?: number
+  camera_name?: string
+  received_at: string
+}
+
+interface SystemHealthState {
+  /** Newest-first ring buffer of alerts seen on this socket (max 100). */
+  recentAlerts: SystemAlertEvent[]
+  /** True while a critical disk condition is active (drives the banner). */
+  diskCritical: boolean
+}
+
+const SystemHealthContext = createContext<SystemHealthState>({ recentAlerts: [], diskCritical: false })
+
+// Alert types that flip the persistent disk banner rather than just toasting.
+const DISK_CRITICAL_TYPES = new Set(['disk_low', 'disk_purge_exhausted'])
+// Re-toasting the same still-active alert type is suppressed for this long
+// (a WS reconnect or a re-published purge event must not spam the operator).
+const TOAST_COOLDOWN_MS = 10 * 60 * 1000
 
 /**
  * App-wide subscriber to the backend `camera_status` events (published when
@@ -55,13 +89,15 @@ interface CameraStatusEvent {
  */
 export function CameraStatusProvider({ children }: { children: ReactNode }) {
   const { token } = useAuth()
-  const { showWarning, showSuccess } = useSnackbar()
+  const { showWarning, showSuccess, showError } = useSnackbar()
   const [state, setState] = useState<CameraStatusState>({ statuses: {}, versions: {} })
+  const [health, setHealth] = useState<SystemHealthState>({ recentAlerts: [], diskCritical: false })
+  const lastToastAt = useRef<Record<string, number>>({})
 
   // The snackbar setters are stable (useCallback in the provider), but keep
   // them behind a ref so the WS effect depends only on `token`.
-  const toastRef = useRef({ showWarning, showSuccess })
-  toastRef.current = { showWarning, showSuccess }
+  const toastRef = useRef({ showWarning, showSuccess, showError })
+  toastRef.current = { showWarning, showSuccess, showError }
 
   useEffect(() => {
     if (!token) return
@@ -110,6 +146,56 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
       })
     }
 
+    const handleSystemAlert = (evt: CameraStatusEvent) => {
+      const alertType = evt.task || 'unknown'
+      const p = evt.payload || {}
+      const alertState = (p.state ?? null) as string | null
+      const severity = (p.severity as string) || 'warning'
+      const description = (p.description as string) ||
+        (evt.event_type === 'camera_event'
+          ? `Recording ${alertState === 'active' ? 'stalled' : 'resumed'} on ${p.camera_name || `camera ${evt.camera_id}`}`
+          : alertType)
+
+      const alert: SystemAlertEvent = {
+        id: `${evt.timestamp ?? Date.now()}-${alertType}-${evt.camera_id ?? 'sys'}`,
+        alert_type: alertType,
+        state: alertState,
+        severity,
+        description,
+        camera_id: evt.camera_id,
+        camera_name: p.camera_name as string | undefined,
+        received_at: new Date().toISOString(),
+      }
+
+      setHealth(prev => {
+        let diskCritical = prev.diskCritical
+        if (DISK_CRITICAL_TYPES.has(alertType)) {
+          if (alertState === 'active' && severity === 'critical') diskCritical = true
+          else if (alertState === 'inactive') diskCritical = false
+        }
+        return { recentAlerts: [alert, ...prev.recentAlerts].slice(0, 100), diskCritical }
+      })
+
+      // Toast with a per-(type,camera,state) cooldown: reconnects and
+      // re-published discrete events (purges) must not spam.
+      const key = `${alertType}:${evt.camera_id ?? ''}:${alertState ?? 'event'}`
+      const nowMs = Date.now()
+      if (nowMs - (lastToastAt.current[key] || 0) < TOAST_COOLDOWN_MS) return
+      lastToastAt.current[key] = nowMs
+
+      if (alertState === 'inactive') {
+        toastRef.current.showSuccess(description)
+      } else if (severity === 'critical') {
+        toastRef.current.showError(description)
+        // Critical host alerts (disk full) surface even from another tab.
+        if (document.visibilityState !== 'visible' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          try { new Notification('OpenNVR system alert', { body: description }) } catch { /* ignore */ }
+        }
+      } else {
+        toastRef.current.showWarning(description)
+      }
+    }
+
     const connect = async () => {
       let ticket: string
       try {
@@ -132,8 +218,13 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
       ws.onmessage = (msg) => {
         let evt: CameraStatusEvent
         try { evt = JSON.parse(msg.data) as CameraStatusEvent } catch { return }
-        if (evt.event_type !== 'camera_status') return
-        handleEvent(evt)
+        if (evt.event_type === 'camera_status') { handleEvent(evt); return }
+        // Host alerts (disk/CPU/RAM/purge) + the recording watchdog's
+        // camera-scoped stall events surface app-wide, same as camera drops.
+        if (evt.event_type === 'system_alert' ||
+            (evt.event_type === 'camera_event' && evt.task === 'recording_stalled')) {
+          handleSystemAlert(evt)
+        }
       }
 
       ws.onclose = () => {
@@ -156,9 +247,20 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
 
   return (
     <CameraStatusContext.Provider value={state}>
-      {children}
+      <SystemHealthContext.Provider value={health}>
+        {children}
+      </SystemHealthContext.Provider>
     </CameraStatusContext.Provider>
   )
+}
+
+/**
+ * Live system-level alerts (host resources, retention purges, recording
+ * stalls) from the shared events socket. `recentAlerts` is newest-first and
+ * bounded; `diskCritical` drives the persistent disk banner.
+ */
+export function useSystemAlerts(): SystemHealthState {
+  return useContext(SystemHealthContext)
 }
 
 /**

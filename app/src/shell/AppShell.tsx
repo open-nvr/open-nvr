@@ -27,6 +27,7 @@ import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
+import { SystemAlertBanner } from '../components/SystemAlertBanner'
 
 type NavItem = {
   to: string
@@ -312,6 +313,7 @@ export function AppShell() {
 
         {/* Main content — boundary keyed by route so navigating away resets a crash */}
         <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-3rem)]">
+          <SystemAlertBanner />
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>

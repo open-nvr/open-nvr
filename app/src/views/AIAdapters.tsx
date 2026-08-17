@@ -28,6 +28,7 @@ import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
+import { MetricPanel, Sparkline, SparkRow, StatTile } from '../components/ui/stats'
 
 type AdapterInfo = Record<string, any>
 
@@ -151,47 +152,6 @@ function formatBytes(v: number | null | undefined): string {
   return `${Math.round(v / 1024)} KiB`
 }
 
-// Inline SVG sparkline — no charting dependency for a 60-point trend.
-function Sparkline({ points, height = 28, className }: {
-  points: Array<number | null>
-  height?: number
-  className?: string
-}) {
-  const vals = points.filter((v): v is number => v != null && Number.isFinite(v))
-  if (vals.length < 2) {
-    return <div className="text-[11px] text-[var(--text-dim)]">not enough samples for a trend yet</div>
-  }
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = max - min || 1
-  const w = 100
-  const step = w / (points.length - 1)
-  let d = ''
-  points.forEach((v, i) => {
-    if (v == null || !Number.isFinite(v)) return
-    const x = i * step
-    const y = height - 3 - ((v - min) / span) * (height - 6)
-    d += (d ? ' L' : 'M') + `${x.toFixed(1)} ${y.toFixed(1)}`
-  })
-  return (
-    <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none"
-      className={`w-full ${className ?? ''}`} style={{ height }} aria-hidden="true">
-      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.5"
-        vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function SparkRow({ label, points, latest }: { label: string; points: Array<number | null>; latest: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="font-mono text-[11px] text-[var(--text-dim)] w-14 shrink-0">{label}</span>
-      <div className="flex-1 text-[var(--accent,#5eb3f6)] opacity-90"><Sparkline points={points} /></div>
-      <span className="font-mono text-[11px] tabular-nums w-16 text-right shrink-0">{latest}</span>
-    </div>
-  )
-}
-
 function formatMs(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—'
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ms`
@@ -210,16 +170,6 @@ function outcomeBarClass(outcome: string): string {
   if (outcome === 'ok') return 'bg-emerald-500'
   if (outcome === 'model_error') return 'bg-amber-500'
   return 'bg-red-500'
-}
-
-function MetricPanel({ title, decision, children }: { title: string; decision: string; children: ReactNode }) {
-  return (
-    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
-      <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">{title}</div>
-      {children}
-      <div className="mt-2 text-[11px] text-[var(--text-dim)]">Decision: {decision}</div>
-    </div>
-  )
 }
 
 function LatencyBars({ latency }: { latency: AdapterMetricsResp['latency_ms'] }) {
@@ -765,16 +715,6 @@ const TIER0_MODE_LABEL: Record<NonNullable<Tier0MetricsResp['mode']>, { text: st
   off: { text: 'gate off', variant: 'neutral' },
   shadow: { text: 'shadow (measuring)', variant: 'info' },
   enforce: { text: 'enforce', variant: 'success' },
-}
-
-function StatTile({ label, value, sub, warn }: { label: string; value: string; sub?: string; warn?: boolean }) {
-  return (
-    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
-      <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] font-mono">{label}</div>
-      <div className={`font-mono text-lg font-bold tabular-nums mt-1 ${warn ? 'text-amber-400' : 'text-[var(--text)]'}`}>{value}</div>
-      {sub && <div className="text-[11px] text-[var(--text-dim)] mt-0.5">{sub}</div>}
-    </div>
-  )
 }
 
 function formatPct(v: number | null | undefined): string {

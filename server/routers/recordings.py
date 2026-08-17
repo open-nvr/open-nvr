@@ -469,6 +469,15 @@ async def get_storage(
         or result.get("recordings_base_path") == "recordings"
     ):
         result["recordings_base_path"] = settings.recordings_base_path
+    # Disk usage of the effective volume, so the settings UI can show a
+    # capacity gauge next to the path (fields absent on stat failure).
+    try:
+        info = storage_service.get_storage_info(db)
+        for key in ("disk_total", "disk_used", "disk_free"):
+            if key in info:
+                result[key] = info[key]
+    except Exception:
+        pass
     return result
 
 

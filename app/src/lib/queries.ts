@@ -134,6 +134,39 @@ export function useSegmentsForCameras(
   })
 }
 
+export type SystemResourcesResp = {
+  sampled_at?: string
+  scope?: string
+  monitoring_available?: boolean
+  cpu_percent?: number | null
+  load_avg?: number[] | null
+  memory?: { total: number; used: number; percent: number } | null
+  disk?: { path: string; total: number; used: number; free: number; percent: number } | null
+  disk_error?: string | null
+  active_alerts?: { alert_type: string; severity: string; description: string; since?: string }[]
+  thresholds?: {
+    enabled?: boolean
+    cpu_percent_threshold?: number | null
+    memory_percent_threshold?: number | null
+    disk_min_free_gb?: number | null
+    disk_used_percent_threshold?: number | null
+  }
+}
+
+/** Host CPU/RAM/disk snapshot — shared by the Dashboard health card, the
+ * disk-critical banner, and RecordingSettings (one cache entry, one poll). */
+export function useSystemResources() {
+  return useQuery({
+    queryKey: ['system-resources'],
+    queryFn: async () => {
+      const { data } = await apiService.getSystemResources()
+      return data as SystemResourcesResp
+    },
+    refetchInterval: 15_000,
+    staleTime: 5_000,
+  })
+}
+
 export function useSuricataStats(limit = 5000) {
   return useQuery({
     queryKey: ['suricata-stats', limit],

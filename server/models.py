@@ -467,6 +467,28 @@ class CameraEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class SystemEvent(Base):
+    """A host-level alert (disk pressure, CPU/RAM, purge outcome) — history
+    store parallel to CameraEvent for events with no camera scope. The live
+    copy is fanned out on the in-process event bus as ``system_alert``."""
+
+    __tablename__ = "system_events"
+    __table_args__ = (
+        Index("ix_system_event_type_time", "event_type", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # cpu_high | memory_high | disk_low | disk_pressure_purge |
+    # disk_purge_exhausted | disk_stat_error
+    event_type = Column(String(50), nullable=False)
+    event_state = Column(String(20), nullable=True)  # active | inactive | None
+    severity = Column(String(10), nullable=False, default="warning")
+    description = Column(String(300), nullable=True)
+    data = Column(Text, nullable=True)  # JSON metric snapshot / purge stats
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Recording(Base):
     """One recorded segment file — the indexed source of truth for listings.
 

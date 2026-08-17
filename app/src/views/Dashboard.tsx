@@ -25,7 +25,8 @@ import SystemNetworkMonitoring from './SystemNetworkMonitoring'
 import { isMediaMtxHealthy } from '../lib/mtxHealth'
 import { Card, CardHeader, CardTitle, CardContent, Badge, Button, Skeleton, ErrorCard, StatusDot } from '../components/ui'
 import { extractApiError } from '../lib/apiError'
-import { useCameras, useRecordingsByDate, useSuricataStats, type CameraItem } from '../lib/queries'
+import { useCameras, useRecordingsByDate, useSuricataStats, useSystemResources, type CameraItem } from '../lib/queries'
+import { StatTile, UsageBar } from '../components/ui/stats'
 import { formatDuration, localDayStart, todayLocalKey } from '../lib/time'
 
 type RecordingItem = { start_time?: string | null; id: number; camera?: string; relpath?: string; url?: string; size?: number }
@@ -443,6 +444,9 @@ export function Dashboard() {
         </CardContent>
       </Card>
 
+      {/* Host resource health (CPU / RAM / recordings disk) */}
+      <SystemHealthCard />
+
       {/* System & Network Monitoring (moved below Cameras by status) */}
       <SystemNetworkMonitoring />
 
@@ -524,5 +528,82 @@ export function Dashboard() {
 
 
     </section>
+  )
+}
+
+function formatBytesShort(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v >= 1024 ** 4) return `${(v / 1024 ** 4).toFixed(2)} TB`
+  return `${(v / 1024 ** 3).toFixed(1)} GB`
+}
+
+/** Host CPU / RAM / recordings-disk tiles, fed by the 15s monitor snapshot. */
+function SystemHealthCard() {
+  const { data, isLoading, error, refetch } = useSystemResources()
+  const thr = data?.thresholds
+  const cpu = data?.cpu_percent
+  const mem = data?.memory
+  const disk = data?.disk
+
+  const cpuThr = thr?.cpu_percent_threshold
+  const memThr = thr?.memory_percent_threshold
+  const diskThr = thr?.disk_used_percent_threshold
+
+  return (
+    <Card>
+      <CardHeader>
+        <HardDrive size={16} className="text-[var(--text-dim)]" />
+        <CardTitle>System health</CardTitle>
+        {(data?.active_alerts?.length ?? 0) > 0 && (
+          <Badge variant="warning">{data!.active_alerts!.length} active alert{data!.active_alerts!.length > 1 ? 's' : ''}</Badge>
+        )}
+        <div className="ml-auto text-xs text-[var(--text-dim)]">host resources · 15s refresh</div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-24" />
+        ) : error ? (
+          <ErrorCard title="System health" message={extractApiError(error, 'Failed to load system resources')} onRetry={() => refetch()} />
+        ) : !data?.sampled_at ? (
+          <div className="text-sm text-[var(--text-dim)]">First resource sample pending…</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <StatTile
+              label="CPU"
+              value={cpu != null ? `${Math.round(cpu)}%` : '—'}
+              sub={data.monitoring_available === false ? 'psutil not installed' : (data.load_avg ? `load ${data.load_avg.map(v => v.toFixed(1)).join(' / ')}` : undefined)}
+              warn={cpu != null && cpuThr != null && cpu >= cpuThr}
+            />
+            <StatTile
+              label="Memory"
+              value={mem ? `${Math.round(mem.percent)}%` : '—'}
+              sub={mem ? `${formatBytesShort(mem.used)} of ${formatBytesShort(mem.total)}` : undefined}
+              warn={mem != null && memThr != null && mem.percent >= memThr}
+            />
+            <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+              <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] font-mono">Recordings disk</div>
+              {disk ? (
+                <>
+                  <div className={`font-mono text-lg font-bold tabular-nums mt-1 ${disk.percent >= 98 ? 'text-red-400' : diskThr != null && disk.percent >= diskThr ? 'text-amber-400' : 'text-[var(--text)]'}`}>
+                    {formatBytesShort(disk.free)} free
+                  </div>
+                  <div className="text-[11px] text-[var(--text-dim)] mt-0.5 mb-1.5">
+                    {formatBytesShort(disk.used)} of {formatBytesShort(disk.total)} used ({Math.round(disk.percent)}%)
+                  </div>
+                  <UsageBar
+                    used={disk.used}
+                    total={disk.total}
+                    warnAt={diskThr != null ? diskThr / 100 : 0.8}
+                    critAt={0.98}
+                  />
+                </>
+              ) : (
+                <div className="text-sm text-[var(--text-dim)] mt-1">{data.disk_error ? `unavailable: ${data.disk_error}` : '—'}</div>
+              )}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
