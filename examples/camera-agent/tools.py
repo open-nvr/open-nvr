@@ -239,6 +239,32 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "describe_event",
+                "description": (
+                    "Describe WHAT HAPPENED in a past event from its kept "
+                    "photo — 'what was the person doing?'. Pass the [#id] "
+                    "printed by search_history. Optional question for a "
+                    "specific detail (what were they wearing / carrying)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "integer",
+                            "description": "Event id — the [#id] from search_history.",
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "Optional specific question about the kept photo.",
+                        },
+                    },
+                    "required": ["event_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the cameras. "
@@ -427,6 +453,46 @@ class CameraTools:
         if not summary:
             return f"{camera_id}: nothing notable visible"
         return f"{camera_id}: I can see {summary}"
+
+    async def _vlm_caption(self, frame: bytes, question: str | None) -> str | None:
+        """Run the caption/VQA adapter on a frame; return the text, or None when
+        no caption adapter is available or it returns nothing. Same VQA-vs-
+        caption selection as describe_camera (a question -> VQA; none -> caption)."""
+        extra: dict[str, Any] = {}
+        if question:
+            extra["question"] = question
+            extra["prompt"] = question
+        else:
+            extra["task"] = "scene_caption"
+        try:
+            response = await self._caption.infer(frame_jpeg=frame, extra=extra)
+        except Exception:
+            return None
+        result = response.get("result") or {}
+        return (result.get("answer") or result.get("caption") or "").strip() or None
+
+    async def describe_event(self, args: dict[str, Any]) -> str:
+        """Describe a PAST event from its stored evidence crop — the best frame
+        captured WHEN IT HAPPENED. Answers "what was the person doing?" for a
+        remembered visit without a live look. Chain after search_history, which
+        prints each visit's [#id]."""
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't look "
+                    "back at a past event.")
+        try:
+            event_id = int(args.get("event_id"))
+        except (TypeError, ValueError):
+            return ("I need the event's id (the [#id] from a history search) to "
+                    "describe it.")
+        question = str(args.get("question") or "").strip() or None
+        crop = await self._events.evidence(event_id)
+        if not crop:
+            return f"I don't have a stored photo for event {event_id}."
+        caption = await self._vlm_caption(crop, question)
+        if caption is None:
+            return (f"Event {event_id}: a photo is kept but scene description "
+                    "isn't available right now.")
+        return f"Event {event_id}: {caption}"
 
     # Irregular plurals worth getting right for the COCO labels the
     # detector emits most; everything else just takes a trailing 's'.
@@ -770,7 +836,7 @@ class CameraTools:
             span = f"{t0}–{t1}" if t1 and t1 != t0 else t0
             plate_bit = f", plate {e.plate_text}" if getattr(e, "plate_text", None) else ""
             clauses.append(
-                f"{span} on camera {e.camera_id}{plate_bit}"
+                f"[#{e.id}] {span} on camera {e.camera_id}{plate_bit}"
                 + (" (photo kept)" if e.has_evidence else "")
             )
         summary = (f"I remember {len(events)} {label} visit(s)"
