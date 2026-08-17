@@ -44,6 +44,36 @@ audited interface:
    behind `/health` + `/infer` + `/info` is a first-class capability. **All model
    weights live here**, never in the apps.
 
+## Mental model: perception → policy → live vs memory
+
+One picture of the whole flow, and the two distinctions it's easy to merge:
+
+```mermaid
+flowchart TD
+    Cam[Camera] --> MTX[MediaMTX<br/>ingest + record]
+    MTX -.->|always kept| Rec[(Recordings<br/>1-min chunks)]
+    MTX --> T0[Tier-0 detector<br/>cheap, always-on]
+    T0 -->|compute-gate| ADP[Purpose adapters<br/>face / LPR / VLM · /infer]
+    ADP -->|perception: what is it| BUS[[NATS bus<br/>opennvr.inference.*]]
+    BUS --> APP[Apps<br/>zone / line / dwell rules]
+    APP -->|policy: does it matter| IE{{interest event}}
+    IE -->|live| SUBS[[Subscribers<br/>UI · agent · Home Assistant]]
+    IE -->|memory| STORE[(Event store<br/>evidence + queryable history)]
+```
+
+- **Perception vs policy.** The model reports *what* is there (a person, a plate)
+  — perception. An app *rule* decides *whether it matters* (a person in this zone
+  after hours) — policy. Different layers: the adapter never decides interest, the
+  app does.
+- **Compute-gating.** The cheap, always-on Tier-0 detector gates the heavy
+  purpose models — continuous awareness on modest hardware, expensive inference
+  only on the frames that earn it.
+- **Bus vs store.** The **bus** delivers an event *live* to whoever is subscribed
+  right now; the **store** *remembers* it for later query. An interest event goes
+  to **both** — the bus is the nervous system, the store is the memory. (A
+  query-only agent could tap the bus but would have no past; the store is what
+  gives it one.)
+
 ## Two data planes
 
 - **Inference plane** — backend → KAI-C → adapter. The backend's own camera
