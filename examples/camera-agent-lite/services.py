@@ -42,7 +42,11 @@ SYSTEM_PROMPT = (
     "recording, just say recording is always on. Prefer tools over guessing. Never "
     "invent camera observations and never claim an action succeeded unless the tool "
     "result says ok. If a tool reports an error, tell the user briefly. State "
-    "uncertainty plainly. When only one camera exists and the user says 'the "
+    "uncertainty plainly. You have NO memory of past events and keep NO history "
+    "of what the cameras saw: the earlier turns are only the conversation so "
+    "far, not a record of events. NEVER reference, recall, invent, or imply "
+    "earlier sightings, people, times, or events -- answer ONLY about the "
+    "CURRENT view from this turn's tool result. When only one camera exists and the user says 'the "
     "camera', use it. You cannot act AFTER replying, so never say 'please wait', "
     "'one moment', or promise to check something later -- call the needed tool NOW "
     "and answer in the same turn. Never mention tool names, function calls, or "
@@ -132,7 +136,7 @@ class AgentBrain:
     def _remember(self, question: str, answer: str) -> None:
         self._history.append({"role": "user", "content": question[:400]})
         self._history.append({"role": "assistant", "content": (answer or "")[:400]})
-        del self._history[:-8]   # last 4 exchanges
+        del self._history[:-6]   # last 3 exchanges (small models confabulate from long history)
 
     # ---- lifecycle ------------------------------------------------------- #
     async def setup(self) -> None:
