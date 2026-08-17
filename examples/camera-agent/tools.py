@@ -344,10 +344,32 @@ class CameraTools:
                          camera_id, exc_info=True)
             return None
 
+    async def _best_frame_if_active(self, camera_id: str) -> bytes | None:
+        """Tier-0's best frame ONLY while a track is currently active on this
+        camera; otherwise ``None`` so the caller takes a fresh live look.
+
+        The best frame is a curated crop of a RECENT detection. It is a good,
+        cheap stand-in for the live scene while something is actively happening,
+        but for a quiet/static scene it is stale — a person sitting still
+        produces no fresh track, so the best frame would answer "what do you see
+        now" with a PAST moment. Gate it on a fresh Tier-0 event (same freshness
+        rule as camera_snapshot); when the scene is static, return None so the
+        caller grabs a live frame.
+        """
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
+        if event is None or (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return None
+        return await self._best_frame(camera_id)
+
     async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
-        # Prefer Tier-0's best frame (clean, already-selected) over an arbitrary
-        # live grab; fall back to a live frame when no best frame is available.
-        frame = await self._best_frame(camera_id)
+        # "What do you see now" must look at a FRESH LIVE frame. Tier-0's best
+        # frame is a curated crop of a RECENT detection — a clean, cheap stand-in
+        # only while a track is ACTIVE right now; for a quiet/static scene it is a
+        # PAST frame (a person sitting still produces no fresh track), so it would
+        # describe an earlier moment. Use the best frame only when a Tier-0 track
+        # is currently active; otherwise take a live grab.
+        frame = await self._best_frame_if_active(camera_id)
         if frame is None:
             try:
                 frame = await self._ctx.get_frame(camera_id)
