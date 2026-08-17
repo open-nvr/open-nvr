@@ -22,13 +22,14 @@ Handles CRUD operations for users with proper authentication and authorization.
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user, get_current_superuser, verify_totp_code
+from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from core.logging_config import main_logger
 from models import Permission, User
 from schemas import UserCreate, UserList, UserResponse, UserUpdate
 from services.audit_service import write_audit_log
 from services.user_service import UserService
+from utils.mfa_guard import require_mfa_code
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -173,16 +174,7 @@ def update_user(
 
 def _require_mfa_code(current_user: User, mfa_code: str | None) -> None:
     """Verify the caller's current TOTP code for sensitive user actions."""
-    if not current_user.mfa_secret:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Set up MFA before performing this action.",
-        )
-    if not mfa_code or not verify_totp_code(current_user.mfa_secret, mfa_code):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing MFA code.",
-        )
+    require_mfa_code(current_user, mfa_code)
 
 
 @router.delete("/{user_id}")

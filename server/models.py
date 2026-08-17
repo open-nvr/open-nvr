@@ -228,6 +228,13 @@ class Camera(Base):
     # Hikvision/Dahua convention.
     substream_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True)
+    # Tombstone for irreversible soft delete. NULL = live (active or paused);
+    # set = camera is in the bin: hidden from every normal list, not editable,
+    # never provisioned, recordings viewable only through the bin until
+    # retention ages them out. Distinct from is_active, which is a reversible
+    # pause. Nullable so the additive column self-heal can add it to old
+    # create_all databases.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
     location = Column(String(200), nullable=True)
     vlan = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="unknown")

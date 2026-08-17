@@ -43,6 +43,7 @@ type Camera = {
   status?: string | null
   owner_id: number
   is_active: boolean
+  deleted_at?: string | null
   mediamtx_provisioned?: boolean | null
   recording_enabled?: boolean | null
   // ONVIF device metadata
@@ -256,7 +257,12 @@ export function Cameras() {
   }
 
   const onDelete = async (c: Camera) => {
-    if (!confirm(`Delete camera "${c.name}"?`)) return
+    if (!confirm(
+      `Delete camera "${c.name}"?\n\n` +
+      'This stops its stream and recording immediately and moves it to ' +
+      'Settings → Deleted Cameras. It cannot be edited or reactivated; its ' +
+      'recordings stay viewable there until retention removes them.'
+    )) return
     try {
       setLoading(true)
       await apiService.deleteCamera(c.id)
@@ -272,7 +278,12 @@ export function Cameras() {
   const onBulkDelete = async () => {
     const ids = Array.from(selected)
     if (!ids.length) return
-    if (!confirm(`Delete ${ids.length} selected camera(s)?`)) return
+    if (!confirm(
+      `Delete ${ids.length} selected camera(s)?\n\n` +
+      'This stops their streams and recording immediately and moves them to ' +
+      'Settings → Deleted Cameras. They cannot be edited or reactivated; their ' +
+      'recordings stay viewable there until retention removes them.'
+    )) return
     try {
       setLoading(true)
       for (const id of ids) {

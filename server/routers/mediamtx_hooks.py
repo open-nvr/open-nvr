@@ -154,12 +154,23 @@ def _camera_from_path(db: Session, path: str) -> Camera | None:
     if not path.lower().startswith("cam-"):
         return None
     tag = path.split("-", 1)[1]
+    # Binned (deleted) cameras are excluded defensively: their path is torn
+    # down at delete time, and any straggler segment must not re-index under
+    # a camera that officially no longer exists. Inactive (paused) cameras
+    # stay resolvable — footage that arrives is never dropped.
     try:
-        return db.query(Camera).filter(Camera.id == int(tag)).first()
+        return (
+            db.query(Camera)
+            .filter(Camera.id == int(tag), Camera.deleted_at.is_(None))
+            .first()
+        )
     except ValueError:
         return (
             db.query(Camera)
-            .filter(Camera.ip_address == tag.replace("_", "."))
+            .filter(
+                Camera.ip_address == tag.replace("_", "."),
+                Camera.deleted_at.is_(None),
+            )
             .first()
         )
 

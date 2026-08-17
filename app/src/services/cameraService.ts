@@ -18,6 +18,18 @@
 
 import { api } from '../lib/api'
 
+/** True when a create failed with the backend's duplicate-camera 409; the
+ * caller should offer "add anyway" and retry with { force: true }. */
+export function isDuplicateCameraError(e: any): boolean {
+  return e?.status === 409 && e?.data?.detail?.code === 'duplicate_camera'
+}
+
+/** Names of the already-added cameras carried in a duplicate-camera 409. */
+export function duplicateCameraNames(e: any): string[] {
+  const dups = e?.data?.detail?.duplicates
+  return Array.isArray(dups) ? dups.map((d: any) => d?.name).filter(Boolean) : []
+}
+
 export const cameraService = {
   // Streams
   getWhepUrl: (cameraId: number) => api.get(`/api/v1/streams/webrtc/${cameraId}`),
@@ -32,9 +44,18 @@ export const cameraService = {
   // Catalog geometry editors (draw a zone/tripwire on the real scene).
   getCameraSnapshot: (cameraId: number) =>
     api.get(`/api/v1/cameras/${cameraId}/snapshot`, { responseType: 'blob' }),
-  createCamera: (payload: any) => api.post('/api/v1/cameras/', payload),
+  createCamera: (payload: any, opts: { force?: boolean } = {}) =>
+    api.post('/api/v1/cameras/', payload, opts.force ? { params: { force: true } } : undefined),
   updateCamera: (cameraId: number, payload: any) => api.put(`/api/v1/cameras/${cameraId}`, payload),
   deleteCamera: (cameraId: number) => api.delete(`/api/v1/cameras/${cameraId}`),
+  // Bin (irreversibly soft-deleted cameras)
+  getDeletedCameras: () => api.get('/api/v1/cameras/deleted'),
+  hardDeleteCamera: (cameraId: number, confirmationPhrase: string, mfaCode: string) =>
+    api.post(
+      `/api/v1/cameras/${cameraId}/hard-delete`,
+      { confirmation_phrase: confirmationPhrase },
+      { headers: { 'X-MFA-Code': mfaCode } }
+    ),
   testCameraConnection: (cameraId: number) => api.post(`/api/v1/cameras/${cameraId}/test-connection`),
   
   // Permissions

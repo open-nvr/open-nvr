@@ -24,10 +24,12 @@ export const recordingService = {
   // Note: these go through the shared api client, which already sends the
   // bearer token in the Authorization header. We deliberately do NOT pass the
   // JWT as a ?token= query param (it would leak into access logs/history).
-  getRecordingsByDate: (cameraId?: number) => {
+  getRecordingsByDate: (cameraId?: number, opts?: { deletedOnly?: boolean }) => {
     // tz: day buckets are the BROWSER'S local days (midnight -> midnight).
     const params: Record<string, any> = { tz: browserTz() }
     if (cameraId) params.camera_id = cameraId
+    // Bin view: binned (deleted) cameras' recordings instead of live ones.
+    if (opts?.deletedOnly) params.deleted_only = true
     return api.get('/api/v1/recordings/list', { params })
   },
   getRecordings: (opts?: { limit?: number; offset?: number; camera_id?: number }) => {

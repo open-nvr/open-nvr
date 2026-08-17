@@ -39,7 +39,11 @@ class CameraConfigService:
     def _ensure_camera_access(
         db: Session, camera_id: int, user: User, manage_required: bool = True
     ) -> Camera:
-        cam = db.query(Camera).filter(Camera.id == camera_id).first()
+        cam = (
+            db.query(Camera)
+            .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+            .first()
+        )
         if not cam:
             raise HTTPException(status_code=404, detail="Camera not found")
         if user.is_superuser or cam.owner_id == user.id:

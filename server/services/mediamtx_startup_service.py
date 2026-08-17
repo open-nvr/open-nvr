@@ -210,6 +210,7 @@ class MediaMtxStartupService:
             db.query(Camera, CameraConfig)
             .outerjoin(CameraConfig, Camera.id == CameraConfig.camera_id)
             .filter(Camera.is_active == True)
+            .filter(Camera.deleted_at.is_(None))
             .filter(Camera.rtsp_url.isnot(None))
             .filter(Camera.rtsp_url != "")
         )
@@ -499,7 +500,11 @@ class MediaMtxStartupService:
         with SessionLocal() as db:
             camera = (
                 db.query(Camera)
-                .filter(Camera.id == camera_id, Camera.is_active == True)
+                .filter(
+                    Camera.id == camera_id,
+                    Camera.is_active == True,
+                    Camera.deleted_at.is_(None),
+                )
                 .first()
             )
 

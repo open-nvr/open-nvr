@@ -6,7 +6,7 @@ Regression cover: /playback/list, /playback/cameras, /playback/url and
 /sessions-for-ai authenticated the caller but did not check per-camera view
 permission, so any logged-in user could enumerate or get playback URLs for
 cameras they don't own. These exercise the decision helpers those endpoints
-now call: _can_view_camera, _viewable_active_cameras, _camera_for_playback_path.
+now call: _can_view_camera, _viewable_cameras, _camera_for_playback_path.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from models import Camera  # noqa: E402
 from routers.recordings import (  # noqa: E402
     _camera_for_playback_path,
     _can_view_camera,
-    _viewable_active_cameras,
+    _viewable_cameras,
 )
 from services.stream_service import _build_stream_name  # noqa: E402
 
@@ -112,21 +112,21 @@ def test_non_owner_with_grant_allowed():
     assert _can_view_camera(FakeUser(5), FakeCamera(9, owner_id=2), db)
 
 
-# ---- _viewable_active_cameras filtering ----
+# ---- _viewable_cameras filtering ----
 
 def test_viewable_filters_out_foreign_cameras():
     mine = FakeCamera(1, owner_id=5)
     shared = FakeCamera(2, owner_id=None)   # legacy null-owner: visible
     foreign = FakeCamera(3, owner_id=99)    # not mine, no grant: hidden
     db = FakeSession(cameras=[mine, shared, foreign], grant_result=None)
-    got = {c.id for c in _viewable_active_cameras(db, FakeUser(5))}
+    got = {c.id for c in _viewable_cameras(db, FakeUser(5))}
     assert got == {1, 2}
 
 
 def test_viewable_superuser_sees_all():
     cams = [FakeCamera(1, 5), FakeCamera(2, 99), FakeCamera(3, None)]
     db = FakeSession(cameras=cams, grant_result=None)
-    got = {c.id for c in _viewable_active_cameras(db, FakeUser(1, superuser=True))}
+    got = {c.id for c in _viewable_cameras(db, FakeUser(1, superuser=True))}
     assert got == {1, 2, 3}
 
 

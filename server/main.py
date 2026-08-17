@@ -290,9 +290,15 @@ async def lifespan(app: FastAPI):
 
                 db = SessionLocal()
                 try:
+                    # Paused (is_active=False) and binned (deleted_at set)
+                    # cameras must stay unprovisioned across restarts —
+                    # deactivate/delete tear their MediaMTX path down and this
+                    # loop must not resurrect it.
                     rows = (
                         db.query(_CameraConfig, _Camera)
                         .join(_Camera, _Camera.id == _CameraConfig.camera_id)
+                        .filter(_Camera.is_active == True)
+                        .filter(_Camera.deleted_at.is_(None))
                         .all()
                     )
                     provisioned_count = 0

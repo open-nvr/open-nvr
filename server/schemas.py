@@ -385,6 +385,38 @@ class CameraUpdate(BaseModel):
             )
 
 
+class DeletedCameraInfo(BaseModel):
+    """A binned camera as shown on the Deleted Cameras page."""
+
+    id: int
+    name: str
+    ip_address: str
+    location: str | None = None
+    owner_id: int
+    deleted_at: datetime
+    # MediaMTX path / on-disk dir name (cam-<id> or cam-<ip>), the key the
+    # playback endpoints take — lets the bin deep-link into recordings.
+    path: str
+
+    class Config:
+        from_attributes = True
+
+
+class DeletedCameraList(BaseModel):
+    cameras: list[DeletedCameraInfo]
+    total: int
+
+
+class CameraHardDeleteRequest(BaseModel):
+    """Confirmation payload for permanently deleting a binned camera.
+
+    The phrase must exactly match "hard delete <camera name> and it's
+    recording"; the server validates it against the stored camera name.
+    """
+
+    confirmation_phrase: str = Field(..., min_length=1, max_length=200)
+
+
 class RecordingUpdate(BaseModel):
     """Schema for updating a recording."""
 
@@ -524,6 +556,7 @@ class CameraResponse(CameraBase):
     id: int
     owner_id: int
     is_active: bool
+    deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
     # Optional MediaMTX provisioning info (populated at creation time)
