@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
+import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
 import { useFullscreen } from '../hooks/useFullscreen'
@@ -1073,6 +1074,47 @@ export function AddCameraDialog({
     rtsp_url: '',
   })
 
+  // Duplicate-camera 409: hold the payload so "Add Anyway" can retry with force.
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{ payload: any; names: string[] } | null>(null)
+
+  // Shared create path for both the discovered and manual flows: create,
+  // retry provisioning if it didn't stick, surface the duplicate confirm.
+  const createAndFinish = async (payload: any, force = false) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await apiService.createCamera(payload, { force })
+      const newCameraId = response?.data?.id
+
+      // The server already auto-provisions on create; only retry from here
+      // if that didn't stick (e.g. MediaMTX was briefly unreachable).
+      // Unconditionally re-provisioning an already-provisioned camera forces
+      // a path replace that can drop the stream it just started.
+      if (newCameraId && response?.data?.mediamtx_provisioned !== true) {
+        try {
+          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
+        } catch (e) {
+          console.warn('Auto-provision failed, camera added but not streaming:', e)
+        }
+      }
+
+      setDuplicatePrompt(null)
+      onCameraAdded(newCameraId)
+    } catch (e: any) {
+      if (!force && isDuplicateCameraError(e)) {
+        setDuplicatePrompt({ payload, names: duplicateCameraNames(e) })
+      } else {
+        setError(
+          (typeof e?.data?.detail === 'string' ? e.data.detail : null) ||
+            e?.message ||
+            'Failed to add camera'
+        )
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // Discover cameras on network via ONVIF. `overrideCidr` scans that range
   // once without touching the saved Camera LAN.
   const handleDiscover = async (overrideCidr?: string) => {
@@ -1229,47 +1271,23 @@ export function AddCameraDialog({
       return
     }
     
-    setLoading(true)
-    setError(null)
-    
-    try {
-      // Embed credentials into RTSP URL for MediaMTX
-      const rtspWithCredentials = embedCredentialsInRtspUrl(rtspUrl, credentials.username, credentials.password)
-      
-      const response = await apiService.createCamera({
-        name: cameraName.trim(),
-        ip_address: selectedCamera.ip,
-        port: 554,
-        username: credentials.username,
-        password: credentials.password,
-        rtsp_url: rtspWithCredentials,
-        // ONVIF device metadata
-        manufacturer: deviceInfo?.manufacturer || undefined,
-        model: deviceInfo?.model || undefined,
-        firmware_version: deviceInfo?.firmwareversion || undefined,
-        serial_number: deviceInfo?.serialnumber || undefined,
-        hardware_id: deviceInfo?.hardwareid || undefined,
-      })
-      const newCameraId = response?.data?.id
-      
-      // The server already auto-provisions on create; only retry from here
-      // if that didn't stick (e.g. MediaMTX was briefly unreachable).
-      // Unconditionally re-provisioning an already-provisioned camera forces
-      // a path replace that can drop the stream it just started.
-      if (newCameraId && response?.data?.mediamtx_provisioned !== true) {
-        try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
-        } catch (e) {
-          console.warn('Auto-provision failed, camera added but not streaming:', e)
-        }
-      }
-      
-      onCameraAdded(newCameraId)
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add camera')
-    } finally {
-      setLoading(false)
-    }
+    // Embed credentials into RTSP URL for MediaMTX
+    const rtspWithCredentials = embedCredentialsInRtspUrl(rtspUrl, credentials.username, credentials.password)
+
+    await createAndFinish({
+      name: cameraName.trim(),
+      ip_address: selectedCamera.ip,
+      port: 554,
+      username: credentials.username,
+      password: credentials.password,
+      rtsp_url: rtspWithCredentials,
+      // ONVIF device metadata
+      manufacturer: deviceInfo?.manufacturer || undefined,
+      model: deviceInfo?.model || undefined,
+      firmware_version: deviceInfo?.firmwareversion || undefined,
+      serial_number: deviceInfo?.serialnumber || undefined,
+      hardware_id: deviceInfo?.hardwareid || undefined,
+    })
   }
 
   // Add manual camera
@@ -1279,42 +1297,18 @@ export function AddCameraDialog({
       return
     }
 
-    setLoading(true)
-    setError(null)
-
-    try {
-      // rtsp_url is optional. If provided, the server embeds the username/password
-      // into it (URL-encoding specials like "@") when they aren't already there.
-      // If left blank, the server derives the URL from the IP + credentials.
-      // Either way it back-fills device identity.
-      const response = await apiService.createCamera({
-        name: form.name,
-        ip_address: form.ip_address,
-        port: form.port,
-        username: form.username || undefined,
-        password: form.password || undefined,
-        rtsp_url: form.rtsp_url || undefined,
-      })
-      const newCameraId = response?.data?.id
-      
-      // The server already auto-provisions on create; only retry from here
-      // if that didn't stick (e.g. MediaMTX was briefly unreachable).
-      // Unconditionally re-provisioning an already-provisioned camera forces
-      // a path replace that can drop the stream it just started.
-      if (newCameraId && response?.data?.mediamtx_provisioned !== true) {
-        try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
-        } catch (e) {
-          console.warn('Auto-provision failed, camera added but not streaming:', e)
-        }
-      }
-      
-      onCameraAdded(newCameraId)
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add camera')
-    } finally {
-      setLoading(false)
-    }
+    // rtsp_url is optional. If provided, the server embeds the username/password
+    // into it (URL-encoding specials like "@") when they aren't already there.
+    // If left blank, the server derives the URL from the IP + credentials.
+    // Either way it back-fills device identity.
+    await createAndFinish({
+      name: form.name,
+      ip_address: form.ip_address,
+      port: form.port,
+      username: form.username || undefined,
+      password: form.password || undefined,
+      rtsp_url: form.rtsp_url || undefined,
+    })
   }
 
   const handleSelectExisting = (cameraId: number) => {
@@ -1764,6 +1758,35 @@ export function AddCameraDialog({
             </div>
           )}
         </div>
+
+        {/* Duplicate-camera confirm (409 from create) */}
+        {duplicatePrompt && (
+          <div className="mx-4 mb-2 p-3 border border-amber-600 bg-amber-950/40 text-sm">
+            <div className="mb-2">
+              A camera with this IP address or stream URL is already added
+              {duplicatePrompt.names.length > 0 && (
+                <>: <span className="font-medium">{duplicatePrompt.names.join(', ')}</span></>
+              )}
+              . Add it again anyway?
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-3 py-1 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]"
+                onClick={() => setDuplicatePrompt(null)}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1 text-sm bg-amber-600 text-white disabled:opacity-50"
+                onClick={() => createAndFinish(duplicatePrompt.payload, true)}
+                disabled={loading}
+              >
+                {loading ? 'Adding...' : 'Add Anyway'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">

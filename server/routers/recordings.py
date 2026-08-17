@@ -169,11 +169,9 @@ async def queue_cloud_upload_for_day(
 
     day_end = day_start + timedelta(days=1)
 
-    camera = (
-        db.query(Camera)
-        .filter(Camera.id == camera_id, Camera.is_active == True)
-        .first()
-    )
+    # Deleted (binned) cameras stay resolvable: superusers may still push a
+    # camera's remaining footage to the cloud before purging it.
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
@@ -358,24 +356,34 @@ def _require_camera_view(user: User, camera: Camera, db: Session) -> None:
         )
 
 
-def _viewable_active_cameras(db: Session, user: User) -> list[Camera]:
-    """Active cameras the user may view (superuser: all; else owner or granted).
+def _viewable_cameras(
+    db: Session, user: User, *, deleted_only: bool = False
+) -> list[Camera]:
+    """Non-deleted cameras the user may view (superuser: all; else owner or
+    granted) — recordings are history, so paused (inactive) cameras keep
+    theirs browsable. With ``deleted_only`` the selection inverts to binned
+    cameras, for the Deleted Cameras page.
 
     Used by the listing endpoints so one user can never enumerate another
     owner's cameras.
     """
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+    tombstone = (
+        Camera.deleted_at.isnot(None) if deleted_only else Camera.deleted_at.is_(None)
+    )
+    cameras = db.query(Camera).filter(tombstone).all()
     return [c for c in cameras if _can_view_camera(user, c, db)]
 
 
 def _camera_for_playback_path(db: Session, path: str) -> Camera | None:
     """Resolve a MediaMTX playback path (``cam-57`` or ``cam-192_168_1_9``) to
-    its Camera by rebuilding each active camera's canonical path.
+    its Camera by rebuilding each camera's canonical path.
 
     Rebuilding (not parsing) works for both id- and ip-based path modes.
-    Returns ``None`` when no active camera owns the path.
+    Deleted and paused cameras resolve too — their recorded history stays
+    playable (the bin page relies on this); per-camera view permission is
+    enforced by the callers. Returns ``None`` when no camera owns the path.
     """
-    for cam in db.query(Camera).filter(Camera.is_active == True).all():  # noqa: E712
+    for cam in db.query(Camera).all():
         if (
             _build_stream_name(
                 settings.mediamtx_stream_prefix, cam.id, cam.ip_address
@@ -684,18 +692,22 @@ async def list_recordings(
 @router.get("/playback/cameras")
 async def list_recording_cameras(
     request: Request = None,
+    deleted_only: bool = Query(
+        False,
+        description="List binned (deleted) cameras' recordings instead — the Deleted Cameras page.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
     List all cameras that have recordings.
-    Queries MediaMTX for each active camera.
+    Queries MediaMTX for each camera.
     """
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Only cameras this user may view — never the whole estate.
-    cameras = _viewable_active_cameras(db, user_obj)
+    cameras = _viewable_cameras(db, user_obj, deleted_only=deleted_only)
     result = []
 
     path_by_cam = {
@@ -870,11 +882,10 @@ async def create_export_ticket(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    camera = (
-        db.query(Camera)
-        .filter(Camera.id == camera_id, Camera.is_active == True)
-        .first()
-    )
+    # Recorded history stays exportable for paused AND binned cameras (the
+    # Deleted Cameras page plays and exports through these endpoints); the
+    # per-camera view permission is the gate, not liveness.
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     _require_camera_view(user_obj, camera, db)
@@ -1013,12 +1024,9 @@ async def create_hls_session(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Validate camera exists and user has access
-    camera = (
-        db.query(Camera)
-        .filter(Camera.id == camera_id, Camera.is_active == True)
-        .first()
-    )
+    # Validate camera exists and user has access. Paused and binned cameras
+    # resolve too — recorded history stays playable (bin page relies on it).
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     _require_camera_view(user_obj, camera, db)
@@ -1438,11 +1446,9 @@ async def get_day_segments(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    camera = (
-        db.query(Camera)
-        .filter(Camera.id == camera_id, Camera.is_active == True)
-        .first()
-    )
+    # Paused and binned cameras resolve too — the DVR timeline is recorded
+    # history, and the Deleted Cameras page plays through it.
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     _require_camera_view(user_obj, camera, db)
@@ -1745,6 +1751,10 @@ async def list_recordings_by_date(
         default=None,
         description="IANA timezone for day grouping (default: server local)",
     ),
+    deleted_only: bool = Query(
+        False,
+        description="List binned (deleted) cameras' recordings instead — the Deleted Cameras page.",
+    ),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -1763,15 +1773,17 @@ async def list_recordings_by_date(
     # Check if MediaMTX is available (async + TTL-cached)
     mediamtx_available = await _check_mediamtx_available()
 
-    # Get cameras to query
+    # Get cameras to query — deleted cameras' recordings surface only via the
+    # bin (deleted_only); paused cameras keep their history browsable.
+    tombstone = (
+        Camera.deleted_at.isnot(None) if deleted_only else Camera.deleted_at.is_(None)
+    )
     if camera_id:
         cameras = (
-            db.query(Camera)
-            .filter(Camera.id == camera_id, Camera.is_active == True)
-            .all()
+            db.query(Camera).filter(Camera.id == camera_id, tombstone).all()
         )
     else:
-        cameras = db.query(Camera).filter(Camera.is_active == True).all()
+        cameras = db.query(Camera).filter(tombstone).all()
 
     # Camera-level scoping: non-superusers only list cameras they may view.
     cameras = [c for c in cameras if _can_view_camera(user_obj, c, db)]
@@ -1947,7 +1959,7 @@ async def get_recording_stats(
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()
+    cameras = db.query(Camera).filter(Camera.deleted_at.is_(None)).all()
     cameras = [c for c in cameras if _can_view_camera(user_obj, c, db)]
     mediamtx_available = await _check_mediamtx_available()
 
@@ -2271,7 +2283,7 @@ async def get_recording_sessions_for_ai(
     if camera_id:
         camera = (
             db.query(Camera)
-            .filter(Camera.id == camera_id, Camera.is_active == True)
+            .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
             .first()
         )
         if not camera:
@@ -2279,7 +2291,7 @@ async def get_recording_sessions_for_ai(
         _require_camera_view(user_obj, camera, db)
         cameras = [camera]
     else:
-        cameras = _viewable_active_cameras(db, user_obj)
+        cameras = _viewable_cameras(db, user_obj)
 
     result = []
 

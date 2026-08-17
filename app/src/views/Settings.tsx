@@ -29,6 +29,7 @@ import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
 import { MediaServerManager } from './settings/MediaServerManager'
 import { RecordingSettings } from './settings/RecordingSettings'
+import { DeletedCameras } from './settings/DeletedCameras'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
 
@@ -52,6 +53,9 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
+  // The bin: irreversibly soft-deleted cameras, their recordings, and the
+  // superuser-only permanent purge.
+  { key: 'deleted-cameras', label: 'Deleted Cameras', panel: () => <DeletedCameras />, submenu: [] },
   {
     key: 'media-source',
     label: 'Media-Source',

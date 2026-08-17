@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 
 type Device = { ip: string | null; service_urls: string[] }
 type Profile = { token: string; name: string }
@@ -147,10 +148,22 @@ export function OnvifTools() {
         vlan: null,
         status: 'unknown',
       }
-      await apiService.createCamera(payload)
+      try {
+        await apiService.createCamera(payload)
+      } catch (e: any) {
+        if (!isDuplicateCameraError(e)) throw e
+        const names = duplicateCameraNames(e)
+        const ok = confirm(
+          'A camera with this IP address or stream URL is already added' +
+          (names.length ? `: ${names.join(', ')}` : '') +
+          '. Add it again anyway?'
+        )
+        if (!ok) return
+        await apiService.createCamera(payload, { force: true })
+      }
       alert('Camera added successfully')
     } catch (e: any) {
-      setErr(e?.data?.detail || e.message || 'Failed to add camera')
+      setErr((typeof e?.data?.detail === 'string' ? e.data.detail : null) || e.message || 'Failed to add camera')
     } finally {
       setLoading(false)
     }
