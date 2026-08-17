@@ -239,6 +239,56 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "describe_event",
+                "description": (
+                    "Describe WHAT HAPPENED in a past event from its kept "
+                    "photo — 'what was the person doing?'. Pass the [#id] "
+                    "printed by search_history. Optional question for a "
+                    "specific detail (what were they wearing / carrying)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "integer",
+                            "description": "Event id — the [#id] from search_history.",
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "Optional specific question about the kept photo.",
+                        },
+                    },
+                    "required": ["event_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "describe_window",
+                "description": (
+                    "Describe WHAT SOMEONE WAS DOING over a past time window by "
+                    "reviewing the RECORDED FOOTAGE — samples frames across the "
+                    "span and narrates the behavior. Use for 'what were they "
+                    "doing between 3:12 and 3:16?' after search_history gives "
+                    "the span and camera. Heavier than describe_event; for "
+                    "detail across a span, not a single moment."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": _camera_prop,
+                        "start_time": {"type": "string", "description": "Window start, ISO 8601 with tz offset."},
+                        "end_time": {"type": "string", "description": "Window end, ISO 8601 with tz offset."},
+                        "question": {"type": "string", "description": "Optional specific question about the activity."},
+                    },
+                    "required": ["camera_id", "start_time", "end_time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the cameras. "
@@ -344,10 +394,32 @@ class CameraTools:
                          camera_id, exc_info=True)
             return None
 
+    async def _best_frame_if_active(self, camera_id: str) -> bytes | None:
+        """Tier-0's best frame ONLY while a track is currently active on this
+        camera; otherwise ``None`` so the caller takes a fresh live look.
+
+        The best frame is a curated crop of a RECENT detection. It is a good,
+        cheap stand-in for the live scene while something is actively happening,
+        but for a quiet/static scene it is stale — a person sitting still
+        produces no fresh track, so the best frame would answer "what do you see
+        now" with a PAST moment. Gate it on a fresh Tier-0 event (same freshness
+        rule as camera_snapshot); when the scene is static, return None so the
+        caller grabs a live frame.
+        """
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
+        if event is None or (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return None
+        return await self._best_frame(camera_id)
+
     async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
-        # Prefer Tier-0's best frame (clean, already-selected) over an arbitrary
-        # live grab; fall back to a live frame when no best frame is available.
-        frame = await self._best_frame(camera_id)
+        # "What do you see now" must look at a FRESH LIVE frame. Tier-0's best
+        # frame is a curated crop of a RECENT detection — a clean, cheap stand-in
+        # only while a track is ACTIVE right now; for a quiet/static scene it is a
+        # PAST frame (a person sitting still produces no fresh track), so it would
+        # describe an earlier moment. Use the best frame only when a Tier-0 track
+        # is currently active; otherwise take a live grab.
+        frame = await self._best_frame_if_active(camera_id)
         if frame is None:
             try:
                 frame = await self._ctx.get_frame(camera_id)
@@ -405,6 +477,100 @@ class CameraTools:
         if not summary:
             return f"{camera_id}: nothing notable visible"
         return f"{camera_id}: I can see {summary}"
+
+    async def _vlm_caption(self, frame: bytes, question: str | None) -> str | None:
+        """Run the caption/VQA adapter on a frame; return the text, or None when
+        no caption adapter is available or it returns nothing. Same VQA-vs-
+        caption selection as describe_camera (a question -> VQA; none -> caption)."""
+        extra: dict[str, Any] = {}
+        if question:
+            extra["question"] = question
+            extra["prompt"] = question
+        else:
+            extra["task"] = "scene_caption"
+        try:
+            response = await self._caption.infer(frame_jpeg=frame, extra=extra)
+        except Exception:
+            return None
+        result = response.get("result") or {}
+        return (result.get("answer") or result.get("caption") or "").strip() or None
+
+    async def describe_event(self, args: dict[str, Any]) -> str:
+        """Describe a PAST event from its stored evidence crop — the best frame
+        captured WHEN IT HAPPENED. Answers "what was the person doing?" for a
+        remembered visit without a live look. Chain after search_history, which
+        prints each visit's [#id]."""
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't look "
+                    "back at a past event.")
+        try:
+            event_id = int(args.get("event_id"))
+        except (TypeError, ValueError):
+            return ("I need the event's id (the [#id] from a history search) to "
+                    "describe it.")
+        question = str(args.get("question") or "").strip() or None
+        crop = await self._events.evidence(event_id)
+        if not crop:
+            return f"I don't have a stored photo for event {event_id}."
+        caption = await self._vlm_caption(crop, question)
+        if caption is None:
+            return (f"Event {event_id}: a photo is kept but scene description "
+                    "isn't available right now.")
+        return f"Event {event_id}: {caption}"
+
+    # describe_window samples this many frames across the requested span.
+    _WINDOW_SAMPLES = 5
+
+    async def describe_window(self, args: dict[str, Any]) -> str:
+        """Describe WHAT HAPPENED over a past window from the RECORDED FOOTAGE —
+        sample a few frames across [start,end] and narrate the behavior over
+        time. Heavier than describe_event (one still); use when the user wants
+        detail across a span. Chain after search_history (which gives the span
+        and camera)."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't review "
+                    "past footage.")
+        cam = args.get("camera_id")
+        if cam in (None, "", "all", "__any__") or not self._ctx.known_camera(str(cam)):
+            return "I need a specific camera to review footage for a time window."
+        try:
+            server_cam = int(self._resolve_camera(str(cam)))
+        except (TypeError, ValueError):
+            return f"Camera '{cam}' has no server-side id."
+        try:
+            start = _dt.fromisoformat(str(args.get("start_time")).replace("Z", "+00:00"))
+            end = _dt.fromisoformat(str(args.get("end_time")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return "I need a valid start_time and end_time (ISO 8601) to review footage."
+        if end <= start:
+            return "The end time must be after the start time."
+        self.last_cameras_used = [str(cam)]
+        question = str(args.get("question") or "").strip() or None
+
+        n = self._WINDOW_SAMPLES
+        step = (end - start).total_seconds() / max(1, n - 1)
+        observations: list[tuple[str, str]] = []
+        for i in range(n):
+            ts = start + _td(seconds=step * i)
+            frame = await self._events.recording_frame(server_cam, ts.isoformat())
+            if not frame:
+                continue
+            caption = await self._vlm_caption(frame, question)
+            if caption:
+                observations.append((self._clock_phrase(ts.isoformat()), caption))
+        if not observations:
+            return ("I couldn't pull footage for that window — no recording, or "
+                    "the frames weren't readable.")
+        # Collapse consecutive identical captions into a short narrative.
+        lines = []
+        last = None
+        for when, what in observations:
+            if what != last:
+                lines.append(f"{when}, {what}")
+                last = what
+        return "Reviewing the footage: " + "; ".join(lines) + "."
 
     # Irregular plurals worth getting right for the COCO labels the
     # detector emits most; everything else just takes a trailing 's'.
@@ -748,7 +914,7 @@ class CameraTools:
             span = f"{t0}–{t1}" if t1 and t1 != t0 else t0
             plate_bit = f", plate {e.plate_text}" if getattr(e, "plate_text", None) else ""
             clauses.append(
-                f"{span} on camera {e.camera_id}{plate_bit}"
+                f"[#{e.id}] {span} on camera {e.camera_id}{plate_bit}"
                 + (" (photo kept)" if e.has_evidence else "")
             )
         summary = (f"I remember {len(events)} {label} visit(s)"

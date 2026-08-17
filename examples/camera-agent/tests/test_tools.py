@@ -11,6 +11,8 @@ phrasing is allowed to evolve."""
 from __future__ import annotations
 
 import time
+import time
+import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -356,14 +358,19 @@ async def test_describe_swallows_best_frame_fetch_errors():
 # ── describe_camera prefers Tier-0's best frame ────────────────────
 
 @pytest.mark.asyncio
-async def test_describe_uses_best_frame_when_available():
+async def test_describe_uses_best_frame_when_track_active():
     ctx = _ctx_with_camera()
     stub = _StubFrameSource()
     ctx.register_frame_source("front-porch", stub)
+    # A Tier-0 track is active RIGHT NOW, so the best frame is a valid stand-in
+    # for the live scene and describe_camera uses it (the efficiency win). When
+    # no track is active the frame is stale and a live grab is taken instead
+    # (see tests/test_live_describe_freshness.py).
+    ctx.latest_inference = lambda cam, adapter=None: types.SimpleNamespace(
+        received_at=time.time(), raw={})
     fetch = AsyncMock(return_value=b"BESTFRAME")
     tools = _build_tools(ctx, best_frame_fetch=fetch)
     await tools.describe_camera({"camera_id": "front-porch", "question": "what colour?"})
-    # the VLM ran on the best frame, and no live grab happened
     assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"BESTFRAME"
     assert stub.calls == 0
 

@@ -315,11 +315,12 @@ _DEFAULT_SYSTEM_PROMPT = (
     "- For ANY question about what a camera sees, what is happening, who or "
     "what is present, or how many of something, you MUST call a tool BEFORE "
     "answering.\n"
-    "- For COUNTING or PRESENCE ('how many', 'is anyone/anything there', 'is "
-    "there a X'), PREFER camera_snapshot — it answers instantly from the "
-    "always-on detector with no new inference. Use detect_objects or "
-    "describe_camera only if camera_snapshot has no data, or the answer needs "
-    "appearance (colour, clothing, what someone is doing).\n"
+    "- For 'what do you see', 'what's happening', or describing the CURRENT "
+    "scene, call describe_camera — it takes a FRESH LIVE look. For pure "
+    "COUNTING ('how many'), camera_snapshot answers instantly from the "
+    "always-on MOTION detector — but it can MISS someone sitting still, so if "
+    "it reports nothing there, confirm with describe_camera (a live look) "
+    "before telling the user no one is present.\n"
     "- For questions about the PAST ('did anyone come between 3 and 4?', "
     "'which cars entered today?', 'was a dog here yesterday?') call "
     "search_history — the NVR remembers every visit with a photo and can "
@@ -352,7 +353,7 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "see": ["describe_camera"],
     "count": ["detect_objects", "camera_snapshot"],
     "faces": ["recognize_faces", "enroll_face", "list_people", "forget_face"],
-    "events": ["recent_events", "search_history"],
+    "events": ["recent_events", "search_history", "describe_event", "describe_window"],
     "footage": ["search_footage"],
     "alarm": ["create_alarm", "stop_alarm"],
     "watch": ["create_monitor", "stop_monitor"],
@@ -2702,6 +2703,8 @@ class CameraAgentRuntime:
             "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,
             "search_history": self.tools.search_history,
+            "describe_event": self.tools.describe_event,
+            "describe_window": self.tools.describe_window,
             "create_background_task": self._handle_create_task,
             "create_monitor": self._handle_create_monitor,
             "stop_monitor": self._handle_stop_monitor,

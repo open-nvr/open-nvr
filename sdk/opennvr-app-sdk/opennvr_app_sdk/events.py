@@ -129,3 +129,19 @@ class EventsClient:
         except Exception:
             return None
         return body if status == 200 and body else None
+
+    async def recording_frame(self, camera_id: int, at: str) -> bytes | None:
+        """One JPEG from recorded footage at instant ``at`` (ISO 8601), or None.
+
+        Powers the agent's describe_window: sample a few instants across a past
+        window and caption each. Internal-key authed like ``evidence``.
+        """
+        from urllib.parse import urlencode
+
+        q = urlencode({"camera_id": int(camera_id), "at": at})
+        url = f"{self._base}/api/v1/internal/camera-agent/recordings/frame?{q}"
+        try:
+            status, body = await self._get(url, self._headers)
+        except Exception:
+            return None
+        return body if status == 200 and body else None

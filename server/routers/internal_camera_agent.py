@@ -322,3 +322,40 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
         )
 
     return {"cameras": out}
+
+
+
+@router.get("/recordings/frame")
+async def internal_recording_frame(
+    camera_id: int = Query(..., description="Camera ID"),
+    at: str = Query(..., description="Wall-clock instant (ISO 8601)"),
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """One JPEG from recorded footage at a past instant, for the agent's
+    describe_window. Reuses the recordings clip-resolution + ffmpeg extract;
+    internal-key authed like the other camera-agent endpoints."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from fastapi.responses import Response
+
+    from routers.recordings import _extract_recording_frame, _resolve_frame_job
+
+    try:
+        at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad 'at' timestamp")
+    if at_dt.tzinfo is None:
+        at_dt = at_dt.replace(tzinfo=UTC)
+
+    job = _resolve_frame_job(db, camera_id, at_dt)
+    if job is None:
+        raise HTTPException(status_code=404, detail="no recording at that time")
+    jpeg = await asyncio.to_thread(_extract_recording_frame, job[0], job[1])
+    if not jpeg:
+        raise HTTPException(status_code=502, detail="could not extract frame")
+    return Response(
+        content=jpeg, media_type="image/jpeg",
+        headers={"Cache-Control": "max-age=86400"},
+    )
