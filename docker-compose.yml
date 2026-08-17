@@ -52,25 +52,30 @@ services:
       - |
         set -e
         if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
-          echo "MediaMTX certs already present; skipping."
-          exit 0
+          echo "MediaMTX certs already present; skipping generation."
+        else
+          umask 077
+          # Add OPENNVR_HOST_IP to the cert SAN so direct RTSPS clients (VLC,
+          # ffmpeg) get a matching cert. Browsers use nginx's cert instead.
+          SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
+          if [ -n "$${OPENNVR_HOST_IP}" ]; then
+            SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+          fi
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout /certs/server.key -out /certs/server.crt \
+            -subj "/CN=opennvr-mediamtx" \
+            -addext "subjectAltName=$${SAN}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage=serverAuth"
+          echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
         fi
-        umask 077
-        # Add OPENNVR_HOST_IP to the cert SAN so direct RTSPS clients (VLC,
-        # ffmpeg) get a matching cert. Browsers use nginx's cert instead.
-        SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
-        if [ -n "$${OPENNVR_HOST_IP}" ]; then
-          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
-        fi
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-          -keyout /certs/server.key -out /certs/server.crt \
-          -subj "/CN=opennvr-mediamtx" \
-          -addext "subjectAltName=$${SAN}" \
-          -addext "basicConstraints=critical,CA:FALSE" \
-          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-          -addext "extendedKeyUsage=serverAuth"
+        # mediamtx runs as uid 1000 (non-root, see the mediamtx service) so
+        # the key must be readable by that uid — on fresh AND pre-existing
+        # installs (older installs wrote it root-owned mode 600).
+        chown 1000:1000 /certs/server.key /certs/server.crt
+        chmod 0600 /certs/server.key
         chmod 0644 /certs/server.crt
-        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
     environment:
       - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
     volumes:
@@ -100,6 +105,15 @@ services:
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
+    # Run as the same uid as the opennvr-core backend (Dockerfile useradd -u
+    # 1000). MediaMTX used to run as root, so every segment dir it created
+    # under the shared recordings mount was root-owned — and the backend
+    # (uid 1000) could not delete a single file from it: retention aging and
+    # the camera hard-delete purge (#243) both failed with EACCES. All ports
+    # are >1024 and the config mounts are read-only, so nothing here needs
+    # root. Pre-existing root-owned trees are migrated by opennvr-core's
+    # entrypoint chown at its next start.
+    user: "1000:1000"
     depends_on:
       db:
         condition: service_healthy
