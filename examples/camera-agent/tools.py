@@ -265,6 +265,30 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "describe_window",
+                "description": (
+                    "Describe WHAT SOMEONE WAS DOING over a past time window by "
+                    "reviewing the RECORDED FOOTAGE — samples frames across the "
+                    "span and narrates the behavior. Use for 'what were they "
+                    "doing between 3:12 and 3:16?' after search_history gives "
+                    "the span and camera. Heavier than describe_event; for "
+                    "detail across a span, not a single moment."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": _camera_prop,
+                        "start_time": {"type": "string", "description": "Window start, ISO 8601 with tz offset."},
+                        "end_time": {"type": "string", "description": "Window end, ISO 8601 with tz offset."},
+                        "question": {"type": "string", "description": "Optional specific question about the activity."},
+                    },
+                    "required": ["camera_id", "start_time", "end_time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the cameras. "
@@ -493,6 +517,60 @@ class CameraTools:
             return (f"Event {event_id}: a photo is kept but scene description "
                     "isn't available right now.")
         return f"Event {event_id}: {caption}"
+
+    # describe_window samples this many frames across the requested span.
+    _WINDOW_SAMPLES = 5
+
+    async def describe_window(self, args: dict[str, Any]) -> str:
+        """Describe WHAT HAPPENED over a past window from the RECORDED FOOTAGE —
+        sample a few frames across [start,end] and narrate the behavior over
+        time. Heavier than describe_event (one still); use when the user wants
+        detail across a span. Chain after search_history (which gives the span
+        and camera)."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't review "
+                    "past footage.")
+        cam = args.get("camera_id")
+        if cam in (None, "", "all", "__any__") or not self._ctx.known_camera(str(cam)):
+            return "I need a specific camera to review footage for a time window."
+        try:
+            server_cam = int(self._resolve_camera(str(cam)))
+        except (TypeError, ValueError):
+            return f"Camera '{cam}' has no server-side id."
+        try:
+            start = _dt.fromisoformat(str(args.get("start_time")).replace("Z", "+00:00"))
+            end = _dt.fromisoformat(str(args.get("end_time")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return "I need a valid start_time and end_time (ISO 8601) to review footage."
+        if end <= start:
+            return "The end time must be after the start time."
+        self.last_cameras_used = [str(cam)]
+        question = str(args.get("question") or "").strip() or None
+
+        n = self._WINDOW_SAMPLES
+        step = (end - start).total_seconds() / max(1, n - 1)
+        observations: list[tuple[str, str]] = []
+        for i in range(n):
+            ts = start + _td(seconds=step * i)
+            frame = await self._events.recording_frame(server_cam, ts.isoformat())
+            if not frame:
+                continue
+            caption = await self._vlm_caption(frame, question)
+            if caption:
+                observations.append((self._clock_phrase(ts.isoformat()), caption))
+        if not observations:
+            return ("I couldn't pull footage for that window — no recording, or "
+                    "the frames weren't readable.")
+        # Collapse consecutive identical captions into a short narrative.
+        lines = []
+        last = None
+        for when, what in observations:
+            if what != last:
+                lines.append(f"{when}, {what}")
+                last = what
+        return "Reviewing the footage: " + "; ".join(lines) + "."
 
     # Irregular plurals worth getting right for the COCO labels the
     # detector emits most; everything else just takes a trailing 's'.

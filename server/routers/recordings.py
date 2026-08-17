@@ -1056,6 +1056,31 @@ def _extract_recording_frame(
     return proc.stdout
 
 
+def _resolve_frame_job(db: Session, camera_id: int, at_dt: datetime):
+    """``(file_path, seek_offset_seconds)`` for the recorded frame at ``at_dt``,
+    or None. DB query + path resolution only (NO ffmpeg) — safe to call on the
+    event loop; the caller runs ``_extract_recording_frame`` via to_thread."""
+    from services.storage_service import (
+        get_effective_recordings_base_path,
+        resolve_under_root,
+    )
+
+    clip = _clip_for_instant(db, camera_id, at_dt)
+    if clip is None:
+        return None
+    clip_start = clip.start_time
+    if clip_start.tzinfo is None:
+        clip_start = clip_start.replace(tzinfo=UTC)
+    root = Path(get_effective_recordings_base_path(db))
+    try:
+        fpath = resolve_under_root(root, clip.file_path)
+    except Exception:
+        return None
+    if not fpath.is_file():
+        return None
+    return str(fpath), max(0.0, (at_dt - clip_start).total_seconds())
+
+
 @router.get("/frame")
 async def get_recording_frame(
     camera_id: int = Query(..., description="Camera ID"),
@@ -1069,11 +1094,6 @@ async def get_recording_frame(
     describe_window) samples a few of these across a window. Authenticated and
     owner-scoped like every recording route.
     """
-    from services.storage_service import (
-        get_effective_recordings_base_path,
-        resolve_under_root,
-    )
-
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1093,23 +1113,10 @@ async def get_recording_frame(
     if at_dt.tzinfo is None:
         at_dt = at_dt.replace(tzinfo=UTC)
 
-    clip = _clip_for_instant(db, camera_id, at_dt)
-    if clip is None:
+    job = _resolve_frame_job(db, camera_id, at_dt)
+    if job is None:
         raise HTTPException(status_code=404, detail="No recording at that time")
-    clip_start = clip.start_time
-    if clip_start.tzinfo is None:
-        clip_start = clip_start.replace(tzinfo=UTC)
-
-    root = Path(get_effective_recordings_base_path(db))
-    try:
-        file_path = resolve_under_root(root, clip.file_path)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Recording file unavailable")
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="Recording file unavailable")
-
-    offset = max(0.0, (at_dt - clip_start).total_seconds())
-    jpeg = await asyncio.to_thread(_extract_recording_frame, str(file_path), offset)
+    jpeg = await asyncio.to_thread(_extract_recording_frame, job[0], job[1])
     if not jpeg:
         raise HTTPException(status_code=502, detail="Could not extract frame")
     return Response(
