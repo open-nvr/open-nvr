@@ -540,8 +540,9 @@ export function AddCameraDialog({
             column is the single scroller here (the panel fits statically). */}
         {mode === 'discover' && !authStep && (
           <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4 md:h-[420px]">
-            {/* Scan panel */}
-            <div className="space-y-3 md:border-r md:border-neutral-800 md:pr-4">
+            {/* Scan panel. Scrolls itself if the chip list ever outgrows the
+                fixed row height — nothing may clip. */}
+            <div className="space-y-3 md:border-r md:border-neutral-800 md:pr-4 md:overflow-y-auto thin-scroll">
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-[var(--text-dim)] uppercase tracking-wide">Scan range</span>
                 <input
@@ -589,6 +590,13 @@ export function AddCameraDialog({
                   Scan
                 </Button>
               )}
+              {scanStatus && (
+                <div className="text-xs text-[var(--text-dim)] flex items-center gap-1.5">
+                  {discovering && <Loader2 size={12} className="animate-spin" />}
+                  {scanStatus}
+                </div>
+              )}
+
               {saveMovesBoundary && (
                 <div className="space-y-1">
                   <Button
@@ -619,13 +627,6 @@ export function AddCameraDialog({
                       Scan {s}
                     </button>
                   ))}
-                </div>
-              )}
-
-              {scanStatus && (
-                <div className="text-xs text-[var(--text-dim)] flex items-center gap-1.5">
-                  {discovering && <Loader2 size={12} className="animate-spin" />}
-                  {scanStatus}
                 </div>
               )}
             </div>
