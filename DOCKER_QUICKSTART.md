@@ -6,6 +6,13 @@ Five minutes from `git clone` to YOLOv8 detection running on your camera feed, u
 
 - **Docker Engine 24+** with Compose v2 (Linux) or **Docker Desktop**
   (macOS / Windows).
+- **x86-64 (amd64) or ARM64.** `opennvr-core`, `detect-pipeline`,
+  `camera-agent` and `yolov8-weights` publish both. The AI adapter images
+  (`yolov8-adapter`, `moondream-adapter`, `whisper-adapter`,
+  `piper-adapter`, ...) are built in the separate
+  [`open-nvr/ai-adapter`](https://github.com/open-nvr/ai-adapter) repo and
+  **older pinned tags are amd64-only** — see
+  [ARM64 / Apple Silicon](#no-matching-manifest-for-linuxarm64v8-apple-silicon--arm) below.
 - **8 GB RAM** recommended (4 GB will work, but YOLOv8 cold-start is
   tight).
 - **20 GB free disk** — most of it is the AI adapter images and YOLO
@@ -203,6 +210,69 @@ in `.env`, then restart `opennvr-core`. Note this is verbose — only flip
 it for troubleshooting.
 
 ## Troubleshooting
+
+### "no matching manifest for linux/arm64/v8" (Apple Silicon / ARM)
+
+The pull aborts partway through with something like:
+
+```
+ ✘ Image ghcr.io/open-nvr/yolov8-adapter:0.1.1  Error no matching manifest
+   for linux/arm64/v8 in the manifest list entries
+Error response from daemon: no matching manifest for linux/arm64/v8 in the
+manifest list entries: no match for platform in manifest: not found
+```
+
+That image has no ARM64 build. The daemon names the platform but not the
+cause, and every other image in the pull reports `Interrupted` — which
+looks like a network failure and is not.
+
+`./scripts/install.sh` (and `install.ps1`) now check every pinned image's
+manifest list *before* pulling and print the full list of images that lack
+a build for your architecture, so you find out in one shot rather than one
+image at a time.
+
+**Fixing it depends on which image is named:**
+
+- **`core`, `detect-pipeline`, `camera-agent`, `camera-agent-lite`** — built
+  in this repo and published for `linux/amd64` **and** `linux/arm64`. If one
+  of these is named, you are on a tag published before ARM64 support landed;
+  move to `:main`/`:latest` or a release tag newer than that.
+- **`*-adapter`** — built in
+  [`open-nvr/ai-adapter`](https://github.com/open-nvr/ai-adapter).
+  ARM64 manifest lists start at adapter tag **0.1.3** (the current
+  `.env.example` pin); tags 0.1.1 and earlier are amd64-only. If you are
+  named one of these, your `.env` carries a stale `ADAPTER_TAG` — raise it
+  to `0.1.3` or later, or run the adapters emulated.
+- **`llamacpp-adapter` / `smolvlm-adapter`** (camera-agent-lite only) — these
+  two have no ARM64 build and will not get one soon: they derive from
+  `ghcr.io/ggml-org/llama.cpp:server`, which upstream publishes for amd64
+  only ([ggml-org/llama.cpp#19177](https://github.com/ggml-org/llama.cpp/issues/19177)).
+  The core NVR and the standard YOLOv8 stack are unaffected — only the
+  camera-agent-lite overlay needs emulation on ARM.
+
+**Running the amd64 images under emulation** works and is the fastest way to
+get a demo up on an M-series Mac, at a real cost in inference latency:
+
+1. Docker Desktop → **Settings → General → "Use Rosetta for x86_64/amd64
+   emulation on Apple Silicon"** → Apply & restart. (Without this, emulated
+   containers frequently fail to start at all rather than merely running
+   slowly.)
+2. Re-run the installer with the opt-in flag:
+
+   ```bash
+   OPENNVR_ALLOW_EMULATION=1 ./scripts/install.sh
+   ```
+
+   ```powershell
+   $env:OPENNVR_ALLOW_EMULATION = "1"; .\scripts\install.ps1
+   ```
+
+   This exports `DOCKER_DEFAULT_PLATFORM=linux/amd64` for the pull and every
+   subsequent `docker compose` call, so the stack does not come up half
+   emulated and half native.
+
+Emulation is a workaround, not a supported configuration — treat detection
+throughput numbers measured this way as meaningless.
 
 ### Core refuses to start: "Refusing to boot on placeholder secret"
 
