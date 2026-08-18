@@ -19,10 +19,20 @@
 #   - Tag matching ``v*``    → build + push :<version>, :latest,
 #     :sha-<short>. The release path.
 #
-# Architecture: linux/amd64 only for v0.1. The opennvr-core image
-# Python deps include opencv + psycopg which have arm64 wheels, so
-# arm64 is a fast-follow once we've validated the Pi 5 path end-to-
-# end. Documented in the Tier 0 README.
+# Architecture: linux/amd64 + linux/arm64. Apple Silicon Macs and
+# Raspberry Pi 5 class hardware are a primary Tier 0 target, and an
+# amd64-only manifest list makes ``docker compose pull`` fail there
+# with a bare daemon error ("no matching manifest for
+# linux/arm64/v8"), which reads as a broken install rather than an
+# unsupported platform. Every runtime dep (opencv, psycopg, uv,
+# python:3.11-slim, node:23-alpine) publishes arm64 artifacts, so
+# the arm64 leg is a plain cross-build.
+#
+# The arm64 leg is built under QEMU on the amd64 runner. The only
+# genuinely slow step under emulation would be the Node frontend
+# build, and that is pinned to $BUILDPLATFORM in the Dockerfile
+# (the Vite output is architecture-independent), so it runs natively
+# once and is reused by both legs.
 
 name: publish-images
 
@@ -74,6 +84,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (cross-arch emulation for the arm64 build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -116,7 +131,13 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          # Multi-arch on push, single-arch on pull_request. ``load: true``
+          # imports the result into the local docker daemon, which cannot
+          # hold a multi-platform image — so the PR smoke test builds
+          # linux/amd64 only. Release/main builds publish a manifest list
+          # covering both, which is what Apple Silicon and Raspberry Pi
+          # hosts resolve against at pull time.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
           tags: |
@@ -266,6 +287,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (cross-arch emulation for the arm64 build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -304,7 +330,12 @@ jobs:
           # (see the build instructions at the top of each Dockerfile).
           context: .
           file: ${{ matrix.agent.dir }}/Dockerfile
-          platforms: linux/amd64
+          # Multi-arch on push, single-arch on pull_request — a PR build
+          # only needs to prove the Dockerfile still resolves, and paying
+          # for the emulated arm64 leg on every PR doubles the wall time
+          # for no extra signal. Release/main builds publish a manifest
+          # list covering both.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

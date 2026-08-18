@@ -6,6 +6,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ARM64 (Apple Silicon / Raspberry Pi 5) install support.**
+  `ghcr.io/open-nvr/core`, `detect-pipeline`, `camera-agent`, and
+  `camera-agent-lite` now publish `linux/amd64` + `linux/arm64` manifest
+  lists, and the default adapter pin moves to `ADAPTER_TAG=0.1.3` — the
+  first [ai-adapter](https://github.com/open-nvr/ai-adapter) release with
+  ARM64 images. Previously a fresh install on an M-series Mac died in
+  `docker compose pull` with a bare
+  ``no matching manifest for linux/arm64/v8``.
+  `llamacpp-adapter`/`smolvlm-adapter` (camera-agent-lite) remain
+  amd64-only pending upstream ggml-org/llama.cpp#19177.
+- **Installer architecture preflight.** `install.sh`/`install.ps1` now
+  check every pinned image's manifest list against the host architecture
+  before pulling, and name the unsupported images instead of surfacing
+  the daemon's error. `OPENNVR_ALLOW_EMULATION=1` opts into running the
+  amd64 images under emulation (exports
+  ``DOCKER_DEFAULT_PLATFORM=linux/amd64`` for the whole stack).
+
 ## [0.1.2] — 2026-08-12
 
 ### Added

@@ -55,11 +55,117 @@ function Configure-Value([string]$Key, [string]$Label, [string]$Default, [string
     Set-EnvValue $Key (Ask-Value $Label $Default)
 }
 
+# Docker's platform vocabulary ('amd64'/'arm64'), not .NET's. Returns an
+# empty string for anything unrecognised, which disables the preflight
+# rather than guessing a platform string and rejecting a valid install.
+function Get-HostArch {
+    $a = ''
+    # RuntimeInformation is the portable source; PROCESSOR_ARCHITECTURE is
+    # the Windows PowerShell 5.1 fallback, where that type is unavailable.
+    try { $a = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
+    catch { $a = $env:PROCESSOR_ARCHITECTURE }
+    switch -Regex ($a) {
+        '^(X64|AMD64)$'   { return 'amd64' }
+        '^(Arm64|ARM64)$' { return 'arm64' }
+        '^(Arm|ARM)$'     { return 'arm' }
+        default           { return '' }
+    }
+}
+
 function Detect-Platform {
     if ($IsLinux) { $script:Platform = 'Linux'; $script:DefaultRecordings = '/var/lib/opennvr/recordings' }
     elseif ($IsMacOS) { $script:Platform = 'macOS'; $script:DefaultRecordings = '/Users/Shared/opennvr-recordings' }
     else { $script:Platform = 'Windows'; $script:DefaultRecordings = 'C:/opennvr/recordings' }
-    Ok "Detected $script:Platform (Docker bridge mode)"
+    $script:HostArch = Get-HostArch
+    $shown = if ($script:HostArch) { $script:HostArch } else { 'unknown-arch' }
+    Ok "Detected $script:Platform/$shown (Docker bridge mode)"
+}
+
+# Does this image's manifest list carry an entry for the host architecture?
+#   0 - yes
+#   1 - the image resolves, but has no build for this architecture
+#   2 - undeterminable (no buildx, private image, registry hiccup, or a
+#       single-arch manifest with no platform metadata). Never a reason to
+#       block an install: a false 'unsupported' is worse than the raw daemon
+#       error this preflight exists to replace.
+function Test-ImageArch([string]$Image) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $raw = (docker buildx imagetools inspect --raw $Image 2>$null | Out-String)
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($code -ne 0 -or -not $raw) { return 2 }
+    # A bare image manifest (schema 2, single platform) has no 'manifests'
+    # key and therefore no platform metadata to check.
+    if ($raw -notmatch '"manifests"') { return 2 }
+    # Buildx attestation entries sit alongside the real ones with
+    # "architecture":"unknown", so matching the host arch specifically is
+    # what distinguishes a usable build from provenance metadata.
+    $flat = $raw -replace '\s', ''
+    if ($flat -match ('"architecture":"' + [regex]::Escape($script:HostArch) + '"')) { return 0 }
+    return 1
+}
+
+# Preflight: name the images that cannot run here, before the pull starts.
+# `docker compose pull` resolves every image's manifest list against
+# linux/$HostArch, and when one has no matching entry the daemon aborts the
+# whole pull with a bare 'no matching manifest for linux/arm64/v8' - no image
+# name, no explanation, several services in. Only meaningful off amd64; every
+# image in the stack publishes amd64.
+function Check-ImageArchitectures {
+    if (-not $script:HostArch -or $script:HostArch -eq 'amd64') { return }
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    docker buildx version 2>$null | Out-Null
+    $buildxOk = ($LASTEXITCODE -eq 0)
+    $images = @()
+    if ($buildxOk) { $images = @(docker compose -f $BaseCompose config --images 2>$null) }
+    $ErrorActionPreference = $prevEAP
+    if (-not $buildxOk -or $images.Count -eq 0) { return }
+
+    Info "Checking that the pinned images publish a linux/$script:HostArch build..."
+    $unsupported = @()
+    foreach ($image in $images) {
+        if (-not $image) { continue }
+        if ((Test-ImageArch $image) -eq 1) { $unsupported += $image }
+    }
+    if ($unsupported.Count -eq 0) {
+        Ok "Every core image has a linux/$script:HostArch build"
+        return
+    }
+
+    Write-Host ''
+    Warn "This machine is $script:Platform/$script:HostArch. These images publish no linux/$script:HostArch build:"
+    foreach ($image in $unsupported) { Write-Host "      $image" }
+    Write-Host ''
+
+    if ($env:OPENNVR_ALLOW_EMULATION -eq '1') {
+        # Set on the process environment, not a local: the installer hands off
+        # to start.ps1 / start.sh, and every later `docker compose` call has to
+        # resolve the same way or the stack comes up half-emulated.
+        $env:DOCKER_DEFAULT_PLATFORM = 'linux/amd64'
+        Warn 'OPENNVR_ALLOW_EMULATION=1 - pulling the linux/amd64 builds and running'
+        Warn 'them under emulation. Detection latency will be several times worse.'
+        Warn 'In Docker Desktop, enable Settings -> General -> "Use Rosetta for'
+        Warn 'x86_64/amd64 emulation" first, or containers may fail to start at all.'
+        Write-Host ''
+        return
+    }
+
+    Write-Host '  Nothing has been downloaded. Left alone, the pull fails partway through'
+    Write-Host "  with `"no matching manifest for linux/$script:HostArch/v8`" and no indication"
+    Write-Host '  of which image caused it.'
+    Write-Host ''
+    Write-Host '  Options:'
+    Write-Host '    1. Install on an amd64 host.'
+    Write-Host '    2. Run the amd64 builds under emulation - slower, but functional.'
+    Write-Host '       In Docker Desktop enable Settings -> General -> "Use Rosetta for'
+    Write-Host '       x86_64/amd64 emulation", then re-run:'
+    Write-Host '         $env:OPENNVR_ALLOW_EMULATION = "1"; .\scripts\install.ps1'
+    Write-Host '    3. Build the images above from source for this architecture.'
+    Write-Host ''
+    Fail "Aborting: $($unsupported.Count) image(s) have no linux/$script:HostArch build."
 }
 
 # CLDR windowsZones primary (territory 001) mapping. Windows PowerShell 5.1
@@ -352,6 +458,7 @@ function Pull-AndBuild {
     Info 'Camera Agent, a local LLM model of ~1 GB). Depending on your network'
     Info 'this can take 8-15 minutes. Later starts are much faster - everything'
     Info 'is cached, so you only pay this cost once.'
+    Check-ImageArchitectures
     Write-Host ''
     Info 'Pulling the OpenNVR core stack...'
     docker compose -f $BaseCompose pull --ignore-buildable

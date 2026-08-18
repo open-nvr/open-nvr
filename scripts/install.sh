@@ -86,7 +86,109 @@ detect_platform() {
         Darwin*) PLATFORM="macOS"; DEFAULT_RECORDINGS="/Users/Shared/opennvr-recordings" ;;
         *) die "Unsupported platform. On Windows run .\\scripts\\install.ps1" ;;
     esac
-    ok "Detected $PLATFORM (Docker bridge mode)"
+    # HOST_ARCH is Docker's platform vocabulary, not uname's. `docker compose
+    # pull` resolves every image's manifest list against linux/$HOST_ARCH, and
+    # when an image has no entry for it the daemon aborts the whole pull with a
+    # bare "no matching manifest for linux/arm64/v8" — no image name, no
+    # explanation, several services in. check_image_architectures() below turns
+    # that into a named list before anything is downloaded.
+    case "$(uname -m)" in
+        x86_64|amd64)  HOST_ARCH="amd64" ;;
+        arm64|aarch64) HOST_ARCH="arm64" ;;
+        armv7l)        HOST_ARCH="arm" ;;
+        # Unknown machine type: leave HOST_ARCH empty and skip the preflight
+        # rather than guess a platform string and reject a valid install.
+        *)             HOST_ARCH="" ;;
+    esac
+    ok "Detected $PLATFORM/${HOST_ARCH:-$(uname -m)} (Docker bridge mode)"
+}
+
+# Does this image's manifest list carry an entry for the host architecture?
+#   0 — yes
+#   1 — the image resolves, but has no build for this architecture
+#   2 — undeterminable (no buildx, private image, registry hiccup, or a
+#       single-arch manifest with no platform metadata). Never a reason to
+#       block an install: a false "unsupported" is worse than the raw
+#       daemon error we are replacing.
+image_supports_host_arch() {
+    local image="$1" raw
+    raw=$(docker buildx imagetools inspect --raw "$image" 2>/dev/null) || return 2
+    # A bare image manifest (schema 2, single platform) has no "manifests"
+    # key and therefore no platform metadata to check.
+    case "$raw" in
+        *'"manifests"'*) ;;
+        *) return 2 ;;
+    esac
+    # Buildx attestation entries appear alongside the real ones with
+    # "architecture":"unknown", so matching the host arch specifically is
+    # what distinguishes a usable build from provenance metadata.
+    if printf '%s' "$raw" | tr -d ' \t\r\n' | grep -q "\"architecture\":\"${HOST_ARCH}\""; then
+        return 0
+    fi
+    return 1
+}
+
+# Preflight: name the images that cannot run here, before the pull starts.
+# Only meaningful off amd64 — every image in the stack publishes amd64.
+check_image_architectures() {
+    [[ -n "$HOST_ARCH" && "$HOST_ARCH" != "amd64" ]] || return 0
+    docker buildx version >/dev/null 2>&1 || return 0
+
+    # A newline-delimited string plus an explicit counter, NOT an array:
+    # macOS still ships bash 3.2, where `${#arr[@]}` on an empty array under
+    # `set -u` is an "unbound variable" error — and an empty list is the
+    # normal, successful outcome of this function.
+    local images image rc unsupported="" count=0
+    images=$(docker compose -f "$BASE_COMPOSE" config --images 2>/dev/null) || return 0
+    [[ -n "$images" ]] || return 0
+
+    info "Checking that the pinned images publish a linux/${HOST_ARCH} build..."
+    while IFS= read -r image; do
+        [[ -n "$image" ]] || continue
+        rc=0
+        image_supports_host_arch "$image" || rc=$?
+        if [[ $rc -eq 1 ]]; then
+            unsupported+="${image}"$'\n'
+            count=$((count + 1))
+        fi
+    done <<< "$images"
+
+    if [[ $count -eq 0 ]]; then
+        ok "Every core image has a linux/${HOST_ARCH} build"
+        return 0
+    fi
+
+    printf '\n'
+    warn "This machine is ${PLATFORM}/${HOST_ARCH}. These images publish no linux/${HOST_ARCH} build:"
+    printf '%s' "$unsupported" | while IFS= read -r image; do
+        printf '      %s\n' "$image"
+    done
+    printf '\n'
+
+    if [[ "${OPENNVR_ALLOW_EMULATION:-0}" == "1" ]]; then
+        # Exported, not just set: the installer ends with `exec start.sh up`,
+        # and every later `docker compose` call has to resolve the same way
+        # or the stack comes up half-emulated and half-broken.
+        export DOCKER_DEFAULT_PLATFORM=linux/amd64
+        warn "OPENNVR_ALLOW_EMULATION=1 — pulling the linux/amd64 builds and running"
+        warn "them under emulation. Detection latency will be several times worse."
+        warn "On Docker Desktop, enable Settings -> General -> 'Use Rosetta for"
+        warn "x86_64/amd64 emulation' first, or containers may fail to start at all."
+        printf '\n'
+        return 0
+    fi
+
+    printf '  Nothing has been downloaded. Left alone, the pull fails partway through\n'
+    printf '  with "no matching manifest for linux/%s/v8" and no indication of which\n' "$HOST_ARCH"
+    printf '  image caused it.\n\n'
+    printf '  Options:\n'
+    printf '    1. Install on an amd64 host.\n'
+    printf '    2. Run the amd64 builds under emulation — slower, but functional.\n'
+    printf '       On Docker Desktop enable Settings -> General -> "Use Rosetta for\n'
+    printf '       x86_64/amd64 emulation", then re-run:\n'
+    printf '         OPENNVR_ALLOW_EMULATION=1 ./scripts/install.sh\n'
+    printf '    3. Build the images above from source for this architecture.\n\n'
+    die "Aborting: ${count} image(s) have no linux/${HOST_ARCH} build."
 }
 
 # Best-effort IANA timezone of this host, used as the default for the TZ
@@ -322,6 +424,7 @@ pull_and_build() {
     info "Camera Agent, a local LLM model of ~1 GB). Depending on your network"
     info "this can take 8-15 minutes. Later starts are much faster — everything"
     info "is cached, so you only pay this cost once."
+    check_image_architectures
     printf '\n'
     info "Pulling the OpenNVR core stack..."
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable

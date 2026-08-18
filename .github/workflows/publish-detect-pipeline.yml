@@ -63,6 +63,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (cross-arch emulation for the arm64 build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -97,7 +102,13 @@ jobs:
         with:
           context: ./detect-pipeline
           file: detect-pipeline/Dockerfile
-          platforms: linux/amd64
+          # Multi-arch on push, single-arch on pull_request. ``load: true``
+          # imports the result into the local docker daemon, which cannot
+          # hold a multi-platform image — so the PR smoke test builds
+          # linux/amd64 only. Release/main builds publish a manifest list
+          # covering both, which is what Apple Silicon and Raspberry Pi
+          # hosts resolve against at pull time.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
           tags: |
