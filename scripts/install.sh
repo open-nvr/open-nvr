@@ -52,7 +52,15 @@ ask_secret() {
 explain() {
     printf '  %s\n' "$1"
     printf '    required: %-4s  default: %s\n' "$2" "$3"
-    [[ -n "${4:-}" ]] && printf '    note: %s\n' "$4"
+    # An if, NOT ``[[ -n ... ]] && printf``: with no note argument the
+    # && list makes the function's exit status 1, and under ``set -e``
+    # the bare ``explain ...`` call kills the installer SILENTLY — the
+    # camera-agent selection died exactly here (the only call site
+    # without a note). Same failure family as the ``read || true``
+    # rule documented above; keep explain() unconditionally returning 0.
+    if [[ -n "${4:-}" ]]; then
+        printf '    note: %s\n' "$4"
+    fi
 }
 # Curated, ALWAYS-prompted value with an explanation. Enter keeps the current
 # .env value (or the given default on a fresh install); typing overrides it.
