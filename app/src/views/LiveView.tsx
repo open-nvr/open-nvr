@@ -1047,6 +1047,9 @@ export function AddCameraDialog({
   // Scan range info & override ("scan once" vs "save as Camera LAN")
   const [scanInfo, setScanInfo] = useState<{cidrs: string[], source: string} | null>(null)
   const [suggestedCidrs, setSuggestedCidrs] = useState<string[]>([])
+  // No range configured or detectable (e.g. bridge container without a host
+  // IP hint) — prompt for one instead of scanning nothing.
+  const [noAutoRange, setNoAutoRange] = useState(false)
   const [showRangePanel, setShowRangePanel] = useState(false)
   const [rangeInput, setRangeInput] = useState('')
   const [savingRange, setSavingRange] = useState(false)
@@ -1125,6 +1128,9 @@ export function AddCameraDialog({
     setDiscovering(true)
     setError(null)
     setDiscoveredCameras([])
+    setNoAutoRange(false)
+    // Show the target range while the scan is still running.
+    if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
     try {
       const response = await apiService.onvifDiscover(overrideCidr ? { cidr: overrideCidr } : undefined)
@@ -1159,6 +1165,7 @@ export function AddCameraDialog({
         subnet_cidr: cidrVal,
       })
       setShowRangePanel(false)
+      setScanInfo({ cidrs: [cidrVal], source: 'configured' })
       await handleDiscover()
     } catch (e: any) {
       setError(e?.data?.detail || e?.message || 'Failed to update Camera LAN.')
@@ -1167,11 +1174,29 @@ export function AddCameraDialog({
     }
   }
   
-  // Start discovery on mount
+  // Start discovery on mount. Fetch the scan plan first (fast) so the target
+  // range is visible while the scan itself (slow) is still running — and so a
+  // "nothing to scan" answer becomes a prompt for a range instead of an error.
   useEffect(() => {
-    if (mode === 'discover') {
-      handleDiscover()
-    }
+    if (mode !== 'discover') return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await apiService.onvifDiscoverPlan()
+        if (cancelled) return
+        const cidrs: string[] = res?.data?.scan_cidrs || []
+        if (cidrs.length === 0) {
+          setNoAutoRange(true)
+          setShowRangePanel(true)
+          return
+        }
+        setScanInfo({ cidrs, source: res?.data?.source || 'configured' })
+      } catch {
+        // Plan endpoint unavailable — fall through and just scan.
+      }
+      if (!cancelled) handleDiscover()
+    })()
+    return () => { cancelled = true }
   }, [])
 
   // Select a discovered camera and show auth step
@@ -1382,7 +1407,9 @@ export function AddCameraDialog({
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-[var(--text-dim)]">
-                  {discovering ? 'Scanning network...' : `Found ${discoveredCameras.length} camera(s)`}
+                  {discovering ? 'Scanning network...'
+                    : noAutoRange ? 'No network range to scan'
+                    : `Found ${discoveredCameras.length} camera(s)`}
                 </span>
                 <button
                   className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
@@ -1460,7 +1487,9 @@ export function AddCameraDialog({
                 {!discovering && discoveredCameras.length === 0 && (
                   <div className="text-center py-8 text-sm text-[var(--text-dim)] space-y-2">
                     <div>
-                      No cameras found{scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}.
+                      {noAutoRange
+                        ? 'Couldn\'t auto-detect your camera network. Enter the subnet your cameras are on (e.g. 192.168.1.0/24) above.'
+                        : `No cameras found${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}.`}
                     </div>
                     {suggestedCidrs.length > 0 && (
                       <div className="space-y-1">

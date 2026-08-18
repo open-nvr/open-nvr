@@ -39,6 +39,20 @@ export function OnvifTools() {
 
   const canAuth = selectedIp && username && password
 
+  // Prefill the CIDR field with the range a scan would cover (configured
+  // Camera LAN or auto-detected), so the target is visible before scanning.
+  useEffect(() => {
+    let cancelled = false
+    apiService.onvifDiscoverPlan()
+      .then(res => {
+        if (!cancelled && res?.data?.scan_cidrs?.[0]) {
+          setScanCidr(prev => prev || res.data.scan_cidrs[0])
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
   const discover = async () => {
     setLoading(true)
     setErr('')

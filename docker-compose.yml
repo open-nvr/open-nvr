@@ -370,6 +370,14 @@ services:
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
       - KAI_C_URL=http://127.0.0.1:8100
+      # ONVIF discovery auto-detection: inside this bridge container the only
+      # visible network is the compose bridge, so the launchers export the
+      # host's LAN IPs as the real subnet hints — OPENNVR_HOST_IP (default
+      # route) plus OPENNVR_LAN_IPS (every LAN-facing NIC on a multi-NIC
+      # host) — and OPENNVR_DOCKER_SUBNET tells detection which range to ignore.
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+      - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
+      - OPENNVR_DOCKER_SUBNET=${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
       - RECORDINGS_BASE_PATH=/app/recordings

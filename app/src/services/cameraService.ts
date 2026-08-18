@@ -85,6 +85,7 @@ export const cameraService = {
 
   // ONVIF
   onvifDiscover: (params?: { cidr?: string | string[] }) => api.get('/api/v1/discover', { params }),
+  onvifDiscoverPlan: () => api.get('/api/v1/discover/plan'),
   onvifConnect: (
     ip: string,
     params: { username: string; password: string; port?: number }
