@@ -164,9 +164,23 @@ async def discover_plan(
     Lets the UI show "Scanning 192.168.1.0/24 · auto-detected" while the actual
     (slow) scan is still running, and render a friendly prompt instead of an
     error when nothing is configured or detectable (``scan_cidrs`` comes back
-    empty rather than a 400)."""
+    empty rather than a 400).
+
+    ``detected_cidrs`` lists ALL of the host's detected LAN subnets regardless
+    of the configured Camera LAN, so the UI can always offer "scan a host
+    network" — an operator hunting for a camera on a second NIC shouldn't have
+    to know its range by heart. Detection is Docker-aware (bridge ignored,
+    host IPs come from OPENNVR_HOST_IP/OPENNVR_LAN_IPS)."""
     scan_cidrs, source = _resolve_scan_plan(db, None)
-    return {"scan_cidrs": scan_cidrs, "source": source}
+    try:
+        detected_cidrs = detect_local_subnets()
+    except Exception:
+        detected_cidrs = []
+    return {
+        "scan_cidrs": scan_cidrs,
+        "source": source,
+        "detected_cidrs": detected_cidrs,
+    }
 
 
 # How often the /discover handler checks whether the client hung up. Polling

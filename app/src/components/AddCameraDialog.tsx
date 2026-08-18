@@ -67,7 +67,10 @@ export function AddCameraDialog({
   // Camera LAN range so the "Save as Camera LAN & scan" button only appears
   // when the input actually moves the boundary.
   const [scanInfo, setScanInfo] = useState<{cidrs: string[], source: string} | null>(null)
-  const [suggestedCidrs, setSuggestedCidrs] = useState<string[]>([])
+  // All of the host's detected LAN subnets (from /discover/plan, topped up by
+  // scan responses) — always offered as one-click scan targets so the
+  // operator can sweep a host network without knowing its range.
+  const [hostCidrs, setHostCidrs] = useState<string[]>([])
   // No range configured or detectable (e.g. bridge container without a host
   // IP hint) — prompt for one instead of scanning nothing.
   const [noAutoRange, setNoAutoRange] = useState(false)
@@ -188,7 +191,7 @@ export function AddCameraDialog({
       if (data.source === 'configured' && data.scan_cidrs?.[0]) {
         setConfiguredCidr(data.scan_cidrs[0])
       }
-      setSuggestedCidrs(data.suggested_cidrs || [])
+      setHostCidrs(prev => Array.from(new Set([...prev, ...(data.suggested_cidrs || [])])))
       setDiscoveredCameras(devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         scheme: d.scheme || 'http',
@@ -247,6 +250,7 @@ export function AddCameraDialog({
       try {
         const res = await apiService.onvifDiscoverPlan()
         if (cancelled) return
+        setHostCidrs(res?.data?.detected_cidrs || [])
         const cidrs: string[] = res?.data?.scan_cidrs || []
         if (cidrs.length === 0) {
           setNoAutoRange(true)
@@ -602,14 +606,15 @@ export function AddCameraDialog({
                 </div>
               )}
 
-              {suggestedCidrs.length > 0 && (
+              {hostCidrs.length > 0 && (
                 <div className="space-y-1">
-                  <div className="text-xs text-[var(--text-dim)]">This host also appears to be on:</div>
-                  {suggestedCidrs.map((s) => (
+                  <div className="text-xs text-[var(--text-dim)]">Host networks:</div>
+                  {hostCidrs.map((s) => (
                     <button
                       key={s}
-                      className="block w-full text-left px-2 py-1 text-xs bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)]"
+                      className="block w-full text-left px-2 py-1 text-xs bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] disabled:opacity-50"
                       onClick={() => { setRangeInput(s); handleDiscover(s) }}
+                      disabled={savingRange}
                     >
                       Scan {s}
                     </button>

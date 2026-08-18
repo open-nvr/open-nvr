@@ -107,6 +107,20 @@ def test_invalid_configured_cidrs_dropped_not_fatal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_plan_always_reports_detected_host_subnets(monkeypatch):
+    """detected_cidrs must list the host's networks even when a Camera LAN is
+    configured — the UI always offers them as one-click scan targets."""
+    monkeypatch.setattr(onvif, "get_camera_lan_subnets", lambda db: ["10.1.0.0/24"])
+    monkeypatch.setattr(
+        onvif, "detect_local_subnets", lambda: ["192.168.1.0/24", "10.114.2.0/24"]
+    )
+    plan = await onvif.discover_plan(db=_DB, current_user=object())
+    assert plan["scan_cidrs"] == ["10.1.0.0/24"]
+    assert plan["source"] == "configured"
+    assert plan["detected_cidrs"] == ["192.168.1.0/24", "10.114.2.0/24"]
+
+
+@pytest.mark.asyncio
 async def test_discover_stops_scan_on_disconnect(monkeypatch):
     """The Stop button only drops the HTTP connection; the disconnect watcher
     must turn that into an actual sweep cancellation."""
