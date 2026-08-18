@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
+import { rebaseToCurrentOrigin } from '../lib/streamUrl'
 import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
@@ -681,8 +682,11 @@ function Tile({
           const { data } = await apiService.getStreamUrls(camera.id)
           if (!alive) return
           setUrls({
-            whep: data.urls?.webrtc,
-            hls: data.urls?.hls,
+            // Rebase onto the origin the UI is being served from — the
+            // backend pins these to the LAN IP, which breaks playback
+            // when browsing via https://localhost (see lib/streamUrl.ts).
+            whep: rebaseToCurrentOrigin(data.urls?.webrtc),
+            hls: rebaseToCurrentOrigin(data.urls?.hls),
             token: data.token
           })
         } catch {
