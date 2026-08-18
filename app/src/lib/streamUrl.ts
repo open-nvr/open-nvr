@@ -21,8 +21,14 @@
  * every origin nginx serves equally valid. Non-proxied URLs (direct
  * MediaMTX ports, absolute URLs to other services) pass through
  * untouched, as does anything that fails to parse.
+ *
+ * /playback/get and /playback/list are the recording-playback
+ * endpoints nginx proxies the same way (exact-match locations). The
+ * backend returns absolute playback_url values built from the same
+ * pinned base; today the SPA only truthiness-checks them, but any
+ * consumer that starts playing them must go through here too.
  */
-const PROXIED_STREAM_PREFIXES = ['/webrtc/', '/hls/']
+const PROXIED_STREAM_PREFIXES = ['/webrtc/', '/hls/', '/playback/get', '/playback/list']
 
 export function rebaseToCurrentOrigin(url: string | undefined): string | undefined {
   if (!url || typeof window === 'undefined') return url
