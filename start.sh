@@ -365,6 +365,21 @@ configure_nginx_bind_host() {
 
     mode="multi-undeclared"
     export NGINX_BIND_HOST="0.0.0.0"
+    # Best-effort browser-facing URLs even without a declared topology:
+    # this branch previously exported no MEDIAMTX_PUBLIC_URL at all, so
+    # compose fell back to https://localhost and live view broke for
+    # every LAN client. detect_lan_ip is now route-aware (default-route
+    # source IP), so its guess is the operator-facing NIC, not
+    # enumeration luck.
+    local fallback_host
+    fallback_host=$(detect_lan_ip 2>/dev/null || echo "")
+    if [ -n "$fallback_host" ]; then
+        export MEDIAMTX_PUBLIC_URL="https://${fallback_host}"
+        export MEDIAMTX_WEBRTC_HOSTS="${fallback_host}"
+        if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+            export OPENNVR_HOST_IP="${fallback_host}"
+        fi
+    fi
     echo -e "  ${YELLOW}NIC topology: multi-NIC, undeclared (non-interactive)${NC}" >&2
     echo -e "  ${GRAY}  Detected ${nic_count} routable interfaces:${NC}" >&2
     echo "$nics" | while IFS=: read -r iface ip; do
@@ -523,6 +538,19 @@ prompt_nic_topology() {
             write_env_var CAMERA_NETWORK_INTERFACE "$cam_iface"
             write_env_var MGMT_NETWORK_INTERFACE "$mgmt_iface"
             export NGINX_BIND_HOST="$mgmt_ip"
+            # First-run parity with the dual-declared branch of
+            # configure_nginx_bind_host: that branch only runs on the
+            # NEXT ./start.sh up (it reads the interface names we just
+            # wrote to .env). Without these exports, the compose up
+            # that follows THIS walkthrough falls back to
+            # https://localhost for the browser-facing stream URLs and
+            # advertises no reachable WebRTC ICE host — live view
+            # broken until a restart nobody knows they need.
+            export MEDIAMTX_PUBLIC_URL="https://${mgmt_ip}"
+            export MEDIAMTX_WEBRTC_HOSTS="${mgmt_ip}"
+            if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+                export OPENNVR_HOST_IP="${mgmt_ip}"
+            fi
             echo "" >&2
             echo -e "  ${GREEN}✓ Dual-NIC mode saved.${NC}" >&2
             echo -e "  ${GRAY}  camera network : ${WHITE}${cam_iface}${GRAY}  (UI not exposed here)${NC}" >&2
@@ -673,6 +701,23 @@ detect_lan_ip() {
     if [ -n "$override" ]; then
         echo "$override"
         return
+    fi
+    # Route-aware detection: the source IP the kernel would use to
+    # reach the internet. On multi-NIC hosts this lands on the
+    # operator-facing NIC by construction — a directly-attached
+    # camera NIC has no default route — unlike the `hostname -I`
+    # fallback below, whose ordering is interface-enumeration luck
+    # and can pick the camera NIC (wrong MEDIAMTX_PUBLIC_URL, wrong
+    # WebRTC ICE hosts, wrong cert SAN). No packet is sent: `ip
+    # route get` is a pure routing-table lookup.
+    if command -v ip >/dev/null 2>&1; then
+        local route_src
+        route_src=$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+        if [ -n "$route_src" ]; then
+            echo "$route_src"
+            return
+        fi
     fi
     # Linux: hostname -I returns space-separated v4/v6 addresses on
     # configured interfaces. Take the first non-loopback v4.
