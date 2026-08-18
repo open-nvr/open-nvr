@@ -164,6 +164,120 @@ async def test_subnet_scan_retries_flaky_onvif_probe(monkeypatch):
     assert attempts == [80, 80]  # one retry, same port
 
 
+@pytest.mark.asyncio
+async def test_exclusive_scan_supersedes_previous(monkeypatch):
+    """A new exclusive scan must cancel the one in flight (which then reports
+    409 to its caller) — overlapping sweeps each bring their own semaphore and
+    together exceed the NAT wedge threshold, silently emptying results."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from services import onvif_service as osvc
+
+    monkeypatch.setattr(osvc, "_SUPERSEDE_GRACE_S", 0)
+    first_running = asyncio.Event()
+    first_cancelled = False
+    calls = 0
+
+    async def fake_scan(cidrs, ports=osvc._ONVIF_CANDIDATE_PORTS, concurrency=96):
+        nonlocal first_cancelled, calls
+        calls += 1
+        if calls == 1:
+            first_running.set()
+            try:
+                await asyncio.Event().wait()  # block until cancelled
+            except asyncio.CancelledError:
+                first_cancelled = True
+                raise
+        return [{"ip": "10.0.0.9", "scheme": "http", "service_urls": []}]
+
+    monkeypatch.setattr(osvc, "scan_onvif_subnets", fake_scan)
+
+    t1 = asyncio.create_task(osvc.scan_onvif_subnets_exclusive(["10.0.0.0/24"]))
+    await first_running.wait()
+    t2 = asyncio.create_task(osvc.scan_onvif_subnets_exclusive(["10.0.0.0/24"]))
+
+    devices = await t2
+    assert [d["ip"] for d in devices] == ["10.0.0.9"]
+    with pytest.raises(HTTPException) as exc:
+        await t1
+    assert exc.value.status_code == 409
+    assert first_cancelled
+
+
+@pytest.mark.asyncio
+async def test_exclusive_scan_single_flight(monkeypatch):
+    """Never more than one sweep in flight across a supersede handoff."""
+    import asyncio
+
+    from services import onvif_service as osvc
+
+    monkeypatch.setattr(osvc, "_SUPERSEDE_GRACE_S", 0)
+    active = 0
+    max_active = 0
+    first_running = asyncio.Event()
+    calls = 0
+
+    async def fake_scan(cidrs, ports=osvc._ONVIF_CANDIDATE_PORTS, concurrency=96):
+        nonlocal active, max_active, calls
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            if calls == 1:
+                first_running.set()
+                await asyncio.Event().wait()
+            else:
+                await asyncio.sleep(0)
+            return []
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(osvc, "scan_onvif_subnets", fake_scan)
+
+    t1 = asyncio.create_task(osvc.scan_onvif_subnets_exclusive(["10.0.0.0/24"]))
+    await first_running.wait()
+    t2 = asyncio.create_task(osvc.scan_onvif_subnets_exclusive(["10.0.0.0/24"]))
+    await t2
+    with pytest.raises(Exception):
+        await t1
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_runs_under_scan_semaphore(monkeypatch):
+    """The ONVIF probe phase must share the scan's semaphore: with
+    concurrency=1 two live hosts may never be probed concurrently (the old
+    unbounded probes were an extra connect burst on top of the gate budget)."""
+    import asyncio
+
+    from services import onvif_service as osvc
+
+    live = {"192.168.1.105", "192.168.1.106"}
+    probing = 0
+    max_probing = 0
+
+    async def fake_tcp_state(ip, port, timeout=osvc._GATE_TIMEOUT):
+        return "open" if ip in live and port == 80 else "dead"
+
+    async def fake_probe(ip, port, timeout=0.5, scheme="http"):
+        nonlocal probing, max_probing
+        probing += 1
+        max_probing = max(max_probing, probing)
+        await asyncio.sleep(0)
+        probing -= 1
+        return {"ip": ip, "port": port, "scheme": scheme,
+                "service_urls": [f"http://{ip}:{port}/onvif/device_service"]}
+
+    monkeypatch.setattr(osvc, "_tcp_state", fake_tcp_state)
+    monkeypatch.setattr(osvc, "probe_onvif_device", fake_probe)
+
+    devices = await osvc.scan_onvif_subnet("192.168.1.104/29", concurrency=1)
+    assert {d["ip"] for d in devices} == live
+    assert max_probing == 1
+
+
 def test_single_unified_port_list():
     """PTZ and the source resolver must not carry their own port lists — they
     route through the shared resolver (regression guard for the fragmentation

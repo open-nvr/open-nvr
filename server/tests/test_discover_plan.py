@@ -104,3 +104,41 @@ def test_invalid_configured_cidrs_dropped_not_fatal(monkeypatch):
     cidrs, source = onvif._resolve_scan_plan(_DB, None)
     assert cidrs == ["10.1.0.0/24"]
     assert source == "configured"
+
+
+@pytest.mark.asyncio
+async def test_discover_stops_scan_on_disconnect(monkeypatch):
+    """The Stop button only drops the HTTP connection; the disconnect watcher
+    must turn that into an actual sweep cancellation."""
+    import asyncio
+
+    monkeypatch.setattr(onvif, "_DISCONNECT_POLL_S", 0.01)
+
+    class _Req:
+        async def is_disconnected(self):
+            return True
+
+    scan = asyncio.create_task(asyncio.Event().wait())  # never finishes
+    with pytest.raises(HTTPException) as exc:
+        await onvif._await_scan_or_disconnect(scan, _Req())
+    assert exc.value.status_code == 409
+    assert scan.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_discover_returns_result_when_client_stays(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(onvif, "_DISCONNECT_POLL_S", 0.01)
+
+    class _Req:
+        async def is_disconnected(self):
+            return False
+
+    async def _scan():
+        await asyncio.sleep(0.03)
+        return [{"ip": "10.0.0.9"}]
+
+    scan = asyncio.create_task(_scan())
+    devices = await onvif._await_scan_or_disconnect(scan, _Req())
+    assert devices == [{"ip": "10.0.0.9"}]
