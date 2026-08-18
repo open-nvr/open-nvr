@@ -1123,8 +1123,13 @@ export function AddCameraDialog({
   }
 
   // Discover cameras on network via ONVIF. `overrideCidr` scans that range
-  // once without touching the saved Camera LAN.
+  // once without touching the saved Camera LAN. Starting a new scan while one
+  // is in flight supersedes it: the sequence token makes the old request's
+  // completion a no-op, so "Change → Scan once" works mid-scan instead of the
+  // operator having to wait out a sweep of the wrong range.
+  const scanSeqRef = useRef(0)
   const handleDiscover = async (overrideCidr?: string) => {
+    const seq = ++scanSeqRef.current
     setDiscovering(true)
     setError(null)
     setDiscoveredCameras([])
@@ -1134,6 +1139,7 @@ export function AddCameraDialog({
 
     try {
       const response = await apiService.onvifDiscover(overrideCidr ? { cidr: overrideCidr } : undefined)
+      if (seq !== scanSeqRef.current) return
       const data = response?.data || {}
       const devices = data.devices || []
       setScanInfo({ cidrs: data.scan_cidrs || [], source: data.source || 'configured' })
@@ -1144,9 +1150,10 @@ export function AddCameraDialog({
         manufacturer: d.manufacturer || d.mfr || ''
       })))
     } catch (e: any) {
+      if (seq !== scanSeqRef.current) return
       setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
     } finally {
-      setDiscovering(false)
+      if (seq === scanSeqRef.current) setDiscovering(false)
     }
   }
 
@@ -1395,7 +1402,7 @@ export function AddCameraDialog({
         </div>
 
         {/* Content */}
-        <div className="p-4 overflow-auto flex-1">
+        <div className="p-4 overflow-auto flex-1 thin-scroll">
           {error && (
             <div className="mb-4 p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">
               {error}
@@ -1449,20 +1456,22 @@ export function AddCameraDialog({
                     placeholder="e.g. 192.168.1.0/24"
                     value={rangeInput}
                     onChange={(e) => setRangeInput(e.target.value)}
-                    disabled={discovering || savingRange}
+                    disabled={savingRange}
                   />
+                  {/* Deliberately usable while a scan is running — a new scan
+                      supersedes the in-flight one (see handleDiscover). */}
                   <div className="flex items-center gap-2">
                     <button
-                      className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)]"
+                      className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)] disabled:opacity-50"
                       onClick={() => handleDiscover(rangeInput.trim())}
-                      disabled={discovering || savingRange || !rangeInput.trim()}
+                      disabled={savingRange || !rangeInput.trim()}
                     >
                       Scan once
                     </button>
                     <button
-                      className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
+                      className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1 disabled:opacity-50"
                       onClick={handleSaveRangeAndScan}
-                      disabled={discovering || savingRange || !rangeInput.trim()}
+                      disabled={savingRange || !rangeInput.trim()}
                     >
                       {savingRange && <Loader2 size={12} className="animate-spin" />}
                       Save as Camera LAN & scan
@@ -1476,7 +1485,9 @@ export function AddCameraDialog({
                 </div>
               )}
 
-              <div className="max-h-60 overflow-auto space-y-2">
+              {/* No nested scroll region — the dialog body is the single
+                  scroll container, so only one (thin) scrollbar ever shows. */}
+              <div className="space-y-2">
                 {discovering && discoveredCameras.length === 0 && (
                   <div className="text-center py-8">
                     <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
@@ -1763,7 +1774,7 @@ export function AddCameraDialog({
                 />
               </div>
               
-              <div className="max-h-60 overflow-auto space-y-1">
+              <div className="max-h-60 overflow-auto space-y-1 thin-scroll">
                 {filteredCameras.length === 0 ? (
                   <div className="text-center text-sm text-[var(--text-dim)] py-8">
                     {existingCameras.length === 0 
