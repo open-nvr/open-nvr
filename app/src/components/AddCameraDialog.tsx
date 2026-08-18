@@ -458,27 +458,33 @@ export function AddCameraDialog({
           </div>
         </div>
       )}
-      <div className="flex items-center justify-end gap-2">
-        <Button onClick={onClose}>Cancel</Button>
-        {mode === 'discover' && authStep && rtspUrl && (
-          <Button
-            variant="primary"
-            onClick={handleAddDiscoveredCamera}
-            disabled={loading || !cameraName.trim()}
-          >
-            {loading ? 'Adding...' : 'Add Camera'}
-          </Button>
-        )}
-        {mode === 'manual' && (
-          <Button
-            variant="primary"
-            onClick={handleAddManualCamera}
-            disabled={loading || !form.name.trim() || !form.ip_address.trim()}
-          >
-            {loading ? 'Adding...' : 'Add Camera'}
-          </Button>
-        )}
-      </div>
+      {/* Hidden while the duplicate prompt is open — its own Cancel /
+          Add Anyway pair is the only decision on screen then (a second
+          Cancel + Add Camera row underneath was confusing, and Add Camera
+          would just re-trigger the same 409). */}
+      {!duplicatePrompt && (
+        <div className="flex items-center justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          {mode === 'discover' && authStep && rtspUrl && (
+            <Button
+              variant="primary"
+              onClick={handleAddDiscoveredCamera}
+              disabled={loading || !cameraName.trim()}
+            >
+              {loading ? 'Adding...' : 'Add Camera'}
+            </Button>
+          )}
+          {mode === 'manual' && (
+            <Button
+              variant="primary"
+              onClick={handleAddManualCamera}
+              disabled={loading || !form.name.trim() || !form.ip_address.trim()}
+            >
+              {loading ? 'Adding...' : 'Add Camera'}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 

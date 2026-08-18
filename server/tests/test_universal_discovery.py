@@ -165,6 +165,32 @@ async def test_subnet_scan_retries_flaky_onvif_probe(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_uri_unescapes_xml_entities(monkeypatch):
+    """Regression: SOAP escapes ``&`` as ``&amp;`` inside <tt:Uri>; the raw
+    regex capture stored the entity, corrupting RTSP URLs with query strings
+    (``?transmode=unicast&amp;profile=va`` reached MediaMTX verbatim)."""
+    from services import onvif_digest_service as ods
+
+    soap = (
+        "<s:Envelope><s:Body><trt:GetStreamUriResponse><trt:MediaUri>"
+        "<tt:Uri>rtsp://10.0.0.9:554/1/1?transmode=unicast&amp;profile=va</tt:Uri>"
+        "</trt:MediaUri></trt:GetStreamUriResponse></s:Body></s:Envelope>"
+    )
+
+    async def fake_caps(*a, **k):
+        return {"media": "http://10.0.0.9/onvif/media_service"}
+
+    async def fake_request(url, body, username, password):
+        return 200, soap
+
+    monkeypatch.setattr(ods, "get_capabilities", fake_caps)
+    monkeypatch.setattr(ods, "_onvif_request", fake_request)
+
+    uri = await ods.get_stream_uri_digest("10.0.0.9", "admin", "pw", "prof1")
+    assert uri == "rtsp://10.0.0.9:554/1/1?transmode=unicast&profile=va"
+
+
+@pytest.mark.asyncio
 async def test_exclusive_scan_supersedes_previous(monkeypatch):
     """A new exclusive scan must cancel the one in flight (which then reports
     409 to its caller) — overlapping sweeps each bring their own semaphore and
