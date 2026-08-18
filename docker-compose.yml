@@ -302,6 +302,9 @@ services:
       # Thread cap for the detector (cv2 intra-op + BLAS). Prevents Tier-0
       # from starving CPU-bound co-tenants; raise it on big machines.
       - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
+      # Per-camera analysis rate. Detection runs on every analyzed frame,
+      # so this is the pipeline's main CPU dial — see .env.example.
+      - DETECT_FPS=${DETECT_FPS:-5}
       - OMP_NUM_THREADS=${DETECT_CV_THREADS:-2}
       # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
       # to run the gated model on enforce escalations, governed + audited by KAI-C.
