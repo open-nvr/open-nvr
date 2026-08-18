@@ -340,6 +340,94 @@ function Show-RunningInfo {
     Write-Color "  First-time setup page opens automatically on first visit." DarkGray
 }
 
+# ── Host LAN IP detection (OPENNVR_HOST_IP) ────────────────
+# The core container runs on a Docker bridge and can't see the host's LAN, so
+# ONVIF discovery (and the TLS cert SAN) needs the host's LAN IP passed in.
+# Mirrors start.sh's route-aware detect_lan_ip: default-route NIC first, VPN
+# tunnels skipped, and an operator-set OPENNVR_HOST_IP (.env or process env)
+# always wins.
+function Test-VpnAddress {
+    param([string]$InterfaceAlias, [string]$Ip)
+    if ($InterfaceAlias -match 'Tailscale|WireGuard|OpenVPN|ZeroTier|Nebula|TAP') { return $true }
+    # CGNAT 100.64.0.0/10 — Tailscale-style overlay addresses.
+    $parts = $Ip -split '\.'
+    if ($parts.Count -eq 4 -and [int]$parts[0] -eq 100 -and [int]$parts[1] -ge 64 -and [int]$parts[1] -le 127) { return $true }
+    return $false
+}
+
+function Test-PrivateIPv4 {
+    param([string]$Ip)
+    $parts = $Ip -split '\.'
+    if ($parts.Count -ne 4) { return $false }
+    $a = [int]$parts[0]; $b = [int]$parts[1]
+    if ($a -eq 10) { return $true }
+    if ($a -eq 172 -and $b -ge 16 -and $b -le 31) { return $true }
+    if ($a -eq 192 -and $b -eq 168) { return $true }
+    return $false
+}
+
+# Every private IPv4 on a physical, connected, non-VPN adapter — default-route
+# NIC's address first. Physical-only skips Hyper-V/WSL vEthernet switches and
+# WiFi-Direct pseudo-adapters, whose host-side IPs are never a camera LAN.
+function Get-LanIPs {
+    $found = New-Object System.Collections.Generic.List[string]
+    try {
+        $physUp = @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })
+        $defaultIfIndexes = @(
+            try {
+                Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+                    Sort-Object -Property RouteMetric, InterfaceMetric |
+                    Select-Object -ExpandProperty InterfaceIndex
+            } catch { @() }
+        )
+        # Default-route adapter first, then the rest (e.g. a second NIC on a
+        # dedicated camera network).
+        $ordered = @($physUp | Where-Object { $defaultIfIndexes -contains $_.ifIndex }) +
+                   @($physUp | Where-Object { $defaultIfIndexes -notcontains $_.ifIndex })
+        foreach ($ad in $ordered) {
+            $addrs = try { Get-NetIPAddress -InterfaceIndex $ad.ifIndex -AddressFamily IPv4 -ErrorAction Stop } catch { @() }
+            foreach ($a in $addrs) {
+                $ip = $a.IPAddress
+                if ($ip -like '127.*' -or $ip -like '169.254.*') { continue }
+                if (Test-VpnAddress $ad.InterfaceAlias $ip) { continue }
+                if ((Test-PrivateIPv4 $ip) -and -not $found.Contains($ip)) { $found.Add($ip) }
+            }
+        }
+    } catch {}
+    if ($found.Count -eq 0) {
+        try {
+            # Fallback: any private IPv4 on a non-VPN interface.
+            foreach ($a in (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)) {
+                $ip = $a.IPAddress
+                if ($ip -like '127.*' -or $ip -like '169.254.*') { continue }
+                if (Test-VpnAddress $a.InterfaceAlias $ip) { continue }
+                if ((Test-PrivateIPv4 $ip) -and -not $found.Contains($ip)) { $found.Add($ip) }
+            }
+        } catch {}
+    }
+    return $found
+}
+
+function Set-HostIpEnv {
+    $hostIpSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_HOST_IP) -or
+                 -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_IP"))
+    $lanIpsSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_LAN_IPS) -or
+                 -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_LAN_IPS"))
+    if ($hostIpSet -and $lanIpsSet) { return }
+    $lanIps = Get-LanIPs
+    if ($lanIps.Count -eq 0) { return }
+    # Process env feeds compose ${VAR:-} interpolation; operator .env wins.
+    if (-not $hostIpSet) {
+        # Single IP only — this one also lands in TLS cert SANs.
+        $env:OPENNVR_HOST_IP = $lanIps[0]
+        Write-Color "  Detected host LAN IP: $($lanIps[0]) (TLS cert SAN + camera discovery)" DarkGray
+    }
+    if (-not $lanIpsSet -and $lanIps.Count -gt 1) {
+        $env:OPENNVR_LAN_IPS = ($lanIps -join ',')
+        Write-Color "  Additional LAN NIC IP(s): $(($lanIps | Select-Object -Skip 1) -join ', ') (camera discovery scans these subnets too)" DarkGray
+    }
+}
+
 # ── Raw start / build (no front-door prompt) ───────────────
 # These assume .env exists — the smart Invoke-Start and the installer
 # guarantee that before calling them. Kept separate so the installer can call
@@ -351,6 +439,7 @@ function Invoke-Up {
     }
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
+    Set-HostIpEnv
     $ca = Get-ComposeArgs
     Write-Color "  Starting all services ..." Green
     docker compose @ca up -d --remove-orphans
@@ -365,6 +454,7 @@ function Invoke-Build {
     }
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
+    Set-HostIpEnv
     $ca = Get-ComposeArgs
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build
