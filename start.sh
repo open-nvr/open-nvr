@@ -365,6 +365,21 @@ configure_nginx_bind_host() {
 
     mode="multi-undeclared"
     export NGINX_BIND_HOST="0.0.0.0"
+    # Best-effort browser-facing URLs even without a declared topology:
+    # this branch previously exported no MEDIAMTX_PUBLIC_URL at all, so
+    # compose fell back to https://localhost and live view broke for
+    # every LAN client. detect_lan_ip is now route-aware (default-route
+    # source IP), so its guess is the operator-facing NIC, not
+    # enumeration luck.
+    local fallback_host
+    fallback_host=$(detect_lan_ip 2>/dev/null || echo "")
+    if [ -n "$fallback_host" ]; then
+        export MEDIAMTX_PUBLIC_URL="https://${fallback_host}"
+        export MEDIAMTX_WEBRTC_HOSTS="${fallback_host}"
+        if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+            export OPENNVR_HOST_IP="${fallback_host}"
+        fi
+    fi
     echo -e "  ${YELLOW}NIC topology: multi-NIC, undeclared (non-interactive)${NC}" >&2
     echo -e "  ${GRAY}  Detected ${nic_count} routable interfaces:${NC}" >&2
     echo "$nics" | while IFS=: read -r iface ip; do
@@ -523,6 +538,19 @@ prompt_nic_topology() {
             write_env_var CAMERA_NETWORK_INTERFACE "$cam_iface"
             write_env_var MGMT_NETWORK_INTERFACE "$mgmt_iface"
             export NGINX_BIND_HOST="$mgmt_ip"
+            # First-run parity with the dual-declared branch of
+            # configure_nginx_bind_host: that branch only runs on the
+            # NEXT ./start.sh up (it reads the interface names we just
+            # wrote to .env). Without these exports, the compose up
+            # that follows THIS walkthrough falls back to
+            # https://localhost for the browser-facing stream URLs and
+            # advertises no reachable WebRTC ICE host — live view
+            # broken until a restart nobody knows they need.
+            export MEDIAMTX_PUBLIC_URL="https://${mgmt_ip}"
+            export MEDIAMTX_WEBRTC_HOSTS="${mgmt_ip}"
+            if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+                export OPENNVR_HOST_IP="${mgmt_ip}"
+            fi
             echo "" >&2
             echo -e "  ${GREEN}✓ Dual-NIC mode saved.${NC}" >&2
             echo -e "  ${GRAY}  camera network : ${WHITE}${cam_iface}${GRAY}  (UI not exposed here)${NC}" >&2
@@ -654,6 +682,38 @@ print_security_posture() {
 # We try to detect the LAN-facing IP best-effort so the operator
 # sees a clickable URL. Failure paths fall back to a generic
 # "https://<server-ip>/" string so the message is never misleading.
+# True if this source-IP / egress-interface pair looks like a VPN
+# tunnel rather than the operator's LAN. Route-aware detection has one
+# failure mode the heuristics it replaced did not: on a host running a
+# full-tunnel VPN (Tailscale, WireGuard, ...) the default route IS the
+# tunnel, so `ip route get` deterministically returns the tunnel IP —
+# and MEDIAMTX_PUBLIC_URL, the WebRTC ICE hosts, and the cert SAN get
+# pinned to an address LAN browsers can't reach. Two independent
+# signals, either one disqualifies:
+#   * egress device named like a tunnel (wg*, tun*, tap*, utun*,
+#     tailscale*, zt* (ZeroTier), nebula*)
+#   * source address in 100.64.0.0/10 — the CGNAT range Tailscale
+#     allocates from; never a home/office LAN address in practice
+# Operators who genuinely WANT the tunnel address (remote-only access)
+# set OPENNVR_HOST_IP in .env, which wins before detection runs.
+is_vpn_tunnel_source() {
+    local src="$1" dev="$2"
+    case "$dev" in
+        wg*|tun*|tap*|utun*|tailscale*|zt*|nebula*) return 0 ;;
+    esac
+    case "$src" in
+        100.*)
+            local second
+            second="${src#100.}"
+            second="${second%%.*}"
+            case "$second" in
+                6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7]) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
 detect_lan_ip() {
     # Self-review M-1: on dual-NIC hosts, NGINX_BIND_HOST is the
     # *authoritative* answer for "which IP does the operator browse
@@ -673,6 +733,30 @@ detect_lan_ip() {
     if [ -n "$override" ]; then
         echo "$override"
         return
+    fi
+    # Route-aware detection: the source IP the kernel would use to
+    # reach the internet. On multi-NIC hosts this lands on the
+    # operator-facing NIC by construction — a directly-attached
+    # camera NIC has no default route — unlike the `hostname -I`
+    # fallback below, whose ordering is interface-enumeration luck
+    # and can pick the camera NIC (wrong MEDIAMTX_PUBLIC_URL, wrong
+    # WebRTC ICE hosts, wrong cert SAN). No packet is sent: `ip
+    # route get` is a pure routing-table lookup.
+    if command -v ip >/dev/null 2>&1; then
+        local route_out route_src route_dev
+        route_out=$(ip -4 route get 1.1.1.1 2>/dev/null | head -n 1)
+        route_src=$(printf '%s\n' "$route_out" \
+            | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+        route_dev=$(printf '%s\n' "$route_out" \
+            | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+        # A tunnel egress means "the default route is the VPN", not
+        # "this is the operator-facing NIC" — skip to the LAN
+        # heuristics below instead of pinning URLs/certs to an
+        # address LAN browsers can't reach (see is_vpn_tunnel_source).
+        if [ -n "$route_src" ] && ! is_vpn_tunnel_source "$route_src" "${route_dev:-}"; then
+            echo "$route_src"
+            return
+        fi
     fi
     # Linux: hostname -I returns space-separated v4/v6 addresses on
     # configured interfaces. Take the first non-loopback v4.
