@@ -146,3 +146,23 @@ Tuning guidance:
   tracker; they are not certified people-counting.
 - Detection is limited to the model's classes (COCO YOLOv8 has no "fire" — the
   Fire alarm preset needs a fire/smoke model registered).
+
+
+## Running the LLM outside Docker (macOS / Windows: do this)
+
+Containers on macOS and Windows run inside a VM with **no GPU access** —
+the bundled ollama container answers on plain CPU, and one agent turn can
+take minutes (the demo's latency chip will show `LLM` dominating the
+turn). Point the agent at an LLM runtime **on the host** instead:
+
+1. Install [Ollama](https://ollama.com) on the machine and pull your
+   model: `ollama pull qwen2.5:1.5b`
+2. Set in `.env`: `OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434`
+3. `./start.sh up` — it adds the
+   `docker-compose.camera-agent.external-llm.yml` overlay automatically,
+   which skips the bundled ollama container (and its 3.2 GB image).
+
+On Apple Silicon this moves inference onto the Metal GPU: the same turn
+that took minutes lands in seconds. Any Ollama-compatible endpoint works,
+including one on another LAN machine. The installer offers this as the
+"LLM runtime" question when you select the camera-agent example.

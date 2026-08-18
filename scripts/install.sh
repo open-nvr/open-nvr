@@ -413,6 +413,22 @@ choose_example() {
         configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
             "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions." "yes" \
             "moondream | blip — both run locally."
+
+        printf '\n'
+        explain "Where should the LLM run? On macOS/Windows, Docker containers CANNOT use the GPU — the bundled LLM container answers on plain CPU and a single question can take minutes. If Ollama is installed on this machine (brew install ollama / ollama.com), the agent can use it directly: GPU-fast, and skips a 3.2 GB image." \
+            "pick one" "1 (bundled container)"
+        ask_value "LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL" "1"
+        if [[ "$REPLY" == "2" ]]; then
+            configure_value OLLAMA_EXTERNAL_URL "External LLM endpoint" "http://host.docker.internal:11434" \
+                "Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker." "yes" \
+                "Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434"
+            local ext_model
+            ext_model=$(env_get OLLAMA_MODEL); ext_model=${ext_model:-qwen2.5:1.5b}
+            warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
+            info "The bundled ollama container will be skipped entirely."
+        else
+            env_set OLLAMA_EXTERNAL_URL ""
+        fi
     else
         # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
         prompt_overlay_defaults "$manifest"

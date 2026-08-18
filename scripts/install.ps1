@@ -442,6 +442,20 @@ function Choose-Example {
         Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
             'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions.' 'yes' `
             'moondream | blip - both run locally.'
+
+        Write-Host ''
+        Explain 'Where should the LLM run? On macOS/Windows, Docker containers CANNOT use the GPU - the bundled LLM container answers on plain CPU and a single question can take minutes. If Ollama is installed on this machine (ollama.com), the agent can use it directly: GPU-fast, and skips a 3.2 GB image.' 'pick one' '1 (bundled container)'
+        $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' '1'
+        if ($llmMode -eq '2') {
+            Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
+                'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
+                'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
+            $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = 'qwen2.5:1.5b' }
+            Warn "Before first use, pull the model ON THE HOST:  ollama pull $extModel"
+            Info 'The bundled ollama container will be skipped entirely.'
+        } else {
+            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+        }
     } else {
         Prompt-OverlayDefaults $manifest
     }

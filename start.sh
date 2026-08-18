@@ -84,6 +84,16 @@ compose_args() {
             return 1
         }
         args="$args -f $example_compose"
+        # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that
+        # skips the bundled ollama container and points the agent at the
+        # operator's endpoint instead — the GPU path on macOS/Windows,
+        # where the in-VM container is CPU-only. Only meaningful for the
+        # camera-agent profiles, and harmless to append with them.
+        local external_llm
+        external_llm=$(get_env_var "OLLAMA_EXTERNAL_URL")
+        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml ]]; then
+            args="$args -f docker-compose.camera-agent.external-llm.yml"
+        fi
     fi
     [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
     echo "$args"
