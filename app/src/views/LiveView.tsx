@@ -1524,8 +1524,12 @@ export function AddCameraDialog({
               {/* No nested scroll region — the dialog body is the single
                   scroll container, so only one (thin) scrollbar ever shows. */}
               <div className="space-y-2">
-                {discovering && discoveredCameras.length === 0 && (
-                  <div className="text-center py-8">
+                {/* Suppressed while the range panel is open: the header
+                    already shows the scan state, and the extra full-height
+                    block just pushed the dialog past its max height (the
+                    spinner text got clipped at the bottom edge). */}
+                {discovering && discoveredCameras.length === 0 && !showRangePanel && (
+                  <div className="text-center py-6">
                     <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
                     <div className="text-sm text-[var(--text-dim)]">Discovering ONVIF cameras...</div>
                   </div>
