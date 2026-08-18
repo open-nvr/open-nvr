@@ -57,6 +57,14 @@
 html, body, #root { height: 100%; }
 body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 
+/* Tailwind v4's preflight resets <button> to cursor:default (v3 used
+   pointer), so every button styled with raw utilities — not the .btn
+   primitives below — showed the arrow cursor. Every enabled button in this
+   app is clickable: give them all the hand cursor, and mirror .btn's
+   not-allowed for disabled ones. */
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+
 /* Reusable UI primitives for consistent styling */
 .card {
   background: var(--panel-2);
