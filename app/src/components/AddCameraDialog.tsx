@@ -20,7 +20,25 @@ import { useEffect, useRef, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 import { QrScanner } from './QrScanner'
-import { Camera, ChevronDown, CheckCircle, Loader2, Plus, Search, Video, X } from 'lucide-react'
+import { Modal } from './Modal'
+import { Button, EmptyState } from './ui'
+import { Camera, ChevronDown, CheckCircle, Loader2, Plus, Search, SearchX, Video, X } from 'lucide-react'
+
+type DiscoveredCamera = { ip: string; scheme?: string; service_urls?: string[] }
+
+// "http · port 80" style subtitle for a discovered device. The server sends
+// {ip, scheme, service_urls}; the port lives inside the service URL.
+function deviceSubtitle(cam: DiscoveredCamera): string {
+  const scheme = cam.scheme || 'http'
+  let port = ''
+  try {
+    const u = new URL(cam.service_urls?.[0] || '')
+    port = u.port || (u.protocol === 'https:' ? '443' : '80')
+  } catch {
+    port = scheme === 'https' ? '443' : '80'
+  }
+  return `${scheme} · port ${port}`
+}
 
 export function AddCameraDialog({
   onClose,
@@ -42,17 +60,19 @@ export function AddCameraDialog({
 
   // ONVIF discovery state
   const [discovering, setDiscovering] = useState(false)
-  const [discoveredCameras, setDiscoveredCameras] = useState<Array<{ip: string, name?: string, manufacturer?: string}>>([])
+  const [discoveredCameras, setDiscoveredCameras] = useState<DiscoveredCamera[]>([])
   const [selectedCamera, setSelectedCamera] = useState<{ip: string, name?: string} | null>(null)
 
-  // Scan range info & override ("scan once" vs "save as Camera LAN")
+  // Scan range: one always-visible panel. `configuredCidr` tracks the saved
+  // Camera LAN range so the "Save as Camera LAN & scan" button only appears
+  // when the input actually moves the boundary.
   const [scanInfo, setScanInfo] = useState<{cidrs: string[], source: string} | null>(null)
   const [suggestedCidrs, setSuggestedCidrs] = useState<string[]>([])
   // No range configured or detectable (e.g. bridge container without a host
   // IP hint) — prompt for one instead of scanning nothing.
   const [noAutoRange, setNoAutoRange] = useState(false)
-  const [showRangePanel, setShowRangePanel] = useState(false)
   const [rangeInput, setRangeInput] = useState('')
+  const [configuredCidr, setConfiguredCidr] = useState<string | null>(null)
   const [savingRange, setSavingRange] = useState(false)
 
   // Authentication step
@@ -126,14 +146,15 @@ export function AddCameraDialog({
   // Discover cameras on network via ONVIF. `overrideCidr` scans that range
   // once without touching the saved Camera LAN. Starting a new scan while one
   // is in flight supersedes it: the sequence token makes the old request's
-  // completion a no-op, so "Change → Scan once" works mid-scan instead of the
-  // operator having to wait out a sweep of the wrong range.
+  // completion a no-op, and aborting the HTTP request makes the SERVER stop
+  // its sweep too (it single-flights scans and cancels on disconnect), so an
+  // operator can re-aim a scan mid-sweep without wedging the next one.
   const scanSeqRef = useRef(0)
   const scanAbortRef = useRef<AbortController | null>(null)
   const [scanStopped, setScanStopped] = useState(false)
 
   // Stop the running scan: invalidate its sequence token and abort the HTTP
-  // request so the connection drops (letting the server cancel its sweep).
+  // request so the connection drops (the server cancels its sweep).
   const cancelScan = () => {
     if (!discovering) return
     scanSeqRef.current++
@@ -164,17 +185,31 @@ export function AddCameraDialog({
       const data = response?.data || {}
       const devices = data.devices || []
       setScanInfo({ cidrs: data.scan_cidrs || [], source: data.source || 'configured' })
+      if (data.source === 'configured' && data.scan_cidrs?.[0]) {
+        setConfiguredCidr(data.scan_cidrs[0])
+      }
       setSuggestedCidrs(data.suggested_cidrs || [])
       setDiscoveredCameras(devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
-        name: d.name || d.model || `Camera`,
-        manufacturer: d.manufacturer || d.mfr || ''
+        scheme: d.scheme || 'http',
+        service_urls: d.service_urls || [],
       })))
     } catch (e: any) {
       if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
       setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
     } finally {
       if (seq === scanSeqRef.current) setDiscovering(false)
+    }
+  }
+
+  // One Scan button: an input matching the saved Camera LAN scans normally;
+  // anything else is a one-off override scan of that range.
+  const handleScanClick = () => {
+    const cidrVal = rangeInput.trim()
+    if (cidrVal && cidrVal !== configuredCidr) {
+      handleDiscover(cidrVal)
+    } else {
+      handleDiscover()
     }
   }
 
@@ -192,7 +227,7 @@ export function AddCameraDialog({
         interface_name: settings.interface_name || 'eth0',
         subnet_cidr: cidrVal,
       })
-      setShowRangePanel(false)
+      setConfiguredCidr(cidrVal)
       setScanInfo({ cidrs: [cidrVal], source: 'configured' })
       await handleDiscover()
     } catch (e: any) {
@@ -215,10 +250,10 @@ export function AddCameraDialog({
         const cidrs: string[] = res?.data?.scan_cidrs || []
         if (cidrs.length === 0) {
           setNoAutoRange(true)
-          setShowRangePanel(true)
           return
         }
         setScanInfo({ cidrs, source: res?.data?.source || 'configured' })
+        if (res?.data?.source === 'configured' && cidrs[0]) setConfiguredCidr(cidrs[0])
       } catch {
         // Plan endpoint unavailable — fall through and just scan.
       }
@@ -226,6 +261,12 @@ export function AddCameraDialog({
     })()
     return () => { cancelled = true; scanAbortRef.current?.abort() }
   }, [])
+
+  // Keep the range input prefilled with the active range, but never clobber
+  // what the operator typed.
+  useEffect(() => {
+    if (scanInfo?.cidrs[0] && !rangeInput) setRangeInput(scanInfo.cidrs[0])
+  }, [scanInfo])
 
   // Select a discovered camera and show auth step
   const handleSelectDiscovered = (camera: {ip: string, name?: string}) => {
@@ -378,531 +419,517 @@ export function AddCameraDialog({
     c.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
-  return (
-    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-      <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-lg shadow-xl max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-neutral-700">
-          <h3 className="font-semibold flex items-center gap-2">
-            <Video size={18} />
-            {title}
-          </h3>
-          <button
-            className="p-1 hover:bg-[var(--panel-2)] rounded"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
+  const saveMovesBoundary =
+    rangeInput.trim() !== '' && rangeInput.trim() !== configuredCidr
 
-        {/* Tab Switcher */}
-        <div className="flex border-b border-neutral-700">
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'discover' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); setError(null); }}
-          >
-            <Search size={12} className="inline mr-1" />
-            Discover
-          </button>
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'manual' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('manual'); setError(null); }}
-          >
-            <Plus size={12} className="inline mr-1" />
-            Manual
-          </button>
-          {existingCameras.length > 0 && (
+  const scanStatus = discovering
+    ? 'Scanning network...'
+    : scanStopped
+    ? 'Scan stopped'
+    : noAutoRange
+    ? 'No network range to scan'
+    : scanInfo
+    ? `Found ${discoveredCameras.length} camera(s)`
+    : ''
+
+  const footer = (
+    <div className="space-y-2">
+      {/* Duplicate-camera confirm (409 from create) */}
+      {duplicatePrompt && (
+        <div className="p-3 border border-amber-600 bg-amber-950/40 text-sm">
+          <div className="mb-2">
+            A camera with this IP address or stream URL is already added
+            {duplicatePrompt.names.length > 0 && (
+              <>: <span className="font-medium">{duplicatePrompt.names.join(', ')}</span></>
+            )}
+            . Add it again anyway?
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setDuplicatePrompt(null)} disabled={loading}>
+              Cancel
+            </Button>
             <button
-              className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-              onClick={() => { setMode('select'); setError(null); }}
+              className="px-3 py-1 text-sm bg-amber-600 text-white disabled:opacity-50"
+              onClick={() => createAndFinish(duplicatePrompt.payload, true)}
+              disabled={loading}
             >
-              <Camera size={12} className="inline mr-1" />
-              Existing
+              {loading ? 'Adding...' : 'Add Anyway'}
             </button>
-          )}
+          </div>
         </div>
+      )}
+      <div className="flex items-center justify-end gap-2">
+        <Button onClick={onClose}>Cancel</Button>
+        {mode === 'discover' && authStep && rtspUrl && (
+          <Button
+            variant="primary"
+            onClick={handleAddDiscoveredCamera}
+            disabled={loading || !cameraName.trim()}
+          >
+            {loading ? 'Adding...' : 'Add Camera'}
+          </Button>
+        )}
+        {mode === 'manual' && (
+          <Button
+            variant="primary"
+            onClick={handleAddManualCamera}
+            disabled={loading || !form.name.trim() || !form.ip_address.trim()}
+          >
+            {loading ? 'Adding...' : 'Add Camera'}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
 
-        {/* Content */}
-        <div className="p-4 overflow-auto flex-1 thin-scroll">
-          {error && (
-            <div className="mb-4 p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">
-              {error}
-            </div>
-          )}
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={<><Video size={16} /> {title}</>}
+      widthClassName="w-full max-w-3xl mx-4"
+      bodyClassName="p-0 flex flex-col"
+      footer={footer}
+    >
+      {/* Tab Switcher */}
+      <div className="flex border-b border-neutral-700">
+        <button
+          className={`flex-1 px-3 py-2 text-xs ${mode === 'discover' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
+          onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); setError(null); }}
+        >
+          <Search size={12} className="inline mr-1" />
+          Discover
+        </button>
+        <button
+          className={`flex-1 px-3 py-2 text-xs ${mode === 'manual' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
+          onClick={() => { setMode('manual'); setError(null); }}
+        >
+          <Plus size={12} className="inline mr-1" />
+          Manual
+        </button>
+        {existingCameras.length > 0 && (
+          <button
+            className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
+            onClick={() => { setMode('select'); setError(null); }}
+          >
+            <Camera size={12} className="inline mr-1" />
+            Existing
+          </button>
+        )}
+      </div>
 
-          {/* DISCOVER MODE */}
-          {mode === 'discover' && !authStep && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-[var(--text-dim)]">
-                  {discovering ? 'Scanning network...'
-                    : scanStopped ? 'Scan stopped'
-                    : noAutoRange ? 'No network range to scan'
-                    : `Found ${discoveredCameras.length} camera(s)`}
-                </span>
-                {/* While a scan runs this is a Stop button — the operator
-                    must never be locked out of their own scan. */}
-                {discovering ? (
-                  <button
-                    className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-red-500 hover:text-red-400 flex items-center gap-1"
-                    onClick={cancelScan}
-                  >
-                    <X size={12} />
-                    Stop
-                  </button>
-                ) : (
-                  <button
-                    className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
-                    onClick={() => handleDiscover()}
-                  >
-                    <Search size={12} />
-                    Rescan
-                  </button>
-                )}
-              </div>
+      {/* Content */}
+      <div className="p-4 flex-1 min-h-0">
+        {error && (
+          <div className="mb-4 p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">
+            {error}
+          </div>
+        )}
 
-              {scanInfo && scanInfo.cidrs.length > 0 && (
-                <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
-                  <span>
-                    {discovering ? 'Scanning' : scanStopped ? 'Range' : 'Scanned'} {scanInfo.cidrs.join(', ')}
-                    {' · '}
-                    {scanInfo.source === 'override' ? 'one-off range'
-                      : scanInfo.source === 'auto-detected' ? 'auto-detected'
-                      : 'from Camera LAN settings'}
-                  </span>
-                  <button
-                    className="underline hover:text-[var(--accent)]"
-                    onClick={() => {
-                      // Changing the range implies the current sweep is the
-                      // wrong one — stop it rather than scanning on in the
-                      // background.
-                      cancelScan()
-                      setShowRangePanel(v => !v)
-                      if (!showRangePanel) setRangeInput(scanInfo.cidrs[0] || '')
-                    }}
-                  >
-                    Change
-                  </button>
+        {/* DISCOVER MODE — scan panel | results, side by side. The results
+            column is the single scroller here (the panel fits statically). */}
+        {mode === 'discover' && !authStep && (
+          <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4 md:h-[420px]">
+            {/* Scan panel */}
+            <div className="space-y-3 md:border-r md:border-neutral-800 md:pr-4">
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)] uppercase tracking-wide">Scan range</span>
+                <input
+                  className="w-full px-2 py-1.5 text-sm bg-[var(--bg-2)] border border-neutral-600 focus:border-[var(--accent)] outline-none"
+                  placeholder="e.g. 192.168.1.0/24"
+                  value={rangeInput}
+                  onChange={(e) => setRangeInput(e.target.value)}
+                  disabled={savingRange}
+                  autoFocus={noAutoRange}
+                />
+              </label>
+              {scanInfo && (
+                <div className="text-xs text-[var(--text-dim)]">
+                  {scanInfo.source === 'override' ? 'One-off range'
+                    : scanInfo.source === 'auto-detected' ? 'Auto-detected'
+                    : 'From Camera LAN settings'}
+                </div>
+              )}
+              {noAutoRange && (
+                <div className="text-xs text-[var(--text-dim)]">
+                  Couldn't auto-detect your camera network. Enter the subnet your
+                  cameras are on.
                 </div>
               )}
 
-              {showRangePanel && (
-                <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 space-y-2">
-                  <input
-                    className="w-full px-2 py-1.5 text-sm bg-[var(--panel)] border border-neutral-600 focus:border-[var(--accent)] outline-none"
-                    placeholder="e.g. 192.168.1.0/24"
-                    value={rangeInput}
-                    onChange={(e) => setRangeInput(e.target.value)}
-                    disabled={savingRange}
-                  />
-                  {/* Deliberately usable while a scan is running — a new scan
-                      supersedes the in-flight one (see handleDiscover). */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)] disabled:opacity-50"
-                      onClick={() => handleDiscover(rangeInput.trim())}
-                      disabled={savingRange || !rangeInput.trim()}
-                    >
-                      Scan once
-                    </button>
-                    <button
-                      className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1 disabled:opacity-50"
-                      onClick={handleSaveRangeAndScan}
-                      disabled={savingRange || !rangeInput.trim()}
-                    >
-                      {savingRange && <Loader2 size={12} className="animate-spin" />}
-                      Save as Camera LAN & scan
-                    </button>
-                  </div>
-                  <div className="text-xs text-[var(--text-dim)]">
-                    Saving updates the Camera LAN — it defines which network cameras can be
-                    reached on. "Scan once" only looks there; cameras found outside the saved
-                    Camera LAN can't be added until it's updated.
+              {/* One Scan/Stop button — the operator must never be locked out
+                  of their own scan. A new Scan mid-sweep supersedes it, on the
+                  server too. */}
+              {discovering ? (
+                <Button
+                  className="w-full justify-center hover:border-red-500 hover:text-red-400"
+                  onClick={cancelScan}
+                >
+                  <X size={14} />
+                  Stop
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  className="w-full justify-center"
+                  onClick={handleScanClick}
+                  disabled={savingRange}
+                >
+                  <Search size={14} />
+                  Scan
+                </Button>
+              )}
+              {saveMovesBoundary && (
+                <div className="space-y-1">
+                  <Button
+                    className="w-full justify-center"
+                    onClick={handleSaveRangeAndScan}
+                    disabled={savingRange || !rangeInput.trim()}
+                    title="Saving updates the Camera LAN — it defines which network cameras can be reached on. A one-off Scan only looks there; cameras found outside the saved Camera LAN can't be added until it's updated."
+                  >
+                    {savingRange && <Loader2 size={12} className="animate-spin" />}
+                    Save as Camera LAN & scan
+                  </Button>
+                  <div className="text-[10px] text-[var(--text-dim)]">
+                    Saving updates which network cameras can be added on.
                   </div>
                 </div>
               )}
 
-              {/* No nested scroll region — the dialog body is the single
-                  scroll container, so only one (thin) scrollbar ever shows. */}
-              <div className="space-y-2">
-                {/* Suppressed while the range panel is open: the header
-                    already shows the scan state, and the extra full-height
-                    block just pushed the dialog past its max height (the
-                    spinner text got clipped at the bottom edge). */}
-                {discovering && discoveredCameras.length === 0 && !showRangePanel && (
-                  <div className="text-center py-6">
-                    <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
-                    <div className="text-sm text-[var(--text-dim)]">Discovering ONVIF cameras...</div>
-                  </div>
-                )}
+              {suggestedCidrs.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs text-[var(--text-dim)]">This host also appears to be on:</div>
+                  {suggestedCidrs.map((s) => (
+                    <button
+                      key={s}
+                      className="block w-full text-left px-2 py-1 text-xs bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)]"
+                      onClick={() => { setRangeInput(s); handleDiscover(s) }}
+                    >
+                      Scan {s}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-                {!discovering && discoveredCameras.length === 0 && (
-                  <div className="text-center py-8 text-sm text-[var(--text-dim)] space-y-2">
-                    <div>
-                      {scanStopped
-                        ? 'Scan stopped. Adjust the range above, or Rescan.'
-                        : noAutoRange
-                        ? 'Couldn\'t auto-detect your camera network. Enter the subnet your cameras are on (e.g. 192.168.1.0/24) above.'
-                        : `No cameras found${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}.`}
-                    </div>
-                    {suggestedCidrs.length > 0 && (
-                      <div className="space-y-1">
-                        <div>This host also appears to be on:</div>
-                        {suggestedCidrs.map((s) => (
-                          <button
-                            key={s}
-                            className="block mx-auto px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-[var(--accent)]"
-                            onClick={() => { setRangeInput(s); handleDiscover(s) }}
-                          >
-                            Scan {s}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <div>Or check the range above, or use Manual entry.</div>
-                  </div>
-                )}
+              {scanStatus && (
+                <div className="text-xs text-[var(--text-dim)] flex items-center gap-1.5">
+                  {discovering && <Loader2 size={12} className="animate-spin" />}
+                  {scanStatus}
+                </div>
+              )}
+            </div>
 
-                {discoveredCameras.map((camera, i) => (
-                  <button
-                    key={i}
-                    className="w-full text-left px-3 py-3 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
-                    onClick={() => handleSelectDiscovered(camera)}
-                  >
-                    <div className="w-10 h-10 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center rounded">
-                      <Camera size={20} className="text-[var(--accent)]" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-sm font-medium">{camera.name || 'ONVIF Camera'}</div>
-                      <div className="text-xs text-[var(--text-dim)]">{camera.ip}</div>
-                      {camera.manufacturer && (
-                        <div className="text-xs text-[var(--text-dim)]">{camera.manufacturer}</div>
-                      )}
-                    </div>
-                    <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90" />
-                  </button>
-                ))}
+            {/* Results column */}
+            <div className="min-h-0 md:overflow-auto thin-scroll space-y-2">
+              {discovering && discoveredCameras.length === 0 && (
+                <div className="text-center py-10">
+                  <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
+                  <div className="text-sm text-[var(--text-dim)]">Discovering ONVIF cameras...</div>
+                  {scanInfo && scanInfo.cidrs.length > 0 && (
+                    <div className="text-xs text-[var(--text-dim)] mt-1">Scanning {scanInfo.cidrs.join(', ')}</div>
+                  )}
+                </div>
+              )}
+
+              {!discovering && discoveredCameras.length === 0 && (
+                <EmptyState
+                  icon={<SearchX size={28} />}
+                  title={
+                    scanStopped
+                      ? 'Scan stopped'
+                      : noAutoRange
+                      ? 'No network range to scan'
+                      : `No cameras found${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}`
+                  }
+                  description={
+                    scanStopped
+                      ? 'Adjust the range on the left, or Scan again.'
+                      : 'Check the scan range, try a suggested one, or use Manual entry.'
+                  }
+                />
+              )}
+
+              {discoveredCameras.map((camera, i) => (
+                <button
+                  key={i}
+                  className="w-full text-left px-3 py-3 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
+                  onClick={() => handleSelectDiscovered(camera)}
+                >
+                  <div className="w-10 h-10 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center">
+                    <Camera size={20} className="text-[var(--accent)]" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-sm font-medium">{camera.ip}</div>
+                    <div className="text-xs text-[var(--text-dim)]">{deviceSubtitle(camera)}</div>
+                  </div>
+                  <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* DISCOVER MODE - AUTH STEP */}
+        {mode === 'discover' && authStep && selectedCamera && (
+          <div className="space-y-4">
+            <button
+              className="text-xs text-[var(--accent)] flex items-center gap-1 hover:underline"
+              onClick={() => { setAuthStep(false); setSelectedCamera(null); setProfiles([]); setRtspUrl(''); setCameraName(''); }}
+            >
+              ← Back to camera list
+            </button>
+
+            <div className="p-3 bg-[var(--bg-2)] border border-neutral-700">
+              <div className="flex items-center gap-3">
+                <Camera size={24} className="text-[var(--accent)]" />
+                <div>
+                  <div className="font-medium">{selectedCamera.name || 'ONVIF Camera'}</div>
+                  <div className="text-xs text-[var(--text-dim)]">{selectedCamera.ip}</div>
+                </div>
               </div>
             </div>
-          )}
 
-          {/* DISCOVER MODE - AUTH STEP */}
-          {mode === 'discover' && authStep && selectedCamera && (
-            <div className="space-y-4">
-              <button
-                className="text-xs text-[var(--accent)] flex items-center gap-1 hover:underline"
-                onClick={() => { setAuthStep(false); setSelectedCamera(null); setProfiles([]); setRtspUrl(''); setCameraName(''); }}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
+              <input
+                type="text"
+                className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                placeholder="e.g., Front Door, Lobby"
+                value={cameraName}
+                onChange={(e) => setCameraName(e.target.value)}
+              />
+            </label>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Username</span>
+                <input
+                  type="text"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  value={credentials.username}
+                  onChange={(e) => setCredentials(c => ({ ...c, username: e.target.value }))}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Password</span>
+                <input
+                  type="password"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  value={credentials.password}
+                  onChange={(e) => setCredentials(c => ({ ...c, password: e.target.value }))}
+                />
+              </label>
+            </div>
+
+            {!rtspUrl && (
+              <Button
+                variant="primary"
+                className="w-full justify-center"
+                onClick={handleAuthenticate}
+                disabled={authenticating || !credentials.password}
               >
-                ← Back to camera list
-              </button>
+                {authenticating ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle size={14} />
+                    Connect & Get Stream
+                  </>
+                )}
+              </Button>
+            )}
 
-              <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 rounded">
-                <div className="flex items-center gap-3">
-                  <Camera size={24} className="text-[var(--accent)]" />
-                  <div>
-                    <div className="font-medium">{selectedCamera.name || 'ONVIF Camera'}</div>
-                    <div className="text-xs text-[var(--text-dim)]">{selectedCamera.ip}</div>
-                  </div>
+            {profiles.length > 0 && (
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Stream Profile</span>
+                <select
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  value={selectedProfile}
+                  onChange={(e) => handleProfileChange(e.target.value)}
+                >
+                  {profiles.map(p => (
+                    <option key={p.token} value={p.token}>
+                      {p.name || p.token}
+                      {p.width && p.height ? ` (${p.width}x${p.height})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {deviceInfo && (
+              <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 text-xs space-y-1">
+                <div className="font-medium text-sm mb-2">Device Information</div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[var(--text-dim)]">
+                  <span>Manufacturer:</span>
+                  <span className="text-[var(--text)]">{deviceInfo.manufacturer || 'Unknown'}</span>
+                  <span>Model:</span>
+                  <span className="text-[var(--text)]">{deviceInfo.model || 'Unknown'}</span>
+                  {deviceInfo.serialnumber && (
+                    <>
+                      <span>Serial Number:</span>
+                      <span className="text-[var(--text)] font-mono">{deviceInfo.serialnumber}</span>
+                    </>
+                  )}
+                  {deviceInfo.firmwareversion && (
+                    <>
+                      <span>Firmware:</span>
+                      <span className="text-[var(--text)]">{deviceInfo.firmwareversion}</span>
+                    </>
+                  )}
+                  {deviceInfo.hardwareid && (
+                    <>
+                      <span>Hardware ID:</span>
+                      <span className="text-[var(--text)] font-mono">{deviceInfo.hardwareid}</span>
+                    </>
+                  )}
                 </div>
               </div>
+            )}
 
+            {rtspUrl && (
+              <div className="p-3 bg-green-900/20 border border-green-700">
+                <div className="flex items-center gap-2 text-green-400 text-sm mb-1">
+                  <CheckCircle size={14} />
+                  Stream URL Retrieved
+                </div>
+                <div className="text-xs font-mono text-[var(--text-dim)] break-all">{rtspUrl}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* MANUAL MODE */}
+        {mode === 'manual' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
                 <input
                   type="text"
                   className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  placeholder="e.g., Front Door, Lobby"
-                  value={cameraName}
-                  onChange={(e) => setCameraName(e.target.value)}
+                  placeholder="e.g., Front Door"
+                  value={form.name}
+                  onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
                 />
               </label>
-
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Username</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={credentials.username}
-                    onChange={(e) => setCredentials(c => ({ ...c, username: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Password</span>
-                  <input
-                    type="password"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={credentials.password}
-                    onChange={(e) => setCredentials(c => ({ ...c, password: e.target.value }))}
-                  />
-                </label>
-              </div>
-
-              {!rtspUrl && (
-                <button
-                  className="w-full px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-2"
-                  onClick={handleAuthenticate}
-                  disabled={authenticating || !credentials.password}
-                >
-                  {authenticating ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" />
-                      Connecting...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle size={14} />
-                      Connect & Get Stream
-                    </>
-                  )}
-                </button>
-              )}
-
-              {profiles.length > 0 && (
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Stream Profile</span>
-                  <select
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={selectedProfile}
-                    onChange={(e) => handleProfileChange(e.target.value)}
-                  >
-                    {profiles.map(p => (
-                      <option key={p.token} value={p.token}>
-                        {p.name || p.token}
-                        {p.width && p.height ? ` (${p.width}x${p.height})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
-              {deviceInfo && (
-                <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 rounded text-xs space-y-1">
-                  <div className="font-medium text-sm mb-2">Device Information</div>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[var(--text-dim)]">
-                    <span>Manufacturer:</span>
-                    <span className="text-[var(--text)]">{deviceInfo.manufacturer || 'Unknown'}</span>
-                    <span>Model:</span>
-                    <span className="text-[var(--text)]">{deviceInfo.model || 'Unknown'}</span>
-                    {deviceInfo.serialnumber && (
-                      <>
-                        <span>Serial Number:</span>
-                        <span className="text-[var(--text)] font-mono">{deviceInfo.serialnumber}</span>
-                      </>
-                    )}
-                    {deviceInfo.firmwareversion && (
-                      <>
-                        <span>Firmware:</span>
-                        <span className="text-[var(--text)]">{deviceInfo.firmwareversion}</span>
-                      </>
-                    )}
-                    {deviceInfo.hardwareid && (
-                      <>
-                        <span>Hardware ID:</span>
-                        <span className="text-[var(--text)] font-mono">{deviceInfo.hardwareid}</span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {rtspUrl && (
-                <div className="p-3 bg-green-900/20 border border-green-700 rounded">
-                  <div className="flex items-center gap-2 text-green-400 text-sm mb-1">
-                    <CheckCircle size={14} />
-                    Stream URL Retrieved
-                  </div>
-                  <div className="text-xs font-mono text-[var(--text-dim)] break-all">{rtspUrl}</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* MANUAL MODE */}
-          {mode === 'manual' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="e.g., Front Door"
-                    value={form.name}
-                    onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">IP Address *</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="192.168.1.100"
-                    value={form.ip_address}
-                    onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
-                  />
-                </label>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Port</span>
-                  <input
-                    type="number"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={form.port}
-                    onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Username</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="admin"
-                    value={form.username}
-                    onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Password</span>
-                  <input
-                    type="password"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={form.password}
-                    onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
-                  />
-                </label>
-              </div>
-
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    className="flex-1 bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                    placeholder="rtsp://192.168.1.100:554/stream1"
-                    value={form.rtsp_url}
-                    onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] text-xs whitespace-nowrap"
-                    onClick={() => setScanQr(true)}
-                    title="Scan the QR from the OpenNVR Cam app"
-                  >
-                    Scan QR
-                  </button>
-                </div>
-                <span className="text-[10px] text-[var(--text-dim)]">
-                  Optional. No need to put credentials in the URL — the
-                  Username/Password above are added automatically. Leave blank to
-                  build the URL from the IP + credentials.
-                </span>
-              </label>
-            </div>
-          )}
-
-          {/* SELECT EXISTING MODE */}
-          {mode === 'select' && (
-            <div className="space-y-3">
-              <div className="relative">
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
+                <span className="text-xs text-[var(--text-dim)]">IP Address *</span>
                 <input
                   type="text"
-                  className="w-full bg-[var(--bg-2)] border border-neutral-700 pl-10 pr-3 py-2 text-sm"
-                  placeholder="Search cameras..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  placeholder="192.168.1.100"
+                  value={form.ip_address}
+                  onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
                 />
-              </div>
+              </label>
+            </div>
 
-              <div className="max-h-60 overflow-auto space-y-1 thin-scroll">
-                {filteredCameras.length === 0 ? (
-                  <div className="text-center text-sm text-[var(--text-dim)] py-8">
-                    {existingCameras.length === 0
-                      ? 'No cameras available. Add a new camera first.'
-                      : 'No cameras match your search.'}
-                  </div>
-                ) : (
-                  filteredCameras.map(camera => (
-                    <button
-                      key={camera.id}
-                      className="w-full text-left px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
-                      onClick={() => handleSelectExisting(camera.id)}
-                    >
-                      <div className="w-8 h-8 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center">
-                        <Camera size={16} className="text-[var(--text-dim)]" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium">{camera.name}</div>
-                        <div className="text-xs text-[var(--text-dim)]">Camera ID: {camera.id}</div>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
+            <div className="grid grid-cols-3 gap-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Port</span>
+                <input
+                  type="number"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  value={form.port}
+                  onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Username</span>
+                <input
+                  type="text"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  placeholder="admin"
+                  value={form.username}
+                  onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[var(--text-dim)]">Password</span>
+                <input
+                  type="password"
+                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  value={form.password}
+                  onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
+                />
+              </label>
             </div>
-          )}
-        </div>
 
-        {/* Duplicate-camera confirm (409 from create) */}
-        {duplicatePrompt && (
-          <div className="mx-4 mb-2 p-3 border border-amber-600 bg-amber-950/40 text-sm">
-            <div className="mb-2">
-              A camera with this IP address or stream URL is already added
-              {duplicatePrompt.names.length > 0 && (
-                <>: <span className="font-medium">{duplicatePrompt.names.join(', ')}</span></>
-              )}
-              . Add it again anyway?
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                className="px-3 py-1 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]"
-                onClick={() => setDuplicatePrompt(null)}
-                disabled={loading}
-              >
-                Cancel
-              </button>
-              <button
-                className="px-3 py-1 text-sm bg-amber-600 text-white disabled:opacity-50"
-                onClick={() => createAndFinish(duplicatePrompt.payload, true)}
-                disabled={loading}
-              >
-                {loading ? 'Adding...' : 'Add Anyway'}
-              </button>
-            </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  className="flex-1 bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
+                  placeholder="rtsp://192.168.1.100:554/stream1"
+                  value={form.rtsp_url}
+                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                />
+                <button
+                  type="button"
+                  className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] text-xs whitespace-nowrap"
+                  onClick={() => setScanQr(true)}
+                  title="Scan the QR from the OpenNVR Cam app"
+                >
+                  Scan QR
+                </button>
+              </div>
+              <span className="text-[10px] text-[var(--text-dim)]">
+                Optional. No need to put credentials in the URL — the
+                Username/Password above are added automatically. Leave blank to
+                build the URL from the IP + credentials.
+              </span>
+            </label>
           </div>
         )}
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-          <button
-            className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          {mode === 'discover' && authStep && rtspUrl && (
-            <button
-              className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
-              onClick={handleAddDiscoveredCamera}
-              disabled={loading || !cameraName.trim()}
-            >
-              {loading ? 'Adding...' : 'Add Camera'}
-            </button>
-          )}
-          {mode === 'manual' && (
-            <button
-              className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
-              onClick={handleAddManualCamera}
-              disabled={loading || !form.name.trim() || !form.ip_address.trim()}
-            >
-              {loading ? 'Adding...' : 'Add Camera'}
-            </button>
-          )}
-        </div>
+        {/* SELECT EXISTING MODE — the Modal body is the single scroller. */}
+        {mode === 'select' && (
+          <div className="space-y-3">
+            <div className="relative">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
+              <input
+                type="text"
+                className="w-full bg-[var(--bg-2)] border border-neutral-700 pl-10 pr-3 py-2 text-sm"
+                placeholder="Search cameras..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              {filteredCameras.length === 0 ? (
+                <div className="text-center text-sm text-[var(--text-dim)] py-8">
+                  {existingCameras.length === 0
+                    ? 'No cameras available. Add a new camera first.'
+                    : 'No cameras match your search.'}
+                </div>
+              ) : (
+                filteredCameras.map(camera => (
+                  <button
+                    key={camera.id}
+                    className="w-full text-left px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
+                    onClick={() => handleSelectExisting(camera.id)}
+                  >
+                    <div className="w-8 h-8 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center">
+                      <Camera size={16} className="text-[var(--text-dim)]" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">{camera.name}</div>
+                      <div className="text-xs text-[var(--text-dim)]">Camera ID: {camera.id}</div>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </div>
+
       {scanQr && (
         <QrScanner
           title="Scan the QR from the OpenNVR Cam app"
@@ -910,6 +937,6 @@ export function AddCameraDialog({
           onClose={() => setScanQr(false)}
         />
       )}
-    </div>
+    </Modal>
   )
 }
