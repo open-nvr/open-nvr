@@ -1128,9 +1128,26 @@ export function AddCameraDialog({
   // completion a no-op, so "Change → Scan once" works mid-scan instead of the
   // operator having to wait out a sweep of the wrong range.
   const scanSeqRef = useRef(0)
+  const scanAbortRef = useRef<AbortController | null>(null)
+  const [scanStopped, setScanStopped] = useState(false)
+
+  // Stop the running scan: invalidate its sequence token and abort the HTTP
+  // request so the connection drops (letting the server cancel its sweep).
+  const cancelScan = () => {
+    if (!discovering) return
+    scanSeqRef.current++
+    scanAbortRef.current?.abort()
+    setDiscovering(false)
+    setScanStopped(true)
+  }
+
   const handleDiscover = async (overrideCidr?: string) => {
     const seq = ++scanSeqRef.current
+    scanAbortRef.current?.abort()
+    const abort = new AbortController()
+    scanAbortRef.current = abort
     setDiscovering(true)
+    setScanStopped(false)
     setError(null)
     setDiscoveredCameras([])
     setNoAutoRange(false)
@@ -1138,7 +1155,10 @@ export function AddCameraDialog({
     if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
     try {
-      const response = await apiService.onvifDiscover(overrideCidr ? { cidr: overrideCidr } : undefined)
+      const response = await apiService.onvifDiscover(
+        overrideCidr ? { cidr: overrideCidr } : undefined,
+        abort.signal,
+      )
       if (seq !== scanSeqRef.current) return
       const data = response?.data || {}
       const devices = data.devices || []
@@ -1150,7 +1170,7 @@ export function AddCameraDialog({
         manufacturer: d.manufacturer || d.mfr || ''
       })))
     } catch (e: any) {
-      if (seq !== scanSeqRef.current) return
+      if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
       setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
     } finally {
       if (seq === scanSeqRef.current) setDiscovering(false)
@@ -1203,7 +1223,7 @@ export function AddCameraDialog({
       }
       if (!cancelled) handleDiscover()
     })()
-    return () => { cancelled = true }
+    return () => { cancelled = true; scanAbortRef.current?.abort() }
   }, [])
 
   // Select a discovered camera and show auth step
@@ -1415,23 +1435,35 @@ export function AddCameraDialog({
               <div className="flex items-center justify-between">
                 <span className="text-sm text-[var(--text-dim)]">
                   {discovering ? 'Scanning network...'
+                    : scanStopped ? 'Scan stopped'
                     : noAutoRange ? 'No network range to scan'
                     : `Found ${discoveredCameras.length} camera(s)`}
                 </span>
-                <button
-                  className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
-                  onClick={() => handleDiscover()}
-                  disabled={discovering}
-                >
-                  {discovering ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
-                  {discovering ? 'Scanning...' : 'Rescan'}
-                </button>
+                {/* While a scan runs this is a Stop button — the operator
+                    must never be locked out of their own scan. */}
+                {discovering ? (
+                  <button
+                    className="px-3 py-1 text-xs bg-[var(--panel)] border border-neutral-600 hover:border-red-500 hover:text-red-400 flex items-center gap-1"
+                    onClick={cancelScan}
+                  >
+                    <X size={12} />
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
+                    onClick={() => handleDiscover()}
+                  >
+                    <Search size={12} />
+                    Rescan
+                  </button>
+                )}
               </div>
 
               {scanInfo && scanInfo.cidrs.length > 0 && (
                 <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
                   <span>
-                    {discovering ? 'Scanning' : 'Scanned'} {scanInfo.cidrs.join(', ')}
+                    {discovering ? 'Scanning' : scanStopped ? 'Range' : 'Scanned'} {scanInfo.cidrs.join(', ')}
                     {' · '}
                     {scanInfo.source === 'override' ? 'one-off range'
                       : scanInfo.source === 'auto-detected' ? 'auto-detected'
@@ -1440,6 +1472,10 @@ export function AddCameraDialog({
                   <button
                     className="underline hover:text-[var(--accent)]"
                     onClick={() => {
+                      // Changing the range implies the current sweep is the
+                      // wrong one — stop it rather than scanning on in the
+                      // background.
+                      cancelScan()
                       setShowRangePanel(v => !v)
                       if (!showRangePanel) setRangeInput(scanInfo.cidrs[0] || '')
                     }}
@@ -1498,7 +1534,9 @@ export function AddCameraDialog({
                 {!discovering && discoveredCameras.length === 0 && (
                   <div className="text-center py-8 text-sm text-[var(--text-dim)] space-y-2">
                     <div>
-                      {noAutoRange
+                      {scanStopped
+                        ? 'Scan stopped. Adjust the range above, or Rescan.'
+                        : noAutoRange
                         ? 'Couldn\'t auto-detect your camera network. Enter the subnet your cameras are on (e.g. 192.168.1.0/24) above.'
                         : `No cameras found${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}.`}
                     </div>
