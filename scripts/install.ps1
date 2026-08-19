@@ -444,14 +444,54 @@ function Choose-Example {
             'moondream | blip - both run locally.'
 
         Write-Host ''
-        Explain 'Where should the LLM run? On macOS/Windows, Docker containers CANNOT use the GPU - the bundled LLM container answers on plain CPU and a single question can take minutes. If Ollama is installed on this machine (ollama.com), the agent can use it directly: GPU-fast, and skips a 3.2 GB image.' 'pick one' '1 (bundled container)'
-        $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' '1'
+        # Platform-aware default: on Windows/macOS the Docker VM has no GPU
+        # access, so host-side Ollama is the usable path; a host Ollama
+        # already answering on :11434 flips the default too. (install.ps1
+        # on Linux is rare — keep the bundled container default there.)
+        $hostOllama = $false
+        try {
+            $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            $hostOllama = $true
+        } catch {}
+        $llmDefault = if ($script:Platform -eq 'Linux' -and -not $hostOllama) { '1' } else { '2' }
+        Explain 'Where should the LLM run? In Docker on Windows/macOS the container CANNOT use the GPU - answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU and skips a 3.2 GB image. On a Linux server the bundled container is fine.' 'pick one' $llmDefault
+        if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
+        $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' $llmDefault
         if ($llmMode -eq '2') {
             Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
                 'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
                 'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
+            $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+            if (-not $hostOllama) {
+                if ($ollamaCmd) {
+                    Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
+                } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+                    if (Ask-YesNo 'Ollama is not installed. Install it now with winget?' $true) {
+                        winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
+                        if ($LASTEXITCODE -eq 0) { Ok 'Ollama installed - launch it once so it starts serving.' }
+                        else { Warn 'Install failed - get it from https://ollama.com/download' }
+                        $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+                    } else {
+                        Warn 'Install Ollama before first use: https://ollama.com/download'
+                    }
+                } else {
+                    Warn 'Install Ollama on this machine first: https://ollama.com/download'
+                }
+            }
             $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = 'qwen2.5:1.5b' }
-            Warn "Before first use, pull the model ON THE HOST:  ollama pull $extModel"
+            if ($ollamaCmd) {
+                $have = (& ollama list 2>$null | Select-Object -Skip 1 | ForEach-Object { ($_ -split '\s+')[0] }) -contains $extModel
+                if ($have) {
+                    Ok "Model $extModel is already available on this machine."
+                } elseif (Ask-YesNo "Pull the model now (ollama pull $extModel)?" $true) {
+                    & ollama pull $extModel
+                    if ($LASTEXITCODE -ne 0) { Warn "Pull failed - run 'ollama pull $extModel' manually before first use." }
+                } else {
+                    Warn "Before first use:  ollama pull $extModel"
+                }
+            } else {
+                Warn "Before first use, pull the model ON THE HOST:  ollama pull $extModel"
+            }
             Info 'The bundled ollama container will be skipped entirely.'
         } else {
             Set-EnvValue OLLAMA_EXTERNAL_URL ''

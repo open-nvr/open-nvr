@@ -415,16 +415,63 @@ choose_example() {
             "moondream | blip — both run locally."
 
         printf '\n'
-        explain "Where should the LLM run? On macOS/Windows, Docker containers CANNOT use the GPU — the bundled LLM container answers on plain CPU and a single question can take minutes. If Ollama is installed on this machine (brew install ollama / ollama.com), the agent can use it directly: GPU-fast, and skips a 3.2 GB image." \
-            "pick one" "1 (bundled container)"
-        ask_value "LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL" "1"
+        # ── LLM runtime: bundled container vs the host machine ─────
+        # Platform-aware default. On macOS the Docker VM has no GPU
+        # access (no Metal for Linux guests), so the bundled container
+        # answers on plain CPU — minutes per turn — while host Ollama
+        # uses the Apple Silicon GPU. On Linux the container is native
+        # and compose-managed: keep it the default there. A host
+        # Ollama already answering on :11434 flips the default too.
+        local llm_default="1" host_ollama=""
+        if command -v curl >/dev/null 2>&1 \
+           && curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+            host_ollama="yes"
+        fi
+        if [[ "$PLATFORM" == "macOS" || -n "$host_ollama" ]]; then
+            llm_default="2"
+        fi
+        explain "Where should the LLM run? In Docker on macOS/Windows the container CANNOT use the GPU — answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU (Metal on Apple Silicon) and skips a 3.2 GB image. On a Linux server the bundled container is fine." \
+            "pick one" "$llm_default"
+        if [[ -n "$host_ollama" ]]; then
+            ok "Found Ollama already running on this machine (:11434)"
+        fi
+        ask_value "LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL" "$llm_default"
         if [[ "$REPLY" == "2" ]]; then
             configure_value OLLAMA_EXTERNAL_URL "External LLM endpoint" "http://host.docker.internal:11434" \
                 "Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker." "yes" \
                 "Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434"
+            # Offer to install / start / pull right here, so "external"
+            # never means "broken until you read the docs".
+            if [[ -z "$host_ollama" ]]; then
+                if command -v ollama >/dev/null 2>&1; then
+                    warn "Ollama is installed but not answering on :11434 — start it"
+                    warn "(macOS: open the Ollama app, or: brew services start ollama)."
+                elif [[ "$PLATFORM" == "macOS" ]] && command -v brew >/dev/null 2>&1; then
+                    if ask_yes_no "Ollama is not installed. Install it now with Homebrew?" y; then
+                        { brew install ollama && brew services start ollama \
+                            && ok "Ollama installed and started."; } \
+                            || warn "Install failed — get it from https://ollama.com/download"
+                    else
+                        warn "Install Ollama before first use: https://ollama.com/download"
+                    fi
+                else
+                    warn "Install Ollama on this machine first: https://ollama.com/download"
+                fi
+            fi
             local ext_model
             ext_model=$(env_get OLLAMA_MODEL); ext_model=${ext_model:-qwen2.5:1.5b}
-            warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
+            if command -v ollama >/dev/null 2>&1; then
+                if ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$ext_model"; then
+                    ok "Model ${ext_model} is already available on this machine."
+                elif ask_yes_no "Pull the model now (ollama pull ${ext_model})?" y; then
+                    ollama pull "$ext_model" \
+                        || warn "Pull failed — run 'ollama pull ${ext_model}' manually before first use."
+                else
+                    warn "Before first use:  ollama pull ${ext_model}"
+                fi
+            else
+                warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
+            fi
             info "The bundled ollama container will be skipped entirely."
         else
             env_set OLLAMA_EXTERNAL_URL ""
