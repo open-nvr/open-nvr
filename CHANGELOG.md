@@ -4,10 +4,46 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] — 2026-08-18
 
 ### Added
 
+- **Canonical event & evidence store.** Tier-0 finished visits are now
+  persisted server-side with their best-frame evidence photos — events
+  survive restarts and become queryable memory instead of ephemeral
+  stream chatter. Events history is owner-scoped like every other
+  camera route.
+- **The agent remembers — and can look back at footage.** The
+  camera-agent gains `search_history` over the events store (and
+  distinguishes "nothing came" from "I couldn't check"), plus
+  past-footage tools: `describe_event` describes a past event from its
+  kept photo, `describe_window` narrates a past time window straight
+  from the recordings, and `describe_camera` takes a fresh live look
+  for static scenes. Backed by a new `GET /recordings/frame` endpoint
+  that returns one JPEG at a past instant.
+- **License-plate enrichment.** Vehicle visits get a registration
+  number via LPR, with an OCR burst guard and an attributed audit
+  trail.
+- **System resource monitoring + alerts.** Host CPU, RAM, and disk are
+  monitored with alerting — a disk filling up is no longer silent
+  (#244).
+- **Camera delete vs deactivate.** Deleting a camera is now a separate
+  action from deactivating it, with a recycle bin, hard delete, and a
+  duplicate-camera alert (#243).
+- **Recording identity + recovery.** Recordings are stamped with
+  on-disk camera identity; after a DB wipe, unowned footage is
+  quarantined instead of silently re-mapped to the wrong cameras, and
+  a recovery UI walks through re-attaching it (#239).
+- **Timezone at install.** The installer offers timezone selection,
+  defaulting to the host's local zone (#232).
+- Tier-0 recall/memory benchmark harness — measures whether tier-0 +
+  event memory earn their keep.
+- Docs: RFC-0001 architecture; a one-picture pipeline mental model
+  (perception → policy → live vs memory).
+- CI: release-pin verification — every `ghcr.io/open-nvr` image pinned
+  by `.env.example`/compose must exist on GHCR before a PR merges or a
+  release tag lands, making issue #212's broken-install class
+  unmergeable.
 - **ARM64 (Apple Silicon / Raspberry Pi 5) install support.**
   `ghcr.io/open-nvr/core`, `detect-pipeline`, `camera-agent`, and
   `camera-agent-lite` now publish `linux/amd64` + `linux/arm64` manifest
@@ -24,6 +60,44 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the daemon's error. `OPENNVR_ALLOW_EMULATION=1` opts into running the
   amd64 images under emulation (exports
   ``DOCKER_DEFAULT_PLATFORM=linux/amd64`` for the whole stack).
+
+### Fixed
+
+- **Recording & playback overhaul.** The stall watchdog confirms a
+  stall against the filesystem before alarming; HLS sessions use the
+  stored codec column and probe only as fallback; the reconciler's
+  periodic pass scans only the window's date dirs; clip export probes
+  upstream status before committing a response; a timeline drag held
+  at the visible window edge auto-pans instead of dead-stopping
+  (#233); the dashboard shows real footage metrics with a per-camera
+  breakdown instead of counting camera-days (#234).
+- **Streaming auth survives recreating core.** The MediaMTX JWT
+  signing keypair is persisted in a named volume, so recreating the
+  core container no longer breaks all streaming auth (#228).
+- Live tile no longer permanently sticks after a stream hiccup once
+  the 60-minute token expires — the token refreshes on auth-rejected
+  WHEP/HLS requests (#241) — and recovers after a MediaMTX restart
+  instead of staying on "Camera offline" (#231).
+- Camera discovery: the dialog shows the scan range and allows a
+  one-off override or persisting a new Camera LAN (#236); subnet scan
+  bursts no longer wedge Docker NAT, so rescans find cameras again
+  (#235); ONVIF discovery scans the host LAN instead of the Docker
+  bridge (#257).
+- A camera no longer loses its MediaMTX path permanently when
+  duplicate provisioning races a config reload — delete + re-add is
+  atomic now, and unchanged config replacement is a no-op (#218).
+- nginx re-resolves upstream DNS at runtime, so recreated containers
+  don't 502 behind a cached IP.
+- Browser-facing stream URLs follow the current origin instead of
+  being pinned to one LAN IP, and the start scripts use route-aware
+  LAN IP detection — no more broken playback from a second NIC or a
+  VPN tunnel address.
+- Installer: the camera-agent selection no longer exits silently at
+  the mode prompt.
+- camera-agent-lite grounding: the small model no longer invents past
+  events it never saw.
+- MediaMTX runs as uid 1000 so the backend can actually delete
+  recordings (#243).
 
 ## [0.1.2] — 2026-08-12
 
@@ -1727,7 +1801,8 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/open-nvr/open-nvr/releases/tag/v0.1.0
