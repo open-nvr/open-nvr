@@ -210,6 +210,14 @@ Then open <http://localhost:9100/demo>. **No camera?** Click **"Use this machine
 First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters — give it a minute. A few knobs:
 
 - **Low-RAM box** — `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`
+- **Mac / Windows: run the LLM on the host** — Docker's VM has no GPU access on
+  these platforms, so the bundled LLM container answers on plain CPU (minutes
+  per turn on an M1). Set `OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434`
+  in `.env` (the installer offers this — and can install Ollama and pull the
+  model for you): the agent uses host Ollama on the real GPU (Metal on Apple
+  Silicon, seconds per turn) and the 3.2 GB ollama image is skipped entirely.
+  Pair with `CAPTION_ADAPTER=ollamavlm` to run scene descriptions on the same
+  host runtime.
 - **Cloud / bring-your-own brain** — point it at any OpenAI-compatible endpoint; see [`config.cloud.yml`](examples/camera-agent/config.cloud.yml)
 - **Drive Compose yourself** — `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent up -d` (or `--profile camera-agent-chat`)
 
@@ -225,7 +233,7 @@ Full details — model picks, hardware notes, how it works — in [`examples/cam
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
 | *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
 
-Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS) on CPU; `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
+Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The LLM runtime is a dial, not a dependency: the bundled Ollama container (Linux default), an Ollama on the machine hosting Docker (`OLLAMA_EXTERNAL_URL` — the macOS/Windows default, where the host's GPU does the work), or any OpenAI-compatible endpoint. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS); `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
 
 This is the first OpenNVR example where the cameras have agency, not just data.
 

@@ -90,7 +90,16 @@ subjects. It changes nothing about ingest, recording, or serving.
 service behind the `tier0` compose profile instead — the lite family is fully
 CPU-bound and co-running an uncapped detector starves it — so the lite
 quickstart does not start Tier-0; add `--profile tier0` to run both.
-**Why is my CPU high? → configure the substream.** Tier-0 decodes each
+**Why is my CPU high? → lower `DETECT_FPS`, then configure the substream.**
+Detection runs on every analyzed frame (the gate skips alarms, not
+inference), so pipeline CPU scales almost linearly with the per-camera
+analysis rate — `DETECT_FPS`, default 5. On CPU-only hosts (laptops; any
+macOS/Windows Docker install, where the VM has no GPU) set `DETECT_FPS=1`
+or `2`: a fraction of the CPU, at the cost of coarser motion/track
+granularity and a smaller candidate pool for best-frame selection. An
+explicit per-camera `fps` from the discovery endpoint still wins.
+
+**Second dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
 provides). If a camera has no substream configured, Tier-0 falls back to
 decoding the full main stream — that is the difference between ~0.3 and ~2
@@ -106,6 +115,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
+DETECT_FPS=5                      # frames analyzed /s /camera (1-30) — the main CPU dial
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)

@@ -101,6 +101,17 @@ cameras are recorded or served.
 - **The gate (next).** Reads Tier-0 events and runs the **expensive** frame-models
   (VLM caption, face, plate) **once, on the best frame** — governed and audited by
   KAI-C (including the *non-events*: "didn't run because score < threshold").
+- **LLM/VLM runtime placement.** The agent's reasoning LLM and (optionally)
+  its caption/VQA model are served by a runtime the operator chooses, not a
+  fixed container: the bundled Ollama container (Linux default), or an Ollama
+  on the machine hosting Docker (`OLLAMA_EXTERNAL_URL`; the macOS/Windows
+  default, because container VMs there have no GPU access while the host
+  does), or any OpenAI-compatible endpoint. Vision can follow the same
+  runtime via the `ollamavlm` contract adapter (`CAPTION_ADAPTER=ollamavlm`) —
+  the audited adapter seam stays in place either way; only where the weights
+  execute moves. Frames never ride the LLM hop: vision models see frames,
+  the text LLM sees tool results.
+
 - **Consumers (camera-agent + apps).** Subscribe to the same bus — **no new
   contract**; the bus + schema *is* the API. A large class of questions ("is anyone
   at the door?", "how many cars?") is answered straight from Tier-0 metadata with
