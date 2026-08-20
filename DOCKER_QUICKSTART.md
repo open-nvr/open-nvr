@@ -162,6 +162,20 @@ docker compose -f docker-compose.yml restart opennvr-core
 
 ## Customisation
 
+### Turn off object detection entirely
+
+Running OpenNVR for models that aren't about detection (captioning/VQA,
+LPR, face recognition, your own adapters) — or just as an NVR? Two lines:
+
+```bash
+# .env
+DETECT_PIPELINE_ENABLED=false
+```
+
+then `./start.sh up`. The Tier-0 detection loop idles (zero inference,
+zero decode), while recording, playback, live view, the camera-agent, and
+every other adapter keep working. Flip it back to `true` any time.
+
 ### Change recording storage location
 
 Recording volume is mapped via `RECORDINGS_PATH` in `.env`. Defaults to
