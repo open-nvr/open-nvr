@@ -949,10 +949,10 @@ export function AddCameraDialog({
                   <div className="flex items-center justify-between gap-2 pt-0.5">
                     <span className="text-xs text-[var(--text-dim)]">Already know the camera's IP?</span>
                     <Button
-                      variant="ghost"
                       className="text-xs px-2 py-1"
                       onClick={() => { setMode('manual'); cancelScan(); setError(null) }}
                     >
+                      <Plus size={12} />
                       Add manually
                     </Button>
                   </div>
@@ -1006,7 +1006,8 @@ export function AddCameraDialog({
                               )}
                             </Button>
                           ))}
-                          <Button variant="ghost" onClick={() => { setMode('manual'); setError(null) }}>
+                          <Button onClick={() => { setMode('manual'); setError(null) }}>
+                            <Plus size={14} />
                             Add manually
                           </Button>
                         </div>

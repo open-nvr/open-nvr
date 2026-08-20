@@ -274,13 +274,19 @@ export function LiveView() {
       // Update display order: add new cameras, remove deleted ones
       setCameraDisplayOrder(prevOrder => {
         const existingIds = new Set(cameraList.map((c: {id: number}) => c.id))
-        // Filter out deleted cameras
-        const filtered = prevOrder.filter(id => existingIds.has(id))
+        // Deleted cameras become empty slots (0), NOT dropped — dropping
+        // would shift every later camera left and lose the empty-tile
+        // positions that drag-drop and tile assignment create.
+        const filtered = prevOrder.map(id => (id === 0 || existingIds.has(id) ? id : 0))
         // Add new cameras that aren't in the order yet
         const newCameras = cameraList
           .filter((c: {id: number}) => !filtered.includes(c.id))
           .map((c: {id: number}) => c.id)
         const updated = [...filtered, ...newCameras]
+        // Trim trailing empties.
+        while (updated.length > 0 && !updated[updated.length - 1]) {
+          updated.pop()
+        }
         // Persist to localStorage
         try {
           localStorage.setItem('liveview-camera-display-order', JSON.stringify(updated))
@@ -290,24 +296,36 @@ export function LiveView() {
     }).catch(console.error)
   }
   
-  // Assign a camera to a specific tile position
+  // Assign a camera to a specific tile position. Same sparse convention as
+  // swapTilePositions: 0 marks an empty tile, so the camera lands on exactly
+  // the tile that was clicked (the old dense-pack version collapsed
+  // placeholders, which made "select existing camera" a visible no-op).
   const assignCameraToTile = (tileIndex: number, cameraId: number) => {
     setCameraDisplayOrder(prev => {
-      // Remove camera from current position if it exists
-      const filtered = prev.filter(id => id !== cameraId)
-      // Insert at the specified tile position
-      const updated = [...filtered]
-      // Ensure array is long enough
-      while (updated.length < tileIndex) {
-        updated.push(-1) // placeholder
+      const updated = [...prev]
+      while (updated.length <= tileIndex) {
+        updated.push(0) // empty-slot placeholder
       }
-      updated.splice(tileIndex, 0, cameraId)
-      // Clean up any -1 placeholders
-      const cleaned = updated.filter(id => id !== -1)
+      const from = updated.indexOf(cameraId)
+      const displaced = updated[tileIndex]
+      updated[tileIndex] = cameraId
+      if (from !== -1 && from !== tileIndex) {
+        // Move/swap: the clicked tile's previous camera (if any) takes the
+        // selected camera's old slot.
+        updated[from] = displaced || 0
+      } else if (from === -1 && displaced && displaced !== cameraId) {
+        // Camera wasn't placed yet but the tile was occupied — keep the
+        // displaced camera visible by appending it.
+        updated.push(displaced)
+      }
+      // Trim trailing empties so shorter layouts aren't padded forever.
+      while (updated.length > 0 && !updated[updated.length - 1]) {
+        updated.pop()
+      }
       try {
-        localStorage.setItem('liveview-camera-display-order', JSON.stringify(cleaned))
+        localStorage.setItem('liveview-camera-display-order', JSON.stringify(updated))
       } catch {}
-      return cleaned
+      return updated
     })
   }
   
@@ -484,9 +502,9 @@ export function LiveView() {
           }}
         >
           {layoutDef.tiles.map((tile, i) => {
-            // Sequential display: cameras fill tiles in order from cameraDisplayOrder
-            // Empty slots only appear after all cameras
-            const assignedCameraId = cameraDisplayOrder[i] ?? null
+            // cameraDisplayOrder maps tile index → camera id; 0 (or missing)
+            // marks an empty tile, so empty slots can sit anywhere.
+            const assignedCameraId = cameraDisplayOrder[i] || null
             
             return (
               <div
