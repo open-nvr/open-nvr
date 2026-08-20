@@ -427,27 +427,15 @@ function Choose-Example {
         Write-Host ''
         Explain 'Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter.' 'pick one' '1 (voice)'
         $mode = Ask-Value 'Camera Agent mode: 1=voice, 2=chat' '1'
+        # $prof, not $profile - $PROFILE is an automatic PowerShell variable.
         $prof = if ($mode -eq '2') { 'camera-agent-chat' } else { 'camera-agent' }
 
         Write-Host ''
-        Write-Host '  -- Camera Agent models (all local, no API keys) -------'
-        Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' 'qwen2.5:1.5b' `
-            'The local chat model that answers your questions; must support tool calling.' 'yes' `
-            'Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower).'
-        if ($prof -eq 'camera-agent') {
-            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
-                'Transcribes your spoken questions (voice mode only).' 'yes' `
-                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
-        }
-        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
-            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
-            'moondream | blip | ollamavlm - all local.'
-
-        Write-Host ''
-        # Platform-aware default: on Windows/macOS the Docker VM has no GPU
-        # access, so host-side Ollama is the usable path; a host Ollama
-        # already answering on :11434 flips the default too. (install.ps1
-        # on Linux is rare — keep the bundled container default there.)
+        # LLM runtime FIRST: where the LLM runs decides which hardware the
+        # model suggestion below is sized for (host GPU/RAM vs the Docker
+        # VM's CPU-only allowance). Windows/macOS default to the host
+        # (container VMs have no GPU access); Linux keeps the bundled
+        # container. A host Ollama already on :11434 flips the default.
         $hostOllama = $false
         try {
             $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
@@ -457,11 +445,13 @@ function Choose-Example {
         Explain 'Where should the LLM run? In Docker on Windows/macOS the container CANNOT use the GPU - answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU and skips a 3.2 GB image. On a Linux server the bundled container is fine.' 'pick one' $llmDefault
         if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
         $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' $llmDefault
+        $llmWhere = 'container'
+        $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
         if ($llmMode -eq '2') {
+            $llmWhere = 'host'
             Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
                 'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
                 'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
-            $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
             if (-not $hostOllama) {
                 if ($ollamaCmd) {
                     Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
@@ -478,7 +468,38 @@ function Choose-Example {
                     Warn 'Install Ollama on this machine first: https://ollama.com/download'
                 }
             }
-            $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = 'qwen2.5:1.5b' }
+            Info 'The bundled ollama container will be skipped entirely.'
+        } else {
+            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+        }
+
+        # Hardware-aware suggestion, sized for where the LLM will run.
+        # Tiers mirror examples/camera-agent/MODELS_AND_LATENCY.md (and
+        # suggest_llm_model in install.sh) - keep the three in sync.
+        $ramGb = 0; $cores = [int]($env:NUMBER_OF_PROCESSORS); $accel = 'cpu'
+        try { $ramGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+        if ($llmWhere -eq 'host') {
+            if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+                try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
+            }
+        }
+        $llmSuggest = if ($accel -ne 'cpu') {
+            if ($ramGb -ge 32) { 'qwen2.5:7b' } elseif ($ramGb -ge 16) { 'qwen2.5:3b' } else { 'qwen2.5:1.5b' }
+        } else {
+            if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen2.5:1.5b' } else { 'qwen2.5:0.5b' }
+        }
+        $vlmSuggest = if ($accel -ne 'cpu' -and $ramGb -ge 16) { 'qwen2.5vl:3b' } else { 'moondream' }
+        $hwDesc = "$(if ($accel -eq 'cuda') { 'NVIDIA GPU (CUDA), ' } else { 'CPU only, ' })$ramGb GB RAM, $cores cores"
+        Ok "Detected: $hwDesc -> suggesting $llmSuggest"
+
+        Write-Host ''
+        Write-Host '  -- Camera Agent models (all local, no API keys) -------'
+        Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' $llmSuggest `
+            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hwDesc)." 'yes' `
+            'qwen2.5:0.5b (low RAM) | 1.5b | 3b | 7b (GPU) - any Ollama model works.'
+        # Pull offer AFTER the model choice, so it pulls what was chosen.
+        if ($llmWhere -eq 'host') {
+            $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = $llmSuggest }
             if ($ollamaCmd) {
                 $have = (& ollama list 2>$null | Select-Object -Skip 1 | ForEach-Object { ($_ -split '\s+')[0] }) -contains $extModel
                 if ($have) {
@@ -492,9 +513,19 @@ function Choose-Example {
             } else {
                 Warn "Before first use, pull the model ON THE HOST:  ollama pull $extModel"
             }
-            Info 'The bundled ollama container will be skipped entirely.'
-        } else {
-            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+        }
+        if ($prof -eq 'camera-agent') {
+            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
+                'Transcribes your spoken questions (voice mode only).' 'yes' `
+                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
+        }
+        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
+            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
+            'moondream | blip | ollamavlm - all local.'
+        if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
+            Configure-Value OLLAMA_VLM_MODEL 'Vision model (Ollama)' $vlmSuggest `
+                'Multimodal Ollama model the ollamavlm adapter uses for scene questions. Default is sized for this machine; the adapter auto-pulls it.' 'yes' `
+                'moondream (efficient) | qwen2.5vl:3b (stronger, GPU) | llava - any Ollama multimodal model.'
         }
     } else {
         Prompt-OverlayDefaults $manifest
