@@ -166,3 +166,25 @@ On Apple Silicon this moves inference onto the Metal GPU: the same turn
 that took minutes lands in seconds. Any Ollama-compatible endpoint works,
 including one on another LAN machine. The installer offers this as the
 "LLM runtime" question when you select the camera-agent example.
+
+
+## What the installer suggests (hardware-aware defaults)
+
+The installer detects the machine that will RUN the LLM (host vs the
+Docker VM) and sizes the default model accordingly. Suggestions only —
+type any Ollama model at the prompt. Keep this table in sync with
+`suggest_llm_model` / `suggest_vlm_model` in `scripts/install.sh` and
+the equivalent logic in `scripts/install.ps1`.
+
+| Where the LLM runs | Hardware | LLM default | VLM default (ollamavlm) |
+|---|---|---|---|
+| Host, Apple Silicon / NVIDIA | ≥ 32 GB RAM | `qwen2.5:7b` | `qwen2.5vl:3b` |
+| Host, Apple Silicon / NVIDIA | 16–31 GB | `qwen2.5:3b` | `qwen2.5vl:3b` |
+| Host, GPU, < 16 GB | | `qwen2.5:1.5b` | `moondream` |
+| Any CPU-only | ≥ 16 GB + ≥ 8 cores | `qwen2.5:1.5b` | `moondream` |
+| Any CPU-only | smaller | `qwen2.5:0.5b` | `moondream` |
+| macOS, bundled container | sized to the Docker VM's RAM, always CPU tier | | |
+
+Tool-calling quality sets the floor: below ~1.5b the agent misroutes
+tools noticeably, so the tiny tier is only suggested where latency would
+otherwise make the agent unusable.
