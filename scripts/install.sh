@@ -395,13 +395,21 @@ detect_llm_hardware() {
 }
 
 # suggest_llm_model → echoes the suggested Ollama model for the detected
-# hardware. Tool-calling quality is the constraint that sets the floor:
-# below ~1.5b the agent misroutes tools noticeably, so small tiers are
-# only suggested where latency would otherwise make it unusable.
+# hardware. Two constraints shape the tiers, deliberately:
+#   * FLOOR — tool-calling quality: below ~1.5b the agent misroutes
+#     tools noticeably, so tiny tiers are only suggested where latency
+#     would otherwise make it unusable.
+#   * CEILING — the tested envelope: suggestions never exceed the
+#     largest model this agent has been exercised with (qwen2.5:3b).
+#     "This hardware CAN run a bigger model" is detectable; "bigger
+#     will be BETTER for this agent's tool-calling and voice latency"
+#     is not — 7b doubles latency for untested gain, so machines with
+#     headroom get it as a note to try, never as the default.
+# Staying inside one family (qwen2.5) keeps the chat template and
+# tool-call format identical across tiers.
 suggest_llm_model() {
     if [[ "$HW_ACCEL" != "cpu" ]]; then
-        if   (( HW_RAM_GB >= 32 )); then echo "qwen2.5:7b"
-        elif (( HW_RAM_GB >= 16 )); then echo "qwen2.5:3b"
+        if (( HW_RAM_GB >= 16 )); then echo "qwen2.5:3b"
         else echo "qwen2.5:1.5b"; fi
     else
         if   (( HW_RAM_GB >= 16 && HW_CORES >= 8 )); then echo "qwen2.5:1.5b"
@@ -409,15 +417,14 @@ suggest_llm_model() {
     fi
 }
 
-# suggest_vlm_model → caption/VQA suggestion for CAPTION_ADAPTER=ollamavlm.
-# moondream is the efficient default everywhere; a GPU-backed box with
-# headroom can afford a stronger VLM.
+# suggest_vlm_model → caption/VQA model for CAPTION_ADAPTER=ollamavlm.
+# ALWAYS moondream: it is the project's tested VQA default, and the
+# ollamavlm adapter is itself new — defaulting an untested model
+# through a new adapter based on a RAM check would stack unknowns.
+# Capable machines are told (in the prompt note) that qwen2.5vl:3b is
+# worth trying; that stays an operator decision.
 suggest_vlm_model() {
-    if [[ "$HW_ACCEL" != "cpu" ]] && (( HW_RAM_GB >= 16 )); then
-        echo "qwen2.5vl:3b"
-    else
-        echo "moondream"
-    fi
+    echo "moondream"
 }
 
 choose_example() {
@@ -533,9 +540,13 @@ choose_example() {
         ok "Detected: $hw_desc → suggesting $llm_suggest"
 
         printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
+        local llm_note="qwen2.5:0.5b (low RAM) | 1.5b | 3b — any Ollama model works."
+        if [[ "$HW_ACCEL" != "cpu" ]] && (( HW_RAM_GB >= 32 )); then
+            llm_note="$llm_note This machine could also run qwen2.5:7b (stronger, ~2x slower per answer — untested with this agent)."
+        fi
         configure_value OLLAMA_MODEL "Local LLM model (Ollama)" "$llm_suggest" \
-            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hw_desc)." "yes" \
-            "qwen2.5:0.5b (low RAM) | 1.5b | 3b | 7b (GPU) — any Ollama model works."
+            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hw_desc), capped at the largest model this agent is tested with." "yes" \
+            "$llm_note"
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if [[ "$llm_where" == "host" ]]; then
             local ext_model
@@ -563,9 +574,13 @@ choose_example() {
             "moondream | blip | ollamavlm — all local."
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
+            local vlm_note="moondream (tested default) | llava | qwen2.5vl:3b — any Ollama multimodal model; the adapter auto-pulls it."
+            if [[ "$HW_ACCEL" != "cpu" ]] && (( HW_RAM_GB >= 16 )); then
+                vlm_note="$vlm_note This machine has headroom for qwen2.5vl:3b if you want stronger VQA (untested with this agent)."
+            fi
             configure_value OLLAMA_VLM_MODEL "Vision model (Ollama)" "$vlm_suggest" \
-                "Multimodal Ollama model the ollamavlm adapter uses for scene questions. Default is sized for this machine; the adapter auto-pulls it." "yes" \
-                "moondream (efficient) | qwen2.5vl:3b (stronger, GPU) | llava — any Ollama multimodal model."
+                "Multimodal Ollama model the ollamavlm adapter uses for scene questions. moondream is the tested default." "yes" \
+                "$vlm_note"
         fi
     else
         # Generic examples: prompt for any ${VAR:-default} the overlay exposes.

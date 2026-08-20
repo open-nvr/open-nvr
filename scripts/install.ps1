@@ -483,20 +483,30 @@ function Choose-Example {
                 try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
             }
         }
+        # Ceiling = the tested envelope: never suggest beyond qwen2.5:3b
+        # (the largest model this agent is exercised with); bigger-is-
+        # runnable is detectable, bigger-is-better is not. VLM default is
+        # ALWAYS moondream — an untested model through the new ollamavlm
+        # adapter would stack unknowns; headroom is advertised in the
+        # prompt note instead.
         $llmSuggest = if ($accel -ne 'cpu') {
-            if ($ramGb -ge 32) { 'qwen2.5:7b' } elseif ($ramGb -ge 16) { 'qwen2.5:3b' } else { 'qwen2.5:1.5b' }
+            if ($ramGb -ge 16) { 'qwen2.5:3b' } else { 'qwen2.5:1.5b' }
         } else {
             if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen2.5:1.5b' } else { 'qwen2.5:0.5b' }
         }
-        $vlmSuggest = if ($accel -ne 'cpu' -and $ramGb -ge 16) { 'qwen2.5vl:3b' } else { 'moondream' }
+        $vlmSuggest = 'moondream'
         $hwDesc = "$(if ($accel -eq 'cuda') { 'NVIDIA GPU (CUDA), ' } else { 'CPU only, ' })$ramGb GB RAM, $cores cores"
         Ok "Detected: $hwDesc -> suggesting $llmSuggest"
 
         Write-Host ''
         Write-Host '  -- Camera Agent models (all local, no API keys) -------'
+        $llmNote = 'qwen2.5:0.5b (low RAM) | 1.5b | 3b - any Ollama model works.'
+        if ($accel -ne 'cpu' -and $ramGb -ge 32) {
+            $llmNote = "$llmNote This machine could also run qwen2.5:7b (stronger, ~2x slower per answer - untested with this agent)."
+        }
         Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' $llmSuggest `
-            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hwDesc)." 'yes' `
-            'qwen2.5:0.5b (low RAM) | 1.5b | 3b | 7b (GPU) - any Ollama model works.'
+            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hwDesc), capped at the largest model this agent is tested with." 'yes' `
+            $llmNote
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if ($llmWhere -eq 'host') {
             $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = $llmSuggest }
@@ -523,9 +533,13 @@ function Choose-Example {
             'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
+            $vlmNote = 'moondream (tested default) | llava | qwen2.5vl:3b - any Ollama multimodal model; the adapter auto-pulls it.'
+            if ($accel -ne 'cpu' -and $ramGb -ge 16) {
+                $vlmNote = "$vlmNote This machine has headroom for qwen2.5vl:3b if you want stronger VQA (untested with this agent)."
+            }
             Configure-Value OLLAMA_VLM_MODEL 'Vision model (Ollama)' $vlmSuggest `
-                'Multimodal Ollama model the ollamavlm adapter uses for scene questions. Default is sized for this machine; the adapter auto-pulls it.' 'yes' `
-                'moondream (efficient) | qwen2.5vl:3b (stronger, GPU) | llava - any Ollama multimodal model.'
+                'Multimodal Ollama model the ollamavlm adapter uses for scene questions. moondream is the tested default.' 'yes' `
+                $vlmNote
         }
     } else {
         Prompt-OverlayDefaults $manifest

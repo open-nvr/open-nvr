@@ -178,13 +178,19 @@ the equivalent logic in `scripts/install.ps1`.
 
 | Where the LLM runs | Hardware | LLM default | VLM default (ollamavlm) |
 |---|---|---|---|
-| Host, Apple Silicon / NVIDIA | ≥ 32 GB RAM | `qwen2.5:7b` | `qwen2.5vl:3b` |
-| Host, Apple Silicon / NVIDIA | 16–31 GB | `qwen2.5:3b` | `qwen2.5vl:3b` |
+| Host, Apple Silicon / NVIDIA | ≥ 16 GB RAM | `qwen2.5:3b` | `moondream` |
 | Host, GPU, < 16 GB | | `qwen2.5:1.5b` | `moondream` |
 | Any CPU-only | ≥ 16 GB + ≥ 8 cores | `qwen2.5:1.5b` | `moondream` |
 | Any CPU-only | smaller | `qwen2.5:0.5b` | `moondream` |
 | macOS, bundled container | sized to the Docker VM's RAM, always CPU tier | | |
 
-Tool-calling quality sets the floor: below ~1.5b the agent misroutes
-tools noticeably, so the tiny tier is only suggested where latency would
-otherwise make the agent unusable.
+Two constraints shape the tiers. The **floor** is tool-calling quality:
+below ~1.5b the agent misroutes tools noticeably, so the tiny tier is
+only suggested where latency would otherwise make the agent unusable.
+The **ceiling** is the tested envelope: defaults never exceed the
+largest model this agent has actually been exercised with — "this
+hardware can run a bigger model" is detectable, "bigger will be better
+for this agent's tool-calling and voice latency" is not. Machines with
+headroom (≥ 32 GB GPU-backed) are told at the prompt that `qwen2.5:7b`
+and `qwen2.5vl:3b` are worth trying; promoting them to defaults should
+follow testing, not RAM arithmetic.
