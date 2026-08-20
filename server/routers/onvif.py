@@ -21,18 +21,22 @@ Supports both WS-Security (via onvif-zeep) and HTTP Digest authentication.
 HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
+import asyncio
+import contextlib
 import ipaddress
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
+from core.client_ip import get_client_ip
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnets,
+    lan_cidr_for_ip,
 )
 from services.onvif_digest_service import (
     connect_and_get_profiles,
@@ -50,7 +54,7 @@ from services.onvif_service import (
     ptz_continuous_move,
     ptz_presets,
     ptz_stop,
-    scan_onvif_subnets,
+    scan_onvif_subnets_exclusive,
 )
 
 router = APIRouter(tags=["onvif"])
@@ -154,6 +158,7 @@ def _resolve_scan_plan(db: Session, cidr: list[str] | None) -> tuple[list[str], 
 
 @router.get("/discover/plan")
 async def discover_plan(
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
@@ -162,13 +167,58 @@ async def discover_plan(
     Lets the UI show "Scanning 192.168.1.0/24 · auto-detected" while the actual
     (slow) scan is still running, and render a friendly prompt instead of an
     error when nothing is configured or detectable (``scan_cidrs`` comes back
-    empty rather than a 400)."""
+    empty rather than a 400).
+
+    ``detected_cidrs`` lists ALL of the host's detected LAN subnets regardless
+    of the configured Camera LAN, so the UI can always offer "scan a host
+    network" — an operator hunting for a camera on a second NIC shouldn't have
+    to know its range by heart. Detection is Docker-aware (bridge ignored,
+    host IPs come from OPENNVR_HOST_IP/OPENNVR_LAN_IPS)."""
     scan_cidrs, source = _resolve_scan_plan(db, None)
-    return {"scan_cidrs": scan_cidrs, "source": source}
+    try:
+        detected_cidrs = detect_local_subnets()
+    except Exception:
+        detected_cidrs = []
+    return {
+        "scan_cidrs": scan_cidrs,
+        "source": source,
+        "detected_cidrs": detected_cidrs,
+        # The requesting browser's own subnet (if it's a usable LAN address):
+        # a live scan suggestion that can't go stale, unlike the env-derived
+        # host hints in detected_cidrs.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
+    }
+
+
+# How often the /discover handler checks whether the client hung up. Polling
+# is safe on a body-less GET (nothing else consumes the receive channel).
+_DISCONNECT_POLL_S = 1.0
+
+
+async def _await_scan_or_disconnect(scan: asyncio.Task, request: Request):
+    """Await the sweep, polling for client abort ~1/s.
+
+    The UI's Stop button (and its scan-supersede path) only drops the HTTP
+    connection; uvicorn does not cancel the handler, so without this the
+    sweep would run to completion and keep loading the NAT path — starving
+    the very scan the operator started next.
+    """
+    while True:
+        done, _ = await asyncio.wait({scan}, timeout=_DISCONNECT_POLL_S)
+        if done:
+            return scan.result()
+        if await request.is_disconnected():
+            scan.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scan
+            raise HTTPException(
+                status_code=409, detail="Client disconnected; scan stopped."
+            )
 
 
 @router.get("/discover")
 async def discover(
+    request: Request,
     cidr: list[str] | None = Query(
         None,
         description="One or more subnet CIDRs to scan (e.g. cidr=192.168.1.0/24&cidr=10.0.0.0/24). "
@@ -205,9 +255,12 @@ async def discover(
 
     # One call scans all subnets under a single shared concurrency bound —
     # per-subnet parallel scans would multiply the connect burst and wedge the
-    # container's NAT path (see scan_onvif_subnets).
+    # container's NAT path (see scan_onvif_subnets). The exclusive wrapper
+    # also supersedes any sweep already in flight, and the disconnect watcher
+    # stops the sweep when the client aborts the request.
     try:
-        devices = await scan_onvif_subnets(valid_cidrs)
+        scan = asyncio.create_task(scan_onvif_subnets_exclusive(valid_cidrs))
+        devices = await _await_scan_or_disconnect(scan, request)
     except HTTPException:
         raise
     except Exception as e:
@@ -215,7 +268,10 @@ async def discover(
     seen_ips: set[str] = {d["ip"] for d in devices}
     scan_cidrs = valid_cidrs
 
-    # Best-effort multicast fallback (works only in host-mode or on native LAN)
+    # Best-effort multicast fallback (works only in host-mode or on native
+    # LAN). Deliberately not serialized with the exclusive sweep slot: a
+    # superseded/disconnected request bails above before reaching this, and
+    # the residual overlap window is one cheap UDP broadcast in a thread.
     try:
         for md in await discover_onvif_devices():
             if md.get("ip") and md["ip"] not in seen_ips:
@@ -244,6 +300,9 @@ async def discover(
         "scan_cidrs": scan_cidrs,
         "source": source,
         "suggested_cidrs": suggested_cidrs,
+        # Mirror of /discover/plan's client_cidr so scan responses can top up
+        # the UI's suggestions too.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
     }
 
 

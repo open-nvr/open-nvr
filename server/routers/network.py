@@ -103,12 +103,30 @@ def detect_local_subnets() -> list[str]:
     in_docker = os.path.exists("/.dockerenv")
     ips: list[str] = []
 
+    # Launcher-refreshed hint file, freshest source first: the launchers
+    # rewrite it on every run, so a host that moved to a new subnet is picked
+    # up without recreating the container — the env vars below are frozen at
+    # container creation.
+    hints_file = os.environ.get("OPENNVR_HOST_IPS_FILE") or "/app/net-hints/host-ips"
+    try:
+        with open(hints_file, encoding="utf-8") as fh:
+            for token in fh.read().replace(",", " ").split():
+                if token not in ips:
+                    ips.append(token)
+    except OSError:
+        pass
+
     # The host's own LAN addresses, when the launcher passed them in. Listed
-    # first so the default-route subnet becomes the primary detected one.
-    for env_key in ("OPENNVR_HOST_IP", "OPENNVR_LAN_IPS"):
-        for token in (os.environ.get(env_key) or "").replace(",", " ").split():
-            if token not in ips:
-                ips.append(token)
+    # ahead of the probes so the default-route subnet becomes the primary
+    # detected one. Skipped entirely when the hint file spoke: the launcher
+    # writes the union of these env values into the file on every run, so
+    # once hints exist the frozen env can only ADD subnets the host has since
+    # left (e.g. the WiFi network it was on at container creation).
+    if not ips:
+        for env_key in ("OPENNVR_HOST_IP", "OPENNVR_LAN_IPS"):
+            for token in (os.environ.get(env_key) or "").replace(",", " ").split():
+                if token not in ips:
+                    ips.append(token)
 
     # Default-route interface — reliable even where the hostname doesn't resolve
     # to every address (some containers). A UDP "connect" selects the egress
@@ -151,6 +169,26 @@ def detect_local_subnets() -> list[str]:
         if cidr not in subnets:
             subnets.append(cidr)
     return subnets
+
+
+def lan_cidr_for_ip(ip: str) -> str | None:
+    """The /24 around ``ip`` when it's a usable private LAN address, else None.
+
+    Same filtering as detect_local_subnets: IPv4, RFC 1918, never loopback,
+    link-local, or (inside a container) a Docker network. Used to turn the
+    requesting browser's address into a live scan suggestion — unlike the
+    env-derived host hints, the client's own subnet can never be stale."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr.version != 4:
+        return None
+    if not addr.is_private or addr.is_loopback or addr.is_link_local:
+        return None
+    if os.path.exists("/.dockerenv") and any(addr in net for net in _docker_excluded_networks()):
+        return None
+    return str(ipaddress.ip_network(f"{ip}/24", strict=False))
 
 
 def _get_or_init(

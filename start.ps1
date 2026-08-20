@@ -436,6 +436,35 @@ function Set-HostIpEnv {
     }
 }
 
+# ── Host LAN IP hint file (./data/net-hints/host-ips) ──────
+# The OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars are frozen into the core
+# container at creation, so they go stale when the host moves to another
+# subnet. This file is bind-mounted read-only into the container (see
+# docker-compose.yml) and rewritten on every launcher run; the server's
+# detect_local_subnets() reads it first, so ONVIF discovery follows the
+# host's *current* networks without a container recreate.
+function Write-NetHints {
+    $hints = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(
+        $env:OPENNVR_HOST_IP, (Get-EnvVar "OPENNVR_HOST_IP"),
+        $env:OPENNVR_LAN_IPS, (Get-EnvVar "OPENNVR_LAN_IPS"))) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        foreach ($token in ($candidate -split '[,\s]+')) {
+            if ($token -and -not $hints.Contains($token)) { $hints.Add($token) }
+        }
+    }
+    $file = Join-Path "data\net-hints" "host-ips"
+    try {
+        if ($hints.Count -gt 0) {
+            New-Item -ItemType Directory -Force "data\net-hints" | Out-Null
+            # ASCII avoids a BOM the container-side parser would choke on.
+            Set-Content -Path $file -Value ($hints -join ' ') -Encoding Ascii
+        } elseif (Test-Path $file) {
+            Remove-Item -Force $file -Confirm:$false
+        }
+    } catch {}
+}
+
 # ── Raw start / build (no front-door prompt) ───────────────
 # These assume .env exists — the smart Invoke-Start and the installer
 # guarantee that before calling them. Kept separate so the installer can call
@@ -448,6 +477,7 @@ function Invoke-Up {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    Write-NetHints
     $ca = Get-ComposeArgs
     Write-Color "  Starting all services ..." Green
     docker compose @ca up -d --remove-orphans
@@ -463,6 +493,7 @@ function Invoke-Build {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    Write-NetHints
     $ca = Get-ComposeArgs
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build
@@ -546,9 +577,27 @@ switch ($Command) {
         Show-FirstTimeSetupToken -ComposeArgs $ca
     }
 
+    "refresh-net" {
+        # Rewrite data\net-hints\host-ips from the host's CURRENT networks —
+        # and nothing else: no validation, no compose, no container churn.
+        # The file is bind-mounted read-only into opennvr-core and re-read on
+        # every discovery request, so camera discovery follows a host that
+        # moved to a new network the moment this finishes. The camera dialog's
+        # network dropdown points operators here.
+        Set-HostIpEnv
+        Write-NetHints
+        $hintsFile = Join-Path "data\net-hints" "host-ips"
+        if (Test-Path $hintsFile) {
+            Write-Color "  ✓ Network hints refreshed: $(Get-Content $hintsFile)" Green
+            Write-Color "  Camera discovery picks this up immediately - no restart needed." DarkGray
+        } else {
+            Write-Color "  ⚠ No LAN address detected; hint file cleared." Yellow
+        }
+    }
+
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|up|build|down|logs|status|validate|token|install|reconfigure]"
+        Write-Color "Usage: .\start.ps1 [start|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
         exit 1
     }
 }

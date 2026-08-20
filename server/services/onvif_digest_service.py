@@ -27,6 +27,7 @@ This implementation uses HTTP Digest authentication which is more widely support
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -36,6 +37,16 @@ import httpx
 from fastapi import HTTPException
 
 from core.logging_config import main_logger
+
+
+def _xml_text(raw: str) -> str:
+    """Unescape XML character entities from regex-extracted element text.
+
+    SOAP responses escape ``&`` as ``&amp;`` (etc.) inside text nodes; a raw
+    regex capture keeps the entity, which corrupted RTSP URLs with query
+    strings — ``?transmode=unicast&amp;profile=va`` was stored and handed to
+    MediaMTX verbatim."""
+    return html.unescape(raw)
 
 # ONVIF XML namespaces
 SOAP_NS = "http://www.w3.org/2003/05/soap-envelope"
@@ -263,7 +274,7 @@ async def get_services(
             if ns_m and xa_m:
                 key = _SERVICE_NS_MAP.get(ns_m.group(1).strip())
                 if key:
-                    services[key] = xa_m.group(1).strip()
+                    services[key] = _xml_text(xa_m.group(1).strip())
 
     if not services:
         # Fallback: older GetCapabilities (no media2/analytics granularity).
@@ -331,7 +342,10 @@ async def fetch_profiles_digest(
             continue
         token = tok.group(1)
         name_m = re.search(r"<(?:\w+:)?Name>([^<]+)</(?:\w+:)?Name>", block)
-        profile_info = {"token": token, "name": name_m.group(1) if name_m else token}
+        profile_info = {
+            "token": token,
+            "name": _xml_text(name_m.group(1)) if name_m else token,
+        }
 
         bounds_match = re.search(r'width="(\d+)"\s+height="(\d+)"', block)
         if bounds_match:
@@ -393,7 +407,7 @@ async def get_stream_uri_digest(
     if not uri_match:
         raise HTTPException(status_code=500, detail="No stream URI in response")
 
-    return uri_match.group(1)
+    return _xml_text(uri_match.group(1))
 
 
 # Common ONVIF control ports across vendors (kept in sync with the discovery

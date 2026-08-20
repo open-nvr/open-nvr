@@ -23,6 +23,7 @@ This module wraps onvif-zeep sync clients in asyncio-friendly helpers via run_in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 from typing import Any
 from urllib.parse import urlparse
@@ -264,6 +265,11 @@ async def _tcp_state(ip: str, port: int, timeout: float = _GATE_TIMEOUT) -> str:
         if writer is not None:
             try:
                 writer.close()
+                # Wait for the FIN handshake so the semaphore slot isn't
+                # released while the socket is still alive — otherwise real
+                # in-flight connects transiently exceed the concurrency bound.
+                # Capped: a wedged NAT path must not hang the sweep.
+                await asyncio.wait_for(writer.wait_closed(), 1.0)
             except Exception:
                 pass
 
@@ -287,8 +293,10 @@ async def scan_onvif_subnets(
     candidate-port list on live hosts only and runs the ONVIF probe (with one
     retry — embedded stacks and the NAT path both drop occasional requests) on
     open ports until the first hit. One shared semaphore bounds in-flight
-    connects across all subnets; ~40 launches/s stays comfortably inside the
-    measured wedge-free regime (clean at 64/s, wedged at 256/s).
+    connects across all subnets — the ONVIF probes included, so a subnet full
+    of live web hosts can't burst past the budget; ~40 launches/s stays
+    comfortably inside the measured wedge-free regime (clean at 64/s, wedged
+    at 256/s).
 
     Returns device dicts with the {ip, scheme, service_urls} shape, deduped by
     IP across subnets.
@@ -328,11 +336,18 @@ async def scan_onvif_subnets(
         open_ports.update(p for p, s in zip(rest, rest_states) if s == "open")
 
         # Probe open ports in candidate-list order; first ONVIF answer wins.
+        # Probes take a semaphore slot too: on a subnet with many live web
+        # hosts (NAS, printers, ...) unbounded probes were an extra connect
+        # burst on top of the gate budget.
         for port in sorted(open_ports, key=ports.index):
             scheme = "https" if port in tls_ports else "http"
-            dev = await probe_onvif_device(ip, port, timeout=3.0, scheme=scheme)
-            if dev is None:
+            async with sem:
                 dev = await probe_onvif_device(ip, port, timeout=3.0, scheme=scheme)
+            if dev is None:
+                async with sem:
+                    dev = await probe_onvif_device(
+                        ip, port, timeout=3.0, scheme=scheme
+                    )
             if dev:
                 return {
                     "ip": dev["ip"],
@@ -354,6 +369,66 @@ async def scan_onvif_subnets(
         *(_scan_host(ip) for ip in hosts), return_exceptions=True
     )
     return [r for r in results if isinstance(r, dict)]
+
+
+# --- Exclusive discovery slot ------------------------------------------------
+# At most one subnet sweep runs per process. Two overlapping sweeps each bring
+# their own Semaphore(96), doubling the connect rate past the vpnkit wedge
+# threshold documented above — the wedged sweep then sees every host as dead
+# and silently returns an empty device list. A new scan SUPERSEDES the running
+# one (cancels it and waits for it to wind down) instead of queueing,
+# mirroring the frontend's abort-and-restart pattern. Discovery is a
+# superuser-only feature: two admin sessions scanning at once also supersede
+# each other (last scan wins; the earlier request gets a 409).
+_scan_handoff = asyncio.Lock()
+_scan_task: asyncio.Task | None = None
+# After cancelling a sweep its in-flight connects tear down immediately, but
+# SYNs already queued in the NAT relay are not. A short drain keeps the
+# combined launch rate of old+new sweep inside the wedge-free regime. The
+# full ~13s wedge tail does NOT need waiting out — that wedge only follows
+# sustained over-rate scanning, which single-flight prevents.
+_SUPERSEDE_GRACE_S = 1.0
+
+
+async def scan_onvif_subnets_exclusive(
+    cidrs: list[str],
+    ports: tuple[int, ...] = _ONVIF_CANDIDATE_PORTS,
+    concurrency: int = 96,
+) -> list[dict[str, Any]]:
+    """Run :func:`scan_onvif_subnets` as the process's only sweep.
+
+    Cancels and drains any sweep already in flight before starting (see the
+    module comment above). Raises 409 when THIS sweep is in turn superseded
+    by a newer one. Cancelling the awaiting task (e.g. the HTTP handler on
+    client disconnect) cancels the underlying sweep too.
+    """
+    global _scan_task
+    async with _scan_handoff:
+        prev = _scan_task
+        if prev is not None and not prev.done():
+            prev.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await prev
+            await asyncio.sleep(_SUPERSEDE_GRACE_S)
+        task = asyncio.create_task(
+            scan_onvif_subnets(cidrs, ports=ports, concurrency=concurrency)
+        )
+        _scan_task = task
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if task.cancelled():
+            # The task itself was cancelled: a newer scan superseded it.
+            raise HTTPException(
+                status_code=409,
+                detail="Scan superseded by a newer discovery scan.",
+            )
+        # Our awaiter was cancelled (client disconnect): stop the sweep too,
+        # then let the cancellation propagate.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
 
 
 async def scan_onvif_subnet(

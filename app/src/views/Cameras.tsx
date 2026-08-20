@@ -24,7 +24,7 @@ import { api } from '../lib/api'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
 import { Unplug } from 'lucide-react'
-import { AddCameraDialog } from './LiveView'
+import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
 import { Modal } from '../components/Modal'
 
