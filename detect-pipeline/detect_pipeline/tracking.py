@@ -108,6 +108,17 @@ def bottom_center_distance(a: Box, b: Box) -> float:
     return math.sqrt(dx * dx + dy * dy + dw * dw + dh * dh)
 
 
+def _coverage(inner: Box, outer: Box) -> float:
+    """Fraction of ``inner``'s area that lies inside ``outer`` (0..1)."""
+    ix1, iy1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    ix2, iy2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area = max((inner[2] - inner[0]) * (inner[3] - inner[1]), 1)
+    return inter / area
+
+
 def _crop_bgr(bgr, box: Box):
     """Clamp ``box`` to the frame and return a copied BGR crop, or None if empty."""
     h, w = bgr.shape[:2]
@@ -133,9 +144,20 @@ class Tracker:
         """Confirmed tracks only (past the initialization delay)."""
         return [t for t in self._tracks if t.confirmed]
 
-    def update(self, detections: list[Detection], bgr=None) -> list[Track]:
+    def update(
+        self, detections: list[Detection], bgr=None,
+        scanned_regions: list[Box] | None = None,
+    ) -> list[Track]:
         # ``bgr`` (the full-frame BGR image) is optional: when given, the best
         # frame's crop pixels are retained on the track for Tier-1 dispatch.
+        #
+        # ``scanned_regions`` is the PR B coasting contract: the regions the
+        # detector actually LOOKED AT this frame. An unmatched track only
+        # counts a miss if its box intersects a scanned region — being
+        # missed where we looked is evidence of absence; being unmatched
+        # because its region was skipped (stationary gating) is not. None
+        # (the default, and every pre-PR-B caller) preserves the original
+        # behavior: every unmatched track counts a miss.
         cfg = self.config
         unmatched_tracks = set(range(len(self._tracks)))
         unmatched_dets = set(range(len(detections)))
@@ -161,12 +183,27 @@ class Tracker:
         for di in unmatched_dets:
             self._spawn(detections[di], bgr)
 
-        # unmatched tracks -> age out
+        # unmatched tracks -> age out (or coast, if never scanned this frame)
         survivors: list[Track] = []
         for ti, tr in enumerate(self._tracks):
             if ti in unmatched_tracks:
-                tr.misses += 1
                 tr.age += 1
+                if scanned_regions is not None and not any(
+                    _coverage(tr.box, r) >= 0.7 for r in scanned_regions
+                ):
+                    # Coast: no scanned region substantially covered this
+                    # object, so its absence from ``detections`` is not
+                    # evidence it left. Mere partial overlap coasts too —
+                    # motion NEXT TO a gated stationary object scans a
+                    # region that clips it; a half-visible car at a crop
+                    # edge going undetected must not accumulate misses, or
+                    # someone loitering beside a parked car would get its
+                    # track deleted. Re-verification frames still expire a
+                    # departed object: the track's own region fully
+                    # contains its box (coverage 1.0).
+                    survivors.append(tr)
+                    continue
+                tr.misses += 1
                 # tentative tracks die on a single miss; confirmed survive to max_disappeared
                 if not tr.confirmed or tr.misses > cfg.disappeared():
                     continue

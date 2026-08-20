@@ -32,7 +32,10 @@ examples/camera-agent/quickstart.sh
 
 That's the **camera-agent** — a hands-free voice assistant, fully local, on a
 normal CPU. Whisper hears you, a small local LLM reasons and calls the vision
-tools, Piper speaks the answer back. No GPU, no cloud account. One command.
+tools, Piper speaks the answer back. No GPU required, no cloud account. One
+command. (Have a GPU? On macOS/Windows the installer runs the LLM on the host
+machine — Docker's VM can't reach the GPU, the host can — so answers arrive in
+seconds instead of minutes. Still your box, still local.)
 
 ---
 

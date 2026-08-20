@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.request
 
 from .service import CameraSpec
@@ -57,6 +58,26 @@ class HttpCameraProvider:
         return [_to_spec(c) for c in data.get("cameras", [])]
 
 
+def _default_fps() -> int:
+    """Per-camera analysis rate: DETECT_FPS env, else 5.
+
+    Detection currently runs on EVERY analyzed frame (the gate skips
+    alarms, not inference), so this is the single biggest CPU dial the
+    pipeline has: on CPU-only hosts — a laptop, or ANY macOS/Windows
+    Docker install (the VM has no GPU) — dropping 5 → 1-2 fps cuts
+    steady-state pipeline CPU nearly proportionally, at the cost of
+    coarser motion/track granularity. Clamped to [1, 30]; a camera dict
+    carrying an explicit per-camera ``fps`` still wins.
+    """
+    try:
+        fps = int(os.environ.get("DETECT_FPS", "5"))
+    except ValueError:
+        log.warning("DETECT_FPS=%r is not an integer; using 5",
+                    os.environ.get("DETECT_FPS"))
+        return 5
+    return max(1, min(30, fps))
+
+
 def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
@@ -68,7 +89,7 @@ def _to_spec(c: dict) -> CameraSpec:
         analyze=bool(c.get("analyze", True)),
         width=c.get("width"),
         height=c.get("height"),
-        fps=int(c.get("fps", 5)),
+        fps=int(c.get("fps", _default_fps())),
         hwaccel=c.get("hwaccel", "cpu"),
     )
 

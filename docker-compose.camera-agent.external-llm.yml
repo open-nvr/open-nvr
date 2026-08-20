@@ -1,0 +1,81 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# External-LLM overlay for the camera-agent profiles.
+#
+# WHY THIS EXISTS: containers on macOS and Windows run inside a VM with
+# NO GPU access — Apple's Virtualization.framework exposes no Metal to
+# Linux guests, and the same applies to the WSL2/Hyper-V path for
+# non-NVIDIA hardware. The bundled ollama container therefore runs the
+# LLM on emulated/plain CPU, and a single camera-agent turn can take
+# minutes at several hundred percent CPU. Running the LLM runtime ON
+# THE HOST (native Ollama with Metal on a Mac, Ollama/LM Studio on
+# Windows, Docker Model Runner, or any OpenAI-compatible server on the
+# LAN) makes the same turn take seconds — and drops the 3.2 GB
+# ollama/ollama image from the install entirely.
+#
+# Usage (the installer wires this automatically when you pick an
+# external LLM; manual form):
+#
+#   1. On the host:  install Ollama, then `ollama pull qwen2.5:1.5b`
+#      (or whatever OLLAMA_MODEL is set to in .env)
+#   2. In .env:      OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434
+#   3. Start with BOTH files + the profile, e.g.:
+#        docker compose -f docker-compose.yml \
+#                       -f docker-compose.camera-agent.yml \
+#                       -f docker-compose.camera-agent.external-llm.yml \
+#                       --profile camera-agent up -d
+#      (./start.sh appends this file by itself whenever
+#       OLLAMA_EXTERNAL_URL is set in .env.)
+#
+# WHAT IT DOES:
+#   * parks the bundled ``ollama`` / ``ollama-model-pull`` services on a
+#     profile that is never activated (compose offers no "remove
+#     service" in an overlay; an inert profile is the supported idiom)
+#   * rewrites both agents' ``depends_on`` (``!override`` — a plain
+#     merge would UNION the maps and keep the ollama entries, and
+#     compose auto-starts depends_on targets even across profiles)
+#   * adds ``host-gateway`` so ``host.docker.internal`` also resolves on
+#     Linux Docker Engine (Docker Desktop provides it out of the box)
+#
+# The model must already be present on the external runtime — nothing
+# pulls it for you (the agent's first turn will say so if it's missing).
+
+services:
+  # ``!override`` on BOTH keys below: compose merges list values by
+  # UNION, so without it the inert profile would be APPENDED to the
+  # active ones and the services would still start.
+  ollama:
+    profiles: !override ["external-llm-inert"]
+  ollama-model-pull:
+    profiles: !override ["external-llm-inert"]
+
+  camera-agent:
+    depends_on: !override
+      camera-agent-config-init:
+        condition: service_completed_successfully
+      camera-agent-certs-init:
+        condition: service_completed_successfully
+      whisper-adapter:
+        condition: service_healthy
+      piper-adapter:
+        condition: service_healthy
+      caption-adapter:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  camera-agent-chat:
+    depends_on: !override
+      camera-agent-config-init-chat:
+        condition: service_completed_successfully
+      camera-agent-certs-init:
+        condition: service_completed_successfully
+      caption-adapter:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

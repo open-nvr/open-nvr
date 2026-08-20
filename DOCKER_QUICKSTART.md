@@ -15,6 +15,13 @@ Five minutes from `git clone` to YOLOv8 detection running on your camera feed, u
   [ARM64 / Apple Silicon](#no-matching-manifest-for-linuxarm64v8-apple-silicon--arm) below.
 - **8 GB RAM** recommended (4 GB will work, but YOLOv8 cold-start is
   tight).
+- **macOS / Windows: check Docker Desktop's VM allowance.** Every
+  container shares one VM whose CPUs/RAM are a Docker Desktop setting
+  (Settings → Resources; WSL2 backend: `%UserProfile%\.wslconfig`) and
+  the default is often half the machine. Give it ≥4 CPUs and ≥6 GB
+  (≥8 GB if you run the camera-agent with the bundled LLM container).
+  The installer measures the allowance and warns when it's undersized —
+  it cannot raise it for you.
 - **20 GB free disk** — most of it is the AI adapter images and YOLO
   weights; the database and the app itself are small.
 - A camera with **ONVIF or RTSP** support. Most modern IP cameras
@@ -154,6 +161,20 @@ docker compose -f docker-compose.yml restart opennvr-core
 ```
 
 ## Customisation
+
+### Turn off object detection entirely
+
+Running OpenNVR for models that aren't about detection (captioning/VQA,
+LPR, face recognition, your own adapters) — or just as an NVR? Two lines:
+
+```bash
+# .env
+DETECT_PIPELINE_ENABLED=false
+```
+
+then `./start.sh up`. The Tier-0 detection loop idles (zero inference,
+zero decode), while recording, playback, live view, the camera-agent, and
+every other adapter keep working. Flip it back to `true` any time.
 
 ### Change recording storage location
 
