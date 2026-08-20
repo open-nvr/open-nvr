@@ -50,6 +50,14 @@ function Get-ComposeArgs {
     if ($exampleCompose) {
         if (-not (Test-Path $exampleCompose)) { throw "Configured example Compose file not found: $exampleCompose" }
         $args += @("-f", $exampleCompose)
+        # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that skips
+        # the bundled ollama container and points the agent at the operator's
+        # endpoint — the GPU path on macOS/Windows, where the in-VM container
+        # is CPU-only. Mirrors compose_args in start.sh.
+        $externalLlm = Get-EnvVar "OLLAMA_EXTERNAL_URL"
+        if ($externalLlm -and $exampleCompose -like "*camera-agent.yml") {
+            $args += @("-f", "docker-compose.camera-agent.external-llm.yml")
+        }
     }
     if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
     return $args

@@ -18,7 +18,7 @@ kaic_url: http://opennvr-core:8100
 bestframe_base_url: http://detect-pipeline:9109
 kaic_api_key: ${INTERNAL_API_KEY}
 
-ollama_url: http://ollama:11434
+ollama_url: ${OLLAMA_URL}
 ollama_token:
 llm_model: ${OLLAMA_MODEL}
 llm_think: false   # Qwen3 default: snappy non-thinking tool-calling

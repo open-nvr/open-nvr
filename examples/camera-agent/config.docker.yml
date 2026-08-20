@@ -28,7 +28,7 @@ kaic_api_key: ${INTERNAL_API_KEY}
 # HTTP API until a standalone ollama-adapter image is published.
 whisper_url: http://whisper-adapter:9003
 whisper_token: ${INTERNAL_API_KEY}
-ollama_url: http://ollama:11434
+ollama_url: ${OLLAMA_URL}
 ollama_token:
 piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}
