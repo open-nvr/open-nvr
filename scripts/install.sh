@@ -630,6 +630,43 @@ choose_example() {
     fi
 }
 
+# ── Docker VM allowance check (macOS; Windows equivalent in install.ps1) ──
+# On macOS/Windows every container shares ONE VM whose CPU/RAM allowance
+# is a Docker Desktop setting — often left at a small default (half the
+# cores, a few GB). detect-pipeline, the caption VLM, and postgres all
+# live inside it. We CANNOT change that setting from here (it belongs to
+# Docker Desktop and needs an Apply & Restart); what we can do is notice
+# it is undersized for what was just selected and say exactly what to
+# change. Thresholds: 6 GB / 4 CPUs for the core stack, 8 GB when a
+# camera-agent example was selected with the BUNDLED LLM (the container
+# LLM is the one big in-VM RAM consumer; with an external LLM the core
+# threshold applies).
+check_docker_vm_allowance() {
+    [[ "$PLATFORM" == "macOS" ]] || return 0
+    local vm_mem_gb vm_cpus host_mem_gb host_cpus
+    vm_mem_gb=$(( $(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0) / 1073741824 ))
+    vm_cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 0)
+    host_mem_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+    host_cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo 0)
+    (( vm_mem_gb > 0 && vm_cpus > 0 )) || return 0
+
+    local need_mem=6
+    if [[ -n "$EXAMPLE_NAME" && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
+        need_mem=8
+    fi
+    info "Docker VM allowance: ${vm_cpus} CPUs / ${vm_mem_gb} GB (this machine has ${host_cpus} CPUs / ${host_mem_gb} GB)."
+    if (( vm_mem_gb < need_mem || vm_cpus < 4 )); then
+        warn "That is on the small side for what you selected (recommended: ≥4 CPUs, ≥${need_mem} GB)."
+        warn "OpenNVR cannot change this itself — raise it in Docker Desktop:"
+        warn "  Settings → Resources → CPUs / Memory → Apply & restart,"
+        warn "then re-run ./start.sh up. Containers share this allowance;"
+        warn "detect-pipeline and the vision model are the main consumers."
+        if (( host_mem_gb >= 16 )); then
+            info "With ${host_mem_gb} GB in this machine, giving Docker $(( host_mem_gb / 2 )) GB is a safe choice."
+        fi
+    fi
+}
+
 pull_and_build() {
     printf '\n'
     info "First-time setup downloads several container images (and, for the"
@@ -642,6 +679,7 @@ pull_and_build() {
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
     choose_example
+    check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
         COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE" --profile "$EXAMPLE_PROFILE")

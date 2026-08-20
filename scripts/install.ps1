@@ -570,6 +570,32 @@ function Choose-Example {
         Info 'The local LLM model downloads on first start - usually the slowest step.'
     }
 }
+# Docker VM allowance check — Windows twin of check_docker_vm_allowance in
+# install.sh. On Docker Desktop the WSL2/Hyper-V VM's CPU/RAM allowance is a
+# Docker Desktop / .wslconfig setting we cannot change from here; detect an
+# undersized allowance for what was selected and say exactly what to change.
+function Check-DockerVmAllowance {
+    $vmMemGb = 0; $vmCpus = 0
+    try {
+        $vmMemGb = [int]([math]::Floor([long](docker info --format '{{.MemTotal}}' 2>$null) / 1GB))
+        $vmCpus  = [int](docker info --format '{{.NCPU}}' 2>$null)
+    } catch {}
+    if ($vmMemGb -le 0 -or $vmCpus -le 0) { return }
+    $hostMemGb = 0
+    try { $hostMemGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+    $needMem = 6
+    if ($script:ExampleName -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
+    Info "Docker VM allowance: $vmCpus CPUs / $vmMemGb GB (this machine has $hostMemGb GB)."
+    if ($vmMemGb -lt $needMem -or $vmCpus -lt 4) {
+        Warn "That is on the small side for what you selected (recommended: >=4 CPUs, >=$needMem GB)."
+        Warn 'OpenNVR cannot change this itself - raise it in Docker Desktop:'
+        Warn '  Settings -> Resources (WSL2 backend: edit %UserProfile%\.wslconfig,'
+        Warn '  e.g. [wsl2] / memory=8GB / processors=4, then wsl --shutdown),'
+        Warn 'then re-run .\start.ps1 up. detect-pipeline and the vision model'
+        Warn 'are the main consumers of this shared allowance.'
+    }
+}
+
 function Pull-AndBuild {
     Write-Host ''
     Info 'First-time setup downloads several container images (and, for the'
@@ -582,6 +608,7 @@ function Pull-AndBuild {
     docker compose -f $BaseCompose pull --ignore-buildable
     if ($LASTEXITCODE -ne 0) { Fail 'Failed to pull the core stack' }
     Choose-Example
+    Check-DockerVmAllowance
     $script:ComposeArgs = @('-f', $BaseCompose)
     if ($script:ExampleCompose) {
         $script:ComposeArgs += @('-f', $script:ExampleCompose, '--profile', $script:ExampleProfile)
