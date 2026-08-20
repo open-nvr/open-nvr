@@ -194,3 +194,33 @@ for this agent's tool-calling and voice latency" is not. Machines with
 headroom (≥ 32 GB GPU-backed) are told at the prompt that `qwen2.5:7b`
 and `qwen2.5vl:3b` are worth trying; promoting them to defaults should
 follow testing, not RAM arithmetic.
+
+
+## Model catalog (what each option is actually good at)
+
+The installer renders this catalog as the model-selection menu, annotated
+for your detected hardware. **Canonical source:**
+[`model_catalog.txt`](model_catalog.txt) — edit there; this table is kept
+in sync by hand. "Tested" means exercised with THIS agent's tool prompts
+and voice loop; "untested" entries are known-good models that nobody has
+validated with this agent yet — trying one and reporting back is a great
+first contribution.
+
+### LLMs (the agent's brain — tool calling is what matters)
+
+| Model | ~RAM | Speed | Status | Good at |
+|---|---|---|---|---|
+| `qwen2.5:0.5b` | 1 GB | fastest | tested | Any CPU; simple questions; weakest at multi-step tool use |
+| `qwen2.5:1.5b` | 2 GB | fast | tested | The balanced default: reliable tool routing at low RAM |
+| `qwen2.5:3b` | 4 GB | medium | tested | Best answers in the tested set; wants GPU or strong CPU |
+| `qwen2.5:7b` | 8 GB | slower | untested | Strongest family reasoning; ~2× slower per answer |
+| `llama3.2:3b` | 4 GB | medium | untested | Different family; conversational tone, solid tool calling |
+| `qwen3:1.7b` | 3 GB | fast | untested | Newer generation; better instruction-following per size |
+
+### VLMs (the agent's eyes — used via `CAPTION_ADAPTER=ollamavlm`)
+
+| Model | ~RAM | Speed | Status | Good at |
+|---|---|---|---|---|
+| `moondream` | 3 GB | fast | tested | Edge-optimized VQA; the tested default |
+| `qwen2.5vl:3b` | 5 GB | medium | untested | Stronger scenes and can READ (signs, labels, plates) |
+| `llava:7b` | 8 GB | slower | untested | Most descriptive general VQA; heavy |

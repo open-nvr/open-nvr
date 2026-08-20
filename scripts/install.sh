@@ -427,6 +427,47 @@ suggest_vlm_model() {
     echo "moondream"
 }
 
+# ── Catalog-driven model menu ───────────────────────────────────────
+# Renders examples/camera-agent/model_catalog.txt (kind|model|min_ram_gb|
+# tested|speed|summary) as a numbered menu, annotated for the DETECTED
+# hardware, with the hardware-sized suggestion preselected. The operator
+# picks a number or types any Ollama model name. Falls back to a plain
+# prompt when the catalog file is missing. Sets PICKED_MODEL.
+pick_model_from_catalog() {
+    local kind="$1" suggest="$2" label="$3"
+    local catalog="examples/camera-agent/model_catalog.txt"
+    PICKED_MODEL="$suggest"
+    if [[ ! -f "$catalog" ]]; then
+        ask_value "$label" "$suggest"
+        PICKED_MODEL="$REPLY"
+        return 0
+    fi
+    local -a names summaries
+    local line model min_ram tested speed summary idx=0 default_idx=""
+    printf '\n  %s — pick a number, or type any Ollama model name:\n' "$label"
+    while IFS='|' read -r k model min_ram tested speed summary; do
+        [[ "$k" == "$kind" ]] || continue
+        idx=$((idx + 1))
+        names[$idx]="$model"
+        local fit="" mark=""
+        if (( HW_RAM_GB > 0 && min_ram > HW_RAM_GB )); then
+            fit="  [needs ~${min_ram} GB — this machine detected ${HW_RAM_GB} GB]"
+        fi
+        [[ "$model" == "$suggest" ]] && { mark="  ← suggested"; default_idx="$idx"; }
+        printf '   %d. %-16s ~%sGB  %-8s %-8s %s%s%s\n' \
+            "$idx" "$model" "$min_ram" "$speed" \
+            "$([[ "$tested" == yes ]] && echo tested || echo untested)" \
+            "$summary" "$fit" "$mark"
+    done < <(grep -v '^#' "$catalog")
+    read -r -p "  ${label} [${default_idx:-$suggest}]: " REPLY || true
+    REPLY="${REPLY:-${default_idx:-$suggest}}"
+    if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= idx )); then
+        PICKED_MODEL="${names[$REPLY]}"
+    elif [[ -n "$REPLY" ]]; then
+        PICKED_MODEL="$REPLY"
+    fi
+}
+
 choose_example() {
     EXAMPLE_NAME=""; EXAMPLE_COMPOSE=""; EXAMPLE_PROFILE=""
     env_set OPENNVR_EXAMPLE ""
@@ -540,13 +581,10 @@ choose_example() {
         ok "Detected: $hw_desc → suggesting $llm_suggest"
 
         printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
-        local llm_note="qwen2.5:0.5b (low RAM) | 1.5b | 3b — any Ollama model works."
-        if [[ "$HW_ACCEL" != "cpu" ]] && (( HW_RAM_GB >= 32 )); then
-            llm_note="$llm_note This machine could also run qwen2.5:7b (stronger, ~2x slower per answer — untested with this agent)."
-        fi
-        configure_value OLLAMA_MODEL "Local LLM model (Ollama)" "$llm_suggest" \
-            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hw_desc), capped at the largest model this agent is tested with." "yes" \
-            "$llm_note"
+        explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hw_desc), capped at the largest model this agent is tested with — 'untested' entries are known-good models nobody has validated with THIS agent yet." \
+            "yes" "$llm_suggest"
+        pick_model_from_catalog llm "$llm_suggest" "Local LLM model (Ollama)"
+        env_set OLLAMA_MODEL "$PICKED_MODEL"
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if [[ "$llm_where" == "host" ]]; then
             local ext_model
@@ -574,13 +612,10 @@ choose_example() {
             "moondream | blip | ollamavlm — all local."
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
-            local vlm_note="moondream (tested default) | llava | qwen2.5vl:3b — any Ollama multimodal model; the adapter auto-pulls it."
-            if [[ "$HW_ACCEL" != "cpu" ]] && (( HW_RAM_GB >= 16 )); then
-                vlm_note="$vlm_note This machine has headroom for qwen2.5vl:3b if you want stronger VQA (untested with this agent)."
-            fi
-            configure_value OLLAMA_VLM_MODEL "Vision model (Ollama)" "$vlm_suggest" \
-                "Multimodal Ollama model the ollamavlm adapter uses for scene questions. moondream is the tested default." "yes" \
-                "$vlm_note"
+            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default." \
+                "yes" "$vlm_suggest"
+            pick_model_from_catalog vlm "$vlm_suggest" "Vision model (Ollama)"
+            env_set OLLAMA_VLM_MODEL "$PICKED_MODEL"
         fi
     else
         # Generic examples: prompt for any ${VAR:-default} the overlay exposes.

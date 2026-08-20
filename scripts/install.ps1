@@ -398,6 +398,35 @@ function Prompt-OverlayDefaults([string]$File) {
         if ([string]::IsNullOrWhiteSpace((Get-EnvValue $key))) { Set-EnvValue $key (Ask-Value $key $default) }
     }
 }
+# Catalog-driven model menu — renders examples/camera-agent/model_catalog.txt
+# (kind|model|min_ram_gb|tested|speed|summary) annotated for the detected
+# hardware, suggestion preselected; returns the chosen model name. Falls
+# back to a plain prompt when the catalog is missing.
+function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, [int]$RamGb) {
+    $catalog = 'examples/camera-agent/model_catalog.txt'
+    if (-not (Test-Path $catalog)) { return (Ask-Value $Label $Suggest) }
+    $rows = @(Get-Content $catalog | Where-Object { $_ -and -not $_.StartsWith('#') } |
+        ForEach-Object { $f = $_ -split '\|'; if ($f[0] -eq $Kind) { $f } })
+    if ($rows.Count -eq 0) { return (Ask-Value $Label $Suggest) }
+    Write-Host ''
+    Write-Host "  $Label - pick a number, or type any Ollama model name:"
+    $defaultIdx = ''
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $f = $rows[$i]
+        $mark = ''
+        if ($f[1] -eq $Suggest) { $mark = '  <- suggested'; $defaultIdx = [string]($i + 1) }
+        $fit = ''
+        if ($RamGb -gt 0 -and [int]$f[2] -gt $RamGb) { $fit = "  [needs ~$($f[2]) GB - detected $RamGb GB]" }
+        $tested = if ($f[3] -eq 'yes') { 'tested' } else { 'untested' }
+        Write-Host ('   {0}. {1,-16} ~{2}GB  {3,-8} {4,-8} {5}{6}{7}' -f ($i + 1), $f[1], $f[2], $f[4], $tested, $f[5], $fit, $mark)
+    }
+    $answer = Read-Host "  $Label [$(if ($defaultIdx) { $defaultIdx } else { $Suggest })]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = if ($defaultIdx) { $defaultIdx } else { $Suggest } }
+    $n = 0
+    if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $rows.Count) { return $rows[$n - 1][1] }
+    return $answer
+}
+
 function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
@@ -500,13 +529,8 @@ function Choose-Example {
 
         Write-Host ''
         Write-Host '  -- Camera Agent models (all local, no API keys) -------'
-        $llmNote = 'qwen2.5:0.5b (low RAM) | 1.5b | 3b - any Ollama model works.'
-        if ($accel -ne 'cpu' -and $ramGb -ge 32) {
-            $llmNote = "$llmNote This machine could also run qwen2.5:7b (stronger, ~2x slower per answer - untested with this agent)."
-        }
-        Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' $llmSuggest `
-            "The local chat model that answers your questions; must support tool calling. Default is sized for this machine ($hwDesc), capped at the largest model this agent is tested with." 'yes' `
-            $llmNote
+        Explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hwDesc), capped at the largest model this agent is tested with - 'untested' entries are known-good models nobody has validated with THIS agent yet." 'yes' $llmSuggest
+        Set-EnvValue OLLAMA_MODEL (Pick-ModelFromCatalog 'llm' $llmSuggest 'Local LLM model (Ollama)' $ramGb)
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if ($llmWhere -eq 'host') {
             $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = $llmSuggest }
@@ -533,13 +557,8 @@ function Choose-Example {
             'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
-            $vlmNote = 'moondream (tested default) | llava | qwen2.5vl:3b - any Ollama multimodal model; the adapter auto-pulls it.'
-            if ($accel -ne 'cpu' -and $ramGb -ge 16) {
-                $vlmNote = "$vlmNote This machine has headroom for qwen2.5vl:3b if you want stronger VQA (untested with this agent)."
-            }
-            Configure-Value OLLAMA_VLM_MODEL 'Vision model (Ollama)' $vlmSuggest `
-                'Multimodal Ollama model the ollamavlm adapter uses for scene questions. moondream is the tested default.' 'yes' `
-                $vlmNote
+            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default.' 'yes' $vlmSuggest
+            Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $ramGb)
         }
     } else {
         Prompt-OverlayDefaults $manifest
