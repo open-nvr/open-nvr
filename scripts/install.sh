@@ -442,7 +442,7 @@ pick_model_from_catalog() {
         PICKED_MODEL="$REPLY"
         return 0
     fi
-    local -a names summaries
+    local -a names
     local line model min_ram tested speed summary idx=0 default_idx=""
     printf '\n  %s — pick a number, or type any Ollama model name:\n' "$label"
     while IFS='|' read -r k model min_ram tested speed summary; do

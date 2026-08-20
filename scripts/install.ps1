@@ -406,7 +406,7 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
     $catalog = 'examples/camera-agent/model_catalog.txt'
     if (-not (Test-Path $catalog)) { return (Ask-Value $Label $Suggest) }
     $rows = @(Get-Content $catalog | Where-Object { $_ -and -not $_.StartsWith('#') } |
-        ForEach-Object { $f = $_ -split '\|'; if ($f[0] -eq $Kind) { $f } })
+        ForEach-Object { $f = $_ -split '\|'; if ($f[0] -eq $Kind) { ,$f } })  # ,$f: emit the ARRAY as one object — a bare $f is unrolled into the pipeline and $rows would flatten to strings
     if ($rows.Count -eq 0) { return (Ask-Value $Label $Suggest) }
     Write-Host ''
     Write-Host "  $Label - pick a number, or type any Ollama model name:"
