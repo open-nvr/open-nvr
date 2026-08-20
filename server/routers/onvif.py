@@ -32,9 +32,11 @@ from core.auth import get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
+from core.client_ip import get_client_ip
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnets,
+    lan_cidr_for_ip,
 )
 from services.onvif_digest_service import (
     connect_and_get_profiles,
@@ -156,6 +158,7 @@ def _resolve_scan_plan(db: Session, cidr: list[str] | None) -> tuple[list[str], 
 
 @router.get("/discover/plan")
 async def discover_plan(
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
@@ -180,6 +183,10 @@ async def discover_plan(
         "scan_cidrs": scan_cidrs,
         "source": source,
         "detected_cidrs": detected_cidrs,
+        # The requesting browser's own subnet (if it's a usable LAN address):
+        # a live scan suggestion that can't go stale, unlike the env-derived
+        # host hints in detected_cidrs.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
     }
 
 
@@ -293,6 +300,9 @@ async def discover(
         "scan_cidrs": scan_cidrs,
         "source": source,
         "suggested_cidrs": suggested_cidrs,
+        # Mirror of /discover/plan's client_cidr so scan responses can top up
+        # the UI's suggestions too.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
     }
 
 

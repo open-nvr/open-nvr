@@ -163,6 +163,27 @@ button:disabled { cursor: not-allowed; }
   background-color: color-mix(in oklab, var(--text-dim) 60%, transparent);
 }
 
+/* Indeterminate progress bar — a thin track with a sliding accent segment.
+   Used while camera discovery sweeps a subnet (no measurable progress). */
+.progress-indeterminate {
+  position: relative;
+  height: 3px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.progress-indeterminate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: var(--accent);
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(260%); }
+}
+
 /* Snackbar slide-in animation */
 @keyframes slide-in-right {
   from {

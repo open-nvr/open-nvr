@@ -351,6 +351,11 @@ services:
       # container recreates; otherwise MediaMTX keeps serving its cached
       # JWKS and rejects every stream token until it is restarted.
       - opennvr_jwt_keys:/app/keys
+      # Host LAN IP hints, rewritten by the launchers on every run so ONVIF
+      # discovery keeps seeing the host's *current* networks even when the
+      # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
+      # creation) go stale after a subnet change.
+      - ./data/net-hints:/app/net-hints:ro
     environment:
       # Must match the mediamtx service's TZ — recording directories are
       # named in local time and parsed with the same zone.

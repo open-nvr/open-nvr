@@ -45,11 +45,13 @@ import routers.network as net  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """Detection reads OPENNVR_HOST_IP / OPENNVR_DOCKER_SUBNET — keep the host's
-    real environment out of every test."""
+    """Detection reads OPENNVR_HOST_IP / OPENNVR_DOCKER_SUBNET and the host-ips
+    hint file — keep the host's real environment (and any real hint file, e.g.
+    when the suite runs inside the container) out of every test."""
     monkeypatch.delenv("OPENNVR_HOST_IP", raising=False)
     monkeypatch.delenv("OPENNVR_LAN_IPS", raising=False)
     monkeypatch.delenv("OPENNVR_DOCKER_SUBNET", raising=False)
+    monkeypatch.setenv("OPENNVR_HOST_IPS_FILE", "/nonexistent/host-ips")
 
 
 def _stub_docker(monkeypatch, in_docker=True):
@@ -190,3 +192,43 @@ def test_host_ip_hint_also_works_outside_docker(monkeypatch):
     _stub_hostname_ips(monkeypatch, ["10.20.0.5"])
     monkeypatch.setenv("OPENNVR_HOST_IP", "192.168.1.50")
     assert net.detect_local_subnets() == ["192.168.1.0/24", "10.20.0.0/24"]
+
+
+# ── Launcher hint file (refresh-net) ────────────────────────────────────────
+# The launchers rewrite ./data/net-hints/host-ips on every run (incl. the
+# refresh-net command); it is bind-mounted into the container and read fresh
+# per request. When it has IPs it OVERRIDES the env vars, which are frozen at
+# container creation and would otherwise resurrect subnets the host has left.
+
+
+def _write_hints(tmp_path, monkeypatch, content):
+    f = tmp_path / "host-ips"
+    f.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("OPENNVR_HOST_IPS_FILE", str(f))
+
+
+def test_hint_file_overrides_frozen_env(monkeypatch, tmp_path):
+    # Host moved from 192.168.29.x to 192.168.1.x, then ran refresh-net; the
+    # container env still holds the old address — it must NOT reappear.
+    _stub_docker(monkeypatch)
+    _stub_hostname_ips(monkeypatch, ["172.28.0.5"])
+    monkeypatch.setenv("OPENNVR_HOST_IP", "192.168.29.140")
+    monkeypatch.setenv("OPENNVR_LAN_IPS", "192.168.29.140,192.168.0.200")
+    _write_hints(tmp_path, monkeypatch, "192.168.1.17 192.168.0.200\n")
+    assert net.detect_local_subnets() == ["192.168.1.0/24", "192.168.0.0/24"]
+
+
+def test_empty_hint_file_falls_back_to_env(monkeypatch, tmp_path):
+    _stub_docker(monkeypatch)
+    _stub_hostname_ips(monkeypatch, [])
+    monkeypatch.setenv("OPENNVR_HOST_IP", "192.168.29.140")
+    _write_hints(tmp_path, monkeypatch, "")
+    assert net.detect_local_subnets() == ["192.168.29.0/24"]
+
+
+def test_missing_hint_file_falls_back_to_env(monkeypatch):
+    _stub_docker(monkeypatch)
+    _stub_hostname_ips(monkeypatch, [])
+    monkeypatch.setenv("OPENNVR_HOST_IP", "192.168.29.140")
+    # _clean_env already points OPENNVR_HOST_IPS_FILE at a nonexistent path.
+    assert net.detect_local_subnets() == ["192.168.29.0/24"]
