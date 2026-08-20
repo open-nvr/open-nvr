@@ -360,6 +360,114 @@ prompt_overlay_defaults() {
     done
 }
 
+# ── Hardware-aware model suggestion ────────────────────────────────
+# Detect the resources of the machine that will RUN the LLM and map them
+# to a sensible Ollama model tier. Suggestion only — every prompt still
+# lets the operator type anything. Tiers mirror
+# examples/camera-agent/MODELS_AND_LATENCY.md; update both together.
+#
+# detect_llm_hardware <host|container> → sets HW_RAM_GB, HW_CORES, HW_ACCEL
+detect_llm_hardware() {
+    local where="$1"
+    HW_RAM_GB=0; HW_CORES=0; HW_ACCEL="cpu"
+    if [[ "$PLATFORM" == "macOS" ]]; then
+        HW_RAM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+        HW_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 0)
+        # Apple Silicon → Metal, but ONLY when the model runs on the host:
+        # the Docker VM has no GPU access, and its RAM is the VM's
+        # allowance, not the machine's.
+        if [[ "$where" == "host" && "$(uname -m)" == "arm64" ]]; then
+            HW_ACCEL="metal"
+        fi
+        if [[ "$where" == "container" ]]; then
+            HW_RAM_GB=$(( $(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0) / 1073741824 ))
+        fi
+    else
+        HW_RAM_GB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0) / 1048576 ))
+        HW_CORES=$(nproc 2>/dev/null || echo 0)
+        # NVIDIA on Linux: Ollama uses CUDA both in-container (with the
+        # nvidia runtime) and on the host, so it counts either way.
+        if command -v nvidia-smi >/dev/null 2>&1 \
+           && nvidia-smi -L >/dev/null 2>&1; then
+            HW_ACCEL="cuda"
+        fi
+    fi
+}
+
+# suggest_llm_model → echoes the suggested Ollama model for the detected
+# hardware. Two constraints shape the tiers, deliberately:
+#   * FLOOR — tool-calling quality: below ~1.5b the agent misroutes
+#     tools noticeably, so tiny tiers are only suggested where latency
+#     would otherwise make it unusable.
+#   * CEILING — the tested envelope: suggestions never exceed the
+#     largest model this agent has been exercised with (qwen2.5:3b).
+#     "This hardware CAN run a bigger model" is detectable; "bigger
+#     will be BETTER for this agent's tool-calling and voice latency"
+#     is not — 7b doubles latency for untested gain, so machines with
+#     headroom get it as a note to try, never as the default.
+# Staying inside one family (qwen2.5) keeps the chat template and
+# tool-call format identical across tiers.
+suggest_llm_model() {
+    if [[ "$HW_ACCEL" != "cpu" ]]; then
+        if (( HW_RAM_GB >= 16 )); then echo "qwen2.5:3b"
+        else echo "qwen2.5:1.5b"; fi
+    else
+        if   (( HW_RAM_GB >= 16 && HW_CORES >= 8 )); then echo "qwen2.5:1.5b"
+        else echo "qwen2.5:0.5b"; fi
+    fi
+}
+
+# suggest_vlm_model → caption/VQA model for CAPTION_ADAPTER=ollamavlm.
+# ALWAYS moondream: it is the project's tested VQA default, and the
+# ollamavlm adapter is itself new — defaulting an untested model
+# through a new adapter based on a RAM check would stack unknowns.
+# Capable machines are told (in the prompt note) that qwen2.5vl:3b is
+# worth trying; that stays an operator decision.
+suggest_vlm_model() {
+    echo "moondream"
+}
+
+# ── Catalog-driven model menu ───────────────────────────────────────
+# Renders examples/camera-agent/model_catalog.txt (kind|model|min_ram_gb|
+# tested|speed|summary) as a numbered menu, annotated for the DETECTED
+# hardware, with the hardware-sized suggestion preselected. The operator
+# picks a number or types any Ollama model name. Falls back to a plain
+# prompt when the catalog file is missing. Sets PICKED_MODEL.
+pick_model_from_catalog() {
+    local kind="$1" suggest="$2" label="$3"
+    local catalog="examples/camera-agent/model_catalog.txt"
+    PICKED_MODEL="$suggest"
+    if [[ ! -f "$catalog" ]]; then
+        ask_value "$label" "$suggest"
+        PICKED_MODEL="$REPLY"
+        return 0
+    fi
+    local -a names
+    local line model min_ram tested speed summary idx=0 default_idx=""
+    printf '\n  %s — pick a number, or type any Ollama model name:\n' "$label"
+    while IFS='|' read -r k model min_ram tested speed summary; do
+        [[ "$k" == "$kind" ]] || continue
+        idx=$((idx + 1))
+        names[$idx]="$model"
+        local fit="" mark=""
+        if (( HW_RAM_GB > 0 && min_ram > HW_RAM_GB )); then
+            fit="  [needs ~${min_ram} GB — this machine detected ${HW_RAM_GB} GB]"
+        fi
+        [[ "$model" == "$suggest" ]] && { mark="  ← suggested"; default_idx="$idx"; }
+        printf '   %d. %-16s ~%sGB  %-8s %-8s %s%s%s\n' \
+            "$idx" "$model" "$min_ram" "$speed" \
+            "$([[ "$tested" == yes ]] && echo tested || echo untested)" \
+            "$summary" "$fit" "$mark"
+    done < <(grep -v '^#' "$catalog")
+    read -r -p "  ${label} [${default_idx:-$suggest}]: " REPLY || true
+    REPLY="${REPLY:-${default_idx:-$suggest}}"
+    if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= idx )); then
+        PICKED_MODEL="${names[$REPLY]}"
+    elif [[ -n "$REPLY" ]]; then
+        PICKED_MODEL="$REPLY"
+    fi
+}
+
 choose_example() {
     EXAMPLE_NAME=""; EXAMPLE_COMPOSE=""; EXAMPLE_PROFILE=""
     env_set OPENNVR_EXAMPLE ""
@@ -401,28 +509,18 @@ choose_example() {
         ask_value "Camera Agent mode: 1=voice, 2=chat" "1"
         [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="camera-agent-chat" || EXAMPLE_PROFILE="camera-agent"
 
-        printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
-        configure_value OLLAMA_MODEL "Local LLM model (Ollama)" "qwen2.5:1.5b" \
-            "The local chat model that answers your questions; must support tool calling." "yes" \
-            "Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower)."
-        if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
-            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" "base.en" \
-                "Transcribes your spoken questions (voice mode only)." "yes" \
-                "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
-        fi
-        configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
-            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast on macOS when the LLM runs on this machine — needs an adapter tag newer than 0.1.3)." "yes" \
-            "moondream | blip | ollamavlm — all local."
-
         printf '\n'
         # ── LLM runtime: bundled container vs the host machine ─────
-        # Platform-aware default. On macOS the Docker VM has no GPU
+        # Asked BEFORE the model prompts: where the LLM runs decides
+        # which hardware the model suggestion below should be sized
+        # for (host GPU/RAM vs the Docker VM's CPU-only allowance).
+        # Platform-aware default: on macOS the Docker VM has no GPU
         # access (no Metal for Linux guests), so the bundled container
         # answers on plain CPU — minutes per turn — while host Ollama
         # uses the Apple Silicon GPU. On Linux the container is native
         # and compose-managed: keep it the default there. A host
         # Ollama already answering on :11434 flips the default too.
-        local llm_default="1" host_ollama=""
+        local llm_default="1" host_ollama="" llm_where="container"
         if command -v curl >/dev/null 2>&1 \
            && curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
             host_ollama="yes"
@@ -437,11 +535,12 @@ choose_example() {
         fi
         ask_value "LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL" "$llm_default"
         if [[ "$REPLY" == "2" ]]; then
+            llm_where="host"
             configure_value OLLAMA_EXTERNAL_URL "External LLM endpoint" "http://host.docker.internal:11434" \
                 "Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker." "yes" \
                 "Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434"
-            # Offer to install / start / pull right here, so "external"
-            # never means "broken until you read the docs".
+            # Offer to install / start right here, so "external" never
+            # means "broken until you read the docs".
             if [[ -z "$host_ollama" ]]; then
                 if command -v ollama >/dev/null 2>&1; then
                     warn "Ollama is installed but not answering on :11434 — start it"
@@ -458,8 +557,38 @@ choose_example() {
                     warn "Install Ollama on this machine first: https://ollama.com/download"
                 fi
             fi
+            info "The bundled ollama container will be skipped entirely."
+        else
+            env_set OLLAMA_EXTERNAL_URL ""
+        fi
+
+        # ── Hardware-aware model suggestions ───────────────────────
+        # Size the defaults for the machine that will actually run the
+        # model. Suggestions only — type any Ollama model to override.
+        detect_llm_hardware "$llm_where"
+        local llm_suggest vlm_suggest hw_desc
+        llm_suggest=$(suggest_llm_model)
+        vlm_suggest=$(suggest_vlm_model)
+        hw_desc="${HW_RAM_GB} GB RAM, ${HW_CORES} cores"
+        case "$HW_ACCEL" in
+            metal) hw_desc="Apple Silicon GPU (Metal), $hw_desc" ;;
+            cuda)  hw_desc="NVIDIA GPU (CUDA), $hw_desc" ;;
+            *)     hw_desc="CPU only, $hw_desc" ;;
+        esac
+        if [[ "$llm_where" == "container" && "$PLATFORM" == "macOS" ]]; then
+            hw_desc="$hw_desc (Docker VM allowance)"
+        fi
+        ok "Detected: $hw_desc → suggesting $llm_suggest"
+
+        printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
+        explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hw_desc), capped at the largest model this agent is tested with — 'untested' entries are known-good models nobody has validated with THIS agent yet." \
+            "yes" "$llm_suggest"
+        pick_model_from_catalog llm "$llm_suggest" "Local LLM model (Ollama)"
+        env_set OLLAMA_MODEL "$PICKED_MODEL"
+        # Pull offer AFTER the model choice, so it pulls what was chosen.
+        if [[ "$llm_where" == "host" ]]; then
             local ext_model
-            ext_model=$(env_get OLLAMA_MODEL); ext_model=${ext_model:-qwen2.5:1.5b}
+            ext_model=$(env_get OLLAMA_MODEL); ext_model=${ext_model:-$llm_suggest}
             if command -v ollama >/dev/null 2>&1; then
                 if ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$ext_model"; then
                     ok "Model ${ext_model} is already available on this machine."
@@ -472,9 +601,21 @@ choose_example() {
             else
                 warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
             fi
-            info "The bundled ollama container will be skipped entirely."
-        else
-            env_set OLLAMA_EXTERNAL_URL ""
+        fi
+        if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
+            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" "base.en" \
+                "Transcribes your spoken questions (voice mode only)." "yes" \
+                "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
+        fi
+        configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
+            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast on macOS when the LLM runs on this machine — needs an adapter tag newer than 0.1.3)." "yes" \
+            "moondream | blip | ollamavlm — all local."
+        # ollamavlm chosen → suggest a VLM sized like the LLM was.
+        if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
+            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default." \
+                "yes" "$vlm_suggest"
+            pick_model_from_catalog vlm "$vlm_suggest" "Vision model (Ollama)"
+            env_set OLLAMA_VLM_MODEL "$PICKED_MODEL"
         fi
     else
         # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
@@ -486,6 +627,43 @@ choose_example() {
     ok "Selected $EXAMPLE_NAME ($EXAMPLE_PROFILE)"
     if [[ "$name" == "camera-agent" ]]; then
         info "The local LLM model downloads on first start — usually the slowest step."
+    fi
+}
+
+# ── Docker VM allowance check (macOS; Windows equivalent in install.ps1) ──
+# On macOS/Windows every container shares ONE VM whose CPU/RAM allowance
+# is a Docker Desktop setting — often left at a small default (half the
+# cores, a few GB). detect-pipeline, the caption VLM, and postgres all
+# live inside it. We CANNOT change that setting from here (it belongs to
+# Docker Desktop and needs an Apply & Restart); what we can do is notice
+# it is undersized for what was just selected and say exactly what to
+# change. Thresholds: 6 GB / 4 CPUs for the core stack, 8 GB when a
+# camera-agent example was selected with the BUNDLED LLM (the container
+# LLM is the one big in-VM RAM consumer; with an external LLM the core
+# threshold applies).
+check_docker_vm_allowance() {
+    [[ "$PLATFORM" == "macOS" ]] || return 0
+    local vm_mem_gb vm_cpus host_mem_gb host_cpus
+    vm_mem_gb=$(( $(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0) / 1073741824 ))
+    vm_cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 0)
+    host_mem_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+    host_cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo 0)
+    (( vm_mem_gb > 0 && vm_cpus > 0 )) || return 0
+
+    local need_mem=6
+    if [[ -n "$EXAMPLE_NAME" && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
+        need_mem=8
+    fi
+    info "Docker VM allowance: ${vm_cpus} CPUs / ${vm_mem_gb} GB (this machine has ${host_cpus} CPUs / ${host_mem_gb} GB)."
+    if (( vm_mem_gb < need_mem || vm_cpus < 4 )); then
+        warn "That is on the small side for what you selected (recommended: ≥4 CPUs, ≥${need_mem} GB)."
+        warn "OpenNVR cannot change this itself — raise it in Docker Desktop:"
+        warn "  Settings → Resources → CPUs / Memory → Apply & restart,"
+        warn "then re-run ./start.sh up. Containers share this allowance;"
+        warn "detect-pipeline and the vision model are the main consumers."
+        if (( host_mem_gb >= 16 )); then
+            info "With ${host_mem_gb} GB in this machine, giving Docker $(( host_mem_gb / 2 )) GB is a safe choice."
+        fi
     fi
 }
 
@@ -501,6 +679,7 @@ pull_and_build() {
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
     choose_example
+    check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
         COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE" --profile "$EXAMPLE_PROFILE")

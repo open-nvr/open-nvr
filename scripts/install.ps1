@@ -398,6 +398,35 @@ function Prompt-OverlayDefaults([string]$File) {
         if ([string]::IsNullOrWhiteSpace((Get-EnvValue $key))) { Set-EnvValue $key (Ask-Value $key $default) }
     }
 }
+# Catalog-driven model menu — renders examples/camera-agent/model_catalog.txt
+# (kind|model|min_ram_gb|tested|speed|summary) annotated for the detected
+# hardware, suggestion preselected; returns the chosen model name. Falls
+# back to a plain prompt when the catalog is missing.
+function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, [int]$RamGb) {
+    $catalog = 'examples/camera-agent/model_catalog.txt'
+    if (-not (Test-Path $catalog)) { return (Ask-Value $Label $Suggest) }
+    $rows = @(Get-Content $catalog | Where-Object { $_ -and -not $_.StartsWith('#') } |
+        ForEach-Object { $f = $_ -split '\|'; if ($f[0] -eq $Kind) { ,$f } })  # ,$f: emit the ARRAY as one object — a bare $f is unrolled into the pipeline and $rows would flatten to strings
+    if ($rows.Count -eq 0) { return (Ask-Value $Label $Suggest) }
+    Write-Host ''
+    Write-Host "  $Label - pick a number, or type any Ollama model name:"
+    $defaultIdx = ''
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $f = $rows[$i]
+        $mark = ''
+        if ($f[1] -eq $Suggest) { $mark = '  <- suggested'; $defaultIdx = [string]($i + 1) }
+        $fit = ''
+        if ($RamGb -gt 0 -and [int]$f[2] -gt $RamGb) { $fit = "  [needs ~$($f[2]) GB - detected $RamGb GB]" }
+        $tested = if ($f[3] -eq 'yes') { 'tested' } else { 'untested' }
+        Write-Host ('   {0}. {1,-16} ~{2}GB  {3,-8} {4,-8} {5}{6}{7}' -f ($i + 1), $f[1], $f[2], $f[4], $tested, $f[5], $fit, $mark)
+    }
+    $answer = Read-Host "  $Label [$(if ($defaultIdx) { $defaultIdx } else { $Suggest })]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = if ($defaultIdx) { $defaultIdx } else { $Suggest } }
+    $n = 0
+    if ([int]::TryParse($answer, [ref]$n) -and $n -ge 1 -and $n -le $rows.Count) { return $rows[$n - 1][1] }
+    return $answer
+}
+
 function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
@@ -427,27 +456,15 @@ function Choose-Example {
         Write-Host ''
         Explain 'Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter.' 'pick one' '1 (voice)'
         $mode = Ask-Value 'Camera Agent mode: 1=voice, 2=chat' '1'
+        # $prof, not $profile - $PROFILE is an automatic PowerShell variable.
         $prof = if ($mode -eq '2') { 'camera-agent-chat' } else { 'camera-agent' }
 
         Write-Host ''
-        Write-Host '  -- Camera Agent models (all local, no API keys) -------'
-        Configure-Value OLLAMA_MODEL 'Local LLM model (Ollama)' 'qwen2.5:1.5b' `
-            'The local chat model that answers your questions; must support tool calling.' 'yes' `
-            'Pulled automatically. qwen2.5:0.5b (low RAM) | 1.5b (default) | 3b (better, slower).'
-        if ($prof -eq 'camera-agent') {
-            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
-                'Transcribes your spoken questions (voice mode only).' 'yes' `
-                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
-        }
-        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
-            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
-            'moondream | blip | ollamavlm - all local.'
-
-        Write-Host ''
-        # Platform-aware default: on Windows/macOS the Docker VM has no GPU
-        # access, so host-side Ollama is the usable path; a host Ollama
-        # already answering on :11434 flips the default too. (install.ps1
-        # on Linux is rare — keep the bundled container default there.)
+        # LLM runtime FIRST: where the LLM runs decides which hardware the
+        # model suggestion below is sized for (host GPU/RAM vs the Docker
+        # VM's CPU-only allowance). Windows/macOS default to the host
+        # (container VMs have no GPU access); Linux keeps the bundled
+        # container. A host Ollama already on :11434 flips the default.
         $hostOllama = $false
         try {
             $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
@@ -457,11 +474,13 @@ function Choose-Example {
         Explain 'Where should the LLM run? In Docker on Windows/macOS the container CANNOT use the GPU - answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU and skips a 3.2 GB image. On a Linux server the bundled container is fine.' 'pick one' $llmDefault
         if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
         $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' $llmDefault
+        $llmWhere = 'container'
+        $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
         if ($llmMode -eq '2') {
+            $llmWhere = 'host'
             Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
                 'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
                 'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
-            $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
             if (-not $hostOllama) {
                 if ($ollamaCmd) {
                     Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
@@ -478,7 +497,43 @@ function Choose-Example {
                     Warn 'Install Ollama on this machine first: https://ollama.com/download'
                 }
             }
-            $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = 'qwen2.5:1.5b' }
+            Info 'The bundled ollama container will be skipped entirely.'
+        } else {
+            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+        }
+
+        # Hardware-aware suggestion, sized for where the LLM will run.
+        # Tiers mirror examples/camera-agent/MODELS_AND_LATENCY.md (and
+        # suggest_llm_model in install.sh) - keep the three in sync.
+        $ramGb = 0; $cores = [int]($env:NUMBER_OF_PROCESSORS); $accel = 'cpu'
+        try { $ramGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+        if ($llmWhere -eq 'host') {
+            if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+                try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
+            }
+        }
+        # Ceiling = the tested envelope: never suggest beyond qwen2.5:3b
+        # (the largest model this agent is exercised with); bigger-is-
+        # runnable is detectable, bigger-is-better is not. VLM default is
+        # ALWAYS moondream — an untested model through the new ollamavlm
+        # adapter would stack unknowns; headroom is advertised in the
+        # prompt note instead.
+        $llmSuggest = if ($accel -ne 'cpu') {
+            if ($ramGb -ge 16) { 'qwen2.5:3b' } else { 'qwen2.5:1.5b' }
+        } else {
+            if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen2.5:1.5b' } else { 'qwen2.5:0.5b' }
+        }
+        $vlmSuggest = 'moondream'
+        $hwDesc = "$(if ($accel -eq 'cuda') { 'NVIDIA GPU (CUDA), ' } else { 'CPU only, ' })$ramGb GB RAM, $cores cores"
+        Ok "Detected: $hwDesc -> suggesting $llmSuggest"
+
+        Write-Host ''
+        Write-Host '  -- Camera Agent models (all local, no API keys) -------'
+        Explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hwDesc), capped at the largest model this agent is tested with - 'untested' entries are known-good models nobody has validated with THIS agent yet." 'yes' $llmSuggest
+        Set-EnvValue OLLAMA_MODEL (Pick-ModelFromCatalog 'llm' $llmSuggest 'Local LLM model (Ollama)' $ramGb)
+        # Pull offer AFTER the model choice, so it pulls what was chosen.
+        if ($llmWhere -eq 'host') {
+            $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = $llmSuggest }
             if ($ollamaCmd) {
                 $have = (& ollama list 2>$null | Select-Object -Skip 1 | ForEach-Object { ($_ -split '\s+')[0] }) -contains $extModel
                 if ($have) {
@@ -492,9 +547,18 @@ function Choose-Example {
             } else {
                 Warn "Before first use, pull the model ON THE HOST:  ollama pull $extModel"
             }
-            Info 'The bundled ollama container will be skipped entirely.'
-        } else {
-            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+        }
+        if ($prof -eq 'camera-agent') {
+            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
+                'Transcribes your spoken questions (voice mode only).' 'yes' `
+                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
+        }
+        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
+            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
+            'moondream | blip | ollamavlm - all local.'
+        if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
+            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default.' 'yes' $vlmSuggest
+            Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $ramGb)
         }
     } else {
         Prompt-OverlayDefaults $manifest
@@ -506,6 +570,32 @@ function Choose-Example {
         Info 'The local LLM model downloads on first start - usually the slowest step.'
     }
 }
+# Docker VM allowance check — Windows twin of check_docker_vm_allowance in
+# install.sh. On Docker Desktop the WSL2/Hyper-V VM's CPU/RAM allowance is a
+# Docker Desktop / .wslconfig setting we cannot change from here; detect an
+# undersized allowance for what was selected and say exactly what to change.
+function Check-DockerVmAllowance {
+    $vmMemGb = 0; $vmCpus = 0
+    try {
+        $vmMemGb = [int]([math]::Floor([long](docker info --format '{{.MemTotal}}' 2>$null) / 1GB))
+        $vmCpus  = [int](docker info --format '{{.NCPU}}' 2>$null)
+    } catch {}
+    if ($vmMemGb -le 0 -or $vmCpus -le 0) { return }
+    $hostMemGb = 0
+    try { $hostMemGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+    $needMem = 6
+    if ($script:ExampleName -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
+    Info "Docker VM allowance: $vmCpus CPUs / $vmMemGb GB (this machine has $hostMemGb GB)."
+    if ($vmMemGb -lt $needMem -or $vmCpus -lt 4) {
+        Warn "That is on the small side for what you selected (recommended: >=4 CPUs, >=$needMem GB)."
+        Warn 'OpenNVR cannot change this itself - raise it in Docker Desktop:'
+        Warn '  Settings -> Resources (WSL2 backend: edit %UserProfile%\.wslconfig,'
+        Warn '  e.g. [wsl2] / memory=8GB / processors=4, then wsl --shutdown),'
+        Warn 'then re-run .\start.ps1 up. detect-pipeline and the vision model'
+        Warn 'are the main consumers of this shared allowance.'
+    }
+}
+
 function Pull-AndBuild {
     Write-Host ''
     Info 'First-time setup downloads several container images (and, for the'
@@ -518,6 +608,7 @@ function Pull-AndBuild {
     docker compose -f $BaseCompose pull --ignore-buildable
     if ($LASTEXITCODE -ne 0) { Fail 'Failed to pull the core stack' }
     Choose-Example
+    Check-DockerVmAllowance
     $script:ComposeArgs = @('-f', $BaseCompose)
     if ($script:ExampleCompose) {
         $script:ComposeArgs += @('-f', $script:ExampleCompose, '--profile', $script:ExampleProfile)
