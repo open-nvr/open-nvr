@@ -108,6 +108,17 @@ def bottom_center_distance(a: Box, b: Box) -> float:
     return math.sqrt(dx * dx + dy * dy + dw * dw + dh * dh)
 
 
+def _coverage(inner: Box, outer: Box) -> float:
+    """Fraction of ``inner``'s area that lies inside ``outer`` (0..1)."""
+    ix1, iy1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    ix2, iy2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area = max((inner[2] - inner[0]) * (inner[3] - inner[1]), 1)
+    return inter / area
+
+
 def _crop_bgr(bgr, box: Box):
     """Clamp ``box`` to the frame and return a copied BGR crop, or None if empty."""
     h, w = bgr.shape[:2]
@@ -178,10 +189,18 @@ class Tracker:
             if ti in unmatched_tracks:
                 tr.age += 1
                 if scanned_regions is not None and not any(
-                    intersection_over_union(tr.box, r) > 0 for r in scanned_regions
+                    _coverage(tr.box, r) >= 0.7 for r in scanned_regions
                 ):
-                    # Coast: nothing looked at this object this frame, so its
-                    # absence from ``detections`` is not evidence it left.
+                    # Coast: no scanned region substantially covered this
+                    # object, so its absence from ``detections`` is not
+                    # evidence it left. Mere partial overlap coasts too —
+                    # motion NEXT TO a gated stationary object scans a
+                    # region that clips it; a half-visible car at a crop
+                    # edge going undetected must not accumulate misses, or
+                    # someone loitering beside a parked car would get its
+                    # track deleted. Re-verification frames still expire a
+                    # departed object: the track's own region fully
+                    # contains its box (coverage 1.0).
                     survivors.append(tr)
                     continue
                 tr.misses += 1

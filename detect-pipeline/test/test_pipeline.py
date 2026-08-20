@@ -233,3 +233,41 @@ def test_departed_object_still_expires():
         if not tracker.tracks:
             break
     assert not tracker.tracks, "departed stationary track never expired"
+
+
+def test_adjacent_motion_does_not_erode_a_gated_track():
+    # Someone loitering NEXT TO a parked car: their motion region CLIPS the
+    # car (~55% coverage at this 720p geometry) but never substantially
+    # covers it, and the detector sees nothing car-shaped in those crops.
+    # The car's track must coast, not accumulate misses toward deletion —
+    # pre-gating it always had its own region, so this failure mode is new
+    # with stationary skipping. (Note: FULL coverage + no detection is the
+    # opposite case and must still expire the track — that is
+    # test_departed_object_still_expires.)
+    W2, H2 = 1280, 720
+    frame2 = lambda seq: Frame(bytes(frame_size_bytes(W2, H2)), W2, H2, seq, float(seq))
+    tracker = Tracker((H2, W2), TrackConfig(fps=5, min_initialized=1, stationary_threshold=3))
+    det = _CountingBoxDetector()
+    motion = _SwitchableMotion(box=(500, 300, 700, 600))   # the "car"
+    pipe = DetectPipeline(_FakeSource(0), motion, det, tracker, stationary_interval=1000)
+    for i in range(6):                                     # establish + go stationary
+        pipe.process_frame(frame2(i))
+    motion.active = False
+    assert tracker.tracks and tracker.tracks[0].stationary
+    car = tracker.tracks[0]
+    tid = car.id
+
+    class _SeesNothing:
+        def detect(self, crop):
+            return []
+
+    pipe.detector = _SeesNothing()
+    # motion box adjacent to the car: its region clips the car partially
+    x1, y1, x2, y2 = car.box
+    motion.box = (x2 + 20, y1 + 50, x2 + 80, y2 - 50)
+    motion.active = True
+    budget = tracker.config.disappeared()
+    for i in range(budget * 4):
+        pipe.process_frame(frame2(700 + i))
+    assert [t.id for t in tracker.tracks] == [tid], (
+        "gated track eroded by adjacent-motion partial scans")
