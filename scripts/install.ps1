@@ -440,8 +440,8 @@ function Choose-Example {
                 'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
         }
         Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
-            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions.' 'yes' `
-            'moondream | blip - both run locally.'
+            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
+            'moondream | blip | ollamavlm - all local.'
 
         Write-Host ''
         # Platform-aware default: on Windows/macOS the Docker VM has no GPU

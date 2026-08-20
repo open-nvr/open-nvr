@@ -411,8 +411,8 @@ choose_example() {
                 "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
         fi
         configure_value CAPTION_ADAPTER "Scene-description model" "moondream" \
-            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions." "yes" \
-            "moondream | blip — both run locally."
+            "Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast on macOS when the LLM runs on this machine — needs an adapter tag newer than 0.1.3)." "yes" \
+            "moondream | blip | ollamavlm — all local."
 
         printf '\n'
         # ── LLM runtime: bundled container vs the host machine ─────
