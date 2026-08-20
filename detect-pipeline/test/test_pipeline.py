@@ -118,3 +118,118 @@ def test_pipeline_skips_detection_while_calibrating():
     assert calls["n"] == 0                    # detector never called while calibrating
     assert all(c is True for c in results)    # calibrating flag surfaced
     assert tracker.tracks == []
+
+
+# ── PR B: stationary-track gating ───────────────────────────────────
+
+class _CountingBoxDetector:
+    """Detects a person at a fixed frame-space box; counts calls."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self, crop):
+        self.calls += 1
+        # normalized coords roughly centered — mapped back via the region
+        return [RawDetection("person", 0.9, (0.3, 0.3, 0.7, 0.7))]
+
+
+class _SwitchableMotion:
+    """Motion that can be turned on/off per frame."""
+
+    def __init__(self, box=(100, 80, 160, 200)):
+        self.box = box
+        self.active = True
+
+    def detect(self, luma):
+        return [self.box] if self.active else []
+
+    def is_calibrating(self):
+        return False
+
+
+def _make_stationary(pipe, motion, frames=6):
+    """Feed frames with motion until a track exists and is stationary."""
+    motion.active = True
+    for i in range(frames):
+        pipe.process_frame(_frame(i))
+    motion.active = False
+
+
+def _gated_pipe(interval=5, stationary_threshold=3):
+    tracker = Tracker(
+        (H, W),
+        TrackConfig(fps=5, min_initialized=1, stationary_threshold=stationary_threshold),
+    )
+    det = _CountingBoxDetector()
+    motion = _SwitchableMotion()
+    pipe = DetectPipeline(
+        _FakeSource(0), motion, det, tracker, stationary_interval=interval,
+    )
+    return pipe, det, motion, tracker
+
+
+def test_stationary_track_stops_feeding_detector_every_frame():
+    pipe, det, motion, tracker = _gated_pipe(interval=5)
+    _make_stationary(pipe, motion)
+    assert tracker.tracks and tracker.tracks[0].stationary
+    before = det.calls
+    results = [pipe.process_frame(_frame(100 + i)) for i in range(10)]
+    ran = det.calls - before
+    # 10 still frames, interval 5 → exactly 2 staggered re-verifications
+    assert ran == 2, f"expected 2 re-verify detections, detector ran {ran}x"
+    assert sum(r.skipped_stationary for r in results) == 8
+
+
+def test_stationary_track_coasts_instead_of_dying():
+    # Skipped frames must not age the track toward deletion: run far past
+    # the tracker's disappearance budget (fps*5 = 25) with detection skipped.
+    pipe, det, motion, tracker = _gated_pipe(interval=5)
+    _make_stationary(pipe, motion)
+    tid = tracker.tracks[0].id
+    for i in range(60):
+        pipe.process_frame(_frame(200 + i))
+    assert [t.id for t in tracker.tracks] == [tid], "stationary track was lost while gated"
+    assert tracker.tracks[0].stationary
+
+
+def test_motion_on_stationary_object_reverifies_immediately():
+    pipe, det, motion, tracker = _gated_pipe(interval=1000)   # never re-verify by timer
+    _make_stationary(pipe, motion)
+    before = det.calls
+    # a couple of still frames: fully skipped
+    pipe.process_frame(_frame(300)); pipe.process_frame(_frame(301))
+    assert det.calls == before
+    # motion overlapping the tracked object → detector runs THIS frame
+    motion.active = True
+    r = pipe.process_frame(_frame(302))
+    assert det.calls > before
+    assert r.skipped_stationary == 0
+
+
+def test_interval_zero_disables_gating():
+    pipe, det, motion, tracker = _gated_pipe(interval=0)
+    _make_stationary(pipe, motion)
+    before = det.calls
+    results = [pipe.process_frame(_frame(400 + i)) for i in range(5)]
+    # pre-PR-B behavior: the track feeds a region EVERY frame
+    assert det.calls - before == 5
+    assert all(r.skipped_stationary == 0 for r in results)
+
+
+def test_departed_object_still_expires():
+    # When the object actually leaves, re-verification frames scan its region,
+    # find nothing, and the track must eventually die (not coast forever).
+    pipe, det, motion, tracker = _gated_pipe(interval=3)
+
+    class _GoneDetector:
+        def detect(self, crop):
+            return []
+
+    _make_stationary(pipe, motion)
+    pipe.detector = _GoneDetector()
+    for i in range(200):
+        pipe.process_frame(_frame(500 + i))
+        if not tracker.tracks:
+            break
+    assert not tracker.tracks, "departed stationary track never expired"

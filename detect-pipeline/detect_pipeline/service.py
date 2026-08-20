@@ -174,9 +174,17 @@ class CameraWorker:
         lifecycle = VisitLifecycle(self.spec.camera_id)
         motion = MotionDetector((h, w), MotionConfig())
         tracker = Tracker((h, w), TrackConfig(fps=self.spec.fps))
+        import os as _os
+        try:
+            _stationary_interval = int(_os.environ.get("DETECT_STATIONARY_INTERVAL", "10"))
+        except ValueError:
+            log.warning("DETECT_STATIONARY_INTERVAL=%r is not an integer; using 10",
+                        _os.environ.get("DETECT_STATIONARY_INTERVAL"))
+            _stationary_interval = 10
         pipe = DetectPipeline(
             None, motion, self.detector, tracker,
             model_size=(self.model_size, self.model_size),
+            stationary_interval=_stationary_interval,
         )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)

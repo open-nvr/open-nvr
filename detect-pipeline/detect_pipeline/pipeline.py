@@ -11,9 +11,16 @@ The per-camera Tier-0 worker — ties the pieces together.
                                                                          ▲
                                      recording is MediaMTX's job ────────┘  (never gated)
 
-Everything runs full-time here — PR A does NOT gate. The gate (skip detection on
-stationary tracks) and the Tier-1 dispatch of best crops through KAI-C land in
-PR B; this worker only produces tracks + best frames.
+Detection is DOUBLY gated. The first gate has always been region selection:
+no motion boxes and no active tracks → no regions → the detector never runs.
+The second gate is stationary-track skipping (PR B, this file): a track that
+has not moved for ``stationary_threshold`` frames stops feeding a region
+every frame and is only re-verified every ``stationary_interval``-th frame
+(staggered per track id so multiple parked objects don't re-verify on the
+same frame), or IMMEDIATELY when a motion box intersects it — a parked car
+no longer pins the detector, but something moving next to it re-checks it
+at once. Skipped tracks coast in the tracker (see Tracker.update's
+scanned_regions contract) instead of aging toward deletion.
 
 Region selection here is the simple form: a region per motion box and per active
 track, de-duplicated by IoU. The learned per-camera region grid is a documented
@@ -58,6 +65,9 @@ class FrameResult:
     # where the detector didn't run (calibrating / no motion).
     detections: list[Detection] = field(default_factory=list)
     detect_latency_s: float | None = None
+    # Stationary tracks whose region was NOT scanned this frame (the PR B
+    # saving, made visible for metrics/tests).
+    skipped_stationary: int = 0
     # Per-stage wall time for the frame (decode/motion/region/detect/track) — lets
     # the test-bed see *where* time goes, not just the end-to-end total.
     stage_latency_s: dict[str, float] = field(default_factory=dict)
@@ -107,6 +117,7 @@ class DetectPipeline:
         *,
         model_size: tuple[int, int] = (320, 320),
         region_multiplier: float = 1.35,
+        stationary_interval: int = 10,
     ) -> None:
         self.frame_source = frame_source
         self.motion = motion
@@ -115,6 +126,12 @@ class DetectPipeline:
         self.model_size = model_size            # (w, h)
         self.region_multiplier = region_multiplier
         self.min_region = get_min_region_size(model_size[0], model_size[1])
+        # Re-verify a stationary track every Nth frame (staggered by track
+        # id). 0 disables the skip — every track feeds a region every frame,
+        # the pre-PR-B behavior. Kept well below the tracker's disappearance
+        # budget so a skipped track can never age out between verifications.
+        self.stationary_interval = max(0, int(stationary_interval))
+        self._frame_idx = 0
 
     def process_frame(self, frame) -> FrameResult:
         """Run one frame end-to-end; return tracks + motion boxes + regions."""
@@ -133,7 +150,24 @@ class DetectPipeline:
             return FrameResult(tracks, motion_boxes, [], True, stage_latency_s=stages)
 
         frame_shape = (frame.height, frame.width)
-        track_boxes = [t.box for t in self.tracker.tracks]
+        self._frame_idx += 1
+        track_boxes: list[Box] = []
+        skipped = 0
+        for t in self.tracker.tracks:
+            if (
+                self.stationary_interval > 0
+                and t.stationary
+                # staggered re-verify frame for THIS track?
+                and (self._frame_idx + t.id) % self.stationary_interval != 0
+                # motion touching the object forces an immediate re-check —
+                # the car may be leaving, or someone is standing next to it.
+                and not any(
+                    intersection_over_union(t.box, m) > 0 for m in motion_boxes
+                )
+            ):
+                skipped += 1
+                continue
+            track_boxes.append(t.box)
         _t = time.monotonic()
         regions = select_regions(
             motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier
@@ -159,11 +193,12 @@ class DetectPipeline:
         # bgr is passed so the tracker can retain each track's best-frame crop
         # for Tier-1 dispatch (#10); None on frames with no detections.
         _t = time.monotonic()
-        tracks = self.tracker.update(dets, bgr)
+        tracks = self.tracker.update(dets, bgr, scanned_regions=regions)
         stages["track"] = time.monotonic() - _t
         return FrameResult(
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
+            skipped_stationary=skipped,
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
