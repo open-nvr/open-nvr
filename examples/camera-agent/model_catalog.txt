@@ -20,6 +20,12 @@ llm|qwen2.5:3b|4|yes|medium|Best answers in the tested set; noticeably better re
 llm|qwen2.5:7b|8|no|slower|Strongest reasoning in the family; ~2x slower per answer than 3b; untested with this agent
 llm|llama3.2:3b|4|no|medium|Different family, solid tool calling and a more conversational tone; untested with this agent
 llm|qwen3:1.7b|3|no|fast|Newer generation; better instruction-following than same-size qwen2.5; untested with this agent
+# VLM entries apply to CAPTION_ADAPTER=ollamavlm (vision served by your
+# Ollama). Note: 'moondream' here is Ollama's moondream2 (~1.8b) — the
+# separate moondream-adapter container ships the smaller 0.5b-int8 build.
 vlm|moondream|3|yes|fast|Edge-optimized VQA: answers questions about the scene at low cost; the tested default
-vlm|qwen2.5vl:3b|5|no|medium|Stronger scene understanding and can READ (signs, labels, plates); GPU recommended; untested with this agent
-vlm|llava:7b|8|no|slower|General-purpose VQA, most descriptive answers; heavy; untested with this agent
+vlm|gemma3:4b|4|no|medium|Well-rounded multimodal generalist; good scene descriptions and decent text reading for its size
+vlm|qwen2.5vl:3b|5|no|medium|Strong scene understanding and the best READER of its size (signs, labels, plates); GPU recommended
+vlm|minicpm-v|6|no|medium|OCR standout: reads dense or small text (delivery labels, screens) better than most; 8b-class
+vlm|llava:7b|6|no|slower|The classic general VQA: most descriptive free-form answers; weaker at reading text than qwen2.5vl
+vlm|llama3.2-vision:11b|9|no|slowest|Strongest scene reasoning of the set; heavy — really wants a GPU with headroom

@@ -219,8 +219,25 @@ first contribution.
 
 ### VLMs (the agent's eyes — used via `CAPTION_ADAPTER=ollamavlm`)
 
+These are Ollama-servable vision models; the installer annotates each
+with whether it fits your detected hardware. (`moondream` here is
+Ollama's moondream2 ~1.8b; the standalone moondream-adapter container
+ships the smaller 0.5b-int8 build — both are the same family and the
+tested default either way. `blip` remains available as a plain
+captioner via its own adapter, outside this menu.)
+
 | Model | ~RAM | Speed | Status | Good at |
 |---|---|---|---|---|
-| `moondream` | 3 GB | fast | tested | Edge-optimized VQA; the tested default |
-| `qwen2.5vl:3b` | 5 GB | medium | untested | Stronger scenes and can READ (signs, labels, plates) |
-| `llava:7b` | 8 GB | slower | untested | Most descriptive general VQA; heavy |
+| `moondream` | 3 GB | fast | tested | Edge-optimized VQA at low cost; the tested default |
+| `gemma3:4b` | 4 GB | medium | untested | Well-rounded generalist; good descriptions, decent text reading |
+| `qwen2.5vl:3b` | 5 GB | medium | untested | Best text READER of its size (signs, labels, plates) |
+| `minicpm-v` | 6 GB | medium | untested | OCR standout: dense/small text (delivery labels, screens) |
+| `llava:7b` | 6 GB | slower | untested | Classic general VQA; most descriptive free-form answers |
+| `llama3.2-vision:11b` | 9 GB | slowest | untested | Strongest scene reasoning; wants a GPU with headroom |
+
+Picking for a security camera: **counting and "is something there" never
+needs a VLM** (YOLOv8 does that); the VLM answers "what/who/how does it
+look". `moondream` covers that cheaply. Reach for `qwen2.5vl:3b` or
+`minicpm-v` when your questions involve **reading** (plates, parcel
+labels, uniforms with text); reach for the big ones only when answer
+richness matters more than latency.
