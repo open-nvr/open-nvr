@@ -160,6 +160,8 @@ Run `.\start.ps1` (or `./start.sh`) any time. If it's already set up, it asks wh
 
 > **Just want to try the AI?** Pick **camera-agent** in step 3, or see [Talk to your cameras](#talk-to-your-cameras).
 
+> **Don't need object detection?** Set `DETECT_PIPELINE_ENABLED=false` in `.env` and restart — the always-on detection loop (and its CPU) switches off entirely, while recording, playback, the camera-agent, and any adapters you bring keep working. Made for setups running other kinds of AI (captioning/VQA, LPR, faces, your own [Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) models) that don't want a detector running underneath.
+
 ### Common follow-ups
 
 Commands below use `./start.sh`; on Windows use `.\start.ps1` with the same word.

@@ -90,7 +90,18 @@ subjects. It changes nothing about ingest, recording, or serving.
 service behind the `tier0` compose profile instead — the lite family is fully
 CPU-bound and co-running an uncapped detector starves it — so the lite
 quickstart does not start Tier-0; add `--profile tier0` to run both.
-**Why is my CPU high? → lower `DETECT_FPS`, then configure the substream.**
+**Why is my CPU high? → check for a pinned stationary object, lower
+`DETECT_FPS`, then configure the substream.** As of stationary-track
+gating, an object that stops moving (parked car, person sitting still)
+is re-verified every `DETECT_STATIONARY_INTERVAL`-th frame (default 10,
+staggered per object; motion touching it re-checks immediately) instead
+of feeding the detector every frame — an idle scene with parked objects
+now costs decode+motion, not inference. If CPU is still high on a still
+scene, look for perpetual motion sources: a camera-OSD timestamp burned
+into the substream ticks every second and defeats motion gating — turn
+the overlay off in the camera, or crop/mask it.
+
+**Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
 analysis rate — `DETECT_FPS`, default 5. On CPU-only hosts (laptops; any
@@ -99,7 +110,7 @@ or `2`: a fraction of the CPU, at the cost of coarser motion/track
 granularity and a smaller candidate pool for best-frame selection. An
 explicit per-camera `fps` from the discovery endpoint still wins.
 
-**Second dial: configure the substream.** Tier-0 decodes each
+**Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
 provides). If a camera has no substream configured, Tier-0 falls back to
 decoding the full main stream — that is the difference between ~0.3 and ~2
@@ -116,6 +127,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_FPS=5                      # frames analyzed /s /camera (1-30) — the main CPU dial
+DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)
