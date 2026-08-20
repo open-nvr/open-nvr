@@ -608,6 +608,18 @@ def looks_like_noise(transcript: str) -> bool:
     words = norm.split()
     if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
         return True
+    # Repetition hallucination: Whisper on sustained background noise loops a
+    # phrase ("I will go to sleep. I will go to sleep. I will go to sleep.").
+    # Real questions almost never repeat the same 3-word run three times or
+    # collapse to a handful of unique words — such a transcript is noise, and
+    # answering it costs a full LLM+VLM turn (the observed failure: phantom
+    # turns keeping the vision model busy while nobody was speaking).
+    if len(words) >= 6:
+        if len(set(words)) / len(words) < 0.4:
+            return True
+        trigrams = [" ".join(words[i:i + 3]) for i in range(len(words) - 2)]
+        if trigrams and max(trigrams.count(t) for t in set(trigrams)) >= 3:
+            return True
     return False
 
 
@@ -4689,6 +4701,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     # Demo-local conversation memory (single user). Kept tiny and turn-text
     # only; reset via POST /reset. A multi-user UI would key this per session.
     demo_history: list[dict[str, str]] = []
+    # The in-flight voice turn, cancellable from /converse/cancel. One slot on
+    # purpose: the demo UI serialises turns (``busy`` gate), so at most one
+    # LLM turn is ever running; Stop must be able to kill it — a 25 s
+    # LLM+VLM turn that can't be abandoned is the "Stop doesn't stop"
+    # complaint in code form.
+    _inflight: dict[str, asyncio.Task | None] = {"turn": None}
     _MAX_HISTORY_TURNS = 8  # 4 user + 4 assistant
 
     @app.post("/reset")
@@ -4886,15 +4904,38 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # the current moment, not a frame cached seconds ago (a cause of the
             # same answer repeating when the scene has actually changed).
             runtime.context.invalidate_frame_cache()
+            turn = asyncio.create_task(_run_conversation_turn(
+                runtime, demo_history, question, preferred_camera=camera_hint,
+                tool_definitions=runtime.tools_for_tier(
+                    getattr(request.state, "agent_tier", "admin")),
+            ), name="converse-turn")
+            _inflight["turn"] = turn
             try:
-                reply = await _run_conversation_turn(
-                    runtime, demo_history, question, preferred_camera=camera_hint,
-                    tool_definitions=runtime.tools_for_tier(
-                        getattr(request.state, "agent_tier", "admin")),
-                )
+                reply = await turn
+            except asyncio.CancelledError:
+                # Two ways to get here, and they need different handling:
+                #  a) /converse/cancel cancelled THE TURN (user tapped Stop) —
+                #     answer the still-open request with {cancelled: true}.
+                #  b) THIS ENDPOINT was cancelled (client aborted the request /
+                #     disconnected) while the turn task is still running. The
+                #     turn is a separate task, so it would survive as an
+                #     orphan and keep burning the LLM — cancel it here, then
+                #     re-raise so the teardown proceeds. Without this, Stop's
+                #     fetch-abort raced /converse/cancel and could leave the
+                #     turn running to completion.
+                if not turn.done():
+                    turn.cancel()
+                    raise
+                logger.info("converse: turn cancelled by user")
+                timings["total"] = int((_t.perf_counter() - t0) * 1000)
+                return JSONResponse({"transcript": transcript, "reply": "",
+                                     "audio_b64": None, "timings_ms": timings,
+                                     "cancelled": True})
             except Exception:
                 logger.exception("converse: LLM turn failed")
                 return JSONResponse({"error": "assistant failed"}, status_code=502)
+            finally:
+                _inflight["turn"] = None
         t3 = _mark("llm", t2)
         logger.info("converse: reply=%r", reply[:160])
 
@@ -4904,14 +4945,27 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             demo_history.append({"role": "assistant", "content": reply})
             del demo_history[:-_MAX_HISTORY_TURNS]
 
-        # 4) Synthesise the reply.
+        # 4) Synthesise the reply. One retry (a transient 503 from a
+        #    just-restarted / briefly starved Piper adapter shouldn't mute a
+        #    whole turn); a persistent failure is REPORTED to the UI via
+        #    ``tts_error`` instead of silently degrading to text-only.
         audio_b64 = None
-        try:
-            audio = await runtime.piper.synthesize(reply)
-            if audio:
-                audio_b64 = base64.b64encode(audio).decode("ascii")
-        except Exception:
-            logger.exception("converse: TTS failed")  # text still returned
+        tts_error = False
+        for attempt in (1, 2):
+            try:
+                audio = await runtime.piper.synthesize(reply)
+                if audio:
+                    audio_b64 = base64.b64encode(audio).decode("ascii")
+                break
+            except Exception:
+                if attempt == 1:
+                    logger.warning("converse: TTS failed; retrying once")
+                    await asyncio.sleep(0.4)
+                else:
+                    tts_error = True
+                    logger.exception(
+                        "converse: TTS failed after retry — check the piper "
+                        "adapter (docker logs, /health); text-only reply")
         _mark("tts", t3)
         timings["total"] = int((_t.perf_counter() - t0) * 1000)
         # Log the per-stage breakdown so a slow turn can be diagnosed straight
@@ -4924,7 +4978,18 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": _frames_for(runtime),
             "timings_ms": timings, "invoked": True, "armed": armed,
+            "tts_error": tts_error,
         })
+
+    @app.post("/converse/cancel")
+    async def _converse_cancel() -> JSONResponse:
+        """Abandon the in-flight voice turn (the demo's Stop while thinking).
+        Idempotent: cancelling when nothing is running is a no-op."""
+        turn = _inflight.get("turn")
+        if turn is not None and not turn.done():
+            turn.cancel()
+            return JSONResponse({"cancelled": True})
+        return JSONResponse({"cancelled": False})
 
     @app.websocket("/updates")
     async def _updates_ws(websocket: WebSocket) -> None:

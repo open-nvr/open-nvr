@@ -113,6 +113,9 @@
     @keyframes orbpulse{0%,100%{box-shadow:0 0 0 1px rgba(94,179,246,0.55),0 0 46px rgba(94,179,246,0.4)}50%{box-shadow:0 0 0 1px rgba(94,179,246,0.7),0 0 72px rgba(94,179,246,0.6)}}
     .ram .mouth{fill:var(--accent); opacity:0; transition:opacity 0.15s;}
     .ram.speaking .mouth{opacity:0.92;} .ram.speaking .iris{opacity:0.85;}
+    .wakeopt{display:inline-flex; align-items:center; gap:0.35rem; font-size:0.74rem; color:var(--muted);
+      margin-top:0.3rem; cursor:pointer; user-select:none;}
+    .wakeopt input{accent-color:var(--accent);}
     .micdot{display:inline-flex; align-items:center; gap:0.3rem; font-size:0.72rem; color:var(--danger); margin-top:0.25rem;}
     .micdot::before{content:""; width:0.5rem; height:0.5rem; border-radius:50%; background:var(--danger); animation:blink 1.2s steps(2,start) infinite;}
 
@@ -446,7 +449,7 @@
        show. The body class is set once in loadAgent(). */
     body.mode-voice .askrow, body.mode-voice #camAsk{display:none !important;}
     body.mode-text #talk, body.mode-text .voicebar, body.mode-text #micdot,
-    body.mode-text #camTalk{display:none !important;}
+    body.mode-text #wakeOpt, body.mode-text #camTalk{display:none !important;}
     body.mode-voice .log:empty::after{content:"Ask your cameras anything — tap Talk and speak.";}
     body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
   </style>
@@ -475,6 +478,8 @@
             <div>
               <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</h1></div>
               <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
+              <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
+                <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
@@ -800,7 +805,7 @@
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
     const ledeEl=$("lede");
-    const mouthEl=$("mouth"), micdotEl=$("micdot");
+    const mouthEl=$("mouth"), micdotEl=$("micdot"), wakeReqEl=$("wakeReq");
     // Inline SVG icons (no webfont, no external assets — works fully offline).
     const IC={
       mic:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
@@ -821,6 +826,9 @@
     let mediaStream=null, audioCtx=null, analyser=null, floatBuf=null;
     let recorder=null, chunks=[];
     let sessionActive=false, capturing=false, speaking=false, busy=false, alarmRinging=false;
+    // Turn lifecycle: a generation counter + AbortController let Stop abandon
+    // an in-flight /converse — the reply that eventually lands is discarded.
+    let inflightCtl=null, turnGen=0, armedUntil=0, ttsWarned=false;
     let loudFrames=0, captureStart=0, lastVoice=0, lastActivity=0;
     let vadTimer=null, pollTimer=null, alarmTimer=null, workingTimer=null, introPlayed=false;
     const knownTasks={}, seenNotes={}, seenAlarmEvents={}, seenReports={};
@@ -989,6 +997,8 @@
       window._ringDefaults=a.ring_defaults||{};
       // The card greets with the AGENT'S configured name (/agent is an
       // open endpoint precisely so the gate can be personal pre-login).
+      window._agentName=a.name||"agent";
+      { const wn=$("wakeName"); if(wn) wn.textContent=window._agentName; }
       if(a.name){ const ln=$("loginAgentLine");
         if(ln){ ln.innerHTML="Sign in with your OpenNVR account to talk to <b></b>";
           ln.querySelector("b").textContent=a.name; } }
@@ -1533,19 +1543,35 @@
 
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
-      busy=true;
-      try{ // wake=0 → the session is the addressing; every utterance is answered.
-        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake=0";
-        const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob});
+      busy=true; const gen=++turnGen; inflightCtl=new AbortController();
+      setAvatar("thinking"); setStatus("Thinking… tap Stop to cancel.","active");
+      try{
+        // Addressing: with "require my name" ON the server's wake-word gate
+        // decides whether this utterance was for the agent (side chatter and
+        // TV audio are ignored). A bare "Hey <name>" ARMS it: the next
+        // utterance within 20 s is answered without the name.
+        const wantWake = wakeReqEl && wakeReqEl.checked && Date.now()>armedUntil;
+        const url="/converse?camera="+encodeURIComponent(cameraParam())+"&wake="+(wantWake?"1":"0");
+        const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:blob,signal:inflightCtl.signal});
+        if(gen!==turnGen) return;                       // stopped while waiting — discard
         if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||("HTTP "+resp.status));}
         const data=await resp.json();
+        if(gen!==turnGen || data.cancelled) return;     // stopped mid-turn — discard
+        if(data.invoked===false){                       // heard, but not addressed to the agent
+          if(sessionActive){ setAvatar("listening");
+            setStatus(`Heard you, but you didn't say my name — start with “Hey ${window._agentName||"agent"}…”`,"active"); }
+          return; }
         if(!data.transcript){ if(sessionActive){setAvatar("listening");setStatus("Didn't catch that — go ahead.","active");} return; }
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
+        if(data.armed) armedUntil=Date.now()+20000;     // "Yes?" — next utterance needs no name
         if(data.reply) addMsg(data.reply,"agent",data.frames);
-        if(data.audio_b64){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(data.reply && !data.audio_b64 && data.tts_error && !ttsWarned){ ttsWarned=true;
+          addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
+        if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
-      }catch(err){ addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
-      finally{ busy=false; lastActivity=performance.now(); }
+      }catch(err){ if(gen!==turnGen || err.name==="AbortError") return;  // user cancelled — not an error
+        addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
+      finally{ if(gen===turnGen){ busy=false; inflightCtl=null; } lastActivity=performance.now(); }
     }
 
     // ── listening session ──
@@ -1568,7 +1594,24 @@
     }
     function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
-      stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle"); }
+      stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle");
+      // Abandon any in-flight turn: drop its eventual reply client-side
+      // (generation bump), abort the request, and tell the server to stop
+      // burning the LLM/VLM on an answer nobody is waiting for.
+      cancelTurn();
+      // RELEASE the microphone. Keeping the stream open after Stop leaves the
+      // browser/OS mic indicator on and the room audible to the page — "it
+      // keeps listening" — even though VAD stopped. ensureMic() reopens it on
+      // the next session.
+      if(mediaStream){ try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+        mediaStream=null; analyser=null; } }
+    function cancelTurn(){ turnGen++;
+      // Server cancel FIRST, then abort: aborting first tears the endpoint
+      // down, which clears its in-flight slot — the cancel that follows
+      // would find nothing and the LLM turn could run on as an orphan (the
+      // server also guards this, but don't rely on the race going our way).
+      if(busy){ fetch("/converse/cancel",{method:"POST"}).catch(()=>{}); busy=false; }
+      if(inflightCtl){ try{ inflightCtl.abort(); }catch{} inflightCtl=null; } }
     function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk"; setStatus("Stopped. Tap Talk to start again."); }
     function pauseForIdle(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
       setStatus("Stopped listening after a quiet spell. Tap Talk to resume.");
@@ -1703,9 +1746,13 @@
       if(btn.dataset.ring) body.ring=btn.dataset.ring; addAlarm(body); }));
     $("askBtn").addEventListener("click", ask);
     $("askInput").addEventListener("keydown",(e)=>{ if(e.key==="Enter") ask(); });
-    // Click Talk to start/stop the listening session.
+    // Click Talk to start/stop the listening session. Stop must ALWAYS work —
+    // especially while the agent is thinking (stopSession → endSession →
+    // cancelTurn aborts the in-flight request and tells the server to stop).
+    // The old `if(busy&&sessionActive)return;` made Stop a no-op during the
+    // longest, most cancel-worthy moment of a turn.
     talkBtn.addEventListener("click",()=>{ ensureOutputAudio();
-      if(busy&&sessionActive)return; if(sessionActive)stopSession(); else startSession(); });
+      if(sessionActive)stopSession(); else startSession(); });
     resetBtn.addEventListener("click",async()=>{ stopSpeaking(); clearPin(); try{ await fetch("/reset",{method:"POST"}); logEl.innerHTML=""; addMsg("Conversation reset.","sys"); }catch{} });
 
     async function loadNotify(){

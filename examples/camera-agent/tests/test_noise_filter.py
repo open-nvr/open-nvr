@@ -25,11 +25,28 @@ def test_noise_is_filtered(text):
 
 
 @pytest.mark.parametrize("text", [
+    # Repetition hallucinations: Whisper looping a phrase over sustained
+    # background noise (observed live: each one cost a full LLM+VLM turn).
+    "Yes, I will do it. Okay. So, you have to do this. Yes, I will do it. "
+    "You come here. I will do it. You come here. I will do it. I will do it. "
+    "I will not go to bed. I will go to sleep. I will go to sleep. "
+    "I will go to sleep.",
+    "I will go to sleep. I will go to sleep. I will go to sleep.",
+    "okay okay okay okay okay okay okay okay",
+])
+def test_repetition_hallucinations_are_filtered(text):
+    assert looks_like_noise(text) is True
+
+
+@pytest.mark.parametrize("text", [
     "how many people are at the door",
     "is anyone in the kitchen?",
     "sound a fire alarm if you see smoke",
     "what's happening on the driveway",
     "count the cars",
+    # Long real sentences with some repeated words must NOT be dropped.
+    "check the front door camera and the back door camera and tell me if "
+    "there is a person at either door right now",
 ])
 def test_real_questions_pass(text):
     assert looks_like_noise(text) is False
