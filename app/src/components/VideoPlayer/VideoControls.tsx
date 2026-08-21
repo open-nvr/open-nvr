@@ -138,6 +138,17 @@ export function VideoControls({
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
 
+  // The transport the chip switches to when clicked — the next one in the
+  // list, wrapping, so it flips with the usual two. null when there is
+  // nothing to switch to, which is what turns the chip back into a label.
+  // An unknown current transport falls back to the first available.
+  const nextStreamType =
+    availableStreamTypes.length > 1
+      ? availableStreamTypes[
+          (availableStreamTypes.indexOf(streamType as 'webrtc' | 'hls') + 1) % availableStreamTypes.length
+        ]
+      : null
+
   return (
     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-8 pb-2 px-3 @max-[300px]:px-1.5 @max-[300px]:pb-1 transition-opacity group-hover:opacity-100 opacity-0">
       {/* Progress bar (hidden for live) */}
@@ -273,11 +284,28 @@ export function VideoControls({
         {/* Spacer */}
         <div className="flex-1 min-w-0" />
 
-        {/* Stream type indicator (live only) */}
+        {/* Transport chip (live only). Where there is more than one transport
+            this IS the switcher — clicking flips to the next — so the chip
+            styling that already made it look like a button is now honest,
+            and swapping transport costs one click instead of finding it in a
+            menu. That matters when the camera's audio codec rules one of them
+            out: AAC cannot travel over WebRTC, so HLS is the one with sound.
+            With a single transport there is nothing to switch to, so it drops
+            the button styling and renders as a plain status label. */}
         {isLive && streamType && (
-          <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded @max-[360px]:hidden">
-            {streamType}
-          </span>
+          nextStreamType && onStreamTypeChange ? (
+            <button
+              onClick={() => onStreamTypeChange(nextStreamType)}
+              className="text-[10px] uppercase tracking-wider bg-white/20 hover:bg-white/30 px-1.5 py-0.5 rounded transition-colors @max-[220px]:hidden"
+              title={`Streaming over ${streamType.toUpperCase()} — switch to ${nextStreamType.toUpperCase()}`}
+            >
+              {streamType}
+            </button>
+          ) : (
+            <span className="text-[10px] uppercase tracking-wider text-white/50 px-1 @max-[360px]:hidden">
+              {streamType}
+            </span>
+          )
         )}
 
         {/* Snapshot */}
@@ -291,8 +319,13 @@ export function VideoControls({
           </button>
         )}
 
-        {/* Settings */}
-        {(availableStreamTypes.length > 1 || !isLive) && (
+        {/* Settings — playback only. Its menu had exactly two sections, one
+            gated on live and one on playback, so with the transport switcher
+            moved onto the chip a live tile's gear would open an empty menu.
+            Speed is the only thing left, and that is playback-only. Dropping
+            it from live tiles also hands a control's worth of width back to
+            the row, which is scarce on a narrow tile. */}
+        {!isLive && (
           <div className="relative @max-[220px]:hidden" ref={settingsRef}>
             <button
               onClick={() => setShowSettings(!showSettings)}
@@ -303,26 +336,8 @@ export function VideoControls({
             </button>
             {showSettings && (
               <div className="absolute bottom-full right-0 mb-2 bg-[var(--panel)] border border-neutral-700 rounded shadow-lg min-w-[140px] py-1 text-sm">
-                {/* Stream type switcher (live only) */}
-                {isLive && availableStreamTypes.length > 1 && onStreamTypeChange && (
-                  <div className="px-3 py-1.5 border-b border-neutral-700">
-                    <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">Stream</div>
-                    {availableStreamTypes.map((type) => (
-                      <button
-                        key={type}
-                        onClick={() => {
-                          onStreamTypeChange(type)
-                          setShowSettings(false)
-                        }}
-                        className={`menu-item block w-full text-left px-2 py-1 rounded text-xs ${streamType === type ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
-                      >
-                        {type.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {/* Playback speed (playback only) */}
-                {!isLive && videoRef.current && (
+                {/* Playback speed */}
+                {videoRef.current && (
                   <div className="px-3 py-1.5">
                     <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">Speed</div>
                     {[0.5, 1, 1.5, 2].map((speed) => (
