@@ -167,6 +167,51 @@ services:
     networks:
       - opennvr_internal
 
+  # Register the voice adapters with KAI-C too. The camera agent calls
+  # whisper/piper DIRECTLY (not through KAI-C), so this registration is
+  # purely for OBSERVABILITY: registered adapters get the 60 s health +
+  # /metrics poll, show on the AI Adapters page (up/down, p95, domain
+  # series like audio realtime-factor), and count in kaic_adapter_up —
+  # a silently-503ing piper becomes a red row instead of a mystery.
+  voice-adapters-register:
+    profiles: [camera-agent]
+    image: alpine:3.20
+    container_name: opennvr_voice_register
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      whisper-adapter:
+        condition: service_healthy
+      piper-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        register() {
+          name="$$1"; url="$$2"; i=0
+          while [ $$i -lt 30 ]; do
+            if wget -q -O- \
+                 --header="Content-Type: application/json" \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+                 http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+              echo "Registered '$$name' -> $$url with KAI-C."; return 0
+            fi
+            i=$$((i+1)); echo "register '$$name' attempt $$i/30 failed; retry in 5s"; sleep 5
+          done
+          echo "WARN: could not register '$$name' — it won't appear on the AI health panel." >&2
+          return 0
+        }
+        register whisper http://whisper-adapter:9003
+        register piper http://piper-adapter:9001
+    networks:
+      - opennvr_internal
+
   # ──────────────────────────────────────────────────────────────
   # Ollama — local LLM runtime (VOICE + CHAT). Official upstream image: stable,
   # well-maintained, identical to what developers run on their laptops today.

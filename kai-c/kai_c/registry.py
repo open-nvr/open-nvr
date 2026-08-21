@@ -55,7 +55,7 @@ from kai_c.contract_types import (
     HealthResponse,
     Permissions,
 )
-from kai_c.metrics import MetricsRollup, parse_adapter_metrics
+from kai_c.metrics import MetricsRollup, parse_adapter_metrics, proxy_metrics
 from kai_c.sovereignty import (
     SovereigntyViolation,
     adapter_summary_for_audit,
@@ -798,17 +798,33 @@ class AdapterRegistry:
                     f"{len(pending)} permission(s) awaiting operator grant"
                 ),
             )
+            proxy_metrics.record(adapter_name, "refused", None)
             raise PermissionError(
                 f"adapter {adapter_name!r} is {adapter.approval_status}: "
                 f"{len(pending)} declared permission(s) await operator "
                 f"approval before it may serve inference"
             )
 
-        response = await self._client.post(
-            f"{adapter.url}/infer",
-            json=payload,
-            headers={"X-Correlation-Id": correlation_id},
-            timeout=30.0,
+        # Client-observed timing: network hop + adapter queue + inference —
+        # what CALLERS experience, complementing the adapter's self-reported
+        # histogram (and still recorded when the adapter can't self-report).
+        started = time.monotonic()
+        try:
+            response = await self._client.post(
+                f"{adapter.url}/infer",
+                json=payload,
+                headers={"X-Correlation-Id": correlation_id},
+                timeout=30.0,
+            )
+        except Exception:
+            proxy_metrics.record(
+                adapter_name, "exception", time.monotonic() - started)
+            raise
+        latency = time.monotonic() - started
+        proxy_metrics.record(
+            adapter_name,
+            "ok" if response.status_code < 400 else "http_error",
+            latency,
         )
         try:
             body = response.json()

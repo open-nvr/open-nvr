@@ -1,0 +1,88 @@
+{
+  "__comment": "OpenNVR AI health — starter dashboard. Import into Grafana (needs a Prometheus datasource scraping KAI-C, the adapters, and detect-pipeline per docs/OBSERVABILITY.md). Every panel is one PromQL expression to copy and adapt.",
+  "title": "OpenNVR AI Health",
+  "uid": "opennvr-ai-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-3h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Adapters up",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(kaic_adapter_up)", "legendFormat": "up" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] }
+    },
+    {
+      "type": "table",
+      "title": "Fleet — up / consecutive health failures",
+      "gridPos": { "h": 5, "w": 18, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "kaic_adapter_up", "format": "table", "instant": true },
+        { "expr": "kaic_adapter_consecutive_health_failures", "format": "table", "instant": true }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Client-observed p95 latency by adapter (KAI-C vantage)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum by (adapter, le) (rate(kaic_proxy_infer_latency_seconds_bucket[5m])))",
+        "legendFormat": "{{adapter}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Inference rate & errors by adapter",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "expr": "sum by (adapter) (rate(kaic_proxy_infer_total[5m])) * 60", "legendFormat": "{{adapter}} req/min" },
+        { "expr": "sum by (adapter) (rate(kaic_proxy_infer_total{result!=\"ok\"}[5m])) * 60", "legendFormat": "{{adapter}} errors/min" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Detections per class per minute (false-positive watch)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [{
+        "expr": "sum by (label) (rate(adapter_detections_total[5m])) * 60",
+        "legendFormat": "{{label}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Audio realtime factor (>1 = can't keep up)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [{
+        "expr": "rate(adapter_realtime_factor_sum[10m]) / rate(adapter_realtime_factor_count[10m])",
+        "legendFormat": "RTF (mean)"
+      }],
+      "fieldConfig": { "defaults": { "custom": {}, "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Self-reported p95 by task (all adapters)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum by (task, le) (rate(adapter_infer_latency_seconds_bucket[5m])))",
+        "legendFormat": "{{task}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tier-0 — where each frame's time goes",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [{
+        "expr": "sum by (stage) (rate(tier0_stage_latency_seconds_sum[5m]))",
+        "legendFormat": "{{stage}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    }
+  ]
+}

@@ -548,3 +548,41 @@ def test_rollup_domain_window_delta_and_reset_fallback():
     rollup.record_sample("yolov8", parse_adapter_metrics(t3, scraped_at=220.0))
     snap = rollup.snapshot("yolov8")
     assert snap["domain"]['adapter_detections_total{label="person"}'] == 4.0
+
+
+# ── KAI-C's own /metrics (client-side vantage point) ───────────────
+
+def test_proxy_metrics_records_and_renders():
+    from kai_c.metrics import ProxyMetrics
+    pm = ProxyMetrics()
+    pm.record("moondream", "ok", 0.8)
+    pm.record("moondream", "ok", 2.0)
+    pm.record("moondream", "http_error", 0.1)
+    pm.record("piper", "exception", 0.05)
+    pm.record("piper", "refused", None)          # no latency for refusals
+    body = pm.render()
+    assert 'kaic_proxy_infer_total{adapter="moondream",result="ok"} 2' in body
+    assert 'kaic_proxy_infer_total{adapter="moondream",result="http_error"} 1' in body
+    assert 'kaic_proxy_infer_total{adapter="piper",result="refused"} 1' in body
+    assert 'kaic_proxy_infer_latency_seconds_count{adapter="moondream"} 3' in body
+    assert 'kaic_proxy_infer_latency_seconds_count{adapter="piper"} 1' in body
+    assert 'kaic_proxy_infer_latency_seconds_bucket{adapter="moondream",le="1.0"} 2' in body
+
+
+def test_proxy_metrics_render_includes_up_gauges_from_summaries():
+    from kai_c.metrics import ProxyMetrics
+    pm = ProxyMetrics()
+    body = pm.render([
+        {"name": "yolov8", "health_status": "ok", "consecutive_health_failures": 0},
+        {"name": "piper", "health_status": "error", "consecutive_health_failures": 4},
+    ])
+    assert 'kaic_adapter_up{adapter="yolov8"} 1' in body
+    assert 'kaic_adapter_up{adapter="piper"} 0' in body
+    assert 'kaic_adapter_consecutive_health_failures{adapter="piper"} 4' in body
+
+
+def test_proxy_metrics_unknown_result_folds_to_exception():
+    from kai_c.metrics import ProxyMetrics
+    pm = ProxyMetrics()
+    pm.record("x", "weird", 0.1)
+    assert 'kaic_proxy_infer_total{adapter="x",result="exception"} 1' in pm.render()

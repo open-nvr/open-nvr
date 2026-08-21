@@ -307,6 +307,118 @@ def _outcome_delta(newest: dict[str, float], oldest: dict[str, float]) -> dict[s
     return counts
 
 
+# ── KAI-C's OWN Prometheus exposition (client-side vantage point) ──
+#
+# Everything above is what ADAPTERS report about themselves. This is the
+# other half of the observability story: what KAI-C — the client every
+# governed inference flows through — observes. Proxy-side latency
+# includes the network hop and any queueing in front of the adapter, and
+# it keeps working when an adapter is too wedged to answer its own
+# /metrics. Rendered at KAI-C's GET /metrics for external Prometheus.
+
+_PROXY_BUCKETS: tuple[float, ...] = (
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+)
+_PROXY_RESULTS: tuple[str, ...] = ("ok", "http_error", "exception", "refused")
+
+
+def _esc_label(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+class ProxyMetrics:
+    """Per-adapter counters + latency histogram for KAI-C's proxied
+    inference calls, measured around the HTTP hop to the adapter.
+    Bounded: one label (adapter name), series only for adapters that
+    actually served traffic. Thread-safe (recorded from the async route,
+    rendered from a sync handler)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # adapter → result → count
+        self._totals: dict[str, dict[str, float]] = {}
+        # adapter → {"buckets": {ub: n}, "inf": n, "sum": s, "count": n}
+        self._lat: dict[str, dict] = {}
+
+    def record(self, adapter: str, result: str, latency_seconds: float | None) -> None:
+        if result not in _PROXY_RESULTS:
+            result = "exception"
+        with self._lock:
+            totals = self._totals.setdefault(
+                adapter, {r: 0.0 for r in _PROXY_RESULTS})
+            totals[result] += 1
+            if latency_seconds is not None:
+                hist = self._lat.get(adapter)
+                if hist is None:
+                    hist = self._lat[adapter] = {
+                        "buckets": {ub: 0 for ub in _PROXY_BUCKETS},
+                        "inf": 0, "sum": 0.0, "count": 0,
+                    }
+                for ub in _PROXY_BUCKETS:
+                    if latency_seconds <= ub:
+                        hist["buckets"][ub] += 1
+                hist["inf"] += 1
+                hist["sum"] += latency_seconds
+                hist["count"] += 1
+
+    def render(self, adapter_summaries: list[dict[str, Any]] | None = None) -> str:
+        """Prometheus text exposition: proxy series plus, when the
+        registry's summaries are supplied, per-adapter up/health gauges
+        (so a scrape of KAI-C alone answers 'is the fleet alive')."""
+        lines: list[str] = []
+        with self._lock:
+            lines.append(
+                "# HELP kaic_proxy_infer_total Proxied /infer calls by adapter and result.")
+            lines.append("# TYPE kaic_proxy_infer_total counter")
+            for adapter in sorted(self._totals):
+                for result in _PROXY_RESULTS:
+                    lines.append(
+                        f'kaic_proxy_infer_total{{adapter="{_esc_label(adapter)}",result="{result}"}} '
+                        f"{self._totals[adapter][result]}"
+                    )
+            lines.append(
+                "# HELP kaic_proxy_infer_latency_seconds Client-observed latency of "
+                "proxied inference (network + adapter queue + inference).")
+            lines.append("# TYPE kaic_proxy_infer_latency_seconds histogram")
+            for adapter in sorted(self._lat):
+                hist = self._lat[adapter]
+                al = f'adapter="{_esc_label(adapter)}"'
+                for ub in _PROXY_BUCKETS:
+                    lines.append(
+                        f'kaic_proxy_infer_latency_seconds_bucket{{{al},le="{ub}"}} '
+                        f"{hist['buckets'][ub]}"
+                    )
+                lines.append(
+                    f'kaic_proxy_infer_latency_seconds_bucket{{{al},le="+Inf"}} {hist["inf"]}')
+                lines.append(f'kaic_proxy_infer_latency_seconds_sum{{{al}}} {hist["sum"]}')
+                lines.append(f'kaic_proxy_infer_latency_seconds_count{{{al}}} {hist["count"]}')
+        if adapter_summaries:
+            lines.append("# HELP kaic_adapter_up 1 when the adapter's last health probe was ok.")
+            lines.append("# TYPE kaic_adapter_up gauge")
+            fail_lines: list[str] = []
+            for summary in adapter_summaries:
+                name = summary.get("name")
+                if not name:
+                    continue
+                al = f'adapter="{_esc_label(str(name))}"'
+                up = 1 if summary.get("health_status") == "ok" else 0
+                lines.append(f"kaic_adapter_up{{{al}}} {up}")
+                fail_lines.append(
+                    f"kaic_adapter_consecutive_health_failures{{{al}}} "
+                    f"{int(summary.get('consecutive_health_failures') or 0)}"
+                )
+            if fail_lines:
+                lines.append(
+                    "# HELP kaic_adapter_consecutive_health_failures Consecutive failed health probes (3+ = unavailable).")
+                lines.append("# TYPE kaic_adapter_consecutive_health_failures gauge")
+                lines.extend(fail_lines)
+        return "\n".join(lines) + "\n"
+
+
+# Module-global singleton (mirrors the registry's rollup pattern).
+proxy_metrics = ProxyMetrics()
+
+
 # ── Rollup store ───────────────────────────────────────────────────
 
 
