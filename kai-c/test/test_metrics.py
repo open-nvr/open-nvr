@@ -618,3 +618,20 @@ def test_domain_trend_series_points_carry_interval_values():
     rollup.record_sample("whisper", parse_adapter_metrics(t3, scraped_at=220.0))
     snap = rollup.snapshot("whisper")
     assert snap["series"][2]["domain"]['adapter_detections_total{label="person"}'] is None
+
+
+def test_kaic_prometheus_endpoint_serves_exposition_with_up_gauges(kaic_app):
+    """KAI-C's OWN /metrics: Prometheus text (not JSON), carrying the
+    proxy series and a per-adapter up gauge for every registered
+    adapter — the endpoint an external Prometheus scrapes."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register",
+                json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+    response = client.get("/metrics")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/plain")
+    body = response.text
+    assert "# TYPE kaic_proxy_infer_total counter" in body
+    assert "# TYPE kaic_proxy_infer_latency_seconds histogram" in body
+    assert 'kaic_adapter_up{adapter="stub-x"}' in body
+    assert 'kaic_adapter_consecutive_health_failures{adapter="stub-x"}' in body

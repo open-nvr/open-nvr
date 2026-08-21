@@ -35,9 +35,18 @@ reports the numbers that define *its* health:
 
 ## Prometheus scrape config
 
-Drop this into `prometheus.yml` on a Prometheus that can reach the
-compose network (run it as a service on `opennvr_internal`, or publish
-the ports to a monitoring host):
+**None of these ports are published to the host** — KAI-C (8100), the
+adapters, and detect-pipeline (9109) all listen on the internal compose
+network only. Run Prometheus as a service attached to
+`opennvr_internal` (recommended: nothing new is exposed), or publish the
+ports you need to a monitoring host yourself.
+
+**Adapters require a bearer token.** Compose starts every adapter with
+`OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}`, and the contract's §3.8
+middleware leaves only `/health` open — so `/metrics` answers 401
+without it. Use the `INTERNAL_API_KEY` value from your `.env`. KAI-C's
+and detect-pipeline's `/metrics` need no token (they are unpublished and
+carry no adapter secrets).
 
 ```yaml
 scrape_configs:
@@ -50,6 +59,9 @@ scrape_configs:
   # Adapters: self-reported + domain series. List the ones you run.
   - job_name: opennvr-adapters
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: "<INTERNAL_API_KEY from .env>"   # or credentials_file:
     static_configs:
       - targets:
           - "yolov8-adapter:9002"
@@ -67,6 +79,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["detect-pipeline:9109"]
+```
+
+Quick check that a target is reachable and authorised, from inside the
+compose network:
+
+```bash
+docker compose exec opennvr-core \
+  curl -s localhost:8100/metrics | head            # KAI-C, no token
+docker compose exec opennvr-core sh -c \
+  'curl -s -H "Authorization: Bearer $INTERNAL_API_KEY" \
+     http://yolov8-adapter:9002/metrics | head'    # adapter, token required
 ```
 
 ## Grafana starter dashboard
