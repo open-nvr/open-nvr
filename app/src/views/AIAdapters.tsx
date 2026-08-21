@@ -21,7 +21,7 @@
 // Registration, permission approval, and metrics come later with the KAI-C
 // /api/v1/adapters migration.
 
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
@@ -139,6 +139,39 @@ type AdapterMetricsResp = {
   series?: SeriesPoint[]
   fingerprint_changes: string[]
   samples: number
+  // SDK ≥1.2: model identity labels from adapter_model_info, and the
+  // adapter's own domain series (detections by class, audio seconds,
+  // realtime factor…) as windowed deltas keyed by series identity.
+  model_info?: Record<string, string>
+  domain?: Record<string, number>
+}
+
+// ── Domain-series presentation ──────────────────────────────────────
+// Keys look like `adapter_detections_total{label="person"}` or
+// `adapter_audio_seconds_total`. `_sum`/`_count` pairs (histograms)
+// collapse into a windowed average row; everything else shows its
+// windowed delta. Top rows by value; model-specific by construction.
+function domainRows(domain: Record<string, number>): { label: string; value: string }[] {
+  const entries = Object.entries(domain)
+  const counts = new Map<string, number>()
+  for (const [k, v] of entries) if (k.endsWith('_count')) counts.set(k.slice(0, -6), v)
+  const rows: { label: string; value: string; sort: number }[] = []
+  const nice = (raw: string) => {
+    const m = raw.match(/^([a-z0-9_]+?)(?:_total)?(?:\{(\w+)="([^"]*)"\})?$/i)
+    const base = (m?.[1] ?? raw).replace(/^adapter_/, '').replace(/_/g, ' ')
+    return m?.[3] ? `${base} · ${m[3]}` : base
+  }
+  for (const [k, v] of entries) {
+    if (k.endsWith('_count')) continue
+    if (k.endsWith('_sum')) {
+      const stem = k.slice(0, -4)
+      const n = counts.get(stem)
+      if (n && n > 0) rows.push({ label: `${nice(stem)} (avg)`, value: (v / n).toFixed(2), sort: 0 })
+      continue
+    }
+    rows.push({ label: nice(k), value: v % 1 === 0 ? String(v) : v.toFixed(1), sort: v })
+  }
+  return rows.sort((a, b) => b.sort - a.sort).slice(0, 10)
 }
 
 type FleetMetricsResp = {
@@ -522,6 +555,19 @@ function AdapterMetricsSection({ name }: { name: string }) {
             <div className="space-y-2">
               <div className="font-mono text-[11px] text-[var(--text-dim)]">
                 {formatWindow(m.window_s)}{m.samples != null ? ` · ${m.samples} samples` : ''}
+                {m.model_info?.model ? (
+                  <span>
+                    {' · '}
+                    <span className="text-[var(--text)]">{m.model_info.model}</span>
+                    {m.model_info.model_version ? `@${m.model_info.model_version}` : ''}
+                    {m.model_info.framework ? ` (${m.model_info.framework})` : ''}
+                    {m.model_info.fingerprint ? (
+                      <span title={m.model_info.fingerprint}>
+                        {' · '}{m.model_info.fingerprint.replace('sha256:', '').slice(0, 8)}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <MetricPanel title="Inference latency" decision="which model per camera; is the SLA breached">
@@ -530,6 +576,18 @@ function AdapterMetricsSection({ name }: { name: string }) {
                 <MetricPanel title="Outcomes" decision="rollback / retire / investigate the adapter">
                   <OutcomesSplit outcomes={m.outcomes} />
                 </MetricPanel>
+                {m.domain && Object.keys(m.domain).length > 0 && (
+                  <MetricPanel title="Model output — this window" decision="what the model is actually producing; false-positive classes stand out">
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs">
+                      {domainRows(m.domain).map(r => (
+                        <Fragment key={r.label}>
+                          <span className="text-[var(--text-dim)] truncate" title={r.label}>{r.label}</span>
+                          <span className="tabular-nums">{r.value}</span>
+                        </Fragment>
+                      ))}
+                    </div>
+                  </MetricPanel>
+                )}
                 <MetricPanel title="Saturation" decision="scale out a replica / rebalance cameras">
                   <SaturationGauge inflight={m.inflight ?? 0} maxInflight={m.max_inflight ?? 0} />
                 </MetricPanel>

@@ -167,6 +167,14 @@ class MetricsSample:
     memory_bytes: float | None = None
     gpu_utilization: float | None = None
     gpu_memory_bytes: float | None = None
+    # Model identity labels from ``adapter_model_info`` (SDK ≥1.2):
+    # adapter/model/version/framework/fingerprint. Empty when absent.
+    model_info: dict[str, str] = field(default_factory=dict)
+    # Adapter-defined DOMAIN series (SDK ≥1.2): any other ``adapter_*``
+    # counter/gauge/sum/count line, keyed by its full series identity
+    # (name plus one optional label, e.g. ``adapter_detections_total{label="person"}``).
+    # Buckets are skipped — bounded by what the adapter registered.
+    domain: dict[str, float] = field(default_factory=dict)
 
 
 def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> MetricsSample:
@@ -189,11 +197,15 @@ def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> Metr
                 le = math.inf if le_raw in ("+Inf", "Inf", "inf") else float(le_raw)
             except ValueError:
                 continue
-            sample.latency_buckets[le] = value
+            # SDK ≥1.2 splits the histogram by a ``task`` label — one
+            # series per task, same ``le`` bounds. SUM across them (an
+            # assignment here would keep only the last task's counts and
+            # silently corrupt every percentile).
+            sample.latency_buckets[le] = sample.latency_buckets.get(le, 0.0) + value
         elif name == f"{_HISTOGRAM}_sum":
-            sample.latency_sum = value
+            sample.latency_sum = (sample.latency_sum or 0.0) + value
         elif name == f"{_HISTOGRAM}_count":
-            sample.latency_count = value
+            sample.latency_count = (sample.latency_count or 0.0) + value
         elif name == _OUTCOMES:
             outcome = labels.get("outcome")
             if outcome:
@@ -210,6 +222,26 @@ def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> Metr
             sample.gpu_utilization = value
         elif name == _GPU_MEM_BYTES:
             sample.gpu_memory_bytes = value
+        elif name == "adapter_model_info":
+            # Identity is in the labels; the value is always 1.
+            sample.model_info = dict(labels)
+        elif (
+            name.startswith("adapter_")
+            and not name.endswith("_bucket")
+            # standard-but-uninteresting gauges stay out of the domain map
+            and name not in ("adapter_model_loaded", "adapter_stream_connections_active")
+        ):
+            # Adapter-defined DOMAIN series (detections by class, audio
+            # seconds, RTF sums...). Key by name plus the one meaningful
+            # label if present, so per-class counters stay distinct.
+            # Bounded: adapters register these with closed label sets.
+            meaningful = {k: v for k, v in labels.items() if k != "le"}
+            if meaningful:
+                k, v = sorted(meaningful.items())[0]
+                key = f'{name}{{{k}="{v}"}}'
+            else:
+                key = name
+            sample.domain[key] = sample.domain.get(key, 0.0) + value
     return sample
 
 
@@ -384,10 +416,27 @@ class MetricsRollup:
             series.append(entry)
             prev = smp
 
+        # Domain series (SDK ≥1.2): windowed delta per series over the
+        # sample window (counter reset → fall back to newest cumulative,
+        # same posture as _outcome_delta), plus the model identity from
+        # the newest scrape. ``_sum``/``_count`` pairs ride along so the
+        # UI can derive windowed averages (e.g. mean realtime factor).
+        domain: dict[str, float] = {}
+        model_info: dict[str, str] = {}
+        if samples:
+            newest = samples[-1]
+            oldest = samples[0]
+            model_info = dict(newest.model_info)
+            for key, val in newest.domain.items():
+                d = val - oldest.domain.get(key, 0.0)
+                domain[key] = round(val if d < 0 else d, 4)
+
         newest_hw = samples[-1] if samples else None
         return {
             "adapter": adapter,
             "window_s": WINDOW_SECONDS,
+            "model_info": model_info,
+            "domain": domain,
             "latency_ms": latency_ms,
             "outcomes": outcomes,
             "inflight": inflight,

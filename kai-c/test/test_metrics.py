@@ -125,6 +125,8 @@ def test_rollup_snapshot_with_no_samples_is_all_null():
     assert snap == {
         "adapter": "ghost",
         "window_s": 3600,
+        "model_info": {},
+        "domain": {},
         "latency_ms": {"p50": None, "p95": None, "p99": None},
         "outcomes": {},
         "inflight": None,
@@ -484,3 +486,65 @@ def test_fleet_metrics_endpoint(kaic_app):
     assert snap["samples"] == 1
     assert "max_inflight" in snap and "status" in snap
     assert isinstance(snap["series"], list) and len(snap["series"]) == 1
+
+
+# ── SDK ≥1.2: task labels, model identity, domain series ───────────
+
+def test_parse_sums_task_labeled_histogram_and_counters():
+    """SDK 1.2 splits infer series by a ``task`` label. The parser must
+    SUM across tasks — assignment would keep only the last task's counts
+    and corrupt every percentile."""
+    text = (
+        'adapter_infer_total{outcome="ok",task="visual_qa"} 3\n'
+        'adapter_infer_total{outcome="ok",task="scene_caption"} 4\n'
+        'adapter_infer_latency_seconds_bucket{task="visual_qa",le="1.0"} 3\n'
+        'adapter_infer_latency_seconds_bucket{task="scene_caption",le="1.0"} 4\n'
+        'adapter_infer_latency_seconds_bucket{task="visual_qa",le="+Inf"} 3\n'
+        'adapter_infer_latency_seconds_bucket{task="scene_caption",le="+Inf"} 4\n'
+        'adapter_infer_latency_seconds_sum{task="visual_qa"} 1.5\n'
+        'adapter_infer_latency_seconds_sum{task="scene_caption"} 2.5\n'
+        'adapter_infer_latency_seconds_count{task="visual_qa"} 3\n'
+        'adapter_infer_latency_seconds_count{task="scene_caption"} 4\n'
+    )
+    sample = parse_adapter_metrics(text)
+    assert sample.outcomes == {"ok": 7.0}
+    assert sample.latency_buckets[1.0] == 7.0
+    assert sample.latency_sum == 4.0
+    assert sample.latency_count == 7.0
+
+
+def test_parse_collects_model_info_and_domain_series():
+    text = (
+        'adapter_model_info{adapter="yolov8",model="yolov8n",fingerprint="sha256:abc"} 1\n'
+        'adapter_detections_total{label="person"} 12\n'
+        'adapter_detections_total{label="car"} 5\n'
+        'adapter_audio_seconds_total 42.5\n'
+        'adapter_realtime_factor_sum 3.5\n'
+        'adapter_realtime_factor_count 7\n'
+        'adapter_realtime_factor_bucket{le="1.0"} 6\n'      # buckets skipped
+        'adapter_model_loaded 1\n'                          # standard gauge skipped
+    )
+    sample = parse_adapter_metrics(text)
+    assert sample.model_info["model"] == "yolov8n"
+    assert sample.model_info["fingerprint"] == "sha256:abc"
+    assert sample.domain['adapter_detections_total{label="person"}'] == 12.0
+    assert sample.domain['adapter_detections_total{label="car"}'] == 5.0
+    assert sample.domain["adapter_audio_seconds_total"] == 42.5
+    assert sample.domain["adapter_realtime_factor_sum"] == 3.5
+    assert "adapter_model_loaded" not in sample.domain
+    assert not any("_bucket" in k for k in sample.domain)
+
+
+def test_rollup_domain_window_delta_and_reset_fallback():
+    rollup = MetricsRollup()
+    t1 = 'adapter_detections_total{label="person"} 10\n'
+    t2 = 'adapter_detections_total{label="person"} 25\n'
+    rollup.record_sample("yolov8", parse_adapter_metrics(t1, scraped_at=100.0))
+    rollup.record_sample("yolov8", parse_adapter_metrics(t2, scraped_at=160.0))
+    snap = rollup.snapshot("yolov8")
+    assert snap["domain"]['adapter_detections_total{label="person"}'] == 15.0
+    # counter reset (restart) → fall back to newest cumulative
+    t3 = 'adapter_detections_total{label="person"} 4\n'
+    rollup.record_sample("yolov8", parse_adapter_metrics(t3, scraped_at=220.0))
+    snap = rollup.snapshot("yolov8")
+    assert snap["domain"]['adapter_detections_total{label="person"}'] == 4.0
