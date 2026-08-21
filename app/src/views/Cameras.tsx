@@ -26,6 +26,7 @@ import { usePermissions } from '../hooks/usePermissions'
 import { Unplug } from 'lucide-react'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
+import { parseCameraQr } from '../lib/cameraQr'
 import { Modal } from '../components/Modal'
 
 type Camera = {
@@ -673,7 +674,19 @@ export function Cameras() {
           {scanQr && (
             <QrScanner
               title="Scan the QR from the OpenNVR Cam app"
-              onResult={(text) => { setForm({ ...form, rtsp_url: text }); setScanQr(false) }}
+              onResult={(text) => {
+                // Same unpacking as the add dialog: the scanned rtsp:// URL
+                // carries host, port and credentials, so fill those fields
+                // instead of leaving them for the operator to retype. The
+                // name of a camera being edited is never overwritten.
+                const scanned = parseCameraQr(text)
+                setForm(f => ({
+                  ...f,
+                  ...scanned,
+                  name: f.name.trim() || scanned.name || f.name,
+                }))
+                setScanQr(false)
+              }}
               onClose={() => setScanQr(false)}
             />
           )}

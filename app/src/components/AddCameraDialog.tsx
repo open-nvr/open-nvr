@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 import { QrScanner } from './QrScanner'
+import { parseCameraQr } from '../lib/cameraQr'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
 import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, X } from 'lucide-react'
@@ -1350,7 +1351,19 @@ export function AddCameraDialog({
       {scanQr && (
         <QrScanner
           title="Scan the QR from the OpenNVR Cam app"
-          onResult={(text) => { setForm(f => ({ ...f, rtsp_url: text })); setScanQr(false) }}
+          onResult={(text) => {
+            // The QR's rtsp:// URL already holds the host, port and any
+            // credentials, so fill those fields too rather than making the
+            // operator retype what they just scanned. The suggested name
+            // only lands in an empty box — never over one already typed.
+            const scanned = parseCameraQr(text)
+            setForm(f => ({
+              ...f,
+              ...scanned,
+              name: f.name.trim() || scanned.name || f.name,
+            }))
+            setScanQr(false)
+          }}
           onClose={() => setScanQr(false)}
         />
       )}
