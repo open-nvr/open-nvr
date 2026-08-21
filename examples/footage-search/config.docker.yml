@@ -42,6 +42,13 @@ camera_aliases: {}
 # Max results returned by a search.
 result_limit: 25
 
+# ── Retention ─────────────────────────────────────────────────────
+# Days of searchable history to keep. The index grows with every
+# detection and Tier-0 publishes continuously, so an unbounded index
+# is a slow disk leak on an active camera. Pruned on start and every
+# 6h. Set 0 to keep everything forever (you own the disk).
+retention_days: 30
+
 # ── Optional LLM query parsing (Ollama) ────────────────────────────
 # When enabled, queries are parsed by a local Ollama model (e.g. the
 # camera-agent overlay's ``ollama`` service) instead of the built-in

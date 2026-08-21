@@ -193,3 +193,65 @@ def test_unknown_camera_id_warns_once(caplog):
         counter.handle_event(_tier0_event(1, camera_id="cam1"))
     warnings = [r for r in caplog.records if "not in my config" in r.message]
     assert len(warnings) == 1, "warn once per unknown camera, not per frame"
+
+
+# ── Camera auto-derivation ─────────────────────────────────────────
+#
+# Hand-copying camera ids is how this app ends up counting nothing:
+# OpenNVR names cameras ``cam1``, hand-written configs say ``cam-1``.
+# With no cameras listed, the app asks OpenNVR instead of refusing.
+
+
+def _write_config(tmp_path, body: str) -> str:
+    p = tmp_path / "config.yml"
+    p.write_text(
+        'nats_url: "nats://x:4222"\n'
+        "max_occupancy: 5\n" + body
+    )
+    return str(p)
+
+
+def test_cameras_are_derived_from_opennvr_when_unlisted(tmp_path, monkeypatch):
+    import opennvr_app_sdk.cameras as sdk_cameras
+
+    monkeypatch.setattr(
+        oc, "discover_cameras",
+        lambda url, api_key=None: [{"camera_id": "cam1"}, {"camera_id": "cam2"}],
+    )
+    cfg = oc.load_config(_write_config(tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+    cam = cfg.cameras["cam1"]
+    # Whole-frame zone in the SDK's unit space — correct at any real
+    # resolution because detector boxes are normalised before comparison.
+    assert cam.frame_width == sdk_cameras.UNIT_FRAME
+    assert cam.max_occupancy == 5                      # app-level default applies
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    fired = counter.handle_event(_tier0_event(6, camera_id="cam1"))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 6
+
+
+def test_explicit_cameras_still_win(tmp_path, monkeypatch):
+    called = {"n": 0}
+
+    def _never(*a, **k):
+        called["n"] += 1
+        return [{"camera_id": "cam9"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _never)
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    assert list(cfg.cameras) == ["cam1"]
+    assert called["n"] == 0, "must not call OpenNVR when cameras are pinned"
+
+
+def test_no_cameras_and_no_discovery_is_a_clear_error(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    with pytest.raises(ValueError, match="discovered"):
+        oc.load_config(_write_config(tmp_path, "cameras: []\n"))

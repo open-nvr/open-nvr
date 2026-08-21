@@ -81,6 +81,11 @@ from opennvr_app_sdk import (
     StateView,
     app,
 )
+from opennvr_app_sdk.cameras import (
+    UNIT_FRAME,
+    discover_cameras,
+    full_frame_polygon,
+)
 from opennvr_app_sdk.config import load_yaml
 from opennvr_app_sdk.geometry import Zone, bbox_center
 
@@ -240,7 +245,41 @@ def load_config(path: str) -> AppConfig:
 
     cameras_raw = raw.get("cameras") or []
     if not cameras_raw:
-        raise ValueError("config: at least one camera entry is required")
+        # No cameras listed → ASK OpenNVR which ones exist instead of
+        # refusing to boot. Hand-copying camera ids is the most common way
+        # this app ends up counting nothing: OpenNVR names them ``cam1``,
+        # a hand-written config almost always says ``cam-1``, and the two
+        # look identical until you notice nothing has ever fired. Each
+        # discovered camera gets a whole-frame zone in the SDK's unit
+        # space, which is exactly correct at any real resolution (see
+        # opennvr_app_sdk.cameras). Draw a real zone in the catalog UI —
+        # or list cameras explicitly here — to override.
+        discovered = discover_cameras(
+            str(raw.get("opennvr_url") or ""),
+            api_key=raw.get("internal_api_key"),
+        )
+        cameras_raw = [
+            {
+                "camera_id": c["camera_id"],
+                "zone_name": "full-frame (auto)",
+                "zone": full_frame_polygon(),
+                "frame_width": UNIT_FRAME,
+                "frame_height": UNIT_FRAME,
+            }
+            for c in discovered
+        ]
+        if cameras_raw:
+            logger.info(
+                "no cameras configured — watching all %d camera(s) OpenNVR "
+                "knows about with a whole-frame zone: %s",
+                len(cameras_raw), ", ".join(c["camera_id"] for c in cameras_raw),
+            )
+        else:
+            raise ValueError(
+                "config: no 'cameras' entries and none could be discovered "
+                "from OpenNVR — set 'opennvr_url' (and OPENNVR_INTERNAL_API_KEY) "
+                "so the app can read the camera list, or list cameras explicitly"
+            )
     cameras: dict[str, CameraZone] = {}
     for idx, c in enumerate(cameras_raw):
         try:
