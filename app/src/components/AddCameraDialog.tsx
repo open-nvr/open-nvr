@@ -408,8 +408,10 @@ export function AddCameraDialog({
 
   // Authenticate and get RTSP URL using HTTP Digest (Hikvision compatible)
   const handleAuthenticate = async () => {
-    if (!selectedCamera || !credentials.username || !credentials.password) {
-      setError('Username and password are required')
+    // Password is intentionally optional — some cameras ship with no
+    // password set, and the backend accepts an empty one.
+    if (!selectedCamera || !credentials.username.trim()) {
+      setError('Username is required')
       return
     }
 
@@ -546,7 +548,7 @@ export function AddCameraDialog({
       ip_address: selectedCamera.ip,
       port: 554,
       username: credentials.username,
-      password: credentials.password,
+      password: credentials.password || undefined,
       rtsp_url: rtspWithCredentials,
       // ONVIF device metadata
       manufacturer: deviceInfo?.manufacturer || undefined,
@@ -653,7 +655,7 @@ export function AddCameraDialog({
       ? {
           label: authenticating ? 'Connecting...' : 'Connect',
           onClick: handleAuthenticate,
-          disabled: authenticating || !credentials.password || lanPromptBusy,
+          disabled: authenticating || !credentials.username.trim() || lanPromptBusy,
         }
       : mode === 'discover' && selectedCamera && connected
       ? {
@@ -1091,11 +1093,12 @@ export function AddCameraDialog({
                 <input
                   type="password"
                   className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  placeholder="Leave blank if none"
                   autoFocus
                   value={credentials.password}
                   onChange={(e) => handleCredentialsChange({ password: e.target.value })}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !connected && credentials.password && !authenticating) {
+                    if (e.key === 'Enter' && !connected && credentials.username.trim() && !authenticating) {
                       e.preventDefault()
                       handleAuthenticate()
                     }
