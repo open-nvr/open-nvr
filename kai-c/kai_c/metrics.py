@@ -167,6 +167,14 @@ class MetricsSample:
     memory_bytes: float | None = None
     gpu_utilization: float | None = None
     gpu_memory_bytes: float | None = None
+    # Model identity labels from ``adapter_model_info`` (SDK ≥1.2):
+    # adapter/model/version/framework/fingerprint. Empty when absent.
+    model_info: dict[str, str] = field(default_factory=dict)
+    # Adapter-defined DOMAIN series (SDK ≥1.2): any other ``adapter_*``
+    # counter/gauge/sum/count line, keyed by its full series identity
+    # (name plus one optional label, e.g. ``adapter_detections_total{label="person"}``).
+    # Buckets are skipped — bounded by what the adapter registered.
+    domain: dict[str, float] = field(default_factory=dict)
 
 
 def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> MetricsSample:
@@ -189,11 +197,15 @@ def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> Metr
                 le = math.inf if le_raw in ("+Inf", "Inf", "inf") else float(le_raw)
             except ValueError:
                 continue
-            sample.latency_buckets[le] = value
+            # SDK ≥1.2 splits the histogram by a ``task`` label — one
+            # series per task, same ``le`` bounds. SUM across them (an
+            # assignment here would keep only the last task's counts and
+            # silently corrupt every percentile).
+            sample.latency_buckets[le] = sample.latency_buckets.get(le, 0.0) + value
         elif name == f"{_HISTOGRAM}_sum":
-            sample.latency_sum = value
+            sample.latency_sum = (sample.latency_sum or 0.0) + value
         elif name == f"{_HISTOGRAM}_count":
-            sample.latency_count = value
+            sample.latency_count = (sample.latency_count or 0.0) + value
         elif name == _OUTCOMES:
             outcome = labels.get("outcome")
             if outcome:
@@ -210,6 +222,26 @@ def parse_adapter_metrics(text: str, *, scraped_at: float | None = None) -> Metr
             sample.gpu_utilization = value
         elif name == _GPU_MEM_BYTES:
             sample.gpu_memory_bytes = value
+        elif name == "adapter_model_info":
+            # Identity is in the labels; the value is always 1.
+            sample.model_info = dict(labels)
+        elif (
+            name.startswith("adapter_")
+            and not name.endswith("_bucket")
+            # standard-but-uninteresting gauges stay out of the domain map
+            and name not in ("adapter_model_loaded", "adapter_stream_connections_active")
+        ):
+            # Adapter-defined DOMAIN series (detections by class, audio
+            # seconds, RTF sums...). Key by name plus the one meaningful
+            # label if present, so per-class counters stay distinct.
+            # Bounded: adapters register these with closed label sets.
+            meaningful = {k: v for k, v in labels.items() if k != "le"}
+            if meaningful:
+                k, v = sorted(meaningful.items())[0]
+                key = f'{name}{{{k}="{v}"}}'
+            else:
+                key = name
+            sample.domain[key] = sample.domain.get(key, 0.0) + value
     return sample
 
 
@@ -273,6 +305,118 @@ def _outcome_delta(newest: dict[str, float], oldest: dict[str, float]) -> dict[s
             return {k: int(v) for k, v in newest.items()}
         counts[outcome] = int(d)
     return counts
+
+
+# ── KAI-C's OWN Prometheus exposition (client-side vantage point) ──
+#
+# Everything above is what ADAPTERS report about themselves. This is the
+# other half of the observability story: what KAI-C — the client every
+# governed inference flows through — observes. Proxy-side latency
+# includes the network hop and any queueing in front of the adapter, and
+# it keeps working when an adapter is too wedged to answer its own
+# /metrics. Rendered at KAI-C's GET /metrics for external Prometheus.
+
+_PROXY_BUCKETS: tuple[float, ...] = (
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+)
+_PROXY_RESULTS: tuple[str, ...] = ("ok", "http_error", "exception", "refused")
+
+
+def _esc_label(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+class ProxyMetrics:
+    """Per-adapter counters + latency histogram for KAI-C's proxied
+    inference calls, measured around the HTTP hop to the adapter.
+    Bounded: one label (adapter name), series only for adapters that
+    actually served traffic. Thread-safe (recorded from the async route,
+    rendered from a sync handler)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # adapter → result → count
+        self._totals: dict[str, dict[str, float]] = {}
+        # adapter → {"buckets": {ub: n}, "inf": n, "sum": s, "count": n}
+        self._lat: dict[str, dict] = {}
+
+    def record(self, adapter: str, result: str, latency_seconds: float | None) -> None:
+        if result not in _PROXY_RESULTS:
+            result = "exception"
+        with self._lock:
+            totals = self._totals.setdefault(
+                adapter, {r: 0.0 for r in _PROXY_RESULTS})
+            totals[result] += 1
+            if latency_seconds is not None:
+                hist = self._lat.get(adapter)
+                if hist is None:
+                    hist = self._lat[adapter] = {
+                        "buckets": {ub: 0 for ub in _PROXY_BUCKETS},
+                        "inf": 0, "sum": 0.0, "count": 0,
+                    }
+                for ub in _PROXY_BUCKETS:
+                    if latency_seconds <= ub:
+                        hist["buckets"][ub] += 1
+                hist["inf"] += 1
+                hist["sum"] += latency_seconds
+                hist["count"] += 1
+
+    def render(self, adapter_summaries: list[dict[str, Any]] | None = None) -> str:
+        """Prometheus text exposition: proxy series plus, when the
+        registry's summaries are supplied, per-adapter up/health gauges
+        (so a scrape of KAI-C alone answers 'is the fleet alive')."""
+        lines: list[str] = []
+        with self._lock:
+            lines.append(
+                "# HELP kaic_proxy_infer_total Proxied /infer calls by adapter and result.")
+            lines.append("# TYPE kaic_proxy_infer_total counter")
+            for adapter in sorted(self._totals):
+                for result in _PROXY_RESULTS:
+                    lines.append(
+                        f'kaic_proxy_infer_total{{adapter="{_esc_label(adapter)}",result="{result}"}} '
+                        f"{self._totals[adapter][result]}"
+                    )
+            lines.append(
+                "# HELP kaic_proxy_infer_latency_seconds Client-observed latency of "
+                "proxied inference (network + adapter queue + inference).")
+            lines.append("# TYPE kaic_proxy_infer_latency_seconds histogram")
+            for adapter in sorted(self._lat):
+                hist = self._lat[adapter]
+                al = f'adapter="{_esc_label(adapter)}"'
+                for ub in _PROXY_BUCKETS:
+                    lines.append(
+                        f'kaic_proxy_infer_latency_seconds_bucket{{{al},le="{ub}"}} '
+                        f"{hist['buckets'][ub]}"
+                    )
+                lines.append(
+                    f'kaic_proxy_infer_latency_seconds_bucket{{{al},le="+Inf"}} {hist["inf"]}')
+                lines.append(f'kaic_proxy_infer_latency_seconds_sum{{{al}}} {hist["sum"]}')
+                lines.append(f'kaic_proxy_infer_latency_seconds_count{{{al}}} {hist["count"]}')
+        if adapter_summaries:
+            lines.append("# HELP kaic_adapter_up 1 when the adapter's last health probe was ok.")
+            lines.append("# TYPE kaic_adapter_up gauge")
+            fail_lines: list[str] = []
+            for summary in adapter_summaries:
+                name = summary.get("name")
+                if not name:
+                    continue
+                al = f'adapter="{_esc_label(str(name))}"'
+                up = 1 if summary.get("health_status") == "ok" else 0
+                lines.append(f"kaic_adapter_up{{{al}}} {up}")
+                fail_lines.append(
+                    f"kaic_adapter_consecutive_health_failures{{{al}}} "
+                    f"{int(summary.get('consecutive_health_failures') or 0)}"
+                )
+            if fail_lines:
+                lines.append(
+                    "# HELP kaic_adapter_consecutive_health_failures Consecutive failed health probes (3+ = unavailable).")
+                lines.append("# TYPE kaic_adapter_consecutive_health_failures gauge")
+                lines.extend(fail_lines)
+        return "\n".join(lines) + "\n"
+
+
+# Module-global singleton (mirrors the registry's rollup pattern).
+proxy_metrics = ProxyMetrics()
 
 
 # ── Rollup store ───────────────────────────────────────────────────
@@ -384,10 +528,71 @@ class MetricsRollup:
             series.append(entry)
             prev = smp
 
+        # Domain series (SDK ≥1.2): windowed delta per series over the
+        # sample window (counter reset → fall back to newest cumulative,
+        # same posture as _outcome_delta), plus the model identity from
+        # the newest scrape. ``_sum``/``_count`` pairs ride along so the
+        # UI can derive windowed averages (e.g. mean realtime factor).
+        domain: dict[str, float] = {}
+        model_info: dict[str, str] = {}
+        if samples:
+            newest = samples[-1]
+            oldest = samples[0]
+            model_info = dict(newest.model_info)
+            for key, val in newest.domain.items():
+                d = val - oldest.domain.get(key, 0.0)
+                domain[key] = round(val if d < 0 else d, 4)
+
+        # Trend keys for the UI's domain sparklines — bounded to 6 series
+        # so the payload stays small at 60 samples: derived averages for
+        # _sum/_count pairs first (e.g. realtime factor — the efficiency
+        # trend), then the busiest counters by windowed delta.
+        avg_stems = sorted(
+            k[:-4] for k in domain
+            if k.endswith("_sum") and (k[:-4] + "_count") in domain
+        )[:2]
+        counter_keys = sorted(
+            (k for k in domain if not k.endswith("_sum") and not k.endswith("_count")),
+            key=lambda k: domain[k], reverse=True,
+        )
+        domain_trend_keys = (
+            [s + "_avg" for s in avg_stems] + counter_keys[: 6 - len(avg_stems)]
+        )
+
+        def _domain_point(prev_s: MetricsSample, cur: MetricsSample) -> dict[str, float | None]:
+            """Per-interval domain values for one series point: counter
+            deltas (reset → None) and _sum/_count-derived interval
+            averages (no observations in the interval → None)."""
+            out: dict[str, float | None] = {}
+            for key in domain_trend_keys:
+                if key.endswith("_avg"):
+                    stem = key[:-4]
+                    ds = cur.domain.get(stem + "_sum", 0.0) - prev_s.domain.get(stem + "_sum", 0.0)
+                    dc = cur.domain.get(stem + "_count", 0.0) - prev_s.domain.get(stem + "_count", 0.0)
+                    out[key] = round(ds / dc, 4) if dc > 0 and ds >= 0 else None
+                else:
+                    cur_v = cur.domain.get(key)
+                    prev_v = prev_s.domain.get(key)
+                    if cur_v is None or prev_v is None or cur_v < prev_v:
+                        out[key] = None
+                    else:
+                        out[key] = round(cur_v - prev_v, 4)
+            return out
+
+        # Second pass over the already-built series points: inject the
+        # per-interval domain values (series[i] pairs samples[i-1]→[i]).
+        if domain_trend_keys and len(samples) > 1:
+            series[0]["domain"] = {k: None for k in domain_trend_keys}
+            for i in range(1, len(samples)):
+                series[i]["domain"] = _domain_point(samples[i - 1], samples[i])
+
         newest_hw = samples[-1] if samples else None
         return {
             "adapter": adapter,
             "window_s": WINDOW_SECONDS,
+            "model_info": model_info,
+            "domain": domain,
+            "domain_trend_keys": domain_trend_keys,
             "latency_ms": latency_ms,
             "outcomes": outcomes,
             "inflight": inflight,
