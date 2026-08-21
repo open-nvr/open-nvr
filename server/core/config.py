@@ -179,9 +179,25 @@ class Settings(BaseSettings):
 
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
-    # RECORDING_SEGMENT_SECONDS. Default 3600 (1h) to match the MediaMTX
-    # pathDefaults `recordSegmentDuration: 1h` — keep them in sync.
-    recording_segment_seconds: int = 3600
+    # RECORDING_SEGMENT_SECONDS. Default 60 (1-minute clips) to match the
+    # MediaMTX pathDefaults `recordSegmentDuration: 60s` — keep them in sync.
+    # Short clips give minute-granular retention, cheap per-file indexing,
+    # and a precise timeline; playback sessions span many clips (Phase 4).
+    recording_segment_seconds: int = 60
+
+    # IANA timezone name (e.g. "Asia/Kolkata") governing how NEW-LAYOUT
+    # recording paths (cam-N/YYYY-MM-DD/HH/MM-SS-ffffff.mp4) are interpreted.
+    # None = the process's local timezone (the TZ env var, which docker-compose
+    # also passes to MediaMTX so both sides name/parse identically). Legacy
+    # layouts (cam-N/YYYY/MM/DD/...) are always parsed as UTC — they were
+    # written while the containers ran UTC.
+    recording_timezone: str | None = None
+
+    # Serve recording listings/timelines from the recordings DB index (fast,
+    # SQL-backed) instead of per-request MediaMTX /list fan-outs. The MediaMTX
+    # path remains as automatic fallback for cameras with no indexed rows, and
+    # this flag is the instant rollback switch for the cutover.
+    use_db_recordings_index: bool = True
 
     # MediaMTX service URLs (internal - for backend to MediaMTX communication)
     mediamtx_hls_url: str | None = "http://localhost:8888"  # HLS streaming endpoint
@@ -294,6 +310,12 @@ class Settings(BaseSettings):
     internal_api_key: str  # For adapter authentication
     kai_c_url: str = "http://localhost:8100"  # KAI-C orchestrator URL
     kai_c_ip: str = "127.0.0.1"  # KAI-C IP for whitelisting
+    # detect-pipeline Tier-0 Prometheus /metrics (compute-gated inference).
+    # Polled read-only for the app's Compute-gated panel; empty disables it.
+    detect_pipeline_metrics_url: str = "http://localhost:9109"
+    # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
+    # and store plate_text on the event row. Best-effort; off = rows only.
+    events_plate_enrichment: bool = True
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod

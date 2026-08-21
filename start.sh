@@ -84,6 +84,16 @@ compose_args() {
             return 1
         }
         args="$args -f $example_compose"
+        # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that
+        # skips the bundled ollama container and points the agent at the
+        # operator's endpoint instead — the GPU path on macOS/Windows,
+        # where the in-VM container is CPU-only. Only meaningful for the
+        # camera-agent profiles, and harmless to append with them.
+        local external_llm
+        external_llm=$(get_env_var "OLLAMA_EXTERNAL_URL")
+        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml ]]; then
+            args="$args -f docker-compose.camera-agent.external-llm.yml"
+        fi
     fi
     [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
     echo "$args"
@@ -365,6 +375,21 @@ configure_nginx_bind_host() {
 
     mode="multi-undeclared"
     export NGINX_BIND_HOST="0.0.0.0"
+    # Best-effort browser-facing URLs even without a declared topology:
+    # this branch previously exported no MEDIAMTX_PUBLIC_URL at all, so
+    # compose fell back to https://localhost and live view broke for
+    # every LAN client. detect_lan_ip is now route-aware (default-route
+    # source IP), so its guess is the operator-facing NIC, not
+    # enumeration luck.
+    local fallback_host
+    fallback_host=$(detect_lan_ip 2>/dev/null || echo "")
+    if [ -n "$fallback_host" ]; then
+        export MEDIAMTX_PUBLIC_URL="https://${fallback_host}"
+        export MEDIAMTX_WEBRTC_HOSTS="${fallback_host}"
+        if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+            export OPENNVR_HOST_IP="${fallback_host}"
+        fi
+    fi
     echo -e "  ${YELLOW}NIC topology: multi-NIC, undeclared (non-interactive)${NC}" >&2
     echo -e "  ${GRAY}  Detected ${nic_count} routable interfaces:${NC}" >&2
     echo "$nics" | while IFS=: read -r iface ip; do
@@ -523,6 +548,19 @@ prompt_nic_topology() {
             write_env_var CAMERA_NETWORK_INTERFACE "$cam_iface"
             write_env_var MGMT_NETWORK_INTERFACE "$mgmt_iface"
             export NGINX_BIND_HOST="$mgmt_ip"
+            # First-run parity with the dual-declared branch of
+            # configure_nginx_bind_host: that branch only runs on the
+            # NEXT ./start.sh up (it reads the interface names we just
+            # wrote to .env). Without these exports, the compose up
+            # that follows THIS walkthrough falls back to
+            # https://localhost for the browser-facing stream URLs and
+            # advertises no reachable WebRTC ICE host — live view
+            # broken until a restart nobody knows they need.
+            export MEDIAMTX_PUBLIC_URL="https://${mgmt_ip}"
+            export MEDIAMTX_WEBRTC_HOSTS="${mgmt_ip}"
+            if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
+                export OPENNVR_HOST_IP="${mgmt_ip}"
+            fi
             echo "" >&2
             echo -e "  ${GREEN}✓ Dual-NIC mode saved.${NC}" >&2
             echo -e "  ${GRAY}  camera network : ${WHITE}${cam_iface}${GRAY}  (UI not exposed here)${NC}" >&2
@@ -654,6 +692,38 @@ print_security_posture() {
 # We try to detect the LAN-facing IP best-effort so the operator
 # sees a clickable URL. Failure paths fall back to a generic
 # "https://<server-ip>/" string so the message is never misleading.
+# True if this source-IP / egress-interface pair looks like a VPN
+# tunnel rather than the operator's LAN. Route-aware detection has one
+# failure mode the heuristics it replaced did not: on a host running a
+# full-tunnel VPN (Tailscale, WireGuard, ...) the default route IS the
+# tunnel, so `ip route get` deterministically returns the tunnel IP —
+# and MEDIAMTX_PUBLIC_URL, the WebRTC ICE hosts, and the cert SAN get
+# pinned to an address LAN browsers can't reach. Two independent
+# signals, either one disqualifies:
+#   * egress device named like a tunnel (wg*, tun*, tap*, utun*,
+#     tailscale*, zt* (ZeroTier), nebula*)
+#   * source address in 100.64.0.0/10 — the CGNAT range Tailscale
+#     allocates from; never a home/office LAN address in practice
+# Operators who genuinely WANT the tunnel address (remote-only access)
+# set OPENNVR_HOST_IP in .env, which wins before detection runs.
+is_vpn_tunnel_source() {
+    local src="$1" dev="$2"
+    case "$dev" in
+        wg*|tun*|tap*|utun*|tailscale*|zt*|nebula*) return 0 ;;
+    esac
+    case "$src" in
+        100.*)
+            local second
+            second="${src#100.}"
+            second="${second%%.*}"
+            case "$second" in
+                6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7]) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
 detect_lan_ip() {
     # Self-review M-1: on dual-NIC hosts, NGINX_BIND_HOST is the
     # *authoritative* answer for "which IP does the operator browse
@@ -673,6 +743,30 @@ detect_lan_ip() {
     if [ -n "$override" ]; then
         echo "$override"
         return
+    fi
+    # Route-aware detection: the source IP the kernel would use to
+    # reach the internet. On multi-NIC hosts this lands on the
+    # operator-facing NIC by construction — a directly-attached
+    # camera NIC has no default route — unlike the `hostname -I`
+    # fallback below, whose ordering is interface-enumeration luck
+    # and can pick the camera NIC (wrong MEDIAMTX_PUBLIC_URL, wrong
+    # WebRTC ICE hosts, wrong cert SAN). No packet is sent: `ip
+    # route get` is a pure routing-table lookup.
+    if command -v ip >/dev/null 2>&1; then
+        local route_out route_src route_dev
+        route_out=$(ip -4 route get 1.1.1.1 2>/dev/null | head -n 1)
+        route_src=$(printf '%s\n' "$route_out" \
+            | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+        route_dev=$(printf '%s\n' "$route_out" \
+            | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+        # A tunnel egress means "the default route is the VPN", not
+        # "this is the operator-facing NIC" — skip to the LAN
+        # heuristics below instead of pinning URLs/certs to an
+        # address LAN browsers can't reach (see is_vpn_tunnel_source).
+        if [ -n "$route_src" ] && ! is_vpn_tunnel_source "$route_src" "${route_dev:-}"; then
+            echo "$route_src"
+            return
+        fi
     fi
     # Linux: hostname -I returns space-separated v4/v6 addresses on
     # configured interfaces. Take the first non-loopback v4.
@@ -696,6 +790,71 @@ detect_lan_ip() {
         done
     fi
     echo ""
+}
+
+# ── Camera-discovery LAN IPs (OPENNVR_LAN_IPS) ─────────────
+# The bridge-networked core container can't see the host's NICs, so ONVIF
+# discovery relies on the launcher exporting the host's LAN address(es).
+# OPENNVR_HOST_IP (exported by configure_nginx_bind_host) covers the
+# operator-facing NIC, but on a multi-NIC host the camera LAN is usually a
+# *different* NIC — so export every routable private IPv4 as OPENNVR_LAN_IPS
+# too and discovery scans each NIC's subnet. Compose passes both variables
+# to opennvr-core; an operator-set .env value always wins.
+export_camera_lan_ips() {
+    if [ -n "${OPENNVR_LAN_IPS:-}" ] || [ -n "$(get_env_var OPENNVR_LAN_IPS 2>/dev/null)" ]; then
+        return 0
+    fi
+    local ips="" iface ip
+    while IFS=: read -r iface ip; do
+        [ -n "$ip" ] || continue
+        if is_vpn_tunnel_source "$ip" "$iface"; then continue; fi
+        # RFC1918 only — a public or CGNAT address is never a camera LAN.
+        case "$ip" in
+            10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) ;;
+            *) continue ;;
+        esac
+        case ",${ips}," in *",${ip},"*) continue ;; esac
+        ips="${ips:+${ips},}${ip}"
+    done <<EOF
+$(detect_routable_nics)
+EOF
+    if [ -n "$ips" ]; then
+        export OPENNVR_LAN_IPS="$ips"
+        case "$ips" in
+            *,*) echo -e "  ${GRAY}Camera discovery will cover subnets of: ${ips}${NC}" >&2 ;;
+        esac
+    fi
+}
+
+# ── Host LAN IP hint file (./data/net-hints/host-ips) ──────
+# The OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars are frozen into the core
+# container at creation, so they go stale when the host moves to another
+# subnet. This file is bind-mounted read-only into the container (see
+# docker-compose.yml) and rewritten on every launcher run; the server's
+# detect_local_subnets() reads it first, so ONVIF discovery follows the
+# host's *current* networks without a container recreate.
+write_net_hints() {
+    local hints="" candidate
+    for candidate in \
+        "${OPENNVR_HOST_IP:-}" "$(get_env_var OPENNVR_HOST_IP 2>/dev/null || true)" \
+        "${OPENNVR_LAN_IPS:-}" "$(get_env_var OPENNVR_LAN_IPS 2>/dev/null || true)"; do
+        local token
+        for token in $(printf '%s' "$candidate" | tr ',' ' '); do
+            [ -n "$token" ] || continue
+            case " ${hints} " in *" ${token} "*) continue ;; esac
+            hints="${hints}${hints:+ }${token}"
+        done
+    done
+    # Best-effort: a permission problem (e.g. the dir was first created
+    # root-owned by Docker) must not abort the launch under set -e.
+    if [ -n "$hints" ]; then
+        { mkdir -p ./data/net-hints \
+            && printf '%s\n' "$hints" > ./data/net-hints/host-ips.tmp \
+            && mv -f ./data/net-hints/host-ips.tmp ./data/net-hints/host-ips; } 2>/dev/null \
+            || echo -e "  ${YELLOW}⚠ Couldn't write ./data/net-hints/host-ips (check permissions)${NC}" >&2
+    else
+        rm -f ./data/net-hints/host-ips 2>/dev/null || true
+    fi
 }
 
 print_access_urls() {
@@ -900,6 +1059,8 @@ run_up() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
+    export_camera_lan_ips
+    write_net_hints
     echo -e "  ${GREEN}Starting all services ...${NC}"
     docker compose $ARGS up -d --remove-orphans
     echo ""
@@ -919,6 +1080,8 @@ run_build() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
+    export_camera_lan_ips
+    write_net_hints
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
     docker compose $ARGS build
     docker compose $ARGS up -d --remove-orphans
@@ -1017,6 +1180,28 @@ case "$COMMAND" in
     print_first_time_setup_token "$ARGS"
     ;;
 
+  refresh-net)
+    # Rewrite ./data/net-hints/host-ips from the host's CURRENT networks —
+    # and nothing else: no validation, no compose, no container churn. The
+    # file is bind-mounted read-only into opennvr-core and re-read on every
+    # discovery request, so camera discovery follows a host that moved to a
+    # new network the moment this finishes. The camera dialog's network
+    # dropdown points operators here. An operator-set OPENNVR_HOST_IP /
+    # OPENNVR_LAN_IPS (.env or environment) still wins over detection.
+    if [ -z "${OPENNVR_HOST_IP:-}" ] && [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null || true)" ]; then
+        detected_ip=$(detect_lan_ip)
+        [ -n "$detected_ip" ] && export OPENNVR_HOST_IP="$detected_ip"
+    fi
+    export_camera_lan_ips
+    write_net_hints
+    if [ -f ./data/net-hints/host-ips ]; then
+        echo -e "  ${GREEN}✓ Network hints refreshed:${NC} $(cat ./data/net-hints/host-ips)"
+        echo -e "  ${GRAY}Camera discovery picks this up immediately — no restart needed.${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ No LAN address detected; hint file cleared.${NC}"
+    fi
+    ;;
+
   refresh-certs)
     # ISSUE-6 v9: regenerate the TLS certs on demand. Used when:
     #   - The host's LAN IP changed (DHCP renewal, moved to a new
@@ -1051,6 +1236,8 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
+    export_camera_lan_ips
+    write_net_hints
     docker compose $ARGS up -d --remove-orphans
     echo ""
     echo -e "  ${GREEN}✓ Fresh certs will be generated by the init containers.${NC}"
@@ -1059,7 +1246,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|up|build|down|logs|status|validate|token|install|reconfigure|refresh-certs]"
+    echo "Usage: ./start.sh [start|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|refresh-certs]"
     exit 1
     ;;
 esac

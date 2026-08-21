@@ -19,6 +19,8 @@ Camera service for business logic operations.
 Handles camera creation, updates, and management.
 """
 
+from datetime import UTC, datetime
+
 from fastapi import HTTPException, status
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
@@ -103,6 +105,34 @@ class CameraService:
             # Commit the transaction to persist the camera
             db.commit()
             db.refresh(db_camera)
+
+            # Identity-protect the recordings directory BEFORE provisioning
+            # (i.e. before MediaMTX can write the first segment): if this
+            # camera's numeric id inherits a pre-existing directory that
+            # belonged to a different camera (DB wipe + re-add), the old tree
+            # is quarantined to orphaned/ and a clean, stamped dir takes its
+            # place. Best-effort: a failure here must never block camera
+            # creation (the reconciler repeats the same protection).
+            try:
+                from services.camera_identity import protect_camera_dir
+
+                classification = protect_camera_dir(db, db_camera, "provision")
+                if classification == "conflict":
+                    camera_logger.log_action(
+                        "camera.recordings_dir_quarantined",
+                        message=(
+                            f"Pre-existing recordings for camera id {db_camera.id} "
+                            "belonged to a different camera and were moved to "
+                            "orphaned/ (recoverable in Settings -> Recording)"
+                        ),
+                        user_id=owner_id,
+                        camera_id=db_camera.id,
+                    )
+            except Exception:
+                camera_logger.error(
+                    f"Recording-dir identity protection failed for camera {db_camera.id}",
+                    exc_info=True,
+                )
 
             # Auto-provision if RTSP URL is present
             if db_camera.rtsp_url:
@@ -254,7 +284,11 @@ class CameraService:
     @staticmethod
     def get_camera_by_id(db: Session, camera_id: int, user_id: int) -> Camera | None:
         """Get camera by ID (only if user owns it or is superuser)."""
-        camera = db.query(Camera).filter(Camera.id == camera_id).first()
+        camera = (
+            db.query(Camera)
+            .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+            .first()
+        )
         if not camera:
             return None
 
@@ -277,7 +311,9 @@ class CameraService:
         active_only: bool = True,
     ) -> list[Camera]:
         """Get list of cameras owned by a specific user."""
-        query = db.query(Camera).filter(Camera.owner_id == owner_id)
+        query = db.query(Camera).filter(
+            Camera.owner_id == owner_id, Camera.deleted_at.is_(None)
+        )
         if active_only:
             query = query.filter(Camera.is_active == True)
 
@@ -288,7 +324,7 @@ class CameraService:
         db: Session, skip: int = 0, limit: int = 100, active_only: bool = True
     ) -> list[Camera]:
         """Get all cameras (for superusers)."""
-        query = db.query(Camera)
+        query = db.query(Camera).filter(Camera.deleted_at.is_(None))
         if active_only:
             query = query.filter(Camera.is_active == True)
 
@@ -313,7 +349,9 @@ class CameraService:
             )
             .subquery()
         )
-        query = db.query(Camera).filter(Camera.id.in_(subq))
+        query = db.query(Camera).filter(
+            Camera.id.in_(subq), Camera.deleted_at.is_(None)
+        )
         if active_only:
             query = query.filter(Camera.is_active == True)
         return query.offset(skip).limit(limit).all()
@@ -349,8 +387,12 @@ class CameraService:
 
     @staticmethod
     def delete_camera(db: Session, camera_id: int, user_id: int) -> bool:
-        """Delete a camera (soft delete by setting is_active to False)."""
-        db_camera = db.query(Camera).filter(Camera.id == camera_id).first()
+        """Delete a camera (irreversible soft delete: tombstone + deactivate)."""
+        db_camera = (
+            db.query(Camera)
+            .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+            .first()
+        )
         if not db_camera:
             return False
 
@@ -363,6 +405,7 @@ class CameraService:
             )
 
         db_camera.is_active = False
+        db_camera.deleted_at = datetime.now(UTC)
         db.commit()
         return True
 

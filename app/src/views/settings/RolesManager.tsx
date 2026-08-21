@@ -17,7 +17,9 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+import { Shield, ShieldPlus, X } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 
 type Role = {
@@ -61,7 +63,7 @@ export function RolesManager() {
         setRoles(list)
         setTotal((res.data && (res.data as any).total) ? (res.data as any).total : list.length)
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load roles')
+        setError(extractApiError(e, 'Failed to load roles'))
       } finally {
         setLoading(false)
       }
@@ -77,11 +79,13 @@ export function RolesManager() {
     setShowCreateDialog(true)
     setEditing(null)
     resetForm()
+    setError(null)
   }
 
   const startEdit = (r: Role) => {
     setEditing(r)
     setShowCreateDialog(false)
+    setError(null)
     setForm({ name: r.name, description: r.description || '' })
     setShowEditDialog(true)
   }
@@ -103,7 +107,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to create role')
+      setError(extractApiError(e, 'Failed to create role'))
     } finally {
       setLoading(false)
     }
@@ -121,7 +125,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to update role')
+      setError(extractApiError(e, 'Failed to update role'))
     } finally {
       setLoading(false)
     }
@@ -135,7 +139,7 @@ export function RolesManager() {
       await apiService.deleteRole(r.id)
       await refresh()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete role')
+      setError(extractApiError(e, 'Failed to delete role'))
     } finally {
       setLoading(false)
     }
@@ -161,21 +165,34 @@ export function RolesManager() {
 
       {/* Create Role Dialog */}
       {showCreateDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-md w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Add New Role</h3>
-            <form onSubmit={onCreate} className="space-y-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Description</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-              </label>
-              <div className="flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm() }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Creating...' : 'Create Role'}</button>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-md shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
+              <h3 className="font-semibold flex items-center gap-2">
+                <ShieldPlus size={18} />
+                Add New Role
+              </h3>
+              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={onCreate} className="flex flex-col flex-1 min-h-0">
+              <div className="p-4 overflow-auto flex-1 space-y-4">
+                {error && (
+                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
+                )}
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
+                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" placeholder="e.g., operator" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-[var(--text-dim)]">Description</span>
+                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+                </label>
+              </div>
+              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Creating...' : 'Create Role'}</button>
               </div>
             </form>
           </div>
@@ -184,21 +201,34 @@ export function RolesManager() {
 
       {/* Edit Role Dialog */}
       {showEditDialog && editing && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-md w-full mx-4 rounded-lg">
-            <h3 className="text-lg font-medium mb-4">Edit Role: {editing.name}</h3>
-            <form onSubmit={onUpdate} className="space-y-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Name</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Description</span>
-                <input className="bg-[var(--panel-2)] border border-neutral-700 px-3 py-2 rounded" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-              </label>
-              <div className="flex justify-end gap-2 mt-4">
-                <button type="button" className="px-4 py-2 border border-neutral-700 bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm() }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 bg-[var(--accent)] text-white rounded" disabled={loading}>{loading ? 'Updating...' : 'Update Role'}</button>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-md shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
+              <h3 className="font-semibold flex items-center gap-2">
+                <Shield size={18} />
+                Edit Role: {editing.name}
+              </h3>
+              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={onUpdate} className="flex flex-col flex-1 min-h-0">
+              <div className="p-4 overflow-auto flex-1 space-y-4">
+                {error && (
+                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
+                )}
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
+                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-[var(--text-dim)]">Description</span>
+                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+                </label>
+              </div>
+              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Updating...' : 'Update Role'}</button>
               </div>
             </form>
           </div>

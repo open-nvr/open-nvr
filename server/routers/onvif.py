@@ -22,18 +22,21 @@ HTTP Digest is more compatible with Hikvision and similar devices.
 """
 
 import asyncio
+import contextlib
 import ipaddress
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
+from core.logging_config import main_logger
+from core.client_ip import get_client_ip
 from routers.network import (
     detect_local_subnets,
-    get_camera_lan_subnet,
     get_camera_lan_subnets,
+    lan_cidr_for_ip,
 )
 from services.onvif_digest_service import (
     connect_and_get_profiles,
@@ -51,7 +54,7 @@ from services.onvif_service import (
     ptz_continuous_move,
     ptz_presets,
     ptz_stop,
-    scan_onvif_subnet,
+    scan_onvif_subnets_exclusive,
 )
 
 router = APIRouter(tags=["onvif"])
@@ -103,8 +106,119 @@ def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
         )
 
 
+def _resolve_scan_plan(db: Session, cidr: list[str] | None) -> tuple[list[str], str]:
+    """Resolve which subnets a discovery scan would cover and where they came
+    from: explicit ``cidr`` override → configured Camera LAN → auto-detection.
+
+    Override CIDRs are validated (internal-only, /16 or smaller) and raise like
+    ``/discover`` always has; unparseable *configured* CIDRs are dropped with a
+    warning. Returns ``([], source)`` when nothing usable remains — callers
+    decide whether that is an error."""
+    source = "configured"
+    if cidr:
+        source = "override"
+        scan_cidrs: list[str] = []
+        for c in cidr:
+            try:
+                requested = ipaddress.ip_network(c, strict=False)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid CIDR '{c}': {exc}")
+            if not _host_is_internal(str(requested.network_address)):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Refusing to scan non-internal range {c}; discovery is restricted to private networks.",
+                )
+            if requested.prefixlen < 16:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CIDR {c} is too large to scan; use /16 or smaller.",
+                )
+            scan_cidrs.append(c)
+        return scan_cidrs, source
+
+    configured_subnets = get_camera_lan_subnets(db)
+    if configured_subnets:
+        scan_cidrs = configured_subnets
+    else:
+        source = "auto-detected"
+        # Nothing configured — auto-detect the host's own subnet so discovery
+        # "just works" on a flat LAN without any manual Camera LAN setup.
+        scan_cidrs = detect_local_subnets()
+
+    # Drop unparseable configured CIDRs instead of failing the whole scan.
+    valid_cidrs: list[str] = []
+    for c in scan_cidrs:
+        try:
+            ipaddress.ip_network(c, strict=False)
+            valid_cidrs.append(c)
+        except ValueError:
+            main_logger.warning(f"Skipping invalid Camera LAN CIDR {c!r} in discovery scan")
+    return valid_cidrs, source
+
+
+@router.get("/discover/plan")
+async def discover_plan(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Return the subnets a discovery scan would cover, without scanning.
+
+    Lets the UI show "Scanning 192.168.1.0/24 · auto-detected" while the actual
+    (slow) scan is still running, and render a friendly prompt instead of an
+    error when nothing is configured or detectable (``scan_cidrs`` comes back
+    empty rather than a 400).
+
+    ``detected_cidrs`` lists ALL of the host's detected LAN subnets regardless
+    of the configured Camera LAN, so the UI can always offer "scan a host
+    network" — an operator hunting for a camera on a second NIC shouldn't have
+    to know its range by heart. Detection is Docker-aware (bridge ignored,
+    host IPs come from OPENNVR_HOST_IP/OPENNVR_LAN_IPS)."""
+    scan_cidrs, source = _resolve_scan_plan(db, None)
+    try:
+        detected_cidrs = detect_local_subnets()
+    except Exception:
+        detected_cidrs = []
+    return {
+        "scan_cidrs": scan_cidrs,
+        "source": source,
+        "detected_cidrs": detected_cidrs,
+        # The requesting browser's own subnet (if it's a usable LAN address):
+        # a live scan suggestion that can't go stale, unlike the env-derived
+        # host hints in detected_cidrs.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
+    }
+
+
+# How often the /discover handler checks whether the client hung up. Polling
+# is safe on a body-less GET (nothing else consumes the receive channel).
+_DISCONNECT_POLL_S = 1.0
+
+
+async def _await_scan_or_disconnect(scan: asyncio.Task, request: Request):
+    """Await the sweep, polling for client abort ~1/s.
+
+    The UI's Stop button (and its scan-supersede path) only drops the HTTP
+    connection; uvicorn does not cancel the handler, so without this the
+    sweep would run to completion and keep loading the NAT path — starving
+    the very scan the operator started next.
+    """
+    while True:
+        done, _ = await asyncio.wait({scan}, timeout=_DISCONNECT_POLL_S)
+        if done:
+            return scan.result()
+        if await request.is_disconnected():
+            scan.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scan
+            raise HTTPException(
+                status_code=409, detail="Client disconnected; scan stopped."
+            )
+
+
 @router.get("/discover")
 async def discover(
+    request: Request,
     cidr: list[str] | None = Query(
         None,
         description="One or more subnet CIDRs to scan (e.g. cidr=192.168.1.0/24&cidr=10.0.0.0/24). "
@@ -115,40 +229,18 @@ async def discover(
 ):
     """Discover ONVIF cameras via unicast subnet scan (works in Docker bridge mode).
 
-    Scans all configured Camera LAN subnets in parallel.  An optional cidr parameter
-    (repeatable) overrides the configured list; each must be within the primary subnet
-    when one is configured.  Multicast WS-Discovery runs as a best-effort fallback.
+    Scans all configured Camera LAN subnets under one concurrency bound. An
+    optional ``cidr`` parameter (repeatable) overrides the configured list for
+    this scan only — each must be an internal (RFC1918-class) range, but may lie
+    outside the configured Camera LAN: the caller is a superuser looking for a
+    camera before committing a Camera LAN change, and adding a camera found
+    outside the boundary still requires persisting that change first (the
+    connect/add flows keep enforcing the configured subnets). Multicast
+    WS-Discovery runs as a best-effort fallback.
     """
-    configured_subnets = get_camera_lan_subnets(db)
-    primary_cidr = get_camera_lan_subnet(db)
-
-    if cidr:
-        scan_cidrs: list[str] = []
-        for c in cidr:
-            try:
-                requested = ipaddress.ip_network(c, strict=False)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"Invalid CIDR '{c}': {exc}")
-            if primary_cidr:
-                try:
-                    configured = ipaddress.ip_network(primary_cidr, strict=False)
-                    if not requested.subnet_of(configured):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"CIDR {c} is not within the configured Camera LAN subnet {primary_cidr}.",
-                        )
-                except HTTPException:
-                    raise
-                except ValueError:
-                    pass
-            scan_cidrs.append(c)
-    elif configured_subnets:
-        scan_cidrs = configured_subnets
-    else:
-        # Nothing configured — auto-detect the host's own subnet so discovery
-        # "just works" on a flat LAN without any manual Camera LAN setup.
-        scan_cidrs = detect_local_subnets()
-        if not scan_cidrs:
+    valid_cidrs, source = _resolve_scan_plan(db, cidr)
+    if not valid_cidrs:
+        if source == "auto-detected":
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -156,26 +248,30 @@ async def discover(
                     "or set the Camera LAN subnet under Network settings."
                 ),
             )
-
-    # Scan all subnets in parallel, deduplicate by IP
-    try:
-        results_per_subnet = await asyncio.gather(
-            *[scan_onvif_subnet(c) for c in scan_cidrs],
-            return_exceptions=True,
+        raise HTTPException(
+            status_code=400,
+            detail="No valid subnet to scan; check the Camera LAN settings.",
         )
+
+    # One call scans all subnets under a single shared concurrency bound —
+    # per-subnet parallel scans would multiply the connect burst and wedge the
+    # container's NAT path (see scan_onvif_subnets). The exclusive wrapper
+    # also supersedes any sweep already in flight, and the disconnect watcher
+    # stops the sweep when the client aborts the request.
+    try:
+        scan = asyncio.create_task(scan_onvif_subnets_exclusive(valid_cidrs))
+        devices = await _await_scan_or_disconnect(scan, request)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    seen_ips: set[str] = {d["ip"] for d in devices}
+    scan_cidrs = valid_cidrs
 
-    seen_ips: set[str] = set()
-    devices: list[dict] = []
-    for result in results_per_subnet:
-        if isinstance(result, list):
-            for d in result:
-                if d.get("ip") and d["ip"] not in seen_ips:
-                    seen_ips.add(d["ip"])
-                    devices.append(d)
-
-    # Best-effort multicast fallback (works only in host-mode or on native LAN)
+    # Best-effort multicast fallback (works only in host-mode or on native
+    # LAN). Deliberately not serialized with the exclusive sweep slot: a
+    # superseded/disconnected request bails above before reaching this, and
+    # the residual overlap window is one cheap UDP broadcast in a thread.
     try:
         for md in await discover_onvif_devices():
             if md.get("ip") and md["ip"] not in seen_ips:
@@ -184,7 +280,30 @@ async def discover(
     except Exception:
         pass
 
-    return {"devices": devices, "scan_cidrs": scan_cidrs}
+    # Surface detected local subnets that the scan did NOT cover, so the UI can
+    # suggest them when a scan comes up empty (e.g. the configured Camera LAN is
+    # stale after a router change). detect_local_subnets() is Docker-aware — in
+    # a container it ignores the bridge network and reports the host's LAN
+    # (from OPENNVR_HOST_IP) — so suggestions are safe there too.
+    suggested_cidrs: list[str] = []
+    try:
+        scanned_nets = [ipaddress.ip_network(c, strict=False) for c in scan_cidrs]
+        for det in detect_local_subnets():
+            det_net = ipaddress.ip_network(det, strict=False)
+            if not any(det_net.overlaps(s) for s in scanned_nets):
+                suggested_cidrs.append(det)
+    except Exception:
+        pass
+
+    return {
+        "devices": devices,
+        "scan_cidrs": scan_cidrs,
+        "source": source,
+        "suggested_cidrs": suggested_cidrs,
+        # Mirror of /discover/plan's client_cidr so scan responses can top up
+        # the UI's suggestions too.
+        "client_cidr": lan_cidr_for_ip(get_client_ip(request)),
+    }
 
 
 @router.post("/connect")

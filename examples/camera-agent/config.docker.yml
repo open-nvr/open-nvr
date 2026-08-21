@@ -15,6 +15,12 @@
 
 # KAI-C inside opennvr-core. Adapter calls flow here for audit.
 kaic_url: http://opennvr-core:8100
+
+# Tier-0 best frame (detect-pipeline). When reachable, describe/VLM calls run
+# on Tier-0's sharpest retained frame for the track instead of an arbitrary
+# live grab — better answers, cheaper. Unreachable/404 falls back to the live
+# grab automatically, so this is safe to leave on even if Tier-0 is disabled.
+bestframe_base_url: http://detect-pipeline:9109
 kaic_api_key: ${INTERNAL_API_KEY}
 
 # Streaming voice path. Whisper and Piper use their published
@@ -22,7 +28,7 @@ kaic_api_key: ${INTERNAL_API_KEY}
 # HTTP API until a standalone ollama-adapter image is published.
 whisper_url: http://whisper-adapter:9003
 whisper_token: ${INTERNAL_API_KEY}
-ollama_url: http://ollama:11434
+ollama_url: ${OLLAMA_URL}
 ollama_token:
 piper_url: http://piper-adapter:9001
 piper_token: ${INTERNAL_API_KEY}

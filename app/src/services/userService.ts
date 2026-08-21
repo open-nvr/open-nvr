@@ -24,7 +24,9 @@ export const userService = {
   getUser: (userId: number) => api.get(`/api/v1/users/${userId}`),
   updateUser: (userId: number, payload: any) => api.put(`/api/v1/users/${userId}`, payload),
   createUser: (payload: any) => api.post('/api/v1/users/', payload),
-  deleteUser: (userId: number) => api.delete(`/api/v1/users/${userId}`),
+  // Deleting or reactivating a user requires the caller's current TOTP code (X-MFA-Code).
+  deleteUser: (userId: number, mfaCode: string) => api.delete(`/api/v1/users/${userId}`, { headers: { 'X-MFA-Code': mfaCode } }),
+  activateUser: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/activate`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
   
   // Roles
   getRoles: () => api.get('/api/v1/roles/'),

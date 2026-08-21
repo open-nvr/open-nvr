@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user
+from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from core.logging_config import main_logger
 from models import AIDetectionResult, User
@@ -364,6 +364,114 @@ async def get_fleet_metrics(
         return await kai_c_service.get_fleet_metrics()
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="KAI-C unreachable")
+
+
+class Tier0GateUpdate(BaseModel):
+    mode: str  # off | shadow | enforce
+
+
+_GATE_KEY = "detect_gate_mode"
+_SHADOW_SINCE_KEY = "detect_shadow_since"
+_VALID_GATE_MODES = ("off", "shadow", "enforce")
+
+
+def _setting(db: Session, key: str):
+    from models import SecuritySetting
+    return db.query(SecuritySetting).filter(SecuritySetting.key == key).first()
+
+
+def _set_setting(db: Session, key: str, value: str) -> None:
+    from models import SecuritySetting
+    row = _setting(db, key)
+    if row is None:
+        row = SecuritySetting(key=key, json_value="")
+        db.add(row)
+    row.json_value = value
+    db.commit()
+
+
+@router.get("/tier0-gate")
+async def get_tier0_gate(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The managed gate-mode override (guided promotion). ``null`` = follow env."""
+    row = _setting(db, _GATE_KEY)
+    mode = (row.json_value or "").strip().lower() if row else ""
+    since = _setting(db, _SHADOW_SINCE_KEY)
+    return {
+        "override": mode if mode in _VALID_GATE_MODES else None,
+        "shadow_since": (since.json_value or None) if since else None,
+    }
+
+
+@router.put("/tier0-gate")
+async def set_tier0_gate(
+    payload: Tier0GateUpdate,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Set the gate mode from the UI (the promotion card's Enable/Revert).
+
+    Stored in the DB; the detect-pipeline picks it up on its next reconcile
+    tick (~30 s) — no redeploy, no .env edit. Superuser-only: enforcement
+    suppresses expensive looks, which is a product decision.
+    """
+    mode = (payload.mode or "").strip().lower()
+    if mode not in _VALID_GATE_MODES:
+        raise HTTPException(status_code=422, detail=f"mode must be one of {_VALID_GATE_MODES}")
+    _set_setting(db, _GATE_KEY, mode)
+    if mode == "shadow":
+        from datetime import UTC, datetime
+        _set_setting(db, _SHADOW_SINCE_KEY, datetime.now(UTC).isoformat())
+    try:
+        from services.audit_service import write_audit_log
+        write_audit_log(
+            db, action="tier0.gate_mode", user_id=current_user.id,
+            entity_type="tier0", details={"mode": mode},
+        )
+    except Exception:
+        pass
+    return {"override": mode}
+
+
+@router.get("/tier0-metrics")
+async def get_tier0_metrics(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Compute-gated (Tier-0) inference metrics for the app's panel.
+
+    Read-only scrape of the detect-pipeline's Prometheus ``/metrics``
+    (``detect_pipeline_metrics_url``), reduced to process CPU/RAM, the
+    motion-gate ratio, gate escalations vs suppressions, and the
+    expensive-model (Tier-1) call count/latency. Unreachable pipeline is a
+    normal state (gate off / not deployed) → ``{available: false}``; never 502.
+    """
+    from services.tier0_metrics import get_tier0_metrics as _scrape
+
+    data = await _scrape()
+
+    # Guided promotion evidence. Shadow's would-save counters become a
+    # recommendation the panel can show with an Enable button (see
+    # ENABLEMENT.md ladder): ready once shadow has run >= 7 days and the
+    # would-save ratio is meaningful.
+    row = _setting(db, _GATE_KEY)
+    override = (row.json_value or "").strip().lower() if row else ""
+    since_row = _setting(db, _SHADOW_SINCE_KEY)
+    since = (since_row.json_value or "") if since_row else ""
+    if data.get("available") and data.get("mode") == "shadow" and not since:
+        from datetime import UTC, datetime
+        since = datetime.now(UTC).isoformat()
+        _set_setting(db, _SHADOW_SINCE_KEY, since)
+
+    from services.tier0_metrics import promotion_evidence
+    data["promotion"] = promotion_evidence(
+        data,
+        override=override if override in _VALID_GATE_MODES else None,
+        shadow_since_iso=since or None,
+    )
+    return data
 
 
 @router.get("/adapters/{adapter_name}/metrics")

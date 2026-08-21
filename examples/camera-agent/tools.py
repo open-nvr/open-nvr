@@ -24,11 +24,16 @@ metadata + the event ring.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from adapter_clients import KaicAdapterClient
 from context import CameraContext
 from frame_sources import FrameSourceError
+# Tier-0 consumption helpers live in the App SDK so every app shares one
+# implementation (best-frame fetch + event snapshot); re-exported here so
+# ``from tools import make_best_frame_fetch`` keeps working for the agent.
+from opennvr_app_sdk import make_best_frame_fetch, snapshot_from_event  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +99,35 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "camera_snapshot",
+                "description": (
+                    "Count objects or check presence on one camera, several, or "
+                    "all — from the always-on detection stream, WITHOUT running a "
+                    "new inference (instant, no model call). PREFER this for "
+                    "counting and presence: 'how many people/cars?', 'is anyone "
+                    "at the door?', 'is there a package?'. Use describe_camera "
+                    "only when the answer needs appearance (colour, clothing, "
+                    "what someone is doing)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": _camera_prop,
+                        "camera_ids": _camera_ids_prop,
+                    },
+                    "required": ["camera_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "detect_objects",
                 "description": (
                     "Detect and count objects (people, cars, packages, "
-                    "animals) on one camera, several, or all of them. Use for "
+                    "animals) on one camera, several, or all of them, by running "
+                    "a FRESH detection. Prefer camera_snapshot for counts when it "
+                    "has data; use this when you need a live re-check. Use for "
                     "'is there a package?' / 'how many people across all cameras?'."
                 ),
                 "parameters": {
@@ -168,6 +198,97 @@ def build_tool_definitions(
         {
             "type": "function",
             "function": {
+                "name": "search_history",
+                "description": (
+                    "Search the NVR's MEMORY: past visits of people, cars, "
+                    "dogs — any detected object — each with the best photo "
+                    "kept. Use for 'did anyone come between 3 and 4pm?', "
+                    "'which cars entered today?', 'was a dog here yesterday?'. "
+                    "For people it also face-matches the kept photos and "
+                    "names anyone recognised."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "What to look for: person, car, truck, dog, … (default person).",
+                        },
+                        "start_time": {
+                            "type": "string",
+                            "description": "Window start, ISO 8601 WITH timezone offset (e.g. 2026-08-12T15:00:00+05:30). Omit for open start.",
+                        },
+                        "end_time": {
+                            "type": "string",
+                            "description": "Window end, ISO 8601 with timezone offset. Omit for 'until now'.",
+                        },
+                        "camera_id": _camera_prop,
+                        "identify_faces": {
+                            "type": "boolean",
+                            "description": "For person searches: face-match the kept photos (default true).",
+                        },
+                        "plate": {
+                            "type": "string",
+                            "description": "Vehicle searches: find visits whose read plate contains this text, e.g. 'KA01' or '1234'.",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "describe_event",
+                "description": (
+                    "Describe WHAT HAPPENED in a past event from its kept "
+                    "photo — 'what was the person doing?'. Pass the [#id] "
+                    "printed by search_history. Optional question for a "
+                    "specific detail (what were they wearing / carrying)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "integer",
+                            "description": "Event id — the [#id] from search_history.",
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "Optional specific question about the kept photo.",
+                        },
+                    },
+                    "required": ["event_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "describe_window",
+                "description": (
+                    "Describe WHAT SOMEONE WAS DOING over a past time window by "
+                    "reviewing the RECORDED FOOTAGE — samples frames across the "
+                    "span and narrates the behavior. Use for 'what were they "
+                    "doing between 3:12 and 3:16?' after search_history gives "
+                    "the span and camera. Heavier than describe_event; for "
+                    "detail across a span, not a single moment."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": _camera_prop,
+                        "start_time": {"type": "string", "description": "Window start, ISO 8601 with tz offset."},
+                        "end_time": {"type": "string", "description": "Window end, ISO 8601 with tz offset."},
+                        "question": {"type": "string", "description": "Optional specific question about the activity."},
+                    },
+                    "required": ["camera_id", "start_time", "end_time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "recent_events",
                 "description": (
                     "Look back at recent inference events on the cameras. "
@@ -217,14 +338,31 @@ class CameraTools:
         detection_client: KaicAdapterClient,
         recognition_client: KaicAdapterClient,
         footage_index: Any = None,
+        best_frame_fetch: Any = None,
+        resolve_camera: Any = None,
+        events_client: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
         self._detect = detection_client
         self._recognise = recognition_client
+        # Map the agent's camera id → the pipeline's camera id (the id on the Tier-0
+        # bus subject / best-frame endpoint). MUST match the mapping used to build
+        # best_frame_fetch, so camera_snapshot and describe_camera agree on which
+        # camera they're reading. Identity by default.
+        self._resolve_camera = resolve_camera or (lambda cid: cid)
+        # Optional async callable(camera_id) -> jpeg bytes | None. When set,
+        # describe_camera runs the VLM on Tier-0's BEST frame (clean, representative)
+        # instead of an arbitrary live grab — more accurate and cheaper. None (or a
+        # miss) falls back to the live frame, so behaviour is unchanged without it.
+        self._best_frame_fetch = best_frame_fetch
         # Optional read-only FootageIndex (footage_index.FootageIndex).
         # When None or unavailable, search_footage reports that cleanly.
         self._footage_index = footage_index
+        # Optional SDK EventsClient — the platform's memory (canonical event
+        # store). Powers search_history: past visits with best-frame evidence,
+        # optionally face-matched. None = tool reports history isn't enabled.
+        self._events = events_client
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
@@ -244,14 +382,52 @@ class CameraTools:
         clauses = [await self._describe_one(c, question) for c in cams]
         return self._join_clauses(clauses)
 
-    async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
+    async def _best_frame(self, camera_id: str) -> bytes | None:
+        """Tier-0's best frame for the camera as JPEG, or None. Best-effort —
+        any failure returns None so the caller falls back to a live grab."""
+        if self._best_frame_fetch is None:
+            return None
         try:
-            frame = await self._ctx.get_frame(camera_id)
-        except LookupError:
-            return f"{camera_id} is not configured"
-        except FrameSourceError as exc:
-            logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
-            return f"{camera_id} appears to be offline"
+            return await self._best_frame_fetch(camera_id)
+        except Exception:
+            logger.debug("best-frame fetch failed for %s; using live frame",
+                         camera_id, exc_info=True)
+            return None
+
+    async def _best_frame_if_active(self, camera_id: str) -> bytes | None:
+        """Tier-0's best frame ONLY while a track is currently active on this
+        camera; otherwise ``None`` so the caller takes a fresh live look.
+
+        The best frame is a curated crop of a RECENT detection. It is a good,
+        cheap stand-in for the live scene while something is actively happening,
+        but for a quiet/static scene it is stale — a person sitting still
+        produces no fresh track, so the best frame would answer "what do you see
+        now" with a PAST moment. Gate it on a fresh Tier-0 event (same freshness
+        rule as camera_snapshot); when the scene is static, return None so the
+        caller grabs a live frame.
+        """
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
+        if event is None or (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return None
+        return await self._best_frame(camera_id)
+
+    async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
+        # "What do you see now" must look at a FRESH LIVE frame. Tier-0's best
+        # frame is a curated crop of a RECENT detection — a clean, cheap stand-in
+        # only while a track is ACTIVE right now; for a quiet/static scene it is a
+        # PAST frame (a person sitting still produces no fresh track), so it would
+        # describe an earlier moment. Use the best frame only when a Tier-0 track
+        # is currently active; otherwise take a live grab.
+        frame = await self._best_frame_if_active(camera_id)
+        if frame is None:
+            try:
+                frame = await self._ctx.get_frame(camera_id)
+            except LookupError:
+                return f"{camera_id} is not configured"
+            except FrameSourceError as exc:
+                logger.warning("VISION DEGRADED: %s frame fetch failed (camera offline / bad RTSP path?): %s", camera_id, exc)
+                return f"{camera_id} appears to be offline"
         # Prefer a real scene caption / VQA answer when the caption adapter is
         # available. Send the task explicitly for symmetry with
         # recognize_faces and so the wire shape is legible in audit logs.
@@ -301,6 +477,100 @@ class CameraTools:
         if not summary:
             return f"{camera_id}: nothing notable visible"
         return f"{camera_id}: I can see {summary}"
+
+    async def _vlm_caption(self, frame: bytes, question: str | None) -> str | None:
+        """Run the caption/VQA adapter on a frame; return the text, or None when
+        no caption adapter is available or it returns nothing. Same VQA-vs-
+        caption selection as describe_camera (a question -> VQA; none -> caption)."""
+        extra: dict[str, Any] = {}
+        if question:
+            extra["question"] = question
+            extra["prompt"] = question
+        else:
+            extra["task"] = "scene_caption"
+        try:
+            response = await self._caption.infer(frame_jpeg=frame, extra=extra)
+        except Exception:
+            return None
+        result = response.get("result") or {}
+        return (result.get("answer") or result.get("caption") or "").strip() or None
+
+    async def describe_event(self, args: dict[str, Any]) -> str:
+        """Describe a PAST event from its stored evidence crop — the best frame
+        captured WHEN IT HAPPENED. Answers "what was the person doing?" for a
+        remembered visit without a live look. Chain after search_history, which
+        prints each visit's [#id]."""
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't look "
+                    "back at a past event.")
+        try:
+            event_id = int(args.get("event_id"))
+        except (TypeError, ValueError):
+            return ("I need the event's id (the [#id] from a history search) to "
+                    "describe it.")
+        question = str(args.get("question") or "").strip() or None
+        crop = await self._events.evidence(event_id)
+        if not crop:
+            return f"I don't have a stored photo for event {event_id}."
+        caption = await self._vlm_caption(crop, question)
+        if caption is None:
+            return (f"Event {event_id}: a photo is kept but scene description "
+                    "isn't available right now.")
+        return f"Event {event_id}: {caption}"
+
+    # describe_window samples this many frames across the requested span.
+    _WINDOW_SAMPLES = 5
+
+    async def describe_window(self, args: dict[str, Any]) -> str:
+        """Describe WHAT HAPPENED over a past window from the RECORDED FOOTAGE —
+        sample a few frames across [start,end] and narrate the behavior over
+        time. Heavier than describe_event (one still); use when the user wants
+        detail across a span. Chain after search_history (which gives the span
+        and camera)."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        if self._events is None:
+            return ("History isn't enabled on this deployment, so I can't review "
+                    "past footage.")
+        cam = args.get("camera_id")
+        if cam in (None, "", "all", "__any__") or not self._ctx.known_camera(str(cam)):
+            return "I need a specific camera to review footage for a time window."
+        try:
+            server_cam = int(self._resolve_camera(str(cam)))
+        except (TypeError, ValueError):
+            return f"Camera '{cam}' has no server-side id."
+        try:
+            start = _dt.fromisoformat(str(args.get("start_time")).replace("Z", "+00:00"))
+            end = _dt.fromisoformat(str(args.get("end_time")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return "I need a valid start_time and end_time (ISO 8601) to review footage."
+        if end <= start:
+            return "The end time must be after the start time."
+        self.last_cameras_used = [str(cam)]
+        question = str(args.get("question") or "").strip() or None
+
+        n = self._WINDOW_SAMPLES
+        step = (end - start).total_seconds() / max(1, n - 1)
+        observations: list[tuple[str, str]] = []
+        for i in range(n):
+            ts = start + _td(seconds=step * i)
+            frame = await self._events.recording_frame(server_cam, ts.isoformat())
+            if not frame:
+                continue
+            caption = await self._vlm_caption(frame, question)
+            if caption:
+                observations.append((self._clock_phrase(ts.isoformat()), caption))
+        if not observations:
+            return ("I couldn't pull footage for that window — no recording, or "
+                    "the frames weren't readable.")
+        # Collapse consecutive identical captions into a short narrative.
+        lines = []
+        last = None
+        for when, what in observations:
+            if what != last:
+                lines.append(f"{when}, {what}")
+                last = what
+        return "Reviewing the footage: " + "; ".join(lines) + "."
 
     # Irregular plurals worth getting right for the COCO labels the
     # detector emits most; everything else just takes a trailing 's'.
@@ -411,6 +681,40 @@ class CameraTools:
         if not detections:
             return f"{camera_id}: no objects"
         return f"{camera_id}: {self._summarize_detections(detections)}"
+
+    # ── camera_snapshot (metadata from Tier-0, no inference) ────────
+
+    async def camera_snapshot(self, args: dict[str, Any]) -> str:
+        """Answer count/presence from the always-on Tier-0 detection stream —
+        no new inference. Reads the latest published tracks off the event ring."""
+        cams = self._resolve_cameras(args)
+        if isinstance(cams, str):  # ERROR
+            return cams
+        clauses = [self._snapshot_one(c) for c in cams]
+        return self._join_clauses(clauses)
+
+    # Tier-0 publishes a track list every frame while objects are present; it stops
+    # (no empty events) once they leave. So an event older than this means the scene
+    # is stale — treat it as "nothing there now" rather than reporting a departed
+    # object as present.
+    _SNAPSHOT_MAX_AGE_S = 10.0
+
+    def _snapshot_one(self, camera_id: str) -> str:
+        # Resolve to the pipeline's camera id — the Tier-0 event ring is keyed by
+        # the id on the bus subject, same id the best-frame path uses.
+        pipeline_cam = self._resolve_camera(camera_id)
+        event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
+        if event is None:
+            # No Tier-0 stream for this camera (not analyzed, or bus not wired) —
+            # say so plainly so the LLM can fall back to a live tool if it must.
+            return f"{camera_id}: no live detection data (try describe_camera)"
+        if (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
+            return f"{camera_id}: nothing detected recently (try describe_camera for a live look)"
+        summary = snapshot_from_event(event.raw or {}).describe()   # SDK: counts→phrase
+        if not summary:
+            return f"{camera_id}: nothing detected right now"
+        age = max(0, int(time.time() - event.received_at))
+        return f"{camera_id}: {summary} (from live detection {age}s ago)"
 
     # ── recognize_faces ────────────────────────────────────────────
 
@@ -555,6 +859,122 @@ class CameraTools:
         return "Found in recorded footage:\n" + "\n".join(lines)
 
     # ── Helpers ────────────────────────────────────────────────────
+
+    # ── search_history (canonical event store — RFC-0001 C1) ──────
+
+    async def search_history(self, args: dict[str, Any]) -> str:
+        """Answer "who/what came between X and Y?" from the events store.
+
+        Reads remembered visits (one row per object's stay, with its best
+        photo). For person queries it can face-match the evidence crops via
+        the recognition adapter — "yes, I saw Priya at 15:12" — capped at a
+        few crops so a busy window can't stall the conversation.
+        """
+        if self._events is None:
+            return ("History isn't enabled on this deployment "
+                    "(events store not configured).")
+        label = str(args.get("label") or "person").strip().lower()
+        plate = args.get("plate")
+        start = args.get("start_time")
+        end = args.get("end_time")
+        camera_arg = args.get("camera_id")
+        camera_id = None
+        if camera_arg not in (None, "", "all", "__any__"):
+            cam = str(camera_arg)
+            if not self._ctx.known_camera(cam):
+                return f"ERROR: unknown camera '{cam}'."
+            # The store keys visits by the server-side camera id (same id the
+            # internal endpoint returns) — resolve like best-frame does.
+            resolved = self._resolve_camera(cam)
+            try:
+                camera_id = int(resolved)
+            except (TypeError, ValueError):
+                return f"ERROR: camera '{cam}' has no server-side id."
+        try:
+            events = await self._events.search(
+                label=label, camera_id=camera_id, plate=plate,
+                start=start, end=end, limit=25,
+            )
+        except Exception:
+            events = None
+        if events is None:
+            # Failure is NOT an empty window: "nothing came" and "I couldn't
+            # check" must be different answers in a security product.
+            logger.warning("search_history: events store unreachable or query rejected")
+            return ("I couldn't check the history just now (store unreachable "
+                    "or the time range wasn't understood) — please try again.")
+        if not events:
+            window = self._window_phrase(start, end)
+            return f"No {label} visits remembered{window}."
+
+        clauses = []
+        for e in events[:10]:
+            t0 = self._clock_phrase(e.started_at)
+            t1 = self._clock_phrase(e.ended_at)
+            span = f"{t0}–{t1}" if t1 and t1 != t0 else t0
+            plate_bit = f", plate {e.plate_text}" if getattr(e, "plate_text", None) else ""
+            clauses.append(
+                f"[#{e.id}] {span} on camera {e.camera_id}{plate_bit}"
+                + (" (photo kept)" if e.has_evidence else "")
+            )
+        summary = (f"I remember {len(events)} {label} visit(s)"
+                   f"{self._window_phrase(start, end)}: " + "; ".join(clauses) + ".")
+
+        # Face-match the evidence for person questions (best-effort, capped).
+        if label == "person" and bool(args.get("identify_faces", True)):
+            names = await self._identify_visit_faces(events)
+            if names:
+                summary += " Recognised: " + ", ".join(sorted(names)) + "."
+        return summary
+
+    async def _identify_visit_faces(self, events, cap: int = 4) -> set:
+        names: set = set()
+        checked = 0
+        for e in events:
+            if checked >= cap:
+                break
+            if not e.has_evidence:
+                continue
+            crop = await self._events.evidence(e.id)
+            if not crop:
+                continue
+            checked += 1
+            try:
+                response = await self._recognise.infer(
+                    frame_jpeg=crop, extra={"task": "face_recognition"}
+                )
+            except Exception:
+                logger.warning("search_history: recognition adapter unavailable")
+                break
+            result = response.get("result") or {}
+            if result.get("recognized"):
+                names.add(str(result.get("name") or result.get("person_id") or "someone"))
+        return names
+
+    @staticmethod
+    def _clock_phrase(iso: str | None) -> str:
+        """UTC-stored timestamp → the agent host's LOCAL clock time for
+        speech ("15:12" must mean the listener's 15:12, not UTC's)."""
+        if not iso:
+            return "?"
+        try:
+            from datetime import datetime as _dt
+            t = _dt.fromisoformat(iso)
+            if t.tzinfo is not None:
+                t = t.astimezone()
+            return t.strftime("%H:%M")
+        except ValueError:
+            return iso
+
+    @staticmethod
+    def _window_phrase(start, end) -> str:
+        if start and end:
+            return f" between {start} and {end}"
+        if start:
+            return f" since {start}"
+        if end:
+            return f" before {end}"
+        return " (all time)"
 
     def _require_camera(self, args: dict[str, Any]) -> str:
         camera_id = args.get("camera_id")

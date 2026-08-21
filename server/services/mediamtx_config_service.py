@@ -51,9 +51,10 @@ class MediaMtxConfigService:
         return {
             "runOnRecordSegmentCreate": f"{webhook_base}/segment-create{token_param}",
             "runOnRecordSegmentComplete": f"{webhook_base}/segment-complete{token_param}",
-            # Add other hooks as needed
-            "runOnReady": None,  # Can be configured later
-            "runOnNotReady": None,
+            # Camera online/offline signals for the connectivity tracker
+            # (services.camera_status_service)
+            "runOnReady": f"{webhook_base}/path-ready{token_param}",
+            "runOnNotReady": f"{webhook_base}/path-not-ready{token_param}",
             "runOnRead": None,
             "runOnReadRemove": None,
             "runOnPublish": None,
@@ -82,10 +83,10 @@ class MediaMtxConfigService:
 
         return {
             "record": True,
-            "recordPath": f"{base_path}/{stream_name}/%Y/%m/%d/%H/%M/%S",
+            "recordPath": f"{base_path}/{stream_name}/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",  # or "ts" for transport stream
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",  # Keep recordings for 30 days
+            "recordDeleteAfter": "0s",  # backend owns retention
         }
 
     @staticmethod
@@ -102,10 +103,10 @@ class MediaMtxConfigService:
             "api": True,
             "apiAddress": f":{settings.mediamtx_api_port}",
             # Recording settings
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/%path/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",  # 30 days
+            "recordDeleteAfter": "0s",  # backend owns retention
             # Performance settings
             "readTimeout": "10s",
             "writeTimeout": "10s",
@@ -145,10 +146,10 @@ class MediaMtxConfigService:
             "rtspTransport": "tcp",
             # Recording settings (disabled by default, enabled per camera)
             "record": False,
-            "recordPath": base_path + "/%path/%Y/%m/%d/%H/%M/%S",
+            "recordPath": base_path + "/%path/%Y-%m-%d/%H/%M-%S-%f",
             "recordFormat": "mp4",
             "recordSegmentDuration": f"{settings.recording_segment_seconds}s",
-            "recordDeleteAfter": "720h",
+            "recordDeleteAfter": "0s",
             # Webhook settings
             **{k: v for k, v in webhook_config.items() if v is not None},
             # Playback settings
@@ -272,7 +273,7 @@ paths: {}
             "critical_setup": {
                 "startup_hook": {
                     "description": "Essential for automatic camera provisioning after MediaMTX restarts",
-                    "config": f'runOnInit: curl -X GET "{application_base_url}{settings.api_prefix}/mediamtx/startup/hook?delay=5&t={webhook_token}"',
+                    "config": "runOnInit: " + 'sh -c \'for i in $(seq 1 60); do curl -fsS -X GET "{url}" && exit 0; echo "[startup-hook] core not reachable (attempt $i/60); retrying in 5s" >&2; sleep 5; done; echo "[startup-hook] FAILED after 60 attempts — cameras are NOT provisioned; restart mediamtx or fix connectivity" >&2\''.format(url=f"{application_base_url}{settings.api_prefix}/mediamtx/startup/hook?delay=5&t={webhook_token}"),
                     "importance": "Without this, cameras won't be re-provisioned automatically after MediaMTX restart",
                 }
             },
@@ -371,7 +372,11 @@ api: yes
 apiAddress: :9997
 
 # Startup hook - CRITICAL for automatic camera provisioning after restart
-runOnInit: curl -X GET "{webhook_base}/startup/hook?delay=5&t={webhook_token}"
+# Retries for ~5 min: in compose, MediaMTX often starts before core's DNS/API
+# is up — a single un-retried curl here meant ZERO cameras provisioned until
+# someone restarted MediaMTX (#218's log). Loud on every failure and on final
+# give-up, so the failure mode is a log line, never a silent empty NVR.
+runOnInit: sh -c 'for i in $(seq 1 60); do curl -fsS -X GET "{webhook_base}/startup/hook?delay=5&t={webhook_token}" && exit 0; echo "[startup-hook] core not reachable (attempt $i/60); retrying in 5s" >&2; sleep 5; done; echo "[startup-hook] FAILED after 60 attempts — cameras are NOT provisioned; restart mediamtx or fix connectivity" >&2'
 runOnInitRestart: no
 
 # RTSP settings
@@ -402,14 +407,19 @@ pathDefaults:
   
   # Recording settings (disabled by default, enabled per camera)
   record: no
-  recordPath: {base_path}/%path/%Y/%m/%d/%H-%M-%S-%f
+  recordPath: {base_path}/%path/%Y-%m-%d/%H/%M-%S-%f
   recordFormat: fmp4
   recordSegmentDuration: {settings.recording_segment_seconds}s
-  recordDeleteAfter: 168h  # 7 days
+  recordDeleteAfter: 0s  # backend owns retention
   
   # Webhook integration for recording events
   runOnRecordSegmentCreate: curl -X GET "{webhook_base}/hooks/segment-create?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&t={webhook_token}"
   runOnRecordSegmentComplete: curl -X GET "{webhook_base}/hooks/segment-complete?path=$MTX_PATH&segment_path=$MTX_SEGMENT_PATH&segment_duration=$MTX_SEGMENT_DURATION&t={webhook_token}"
+
+  # Camera online/offline signals (drive live-view alerts and auto-recovery)
+  runOnReady: curl -X GET "{webhook_base}/hooks/path-ready?path=$MTX_PATH&t={webhook_token}"
+  runOnReadyRestart: no
+  runOnNotReady: curl -X GET "{webhook_base}/hooks/path-not-ready?path=$MTX_PATH&t={webhook_token}"
 
 ###############################################
 # Paths - Camera streams will be provisioned automatically via API

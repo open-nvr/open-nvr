@@ -17,15 +17,19 @@
  */
 
 import { api } from '../lib/api'
+import { browserTz, localDayEnd, localDayStart } from '../lib/time'
 
 export const recordingService = {
   // Playback
   // Note: these go through the shared api client, which already sends the
   // bearer token in the Authorization header. We deliberately do NOT pass the
   // JWT as a ?token= query param (it would leak into access logs/history).
-  getRecordingsByDate: (cameraId?: number) => {
-    const params: Record<string, any> = {}
+  getRecordingsByDate: (cameraId?: number, opts?: { deletedOnly?: boolean }) => {
+    // tz: day buckets are the BROWSER'S local days (midnight -> midnight).
+    const params: Record<string, any> = { tz: browserTz() }
     if (cameraId) params.camera_id = cameraId
+    // Bin view: binned (deleted) cameras' recordings instead of live ones.
+    if (opts?.deletedOnly) params.deleted_only = true
     return api.get('/api/v1/recordings/list', { params })
   },
   getRecordings: (opts?: { limit?: number; offset?: number; camera_id?: number }) => {
@@ -42,11 +46,19 @@ export const recordingService = {
   getPlaybackUrl: (path: string, start: string, duration: number) => {
     return api.get('/api/v1/recordings/playback/url', { params: { path, start, duration } })
   },
-  getTodaySegments: (cameraId: number) => api.get(`/api/v1/recordings/today/${cameraId}`),
-  // Raw per-clip segments for a camera on a given day (YYYY-MM-DD). Powers the
-  // DVR playback timeline (footage/gap blocks + wall-clock seeking).
-  getSegments: (cameraId: number, date?: string) =>
-    api.get(`/api/v1/recordings/segments/${cameraId}`, { params: date ? { date } : {} }),
+  // Continuous recording segments for a camera on a given LOCAL day
+  // (YYYY-MM-DD). Powers the DVR playback timeline (footage/gap blocks +
+  // wall-clock seeking). The browser computes local midnight -> next local
+  // midnight explicitly so the server never has to guess the day boundary.
+  getSegments: (cameraId: number, date?: string) => {
+    const params: Record<string, any> = { tz: browserTz() }
+    if (date) {
+      params.date = date
+      params.start = new Date(localDayStart(date)).toISOString()
+      params.end = new Date(localDayEnd(date)).toISOString()
+    }
+    return api.get(`/api/v1/recordings/segments/${cameraId}`, { params })
+  },
 
   // HLS VOD
   createHlsPlaybackSession: (params: { camera_id: number; start: string; end: string }) => {
@@ -55,6 +67,16 @@ export const recordingService = {
   deleteHlsPlaybackSession: (sessionId: string) => {
     return api.delete(`/api/v1/recordings/playback/hls/${sessionId}`)
   },
+
+  // Clip export: mint a short-lived single-use ticket (authenticated), then
+  // navigate an <a> at the returned download_url — the backend streams the
+  // clip to disk, so nothing is buffered in browser memory.
+  createClipExportTicket: (params: {
+    camera_id: number
+    start: string
+    duration: number
+    filename?: string
+  }) => api.post('/api/v1/recordings/export/ticket', undefined, { params }),
 
   // Cloud upload
   queueCloudUploadForDay: (cameraId: number, date: string) => {
@@ -69,4 +91,15 @@ export const recordingService = {
   updateRecordingStorage: (payload: any) => api.put('/api/v1/recordings/storage', payload),
   getRecordingRetention: () => api.get('/api/v1/recordings/retention'),
   updateRecordingRetention: (payload: any) => api.put('/api/v1/recordings/retention', payload),
+
+  // Orphaned (quarantined) recording trees — footage that could not be
+  // positively attributed to a current camera after a DB rebuild. Superuser.
+  getRecordingOrphans: () => api.get('/api/v1/recordings/orphans'),
+  attachRecordingOrphan: (orphanId: string, cameraId: number) =>
+    api.post(`/api/v1/recordings/orphans/${encodeURIComponent(orphanId)}/attach`, {
+      camera_id: cameraId,
+    }),
+  deleteRecordingOrphan: (orphanId: string) =>
+    api.delete(`/api/v1/recordings/orphans/${encodeURIComponent(orphanId)}`),
+  rescanRecordingOrphans: () => api.post('/api/v1/recordings/orphans/rescan'),
 }

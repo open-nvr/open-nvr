@@ -20,7 +20,7 @@ import { useRef, useEffect, useState, useCallback } from 'react'
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   Settings, Camera, SkipBack, SkipForward, RefreshCw,
-  Radio, Loader2
+  Loader2, Move
 } from 'lucide-react'
 
 export interface VideoControlsProps {
@@ -46,6 +46,9 @@ export interface VideoControlsProps {
   onRefresh?: () => void
   onStreamTypeChange?: (type: 'webrtc' | 'hls') => void
   availableStreamTypes?: Array<'webrtc' | 'hls'>
+  /** Present only when the camera supports PTZ; toggles the PTZ pad */
+  onTogglePtz?: () => void
+  ptzActive?: boolean
 }
 
 export function VideoControls({
@@ -71,6 +74,8 @@ export function VideoControls({
   onRefresh,
   onStreamTypeChange,
   availableStreamTypes = [],
+  onTogglePtz,
+  ptzActive = false,
 }: VideoControlsProps) {
   const [showVolumeSlider, setShowVolumeSlider] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -134,7 +139,7 @@ export function VideoControls({
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
 
   return (
-    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-8 pb-2 px-3 transition-opacity group-hover:opacity-100 opacity-0">
+    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-8 pb-2 px-3 @max-[300px]:px-1.5 @max-[300px]:pb-1 transition-opacity group-hover:opacity-100 opacity-0">
       {/* Progress bar (hidden for live) */}
       {!isLive && (
         <div
@@ -161,12 +166,14 @@ export function VideoControls({
         </div>
       )}
 
-      {/* Controls row */}
-      <div className="flex items-center gap-2">
+      {/* Controls row — container-queried against the player root
+          (containerType: 'size'): low-priority controls drop out as the tile
+          narrows so the essentials (play, mute, fullscreen) never clip. */}
+      <div className="flex items-center gap-2 @max-[300px]:gap-0.5">
         {/* Play/Pause */}
         <button
           onClick={isPlaying ? onPause : onPlay}
-          className="p-1.5 hover:bg-white/20 rounded transition-colors"
+          className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
           title={isPlaying ? 'Pause' : 'Play'}
         >
           {isLoading ? (
@@ -183,14 +190,14 @@ export function VideoControls({
           <>
             <button
               onClick={() => onSeek(Math.max(0, currentTime - 10))}
-              className="p-1.5 hover:bg-white/20 rounded transition-colors"
+              className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[220px]:hidden"
               title="Back 10s"
             >
               <SkipBack size={18} />
             </button>
             <button
               onClick={() => onSeek(Math.min(duration, currentTime + 10))}
-              className="p-1.5 hover:bg-white/20 rounded transition-colors"
+              className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[220px]:hidden"
               title="Forward 10s"
             >
               <SkipForward size={18} />
@@ -202,10 +209,23 @@ export function VideoControls({
         {isLive && onRefresh && (
           <button
             onClick={onRefresh}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[280px]:hidden"
             title="Refresh stream"
           >
             <RefreshCw size={18} />
+          </button>
+        )}
+
+        {/* PTZ (live only, PTZ-capable cameras only) */}
+        {isLive && onTogglePtz && (
+          <button
+            onClick={onTogglePtz}
+            className={`p-1.5 rounded transition-colors flex-shrink-0 @max-[220px]:hidden ${
+              ptzActive ? 'bg-[var(--accent)]/40 text-[var(--accent)]' : 'hover:bg-white/20'
+            }`}
+            title="PTZ controls"
+          >
+            <Move size={18} />
           </button>
         )}
 
@@ -222,12 +242,12 @@ export function VideoControls({
         >
           <button
             onClick={isMuted ? onUnmute : onMute}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
             title={isMuted ? 'Unmute' : 'Mute'}
           >
             {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </button>
-          <div className={`flex items-center overflow-hidden transition-all duration-200 ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
+          <div className={`flex items-center overflow-hidden transition-all duration-200 @max-[320px]:hidden ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
             <input
               type="range"
               min="0"
@@ -240,26 +260,19 @@ export function VideoControls({
           </div>
         </div>
 
-        {/* Time display */}
-        <div className="text-xs text-white/80 ml-2 font-mono">
-          {isLive ? (
-            <span className="flex items-center gap-1.5 text-red-400">
-              <Radio size={12} className="animate-pulse" />
-              LIVE
-            </span>
-          ) : (
-            <>
-              {formatTime(currentTime)} / {formatTime(duration)}
-            </>
-          )}
-        </div>
+        {/* Time display (playback only — live state is shown by the corner badge) */}
+        {!isLive && (
+          <div className="text-xs text-white/80 ml-2 font-mono @max-[280px]:hidden">
+            {formatTime(currentTime)} / {formatTime(duration)}
+          </div>
+        )}
 
         {/* Spacer */}
-        <div className="flex-1" />
+        <div className="flex-1 min-w-0" />
 
         {/* Stream type indicator (live only) */}
         {isLive && streamType && (
-          <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded">
+          <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded @max-[360px]:hidden">
             {streamType}
           </span>
         )}
@@ -268,7 +281,7 @@ export function VideoControls({
         {onSnapshot && (
           <button
             onClick={onSnapshot}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[320px]:hidden"
             title="Take snapshot"
           >
             <Camera size={18} />
@@ -277,7 +290,7 @@ export function VideoControls({
 
         {/* Settings */}
         {(availableStreamTypes.length > 1 || !isLive) && (
-          <div className="relative" ref={settingsRef}>
+          <div className="relative @max-[280px]:hidden" ref={settingsRef}>
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="p-1.5 hover:bg-white/20 rounded transition-colors"
@@ -331,7 +344,7 @@ export function VideoControls({
         {/* Fullscreen */}
         <button
           onClick={onFullscreen}
-          className="p-1.5 hover:bg-white/20 rounded transition-colors"
+          className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
           title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
         >
           {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}

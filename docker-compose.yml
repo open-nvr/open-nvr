@@ -52,25 +52,30 @@ services:
       - |
         set -e
         if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
-          echo "MediaMTX certs already present; skipping."
-          exit 0
+          echo "MediaMTX certs already present; skipping generation."
+        else
+          umask 077
+          # Add OPENNVR_HOST_IP to the cert SAN so direct RTSPS clients (VLC,
+          # ffmpeg) get a matching cert. Browsers use nginx's cert instead.
+          SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
+          if [ -n "$${OPENNVR_HOST_IP}" ]; then
+            SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
+          fi
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout /certs/server.key -out /certs/server.crt \
+            -subj "/CN=opennvr-mediamtx" \
+            -addext "subjectAltName=$${SAN}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage=serverAuth"
+          echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
         fi
-        umask 077
-        # Add OPENNVR_HOST_IP to the cert SAN so direct RTSPS clients (VLC,
-        # ffmpeg) get a matching cert. Browsers use nginx's cert instead.
-        SAN="DNS:localhost,DNS:mediamtx,IP:127.0.0.1,IP:::1"
-        if [ -n "$${OPENNVR_HOST_IP}" ]; then
-          SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
-        fi
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-          -keyout /certs/server.key -out /certs/server.crt \
-          -subj "/CN=opennvr-mediamtx" \
-          -addext "subjectAltName=$${SAN}" \
-          -addext "basicConstraints=critical,CA:FALSE" \
-          -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-          -addext "extendedKeyUsage=serverAuth"
+        # mediamtx runs as uid 1000 (non-root, see the mediamtx service) so
+        # the key must be readable by that uid — on fresh AND pre-existing
+        # installs (older installs wrote it root-owned mode 600).
+        chown 1000:1000 /certs/server.key /certs/server.crt
+        chmod 0600 /certs/server.key
         chmod 0644 /certs/server.crt
-        echo "Wrote /certs/server.{crt,key} with SAN=$${SAN}"
     environment:
       - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
     volumes:
@@ -90,12 +95,25 @@ services:
         FROM curlimages/curl:8.10.1
         USER root
         WORKDIR /
+        # tzdata is required for TZ=<IANA name> to take effect — without it the
+        # Go runtime silently falls back to UTC and recording directories get
+        # named in UTC while opennvr_core parses them in the configured zone.
+        RUN apk add --no-cache tzdata
         # Clear any inherited CMD so it isn't passed to mediamtx as a config arg.
         CMD []
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
     restart: unless-stopped
+    # Run as the same uid as the opennvr-core backend (Dockerfile useradd -u
+    # 1000). MediaMTX used to run as root, so every segment dir it created
+    # under the shared recordings mount was root-owned — and the backend
+    # (uid 1000) could not delete a single file from it: retention aging and
+    # the camera hard-delete purge (#243) both failed with EACCES. All ports
+    # are >1024 and the config mounts are read-only, so nothing here needs
+    # root. Pre-existing root-owned trees are migrated by opennvr-core's
+    # entrypoint chown at its next start.
+    user: "1000:1000"
     depends_on:
       db:
         condition: service_healthy
@@ -119,6 +137,11 @@ services:
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
     environment:
+      # Local timezone: MediaMTX expands recordPath timestamps in process-
+      # local time, so segment directories are named in this TZ. MUST match
+      # opennvr_core's TZ (both read the same ${TZ}) — the backend parses the
+      # names with the same zone. E.g. TZ=Asia/Kolkata. Default UTC.
+      - TZ=${TZ:-UTC}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
       - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
@@ -229,6 +252,88 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────
+  # Tier-0 detect-pipeline — always-on, per-camera motion→region→
+  # detect→track. Additive consumer: pulls the SAME MediaMTX tap the
+  # camera-agent uses (via opennvr-core's internal endpoint) and
+  # publishes detections to the existing opennvr.inference.* NATS
+  # subjects. Changes nothing about ingest, recording, or serving.
+  # On by default; set DETECT_PIPELINE_ENABLED=false to disable.
+  # ──────────────────────────────────────────────────────────────
+  detect-pipeline:
+    # Pulled from GHCR (built + published by publish-detect-pipeline.yml), like
+    # opennvr-core and yolov8-adapter — no local build. To build from source
+    # instead: `docker compose build` with a build: override, or run the
+    # component directly (see detect-pipeline/README.md).
+    image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
+    container_name: opennvr_detect_pipeline
+    restart: unless-stopped
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      # The default detector loads the same yolov8n.onnx the yolov8-adapter uses.
+      yolov8-weights-init:
+        condition: service_completed_successfully
+    environment:
+      - DETECT_PIPELINE_ENABLED=${DETECT_PIPELINE_ENABLED:-true}
+      - OPENNVR_INTERNAL_URL=http://opennvr-core:8000
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - NATS_URL=nats://nats:4222
+      # Default detector: YOLOv8 ONNX via cv2.dnn (falls back to no-op if the
+      # model is missing — the container never crash-loops).
+      - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
+      - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
+      # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
+      # For an accelerator, set backend=ort + providers (and install the matching
+      # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
+      - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
+      - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
+      # Gate: shadow (default — measure only, no behavior change; the app's
+      # Compute-gated panel shows would-save numbers) | off | enforce (act;
+      # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
+      - DETECT_GATE_MODE=${DETECT_GATE_MODE:-shadow}
+      - DETECT_GATE_HEARTBEAT_S=${DETECT_GATE_HEARTBEAT_S:-0}
+      - DETECT_GATE_CRITICAL_CLASSES=${DETECT_GATE_CRITICAL_CLASSES:-}
+      - DETECT_METRICS_PORT=${DETECT_METRICS_PORT:-9109}
+      # Thread cap for the detector (cv2 intra-op + BLAS). Prevents Tier-0
+      # from starving CPU-bound co-tenants; raise it on big machines.
+      - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
+      # Per-camera analysis rate. Detection runs on every analyzed frame,
+      # so this is the pipeline's main CPU dial — see .env.example.
+      - DETECT_FPS=${DETECT_FPS:-5}
+      # Re-verify stationary tracks every Nth frame instead of every frame
+      # (staggered per track; motion near the object re-checks immediately).
+      # 0 = pre-gating behavior. See .env.example.
+      - DETECT_STATIONARY_INTERVAL=${DETECT_STATIONARY_INTERVAL:-10}
+      - OMP_NUM_THREADS=${DETECT_CV_THREADS:-2}
+      # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
+      # to run the gated model on enforce escalations, governed + audited by KAI-C.
+      - DETECT_DISPATCH_KAIC_URL=${DETECT_DISPATCH_KAIC_URL:-}
+    volumes:
+      # Read-only mount of the shared yolov8 weights volume (built by
+      # yolov8-weights-init) — same model as the yolov8-adapter.
+      - opennvr_yolov8_weights:/app/model_weights:ro
+    # Function-based health: /health is 503 when the service is a zombie —
+    # model degraded to stub, bus unauthenticated, or no frames flowing —
+    # not merely when the process is dead. See detect_pipeline/health.py.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:9109/health', timeout=3); sys.exit(0 if r.status==200 else 1)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # For VAAPI/QSV hardware decode, pass the render node through and set
+    # DETECT_HWACCEL=vaapi in .env (uncomment):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # OpenNVR core — backend + frontend + KAI-C.
   # ──────────────────────────────────────────────────────────────
   opennvr-core:
@@ -249,7 +354,19 @@ services:
     volumes:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
+      # MediaMTX JWT signing keypair — persisted so the kid survives
+      # container recreates; otherwise MediaMTX keeps serving its cached
+      # JWKS and rejects every stream token until it is restarted.
+      - opennvr_jwt_keys:/app/keys
+      # Host LAN IP hints, rewritten by the launchers on every run so ONVIF
+      # discovery keeps seeing the host's *current* networks even when the
+      # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
+      # creation) go stale after a subnet change.
+      - ./data/net-hints:/app/net-hints:ro
     environment:
+      # Must match the mediamtx service's TZ — recording directories are
+      # named in local time and parsed with the same zone.
+      - TZ=${TZ:-UTC}
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - MEDIAMTX_BASE_URL=http://mediamtx:8889
       - MEDIAMTX_ADMIN_API=http://mediamtx:9997/v3
@@ -265,6 +382,14 @@ services:
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
       - KAI_C_URL=http://127.0.0.1:8100
+      # ONVIF discovery auto-detection: inside this bridge container the only
+      # visible network is the compose bridge, so the launchers export the
+      # host's LAN IPs as the real subnet hints — OPENNVR_HOST_IP (default
+      # route) plus OPENNVR_LAN_IPS (every LAN-facing NIC on a multi-NIC
+      # host) — and OPENNVR_DOCKER_SUBNET tells detection which range to ignore.
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+      - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
+      - OPENNVR_DOCKER_SUBNET=${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
       - RECORDINGS_BASE_PATH=/app/recordings
@@ -422,3 +547,7 @@ volumes:
   # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``
   # to force a re-download (e.g., after the weights URL changes).
   opennvr_yolov8_weights:
+  # MediaMTX JWT RSA keypair (private key never leaves opennvr-core).
+  # Rotate by removing the volume with core stopped, then restart
+  # mediamtx so it refetches the JWKS.
+  opennvr_jwt_keys:

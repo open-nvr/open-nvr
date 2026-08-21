@@ -82,6 +82,93 @@ def token_from_request(request) -> str | None:
 # ``device_firewall_kill`` is a hard override on top of it (break-glass).
 _ACTIVE_KEY = "device_firewall_active"
 
+# ── Per-request decision cache ──────────────────────────────────────────
+# The middleware runs on every /api/* request — including every HLS video
+# byte-range fetch during playback — and used to open a fresh DB session
+# each time. Enforcement state and per-token approval change rarely, so a
+# short TTL cache keeps the hot path DB-free. Mutations (approve/block/
+# delete/set_enforcement) invalidate immediately; the TTL only bounds
+# staleness for changes made by another process.
+_CACHE_TTL_SECONDS = 15.0
+_TOKEN_CACHE_MAX = 2048
+
+_enforcement_cache: tuple[float, bool] | None = None
+_token_cache: dict[str, tuple[float, bool]] = {}
+
+
+def invalidate_decision_cache() -> None:
+    """Drop cached firewall decisions (called after any registry mutation)."""
+    global _enforcement_cache
+    _enforcement_cache = None
+    _token_cache.clear()
+
+
+def _new_session():
+    """Open a DB session for the cached decision helpers.
+
+    A function (not a module-level import) so tests can monkeypatch it with
+    their own session factory.
+    """
+    from core.database import SessionLocal
+
+    return SessionLocal()
+
+
+def enforcement_active_cached() -> bool:
+    """``enforcement_active`` with a short TTL cache and its own DB session.
+
+    Fail-open like the uncached version: any error reading is treated as OFF.
+    """
+    global _enforcement_cache
+    import time
+
+    now = time.monotonic()
+    cached = _enforcement_cache
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    try:
+        db = _new_session()
+        try:
+            value = enforcement_active(db)
+        finally:
+            db.close()
+    except Exception:
+        return False  # fail-open, and don't cache the failure
+    _enforcement_cache = (now + _CACHE_TTL_SECONDS, value)
+    return value
+
+
+def is_allowed_browser_cached(raw_token: str | None) -> bool:
+    """``is_allowed_browser`` with a short TTL cache keyed by token hash.
+
+    Assumes the caller already established that enforcement is active.
+    Fail-open on registry errors, matching the uncached version.
+    """
+    if not raw_token:
+        return False
+    import time
+
+    key = hash_device_token(raw_token)
+    now = time.monotonic()
+    cached = _token_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    try:
+        db = _new_session()
+        try:
+            dev = get_device_by_token(db, raw_token)
+        finally:
+            db.close()
+    except Exception:
+        return True  # fail-open, and don't cache the failure
+    allowed = bool(dev and dev.status == DeviceStatus.approved)
+    if len(_token_cache) >= _TOKEN_CACHE_MAX:
+        _token_cache.clear()
+    _token_cache[key] = (now + _CACHE_TTL_SECONDS, allowed)
+    return allowed
+
 
 def enforcement_active(db: Session) -> bool:
     """Whether the firewall is currently blocking.
@@ -112,6 +199,7 @@ def set_enforcement(db: Session, active: bool) -> bool:
         db.add(row)
     row.json_value = "true" if active else "false"
     db.commit()
+    invalidate_decision_cache()
     return enforcement_active(db)
 
 
@@ -223,6 +311,7 @@ def register_authenticated_browser(
 
     db.commit()
     db.refresh(dev)
+    invalidate_decision_cache()
     return dev, issued
 
 
@@ -239,6 +328,7 @@ def approve(
         dev.label = label
     db.commit()
     db.refresh(dev)
+    invalidate_decision_cache()
     return dev
 
 
@@ -249,6 +339,7 @@ def block(db: Session, device_id: int) -> TrustedDevice | None:
     dev.status = DeviceStatus.blocked
     db.commit()
     db.refresh(dev)
+    invalidate_decision_cache()
     return dev
 
 
@@ -258,6 +349,7 @@ def delete(db: Session, device_id: int) -> bool:
         return False
     db.delete(dev)
     db.commit()
+    invalidate_decision_cache()
     return True
 
 

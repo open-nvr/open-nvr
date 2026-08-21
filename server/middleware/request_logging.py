@@ -29,10 +29,23 @@ from core.logging_config import api_logger
 from utils.url_redaction import redact_query_params, redact_url_query
 
 
+# High-frequency media paths: an HLS playback session issues hundreds of
+# byte-range requests per minute, and each used to emit TWO structured log
+# records with full header dumps. Those paths get a pass-through with no
+# per-request logging (failures still log via the exception path).
+_QUIET_PREFIXES = (
+    "/api/v1/recordings/playback/hls",
+    "/assets/",
+)
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log all incoming HTTP requests and responses."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.url.path.startswith(_QUIET_PREFIXES):
+            return await call_next(request)
+
         # Generate unique request ID
         request_id = str(uuid.uuid4())
 

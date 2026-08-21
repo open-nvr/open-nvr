@@ -16,13 +16,17 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
+import { rebaseToCurrentOrigin } from '../lib/streamUrl'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
 import { QrScanner } from '../components/QrScanner'
+import { AddCameraDialog } from '../components/AddCameraDialog'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
-import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, Video, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
+import { useCameraStatus } from '../hooks/useCameraStatus'
+import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan } from 'lucide-react'
 import { 
   DndContext, 
   DragOverlay, 
@@ -194,13 +198,11 @@ export function LiveView() {
   const [currentLayout, setCurrentLayout] = useState<string>('3x3')
   const [windowSettings, setWindowSettings] = useState<WindowSettings | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
-  // FS toolbar visibility on bottom hover
+  // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
-  const isOverToolbarRef = useRef(false)
-  const hideTimer = useRef<number | null>(null)
   const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string}>>([])
   
   // Camera display order - array of camera IDs in display sequence
@@ -214,6 +216,22 @@ export function LiveView() {
     }
   })
   
+  // Grid sizing mode, persisted per browser. Fill (default) stretches cells
+  // to use the whole area (feeds letterbox inside against the panel bg);
+  // Fit keeps strict 16:9 cells centered.
+  const [fillMode, setFillMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('liveview-grid-mode') !== 'fit'
+    } catch {
+      return true
+    }
+  })
+  const toggleFillMode = () => setFillMode(prev => {
+    const next = !prev
+    try { localStorage.setItem('liveview-grid-mode', next ? 'fill' : 'fit') } catch { /* private mode */ }
+    return next
+  })
+
   // Drag state for overlay
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   
@@ -256,13 +274,19 @@ export function LiveView() {
       // Update display order: add new cameras, remove deleted ones
       setCameraDisplayOrder(prevOrder => {
         const existingIds = new Set(cameraList.map((c: {id: number}) => c.id))
-        // Filter out deleted cameras
-        const filtered = prevOrder.filter(id => existingIds.has(id))
+        // Deleted cameras become empty slots (0), NOT dropped — dropping
+        // would shift every later camera left and lose the empty-tile
+        // positions that drag-drop and tile assignment create.
+        const filtered = prevOrder.map(id => (id === 0 || existingIds.has(id) ? id : 0))
         // Add new cameras that aren't in the order yet
         const newCameras = cameraList
           .filter((c: {id: number}) => !filtered.includes(c.id))
           .map((c: {id: number}) => c.id)
         const updated = [...filtered, ...newCameras]
+        // Trim trailing empties.
+        while (updated.length > 0 && !updated[updated.length - 1]) {
+          updated.pop()
+        }
         // Persist to localStorage
         try {
           localStorage.setItem('liveview-camera-display-order', JSON.stringify(updated))
@@ -272,24 +296,36 @@ export function LiveView() {
     }).catch(console.error)
   }
   
-  // Assign a camera to a specific tile position
+  // Assign a camera to a specific tile position. Same sparse convention as
+  // swapTilePositions: 0 marks an empty tile, so the camera lands on exactly
+  // the tile that was clicked (the old dense-pack version collapsed
+  // placeholders, which made "select existing camera" a visible no-op).
   const assignCameraToTile = (tileIndex: number, cameraId: number) => {
     setCameraDisplayOrder(prev => {
-      // Remove camera from current position if it exists
-      const filtered = prev.filter(id => id !== cameraId)
-      // Insert at the specified tile position
-      const updated = [...filtered]
-      // Ensure array is long enough
-      while (updated.length < tileIndex) {
-        updated.push(-1) // placeholder
+      const updated = [...prev]
+      while (updated.length <= tileIndex) {
+        updated.push(0) // empty-slot placeholder
       }
-      updated.splice(tileIndex, 0, cameraId)
-      // Clean up any -1 placeholders
-      const cleaned = updated.filter(id => id !== -1)
+      const from = updated.indexOf(cameraId)
+      const displaced = updated[tileIndex]
+      updated[tileIndex] = cameraId
+      if (from !== -1 && from !== tileIndex) {
+        // Move/swap: the clicked tile's previous camera (if any) takes the
+        // selected camera's old slot.
+        updated[from] = displaced || 0
+      } else if (from === -1 && displaced && displaced !== cameraId) {
+        // Camera wasn't placed yet but the tile was occupied — keep the
+        // displaced camera visible by appending it.
+        updated.push(displaced)
+      }
+      // Trim trailing empties so shorter layouts aren't padded forever.
+      while (updated.length > 0 && !updated[updated.length - 1]) {
+        updated.pop()
+      }
       try {
-        localStorage.setItem('liveview-camera-display-order', JSON.stringify(cleaned))
+        localStorage.setItem('liveview-camera-display-order', JSON.stringify(updated))
       } catch {}
-      return cleaned
+      return updated
     })
   }
   
@@ -354,6 +390,32 @@ export function LiveView() {
   
   const layoutDef = getLayoutDef()
 
+  // Fit the grid to the available area while keeping every cell 16:9: the
+  // largest cell size is computed from the container's width AND height, so
+  // videos fill their tiles edge-to-edge (overlays sit on the feed, not on
+  // pillarbox bars) and the toolbar below stays on screen.
+  const [gridSize, setGridSize] = useState<{ w: number; h: number } | null>(null)
+  const GRID_GAP = 8 // matches the grid's Tailwind gap-2
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const compute = () => {
+      const cols = layoutDef.gridCols
+      const rows = layoutDef.gridRows
+      const availW = el.clientWidth - GRID_GAP * (cols - 1)
+      const availH = el.clientHeight - GRID_GAP * (rows - 1)
+      const cellW = Math.max(0, Math.min(availW / cols, (availH / rows) * (16 / 9)))
+      setGridSize({
+        w: cellW * cols + GRID_GAP * (cols - 1),
+        h: cellW * (9 / 16) * rows + GRID_GAP * (rows - 1),
+      })
+    }
+    compute()
+    const ro = new ResizeObserver(compute)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [layoutDef.gridCols, layoutDef.gridRows])
+
   // Load window settings on mount
   useEffect(() => {
     apiService.getWindowSettings().then(({ data }) => {
@@ -370,36 +432,9 @@ export function LiveView() {
     loadCameras()
   }, [])
 
+  // Reset the toolbar when entering/leaving fullscreen so it never starts open.
   useEffect(() => {
-    const el = gridRef.current
-    if (!el || !isFullscreen) return
-
-    const onMouseMove = (e: MouseEvent) => {
-      const viewportHeight = window.innerHeight
-      const fromBottom = viewportHeight - e.clientY
-      const threshold = 80
-      if (fromBottom <= threshold) {
-        // Near bottom edge -> show toolbar
-        if (hideTimer.current) {
-          window.clearTimeout(hideTimer.current)
-          hideTimer.current = null
-        }
-        setFsToolbarVisible(true)
-      } else if (!isOverToolbarRef.current) {
-        // Away from bottom and not over toolbar -> hide after short delay
-        if (hideTimer.current) window.clearTimeout(hideTimer.current)
-        hideTimer.current = window.setTimeout(() => setFsToolbarVisible(false), 600)
-      }
-    }
-
-    el.addEventListener('mousemove', onMouseMove)
-    return () => {
-      el.removeEventListener('mousemove', onMouseMove)
-      if (hideTimer.current) window.clearTimeout(hideTimer.current)
-      hideTimer.current = null
-      setFsToolbarVisible(false)
-      isOverToolbarRef.current = false
-    }
+    setFsToolbarVisible(false)
   }, [isFullscreen])
   
   // Get all available layouts (enabled predefined + enabled custom)
@@ -428,64 +463,21 @@ export function LiveView() {
   const availableLayouts = getAvailableLayouts()
 
   return (
-    <section className="space-y-3">
-      <header className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold">Live View</h1>
-        <div className="ml-auto flex items-center gap-1">
-          {/* Quick layout buttons for common layouts */}
-          {['1x1', '2x2', '3x3', '4x4'].map((layoutId) => {
-            const layout = PREDEFINED_LAYOUTS[layoutId]
-            if (!layout) return null
-            const isEnabled = !windowSettings || windowSettings.layouts_enabled[layoutId] !== false
-            if (!isEnabled) return null
-            return (
-              <button
-                key={layoutId}
-                className={`px-2 py-1 text-xs border ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-neutral-700'}`}
-                onClick={() => setCurrentLayout(layoutId)}
-                title={layout.name}
-              >
-                {layout.name}
-              </button>
-            )
-          })}
-          {/* Layout dropdown for special layouts */}
-          <div className="relative">
-            <button
-              className="px-2 py-1 text-xs border bg-[var(--panel-2)] border-neutral-700 inline-flex items-center gap-1"
-              onClick={() => setLayoutMenuOpen(!layoutMenuOpen)}
-            >
-              <Grid size={12} />
-              <span className="hidden sm:inline">More</span>
-              <ChevronDown size={12} />
-            </button>
-            {layoutMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-[var(--panel)] border border-neutral-700 shadow-lg min-w-[180px]">
-                {availableLayouts.map(layout => (
-                  <button
-                    key={layout.id}
-                    className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--panel-2)] flex items-center justify-between ${currentLayout === layout.id ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : ''}`}
-                    onClick={() => { setCurrentLayout(layout.id); setLayoutMenuOpen(false) }}
-                  >
-                    <span>{layout.name}</span>
-                    <span className="text-[var(--text-dim)]">{layout.tiles} cameras</span>
-                  </button>
-                ))}
-                <div className="border-t border-neutral-700 px-3 py-2">
-                  <button
-                    className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
-                    onClick={() => {
-                      setLayoutMenuOpen(false)
-                      ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
-                    }}
-                  >
-                    ⚙ Configure Layouts...
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+    // Fixed viewport-height layout: header + grid + toolbar must all fit
+    // without a page scrollbar. 3rem = app header, 2rem = main's p-4.
+    <section className="flex flex-col gap-2 h-[calc(100vh-5rem)]">
+      {/* Header doubles as the toolbar — one row of chrome instead of two */}
+      <header className="flex-shrink-0 flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
+        <h1 className="text-lg font-semibold whitespace-nowrap mr-2">Live View</h1>
+        <ToolbarContents
+          currentLayout={currentLayout}
+          setCurrentLayout={setCurrentLayout}
+          availableLayouts={availableLayouts}
+          onOpenMenu={() => setMenuOpen(true)}
+          onToggleFullscreen={toggleFs}
+          fillMode={fillMode}
+          onToggleFillMode={toggleFillMode}
+        />
       </header>
 
       <DndContext 
@@ -494,22 +486,25 @@ export function LiveView() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
+        <div ref={containerRef} className="flex-1 min-h-0 flex items-center justify-center">
         <div
           ref={gridRef}
-          className="grid gap-2 relative content-start"
+          className="grid gap-2 relative"
           style={{
             gridTemplateColumns: `repeat(${layoutDef.gridCols}, minmax(0, 1fr))`,
-            // Rows are sized to the tiles' own 16:9 aspect (see Tile) instead of
-            // stretching to fill viewport height. `content-start` disables grid's
-            // default `align-content: stretch`, which would otherwise stretch the
-            // auto rows to fill the container and make tiles taller than 16:9.
-            gridTemplateRows: `repeat(${layoutDef.gridRows}, auto)`,
+            gridTemplateRows: `repeat(${layoutDef.gridRows}, minmax(0, 1fr))`,
+            // Fullscreen and Fill mode: take the whole container (cells may
+            // deviate from 16:9; the player letterboxes internally). Fit mode
+            // uses the fitted 16:9-cell size (see effect).
+            ...(isFullscreen || fillMode || !gridSize
+              ? { width: '100%', height: '100%' }
+              : { width: gridSize.w, height: gridSize.h }),
           }}
         >
           {layoutDef.tiles.map((tile, i) => {
-            // Sequential display: cameras fill tiles in order from cameraDisplayOrder
-            // Empty slots only appear after all cameras
-            const assignedCameraId = cameraDisplayOrder[i] ?? null
+            // cameraDisplayOrder maps tile index → camera id; 0 (or missing)
+            // marks an empty tile, so empty slots can sit anywhere.
+            const assignedCameraId = cameraDisplayOrder[i] || null
             
             return (
               <div
@@ -538,39 +533,37 @@ export function LiveView() {
               </div>
             )
           })}
-          {/* Fullscreen hover toolbar overlay */}
+          {/* Fullscreen toolbar overlay — opened via the bottom-center handle
+              so it never pops up over the bottom tiles' own controls */}
           {isFullscreen && (
-            <div className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-all duration-200 ${fsToolbarVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'}`}>
-              <div
-                className="pointer-events-auto mt-2 flex items-center gap-2 bg-[var(--bg-2)] border border-neutral-700 p-2 text-xs"
-                onMouseEnter={() => {
-                  if (hideTimer.current) {
-                    window.clearTimeout(hideTimer.current)
-                    hideTimer.current = null
-                  }
-                  isOverToolbarRef.current = true
-                  setFsToolbarVisible(true)
-                }}
-                onMouseLeave={() => {
-                  isOverToolbarRef.current = false
-                  if (hideTimer.current) window.clearTimeout(hideTimer.current)
-                  hideTimer.current = window.setTimeout(() => setFsToolbarVisible(false), 500)
-                }}
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-40 flex flex-col items-center">
+              <button
+                className="pointer-events-auto flex items-center justify-center w-12 h-5 bg-black/50 hover:bg-black/80 text-white/60 hover:text-white transition-colors"
+                onClick={() => setFsToolbarVisible((v) => !v)}
+                title={fsToolbarVisible ? 'Hide toolbar' : 'Show toolbar'}
               >
-                <ToolbarContents 
-                  currentLayout={currentLayout}
-                  setCurrentLayout={setCurrentLayout}
-                  availableLayouts={availableLayouts}
-                  onOpenMenu={() => setMenuOpen(true)} 
-                  onToggleFullscreen={toggleFs} 
-                />
-              </div>
+                {fsToolbarVisible ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+              </button>
+              {fsToolbarVisible && (
+                <div className="pointer-events-auto self-stretch flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
+                  <ToolbarContents
+                    currentLayout={currentLayout}
+                    setCurrentLayout={setCurrentLayout}
+                    availableLayouts={availableLayouts}
+                    onOpenMenu={() => setMenuOpen(true)}
+                    onToggleFullscreen={toggleFs}
+                    dropUp
+                    showFitToggle={false}
+                  />
+                </div>
+              )}
             </div>
           )}
           {/* Menu overlay inside fullscreen so it appears over the live view */}
           {isFullscreen && menuOpen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
         </div>
-        
+        </div>
+
         {/* Drag overlay - small tile preview centered on cursor */}
         <DragOverlay dropAnimation={null} modifiers={[centerOnCursor]}>
           {activeDragId ? (() => {
@@ -600,22 +593,7 @@ export function LiveView() {
         </DragOverlay>
       </DndContext>
 
-      {/* Bottom toolbar (normal mode) */}
-      {!isFullscreen && (
-        <div className="mt-2">
-          <div className="flex items-center gap-2 bg-[var(--bg-2)] border border-neutral-700 p-2 text-xs">
-            <ToolbarContents 
-              currentLayout={currentLayout}
-              setCurrentLayout={setCurrentLayout}
-              availableLayouts={availableLayouts}
-              onOpenMenu={() => setMenuOpen(true)} 
-              onToggleFullscreen={toggleFs} 
-            />
-          </div>
-        </div>
-      )}
-
-  {menuOpen && !isFullscreen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
+      {menuOpen && !isFullscreen && <MenuOverlay onClose={() => setMenuOpen(false)} />}
     </section>
   )
 }
@@ -685,11 +663,34 @@ function Tile({
   const [ptzOpen, setPtzOpen] = useState(false)
   const [showCameraDialog, setShowCameraDialog] = useState(false)
 
+  // Close the PTZ pad when the tile's camera changes.
+  useEffect(() => {
+    setPtzOpen(false)
+  }, [assignedCameraId])
+  // Backend-pushed connectivity: `status` drives the offline overlay;
+  // `version` bumps on each recovery, re-running the URL fetch below (fresh
+  // 60-min stream token) and remounting the player so the stream resumes
+  // without any user action.
+  const { status: connectivity, version: streamVersion } = useCameraStatus(assignedCameraId)
+  // Bumped when the player reports an auth-rejected stream request — the
+  // 60-min token expired mid-session (e.g. a stream hiccup hours in; the
+  // backend never saw the camera go offline, so streamVersion won't bump).
+  // Re-runs the URL fetch below for a fresh token. Throttled so a
+  // persistent non-auth 400 can't hammer the token endpoint.
+  const [tokenVersion, setTokenVersion] = useState(0)
+  const lastTokenRefreshRef = useRef(0)
+  const handleAuthExpired = useCallback(() => {
+    const now = Date.now()
+    if (now - lastTokenRefreshRef.current < 10000) return
+    lastTokenRefreshRef.current = now
+    setTokenVersion((v) => v + 1)
+  }, [])
+
   useEffect(() => {
     let alive = true
     // Use assigned camera if provided, otherwise no camera
-    const camera = assignedCameraId 
-      ? availableCameras.find(c => c.id === assignedCameraId) 
+    const camera = assignedCameraId
+      ? availableCameras.find(c => c.id === assignedCameraId)
       : null
     if (camera) {
       setCameraId(camera.id)
@@ -698,12 +699,18 @@ function Tile({
         try {
           const { data } = await apiService.getStreamUrls(camera.id)
           if (!alive) return
-          setUrls({ 
-            whep: data.urls?.webrtc, 
-            hls: data.urls?.hls,
+          setUrls({
+            // Rebase onto the origin the UI is being served from — the
+            // backend pins these to the LAN IP, which breaks playback
+            // when browsing via https://localhost (see lib/streamUrl.ts).
+            whep: rebaseToCurrentOrigin(data.urls?.webrtc),
+            hls: rebaseToCurrentOrigin(data.urls?.hls),
             token: data.token
           })
-        } catch {}
+        } catch {
+          // Show NO LINK instead of silently keeping stale URLs/token.
+          if (alive) setUrls(null)
+        }
       })()
     } else {
       setCameraId(null)
@@ -711,7 +718,7 @@ function Tile({
       setUrls(null)
     }
     return () => { alive = false }
-  }, [assignedCameraId, availableCameras])
+  }, [assignedCameraId, availableCameras, streamVersion, tokenVersion])
 
   const hasLink = !!urls?.whep || !!urls?.hls
   const displayName = cameraName || `Camera ${cameraId || index + 1}`
@@ -739,11 +746,11 @@ function Tile({
   }
   
   return (
-    <div className="flex flex-col bg-[var(--bg-2)] border border-neutral-700 relative overflow-hidden h-full">
-      {/* Video container — fixed 16:9 frame. Width comes from the grid column;
-          height is locked to 16:9 by aspect-video (no flex-1 stretch, which would
-          let the tile grow taller than 16:9 and letterbox the stream unevenly). */}
-      <div className="aspect-video relative w-full overflow-hidden">
+    <div className="flex flex-col bg-[var(--bg-2)] border border-[var(--border)] relative overflow-hidden h-full">
+      {/* Video container — fills the grid cell. Width comes from the grid
+          column and height from the 1fr row, so the whole layout fits the
+          viewport; object-contain letter/pillarboxes the stream inside. */}
+      <div className="relative w-full flex-1 min-h-0 overflow-hidden">
         {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO CAMERA</div>}
         {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
 
@@ -753,16 +760,38 @@ function Tile({
         <div className="absolute inset-0">
           {hasLink ? (
             <VideoPlayer
+              key={`${cameraId}-${streamVersion}`}
               ref={playerRef}
               mode="live"
               whepUrl={urls?.whep}
               hlsUrl={urls?.hls}
               mediamtxToken={urls?.token}
+              onAuthExpired={handleAuthExpired}
               title={displayName}
               preferredStreamType="webrtc"
               autoPlay
               muted
               onSnapshot={handleSnapshot}
+              onTogglePtz={() => setPtzOpen((s) => !s)}
+              ptzActive={ptzOpen}
+              overlay={ptzOpen && cameraId ? (
+                /* Mini PTZ pad — rendered inside the player so it survives
+                   the player element going fullscreen; sits above the
+                   controls bar (~72px incl. gradient) */
+                <div className="absolute left-2 bottom-20 z-30 bg-black/80 p-2 border border-[var(--border)] text-[10px]">
+                  <div className="grid grid-cols-3 gap-1">
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&uarr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-red-500/30" onClick={() => setPtzOpen(false)}>Close</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
+                    <div />
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Minus size={12} /></button>
+                  </div>
+                </div>
+              ) : null}
               className="w-full h-full"
             />
           ) : (
@@ -787,32 +816,18 @@ function Tile({
           )}
         </div>
 
-        {/* Mini PTZ pad */}
-        {ptzOpen && cameraId && (
-          <div className="absolute left-2 bottom-16 z-30 bg-black/80 p-2 border border-neutral-700 text-[10px] rounded">
-            <div className="grid grid-cols-3 gap-1">
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&uarr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-red-500/30" onClick={() => setPtzOpen(false)}>Close</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
-              <div />
-              <button className="px-1 py-1 bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Minus size={12} /></button>
-            </div>
+        {/* Offline overlay — driven by backend camera_status events. Clears
+            itself (and the player restarts via the key above) when the
+            camera comes back; no user interaction needed. */}
+        {cameraId && connectivity === 'offline' && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
+            <AlertCircle size={24} className="text-yellow-400" />
+            <div className="text-xs uppercase tracking-wide text-yellow-300">Camera offline</div>
+            <div className="text-[11px] text-[var(--text-dim)]">Waiting for camera to reconnect…</div>
           </div>
         )}
 
-        {/* PTZ toggle button - floating */}
-        {cameraId && hasLink && (
-          <button 
-            className="absolute left-2 bottom-2 z-30 px-2 py-1 bg-black/60 hover:bg-black/80 border border-neutral-700 rounded text-[10px] flex items-center gap-1 transition-colors"
-            onClick={() => setPtzOpen((s) => !s)}
-          >
-            <Move size={12} /> PTZ
-          </button>
-        )}
+
       </div>
 
       {/* Camera Selection/Add Dialog */}
@@ -854,29 +869,40 @@ function ToolbarContents({
   availableLayouts,
   onOpenMenu,
   onToggleFullscreen,
+  dropUp = false,
+  fillMode,
+  onToggleFillMode,
+  showFitToggle = true,
 }: {
   currentLayout: string
   setCurrentLayout: (layout: string) => void
   availableLayouts: Array<{ id: string; name: string; tiles: number }>
   onOpenMenu: () => void
   onToggleFullscreen: () => void
+  /** Layout dropdown direction: up when the bar sits at the bottom (fullscreen). */
+  dropUp?: boolean
+  fillMode?: boolean
+  onToggleFillMode?: () => void
+  showFitToggle?: boolean
 }) {
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
-  
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  useClickOutside(dropdownRef, layoutDropdownOpen, () => setLayoutDropdownOpen(false))
+
   return (
     <>
-      <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-neutral-700" onClick={onOpenMenu}>
+      <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={onOpenMenu}>
         <Grid size={14} /> Menu
       </button>
       <div className="ml-auto flex items-center gap-1">
-        {/* Quick layout buttons */}
+        {/* Quick layout buttons — collapse into the dropdown below md */}
         {['1x1', '2x2', '3x3', '4x4'].map((layoutId) => {
           const available = availableLayouts.find(l => l.id === layoutId)
           if (!available) return null
           return (
-            <button 
-              key={layoutId} 
-              className={`px-2 py-1 border ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-neutral-700'}`} 
+            <button
+              key={layoutId}
+              className={`px-2 py-1 border hidden md:inline-flex ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
               onClick={() => setCurrentLayout(layoutId)}
             >
               {available.name}
@@ -884,16 +910,16 @@ function ToolbarContents({
           )
         })}
         {/* More layouts dropdown */}
-        <div className="relative">
-          <button 
-            className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1"
+        <div className="relative" ref={dropdownRef}>
+          <button
+            className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1"
             onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}
           >
             <Grid size={14} />
             <ChevronDown size={12} />
           </button>
           {layoutDropdownOpen && (
-            <div className="absolute right-0 bottom-full mb-1 z-50 bg-[var(--panel)] border border-neutral-700 shadow-lg min-w-[160px]">
+            <div className={`absolute right-0 z-50 bg-[var(--panel)] border border-[var(--border)] shadow-lg min-w-[160px] ${dropUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
               {availableLayouts.map(layout => (
                 <button
                   key={layout.id}
@@ -903,10 +929,32 @@ function ToolbarContents({
                   {layout.name} ({layout.tiles})
                 </button>
               ))}
+              <div className="border-t border-[var(--border)] px-3 py-2">
+                <button
+                  className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
+                  onClick={() => {
+                    setLayoutDropdownOpen(false)
+                    ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
+                  }}
+                >
+                  ⚙ Configure Layouts...
+                </button>
+              </div>
             </div>
           )}
         </div>
-        <button className="px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
+        {/* Fit/Fill toggle (hidden in fullscreen, which always fills) */}
+        {showFitToggle && onToggleFillMode && (
+          <button
+            className={`px-2 py-1 border inline-flex items-center gap-1 ${fillMode ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
+            onClick={onToggleFillMode}
+            title={fillMode ? 'Fill: grid uses all available space' : 'Fit: strict 16:9 cells, centered'}
+          >
+            {fillMode ? <Expand size={14} /> : <Scan size={14} />}
+            <span className="hidden sm:inline">{fillMode ? 'Fill' : 'Fit'}</span>
+          </button>
+        )}
+        <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
           <Maximize size={14} />
           <span className="hidden sm:inline">Fullscreen</span>
         </button>
@@ -988,686 +1036,4 @@ function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: str
     </button>
   )
 }
-
-// Add Camera Dialog Component. Shared by Live View (with the "Existing" tab for
-// tile assignment) and the Cameras tab (add-only, no "Existing" tab).
-export function AddCameraDialog({
-  onClose,
-  onCameraAdded,
-  onCameraSelected,
-  existingCameras = [],
-  title = 'Add Camera to Tile',
-}: {
-  onClose: () => void
-  onCameraAdded: (cameraId?: number) => void
-  onCameraSelected?: (cameraId: number) => void
-  existingCameras?: Array<{id: number, name: string}>
-  title?: string
-}) {
-  const [mode, setMode] = useState<'discover' | 'select' | 'manual'>('discover')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  
-  // ONVIF discovery state
-  const [discovering, setDiscovering] = useState(false)
-  const [discoveredCameras, setDiscoveredCameras] = useState<Array<{ip: string, name?: string, manufacturer?: string}>>([])
-  const [selectedCamera, setSelectedCamera] = useState<{ip: string, name?: string} | null>(null)
-  
-  // Authentication step
-  const [authStep, setAuthStep] = useState(false)
-  const [credentials, setCredentials] = useState({ username: 'admin', password: '' })
-  const [authenticating, setAuthenticating] = useState(false)
-  const [profiles, setProfiles] = useState<Array<{token: string, name: string, stream_uri?: string, width?: number, height?: number}>>([])
-  const [selectedProfile, setSelectedProfile] = useState<string>('')
-  const [rtspUrl, setRtspUrl] = useState('')
-  const [scanQr, setScanQr] = useState(false)
-  const [deviceInfo, setDeviceInfo] = useState<{
-    manufacturer?: string
-    model?: string
-    firmwareversion?: string
-    serialnumber?: string
-    hardwareid?: string
-  } | null>(null)
-  const [cameraName, setCameraName] = useState('')
-  
-  // Manual entry form
-  const [form, setForm] = useState({
-    name: '',
-    ip_address: '',
-    port: 554,
-    username: '',
-    password: '',
-    rtsp_url: '',
-  })
-
-  // Discover cameras on network via ONVIF
-  const handleDiscover = async () => {
-    setDiscovering(true)
-    setError(null)
-    setDiscoveredCameras([])
-    
-    try {
-      const response = await apiService.onvifDiscover()
-      const devices = response?.data?.devices || []
-      setDiscoveredCameras(devices.map((d: any) => ({
-        ip: d.ip || d.host || d.address,
-        name: d.name || d.model || `Camera`,
-        manufacturer: d.manufacturer || d.mfr || ''
-      })))
-      if (devices.length === 0) {
-        setError('No ONVIF cameras found on network. Try manual entry.')
-      }
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
-    } finally {
-      setDiscovering(false)
-    }
-  }
-  
-  // Start discovery on mount
-  useEffect(() => {
-    if (mode === 'discover') {
-      handleDiscover()
-    }
-  }, [])
-
-  // Select a discovered camera and show auth step
-  const handleSelectDiscovered = (camera: {ip: string, name?: string}) => {
-    setSelectedCamera(camera)
-    setAuthStep(true)
-    setError(null)
-    setCameraName('') // Reset camera name for user input
-  }
-  
-  // Authenticate and get RTSP URL using HTTP Digest (Hikvision compatible)
-  const handleAuthenticate = async () => {
-    if (!selectedCamera || !credentials.username || !credentials.password) {
-      setError('Username and password are required')
-      return
-    }
-    
-    setAuthenticating(true)
-    setError(null)
-    
-    try {
-      // Use new onvifConnect endpoint which uses HTTP Digest auth
-      // This works with Hikvision and other devices that don't support WS-Security
-      const response = await apiService.onvifConnect(selectedCamera.ip, {
-        username: credentials.username,
-        password: credentials.password,
-        port: 80
-      })
-      
-      const data = response?.data || {}
-      const profileList = data.profiles || []
-      
-      if (profileList.length > 0) {
-        setProfiles(profileList)
-        setDeviceInfo(data.device_info || null)
-        
-        // Select first profile that has a stream URI
-        const firstWithUri = profileList.find((p: any) => p.stream_uri) || profileList[0]
-        setSelectedProfile(firstWithUri.token)
-        setRtspUrl(firstWithUri.stream_uri || '')
-        
-        if (!firstWithUri.stream_uri) {
-          setError('Could not get RTSP URL. Check camera settings.')
-        }
-      } else {
-        setError('No stream profiles found. Check credentials.')
-      }
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.data?.detail || e?.message || ''
-      if (detail.includes('401') || detail.toLowerCase().includes('authentication')) {
-        setError('Authentication failed. Check username and password.')
-      } else if (detail.includes('timeout') || detail.includes('connect')) {
-        setError('Cannot connect to camera. Check IP address and network.')
-      } else {
-        setError(detail || 'Connection failed. Check credentials and network.')
-      }
-    } finally {
-      setAuthenticating(false)
-    }
-  }
-  
-  // Handle profile change - use stored stream_uri from profiles list
-  const handleProfileChange = (profileToken: string) => {
-    setSelectedProfile(profileToken)
-    const profile = profiles.find(p => p.token === profileToken)
-    if (profile?.stream_uri) {
-      setRtspUrl(profile.stream_uri)
-    }
-  }
-
-  // Helper to embed credentials into RTSP URL
-  const embedCredentialsInRtspUrl = (url: string, username: string, password: string): string => {
-    try {
-      // Parse the URL
-      const urlObj = new URL(url)
-      // URL-encode the password (handle special chars like @)
-      const encodedPassword = encodeURIComponent(password)
-      // Set credentials
-      urlObj.username = username
-      urlObj.password = encodedPassword
-      return urlObj.toString()
-    } catch {
-      // If URL parsing fails, try manual insertion
-      if (url.startsWith('rtsp://')) {
-        const encodedPassword = encodeURIComponent(password)
-        return url.replace('rtsp://', `rtsp://${username}:${encodedPassword}@`)
-      }
-      return url
-    }
-  }
-
-  // Add discovered camera
-  const handleAddDiscoveredCamera = async () => {
-    if (!selectedCamera || !rtspUrl) {
-      setError('RTSP URL not available')
-      return
-    }
-    
-    if (!cameraName.trim()) {
-      setError('Camera name is required')
-      return
-    }
-    
-    setLoading(true)
-    setError(null)
-    
-    try {
-      // Embed credentials into RTSP URL for MediaMTX
-      const rtspWithCredentials = embedCredentialsInRtspUrl(rtspUrl, credentials.username, credentials.password)
-      
-      const response = await apiService.createCamera({
-        name: cameraName.trim(),
-        ip_address: selectedCamera.ip,
-        port: 554,
-        username: credentials.username,
-        password: credentials.password,
-        rtsp_url: rtspWithCredentials,
-        // ONVIF device metadata
-        manufacturer: deviceInfo?.manufacturer || undefined,
-        model: deviceInfo?.model || undefined,
-        firmware_version: deviceInfo?.firmwareversion || undefined,
-        serial_number: deviceInfo?.serialnumber || undefined,
-        hardware_id: deviceInfo?.hardwareid || undefined,
-      })
-      const newCameraId = response?.data?.id
-      
-      // Auto-provision to MediaMTX
-      if (newCameraId) {
-        try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
-        } catch (e) {
-          console.warn('Auto-provision failed, camera added but not streaming:', e)
-        }
-      }
-      
-      onCameraAdded(newCameraId)
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add camera')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // Add manual camera
-  const handleAddManualCamera = async () => {
-    if (!form.name.trim() || !form.ip_address.trim()) {
-      setError('Name and IP address are required')
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-
-    try {
-      // rtsp_url is optional. If provided, the server embeds the username/password
-      // into it (URL-encoding specials like "@") when they aren't already there.
-      // If left blank, the server derives the URL from the IP + credentials.
-      // Either way it back-fills device identity.
-      const response = await apiService.createCamera({
-        name: form.name,
-        ip_address: form.ip_address,
-        port: form.port,
-        username: form.username || undefined,
-        password: form.password || undefined,
-        rtsp_url: form.rtsp_url || undefined,
-      })
-      const newCameraId = response?.data?.id
-      
-      // Auto-provision to MediaMTX
-      if (newCameraId) {
-        try {
-          await apiService.provisionCameraMediaMTX(newCameraId, { enable_recording: true })
-        } catch (e) {
-          console.warn('Auto-provision failed, camera added but not streaming:', e)
-        }
-      }
-      
-      onCameraAdded(newCameraId)
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add camera')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleSelectExisting = (cameraId: number) => {
-    onCameraSelected?.(cameraId)
-    onClose()
-  }
-
-
-  const filteredCameras = existingCameras.filter(c => 
-    c.name.toLowerCase().includes(searchQuery.toLowerCase())
-  )
-
-  return (
-    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-      <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-lg shadow-xl max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-neutral-700">
-          <h3 className="font-semibold flex items-center gap-2">
-            <Video size={18} />
-            {title}
-          </h3>
-          <button 
-            className="p-1 hover:bg-[var(--panel-2)] rounded"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Tab Switcher */}
-        <div className="flex border-b border-neutral-700">
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'discover' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('discover'); setAuthStep(false); setSelectedCamera(null); setError(null); }}
-          >
-            <Search size={12} className="inline mr-1" />
-            Discover
-          </button>
-          <button
-            className={`flex-1 px-3 py-2 text-xs ${mode === 'manual' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-            onClick={() => { setMode('manual'); setError(null); }}
-          >
-            <Plus size={12} className="inline mr-1" />
-            Manual
-          </button>
-          {existingCameras.length > 0 && (
-            <button
-              className={`flex-1 px-3 py-2 text-xs ${mode === 'select' ? 'bg-[var(--accent)]/20 text-[var(--accent)] border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)]'}`}
-              onClick={() => { setMode('select'); setError(null); }}
-            >
-              <Camera size={12} className="inline mr-1" />
-              Existing
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div className="p-4 overflow-auto flex-1">
-          {error && (
-            <div className="mb-4 p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">
-              {error}
-            </div>
-          )}
-
-          {/* DISCOVER MODE */}
-          {mode === 'discover' && !authStep && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-[var(--text-dim)]">
-                  {discovering ? 'Scanning network...' : `Found ${discoveredCameras.length} camera(s)`}
-                </span>
-                <button
-                  className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1"
-                  onClick={handleDiscover}
-                  disabled={discovering}
-                >
-                  {discovering ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
-                  {discovering ? 'Scanning...' : 'Rescan'}
-                </button>
-              </div>
-              
-              <div className="max-h-60 overflow-auto space-y-2">
-                {discovering && discoveredCameras.length === 0 && (
-                  <div className="text-center py-8">
-                    <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
-                    <div className="text-sm text-[var(--text-dim)]">Discovering ONVIF cameras...</div>
-                  </div>
-                )}
-                
-                {!discovering && discoveredCameras.length === 0 && (
-                  <div className="text-center py-8 text-sm text-[var(--text-dim)]">
-                    No cameras found. Try Manual entry.
-                  </div>
-                )}
-                
-                {discoveredCameras.map((camera, i) => (
-                  <button
-                    key={i}
-                    className="w-full text-left px-3 py-3 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
-                    onClick={() => handleSelectDiscovered(camera)}
-                  >
-                    <div className="w-10 h-10 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center rounded">
-                      <Camera size={20} className="text-[var(--accent)]" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-sm font-medium">{camera.name || 'ONVIF Camera'}</div>
-                      <div className="text-xs text-[var(--text-dim)]">{camera.ip}</div>
-                      {camera.manufacturer && (
-                        <div className="text-xs text-[var(--text-dim)]">{camera.manufacturer}</div>
-                      )}
-                    </div>
-                    <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90" />
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* DISCOVER MODE - AUTH STEP */}
-          {mode === 'discover' && authStep && selectedCamera && (
-            <div className="space-y-4">
-              <button 
-                className="text-xs text-[var(--accent)] flex items-center gap-1 hover:underline"
-                onClick={() => { setAuthStep(false); setSelectedCamera(null); setProfiles([]); setRtspUrl(''); setCameraName(''); }}
-              >
-                ← Back to camera list
-              </button>
-              
-              <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 rounded">
-                <div className="flex items-center gap-3">
-                  <Camera size={24} className="text-[var(--accent)]" />
-                  <div>
-                    <div className="font-medium">{selectedCamera.name || 'ONVIF Camera'}</div>
-                    <div className="text-xs text-[var(--text-dim)]">{selectedCamera.ip}</div>
-                  </div>
-                </div>
-              </div>
-              
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  placeholder="e.g., Front Door, Lobby"
-                  value={cameraName}
-                  onChange={(e) => setCameraName(e.target.value)}
-                />
-              </label>
-              
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Username</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={credentials.username}
-                    onChange={(e) => setCredentials(c => ({ ...c, username: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Password</span>
-                  <input
-                    type="password"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={credentials.password}
-                    onChange={(e) => setCredentials(c => ({ ...c, password: e.target.value }))}
-                  />
-                </label>
-              </div>
-              
-              {!rtspUrl && (
-                <button
-                  className="w-full px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-2"
-                  onClick={handleAuthenticate}
-                  disabled={authenticating || !credentials.password}
-                >
-                  {authenticating ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" />
-                      Connecting...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle size={14} />
-                      Connect & Get Stream
-                    </>
-                  )}
-                </button>
-              )}
-              
-              {profiles.length > 0 && (
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Stream Profile</span>
-                  <select
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={selectedProfile}
-                    onChange={(e) => handleProfileChange(e.target.value)}
-                  >
-                    {profiles.map(p => (
-                      <option key={p.token} value={p.token}>
-                        {p.name || p.token}
-                        {p.width && p.height ? ` (${p.width}x${p.height})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              
-              {deviceInfo && (
-                <div className="p-3 bg-[var(--bg-2)] border border-neutral-700 rounded text-xs space-y-1">
-                  <div className="font-medium text-sm mb-2">Device Information</div>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[var(--text-dim)]">
-                    <span>Manufacturer:</span>
-                    <span className="text-[var(--text)]">{deviceInfo.manufacturer || 'Unknown'}</span>
-                    <span>Model:</span>
-                    <span className="text-[var(--text)]">{deviceInfo.model || 'Unknown'}</span>
-                    {deviceInfo.serialnumber && (
-                      <>
-                        <span>Serial Number:</span>
-                        <span className="text-[var(--text)] font-mono">{deviceInfo.serialnumber}</span>
-                      </>
-                    )}
-                    {deviceInfo.firmwareversion && (
-                      <>
-                        <span>Firmware:</span>
-                        <span className="text-[var(--text)]">{deviceInfo.firmwareversion}</span>
-                      </>
-                    )}
-                    {deviceInfo.hardwareid && (
-                      <>
-                        <span>Hardware ID:</span>
-                        <span className="text-[var(--text)] font-mono">{deviceInfo.hardwareid}</span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-              
-              {rtspUrl && (
-                <div className="p-3 bg-green-900/20 border border-green-700 rounded">
-                  <div className="flex items-center gap-2 text-green-400 text-sm mb-1">
-                    <CheckCircle size={14} />
-                    Stream URL Retrieved
-                  </div>
-                  <div className="text-xs font-mono text-[var(--text-dim)] break-all">{rtspUrl}</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* MANUAL MODE */}
-          {mode === 'manual' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="e.g., Front Door"
-                    value={form.name}
-                    onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">IP Address *</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="192.168.1.100"
-                    value={form.ip_address}
-                    onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
-                  />
-                </label>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Port</span>
-                  <input
-                    type="number"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={form.port}
-                    onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Username</span>
-                  <input
-                    type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    placeholder="admin"
-                    value={form.username}
-                    onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Password</span>
-                  <input
-                    type="password"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                    value={form.password}
-                    onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
-                  />
-                </label>
-              </div>
-
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    className="flex-1 bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                    placeholder="rtsp://192.168.1.100:554/stream1"
-                    value={form.rtsp_url}
-                    onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] text-xs whitespace-nowrap"
-                    onClick={() => setScanQr(true)}
-                    title="Scan the QR from the OpenNVR Cam app"
-                  >
-                    Scan QR
-                  </button>
-                </div>
-                <span className="text-[10px] text-[var(--text-dim)]">
-                  Optional. No need to put credentials in the URL — the
-                  Username/Password above are added automatically. Leave blank to
-                  build the URL from the IP + credentials.
-                </span>
-              </label>
-            </div>
-          )}
-
-          {/* SELECT EXISTING MODE */}
-          {mode === 'select' && (
-            <div className="space-y-3">
-              <div className="relative">
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
-                <input
-                  type="text"
-                  className="w-full bg-[var(--bg-2)] border border-neutral-700 pl-10 pr-3 py-2 text-sm"
-                  placeholder="Search cameras..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-              
-              <div className="max-h-60 overflow-auto space-y-1">
-                {filteredCameras.length === 0 ? (
-                  <div className="text-center text-sm text-[var(--text-dim)] py-8">
-                    {existingCameras.length === 0 
-                      ? 'No cameras available. Add a new camera first.'
-                      : 'No cameras match your search.'}
-                  </div>
-                ) : (
-                  filteredCameras.map(camera => (
-                    <button
-                      key={camera.id}
-                      className="w-full text-left px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
-                      onClick={() => handleSelectExisting(camera.id)}
-                    >
-                      <div className="w-8 h-8 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center">
-                        <Camera size={16} className="text-[var(--text-dim)]" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium">{camera.name}</div>
-                        <div className="text-xs text-[var(--text-dim)]">Camera ID: {camera.id}</div>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-          <button
-            className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          {mode === 'discover' && authStep && rtspUrl && (
-            <button
-              className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
-              onClick={handleAddDiscoveredCamera}
-              disabled={loading || !cameraName.trim()}
-            >
-              {loading ? 'Adding...' : 'Add Camera'}
-            </button>
-          )}
-          {mode === 'manual' && (
-            <button
-              className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50"
-              onClick={handleAddManualCamera}
-              disabled={loading || !form.name.trim() || !form.ip_address.trim()}
-            >
-              {loading ? 'Adding...' : 'Add Camera'}
-            </button>
-          )}
-        </div>
-      </div>
-      {scanQr && (
-        <QrScanner
-          title="Scan the QR from the OpenNVR Cam app"
-          onResult={(text) => { setForm(f => ({ ...f, rtsp_url: text })); setScanQr(false) }}
-          onClose={() => setScanQr(false)}
-        />
-      )}
-    </div>
-  )
-}
-
 

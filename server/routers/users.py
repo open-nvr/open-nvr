@@ -19,7 +19,7 @@ Users router for user management operations.
 Handles CRUD operations for users with proper authentication and authorization.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
@@ -29,6 +29,7 @@ from models import Permission, User
 from schemas import UserCreate, UserList, UserResponse, UserUpdate
 from services.audit_service import write_audit_log
 from services.user_service import UserService
+from utils.mfa_guard import require_mfa_code
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -131,6 +132,21 @@ def update_user(
     request: Request = None,
 ):
     """Update user information (superuser only)."""
+    # Deactivating yourself is the same lockout as self-deletion (issue #176).
+    if user_id == current_user.id and user_update.is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account.",
+        )
+    # Reactivation is MFA-gated via /users/{id}/activate; without this guard
+    # the plain update would be a bypass around that check.
+    if user_update.is_active is True:
+        target = db.query(User).filter(User.id == user_id).first()
+        if target and not target.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reactivating a user requires an MFA code — use the Activate action.",
+            )
     user = UserService.update_user(db=db, user_id=user_id, user_update=user_update)
     if not user:
         raise HTTPException(
@@ -156,14 +172,33 @@ def update_user(
     return user
 
 
+def _require_mfa_code(current_user: User, mfa_code: str | None) -> None:
+    """Verify the caller's current TOTP code for sensitive user actions."""
+    require_mfa_code(current_user, mfa_code)
+
+
 @router.delete("/{user_id}")
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superuser),
     request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
 ):
-    """Delete a user (soft delete, superuser only)."""
+    """Delete a user (soft delete, superuser only).
+
+    Requires the caller's current TOTP code in the X-MFA-Code header, and a
+    user can never delete their own account — a soft-deleted user cannot log
+    in, so self-deletion bricks single-admin deployments (issue #176).
+    """
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot delete your own account.",
+        )
+
+    _require_mfa_code(current_user, mfa_code)
+
     success = UserService.delete_user(db=db, user_id=user_id)
     if not success:
         raise HTTPException(
@@ -183,6 +218,45 @@ def delete_user(
     except Exception as e:
         main_logger.warning(f"Failed to write audit log (user.delete): {e}")
     return {"message": "User deleted successfully"}
+
+
+@router.post("/{user_id}/activate", response_model=UserResponse)
+def activate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+    request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """Reactivate a soft-deleted user (superuser only).
+
+    Undoes a delete: the account can log in again. Requires the caller's
+    current TOTP code in the X-MFA-Code header, same as deletion.
+    """
+    _require_mfa_code(current_user, mfa_code)
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    user.is_active = True
+    db.commit()
+    db.refresh(user)
+    try:
+        write_audit_log(
+            db,
+            action="user.activate",
+            user_id=current_user.id,
+            entity_type="user",
+            entity_id=user.id,
+            details={"username": user.username},
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        main_logger.warning(f"Failed to write audit log (user.activate): {e}")
+    return user
 
 
 @router.put("/me", response_model=UserResponse)

@@ -19,28 +19,40 @@ Cameras router for camera management operations.
 Handles CRUD operations for cameras with proper authentication and ownership checks.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import and_
+import shutil
+from datetime import UTC, datetime
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user
+from core.auth import get_current_active_user, get_current_superuser
 from core.config import settings
 from core.database import get_db
 from core.logging_config import camera_logger
 from core.permissions import get_camera_or_403
-from models import Camera, CameraPermission, User
+from models import Camera, CameraEvent, CameraPermission, Recording, TimelineEvent, User
 from schemas import (
     CameraCreate,
+    CameraHardDeleteRequest,
     CameraList,
     CameraPermissionAssign,
     CameraPermissionResponse,
     CameraResponse,
     CameraUpdate,
+    DeletedCameraInfo,
+    DeletedCameraList,
     TransportSecurityUpdate,
 )
 from services.audit_service import write_audit_log
+from services.camera_identity import path_name_for_camera, read_marker
 from services.camera_service import CameraService
+from services.mediamtx_admin_service import MediaMtxAdminService
+from services.storage_service import get_effective_recordings_base_path
 from services.stream_service import _build_stream_name, build_secure_whep_url_for_user
+from utils.mfa_guard import require_mfa_code
+from utils.url_redaction import redact_url_credentials
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -91,6 +103,52 @@ def _record_audit_log(db: Session, user_id: int, cam: Camera, request: Request):
         camera_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
 
+def _find_duplicate_cameras(
+    db: Session, user_id: int, ip_address: str, rtsp_url: str | None
+) -> list[Camera]:
+    """Existing non-deleted cameras of this owner matching the new camera's
+    IP address or exact RTSP URL. Inactive (paused) cameras count — they can
+    be reactivated; binned ones don't."""
+    conditions = [Camera.ip_address == ip_address]
+    if rtsp_url:
+        conditions.append(Camera.rtsp_url == rtsp_url)
+    return (
+        db.query(Camera)
+        .filter(
+            Camera.owner_id == user_id,
+            Camera.deleted_at.is_(None),
+            or_(*conditions),
+        )
+        .all()
+    )
+
+
+def _record_forced_duplicate_audit(
+    db: Session,
+    user_id: int,
+    cam: Camera,
+    duplicates: list[Camera],
+    request: Request,
+):
+    try:
+        write_audit_log(
+            db,
+            action="camera.create_forced_duplicate",
+            user_id=user_id,
+            entity_type="camera",
+            entity_id=cam.id,
+            details={
+                "name": cam.name,
+                "ip": cam.ip_address,
+                "duplicate_of": [d.id for d in duplicates],
+            },
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        camera_logger.error(f"Failed to write audit log: {e}", exc_info=True)
+
+
 def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
     cameras_same_ip = (
         db.query(Camera)
@@ -99,6 +157,7 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
                 Camera.ip_address == cam.ip_address,
                 Camera.owner_id == user_id,
                 Camera.is_active == True,
+                Camera.deleted_at.is_(None),
                 Camera.id != cam.id,
             )
         )
@@ -122,6 +181,10 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
+    force: bool = Query(
+        False,
+        description="Add the camera even when its IP or RTSP URL matches an existing one.",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
@@ -134,6 +197,12 @@ async def create_camera(
     only need IP + username + password.
     """
     _log_camera_creation_start(current_user.id, camera_create, request)
+
+    # Referenced after creation regardless of the credentials branch below —
+    # without these initializers a credential-less create crashed with
+    # UnboundLocalError before ever returning.
+    onvif_port = None
+    control_scheme = None
 
     # On connect, when credentials are supplied: derive the RTSP URL (if none was
     # given), always back-fill device identity (manufacturer/model/firmware/serial),
@@ -224,10 +293,43 @@ async def create_camera(
             control_scheme,
         )
 
+    # Duplicate guard — compared after RTSP derivation/credential injection so
+    # the final URL is what's matched. 409 carries the matches so the client
+    # can show "already added — add anyway?" and retry with ?force=true.
+    duplicates = _find_duplicate_cameras(
+        db, current_user.id, camera_create.ip_address, camera_create.rtsp_url
+    )
+    if duplicates and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "duplicate_camera",
+                "message": (
+                    "A camera with this IP address or stream URL is already added."
+                ),
+                "duplicates": [
+                    {
+                        "id": d.id,
+                        "name": d.name,
+                        "ip_address": d.ip_address,
+                        "rtsp_url": redact_url_credentials(d.rtsp_url)
+                        if d.rtsp_url
+                        else None,
+                        "is_active": d.is_active,
+                    }
+                    for d in duplicates
+                ],
+            },
+        )
+
     try:
         cam = await CameraService.create_camera(
             db=db, camera_create=camera_create, owner_id=current_user.id
         )
+
+        if duplicates:
+            # User explicitly confirmed past the duplicate warning.
+            _record_forced_duplicate_audit(db, current_user.id, cam, duplicates, request)
 
         # Persist the ONVIF control endpoint discovered above (Hikvision http:80,
         # Secureye/Tiandy http:8088, TLS-only devices https:…) so the driver
@@ -315,11 +417,11 @@ def get_cameras(
         cameras = CameraService.get_all_cameras(
             db=db, skip=skip, limit=limit, active_only=active_only
         )
-        # Count only active (non-deleted) cameras when active_only is True
+        # Binned cameras never count; active_only additionally hides paused ones.
+        total_query = db.query(Camera).filter(Camera.deleted_at.is_(None))
         if active_only:
-            total = db.query(Camera).filter(Camera.is_active == True).count()
-        else:
-            total = db.query(Camera).count()
+            total_query = total_query.filter(Camera.is_active == True)
+        total = total_query.count()
         camera_logger.log_action(
             "camera.list_success_admin",
             user_id=current_user.id,
@@ -405,7 +507,9 @@ def get_cameras_by_ip(
     )
 
     if current_user.is_superuser:
-        query = db.query(Camera).filter(Camera.ip_address == ip_address)
+        query = db.query(Camera).filter(
+            Camera.ip_address == ip_address, Camera.deleted_at.is_(None)
+        )
         if active_only:
             query = query.filter(Camera.is_active == True)
         cameras = query.all()
@@ -419,7 +523,8 @@ def get_cameras_by_ip(
     else:
         # Get own cameras
         own_query = db.query(Camera).filter(
-            and_(Camera.ip_address == ip_address, Camera.owner_id == current_user.id)
+            and_(Camera.ip_address == ip_address, Camera.owner_id == current_user.id),
+            Camera.deleted_at.is_(None),
         )
         if active_only:
             own_query = own_query.filter(Camera.is_active == True)
@@ -437,7 +542,8 @@ def get_cameras_by_ip(
             .subquery()
         )
         permitted_query = db.query(Camera).filter(
-            and_(Camera.ip_address == ip_address, Camera.id.in_(permitted_subq))
+            and_(Camera.ip_address == ip_address, Camera.id.in_(permitted_subq)),
+            Camera.deleted_at.is_(None),
         )
         if active_only:
             permitted_query = permitted_query.filter(Camera.is_active == True)
@@ -467,6 +573,40 @@ def get_cameras_by_ip(
     return cameras
 
 
+# NOTE: must be registered before GET /{camera_id} — otherwise "deleted"
+# would be parsed as the int camera_id and 422.
+@router.get("/deleted", response_model=DeletedCameraList)
+def get_deleted_cameras(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List binned (soft-deleted) cameras — the Deleted Cameras page.
+
+    Superusers see every binned camera, other users only their own. These
+    cameras can never be edited or reactivated; their recordings remain
+    playable (via the returned ``path``) until retention removes them, and a
+    superuser can purge them permanently via the hard-delete endpoint.
+    """
+    query = db.query(Camera).filter(Camera.deleted_at.isnot(None))
+    if not current_user.is_superuser:
+        query = query.filter(Camera.owner_id == current_user.id)
+    cameras = query.order_by(Camera.deleted_at.desc()).all()
+
+    items = [
+        DeletedCameraInfo(
+            id=c.id,
+            name=c.name,
+            ip_address=c.ip_address,
+            location=c.location,
+            owner_id=c.owner_id,
+            deleted_at=c.deleted_at,
+            path=path_name_for_camera(c),
+        )
+        for c in cameras
+    ]
+    return DeletedCameraList(cameras=items, total=len(items))
+
+
 @router.get("/{camera_id}", response_model=CameraResponse)
 def get_camera(
     camera_id: int,
@@ -489,6 +629,8 @@ def get_camera(
         camera = CameraService.get_camera_by_id(
             db=db, camera_id=camera_id, user_id=current_user.id
         )
+        if camera is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
 
         camera_logger.log_action(
             "camera.get_success",
@@ -517,7 +659,11 @@ def get_camera(
                     else None,
                 )
                 raise
-            camera = db.query(Camera).filter(Camera.id == camera_id).first()
+            camera = (
+                db.query(Camera)
+                .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+                .first()
+            )
             if not camera:
                 camera_logger.log_action(
                     "camera.get_not_found",
@@ -554,7 +700,7 @@ def get_camera(
 
 
 @router.put("/{camera_id}", response_model=CameraResponse)
-def update_camera(
+async def update_camera(
     camera_id: int,
     camera_update: CameraUpdate,
     camera: Camera = Depends(get_camera_or_403),
@@ -562,7 +708,13 @@ def update_camera(
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Update camera information (owner or superuser)."""
+    """Update camera information (owner or superuser).
+
+    Toggling ``is_active`` is the reversible pause: deactivating immediately
+    tears down the camera's MediaMTX path (stops live view and recording),
+    reactivating re-provisions it. The flag is the source of truth — a
+    MediaMTX hiccup never blocks the state change.
+    """
     camera_logger.log_action(
         "camera.update_start",
         user_id=current_user.id,
@@ -590,11 +742,58 @@ def update_camera(
 
         # Refactoring: Since we have the camera, we can use it.
         # But we need to update it.
+        was_active = bool(camera.is_active)
         for field, value in camera_update.model_dump(exclude_unset=True).items():
             setattr(camera, field, value)
 
         db.commit()
         db.refresh(camera)
+
+        now_active = bool(camera.is_active)
+        stream_action = None
+        if was_active and not now_active:
+            # Pause: stop the stream (and with it, recording) right now, not
+            # at the next restart. Best-effort — see docstring.
+            stream_action = "deactivate"
+            try:
+                res = await MediaMtxAdminService.unprovision_path(
+                    camera.id, camera.ip_address
+                )
+                camera_logger.log_action(
+                    "camera.deactivate_unprovision",
+                    user_id=current_user.id,
+                    camera_id=camera.id,
+                    message=f"Camera {camera.id} deactivated; MediaMTX path removed",
+                    extra_data={"unprovision_result": res},
+                )
+            except Exception as e:
+                camera_logger.error(
+                    f"Camera {camera.id} deactivated but MediaMTX teardown failed: {e}",
+                    extra={"camera_id": camera.id, "action": "camera.deactivate_unprovision_failed"},
+                    exc_info=True,
+                )
+        elif not was_active and now_active:
+            # Resume: re-provision. provision_camera_by_id re-reads the camera
+            # (post-commit, so the new is_active passes its filter) and is
+            # lenient about a missing CameraConfig row.
+            stream_action = "activate"
+            from services.mediamtx_startup_service import MediaMtxStartupService
+
+            try:
+                res = await MediaMtxStartupService.provision_camera_by_id(camera.id)
+                camera_logger.log_action(
+                    "camera.activate_provision",
+                    user_id=current_user.id,
+                    camera_id=camera.id,
+                    message=f"Camera {camera.id} reactivated; MediaMTX provisioning: {res.get('status')}",
+                    extra_data={"provision_result": res},
+                )
+            except Exception as e:
+                camera_logger.error(
+                    f"Camera {camera.id} reactivated but MediaMTX provisioning failed: {e}",
+                    extra={"camera_id": camera.id, "action": "camera.activate_provision_failed"},
+                    exc_info=True,
+                )
 
         camera_logger.log_action(
             "camera.update_success",
@@ -621,7 +820,8 @@ def update_camera(
                 details={
                     "updated_fields": [
                         k for k in camera_update.model_dump(exclude_unset=True).keys()
-                    ]
+                    ],
+                    **({"stream_action": stream_action} if stream_action else {}),
                 },
                 ip=request.client.host if request and request.client else None,
                 user_agent=request.headers.get("user-agent") if request else None,
@@ -649,14 +849,21 @@ def update_camera(
 
 
 @router.delete("/{camera_id}")
-def delete_camera(
+async def delete_camera(
     camera_id: int,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Delete a camera (soft delete)."""
+    """Delete a camera (irreversible soft delete).
+
+    Tears down the MediaMTX path immediately (stops live view and recording),
+    stamps ``deleted_at`` and moves the camera to the bin: it disappears from
+    every normal list, can never be edited or reactivated, and its recordings
+    stay viewable only through the bin until retention ages them out. The
+    already-deleted case 404s via get_camera_or_403.
+    """
     camera_logger.log_action(
         "camera.delete_start",
         user_id=current_user.id,
@@ -669,9 +876,25 @@ def delete_camera(
     camera_name = camera.name
 
     try:
+        # Stop the stream first — best-effort, idempotent, no-op when the
+        # MediaMTX admin API isn't configured. The tombstone below is what
+        # keeps every (re)provisioning path from resurrecting it.
+        teardown = None
+        try:
+            teardown = await MediaMtxAdminService.unprovision_path(
+                camera.id, camera.ip_address
+            )
+        except Exception as e:
+            camera_logger.error(
+                f"MediaMTX teardown failed while deleting camera {camera_id}: {e}",
+                extra={"camera_id": camera_id, "action": "camera.delete_unprovision_failed"},
+                exc_info=True,
+            )
+
         # We already have the camera via dependency and ownership is confirmed.
-        # Direct soft delete.
+        # Irreversible soft delete: tombstone + deactivate.
         camera.is_active = False
+        camera.deleted_at = datetime.now(UTC)
         db.commit()
 
         camera_logger.log_action(
@@ -691,7 +914,11 @@ def delete_camera(
                 user_id=current_user.id,
                 entity_type="camera",
                 entity_id=camera_id,
-                details={"camera_name": camera_name},
+                details={
+                    "camera_name": camera_name,
+                    "deleted_at": camera.deleted_at.isoformat(),
+                    "stream_teardown": (teardown or {}).get("status", "failed"),
+                },
                 ip=request.client.host if request and request.client else None,
                 user_agent=request.headers.get("user-agent") if request else None,
             )
@@ -715,6 +942,139 @@ def delete_camera(
             exc_info=True,
         )
         raise
+
+
+@router.post("/{camera_id}/hard-delete")
+async def hard_delete_camera(
+    camera_id: int,
+    payload: CameraHardDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+    request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """Permanently delete a binned camera: its DB rows and its recordings.
+
+    Superuser only, and deliberately hard to trigger by accident:
+    - the camera must already be in the bin (soft-deleted) — 409 otherwise;
+    - the caller's current TOTP code must be in the X-MFA-Code header;
+    - the body must carry the exact phrase
+      ``hard delete <camera name> and it's recording``.
+
+    Files are purged before rows so a failed purge stays retryable. A
+    recordings dir whose identity marker belongs to a *different* camera uuid
+    is skipped, never deleted (it is that camera's archive).
+    """
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if camera.deleted_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Camera is not in the bin. Delete it first, then purge it from the bin.",
+        )
+
+    require_mfa_code(current_user, mfa_code)
+
+    expected_phrase = f"hard delete {camera.name} and it's recording"
+    if payload.confirmation_phrase != expected_phrase:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Confirmation phrase mismatch. Type exactly: "{expected_phrase}"',
+        )
+
+    # Defensive teardown — delete already unprovisioned it, but the purge must
+    # never race a still-writing publisher.
+    try:
+        await MediaMtxAdminService.unprovision_path(camera.id, camera.ip_address)
+    except Exception:
+        camera_logger.error(
+            f"MediaMTX teardown failed during hard delete of camera {camera_id}",
+            extra={"camera_id": camera_id},
+            exc_info=True,
+        )
+
+    # Purge recording files first; DB rows only fall once the disk is clean,
+    # so an rmtree failure leaves everything retryable.
+    files_result = "no-directory"
+    cam_dir = Path(get_effective_recordings_base_path(db)) / path_name_for_camera(camera)
+    if cam_dir.is_dir():
+        marker, _corrupt = read_marker(cam_dir)
+        marker_uuid = (marker or {}).get("camera_uuid")
+        if marker_uuid and camera.uuid and marker_uuid != camera.uuid:
+            # Different camera's archive living under this reused path name.
+            files_result = "skipped-identity-mismatch"
+            camera_logger.log_action(
+                "camera.hard_delete_dir_skipped",
+                user_id=current_user.id,
+                camera_id=camera_id,
+                message=f"Recordings dir {cam_dir.name} owned by another camera uuid; not deleted",
+                extra_data={"dir": str(cam_dir), "marker_uuid": marker_uuid},
+            )
+        else:
+            try:
+                shutil.rmtree(cam_dir)
+                files_result = "deleted"
+            except Exception as e:
+                camera_logger.error(
+                    f"Failed to purge recordings dir for camera {camera_id}: {e}",
+                    extra={"camera_id": camera_id, "dir": str(cam_dir)},
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to delete the camera's recordings from disk. "
+                    "Nothing was removed from the database; try again.",
+                )
+
+    # Rows without an ORM cascade from Camera go first, then the camera row
+    # (config/permissions/capability cascade via the relationships).
+    camera_name = camera.name
+    recording_rows = (
+        db.query(Recording).filter(Recording.camera_id == camera_id).delete()
+    )
+    event_rows = (
+        db.query(TimelineEvent).filter(TimelineEvent.camera_id == camera_id).delete()
+    )
+    camera_event_rows = (
+        db.query(CameraEvent).filter(CameraEvent.camera_id == camera_id).delete()
+    )
+    db.delete(camera)
+    db.commit()
+
+    summary = {
+        "message": "Camera permanently deleted",
+        "camera_id": camera_id,
+        "camera_name": camera_name,
+        "files": files_result,
+        "recording_rows_deleted": recording_rows,
+        "event_rows_deleted": event_rows + camera_event_rows,
+    }
+
+    camera_logger.log_action(
+        "camera.hard_delete",
+        user_id=current_user.id,
+        camera_id=camera_id,
+        message=f"Camera permanently deleted: {camera_name}",
+        extra_data=summary,
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+    )
+    try:
+        write_audit_log(
+            db,
+            action="camera.hard_delete",
+            user_id=current_user.id,
+            entity_type="camera",
+            entity_id=camera_id,
+            details=summary,
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        camera_logger.error(f"Failed to write audit log: {e}", exc_info=True)
+
+    return summary
 
 
 @router.post("/{camera_id}/permissions", response_model=CameraPermissionResponse)

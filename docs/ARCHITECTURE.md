@@ -44,6 +44,36 @@ audited interface:
    behind `/health` + `/infer` + `/info` is a first-class capability. **All model
    weights live here**, never in the apps.
 
+## Mental model: perception → policy → live vs memory
+
+One picture of the whole flow, and the two distinctions it's easy to merge:
+
+```mermaid
+flowchart TD
+    Cam[Camera] --> MTX[MediaMTX<br/>ingest + record]
+    MTX -.->|always kept| Rec[(Recordings<br/>1-min chunks)]
+    MTX --> T0[Tier-0 detector<br/>cheap, always-on]
+    T0 -->|compute-gate| ADP[Purpose adapters<br/>face / LPR / VLM · /infer]
+    ADP -->|perception: what is it| BUS[[NATS bus<br/>opennvr.inference.*]]
+    BUS --> APP[Apps<br/>zone / line / dwell rules]
+    APP -->|policy: does it matter| IE{{interest event}}
+    IE -->|live| SUBS[[Subscribers<br/>UI · agent · Home Assistant]]
+    IE -->|memory| STORE[(Event store<br/>evidence + queryable history)]
+```
+
+- **Perception vs policy.** The model reports *what* is there (a person, a plate)
+  — perception. An app *rule* decides *whether it matters* (a person in this zone
+  after hours) — policy. Different layers: the adapter never decides interest, the
+  app does.
+- **Compute-gating.** The cheap, always-on Tier-0 detector gates the heavy
+  purpose models — continuous awareness on modest hardware, expensive inference
+  only on the frames that earn it.
+- **Bus vs store.** The **bus** delivers an event *live* to whoever is subscribed
+  right now; the **store** *remembers* it for later query. An interest event goes
+  to **both** — the bus is the nervous system, the store is the memory. (A
+  query-only agent could tap the bus but would have no past; the store is what
+  gives it one.)
+
 ## Two data planes
 
 - **Inference plane** — backend → KAI-C → adapter. The backend's own camera
@@ -53,6 +83,70 @@ audited interface:
   a rule, and publish `opennvr.alerts.>`; alert-sink apps subscribe to those.
   This is how the `examples/` apps (intrusion, loitering, LPR, …) work without
   touching the core.
+
+## Compute-gated inference (Tier-0 → agents/apps)
+
+The inference plane runs a **two-tier, compute-gated** pipeline so AI stays
+affordable on modest hardware (Raspberry Pi 5 / Intel N100) without changing how
+cameras are recorded or served.
+
+![OpenNVR end-to-end flow: cameras → MediaMTX → Tier-0 detect-pipeline → NATS bus → gated expensive models (KAI-C governed) → camera-agent and apps](images/compute-gated-flow.svg)
+
+- **Tier 0 — `detect-pipeline` (shipped, always-on, cheap).** Pulls a MediaMTX
+  substream tap and runs `motion → region → cheap ONNX detect → track →
+  best-frame` per camera, publishing structured events to the **existing** bus:
+  `opennvr.inference.tier0.<camera>.completed` (`opennvr.tier0.v1`). Detection runs
+  through a pluggable backend — `cv2.dnn` (zero-dep CPU) or ONNX Runtime
+  (OpenVINO / TensorRT / CoreML on the same model).
+- **The gate (next).** Reads Tier-0 events and runs the **expensive** frame-models
+  (VLM caption, face, plate) **once, on the best frame** — governed and audited by
+  KAI-C (including the *non-events*: "didn't run because score < threshold").
+- **LLM/VLM runtime placement.** The agent's reasoning LLM and (optionally)
+  its caption/VQA model are served by a runtime the operator chooses, not a
+  fixed container: the bundled Ollama container (Linux default), or an Ollama
+  on the machine hosting Docker (`OLLAMA_EXTERNAL_URL`; the macOS/Windows
+  default, because container VMs there have no GPU access while the host
+  does), or any OpenAI-compatible endpoint. Vision can follow the same
+  runtime via the `ollamavlm` contract adapter (`CAPTION_ADAPTER=ollamavlm`) —
+  the audited adapter seam stays in place either way; only where the weights
+  execute moves. Frames never ride the LLM hop: vision models see frames,
+  the text LLM sees tool results.
+
+- **Consumers (camera-agent + apps).** Subscribe to the same bus — **no new
+  contract**; the bus + schema *is* the API. A large class of questions ("is anyone
+  at the door?", "how many cars?") is answered straight from Tier-0 metadata with
+  **no expensive-model call**.
+
+**In scope:** frame/stream models only (detectors, VLM, face, plate). **Out of
+scope:** STT (Whisper), TTS (Piper), and the reasoning LLM — they process
+voice/text, not camera frames (the LLM still benefits indirectly: fewer, cleaner
+VLM calls). **Recording is never gated.** Every stage is additive and can be
+disabled without touching the rest of the stack.
+
+## The memory plane (canonical event & evidence store)
+
+Sensing without memory answers only "what is happening *now*". The **events
+store** (RFC-0001 Challenge 1) is the platform's memory: one `events` table in
+core, **one row per object visit** (a Tier-0 track lifecycle — person, car,
+anything the detector knows), each carrying the **best-frame photo** selected
+at capture time, content-addressed under `<recordings>/.evidence/`.
+
+```
+tier0 track ends ──POST──▶ core /internal/camera-agent/events ──▶ events row + JPEG
+                                                                        │
+users:  GET /api/v1/events?label=car&from=…&to=…  (owner-scoped)  ◀─────┤
+agents: SDK EventsClient → search_history tool                    ◀─────┘
+        ("did anyone come between 3 and 4?" → visits + face-matched names)
+```
+
+Rules that keep it sane: **per-visit grain** (never per-frame — "which cars
+today" returns visits, not 4,000 detections of one parked car); **junk never
+persists** (confirmed tracks ≥ 1 s only); **detection never blocks on
+history** (bounded queue, best-effort posts); **overlap time semantics** (the
+14:58–15:03 visit counts for "3–4pm"); **ingest is idempotent**
+(`uq_events_visit`). Camera-native alarms (`camera_events`) and app alerts
+converge onto this table in later phases — one timeline, and apps stop
+writing private history stores.
 
 ## Request lifecycle (web)
 

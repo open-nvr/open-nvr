@@ -16,10 +16,13 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
+import { useRecordingsByDate } from '../lib/queries'
+import { formatDuration } from '../lib/time'
 import {
   Calendar,
   Play,
@@ -34,6 +37,7 @@ import {
   PlayCircle,
   Unplug,
   Upload,
+  MonitorPlay,
 } from 'lucide-react'
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
@@ -95,9 +99,14 @@ export function PlaybackView() {
   const [cameras, setCameras] = useState<CameraWithRecordings[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [totalRecordings, setTotalRecordings] = useState(0)
   const [totalDuration, setTotalDuration] = useState(0)
   const [mediamtxAvailable, setMediamtxAvailable] = useState(true)
+
+  // Distinct local calendar days that have any footage, across all cameras.
+  const daysWithFootage = useMemo(
+    () => new Set(cameras.flatMap((c) => (c.recordings ?? []).map((r) => r.date))).size,
+    [cameras]
+  )
 
   // Expanded cameras (accordion style)
   const [expandedCameras, setExpandedCameras] = useState<Set<number>>(new Set())
@@ -114,42 +123,42 @@ export function PlaybackView() {
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [cloudUploadStatus, setCloudUploadStatus] = useState<CloudUploadStatus | null>(null)
+  // Latest status for the poll loop (avoids re-subscribing the effect).
+  const statusRef = useRef<CloudUploadStatus | null>(null)
+  useEffect(() => {
+    statusRef.current = cloudUploadStatus
+  }, [cloudUploadStatus])
   const [cloudUploadConfigured, setCloudUploadConfigured] = useState(true)
   const [queueingDayKey, setQueueingDayKey] = useState<string | null>(null)
   const [queuedDayKey, setQueuedDayKey] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  // Load recordings grouped by camera and date
-  const loadData = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      if (token) api.setToken(token)
-
-      const recordingsRes = await apiService.getRecordingsByDate()
-      
-      setCameras(recordingsRes.data?.cameras || [])
-      setTotalRecordings(recordingsRes.data?.total_recordings || 0)
-      setTotalDuration(recordingsRes.data?.total_duration || 0)
-      setMediamtxAvailable(recordingsRes.data?.mediamtx_available !== false)
-      
-      // Auto-expand first camera if only one exists
-      if (recordingsRes.data?.cameras?.length === 1) {
-        setExpandedCameras(new Set([recordingsRes.data.cameras[0].camera_id]))
-      }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load recordings')
-      showError('Failed to load recordings')
-    } finally {
-      setLoading(false)
-    }
-  }, [token, showError])
+  // Load recordings grouped by camera and date — react-query: shared with
+  // SyncPlayback/Dashboard, cached across navigations.
+  const overviewQuery = useRecordingsByDate()
+  const loadData = useCallback(() => overviewQuery.refetch(), [overviewQuery.refetch])
 
   useEffect(() => {
-    if (!authLoading) {
-      loadData()
+    const data = overviewQuery.data
+    if (!data) {
+      if (overviewQuery.error) {
+        setError((overviewQuery.error as any)?.message || 'Failed to load recordings')
+        setLoading(false)
+      } else {
+        setLoading(overviewQuery.isPending)
+      }
+      return
     }
-  }, [authLoading, loadData])
+    setError(null)
+    setCameras((data.cameras as any) || [])
+    setTotalDuration(data.total_duration || 0)
+    setMediamtxAvailable(data.mediamtx_available !== false)
+    // Auto-expand first camera if only one exists
+    if (data.cameras?.length === 1) {
+      setExpandedCameras(new Set([(data.cameras[0] as any).camera_id]))
+    }
+    setLoading(false)
+  }, [overviewQuery.data, overviewQuery.error, overviewQuery.isPending])
 
   useEffect(() => {
     if (!user?.is_superuser) return
@@ -178,7 +187,11 @@ export function PlaybackView() {
         // Non-blocking UI: keep playback usable even if status polling fails.
       } finally {
         if (!stopped && keepGoing) {
-          timer = setTimeout(poll, 3000)
+          // Fast polling only while an upload is actually moving; a quiet
+          // queue gets a slow heartbeat instead of a request every 3s.
+          const s = statusRef.current
+          const busy = !!s && (s.queue_size > 0 || (s as any).worker_running)
+          timer = setTimeout(poll, busy ? 3000 : 30000)
         }
       }
     }
@@ -328,15 +341,6 @@ export function PlaybackView() {
   }
 
   // Format helpers
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const mins = Math.floor((seconds % 3600) / 60)
-    if (hours > 0) {
-      return `${hours}h ${mins}m`
-    }
-    return `${mins}m`
-  }
-
   const formatDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split('-')
     const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day))
@@ -369,7 +373,7 @@ export function PlaybackView() {
           <div className="flex items-center gap-4 text-sm text-[var(--text-dim)]">
             <span className="flex items-center gap-1.5">
               <Film size={14} />
-              {totalRecordings} recording{totalRecordings !== 1 ? 's' : ''}
+              {daysWithFootage} day{daysWithFootage !== 1 ? 's' : ''} with footage
             </span>
             <span className="flex items-center gap-1.5">
               <Clock size={14} />
@@ -383,6 +387,14 @@ export function PlaybackView() {
         )}
         
         <div className="flex items-center gap-2 ml-auto">
+          <Link
+            to="/playback/sync"
+            className="px-4 py-1.5 border border-[var(--border)] text-sm flex items-center gap-2 text-[var(--text)] hover:bg-[var(--panel-2)] transition-colors"
+            title="Synchronized multi-camera playback with calendar"
+          >
+            <MonitorPlay size={14} className="text-[var(--accent)]" />
+            Multi-Cam Playback
+          </Link>
           <button
             onClick={loadData}
             disabled={loading}

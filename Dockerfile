@@ -1,7 +1,15 @@
 # ==========================================
 # STAGE 1: Frontend Build (Node.js)
 # ==========================================
-FROM node:23-alpine AS frontend-builder
+# --platform=$BUILDPLATFORM pins this stage to the ARCHITECTURE OF THE
+# BUILDER, not the target. Vite emits static JS/CSS/HTML that is
+# architecture-independent, so there is nothing to gain from running
+# `npm ci` + `npm run build` under QEMU for the linux/arm64 leg of a
+# multi-arch build — and plenty to lose: an emulated Node build is
+# roughly an order of magnitude slower and is the single step that
+# would make arm64 publishing impractical. The dist/ output is copied
+# into the target-arch runtime stage below.
+FROM --platform=$BUILDPLATFORM node:23-alpine AS frontend-builder
 
 WORKDIR /app-src
 
@@ -126,6 +134,7 @@ RUN find /app -name ".env" -type f -delete 2>/dev/null || true && \
 # Create non-root user for better security (optional but recommended)
 RUN useradd -m -u 1000 opennvr && \
     mkdir -p /app/logs && \
+    mkdir -p /app/keys && \
     mkdir -p /app/AI-adapters/AIAdapters/frames && \
     chown -R opennvr:opennvr /app
 # Note: Do NOT switch to USER opennvr here - entrypoint needs root to fix permissions

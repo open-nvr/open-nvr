@@ -1,0 +1,116 @@
+<svg viewBox="0 0 880 950" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ttl dsc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+<title id="ttl">OpenNVR end-to-end data flow from camera stream to agents and apps</title>
+<desc id="dsc">Cameras feed MediaMTX, which records to disk (never gated) and republishes a substream to the Tier-0 detect-pipeline (PR A: decode, motion, region, ONNX detect, track, best-frame). Tier-0 publishes events to the NATS bus. In PR B a gate reads those events and runs expensive frame models (VLM, face, plate) once on the best frame, governed by KAI-C. The camera-agent and apps consume results; many questions are answered from Tier-0 metadata with no VLM call. STT, TTS and the LLM are voice/text and not gated.</desc>
+<style>
+  .ba{fill:#EEEDFE;stroke:#AFA9EC}
+  .bb{fill:#FAEEDA;stroke:#FAC775}
+  .bn{fill:#F1EFE8;stroke:#D3D1C7}
+  .pa{fill:#E3E0FB;stroke:#AFA9EC}
+  .pb{fill:#F7DCB4;stroke:#EF9F27}
+  .ta{fill:#26215C}
+  .tb{fill:#854F0B}
+  .tn{fill:#2C2C2A}
+  .lbl{fill:#5F5E5A}
+  .ln{stroke:#888780}
+  text{font-size:11px}
+  .h{font-weight:700;font-size:13px}
+  .sub{font-size:10px}
+  .chip{font-size:9.5px;font-weight:600}
+</style>
+<defs>
+  <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#888780"/></marker>
+</defs>
+
+<rect x="1" y="1" width="878" height="948" rx="16" fill="#FBFAF7" stroke="#E7E5DE"/>
+
+<text x="440" y="30" text-anchor="middle" class="h ta">OpenNVR — camera stream → agents / apps</text>
+<text x="440" y="46" text-anchor="middle" class="sub lbl">solid = PR A (shipped) · dashed = PR B (next) · dotted = answered from Tier-0, no expensive model</text>
+
+<!-- Cameras -->
+<rect x="310" y="62" width="260" height="46" rx="9" class="bn"/>
+<text x="440" y="82" text-anchor="middle" class="h tn">Cameras</text>
+<text x="440" y="98" text-anchor="middle" class="sub lbl">RTSP · ONVIF</text>
+<line x1="440" y1="108" x2="440" y2="146" class="ln" marker-end="url(#arw)"/>
+
+<!-- MediaMTX -->
+<rect x="270" y="146" width="340" height="60" rx="9" class="bn"/>
+<text x="440" y="172" text-anchor="middle" class="h tn">MediaMTX</text>
+<text x="440" y="190" text-anchor="middle" class="sub lbl">ingest · record · republish (owns the 1 connection)</text>
+<line x1="610" y1="176" x2="656" y2="176" class="ln" marker-end="url(#arw)"/>
+<rect x="658" y="150" width="200" height="52" rx="9" class="bn" stroke-dasharray="4 3"/>
+<text x="758" y="172" text-anchor="middle" class="h tn" font-size="12">Recording → disk</text>
+<text x="758" y="189" text-anchor="middle" class="sub lbl">never gated (safety floor)</text>
+<line x1="440" y1="206" x2="440" y2="244" class="ln" marker-end="url(#arw)"/>
+<text x="450" y="228" class="sub lbl">substream tap</text>
+
+<!-- Tier 0 band -->
+<rect x="175" y="246" width="530" height="120" rx="11" class="ba"/>
+<text x="192" y="270" class="h ta">detect-pipeline · Tier 0</text>
+<text x="688" y="270" text-anchor="end" class="sub ta">always-on · cheap · PR A</text>
+<rect x="192" y="286" width="74" height="40" rx="7" class="pa"/><text x="229" y="310" text-anchor="middle" class="chip ta">decode</text>
+<rect x="276" y="286" width="74" height="40" rx="7" class="pa"/><text x="313" y="310" text-anchor="middle" class="chip ta">motion</text>
+<rect x="360" y="286" width="74" height="40" rx="7" class="pa"/><text x="397" y="310" text-anchor="middle" class="chip ta">region</text>
+<rect x="444" y="286" width="74" height="40" rx="7" class="pa"/><text x="481" y="310" text-anchor="middle" class="chip ta">detect ONNX</text>
+<rect x="528" y="286" width="74" height="40" rx="7" class="pa"/><text x="565" y="310" text-anchor="middle" class="chip ta">track</text>
+<rect x="612" y="286" width="74" height="40" rx="7" class="pa"/><text x="649" y="310" text-anchor="middle" class="chip ta">best-frame</text>
+<text x="192" y="352" class="sub lbl">hwaccel (VAAPI/QSV/NVIDIA/RPi…) · cv2.dnn or ONNX Runtime (OpenVINO / TensorRT)</text>
+<line x1="440" y1="366" x2="440" y2="402" class="ln" marker-end="url(#arw)"/>
+
+<!-- NATS bus -->
+<rect x="235" y="402" width="410" height="50" rx="9" class="ba"/>
+<text x="440" y="424" text-anchor="middle" class="h ta">NATS event bus</text>
+<text x="440" y="440" text-anchor="middle" class="sub ta" font-family="ui-monospace, monospace">opennvr.inference.tier0.&lt;cam&gt;.completed · v1</text>
+<line x1="440" y1="452" x2="440" y2="488" class="ln" marker-end="url(#arw)"/>
+
+<!-- Gate PR B -->
+<rect x="300" y="488" width="280" height="56" rx="9" class="bb" stroke-dasharray="5 3"/>
+<text x="440" y="510" text-anchor="middle" class="h tb">Gate  ·  PR B</text>
+<text x="440" y="527" text-anchor="middle" class="sub tb">escalate or suppress? · once, best frame</text>
+<line x1="440" y1="544" x2="440" y2="578" class="ln" stroke-dasharray="5 3" marker-end="url(#arw)"/>
+
+<!-- Expensive models -->
+<rect x="250" y="578" width="380" height="86" rx="10" class="bb"/>
+<text x="270" y="600" class="h tb">Expensive frame models · gated (Tier 1)</text>
+<rect x="266" y="612" width="108" height="38" rx="7" class="pb"/><text x="320" y="636" text-anchor="middle" class="chip tb">VLM caption</text>
+<rect x="386" y="612" width="108" height="38" rx="7" class="pb"/><text x="440" y="636" text-anchor="middle" class="chip tb">face</text>
+<rect x="506" y="612" width="108" height="38" rx="7" class="pb"/><text x="560" y="636" text-anchor="middle" class="chip tb">plate</text>
+
+<!-- governance bracket -->
+<rect x="648" y="488" width="210" height="176" rx="10" class="bn" stroke-dasharray="4 3"/>
+<text x="658" y="512" class="h tn" font-size="12">KAI-C governance</text>
+<text x="658" y="532" class="sub lbl">registry · sovereignty = local</text>
+<text x="658" y="550" class="sub lbl">audit — incl. non-events</text>
+<text x="658" y="574" class="sub lbl">every dispatch governed &amp;</text>
+<text x="658" y="588" class="sub lbl">provably on-prem</text>
+<text x="658" y="618" class="sub lbl">escape hatch: ungoverned</text>
+<text x="658" y="632" class="sub lbl">path available (opt-in)</text>
+
+<!-- to consumers -->
+<line x1="440" y1="664" x2="440" y2="686" class="ln"/>
+<text x="450" y="680" class="sub lbl">results → same bus · governed + audited</text>
+<path d="M440 686 L325 706" class="ln" fill="none" marker-end="url(#arw)"/>
+<path d="M440 686 L600 706" class="ln" fill="none" marker-end="url(#arw)"/>
+
+<!-- consumers -->
+<rect x="175" y="708" width="300" height="150" rx="10" class="bn"/>
+<text x="192" y="732" class="h tn">camera-agent (skills)</text>
+<text x="192" y="756" class="sub tn">• answers from Tier-0 metadata — no VLM</text>
+<text x="192" y="776" class="sub tn">• gates VLM on events · runs on best frame</text>
+<text x="192" y="796" class="sub tn">• skills compose many models freely</text>
+<line x1="192" y1="808" x2="458" y2="808" class="ln" stroke-dasharray="3 3"/>
+<text x="192" y="828" class="sub lbl">voice: STT · TTS · LLM — not frame-gated</text>
+<text x="192" y="846" class="sub lbl">(LLM still benefits: fewer VLM calls)</text>
+
+<rect x="495" y="708" width="210" height="150" rx="10" class="bn"/>
+<text x="512" y="732" class="h tn">apps / dashboards</text>
+<text x="512" y="756" class="sub tn">• subscribe to tier0.* events</text>
+<text x="512" y="776" class="sub tn">• alerts · custom UIs</text>
+<text x="512" y="796" class="sub tn">• automations</text>
+<text x="512" y="828" class="sub lbl">no new contract —</text>
+<text x="512" y="844" class="sub lbl">the bus + schema is the API</text>
+
+<!-- dotted shortcut: bus -> camera-agent (no VLM) -->
+<path d="M235 432 C 120 520, 120 650, 202 726" class="ln" fill="none" stroke-dasharray="2 4" marker-end="url(#arw)"/>
+<text x="103" y="560" text-anchor="middle" class="sub lbl">cheap answers</text>
+<text x="103" y="574" text-anchor="middle" class="sub lbl">(no VLM)</text>
+</svg>

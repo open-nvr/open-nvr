@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import Hls from 'hls.js'
+import type Hls from 'hls.js'
 import {
   Play,
   Pause,
@@ -38,6 +38,9 @@ import {
   Radio,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { loadHls, warmHls } from '../lib/loadHls'
+import { useCameraSegments } from '../lib/queries'
+import { localDayEnd, localDayStart } from '../lib/time'
 import { PlaybackTimeline, type TimelineSegment } from './PlaybackTimeline'
 
 interface RawSegment {
@@ -99,6 +102,13 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const hlsRef = useRef<Hls | null>(null)
+  // The lazily-loaded hls.js module (see lib/loadHls); null until resolved.
+  const hlsLibRef = useRef<typeof Hls | null>(null)
+
+  // Start the hls.js chunk download while segments are being fetched.
+  useEffect(() => {
+    warmHls()
+  }, [])
   const sessionIdRef = useRef<string | null>(null)
   // Guards against out-of-order async loads: only the latest load token wins.
   const loadTokenRef = useRef(0)
@@ -153,89 +163,68 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     [segs]
   )
 
-  // ---- Load the day's segments ---------------------------------------------
+  // ---- Load the day's segments (react-query; polls today at 10s) -----------
+  // Polling only runs while `date` is the local today (footage still being
+  // written); historical days are cached and never refetched on an interval.
+  const segQuery = useCameraSegments(cameraId, date, { poll: true, pollMs: 10_000 })
+
+  // Init-once guard per camera+day: the day window/playhead initialize on the
+  // first data arrival, later poll updates only grow the timeline.
+  const initKeyRef = useRef<string | null>(null)
+
   useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    apiService
-      .getSegments(cameraId, date)
-      .then((res: any) => {
-        if (cancelled) return
-        const parsed = parseSegments(res.data?.segments || [])
-
-        setBase((res.data?.playback_base_url || '').replace(/\/$/, ''))
-        setPath(res.data?.path || '')
-        setSegs(parsed)
-        const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
-        liveEdgeRef.current = Number.isFinite(edge) ? edge : null
-        setLiveEdgeMs(liveEdgeRef.current)
-
-        if (parsed.length === 0) {
-          setError('No recordings found for this day.')
-          setLoading(false)
-          return
-        }
-
-        // Day window = local calendar day that contains the first clip.
-        const d = new Date(parsed[0].startMs)
-        d.setHours(0, 0, 0, 0)
-        const ds = d.getTime()
-        const de = ds + 24 * 3600_000
-        setDayStart(ds)
-        setDayEnd(de)
-        setView({ start: ds, end: de })
-        setZoomIdx(0)
-        setCurrentMs(parsed[0].startMs)
-        windowStartRef.current = parsed[0].startMs
-        setLoading(false)
-      })
-      .catch((e: any) => {
-        if (cancelled) return
-        setError(e?.message || 'Failed to load recordings')
-        setLoading(false)
-      })
-    return () => {
-      cancelled = true
+    if (segQuery.isPending) {
+      setLoading(true)
+      setError(null)
+      return
     }
-  }, [cameraId, date])
+    if (segQuery.error) {
+      setError((segQuery.error as any)?.message || 'Failed to load recordings')
+      setLoading(false)
+      return
+    }
+    const data: any = segQuery.data
+    const parsed = parseSegments(data?.segments || [])
 
-  // Mirror segments to a ref for the poll loop.
+    setBase((data?.playback_base_url || '').replace(/\/$/, ''))
+    setPath(data?.path || '')
+    // sameSegs guard: unchanged poll responses must not replace state (and
+    // cascade re-renders/effects downstream).
+    if (!sameSegs(segsRef.current, parsed)) setSegs(parsed)
+
+    const edge = data?.live_edge_start ? Date.parse(data.live_edge_start) : NaN
+    const edgeMs = Number.isFinite(edge) ? edge : null
+    if (edgeMs !== liveEdgeRef.current) {
+      liveEdgeRef.current = edgeMs
+      setLiveEdgeMs(edgeMs)
+    }
+
+    const initKey = `${cameraId}:${date}`
+    if (initKeyRef.current !== initKey) {
+      if (parsed.length === 0) {
+        setError('No recordings found for this day.')
+        setLoading(false)
+        return
+      }
+      initKeyRef.current = initKey
+      // Day window = the selected LOCAL day (midnight -> midnight), matching
+      // the API's local-day segment range.
+      const ds = localDayStart(date)
+      const de = localDayEnd(date)
+      setDayStart(ds)
+      setDayEnd(de)
+      setView({ start: ds, end: de })
+      setZoomIdx(0)
+      setCurrentMs(parsed[0].startMs)
+      windowStartRef.current = parsed[0].startMs
+    }
+    setLoading(false)
+  }, [segQuery.data, segQuery.isPending, segQuery.error, cameraId, date])
+
+  // Mirror segments to a ref so async callbacks read the latest list.
   useEffect(() => {
     segsRef.current = segs
   }, [segs])
-
-  // Live-follow: while the player is open on a still-recording day, re-fetch the
-  // segment list so the timeline's red blocks grow as new footage lands — no
-  // manual reload. Auto-stops once the newest footage is well in the past.
-  useEffect(() => {
-    if (loading || error) return
-    let stopped = false
-    const id = setInterval(async () => {
-      const cur = segsRef.current
-      const lastEnd = cur.length ? cur[cur.length - 1].endMs : 0
-      // Static (past) day → nothing more will be written; stop polling.
-      if (lastEnd && Date.now() - lastEnd > 15 * 60_000) return
-      try {
-        const res: any = await apiService.getSegments(cameraId, date)
-        if (stopped) return
-        const parsed = parseSegments(res.data?.segments || [])
-        if (parsed.length && !sameSegs(segsRef.current, parsed)) setSegs(parsed)
-        const edge = res.data?.live_edge_start ? Date.parse(res.data.live_edge_start) : NaN
-        const edgeMs = Number.isFinite(edge) ? edge : null
-        if (edgeMs !== liveEdgeRef.current) {
-          liveEdgeRef.current = edgeMs
-          setLiveEdgeMs(edgeMs)
-        }
-      } catch {
-        /* transient — try again next tick */
-      }
-    }, 10_000)
-    return () => {
-      stopped = true
-      clearInterval(id)
-    }
-  }, [loading, error, cameraId, date])
 
   // ---- Clip loading via per-clip byte-range HLS session ---------------------
   const teardownHls = useCallback(() => {
@@ -298,11 +287,16 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
       // are native, no reload).
       let fileOffsetSec = 0
       try {
-        const res: any = await apiService.createHlsPlaybackSession({
-          camera_id: cameraId,
-          start: sessionStartIso,
-          end: new Date(clip.endMs).toISOString(),
-        })
+        // hls.js is lazy-loaded; fetch it in parallel with the session create.
+        const [res, HlsLib] = (await Promise.all([
+          apiService.createHlsPlaybackSession({
+            camera_id: cameraId,
+            start: sessionStartIso,
+            end: new Date(clip.endMs).toISOString(),
+          }),
+          loadHls().catch(() => null),
+        ])) as [any, typeof Hls | null]
+        hlsLibRef.current = HlsLib
         if (token !== loadTokenRef.current) return // superseded by a newer load
         manifestUrl = res.data?.manifest_url
         sessionIdRef.current = res.data?.session_id || null
@@ -397,8 +391,9 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
           },
           { once: true }
         )
-      } else if (Hls.isSupported()) {
-        const hls = new Hls({
+      } else if (hlsLibRef.current?.isSupported()) {
+        const HlsLib = hlsLibRef.current
+        const hls = new HlsLib({
           enableWorker: true,
           lowLatencyMode: false,
           backBufferLength: 30,
@@ -408,11 +403,11 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         hlsRef.current = hls
         hls.loadSource(manifestUrl)
         hls.attachMedia(el)
-        hls.on(Hls.Events.MANIFEST_PARSED, startAtOffset)
-        hls.on(Hls.Events.ERROR, (_evt, data) => {
+        hls.on(HlsLib.Events.MANIFEST_PARSED, startAtOffset)
+        hls.on(HlsLib.Events.ERROR, (_evt, data) => {
           if (!data.fatal) return
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
-          else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad()
+          if (data.type === HlsLib.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
+          else if (data.type === HlsLib.ErrorTypes.NETWORK_ERROR) hls.startLoad()
         })
       } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
         el.src = manifestUrl
@@ -594,18 +589,22 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     try {
       const startIso = new Date(selection.inMs).toISOString()
       const durationSec = Math.max(1, (selection.outMs - selection.inMs) / 1000)
-      const url = `${base}/get?path=${path}&start=${encodeURIComponent(startIso)}&duration=${durationSec}`
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const blob = await res.blob()
-      const href = URL.createObjectURL(blob)
+      // Authenticated backend export proxy: streams the clip to disk (the
+      // old direct-MediaMTX fetch buffered the WHOLE clip in browser memory —
+      // multi-GB for long selections — and carried no credential).
+      const res: any = await apiService.createClipExportTicket({
+        camera_id: cameraId,
+        start: startIso,
+        duration: durationSec,
+        filename: `${cameraName.replace(/\s+/g, '-')}_${stamp(selection.inMs)}.mp4`,
+      })
+      const url = res.data?.download_url
+      if (!url) throw new Error('No download URL returned')
       const a = document.createElement('a')
-      a.href = href
-      a.download = `${cameraName.replace(/\s+/g, '-')}_${stamp(selection.inMs)}.mp4`
+      a.href = url
       document.body.appendChild(a)
       a.click()
       a.remove()
-      URL.revokeObjectURL(href)
       setClipMode(false)
       setSelection(null)
     } catch (e) {
@@ -632,6 +631,21 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
     const start = clamp(center - span / 2, dayStart, dayEnd - span)
     setView({ start, end: start + span })
   }
+
+  // Edge auto-scroll while scrubbing: shift the window, keep the span (and
+  // the active zoom preset). Returning the same object when clamped-unchanged
+  // avoids re-render churn at the day boundaries.
+  const panBy = useCallback(
+    (deltaMs: number) => {
+      setView((v) => {
+        const span = v.end - v.start
+        if (span <= 0) return v
+        const start = clamp(v.start + deltaMs, dayStart, Math.max(dayStart, dayEnd - span))
+        return start === v.start ? v : { start, end: start + span }
+      })
+    },
+    [dayStart, dayEnd]
+  )
 
   // Continuous wheel zoom, anchored so the time under the cursor stays fixed.
   const zoomAt = useCallback(
@@ -851,6 +865,7 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
               onSeek={seekTo}
               onScrubPreview={setPreviewMs}
               onZoomAt={zoomAt}
+              onPan={panBy}
               mode={clipMode ? 'clip' : 'seek'}
               selection={clipMode ? selection : null}
               onSelectionChange={setSelection}

@@ -100,6 +100,10 @@ class AppConfig:
     detection_adapter: str = "yolov8"
     recognition_adapter: str = "insightface"
     caption_adapter: str = "blip"
+    # detect-pipeline metrics origin (e.g. http://tier0:9109). When set,
+    # describe_camera runs the VLM on Tier-0's best frame (/best_frame) instead of
+    # an arbitrary live grab. Unset = live grab, fully backward-compatible.
+    bestframe_base_url: str | None = None
 
     # Direct adapter URLs (streaming voice path — bypasses KAI-C in v0.1).
     whisper_url: str = "http://127.0.0.1:9003"
@@ -309,8 +313,18 @@ _DEFAULT_SYSTEM_PROMPT = (
     "to know is to call a tool.\n\n"
     "RULES:\n"
     "- For ANY question about what a camera sees, what is happening, who or "
-    "what is present, or how many of something, you MUST call detect_objects "
-    "or describe_camera BEFORE answering.\n"
+    "what is present, or how many of something, you MUST call a tool BEFORE "
+    "answering.\n"
+    "- For 'what do you see', 'what's happening', or describing the CURRENT "
+    "scene, call describe_camera — it takes a FRESH LIVE look. For pure "
+    "COUNTING ('how many'), camera_snapshot answers instantly from the "
+    "always-on MOTION detector — but it can MISS someone sitting still, so if "
+    "it reports nothing there, confirm with describe_camera (a live look) "
+    "before telling the user no one is present.\n"
+    "- For questions about the PAST ('did anyone come between 3 and 4?', "
+    "'which cars entered today?', 'was a dog here yesterday?') call "
+    "search_history — the NVR remembers every visit with a photo and can "
+    "name recognised people.\n"
     "- NEVER invent, guess, or describe what is on a camera from imagination. "
     "If you have not called a tool this turn, you do not know.\n"
     "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
@@ -337,9 +351,9 @@ DEFAULT_VOICE_GENDER = "neutral"
 # configured. First tool in each list is the "primary" (used for gating).
 SKILL_TOOLS: dict[str, list[str]] = {
     "see": ["describe_camera"],
-    "count": ["detect_objects"],
+    "count": ["detect_objects", "camera_snapshot"],
     "faces": ["recognize_faces", "enroll_face", "list_people", "forget_face"],
-    "events": ["recent_events"],
+    "events": ["recent_events", "search_history", "describe_event", "describe_window"],
     "footage": ["search_footage"],
     "alarm": ["create_alarm", "stop_alarm"],
     "watch": ["create_monitor", "stop_monitor"],
@@ -2374,6 +2388,7 @@ def load_config(path: str | Path) -> AppConfig:
         kaic_url=str(raw["kaic_url"]),
         kaic_api_key=str(raw["kaic_api_key"]),
         opennvr_base_url=_base,
+        bestframe_base_url=(_str("bestframe_base_url", "") or None),
         detection_adapter=_str("detection_adapter", "yolov8"),
         recognition_adapter=_str("recognition_adapter", "insightface"),
         caption_adapter=_str("caption_adapter", "blip"),
@@ -2627,12 +2642,49 @@ class CameraAgentRuntime:
                     cfg.footage_index_path,
                 )
 
+        # Agent camera id → pipeline camera id (the OpenNVR camera id on the Tier-0
+        # bus subject / best-frame endpoint). Used by BOTH camera_snapshot (ring
+        # lookup) and describe_camera (best-frame fetch) so they agree on the camera.
+        _cam_map = {
+            cam.camera_id: str(cam.opennvr_camera_id)
+            for cam in cfg.cameras if cam.opennvr_camera_id is not None
+        }
+        _resolve_camera = lambda cid: _cam_map.get(cid, cid)  # noqa: E731
+
+        # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
+        # frame when the detect-pipeline origin is configured.
+        best_frame_fetch = None
+        if cfg.bestframe_base_url:
+            from tools import make_best_frame_fetch
+            best_frame_fetch = make_best_frame_fetch(
+                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
+            )
+
+        # Events store (the platform's memory, RFC-0001 C1): built whenever the
+        # server API origin is configured — same origin + INTERNAL_API_KEY chain
+        # the app door uses. Shared primitive from the SDK (Challenge-3 rule).
+        events_client = None
+        if cfg.opennvr_api_url:
+            import os as _os
+
+            from opennvr_app_sdk import EventsClient
+            events_client = EventsClient(
+                cfg.opennvr_api_url,
+                cfg.opennvr_api_key
+                or cfg.kaic_api_key
+                or _os.environ.get("INTERNAL_API_KEY", ""),
+            )
+            logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+
         self.tools = CameraTools(
             context=self.context,
             caption_client=self.caption_client,
             detection_client=self.detection_client,
             recognition_client=self.recognition_client,
             footage_index=self.footage_index,
+            best_frame_fetch=best_frame_fetch,
+            resolve_camera=_resolve_camera,
+            events_client=events_client,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -2646,9 +2698,13 @@ class CameraAgentRuntime:
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
             "detect_objects": self.tools.detect_objects,
+            "camera_snapshot": self.tools.camera_snapshot,
             "recognize_faces": self.tools.recognize_faces,
             "search_footage": self.tools.search_footage,
             "recent_events": self.tools.recent_events,
+            "search_history": self.tools.search_history,
+            "describe_event": self.tools.describe_event,
+            "describe_window": self.tools.describe_window,
             "create_background_task": self._handle_create_task,
             "create_monitor": self._handle_create_monitor,
             "stop_monitor": self._handle_stop_monitor,
@@ -4869,6 +4925,63 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "frames": _frames_for(runtime),
             "timings_ms": timings, "invoked": True, "armed": armed,
         })
+
+    @app.websocket("/updates")
+    async def _updates_ws(websocket: WebSocket) -> None:
+        """Push channel for the demo page's status panels (tasks, monitors,
+        reports, events, alarms) — one connection instead of five HTTP polls
+        every 2-3s. Sends the SAME payload each GET endpoint returns, keyed by
+        panel, and only when the state actually changed. The page falls back
+        to HTTP polling whenever this socket is unavailable, so the GET
+        endpoints stay the source of truth."""
+        # WebSockets bypass the HTTP auth middleware — token + device identity
+        # arrive as query params and are checked here (same gate as /ws).
+        if runtime.cfg.auth_mode == "opennvr":
+            _dev = websocket.query_params.get("device_token") or None
+            if runtime.auth and not await runtime.auth.device_allowed(_dev):
+                await websocket.close(code=4403)   # 4403 = device blocked
+                return
+            _tok = websocket.query_params.get("token", "")
+            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            if _user is None:
+                await websocket.close(code=4401)   # 4401 = auth required
+                return
+        await websocket.accept()
+        last: str | None = None
+        try:
+            while True:
+                alarms = runtime.alarms.list()
+                payload = {
+                    "tasks": {"tasks": runtime.tasks.list()},
+                    "monitors": {
+                        "monitors": runtime.monitors.list(),
+                        "notifications": runtime.monitors.notifications(),
+                    },
+                    "reports": {
+                        "schedules": runtime.reports.list(),
+                        "reports": runtime.reports.reports(),
+                    },
+                    "events": {"events": runtime.events_feed()},
+                    "alarms": {
+                        "alarms": alarms,
+                        "events": runtime.alarms.events(),
+                        # Mirror GET /alarms exactly (active-check rationale there).
+                        "ringing": any(a["triggered"] and a["active"] for a in alarms),
+                        "ringing_kind": ("siren" if any(
+                            a["triggered"] and a["active"] and a.get("ring") != "pulse"
+                            for a in alarms) else ("pulse" if any(
+                                a["triggered"] and a["active"] for a in alarms) else None)),
+                    },
+                }
+                text = json.dumps(payload, default=str)
+                if text != last:
+                    await websocket.send_text(text)
+                    last = text
+                await asyncio.sleep(2.0)
+        except Exception:
+            # Disconnect (or send on a closed socket) ends the loop; the page
+            # reconnects with backoff and polls in the meantime.
+            return
 
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:

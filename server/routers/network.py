@@ -26,6 +26,7 @@ from the internet (DB-only rule; OS-level enforcement depends on an external age
 
 import ipaddress
 import json
+import os
 import socket
 from typing import Any
 
@@ -66,6 +67,22 @@ def get_camera_lan_subnets(db: Session) -> list[str]:
     return subnets
 
 
+def _docker_excluded_networks() -> list[ipaddress.IPv4Network]:
+    """Networks that must never be treated as a camera LAN inside a container:
+    the compose bridge subnet (OPENNVR_DOCKER_SUBNET, default matches
+    docker-compose.yml)."""
+    raw = os.environ.get("OPENNVR_DOCKER_SUBNET") or "172.28.0.0/16"
+    nets: list[ipaddress.IPv4Network] = []
+    for part in raw.replace(",", " ").split():
+        try:
+            net = ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            continue
+        if isinstance(net, ipaddress.IPv4Network):
+            nets.append(net)
+    return nets
+
+
 def detect_local_subnets() -> list[str]:
     """Best-effort auto-detection of the host's own IPv4 /24 subnet(s), so ONVIF
     discovery can run without the operator manually configuring a Camera LAN
@@ -74,9 +91,42 @@ def detect_local_subnets() -> list[str]:
     Enumerates *every* local IPv4 interface (a multi-NIC NVR typically has a
     separate camera-LAN interface distinct from its default/uplink route), plus
     the default-route address, then keeps only private (RFC 1918) /24s — never a
-    loopback, link-local (169.254.x), or public range. Returns [] if nothing
-    usable is found (e.g. a locked-down container)."""
-    ips: set[str] = set()
+    loopback, link-local (169.254.x), or public range.
+
+    Inside a Docker container the socket probes only see the bridge network
+    (e.g. 172.28.0.x), which is never a camera LAN — those addresses are
+    excluded, and the launcher-exported host addresses stand in for the host's
+    real subnets: OPENNVR_HOST_IP (the default-route LAN IP, also used for the
+    TLS cert SAN) plus OPENNVR_LAN_IPS (every LAN-facing NIC on a multi-NIC
+    host, e.g. a dedicated camera network on a second adapter). Returns [] if
+    nothing usable is found (e.g. a bridge container without either)."""
+    in_docker = os.path.exists("/.dockerenv")
+    ips: list[str] = []
+
+    # Launcher-refreshed hint file, freshest source first: the launchers
+    # rewrite it on every run, so a host that moved to a new subnet is picked
+    # up without recreating the container — the env vars below are frozen at
+    # container creation.
+    hints_file = os.environ.get("OPENNVR_HOST_IPS_FILE") or "/app/net-hints/host-ips"
+    try:
+        with open(hints_file, encoding="utf-8") as fh:
+            for token in fh.read().replace(",", " ").split():
+                if token not in ips:
+                    ips.append(token)
+    except OSError:
+        pass
+
+    # The host's own LAN addresses, when the launcher passed them in. Listed
+    # ahead of the probes so the default-route subnet becomes the primary
+    # detected one. Skipped entirely when the hint file spoke: the launcher
+    # writes the union of these env values into the file on every run, so
+    # once hints exist the frozen env can only ADD subnets the host has since
+    # left (e.g. the WiFi network it was on at container creation).
+    if not ips:
+        for env_key in ("OPENNVR_HOST_IP", "OPENNVR_LAN_IPS"):
+            for token in (os.environ.get(env_key) or "").replace(",", " ").split():
+                if token not in ips:
+                    ips.append(token)
 
     # Default-route interface — reliable even where the hostname doesn't resolve
     # to every address (some containers). A UDP "connect" selects the egress
@@ -85,7 +135,8 @@ def detect_local_subnets() -> list[str]:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(("8.8.8.8", 80))
-            ips.add(s.getsockname()[0])
+            if s.getsockname()[0] not in ips:
+                ips.append(s.getsockname()[0])
         finally:
             s.close()
     except OSError:
@@ -95,9 +146,12 @@ def detect_local_subnets() -> list[str]:
     # a dedicated camera LAN that isn't on the default route.
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
+            if info[4][0] not in ips:
+                ips.append(info[4][0])
     except OSError:
         pass
+
+    excluded = _docker_excluded_networks() if in_docker else []
 
     subnets: list[str] = []
     for ip in ips:
@@ -105,12 +159,36 @@ def detect_local_subnets() -> list[str]:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             continue
+        if addr.version != 4:
+            continue
         if not addr.is_private or addr.is_loopback or addr.is_link_local:
+            continue
+        if any(addr in net for net in excluded):
             continue
         cidr = str(ipaddress.ip_network(f"{ip}/24", strict=False))
         if cidr not in subnets:
             subnets.append(cidr)
     return subnets
+
+
+def lan_cidr_for_ip(ip: str) -> str | None:
+    """The /24 around ``ip`` when it's a usable private LAN address, else None.
+
+    Same filtering as detect_local_subnets: IPv4, RFC 1918, never loopback,
+    link-local, or (inside a container) a Docker network. Used to turn the
+    requesting browser's address into a live scan suggestion — unlike the
+    env-derived host hints, the client's own subnet can never be stale."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr.version != 4:
+        return None
+    if not addr.is_private or addr.is_loopback or addr.is_link_local:
+        return None
+    if os.path.exists("/.dockerenv") and any(addr in net for net in _docker_excluded_networks()):
+        return None
+    return str(ipaddress.ip_network(f"{ip}/24", strict=False))
 
 
 def _get_or_init(

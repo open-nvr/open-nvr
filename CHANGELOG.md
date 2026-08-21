@@ -4,7 +4,167 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] — 2026-08-18
+
+### Added
+
+- **Canonical event & evidence store.** Tier-0 finished visits are now
+  persisted server-side with their best-frame evidence photos — events
+  survive restarts and become queryable memory instead of ephemeral
+  stream chatter. Events history is owner-scoped like every other
+  camera route.
+- **The agent remembers — and can look back at footage.** The
+  camera-agent gains `search_history` over the events store (and
+  distinguishes "nothing came" from "I couldn't check"), plus
+  past-footage tools: `describe_event` describes a past event from its
+  kept photo, `describe_window` narrates a past time window straight
+  from the recordings, and `describe_camera` takes a fresh live look
+  for static scenes. Backed by a new `GET /recordings/frame` endpoint
+  that returns one JPEG at a past instant.
+- **License-plate enrichment.** Vehicle visits get a registration
+  number via LPR, with an OCR burst guard and an attributed audit
+  trail.
+- **System resource monitoring + alerts.** Host CPU, RAM, and disk are
+  monitored with alerting — a disk filling up is no longer silent
+  (#244).
+- **Camera delete vs deactivate.** Deleting a camera is now a separate
+  action from deactivating it, with a recycle bin, hard delete, and a
+  duplicate-camera alert (#243).
+- **Recording identity + recovery.** Recordings are stamped with
+  on-disk camera identity; after a DB wipe, unowned footage is
+  quarantined instead of silently re-mapped to the wrong cameras, and
+  a recovery UI walks through re-attaching it (#239).
+- **Timezone at install.** The installer offers timezone selection,
+  defaulting to the host's local zone (#232).
+- Tier-0 recall/memory benchmark harness — measures whether tier-0 +
+  event memory earn their keep.
+- Docs: RFC-0001 architecture; a one-picture pipeline mental model
+  (perception → policy → live vs memory).
+- CI: release-pin verification — every `ghcr.io/open-nvr` image pinned
+  by `.env.example`/compose must exist on GHCR before a PR merges or a
+  release tag lands, making issue #212's broken-install class
+  unmergeable.
+- **ARM64 (Apple Silicon / Raspberry Pi 5) install support.**
+  `ghcr.io/open-nvr/core`, `detect-pipeline`, `camera-agent`, and
+  `camera-agent-lite` now publish `linux/amd64` + `linux/arm64` manifest
+  lists, and the default adapter pin moves to `ADAPTER_TAG=0.1.3` — the
+  first [ai-adapter](https://github.com/open-nvr/ai-adapter) release with
+  ARM64 images. Previously a fresh install on an M-series Mac died in
+  `docker compose pull` with a bare
+  ``no matching manifest for linux/arm64/v8``.
+  `llamacpp-adapter`/`smolvlm-adapter` (camera-agent-lite) remain
+  amd64-only pending upstream ggml-org/llama.cpp#19177.
+- **Installer architecture preflight.** `install.sh`/`install.ps1` now
+  check every pinned image's manifest list against the host architecture
+  before pulling, and name the unsupported images instead of surfacing
+  the daemon's error. `OPENNVR_ALLOW_EMULATION=1` opts into running the
+  amd64 images under emulation (exports
+  ``DOCKER_DEFAULT_PLATFORM=linux/amd64`` for the whole stack).
+
+### Fixed
+
+- **Recording & playback overhaul.** The stall watchdog confirms a
+  stall against the filesystem before alarming; HLS sessions use the
+  stored codec column and probe only as fallback; the reconciler's
+  periodic pass scans only the window's date dirs; clip export probes
+  upstream status before committing a response; a timeline drag held
+  at the visible window edge auto-pans instead of dead-stopping
+  (#233); the dashboard shows real footage metrics with a per-camera
+  breakdown instead of counting camera-days (#234).
+- **Streaming auth survives recreating core.** The MediaMTX JWT
+  signing keypair is persisted in a named volume, so recreating the
+  core container no longer breaks all streaming auth (#228).
+- Live tile no longer permanently sticks after a stream hiccup once
+  the 60-minute token expires — the token refreshes on auth-rejected
+  WHEP/HLS requests (#241) — and recovers after a MediaMTX restart
+  instead of staying on "Camera offline" (#231).
+- Camera discovery: the dialog shows the scan range and allows a
+  one-off override or persisting a new Camera LAN (#236); subnet scan
+  bursts no longer wedge Docker NAT, so rescans find cameras again
+  (#235); ONVIF discovery scans the host LAN instead of the Docker
+  bridge (#257).
+- A camera no longer loses its MediaMTX path permanently when
+  duplicate provisioning races a config reload — delete + re-add is
+  atomic now, and unchanged config replacement is a no-op (#218).
+- nginx re-resolves upstream DNS at runtime, so recreated containers
+  don't 502 behind a cached IP.
+- Browser-facing stream URLs follow the current origin instead of
+  being pinned to one LAN IP, and the start scripts use route-aware
+  LAN IP detection — no more broken playback from a second NIC or a
+  VPN tunnel address.
+- Installer: the camera-agent selection no longer exits silently at
+  the mode prompt.
+- camera-agent-lite grounding: the small model no longer invents past
+  events it never saw.
+- MediaMTX runs as uid 1000 so the backend can actually delete
+  recordings (#243).
+
+## [0.1.2] — 2026-08-12
+
+### Added
+
+- **Tier-0 detection pipeline.** A new `detect-pipeline` service that runs
+  an always-on, CPU-cheap analysis loop per camera — hardware-accelerated
+  ffmpeg decode, improved motion detection, a lean size-aware object
+  tracker, and attribute-aware best-frame selection — and gates the
+  expensive AI model so it only runs when something worth analyzing
+  happens. Ships as a compose service **on by default in shadow mode**
+  (observe and collect evidence, enforce nothing) from
+  `ghcr.io/open-nvr/detect-pipeline`, pinned via `CORE_TAG`. Highlights:
+  - Pluggable detector backends: ONNX YOLOv8 via OpenCV `cv2.dnn` by
+    default, ONNX Runtime optional (`DETECT_ONNX_BACKEND`). OpenCV 5
+    supported.
+  - The gate publishes Tier-0 events to NATS (token-authenticated) and
+    discovers cameras via the existing internal endpoint — no server
+    changes needed.
+  - **Tier-1 dispatch**: gate escalations run the gated model through
+    KAI-C with declarative, model-agnostic routing (flag-gated off by
+    default). Gate mode is a managed setting — the pipeline obeys the UI,
+    live.
+  - **Guided promotion card** in the UI: go from shadow-mode evidence to
+    enforcement in one click, with a best-frame VLM check on by default.
+  - Metrics end to end: compute-gated (Tier-0) metrics in the AI Adapters
+    view, model-attributable detector metrics for model-vs-model
+    benchmarking, per-stage latency, operator keeping-up health, process
+    CPU/RAM, and a benchmark harness. Demo polling replaced with a
+    `/updates` WebSocket push.
+  - Adapter SDK: opt-in `consume_tier0` helpers bridge Tier-0 into any
+    DetectorApp.
+  - CI builds and publishes the image and runs the pipeline's 100+ test
+    suite on every push.
+- **Synchronized multi-camera playback.** New Sync Playback screen plays
+  several cameras side by side on one shared timeline, with a recording
+  calendar for picking the day and per-tile playback controls.
+- **MFA enrollment wall.** Users without enrolled MFA can log in with
+  their password and are then walked through TOTP enrollment before
+  reaching the app — no more locked-out accounts, no unenrolled ones
+  either.
+
+### Changed
+
+- Sidebar revamped: compact layout, icon-only collapse toggle, larger
+  collapsible group headers, pinned NVR items, themed thin scrollbar.
+- Live view, top bar, and the recording/playback screen polished.
+- RBAC user/role dialogs restyled to match the Add Camera dialog, and
+  RBAC screens now show readable validation messages instead of crashing
+  on 422 responses.
+
+### Fixed
+
+- Opening the camera menu no longer distorts the page layout, and
+  dropdown menus close when clicking outside them.
+- Tier-0 operational hardening: workers can no longer become silent
+  zombies, the NATS publisher authenticates against the token-auth
+  broker, the pipeline no longer starves the lite agent's CPU-bound
+  models, and the gate heartbeat anchors to the first frame instead of
+  firing immediately.
+
+### Security
+
+- Deleting, deactivating, or reactivating a user requires the admin's
+  MFA code via an in-app confirm dialog — and the check is enforced
+  server-side, so a direct API call can't bypass it. Self-deletion and
+  self-deactivation are blocked outright.
 
 ## [0.1.1] — 2026-07-31
 
@@ -1641,6 +1801,8 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/open-nvr/open-nvr/releases/tag/v0.1.0

@@ -9,6 +9,25 @@ if [ -d "/app/AI-adapters/AIAdapters/frames" ]; then
     chown -R opennvr:opennvr /app/AI-adapters/AIAdapters/frames 2>/dev/null || true
 fi
 
+# The opennvr_jwt_keys volume may be mounted with root ownership on first
+# use — the backend (running as opennvr) must be able to write the
+# MediaMTX signing keypair there.
+if [ -d "/app/keys" ]; then
+    chown -R opennvr:opennvr /app/keys 2>/dev/null || true
+fi
+
+# Recordings tree: MediaMTX used to run as root, so segment dirs it created
+# under the shared mount were root-owned — unlinkable by the backend
+# (uid 1000), which broke retention aging and the camera hard-delete purge
+# (#243). MediaMTX now runs as uid 1000 too (docker-compose user:), so new
+# files are fine; this migrates whatever an older stack left behind. Scoped
+# to files NOT already owned by opennvr, so on a healthy tree it is a
+# metadata-only scan, not a full re-chown.
+if [ -d "/app/recordings" ]; then
+    echo "Fixing ownership of non-opennvr files in recordings tree..."
+    find /app/recordings ! -user opennvr -exec chown opennvr:opennvr {} + 2>/dev/null || true
+fi
+
 # ──────────────────────────────────────────────────────────────────────
 # ISSUE-29: Surface the first-time setup token banner to docker logs.
 # ──────────────────────────────────────────────────────────────────────

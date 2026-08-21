@@ -33,32 +33,95 @@ import { MFAVerify } from './views/MFAVerify'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
 // monolithic bundle. Auth/MFA stay eager: they gate first paint.
-const Dashboard = lazy(() => import('./views/Dashboard').then((m) => ({ default: m.Dashboard })))
-const LiveView = lazy(() => import('./views/LiveView').then((m) => ({ default: m.LiveView })))
-const PlaybackView = lazy(() => import('./views/PlaybackView').then((m) => ({ default: m.PlaybackView })))
-const Cameras = lazy(() => import('./views/Cameras').then((m) => ({ default: m.Cameras })))
-const Settings = lazy(() => import('./views/Settings').then((m) => ({ default: m.Settings })))
-const Events = lazy(() => import('./views/Events').then((m) => ({ default: m.Events })))
-const Updates = lazy(() => import('./views/Updates').then((m) => ({ default: m.Updates })))
-const Logs = lazy(() => import('./views/Logs').then((m) => ({ default: m.Logs })))
-const AIEngine = lazy(() => import('./views/AIEngine').then((m) => ({ default: m.AIEngine })))
-const Compliance = lazy(() => import('./views/Compliance').then((m) => ({ default: m.Compliance })))
-const AlertsIncidents = lazy(() => import('./views/AlertsIncidents').then((m) => ({ default: m.AlertsIncidents })))
-const Integrations = lazy(() => import('./views/Integrations').then((m) => ({ default: m.Integrations })))
-const Support = lazy(() => import('./views/Support').then((m) => ({ default: m.Support })))
-const AccessControl = lazy(() => import('./views/AccessControl').then((m) => ({ default: m.AccessControl })))
-const BYOK = lazy(() => import('./views/BYOK').then((m) => ({ default: m.BYOK })))
-const NetworkView = lazy(() => import('./views/NetworkView').then((m) => ({ default: m.NetworkView })))
-const FirmwareView = lazy(() => import('./views/FirmwareView').then((m) => ({ default: m.FirmwareView })))
-const AIModelsBYOM = lazy(() => import('./views/AIModelsBYOM').then((m) => ({ default: m.AIModelsBYOM })))
-const AIDetectionResults = lazy(() => import('./views/AIDetectionResults').then((m) => ({ default: m.AIDetectionResults })))
-const AIAdapters = lazy(() => import('./views/AIAdapters').then((m) => ({ default: m.AIAdapters })))
-const AppCatalog = lazy(() => import('./views/AppCatalog').then((m) => ({ default: m.AppCatalog })))
-const AppView = lazy(() => import('./views/AppView').then((m) => ({ default: m.AppView })))
-const Cloud = lazy(() => import('./views/Cloud').then((m) => ({ default: m.Cloud })))
-const OnvifTools = lazy(() => import('./views/OnvifTools').then((m) => ({ default: m.OnvifTools })))
-const Register = lazy(() => import('./views/Register').then((m) => ({ default: m.Register })))
-const FirstTimeSetup = lazy(() => import('./views/FirstTimeSetup').then((m) => ({ default: m.FirstTimeSetup })))
+//
+// Importers for the heaviest/most-visited routes are hoisted to named consts
+// so the warm-up below can start their chunk download in parallel with the
+// auth bootstrap (dynamic import is cached: lazy() reuses the in-flight
+// fetch, so nothing is downloaded twice).
+
+// A failed chunk fetch usually means this tab's index.html is from a build
+// that was since replaced — the content-hashed chunk files it references no
+// longer exist on the server ("Failed to fetch dynamically imported
+// module"). One forced reload fetches the current index.html and everything
+// resolves; NVR tabs stay open across upgrades, so this happens after every
+// update. The sessionStorage guard stops a reload loop when the failure is
+// something else (server down, offline) — the second failure surfaces to the
+// route error boundary as before.
+const CHUNK_RELOAD_FLAG = 'opennvr.chunk-reloaded'
+function reloadOnStale<T>(importer: () => Promise<T>): () => Promise<T> {
+  return () =>
+    importer().then(
+      (m) => {
+        try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG) } catch { /* private mode */ }
+        return m
+      },
+      (err) => {
+        let alreadyReloaded = true
+        try {
+          alreadyReloaded = sessionStorage.getItem(CHUNK_RELOAD_FLAG) === '1'
+          if (!alreadyReloaded) sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1')
+        } catch { /* private mode: fall through to the error boundary */ }
+        if (alreadyReloaded) throw err
+        window.location.reload()
+        // The page is tearing down — never settle, so no error UI flashes.
+        return new Promise<T>(() => {})
+      },
+    )
+}
+
+const importDashboard = reloadOnStale(() => import('./views/Dashboard'))
+const importLiveView = reloadOnStale(() => import('./views/LiveView'))
+const importPlaybackView = reloadOnStale(() => import('./views/PlaybackView'))
+const importSyncPlayback = reloadOnStale(() => import('./views/SyncPlayback'))
+
+const Dashboard = lazy(() => importDashboard().then((m) => ({ default: m.Dashboard })))
+const LiveView = lazy(() => importLiveView().then((m) => ({ default: m.LiveView })))
+const PlaybackView = lazy(() => importPlaybackView().then((m) => ({ default: m.PlaybackView })))
+const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.SyncPlayback })))
+const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
+const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
+const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
+const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => ({ default: m.Updates }))))
+const Logs = lazy(reloadOnStale(() => import('./views/Logs').then((m) => ({ default: m.Logs }))))
+const AIEngine = lazy(reloadOnStale(() => import('./views/AIEngine').then((m) => ({ default: m.AIEngine }))))
+const Compliance = lazy(reloadOnStale(() => import('./views/Compliance').then((m) => ({ default: m.Compliance }))))
+const AlertsIncidents = lazy(reloadOnStale(() => import('./views/AlertsIncidents').then((m) => ({ default: m.AlertsIncidents }))))
+const Integrations = lazy(reloadOnStale(() => import('./views/Integrations').then((m) => ({ default: m.Integrations }))))
+const Support = lazy(reloadOnStale(() => import('./views/Support').then((m) => ({ default: m.Support }))))
+const AccessControl = lazy(reloadOnStale(() => import('./views/AccessControl').then((m) => ({ default: m.AccessControl }))))
+const BYOK = lazy(reloadOnStale(() => import('./views/BYOK').then((m) => ({ default: m.BYOK }))))
+const NetworkView = lazy(reloadOnStale(() => import('./views/NetworkView').then((m) => ({ default: m.NetworkView }))))
+const FirmwareView = lazy(reloadOnStale(() => import('./views/FirmwareView').then((m) => ({ default: m.FirmwareView }))))
+const AIModelsBYOM = lazy(reloadOnStale(() => import('./views/AIModelsBYOM').then((m) => ({ default: m.AIModelsBYOM }))))
+const AIDetectionResults = lazy(reloadOnStale(() => import('./views/AIDetectionResults').then((m) => ({ default: m.AIDetectionResults }))))
+const AIAdapters = lazy(reloadOnStale(() => import('./views/AIAdapters').then((m) => ({ default: m.AIAdapters }))))
+const AppCatalog = lazy(reloadOnStale(() => import('./views/AppCatalog').then((m) => ({ default: m.AppCatalog }))))
+const AppView = lazy(reloadOnStale(() => import('./views/AppView').then((m) => ({ default: m.AppView }))))
+const Cloud = lazy(reloadOnStale(() => import('./views/Cloud').then((m) => ({ default: m.Cloud }))))
+const OnvifTools = lazy(reloadOnStale(() => import('./views/OnvifTools').then((m) => ({ default: m.OnvifTools }))))
+const Register = lazy(reloadOnStale(() => import('./views/Register').then((m) => ({ default: m.Register }))))
+const FirstTimeSetup = lazy(reloadOnStale(() => import('./views/FirstTimeSetup').then((m) => ({ default: m.FirstTimeSetup }))))
+
+// Warm the chunk for the route the user is actually loading, immediately at
+// module evaluation — long before auth resolves and the router mounts. Then
+// idle-prefetch the other top routes so in-app navigation is instant.
+const routeWarmups: Array<[RegExp, () => Promise<unknown>]> = [
+  [/^\/playback\/sync/, importSyncPlayback],
+  [/^\/playback/, importPlaybackView],
+  [/^\/live/, importLiveView],
+  [/^\/$/, importDashboard],
+]
+try {
+  const path = window.location.pathname
+  const match = routeWarmups.find(([re]) => re.test(path))
+  if (match) match[1]().catch(() => {})
+  const idle = (window as any).requestIdleCallback ?? ((fn: () => void) => setTimeout(fn, 2000))
+  idle(() => {
+    for (const [, importer] of routeWarmups) importer().catch(() => {})
+  })
+} catch {
+  /* warm-up is best-effort */
+}
 
 function RouteFallback() {
   return <div className="p-4 text-sm text-[var(--text-dim)]">Loading…</div>
@@ -96,6 +159,7 @@ const router = createBrowserRouter([
           { index: true, element: <Dashboard /> },
           { path: 'live', element: <LiveView /> },
           { path: 'playback', element: <PlaybackView /> },
+          { path: 'playback/sync', element: <SyncPlayback /> },
           { path: 'cameras', element: <Cameras /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },
@@ -143,7 +207,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </ErrorBoundary>
 )
 
-  // Service worker registration is handled by vite-plugin-pwa (injectRegister: 'auto')
+// Service worker: registered manually AFTER window 'load' so registration
+// (and Workbox's precache pass) never competes with first-paint requests.
+window.addEventListener('load', () => {
+  import('virtual:pwa-register')
+    .then(({ registerSW }) => registerSW({ immediate: true }))
+    .catch(() => {
+      /* PWA support unavailable (e.g. dev without plugin) — app works without it */
+    })
+})
 
   // Expose a simple navigate function for non-routed components (menu overlay)
   ; (window as any).routerNavigate = (path: string) => {

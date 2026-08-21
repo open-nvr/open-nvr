@@ -55,7 +55,7 @@ class MediaMtxStartupService:
 
             # Build path defaults payload with recording path
             # Use %path to include stream name in path
-            record_path = f"{base_path}/%path/%Y/%m/%d/%H-%M-%S-%f"
+            record_path = f"{base_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
 
             payload = {
                 "recordPath": record_path,
@@ -148,6 +148,21 @@ class MediaMtxStartupService:
                 )
 
                 for camera, config in cameras:
+                    # Identity-protect the recordings dir before (re)enabling
+                    # recording: quarantines a tree this camera does not own
+                    # (DB wipe + id reuse) and stamps its identity marker.
+                    try:
+                        from services.camera_identity import protect_camera_dir
+
+                        await asyncio.to_thread(
+                            protect_camera_dir, db, camera, "provision"
+                        )
+                    except Exception:
+                        mediamtx_logger.error(
+                            f"Recording-dir identity protection failed for "
+                            f"camera {camera.id}",
+                            exc_info=True,
+                        )
                     camera_result = (
                         await MediaMtxStartupService._provision_camera_with_retry(
                             db, camera, config, max_retries, retry_delay
@@ -195,6 +210,7 @@ class MediaMtxStartupService:
             db.query(Camera, CameraConfig)
             .outerjoin(CameraConfig, Camera.id == CameraConfig.camera_id)
             .filter(Camera.is_active == True)
+            .filter(Camera.deleted_at.is_(None))
             .filter(Camera.rtsp_url.isnot(None))
             .filter(Camera.rtsp_url != "")
         )
@@ -423,8 +439,14 @@ class MediaMtxStartupService:
                 if config.recording_path:
                     recording_path = config.recording_path
                 else:
+                    # %path (NOT a literal cam-<id>): a literal camera dir made
+                    # _normalize_record_path append the missing %path AFTER the
+                    # timestamp, nesting every clip in its own directory with a
+                    # name the timeline parser can't read.
+                    from services.recording_paths import NEW_LAYOUT_RECORD_PATH
+
                     base_path = get_effective_recordings_base_path(db)
-                    recording_path = f"{base_path}/cam-{camera.id}/%Y/%m/%d/%H-%M-%S-%f"
+                    recording_path = f"{base_path}/{NEW_LAYOUT_RECORD_PATH}"
                 provision_config["recording"] = {
                     "enabled": True,
                     "path": recording_path,
@@ -478,7 +500,11 @@ class MediaMtxStartupService:
         with SessionLocal() as db:
             camera = (
                 db.query(Camera)
-                .filter(Camera.id == camera_id, Camera.is_active == True)
+                .filter(
+                    Camera.id == camera_id,
+                    Camera.is_active == True,
+                    Camera.deleted_at.is_(None),
+                )
                 .first()
             )
 

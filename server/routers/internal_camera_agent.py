@@ -10,16 +10,19 @@ passwords or requiring an operator login token.
 
 from __future__ import annotations
 
+import binascii
 import logging
 import secrets
+from datetime import datetime
 from urllib.parse import quote as urlquote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.database import get_db
-from models import Camera
+from models import Camera, SecuritySetting
 from services.stream_service import _build_stream_name
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,184 @@ def _require_internal_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal api key",
         )
+
+
+class TrackEventIn(BaseModel):
+    """One finished object visit, posted by the detect-pipeline at track end."""
+
+    camera_id: int
+    label: str
+    score: float | None = None
+    track_id: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    stationary: bool | None = None
+    # Best-frame crop (JPEG, base64). Optional: a visit with no retained crop
+    # is still history worth keeping.
+    evidence_jpeg_b64: str | None = None
+
+
+@router.post("/events", status_code=201)
+async def ingest_track_event(
+    payload: TrackEventIn,
+    background: BackgroundTasks,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Canonical-store ingest (RFC-0001 C1): persist a visit + its evidence.
+
+    Called by the detect-pipeline when a track ends — the moment its best
+    frame is final. Idempotent enough for retries: identical evidence
+    content-addresses to the same file; duplicate rows are tolerated and
+    cheap to de-dup at query time via (camera_id, track_id, started_at).
+    """
+    camera = db.query(Camera).filter(Camera.id == payload.camera_id).first()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="unknown camera_id")
+
+    evidence_rel = None
+    if payload.evidence_jpeg_b64:
+        import base64
+
+        from services.evidence_store import MAX_EVIDENCE_BYTES, save_evidence_jpeg
+
+        # Reject oversized payloads BEFORE decoding: base64 is 4/3 the raw
+        # size, so anything beyond that bound can't be a valid crop and
+        # shouldn't cost us the decode allocation.
+        if len(payload.evidence_jpeg_b64) > (MAX_EVIDENCE_BYTES * 4) // 3 + 8:
+            raise HTTPException(status_code=422, detail="evidence too large")
+        try:
+            evidence_rel = save_evidence_jpeg(
+                base64.b64decode(payload.evidence_jpeg_b64, validate=True)
+            )
+        except (ValueError, binascii.Error) as e:
+            raise HTTPException(status_code=422, detail=f"bad evidence: {e}")
+
+    from sqlalchemy.exc import IntegrityError
+
+    from services.timeline_service import record_track_visit
+
+    try:
+        row = record_track_visit(
+            db,
+            camera_id=payload.camera_id,
+            label=payload.label,
+            started_at=payload.started_at,
+            ended_at=payload.ended_at,
+            score=payload.score,
+            track_id=payload.track_id,
+            stationary=payload.stationary,
+            evidence_path=evidence_rel,
+        )
+    except IntegrityError:
+        # Retry raced an earlier success — the visit already exists
+        # (uq_events_visit). Idempotent: report the existing row.
+        db.rollback()
+        from models import TimelineEvent
+
+        existing = (
+            db.query(TimelineEvent)
+            .filter(
+                TimelineEvent.camera_id == payload.camera_id,
+                TimelineEvent.track_id == (payload.track_id or "")[:40],
+                TimelineEvent.started_at == payload.started_at,
+            )
+            .first()
+        )
+        return {"id": existing.id if existing else None, "duplicate": True}
+    # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
+    # frame (background — never on the ingest path). Best-effort: no adapter,
+    # no plate, no problem.
+    from services.plate_enrichment import enrich_event_plate, wants_plate
+
+    if wants_plate(row.label, evidence_rel, settings.events_plate_enrichment):
+        background.add_task(enrich_event_plate, row.id)
+    return {"id": row.id, "evidence_path": evidence_rel}
+
+
+@router.get("/events")
+async def internal_list_events(
+    camera_id: int | None = None,
+    label: str | None = None,
+    plate: str | None = None,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = 100,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Event-store read for trusted internal components (the camera agents).
+
+    Same OVERLAP query the user API serves, fleet-wide: the agent is a
+    platform component like tier0, not a per-user browser session — its
+    answers are already scoped by which cameras it is configured to see.
+    """
+    from services.timeline_service import query_events
+
+    rows = query_events(db, camera_id=camera_id, label=label, plate=plate,
+                        from_=from_, to=to, limit=limit)
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "camera_id": e.camera_id,
+                "label": e.label,
+                "score": e.score,
+                "started_at": e.started_at.isoformat() if e.started_at else None,
+                "ended_at": e.ended_at.isoformat() if e.ended_at else None,
+                "stationary": (e.payload or {}).get("stationary"),
+                "plate_text": e.plate_text,
+                "has_evidence": bool(e.evidence_path),
+            }
+            for e in rows
+        ]
+    }
+
+
+@router.get("/events/{event_id}/evidence")
+async def internal_event_evidence(
+    event_id: int,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The visit's best-frame JPEG, for agent-side face match / VLM looks."""
+    from fastapi.responses import FileResponse
+
+    from models import TimelineEvent
+    from services.evidence_store import resolve_evidence
+
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.evidence_path:
+        raise HTTPException(status_code=404, detail="no evidence")
+    path = resolve_evidence(e.evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence missing")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+GATE_MODE_KEY = "detect_gate_mode"
+SHADOW_SINCE_KEY = "detect_shadow_since"
+_VALID_GATE_MODES = ("off", "shadow", "enforce")
+
+
+@router.get("/detect-config")
+async def get_detect_config(
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Effective Tier-0 gate override for the detect-pipeline.
+
+    The pipeline polls this on its reconcile tick (guided promotion: an admin
+    flips shadow->enforce in the UI; the pipeline applies it live, no
+    redeploy). ``gate_mode: null`` means "no override — follow your env".
+    """
+    row = (
+        db.query(SecuritySetting)
+        .filter(SecuritySetting.key == GATE_MODE_KEY)
+        .first()
+    )
+    mode = (row.json_value or "").strip().lower() if row else ""
+    return {"gate_mode": mode if mode in _VALID_GATE_MODES else None}
 
 
 def _mint_mediamtx_jwt() -> str | None:
@@ -141,3 +322,40 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
         )
 
     return {"cameras": out}
+
+
+
+@router.get("/recordings/frame")
+async def internal_recording_frame(
+    camera_id: int = Query(..., description="Camera ID"),
+    at: str = Query(..., description="Wall-clock instant (ISO 8601)"),
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """One JPEG from recorded footage at a past instant, for the agent's
+    describe_window. Reuses the recordings clip-resolution + ffmpeg extract;
+    internal-key authed like the other camera-agent endpoints."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from fastapi.responses import Response
+
+    from routers.recordings import _extract_recording_frame, _resolve_frame_job
+
+    try:
+        at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad 'at' timestamp")
+    if at_dt.tzinfo is None:
+        at_dt = at_dt.replace(tzinfo=UTC)
+
+    job = _resolve_frame_job(db, camera_id, at_dt)
+    if job is None:
+        raise HTTPException(status_code=404, detail="no recording at that time")
+    jpeg = await asyncio.to_thread(_extract_recording_frame, job[0], job[1])
+    if not jpeg:
+        raise HTTPException(status_code=502, detail="could not extract frame")
+    return Response(
+        content=jpeg, media_type="image/jpeg",
+        headers={"Cache-Control": "max-age=86400"},
+    )

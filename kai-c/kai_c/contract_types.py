@@ -171,6 +171,42 @@ class CapabilityDescriptor(BaseModel):
     example_result: dict | None = None
 
 
+class Accelerator(BaseModel):
+    """Contract v1.1 (optional): compute backend an object-detector runs on.
+
+    Vendored from the SDK (opennvr_adapter_sdk/contract.py). ``backend`` is an
+    opaque string so a newer adapter's backend value never fails to parse here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    backend: str = Field(default="cpu", min_length=1)
+    device: str | None = None
+
+
+class InputSpec(BaseModel):
+    """Contract v1.1 (optional): the tensor an object-detector expects. KAI-C
+    shapes region crops to this so the adapter stays layout-simple."""
+
+    model_config = ConfigDict(extra="ignore")
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    layout: str = "nhwc"          # nhwc | nchw
+    dtype: str = "uint8"          # uint8 | float | float_denorm
+    pixel_format: str = "rgb"     # rgb | bgr | yuv
+
+
+class DetectorSpec(BaseModel):
+    """Contract v1.1 (optional): marks the adapter as an object detector the
+    Tier-0 detect pipeline can dispatch region crops to. Non-detector adapters
+    omit it; KAI-C then does not use them in the detect loop."""
+
+    model_config = ConfigDict(extra="ignore")
+    input: InputSpec
+    accelerator: Accelerator = Field(default_factory=Accelerator)
+    labels: list[str] = Field(default_factory=list)
+    max_detections: int = Field(default=20, ge=1)
+
+
 class CapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     adapter: AdapterInfo
@@ -181,6 +217,8 @@ class CapabilitiesResponse(BaseModel):
     permissions: Permissions = Field(default_factory=Permissions)
     scheduling: Scheduling
     cost: Cost = Field(default_factory=Cost)
+    # Contract v1.1 (optional): present only on object-detector adapters.
+    detector: DetectorSpec | None = None
 
 
 # ── Failure envelope ───────────────────────────────────────────────

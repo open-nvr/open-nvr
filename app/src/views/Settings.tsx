@@ -29,8 +29,10 @@ import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
 import { MediaServerManager } from './settings/MediaServerManager'
 import { RecordingSettings } from './settings/RecordingSettings'
+import { DeletedCameras } from './settings/DeletedCameras'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
+import { SystemHealthSettings } from './settings/SystemHealthSettings'
 
 // Single settings registry: each tab owns its label and its subviews, and
 // each subview owns its slug, label, and panel. Tabs without subviews render
@@ -52,6 +54,9 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
+  // The bin: irreversibly soft-deleted cameras, their recordings, and the
+  // superuser-only permanent purge.
+  { key: 'deleted-cameras', label: 'Deleted Cameras', panel: () => <DeletedCameras />, submenu: [] },
   {
     key: 'media-source',
     label: 'Media-Source',
@@ -78,6 +83,7 @@ const SETTINGS_REGISTRY: TabEntry[] = [
       { slug: 'webrtc', label: 'WebRTC', panel: () => <WebRTCSettings /> },
       { slug: 'window-settings', label: 'Window Settings', panel: () => <WindowSettings /> },
       { slug: 'uplink', label: 'Uplink', panel: () => <MoreUplink /> },
+      { slug: 'system-health', label: 'System Health', panel: () => <SystemHealthSettings /> },
     ],
   },
 ]

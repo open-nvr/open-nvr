@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from 'react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 
 type Policy = {
@@ -78,14 +79,7 @@ export function PasswordPolicy() {
           require_mfa_for_privileged: data.require_mfa_for_privileged,
         })
       } catch (e: any) {
-        const detail = e?.data?.detail || e?.response?.data?.detail
-        if (Array.isArray(detail)) {
-          setError(detail.map((d: any) => d.msg || JSON.stringify(d)).join(', '))
-        } else if (typeof detail === 'object' && detail !== null) {
-          setError(detail.msg || JSON.stringify(detail))
-        } else {
-          setError(detail || e?.message || 'Failed to load policy')
-        }
+        setError(extractApiError(e, 'Failed to load policy'))
       } finally {
         setLoading(false)
       }
@@ -101,14 +95,7 @@ export function PasswordPolicy() {
         expiration_days: policy.expiration_days ?? null,
       })
     } catch (e: any) {
-      const detail = e?.data?.detail || e?.response?.data?.detail
-      if (Array.isArray(detail)) {
-        setError(detail.map((d: any) => d.msg || JSON.stringify(d)).join(', '))
-      } else if (typeof detail === 'object' && detail !== null) {
-        setError(detail.msg || JSON.stringify(detail))
-      } else {
-        setError(detail || e?.message || 'Failed to save policy')
-      }
+      setError(extractApiError(e, 'Failed to save policy'))
     } finally {
       setLoading(false)
     }

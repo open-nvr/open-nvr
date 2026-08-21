@@ -18,13 +18,16 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, Play, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
+import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { CameraStatusProvider } from '../hooks/useCameraStatus'
+import { SystemAlertBanner } from '../components/SystemAlertBanner'
 
 type NavItem = {
   to: string
@@ -32,11 +35,15 @@ type NavItem = {
   icon: React.ReactNode
   /** key into NAV_PERMISSIONS; null-valued entries are always visible */
   perm: keyof typeof NAV_PERMISSIONS
+  /** exact-match highlighting — set when a sibling route extends this path */
+  end?: boolean
 }
 
 type NavGroup = {
   key: string
   label: string
+  /** pinned groups render their items directly — no header, never collapsible */
+  pinned?: boolean
   items: NavItem[]
 }
 
@@ -46,10 +53,11 @@ const NAV_GROUPS: NavGroup[] = [
   {
     key: 'nvr',
     label: 'NVR',
+    pinned: true,
     items: [
       { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
       { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
-      { to: '/playback', label: 'Recordings', icon: <Play size={16} />, perm: '/playback' },
+      { to: '/playback/sync', label: 'Recordings', icon: <MonitorPlay size={16} />, perm: '/playback/sync' },
       { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
     ],
   },
@@ -97,13 +105,14 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
-const COLLAPSED_GROUPS_KEY = 'opennvr.sidebar.collapsedGroups'
+// Accordion: at most one group is open at a time; its key is persisted.
+const OPEN_GROUP_KEY = 'opennvr.sidebar.openGroup'
 
-function loadCollapsedGroups(): Record<string, boolean> {
+function loadOpenGroup(): string | null {
   try {
-    return JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || '{}')
+    return localStorage.getItem(OPEN_GROUP_KEY)
   } catch {
-    return {}
+    return null
   }
 }
 
@@ -114,11 +123,13 @@ export function AppShell() {
   const { user, logout } = useAuth()
   const { hasPermission } = usePermissions()
   const [menuOpen, setMenuOpen] = useState(false)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
+  useClickOutside(accountMenuRef, menuOpen, () => setMenuOpen(false))
   const { theme, toggleTheme } = useTheme()
   const sidebarRef = useRef<HTMLDivElement>(null)
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
   const location = useLocation()
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(loadCollapsedGroups)
+  const [openGroup, setOpenGroup] = useState<string | null>(loadOpenGroup)
 
   const canView = (path: keyof typeof NAV_PERMISSIONS) => {
     const requiredPerm = NAV_PERMISSIONS[path]
@@ -132,8 +143,9 @@ export function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [hasPermission]
   )
+  const pinnedGroups = visibleGroups.filter((g) => g.pinned)
+  const menuGroups = visibleGroups.filter((g) => !g.pinned)
 
-  // The group owning the current route stays expanded regardless of stored state.
   const activeGroupKey = useMemo(() => {
     for (const g of NAV_GROUPS) {
       if (g.items.some((i) => (i.to === '/' ? location.pathname === '/' : location.pathname.startsWith(i.to)))) return g.key
@@ -141,12 +153,28 @@ export function AppShell() {
     return null
   }, [location.pathname])
 
+  function persistOpenGroup(key: string | null) {
+    try {
+      if (key === null) localStorage.removeItem(OPEN_GROUP_KEY)
+      else localStorage.setItem(OPEN_GROUP_KEY, key)
+    } catch { /* storage unavailable: keep in-memory state */ }
+  }
+
+  // Navigating into a group opens it (closing any other); the user can still
+  // close it manually afterwards.
+  useEffect(() => {
+    if (!activeGroupKey) return
+    setOpenGroup((prev) => {
+      if (prev === activeGroupKey) return prev
+      persistOpenGroup(activeGroupKey)
+      return activeGroupKey
+    })
+  }, [activeGroupKey])
+
   function toggleGroup(key: string) {
-    setCollapsedGroups((prev) => {
-      const next = { ...prev, [key]: !prev[key] }
-      try {
-        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(next))
-      } catch { /* storage unavailable: keep in-memory state */ }
+    setOpenGroup((prev) => {
+      const next = prev === key ? null : key
+      persistOpenGroup(next)
       return next
     })
   }
@@ -158,9 +186,10 @@ export function AppShell() {
   }
 
   return (
+    <CameraStatusProvider>
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
   {/* Top white header (sticky) */}
-  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-16 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
+  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
         <Link to="/" className="font-semibold inline-flex items-center gap-2">
           <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
         </Link>
@@ -184,7 +213,7 @@ export function AppShell() {
               <span className="hidden md:inline">Live</span>
             </Link>
           )}
-          <div className="relative">
+          <div className="relative" ref={accountMenuRef}>
             <button
               className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
               onClick={() => setMenuOpen((s) => !s)}
@@ -211,52 +240,80 @@ export function AppShell() {
             {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
             <span className="hidden md:inline">Fullscreen</span>
           </button>
-          <span className="opacity-90">{new Date().toLocaleString()}</span>
+          <LiveClock />
         </div>
       </header>
 
       <div className="flex">
         {/* Sidebar */}
-  <aside ref={sidebarRef} onScroll={onSidebarScroll} className={`${sidebarOpen ? 'w-64' : 'w-14'} sticky top-16 self-start h-[calc(100vh-4rem)] transition-all duration-200 overflow-y-auto overflow-x-hidden bg-[var(--bg-2)] p-2 sidebar-scroll ${sidebarScrolling ? 'is-scrolling' : ''}`}>
-          <button
-            className="flex items-center gap-2 w-full px-2 py-2 text-sm text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
-            onClick={() => setSidebarOpen((s) => !s)}
-            aria-label="Toggle Sidebar"
-            title={sidebarOpen ? 'Collapse' : 'Expand'}
-          >
-            <Menu size={16} />
-            <span className={`${sidebarOpen ? 'inline' : 'hidden'}`}>Menu</span>
-          </button>
-          <nav className="mt-2 space-y-1">
-            {visibleGroups.map((group) => {
-              const collapsed = collapsedGroups[group.key] && group.key !== activeGroupKey
+  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-12 self-start h-[calc(100vh-3rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
+          {/* Fixed header: toggle + pinned items never scroll away; its bottom
+              border is the clip line for the scrollable nav below */}
+          <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
+            <button
+              className="inline-flex items-center justify-center p-2 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
+              onClick={() => setSidebarOpen((s) => !s)}
+              aria-label="Toggle Sidebar"
+              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+            >
+              <Menu size={16} />
+            </button>
+            {pinnedGroups.map((group) => (
+              <div key={group.key} className="mt-2 space-y-0.5">
+                {group.items.map((item) => (
+                  <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                ))}
+              </div>
+            ))}
+          </div>
+          {/* No bottom padding: the scroll clip edge must coincide with where
+              the last sticky header docks, or items peek out beneath it */}
+          <nav ref={sidebarRef} onScroll={onSidebarScroll} className={`flex-1 overflow-y-auto overflow-x-hidden px-2 sidebar-scroll ${sidebarScrolling ? 'is-scrolling' : ''}`}>
+            {menuGroups.map((group, gi) => {
+              const collapsed = openGroup !== group.key
+              if (!sidebarOpen) {
+                return (
+                  <div key={group.key} className="mb-2 pb-2 border-b border-[var(--border)] last:border-b-0 space-y-0.5">
+                    {group.items.map((item) => (
+                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed />
+                    ))}
+                  </div>
+                )
+              }
+              // Sticky headers: headers and item lists are direct children of
+              // the scroll container (sticky is bounded by its parent, so
+              // nesting would defeat it). Headers passed while scrolling stack
+              // in order at the top; groups further down scroll naturally.
               return (
-                <div key={group.key} className={sidebarOpen ? 'mb-1' : 'mb-2 pb-2 border-b border-[var(--border)] last:border-b-0'}>
-                  {sidebarOpen && (
-                    <button
-                      className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] uppercase tracking-wider text-[var(--text-dim)] hover:text-[var(--text)]"
-                      onClick={() => toggleGroup(group.key)}
-                      aria-expanded={!collapsed}
-                    >
-                      <span>{group.label}</span>
-                      <ChevronDown size={12} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-                    </button>
-                  )}
-                  {(!sidebarOpen || !collapsed) && (
-                    <div className="space-y-0.5">
+                <Fragment key={group.key}>
+                  <button
+                    style={{ top: gi * 32 }}
+                    className="sticky z-10 w-full h-8 flex items-center justify-between px-2.5 text-sm font-medium bg-[var(--bg-2)] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
+                    onClick={() => toggleGroup(group.key)}
+                    aria-expanded={!collapsed}
+                  >
+                    <span className="truncate whitespace-nowrap">{group.label}</span>
+                    <ChevronDown size={16} className={`flex-shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+                  </button>
+                  {!collapsed && (
+                    <div className="pl-3 py-1 space-y-0.5">
                       {group.items.map((item) => (
-                        <SideLink key={item.to} to={item.to} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                        <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
                       ))}
                     </div>
                   )}
-                </div>
+                </Fragment>
               )
             })}
           </nav>
+          {/* Dead strip: keeps bottom-docked headers clear of the browser's
+              status bubble that previews link URLs in the corner */}
+          <div className="h-8 flex-shrink-0" aria-hidden="true" />
         </aside>
 
         {/* Main content — boundary keyed by route so navigating away resets a crash */}
-        <main className="flex-1 p-4 bg-[var(--panel)] min-h-[calc(100vh-4rem)]">
+        <main className="flex-1 min-w-0 p-4 bg-[var(--panel)] min-h-[calc(100vh-3rem)]">
+          <SystemAlertBanner />
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
@@ -264,19 +321,29 @@ export function AppShell() {
       </div>
       <DeviceBlockedOverlay />
     </div>
+    </CameraStatusProvider>
   )
 }
 
-function SideLink({ to, label, icon, collapsed }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean }) {
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="opacity-90 tabular-nums">{now.toLocaleString()}</span>
+}
+
+function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {
   return (
     <NavLink
       to={to}
-      end={to === '/'}
+      end={end || to === '/'}
       title={collapsed ? label : undefined}
-      className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-3 py-2 rounded text-sm ${isActive ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
+      className={({ isActive }) => `flex items-center ${collapsed ? 'justify-center' : ''} gap-2 px-2.5 py-1 rounded text-sm ${isActive ? 'bg-[color-mix(in_oklab,var(--accent)_15%,transparent)] text-[var(--accent)] font-medium' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
     >
       <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center">{icon}</span>
-      <span className={`${collapsed ? 'hidden' : 'inline'}`}>{label}</span>
+      <span className={`${collapsed ? 'hidden' : 'inline'} truncate whitespace-nowrap`}>{label}</span>
     </NavLink>
   )
 }

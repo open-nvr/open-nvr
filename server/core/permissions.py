@@ -69,7 +69,16 @@ def get_camera_or_403(
     db: Session = Depends(get_db),
 ) -> Camera:
     checker = PermissionChecker(Camera)
-    return checker.check(camera_id, current_user, db)
+    camera = checker.check(camera_id, current_user, db)
+    # A soft-deleted (binned) camera is dead to every per-camera endpoint that
+    # goes through this dependency — edit, delete, permissions, PTZ, snapshot.
+    # Only the bin's own endpoints (which do their own lookup) may touch it.
+    if camera.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found",
+        )
+    return camera
 
 
 def user_has_permission(user: User, permission_name: str) -> bool:

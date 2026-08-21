@@ -25,7 +25,8 @@ import {
   useCallback,
 } from 'react'
 import { apiService } from '../../lib/apiService'
-import Hls from 'hls.js'
+import type Hls from 'hls.js'
+import { loadHls } from '../../lib/loadHls'
 import { VideoControls } from './VideoControls'
 import { AlertCircle } from 'lucide-react'
 
@@ -61,8 +62,18 @@ export interface VideoPlayerProps {
   onSnapshot?: (dataUrl: string) => void
   /** Callback on error */
   onError?: (error: string) => void
+  /** Live mode: a stream request was rejected as unauthorized — the
+      mediamtxToken has expired. The parent owns the token, so it must
+      refetch stream URLs; the changed token prop re-runs setup here. */
+  onAuthExpired?: () => void
   /** Callback when HLS playback fails (to trigger fallback) */
   onHlsPlaybackError?: () => void
+  /** Present only when the camera supports PTZ; toggles the PTZ pad */
+  onTogglePtz?: () => void
+  ptzActive?: boolean
+  /** Extra overlay rendered inside the player (e.g. the PTZ pad) — kept
+      inside so it stays visible when the player element goes fullscreen */
+  overlay?: React.ReactNode
 }
 
 export interface VideoPlayerHandle {
@@ -91,7 +102,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       className = '',
       onSnapshot,
       onError,
+      onAuthExpired,
       onHlsPlaybackError,
+      onTogglePtz,
+      ptzActive = false,
+      overlay,
     },
     ref
   ) {
@@ -123,6 +138,37 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [error, setError] = useState<string | null>(null)
     const [showControls, setShowControls] = useState(true)
     const hideControlsTimeout = useRef<number | null>(null)
+    // Bounded auto-reconnect (live mode). Covers stream drops the backend
+    // can't push an event for (e.g. a network blip between this browser and
+    // MediaMTX). Refs, not state, so the setup callbacks' event handlers can
+    // use them without creating dependency cycles.
+    const retryCountRef = useRef(0)
+    const retryTimerRef = useRef<number | null>(null)
+    const disconnectGraceRef = useRef<number | null>(null)
+    const restartRef = useRef<() => void>(() => {})
+    // Slow, unbounded poll while the WHEP path 404s (path missing
+    // server-side, e.g. a MediaMTX restart raced the backend's
+    // re-provisioning). Separate from the bounded fast-retry budget: the
+    // offline overlay stays up while probe attempts run.
+    const offlinePollTimerRef = useRef<number | null>(null)
+    const offlinePollingRef = useRef(false)
+    // Via a ref so the setup callbacks don't take the parent's callback
+    // identity as a dependency — an unstable identity would tear down and
+    // rebuild the stream on every parent render.
+    const onAuthExpiredRef = useRef(onAuthExpired)
+    onAuthExpiredRef.current = onAuthExpired
+    const [isReconnecting, setIsReconnecting] = useState(false)
+    // Real aspect ratio of the incoming stream (width/height), read from the
+    // video metadata. null until known (or after the source is torn down).
+    const [videoAspect, setVideoAspect] = useState<number | null>(null)
+    // Title chip fades to half opacity after a few seconds so it stops
+    // competing with the camera's burned-in OSD; tile hover restores it
+    // purely via CSS (group-hover), so there are no re-renders on hover.
+    const [titleDimmed, setTitleDimmed] = useState(false)
+    useEffect(() => {
+      const t = window.setTimeout(() => setTitleDimmed(true), 4000)
+      return () => window.clearTimeout(t)
+    }, [])
 
     const isLive = mode === 'live'
 
@@ -180,9 +226,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
     // Cleanup function
     const cleanup = useCallback(() => {
-      // Clear any existing error state
-      setError(null)
-      
+      // Clear any existing error state — except mid-offline-poll, where the
+      // overlay must not flash off while a probe attempt tears down/rebuilds.
+      if (!offlinePollingRef.current) setError(null)
+
+      // Cancel pending auto-reconnect timers
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+      if (disconnectGraceRef.current) {
+        clearTimeout(disconnectGraceRef.current)
+        disconnectGraceRef.current = null
+      }
+      if (offlinePollTimerRef.current) {
+        clearTimeout(offlinePollTimerRef.current)
+        offlinePollTimerRef.current = null
+      }
+
       // Cleanup HLS
       if (hlsInstanceRef.current) {
         hlsInstanceRef.current.destroy()
@@ -190,6 +251,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
       // Cleanup WebRTC
       if (pcRef.current) {
+        // Detach the handler first: an intentional close must not look like a
+        // connection drop and trigger an auto-retry.
+        pcRef.current.onconnectionstatechange = null
         pcRef.current.getSenders().forEach((s) => {
           try {
             if (s.track) s.track.stop()
@@ -214,11 +278,41 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [])
 
+    // Schedule a bounded, exponentially backed-off restart of the live
+    // stream: 2s, 4s, 8s, 16s, 30s — then give up into the manual-retry
+    // error overlay. Success paths reset the counter.
+    const MAX_AUTO_RETRIES = 5
+    const OFFLINE_POLL_INTERVAL_MS = 10000
+    const scheduleAutoRetry = useCallback((failMessage: string) => {
+      if (mode !== 'live') {
+        setError(failMessage)
+        setIsLoading(false)
+        return
+      }
+      if (retryTimerRef.current) return // one pending retry at a time
+      if (retryCountRef.current >= MAX_AUTO_RETRIES) {
+        setIsReconnecting(false)
+        setError(failMessage)
+        setIsLoading(false)
+        return
+      }
+      const delay = Math.min(2000 * 2 ** retryCountRef.current, 30000)
+      retryCountRef.current += 1
+      setIsReconnecting(true)
+      setError(null)
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null
+        restartRef.current()
+      }, delay)
+    }, [mode])
+
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
       if (!whepUrl || !videoRef.current) return
-      setIsLoading(true)
-      setError(null)
+      if (!offlinePollingRef.current) {
+        setIsLoading(true)
+        setError(null)
+      }
 
       try {
         // ICE servers come from Settings > More Settings > WebRTC. Falling back
@@ -257,6 +351,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           const [stream] = ev.streams
           if (videoRef.current && stream) {
             // Clear any existing error when we get a valid stream
+            offlinePollingRef.current = false
             setError(null)
             videoRef.current.srcObject = stream
             videoRef.current.play().catch(() => {})
@@ -267,10 +362,30 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         pc.onconnectionstatechange = () => {
           if (pc.connectionState === 'connected') {
             setIsLoading(false)
+            offlinePollingRef.current = false
             setError(null)
-          } else if (pc.connectionState === 'failed') {
-            setError('WebRTC connection failed')
-            setIsLoading(false)
+            setIsReconnecting(false)
+            retryCountRef.current = 0
+            if (disconnectGraceRef.current) {
+              clearTimeout(disconnectGraceRef.current)
+              disconnectGraceRef.current = null
+            }
+          } else if (
+            pc.connectionState === 'failed' ||
+            pc.connectionState === 'closed'
+          ) {
+            scheduleAutoRetry('WebRTC connection failed')
+          } else if (pc.connectionState === 'disconnected') {
+            // 'disconnected' can self-heal; give ICE a short grace period
+            // before tearing down and reconnecting.
+            if (!disconnectGraceRef.current) {
+              disconnectGraceRef.current = window.setTimeout(() => {
+                disconnectGraceRef.current = null
+                if (pcRef.current === pc && pc.connectionState !== 'connected') {
+                  scheduleAutoRetry('WebRTC connection lost')
+                }
+              }, 5000)
+            }
           }
         }
 
@@ -292,6 +407,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           if (resp.status === 404) {
             throw new Error('Camera offline')
           }
+          // MediaMTX rejects an expired/invalid stream JWT with 400/401 on
+          // the WHEP POST (observed: 400 for "token is expired"). Retrying
+          // with the same token can never succeed, so ask the parent for a
+          // fresh one — the changed token prop re-runs setup. The bounded
+          // auto-retry below still runs as a fallback for non-auth 400s.
+          if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
+            onAuthExpiredRef.current?.()
+          }
           throw new Error(`WHEP connection failed: ${resp.status}`)
         }
 
@@ -300,14 +423,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       } catch (e: any) {
         const msg = e?.message || 'WebRTC setup failed'
-        setError(msg)
-        setIsLoading(false)
         onError?.(msg)
+        if (msg === 'Camera offline') {
+          // The path doesn't exist server-side — e.g. a MediaMTX restart and
+          // this WHEP attempt raced the backend's re-provisioning. The
+          // camera-status event remounts the player when the backend notices,
+          // but an outage shorter than its offline debounce never emits one,
+          // so also poll on a slow cadence until the path comes back.
+          setError(msg)
+          setIsLoading(false)
+          offlinePollingRef.current = true
+          if (!offlinePollTimerRef.current) {
+            offlinePollTimerRef.current = window.setTimeout(() => {
+              offlinePollTimerRef.current = null
+              restartRef.current()
+            }, OFFLINE_POLL_INTERVAL_MS)
+          }
+        } else {
+          // Any non-404 failure leaves offline-poll mode for the bounded
+          // fast-retry path.
+          offlinePollingRef.current = false
+          scheduleAutoRetry(msg)
+        }
       }
-    }, [whepUrl, mediamtxToken, onError])
+    }, [whepUrl, mediamtxToken, onError, scheduleAutoRetry])
 
     // Setup HLS
-    const setupHLS = useCallback(() => {
+    const setupHLS = useCallback(async () => {
       if (!hlsUrl || !videoRef.current) return
       setIsLoading(true)
       setError(null)
@@ -318,7 +460,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
       // Build HLS URL with JWT token as query parameter (MediaMTX requirement)
       // MediaMTX accepts JWT tokens via ?jwt=<token> query param
-      const hlsUrlWithToken = mediamtxToken 
+      const hlsUrlWithToken = mediamtxToken
         ? `${hlsUrl}${hlsUrl.includes('?') ? '&' : '?'}jwt=${mediamtxToken}`
         : hlsUrl
 
@@ -330,8 +472,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return
       }
 
-      // HLS.js
-      if (Hls.isSupported()) {
+      // HLS.js (lazy-loaded chunk)
+      const Hls = await loadHls().catch(() => null)
+      if (!videoRef.current) return // unmounted while the chunk loaded
+      if (Hls?.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -357,6 +501,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setIsLoading(false)
           setError(null) // Clear any previous errors
+          setIsReconnecting(false)
+          retryCountRef.current = 0
           if (autoPlay) {
             el.play().catch(() => {
               el.muted = true
@@ -367,6 +513,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
         hls.on(Hls.Events.FRAG_LOADED, () => {
           setError(null) // Clear error on successful fragment load
+          setIsReconnecting(false)
+          retryCountRef.current = 0
           if (el.paused && autoPlay) el.play().catch(() => {})
         })
 
@@ -376,14 +524,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             const msg = `HLS Error: ${data.details}`
             setIsLoading(false)
             onError?.(msg)
-            
+
             // Auto-recover from errors
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               console.log('[HLS] Attempting media error recovery...')
               hls.recoverMediaError()
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // An expired stream JWT surfaces here as a 400/401 on the
+              // manifest/fragment request — same recovery as the WHEP path:
+              // a fresh token from the parent, since retrying with the
+              // stale one can never succeed.
+              const code = data.response?.code
+              if (code === 400 || code === 401 || code === 403) {
+                onAuthExpiredRef.current?.()
+              }
+              // Full restart with backoff (a bare startLoad() retry keeps
+              // failing while MediaMTX is briefly unreachable).
               console.log('[HLS] Attempting network error recovery...')
-              setTimeout(() => hls.startLoad(), 1000)
+              scheduleAutoRetry(msg)
             } else {
               setError(msg)
             }
@@ -393,7 +551,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         setError('HLS not supported')
         setIsLoading(false)
       }
-    }, [hlsUrl, mediamtxToken, isMuted, autoPlay, onError])
+    }, [hlsUrl, mediamtxToken, isMuted, autoPlay, onError, scheduleAutoRetry])
 
     // Setup MP4 playback with optimized loading for fast start
     const setupMP4 = useCallback(() => {
@@ -458,7 +616,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     }, [mp4Url, isMuted, autoPlay])
 
     // Setup HLS VOD playback (for recordings via backend-generated manifest)
-    const setupHLSPlayback = useCallback(() => {
+    const setupHLSPlayback = useCallback(async () => {
       if (!hlsPlaybackUrl || !videoRef.current) return
       setIsLoading(true)
       setError(null)
@@ -473,7 +631,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       // that reports canPlayType('...mpegurl') as playable) over-fetch byte-range
       // VOD with open-ended ranges, redundantly streaming toward EOF. So only
       // fall back to native HLS when hls.js isn't available (iOS Safari).
-      if (Hls.isSupported()) {
+      const Hls = await loadHls().catch(() => null)
+      if (!videoRef.current) return // unmounted while the chunk loaded
+      if (Hls?.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
@@ -635,6 +795,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [])
 
+    // Track the stream's true aspect ratio. 'resize' fires when the decoded
+    // frame size changes mid-stream (e.g. adaptive HLS level switch); 'emptied'
+    // resets it when the source is torn down.
+    useEffect(() => {
+      const el = videoRef.current
+      if (!el) return
+      const update = () => {
+        setVideoAspect(el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : null)
+      }
+      update()
+      el.addEventListener('loadedmetadata', update)
+      el.addEventListener('resize', update)
+      el.addEventListener('emptied', update)
+      return () => {
+        el.removeEventListener('loadedmetadata', update)
+        el.removeEventListener('resize', update)
+        el.removeEventListener('emptied', update)
+      }
+    }, [])
+
     // Fullscreen change listener
     useEffect(() => {
       const onFullscreenChange = () => {
@@ -733,7 +913,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         console.error('[VideoPlayer] Snapshot failed:', err)
       }
     }
-    const handleRefresh = () => {
+    const restartStream = () => {
       cleanup()
       if (streamType === 'webrtc' && whepUrl) {
         setupWebRTC()
@@ -741,8 +921,20 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         setupHLS()
       }
     }
+    // Auto-retries go through the ref so scheduleAutoRetry (defined before
+    // the setup callbacks) always calls the current stream config.
+    restartRef.current = restartStream
+    const handleRefresh = () => {
+      // Manual retry: start the auto-retry budget over and show the normal
+      // loading UX rather than the frozen offline overlay.
+      retryCountRef.current = 0
+      offlinePollingRef.current = false
+      setIsReconnecting(false)
+      restartStream()
+    }
     const handleStreamTypeChange = (type: 'webrtc' | 'hls') => {
       if (type !== streamType) {
+        offlinePollingRef.current = false
         cleanup()
         setStreamType(type)
       }
@@ -800,50 +992,65 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     return (
       <div
         ref={containerRef}
-        className={`relative bg-black overflow-hidden group flex items-center justify-center ${className}`}
+        className={`relative bg-[var(--bg-2)] overflow-hidden group flex items-center justify-center ${className}`}
+        style={{ containerType: 'size' }}
         tabIndex={0}
         onDoubleClick={handleDoubleClick}
       >
-        {/* Title overlay */}
+        {/* Content box — the largest rectangle matching the stream's real
+            aspect ratio that fits the container (100cqh = container height).
+            The video fills it exactly, and every overlay anchored to it
+            (title, LIVE badge, controls) hugs the actual feed. Residual space
+            around it shows the app panel background, not black bars. Until
+            the aspect is known the box just fills the container. */}
+        <div
+          className="relative bg-black"
+          style={
+            videoAspect
+              ? { aspectRatio: String(videoAspect), width: `min(100%, calc(100cqh * ${videoAspect}))` }
+              : { width: '100%', height: '100%' }
+          }
+        >
+        {/* Title overlay — transparent top-center label (clear of the corner
+            OSD burn-ins), legible via text shadow instead of a scrim */}
         {title && (
-          <div className="absolute top-2 left-2 z-10 text-sm text-white/90 bg-black/50 px-2 py-0.5 rounded">
+          <div
+            className={`absolute top-1.5 left-1/2 -translate-x-1/2 z-10 max-w-[60%] truncate text-sm leading-tight font-medium text-white/90 px-1.5 py-0.5 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)] transition-opacity duration-700 group-hover:opacity-100 ${
+              titleDimmed ? 'opacity-50' : 'opacity-100'
+            }`}
+          >
             {title}
           </div>
         )}
 
-        {/* Live indicator */}
+        {/* Live indicator — transparent: glowing dot + shadowed text so it
+            doesn't overshadow the stream like the old solid red chip */}
         {isLive && !error && (
-          <div className="absolute top-2 right-2 z-10 flex items-center gap-1.5 text-xs bg-red-600/90 text-white px-2 py-0.5 rounded">
-            <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 text-[10px] font-semibold tracking-wider text-red-400 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
+            <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse [box-shadow:0_0_5px_rgba(239,68,68,0.9)]" />
             LIVE
           </div>
         )}
 
-        {/* Fixed 16:9 frame — locks the stream into a letterboxed/pillarboxed
-            box so a non-16:9 source never distorts the layout. In fullscreen the
-            container fills the (possibly non-16:9) screen, so cap the frame to the
-            largest 16:9 area that fits the viewport and center it. */}
-        <div
-          className={`relative w-full h-full ${
-            isFullscreen ? 'max-w-[177.78vh] max-h-[56.25vw]' : ''
-          }`}
-        >
-          {/* Video element */}
-          <video
-            ref={videoRef}
-            className="w-full h-full object-contain"
-            playsInline
-            muted={isMuted}
-            autoPlay={autoPlay}
-            crossOrigin="anonymous"
-            preload={mode === 'playback' ? 'metadata' : 'auto'}
-          />
-        </div>
+        {/* Video element — the content box already matches its aspect ratio,
+            so object-contain leaves no internal bars once metadata is known */}
+        <video
+          ref={videoRef}
+          className="block w-full h-full object-contain"
+          playsInline
+          muted={isMuted}
+          autoPlay={autoPlay}
+          crossOrigin="anonymous"
+          preload={mode === 'playback' ? 'metadata' : 'auto'}
+        />
 
-        {/* Loading overlay */}
-        {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+        {/* Loading / reconnecting overlay */}
+        {(isLoading || isReconnecting) && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
             <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            {isReconnecting && (
+              <div className="text-xs text-white/80">Reconnecting…</div>
+            )}
           </div>
         )}
 
@@ -911,7 +1118,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             onRefresh={isLive ? handleRefresh : undefined}
             onStreamTypeChange={isLive ? handleStreamTypeChange : undefined}
             availableStreamTypes={availableStreamTypes}
+            onTogglePtz={onTogglePtz}
+            ptzActive={ptzActive}
           />
+        </div>
+
+        {/* Caller-provided overlay (PTZ pad etc.) — anchored to the feed box */}
+        {overlay}
         </div>
       </div>
     )

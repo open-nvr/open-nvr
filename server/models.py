@@ -80,7 +80,11 @@ class User(Base):
     password_set = Column(
         Boolean, default=False
     )  # Track if initial password setup is complete
-    mfa_enabled = Column(Boolean, default=True)  # MFA enabled by default for security
+    # True only once the user has enrolled a TOTP secret (/auth/mfa/verify).
+    # New accounts start False; the client blocks app access until enrollment
+    # completes (MFA wall), so MFA is still mandatory — just set up by the
+    # account owner on first login, not assumed at creation.
+    mfa_enabled = Column(Boolean, default=False)
 
     # Store encrypted MFA secret
     encrypted_mfa_secret = Column(String(500), nullable=True)
@@ -168,6 +172,20 @@ class Camera(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    # Stable identity that survives a DB wipe/rebuild (the numeric id is a
+    # sequence that restarts at 1 on a fresh DB). Stamped into each camera's
+    # on-disk recordings directory (.camera-identity.json) so footage can
+    # never be silently re-attributed to a different camera that later reuses
+    # the same numeric id. Nullable at the DB level only so the additive
+    # column self-heal can add it to old create_all databases; code always
+    # populates it (default here + ensure_camera_uuids at startup).
+    uuid = Column(
+        String(36),
+        nullable=True,
+        unique=True,
+        index=True,
+        default=lambda: str(uuid.uuid4()),
+    )
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=False)
@@ -210,6 +228,13 @@ class Camera(Base):
     # Hikvision/Dahua convention.
     substream_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True)
+    # Tombstone for irreversible soft delete. NULL = live (active or paused);
+    # set = camera is in the bin: hidden from every normal list, not editable,
+    # never provisioned, recordings viewable only through the bin until
+    # retention ages them out. Distinct from is_active, which is a reversible
+    # pause. Nullable so the additive column self-heal can add it to old
+    # create_all databases.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
     location = Column(String(200), nullable=True)
     vlan = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="unknown")
@@ -386,6 +411,41 @@ class CameraCapability(Base):
     camera = relationship("Camera", back_populates="capability")
 
 
+class TimelineEvent(Base):
+    """Canonical event & evidence store (RFC-0001 Challenge 1) — one row per
+    object VISIT (a Tier-0 track lifecycle), alarm, or app alert.
+
+    The question-shaped store: "who came between 3 and 4pm?" is a range scan
+    here, each row carrying its best-frame evidence JPEG (selected at capture
+    time — the sharpest look Tier-0 had at the object) and, later, the
+    recording anchor and LPR plate text. All producers share this table; apps
+    query it instead of keeping private stores."""
+
+    __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_cam_start", "camera_id", "started_at"),
+        # One visit = one (camera, track, start): ingest retries are
+        # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
+        Index("uq_events_visit", "camera_id", "track_id", "started_at",
+              unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    source = Column(String(30), nullable=False)        # tier0 | camera | app | adapter
+    event_type = Column(String(30), nullable=False)    # track | alarm | alert
+    label = Column(String(60), nullable=True, index=True)
+    score = Column(Float, nullable=True)
+    track_id = Column(String(40), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    recording_ref = Column(String(500), nullable=True)
+    evidence_path = Column(String(500), nullable=True)
+    plate_text = Column(String(32), nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class CameraEvent(Base):
     """A camera-native alarm (motion / tamper / video-loss / IO) received from
     the device's event stream. History store parallel to AIDetectionResult; the
@@ -407,10 +467,44 @@ class CameraEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class SystemEvent(Base):
+    """A host-level alert (disk pressure, CPU/RAM, purge outcome) — history
+    store parallel to CameraEvent for events with no camera scope. The live
+    copy is fanned out on the in-process event bus as ``system_alert``."""
+
+    __tablename__ = "system_events"
+    __table_args__ = (
+        Index("ix_system_event_type_time", "event_type", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # cpu_high | memory_high | disk_low | disk_pressure_purge |
+    # disk_purge_exhausted | disk_stat_error
+    event_type = Column(String(50), nullable=False)
+    event_state = Column(String(20), nullable=True)  # active | inactive | None
+    severity = Column(String(10), nullable=False, default="warning")
+    description = Column(String(300), nullable=True)
+    data = Column(Text, nullable=True)  # JSON metric snapshot / purge stats
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Recording(Base):
-    """Recording model for storing video recording metadata."""
+    """One recorded segment file — the indexed source of truth for listings.
+
+    Fed by the MediaMTX segment-complete webhook and converged with the
+    filesystem by the recording reconciler. ``start_time``/``end_time`` are
+    tz-aware UTC derived from the segment filename (never wall-clock at
+    webhook receipt). ``(camera_id, file_path)`` is unique so webhook retries
+    and reconciler overlap upsert instead of duplicating.
+    """
 
     __tablename__ = "recordings"
+    __table_args__ = (
+        Index("ix_recordings_camera_start", "camera_id", "start_time"),
+        Index("uq_recordings_camera_file", "camera_id", "file_path", unique=True),
+        Index("ix_recordings_start_time", "start_time"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String(255), nullable=False)
@@ -422,9 +516,16 @@ class Recording(Base):
     end_time = Column(DateTime(timezone=True), nullable=True)
     is_processed = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Video codec tag recorded at segment-complete (e.g. 'h264', 'hevc') so
+    # playback can pick the H.265 remux path without probing the file.
+    codec = Column(String(20), nullable=True)
+    # Flagged recordings survive retention (protect_flagged).
+    is_flagged = Column(Boolean, nullable=False, default=False, server_default="false")
+    # How the row entered the index: 'webhook' | 'reconciler'.
+    source = Column(String(10), nullable=True)
 
     camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
-    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     camera = relationship("Camera", back_populates="recordings")
     created_by = relationship("User", back_populates="recordings")

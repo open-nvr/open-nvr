@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -49,7 +49,8 @@ class IntegrationService:
             return {"success": False, "message": f"Test failed: {e!s}"}
 
     @staticmethod
-    async def _test_email(config: dict) -> dict:
+    async def _send_email(config: dict, subject: str, body: str) -> dict:
+        """Send one email through the integration's SMTP config."""
         smtp_host = config.get("smtp_host")
         smtp_port = config.get("smtp_port", 587)
         username = config.get("username")
@@ -67,15 +68,12 @@ class IntegrationService:
         msg = MIMEMultipart()
         msg["From"] = from_addr
         msg["To"] = to_addrs
-        msg["Subject"] = "OpenNVR - Integration Test"
-        body = "This is a test email from your OpenNVR system. If you received this, your email integration is working correctly."
+        msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
         try:
-            # We use a synchronous SMTP call here. In a high-throughput scenario,
-            # this should be offloaded to a thread pool or use an async SMTP lib (aiosmtplib).
-            # For a "Test" button, sync is acceptable if not blocking main loop for too long,
-            # but ideally we run it in a thread.
+            # Synchronous SMTP offloaded to the default executor so it never
+            # blocks the event loop.
             import asyncio
 
             def send_sync():
@@ -89,7 +87,7 @@ class IntegrationService:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, send_sync)
 
-            return {"success": True, "message": f"Test email sent to {to_addrs}"}
+            return {"success": True, "message": f"Email sent to {to_addrs}"}
 
         except smtplib.SMTPAuthenticationError:
             return {
@@ -102,7 +100,17 @@ class IntegrationService:
             return {"success": False, "message": f"SMTP Error: {e!s}"}
 
     @staticmethod
-    async def _test_webhook(integration: Integration) -> dict:
+    async def _test_email(config: dict) -> dict:
+        return await IntegrationService._send_email(
+            config,
+            "OpenNVR - Integration Test",
+            "This is a test email from your OpenNVR system. If you received "
+            "this, your email integration is working correctly.",
+        )
+
+    @staticmethod
+    async def _send_webhook(integration: Integration, payload: dict) -> dict:
+        """POST a payload to the integration's webhook URL (webhook/slack/teams)."""
         config = integration.config
         url = ""
 
@@ -113,16 +121,6 @@ class IntegrationService:
 
         if not url:
             return {"success": False, "message": "Missing Webhook URL"}
-
-        payload = {
-            "event": "integration.test",
-            "message": "This is a test event from OpenNVR.",
-            "timestamp": "2024-01-01T00:00:00Z",
-        }
-
-        # Slack/Teams specific formatting could go here, but raw JSON usually works or gives a 400
-        if integration.type == "slack" or integration.type == "teams":
-            payload = {"text": "🔔 OpenNVR: Integration Test Successful!"}
 
         async with httpx.AsyncClient() as client:
             try:
@@ -149,3 +147,60 @@ class IntegrationService:
                     "success": False,
                     "message": f"Webhook connection failed: {e!s}",
                 }
+
+    @staticmethod
+    async def _test_webhook(integration: Integration) -> dict:
+        payload = {
+            "event": "integration.test",
+            "message": "This is a test event from OpenNVR.",
+            "timestamp": "2024-01-01T00:00:00Z",
+        }
+        # Slack/Teams specific formatting could go here, but raw JSON usually works or gives a 400
+        if integration.type == "slack" or integration.type == "teams":
+            payload = {"text": "🔔 OpenNVR: Integration Test Successful!"}
+        return await IntegrationService._send_webhook(integration, payload)
+
+    @staticmethod
+    async def send_alert(*, subject: str, message: str, payload: dict) -> None:
+        """Fan an alert out to every enabled email/webhook/slack/teams
+        integration. Best-effort per integration — one failing endpoint never
+        blocks the others, and callers treat the whole send as fire-and-forget.
+        """
+        from core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(Integration)
+                .filter(Integration.enabled == True)  # noqa: E712
+                .all()
+            )
+        finally:
+            db.close()
+
+        for integration in rows:
+            try:
+                if integration.type == "email":
+                    result = await IntegrationService._send_email(
+                        integration.config, subject, message
+                    )
+                elif integration.type in ["slack", "teams"]:
+                    result = await IntegrationService._send_webhook(
+                        integration, {"text": f"🚨 {subject}\n{message}"}
+                    )
+                elif integration.type == "webhook":
+                    result = await IntegrationService._send_webhook(
+                        integration,
+                        {"subject": subject, "message": message, **payload},
+                    )
+                else:
+                    continue
+                if not result.get("success"):
+                    logger.warning(
+                        f"Alert delivery to integration '{integration.name}' "
+                        f"failed: {result.get('message')}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Alert delivery to integration '{integration.name}' raised: {e}"
+                )

@@ -309,6 +309,14 @@ def register_tools(registry: ToolRegistry, ctx: ToolContext) -> None:
         except CameraContextError as exc:
             return _err("look_at_camera", exc)
 
+        # A blank/again question yields a vague caption; give the small VLM a
+        # concrete default that elicits presence — the "it didn't say someone
+        # was there" symptom is worse with an empty prompt.
+        question = (question or "").strip() or (
+            "Describe what is happening in this camera view, and state plainly "
+            "whether a person is present."
+        )
+
         t0 = time.monotonic()
         try:
             if temporal:

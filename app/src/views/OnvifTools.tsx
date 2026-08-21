@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 
 type Device = { ip: string | null; service_urls: string[] }
 type Profile = { token: string; name: string }
@@ -37,6 +38,20 @@ export function OnvifTools() {
   const [cameraTime, setCameraTime] = useState<string>('')
 
   const canAuth = selectedIp && username && password
+
+  // Prefill the CIDR field with the range a scan would cover (configured
+  // Camera LAN or auto-detected), so the target is visible before scanning.
+  useEffect(() => {
+    let cancelled = false
+    apiService.onvifDiscoverPlan()
+      .then(res => {
+        if (!cancelled && res?.data?.scan_cidrs?.[0]) {
+          setScanCidr(prev => prev || res.data.scan_cidrs[0])
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const discover = async () => {
     setLoading(true)
@@ -147,10 +162,22 @@ export function OnvifTools() {
         vlan: null,
         status: 'unknown',
       }
-      await apiService.createCamera(payload)
+      try {
+        await apiService.createCamera(payload)
+      } catch (e: any) {
+        if (!isDuplicateCameraError(e)) throw e
+        const names = duplicateCameraNames(e)
+        const ok = confirm(
+          'A camera with this IP address or stream URL is already added' +
+          (names.length ? `: ${names.join(', ')}` : '') +
+          '. Add it again anyway?'
+        )
+        if (!ok) return
+        await apiService.createCamera(payload, { force: true })
+      }
       alert('Camera added successfully')
     } catch (e: any) {
-      setErr(e?.data?.detail || e.message || 'Failed to add camera')
+      setErr((typeof e?.data?.detail === 'string' ? e.data.detail : null) || e.message || 'Failed to add camera')
     } finally {
       setLoading(false)
     }

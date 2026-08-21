@@ -131,19 +131,20 @@ async def get_compliance_summary(
             else:
                 offline_count += 1
 
-            # Fetch recordings (still need for total_recordings count)
+            # Fetch recordings (still need for total_recordings count).
+            # Async + cached — the old blocking requests.get here froze the
+            # event loop once per camera.
             if settings.mediamtx_playback_url:
                 try:
-                    import requests as http_client
+                    from services import mediamtx_client
 
-                    url = f"{settings.mediamtx_playback_url}/list?path={stream_name}"
-                    resp = http_client.get(url, timeout=0.5)
-                    if resp.status_code == 200:
-                        segs = resp.json()
-                        if segs:
-                            for s in segs:
-                                s["camera_id"] = cam.id
-                                all_segments.append(s)
+                    segs = await mediamtx_client.list_segments(
+                        stream_name, timeout=2.0
+                    )
+                    if segs:
+                        for s in segs:
+                            s["camera_id"] = cam.id
+                            all_segments.append(s)
                 except Exception:
                     pass
 

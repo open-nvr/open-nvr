@@ -11,6 +11,8 @@ phrasing is allowed to evolve."""
 from __future__ import annotations
 
 import time
+import time
+import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -45,7 +47,9 @@ def _ctx_with_camera() -> CameraContext:
 def _build_tools(ctx: CameraContext, *,
                  caption_response=None,
                  detection_response=None,
-                 recognition_response=None) -> CameraTools:
+                 recognition_response=None,
+                 best_frame_fetch=None,
+                 resolve_camera=None) -> CameraTools:
     caption = AsyncMock()
     caption.infer.return_value = caption_response or {
         "result": {"caption": "a box on a doormat"}
@@ -63,6 +67,8 @@ def _build_tools(ctx: CameraContext, *,
         caption_client=caption,
         detection_client=detect,
         recognition_client=recognise,
+        best_frame_fetch=best_frame_fetch,
+        resolve_camera=resolve_camera,
     )
 
 
@@ -285,3 +291,224 @@ def test_tool_definitions_with_no_cameras_has_sentinel():
     describe = next(d for d in defs if d["function"]["name"] == "describe_camera")
     enum = describe["function"]["parameters"]["properties"]["camera_id"]["enum"]
     assert enum  # non-empty
+
+
+# ── camera_snapshot: metadata from Tier-0, no inference ────────────
+
+def _record_tier0(ctx: CameraContext, camera_id: str, labels: list[str]) -> None:
+    ctx.record_event(EventRecord(
+        received_at=time.time(), camera_id=camera_id, adapter="tier0",
+        summary="tier0", raw={"tracks": [{"label": lbl} for lbl in labels]},
+    ))
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_counts_from_tier0_without_inference():
+    ctx = _ctx_with_camera()
+    _record_tier0(ctx, "front-porch", ["person", "car", "car"])
+    tools = _build_tools(ctx)
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "a person" in out and "2 cars" in out
+    # no live inference fired — the whole point of the tool
+    tools._detect.infer.assert_not_awaited()
+    tools._caption.infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_reports_when_no_tier0_data():
+    tools = _build_tools(_ctx_with_camera())
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "no live detection data" in out
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_resolves_agent_camera_to_pipeline_id():
+    # The Tier-0 ring is keyed by the pipeline camera id ("3"); the tool is called
+    # with the agent id ("front-porch"). Without the resolver they'd never match.
+    ctx = _ctx_with_camera()
+    _record_tier0(ctx, "3", ["person"])                 # ring keyed by pipeline id
+    tools = _build_tools(ctx, resolve_camera=lambda c: "3")
+    out = await tools.camera_snapshot({"camera_id": "front-porch"})
+    assert "a person" in out
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_ignores_stale_events():
+    ctx = _ctx_with_camera()
+    ctx.record_event(EventRecord(
+        received_at=time.time() - 30, camera_id="front-porch", adapter="tier0",
+        summary="old", raw={"tracks": [{"label": "person"}]},
+    ))
+    out = await _build_tools(ctx).camera_snapshot({"camera_id": "front-porch"})
+    assert "nothing detected recently" in out
+
+
+@pytest.mark.asyncio
+async def test_describe_swallows_best_frame_fetch_errors():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource(frame=b"LIVEFRAME")
+    ctx.register_frame_source("front-porch", stub)
+    boom = AsyncMock(side_effect=RuntimeError("network down"))
+    tools = _build_tools(ctx, best_frame_fetch=boom)
+    await tools.describe_camera({"camera_id": "front-porch"})   # must not raise
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"LIVEFRAME"
+    assert stub.calls == 1
+
+
+# ── describe_camera prefers Tier-0's best frame ────────────────────
+
+@pytest.mark.asyncio
+async def test_describe_uses_best_frame_when_track_active():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource()
+    ctx.register_frame_source("front-porch", stub)
+    # A Tier-0 track is active RIGHT NOW, so the best frame is a valid stand-in
+    # for the live scene and describe_camera uses it (the efficiency win). When
+    # no track is active the frame is stale and a live grab is taken instead
+    # (see tests/test_live_describe_freshness.py).
+    ctx.latest_inference = lambda cam, adapter=None: types.SimpleNamespace(
+        received_at=time.time(), raw={})
+    fetch = AsyncMock(return_value=b"BESTFRAME")
+    tools = _build_tools(ctx, best_frame_fetch=fetch)
+    await tools.describe_camera({"camera_id": "front-porch", "question": "what colour?"})
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"BESTFRAME"
+    assert stub.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_describe_falls_back_to_live_frame_when_no_best():
+    ctx = _ctx_with_camera()
+    stub = _StubFrameSource(frame=b"LIVEFRAME")
+    ctx.register_frame_source("front-porch", stub)
+    fetch = AsyncMock(return_value=None)          # best frame unavailable
+    tools = _build_tools(ctx, best_frame_fetch=fetch)
+    await tools.describe_camera({"camera_id": "front-porch"})
+    assert tools._caption.infer.await_args.kwargs["frame_jpeg"] == b"LIVEFRAME"
+    assert stub.calls == 1
+
+
+# ── make_best_frame_fetch client ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_make_best_frame_fetch_maps_camera_and_handles_status():
+    from tools import make_best_frame_fetch
+    seen = {}
+
+    async def http_get(url):
+        seen["url"] = url
+        return (200, b"IMG") if "camera=7" in url else (404, b"")
+
+    fetch = make_best_frame_fetch(
+        "http://tier0:9109/", resolve_camera=lambda c: "7", http_get=http_get)
+    assert await fetch("front-porch") == b"IMG"
+    assert seen["url"] == "http://tier0:9109/best_frame?camera=7"
+
+    fetch_miss = make_best_frame_fetch(
+        "http://tier0:9109", resolve_camera=lambda c: "9", http_get=http_get)
+    assert await fetch_miss("x") is None          # 404 -> None
+
+
+# ── search_history (canonical event store, RFC-0001 C1) ─────────────
+
+class _FakeEvent:
+    def __init__(self, id, camera_id=3, label="person", has_evidence=True,
+                 plate_text=None,
+                 started_at="2026-08-12T15:12:04+00:00",
+                 ended_at="2026-08-12T15:14:11+00:00"):
+        self.id = id
+        self.camera_id = camera_id
+        self.label = label
+        self.score = 0.9
+        self.started_at = started_at
+        self.ended_at = ended_at
+        self.stationary = False
+        self.plate_text = plate_text
+        self.has_evidence = has_evidence
+
+
+class _FakeEventsClient:
+    def __init__(self, events, crops=None):
+        self._events = events
+        self._crops = crops or {}
+        self.searches = []
+
+    async def search(self, **kw):
+        self.searches.append(kw)
+        return self._events
+
+    async def evidence(self, event_id):
+        return self._crops.get(event_id)
+
+
+class _FakeRecogniser:
+    def __init__(self, by_crop):
+        self._by = by_crop
+
+    async def infer(self, frame_jpeg=None, extra=None):
+        name = self._by.get(frame_jpeg)
+        if name:
+            return {"result": {"recognized": True, "name": name}}
+        return {"result": {}}
+
+
+def _history_tools(events_client, recogniser=None):
+    from unittest.mock import AsyncMock
+    stub = AsyncMock()
+    stub.infer.return_value = {"result": {}}
+    return CameraTools(
+        context=_ctx_with_camera(),
+        caption_client=stub,
+        detection_client=stub,
+        recognition_client=recogniser or stub,
+        events_client=events_client,
+    )
+
+
+def test_search_history_reports_visits_and_names(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient(
+        [_FakeEvent(1), _FakeEvent(2, has_evidence=False)],
+        crops={1: b"crop-1"},
+    )
+    tools = _history_tools(ec, _FakeRecogniser({b"crop-1": "Priya"}))
+    out = asyncio.run(tools.search_history({
+        "label": "person",
+        "start_time": "2026-08-12T15:00", "end_time": "2026-08-12T16:00",
+    }))
+    assert "2 person visit(s)" in out
+    assert "photo kept" in out          # times are spoken in LOCAL tz (host-dependent)
+    assert "Recognised: Priya" in out
+    assert ec.searches[0]["label"] == "person"
+
+
+def test_search_history_without_store_or_matches(anyio_backend=None):
+    import asyncio
+    tools = _history_tools(None)
+    assert "isn't enabled" in asyncio.run(tools.search_history({}))
+    ec = _FakeEventsClient([])
+    tools2 = _history_tools(ec)
+    out = asyncio.run(tools2.search_history({"label": "car"}))
+    assert "No car visits" in out
+
+
+def test_search_history_failure_is_not_reported_as_empty(anyio_backend=None):
+    # Store down / rejected query must NOT sound like "nobody came".
+    import asyncio
+
+    class _DownClient:
+        async def search(self, **kw):
+            return None
+
+    tools = _history_tools(_DownClient())
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "couldn't check" in out
+    assert "No person visits" not in out
+
+
+def test_search_history_speaks_plates(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient([_FakeEvent(1, label="car", plate_text="KA01AB1234")])
+    tools = _history_tools(ec)
+    out = asyncio.run(tools.search_history({"label": "car", "plate": "KA01"}))
+    assert "plate KA01AB1234" in out
+    assert ec.searches[0]["plate"] == "KA01"

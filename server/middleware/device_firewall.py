@@ -59,7 +59,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from core.client_ip import get_client_ip, is_internal_service, is_loopback
-from core.database import SessionLocal
 from services import device_firewall_service as dfw
 
 # API paths reachable by an unapproved device. Everything else under /api is
@@ -104,21 +103,20 @@ class DeviceFirewallMiddleware(BaseHTTPMiddleware):
 
         token = dfw.token_from_request(request)
 
-        db = SessionLocal()
-        try:
-            if not dfw.enforcement_active(db):
+        # Cached decisions (15s TTL, invalidated on any registry mutation):
+        # this middleware runs on every /api/* request including every HLS
+        # byte-range fetch, so the hot path must not open a DB session.
+        if not dfw.enforcement_active_cached():
+            return await call_next(request)
+        if token:
+            if dfw.is_allowed_browser_cached(token):
                 return await call_next(request)
-            if token:
-                if dfw.is_allowed_browser(db, token):
-                    return await call_next(request)
-            elif is_internal_service(ip):
-                # No device token: a sibling container (MediaMTX/KAI-C/adapters),
-                # or a browser that last logged in before this feature shipped.
-                # Allowing these is what keeps an upgrade from locking everyone
-                # out; they enroll on their next login.
-                return await call_next(request)
-        finally:
-            db.close()
+        elif is_internal_service(ip):
+            # No device token: a sibling container (MediaMTX/KAI-C/adapters),
+            # or a browser that last logged in before this feature shipped.
+            # Allowing these is what keeps an upgrade from locking everyone
+            # out; they enroll on their next login.
+            return await call_next(request)
 
         return JSONResponse(
             status_code=403,
