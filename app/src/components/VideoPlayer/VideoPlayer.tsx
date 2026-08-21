@@ -306,6 +306,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }, delay)
     }, [mode])
 
+    // The video-element error listener is bound once, on mount, so it reaches
+    // the current scheduler through a ref instead of capturing the one that
+    // existed at mount.
+    const scheduleAutoRetryRef = useRef(scheduleAutoRetry)
+    scheduleAutoRetryRef.current = scheduleAutoRetry
+
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
       if (!whepUrl || !videoRef.current) return
@@ -766,8 +772,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (!el.src && !el.srcObject) {
           return
         }
-        setError(errorMsg || 'Video error')
-        setIsLoading(false)
+        // Go through the retry scheduler rather than straight to the error
+        // overlay. A media error on a live stream is usually transient: with
+        // hlsAlwaysRemux disabled, MediaMTX only builds an HLS muxer once a
+        // client asks for one, so the first request right after switching a
+        // tile to HLS can be answered before any segment exists. The native
+        // player reports that unparsable body as DEMUXER_ERROR_COULD_NOT_PARSE,
+        // which used to park the tile on a manual Retry that succeeded purely
+        // because the muxer had warmed up by the time it was clicked. The
+        // scheduler still lands on the error overlay once the backoff budget
+        // is spent, so a genuinely broken stream is not hidden — and for
+        // playback it sets the error immediately, as before.
+        scheduleAutoRetryRef.current(errorMsg || 'Video error')
       }
 
       el.addEventListener('play', onPlay)
