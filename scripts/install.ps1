@@ -553,8 +553,16 @@ function Choose-Example {
                 'Transcribes your spoken questions (voice mode only).' 'yes' `
                 'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
         }
-        Configure-Value CAPTION_ADAPTER 'Scene-description model' 'moondream' `
-            'Describes what a camera sees. moondream answers questions (VQA); blip writes plain captions; ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - needs an adapter tag newer than 0.1.3).' 'yes' `
+        # When the LLM already runs on the host Ollama, the VLM belongs there
+        # too: the ollamavlm adapter proxies scene questions to the same
+        # GPU-fast Ollama (a caption costs ~1-2 s vs ~25 s of VM CPU with
+        # the in-container weights). Same adapter contract, same audited
+        # KAI-C path - only where the weights execute changes. On the
+        # bundled-container path the in-VM moondream stays the default.
+        $captionDefault = 'moondream'
+        if ($llmWhere -eq 'host') { $captionDefault = 'ollamavlm' }
+        Configure-Value CAPTION_ADAPTER 'Scene-description model' $captionDefault `
+            'Describes what a camera sees. ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - the default in that case; needs an adapter tag newer than 0.1.3); moondream/blip run inside Docker (moondream answers questions, blip writes plain captions).' 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
             Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default.' 'yes' $vlmSuggest
