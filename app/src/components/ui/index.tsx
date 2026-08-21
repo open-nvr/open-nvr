@@ -57,8 +57,10 @@ const BADGE_STYLES: Record<BadgeVariant, string> = {
   info: 'bg-[var(--badge-info-bg)] text-[var(--badge-info-text)]',
 }
 
-export function Badge({ children, variant = 'neutral', className = '' }: { children: ReactNode; variant?: BadgeVariant; className?: string }) {
-  return <span className={clsx('inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px]', BADGE_STYLES[variant], className)}>{children}</span>
+// Spreads span attributes so callers can attach a `title` — a badge that
+// summarises a state often needs to explain it on hover.
+export function Badge({ children, variant = 'neutral', className = '', ...rest }: HTMLAttributes<HTMLSpanElement> & { variant?: BadgeVariant }) {
+  return <span className={clsx('inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px]', BADGE_STYLES[variant], className)} {...rest}>{children}</span>
 }
 
 /* ---------------------------- Button ---------------------------- */
