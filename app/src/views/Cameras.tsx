@@ -29,6 +29,7 @@ import type { BadgeVariant } from '../components/ui'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
 import { parseCameraQr } from '../lib/cameraQr'
+import { formatDuration } from '../lib/time'
 import { Modal } from '../components/Modal'
 
 type Camera = {
@@ -48,7 +49,13 @@ type Camera = {
   is_active: boolean
   deleted_at?: string | null
   mediamtx_provisioned?: boolean | null
+  // Configuration intent — always true for a provisioned camera and not
+  // switchable, so it says nothing about whether footage is being written.
   recording_enabled?: boolean | null
+  // Observed recording health, derived server-side from the newest indexed
+  // segment. Absent (undefined) means the endpoint didn't compute it.
+  recording_state?: 'recording' | 'stalled' | 'never' | 'off' | null
+  last_recording_at?: string | null
   // ONVIF device metadata
   manufacturer?: string | null
   model?: string | null
@@ -171,6 +178,41 @@ export function Cameras() {
     }
     if (c.mediamtx_provisioned === false) return { variant: 'destructive', label: 'Error' }
     return { variant: 'neutral', label: 'Not configured' }
+  }
+
+  // Observed recording health, not the config flag. `recording_enabled` is
+  // true for every provisioned camera and cannot be switched off, so it used
+  // to claim "Recording" beside a dead stream. The server derives this from
+  // the newest written segment instead, using the recording watchdog's own
+  // thresholds, so this badge agrees with the stall alert.
+  const recordingState = (c: Camera): { variant: BadgeVariant; label: string; title?: string } => {
+    const at = c.last_recording_at ? new Date(c.last_recording_at) : null
+    const agoSeconds = at ? Math.max(0, (Date.now() - at.getTime()) / 1000) : null
+    const seenAt = at ? `Last segment ${at.toLocaleString()}` : undefined
+
+    switch (c.recording_state) {
+      case 'recording':
+        return { variant: 'success', label: 'Recording', title: seenAt }
+      case 'stalled': {
+        // formatDuration never rolls up to days, so a multi-day stall would
+        // render "Stalled 74h 12m" and overflow the column.
+        const age =
+          agoSeconds === null ? null : agoSeconds >= 86400 ? '>24h' : formatDuration(agoSeconds)
+        return {
+          variant: 'warning',
+          label: age ? `Stalled ${age}` : 'Stalled',
+          title: seenAt ? `${seenAt} — nothing written since` : undefined,
+        }
+      }
+      case 'never':
+        return { variant: 'warning', label: 'No data', title: 'No recording has ever been indexed for this camera' }
+      case 'off':
+        return { variant: 'neutral', label: 'Off' }
+      default:
+        // Endpoints that don't compute it leave this unset — say so rather
+        // than implying recording is off.
+        return { variant: 'neutral', label: '—', title: 'Recording state unavailable' }
+    }
   }
 
   // Load cameras
@@ -515,13 +557,14 @@ export function Cameras() {
               <TH>Camera</TH>
               <TH className="w-[170px]">Address</TH>
               <TH className="w-[150px]">Stream</TH>
-              <TH className="w-[130px]">Recording</TH>
+              <TH className="w-[150px]">Recording</TH>
               <TH className="w-[110px]">Actions</TH>
             </TR>
           </THead>
           <TBody striped>
             {cameras.map((c) => {
               const stream = streamState(c)
+              const rec = recordingState(c)
               // Model and serial lost their own columns; keep every field
               // reachable from the hover text rather than dropping it.
               const device = [c.manufacturer, c.model].filter(Boolean).join(' ')
@@ -564,9 +607,7 @@ export function Cameras() {
                     </Badge>
                   </TD>
                   <TD>
-                    <Badge variant={c.recording_enabled === true ? 'destructive' : 'neutral'}>
-                      {c.recording_enabled === true ? 'Recording' : 'Off'}
-                    </Badge>
+                    <Badge variant={rec.variant} title={rec.title}>{rec.label}</Badge>
                   </TD>
                   <TD>
                     <div className="flex items-center justify-end gap-1">
@@ -577,7 +618,8 @@ export function Cameras() {
                       )}
                       {/* Recording is automatic on an NVR — no manual
                           start/stop control. The Recording column shows its
-                          live status. */}
+                          live status, derived from the newest written
+                          segment rather than the config flag. */}
                       {c.mediamtx_provisioned === true && (
                         <button
                           className={`${ICON_BTN} border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)]/10`}
