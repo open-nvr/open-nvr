@@ -101,6 +101,30 @@ scene, look for perpetual motion sources: a camera-OSD timestamp burned
 into the substream ticks every second and defeats motion gating — turn
 the overlay off in the camera, or crop/mask it.
 
+**Worst case is bounded by design.** A cluttered scene (a desk of wires
+and boards) once drove the field failure this section exists for: at
+confidence 0.25 across all 80 COCO classes, yolov8n hallucinated
+"kite"/"banana" phantoms that confirmed into 181 standing tracks, and
+re-verifying that population cost ~30 s of detector per frame. Four
+guards now keep the worst case flat regardless of scene content, each
+with an env dial and a metric (never a silent cap):
+
+* `DETECT_LABELS` (default `person,car,truck,bus,motorcycle,bicycle,cat,dog`)
+  — only these classes are tracked; `all` restores every COCO class.
+* `DETECT_CONF` (default `0.4`) — detector confidence floor, plus
+  `DETECT_MIN_SPAWN_SCORE` (default `0.5`): it takes solid evidence to
+  *create* a track, weaker evidence still *matches* one (Frigate-style
+  hysteresis).
+* `DETECT_MAX_REGIONS` (default `8`) — hard per-frame budget of detector
+  crops. Motion regions win slots first; track re-verifies round-robin
+  the remainder across frames (skipped tracks coast, they don't age).
+  Capped frames count on `tier0_regions_capped_total`.
+* `DETECT_MAX_TRACKS` (default `50`) + `DETECT_TRACK_TTL` (default
+  `300` s) — a hard ceiling on live tracks, and a wall-clock TTL so a
+  track that is never positively re-detected always drains (frame-based
+  miss counting stalls exactly when the pipeline is overloaded). Refused
+  spawns show on `tier0_track_spawns_dropped`.
+
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera

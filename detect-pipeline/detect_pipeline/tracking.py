@@ -20,6 +20,7 @@ prevents ID churn. Kept dependency-light on purpose.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from itertools import count
 
@@ -53,6 +54,26 @@ class TrackConfig:
     motionless_iou: float = 0.9
     # motionless frames before a track is considered stationary (Frigate: 50)
     stationary_threshold: int = 50
+    # ── Bounded-load guards (#track-explosion) ─────────────────────────
+    # Hard ceiling on live tracks per camera. A cluttered scene full of
+    # persistent false positives (wires → "kite"/"banana") must not grow the
+    # track list — and with it the per-frame re-verify region count — without
+    # bound. At the cap, new spawns are refused (counted on
+    # ``Tracker.spawns_dropped``); expiry below drains the population.
+    max_tracks: int = 50
+    # Wall-clock TTL: a track not positively MATCHED for this many seconds
+    # expires no matter what, coasting or not. Frame-based miss counting
+    # drains far too slowly when the pipeline is overloaded (the very moment
+    # an explosion needs draining) — wall time doesn't care how slow frames
+    # are. A real object that expires is simply re-detected on the next scan
+    # of its region; cheap churn, bounded state. 0 disables.
+    coast_ttl_seconds: float = 300.0
+    # Minimum detection score to SPAWN a new track (matching an existing
+    # track has no floor beyond the detector's own threshold). Frigate's
+    # min_score/threshold hysteresis: it takes solid evidence to create an
+    # object, weaker evidence to keep following it. 0 preserves the
+    # pre-guard behavior for existing callers/tests.
+    min_spawn_score: float = 0.0
 
     def initialized(self) -> int:
         return self.min_initialized if self.min_initialized is not None else max(1, self.fps // 2)
@@ -77,6 +98,9 @@ class Track:
     confirmed: bool = False
     best: ThumbCandidate | None = None
     stationary_threshold: int = 50
+    # Monotonic timestamp of the last positive match (set at spawn and on
+    # every match) — the coast-TTL expiry anchor.
+    last_matched: float = 0.0
     # BGR crop of the best frame, retained only when the tracker is fed pixels
     # (the Tier-1 gate dispatches THIS on escalation — see gate/dispatch, PR B #10).
     best_crop: object | None = field(default=None, repr=False, compare=False)
@@ -133,11 +157,19 @@ def _crop_bgr(bgr, box: Box):
 class Tracker:
     """Greedy, size-aware multi-object tracker."""
 
-    def __init__(self, frame_shape: tuple[int, int], config: TrackConfig | None = None) -> None:
+    def __init__(
+        self, frame_shape: tuple[int, int], config: TrackConfig | None = None,
+        clock=None,
+    ) -> None:
         self.frame_shape = frame_shape  # (h, w)
         self.config = config or TrackConfig()
         self._tracks: list[Track] = []
         self._ids = count(1)
+        # Injectable monotonic clock (tests); wall time drives coast-TTL expiry.
+        self._clock = clock or time.monotonic
+        # Spawns refused because the track cap or spawn-score floor was hit —
+        # observability for the bounded-load guards (service exports it).
+        self.spawns_dropped = 0
 
     @property
     def tracks(self) -> list[Track]:
@@ -159,6 +191,7 @@ class Tracker:
         # (the default, and every pre-PR-B caller) preserves the original
         # behavior: every unmatched track counts a miss.
         cfg = self.config
+        now = self._clock()
         unmatched_tracks = set(range(len(self._tracks)))
         unmatched_dets = set(range(len(detections)))
 
@@ -175,17 +208,31 @@ class Tracker:
 
         for _dist, ti, di in pairs:
             if ti in unmatched_tracks and di in unmatched_dets:
-                self._match(self._tracks[ti], detections[di], bgr)
+                self._match(self._tracks[ti], detections[di], bgr, now)
                 unmatched_tracks.discard(ti)
                 unmatched_dets.discard(di)
 
-        # unmatched detections -> new tentative tracks
+        # unmatched detections -> new tentative tracks (bounded: the track
+        # cap and the spawn-score floor refuse, never grow without limit)
         for di in unmatched_dets:
-            self._spawn(detections[di], bgr)
+            det = detections[di]
+            if det.score < cfg.min_spawn_score or len(self._tracks) >= cfg.max_tracks:
+                self.spawns_dropped += 1
+                continue
+            self._spawn(det, bgr, now)
 
         # unmatched tracks -> age out (or coast, if never scanned this frame)
         survivors: list[Track] = []
         for ti, tr in enumerate(self._tracks):
+            # Coast-TTL: however it got here — coasting unscanned, surviving
+            # on misses — a track that hasn't been positively matched in
+            # ``coast_ttl_seconds`` of WALL time is gone. This is the drain
+            # that frame-based miss counting can't provide under load.
+            if (
+                cfg.coast_ttl_seconds > 0
+                and (now - tr.last_matched) > cfg.coast_ttl_seconds
+            ):
+                continue
             if ti in unmatched_tracks:
                 tr.age += 1
                 if scanned_regions is not None and not any(
@@ -211,7 +258,7 @@ class Tracker:
         self._tracks = survivors
         return self.tracks
 
-    def _match(self, tr: Track, det: Detection, bgr=None) -> None:
+    def _match(self, tr: Track, det: Detection, bgr=None, now: float | None = None) -> None:
         iou = intersection_over_union(tr.box, det.box)
         if iou >= self.config.motionless_iou:
             tr.motionless_count += 1
@@ -222,17 +269,19 @@ class Tracker:
         tr.hits += 1
         tr.age += 1
         tr.misses = 0
+        tr.last_matched = now if now is not None else self._clock()
         if not tr.confirmed and tr.hits >= self.config.initialized():
             tr.confirmed = True
         self._update_best(tr, det, bgr)
 
-    def _spawn(self, det: Detection, bgr=None) -> None:
+    def _spawn(self, det: Detection, bgr=None, now: float | None = None) -> None:
         tr = Track(
             id=next(self._ids),
             label=det.label,
             box=det.box,
             score=det.score,
             stationary_threshold=self.config.stationary_threshold,
+            last_matched=now if now is not None else self._clock(),
         )
         tr.confirmed = self.config.initialized() <= 1
         self._update_best(tr, det, bgr)

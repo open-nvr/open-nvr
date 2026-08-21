@@ -56,8 +56,9 @@ def test_nms_suppresses_overlapping_same_label():
 
 def test_select_regions_dedups_overlapping():
     boxes = [(100, 100, 160, 200), (105, 100, 165, 205)]  # near-identical
-    regions = select_regions(boxes, [], (H, W), min_region=320)
+    regions, capped = select_regions(boxes, [], (H, W), min_region=320)
     assert len(regions) == 1                              # collapsed to one region
+    assert capped is False
 
 
 # ── integration ─────────────────────────────────────────────────────
