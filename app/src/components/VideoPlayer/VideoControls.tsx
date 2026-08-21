@@ -166,10 +166,13 @@ export function VideoControls({
         </div>
       )}
 
-      {/* Controls row — container-queried against the player root
-          (containerType: 'size'): low-priority controls drop out as the tile
-          narrows so the essentials (play, mute, fullscreen) never clip. */}
-      <div className="flex items-center gap-2 @max-[300px]:gap-0.5">
+      {/* Controls row — container-queried against the chrome band, which is
+          the width these controls are actually laid out in. Low-priority
+          controls drop out as the tile narrows, in reverse order of how much
+          an operator needs them (snapshot outlives PTZ and refresh), and
+          below 300px the remaining icons shrink rather than clip, so play,
+          mute and fullscreen survive at any size. */}
+      <div className="flex items-center gap-2 @max-[300px]:gap-0.5 @max-[300px]:[&_button:not(.menu-item)]:p-1 @max-[300px]:[&_svg]:w-4 @max-[300px]:[&_svg]:h-4">
         {/* Play/Pause */}
         <button
           onClick={isPlaying ? onPause : onPlay}
@@ -209,7 +212,7 @@ export function VideoControls({
         {isLive && onRefresh && (
           <button
             onClick={onRefresh}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[280px]:hidden"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[260px]:hidden"
             title="Refresh stream"
           >
             <RefreshCw size={18} />
@@ -247,7 +250,7 @@ export function VideoControls({
           >
             {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </button>
-          <div className={`flex items-center overflow-hidden transition-all duration-200 @max-[320px]:hidden ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
+          <div className={`flex items-center overflow-hidden transition-all duration-200 @max-[420px]:hidden ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
             <input
               type="range"
               min="0"
@@ -281,7 +284,7 @@ export function VideoControls({
         {onSnapshot && (
           <button
             onClick={onSnapshot}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[320px]:hidden"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[180px]:hidden"
             title="Take snapshot"
           >
             <Camera size={18} />
@@ -290,7 +293,7 @@ export function VideoControls({
 
         {/* Settings */}
         {(availableStreamTypes.length > 1 || !isLive) && (
-          <div className="relative @max-[280px]:hidden" ref={settingsRef}>
+          <div className="relative @max-[220px]:hidden" ref={settingsRef}>
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="p-1.5 hover:bg-white/20 rounded transition-colors"
@@ -311,7 +314,7 @@ export function VideoControls({
                           onStreamTypeChange(type)
                           setShowSettings(false)
                         }}
-                        className={`block w-full text-left px-2 py-1 rounded text-xs ${streamType === type ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
+                        className={`menu-item block w-full text-left px-2 py-1 rounded text-xs ${streamType === type ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
                       >
                         {type.toUpperCase()}
                       </button>
@@ -329,7 +332,7 @@ export function VideoControls({
                           if (videoRef.current) videoRef.current.playbackRate = speed
                           setShowSettings(false)
                         }}
-                        className={`block w-full text-left px-2 py-1 rounded text-xs ${videoRef.current?.playbackRate === speed ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
+                        className={`menu-item block w-full text-left px-2 py-1 rounded text-xs ${videoRef.current?.playbackRate === speed ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
                       >
                         {speed}x
                       </button>

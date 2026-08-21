@@ -997,42 +997,42 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         tabIndex={0}
         onDoubleClick={handleDoubleClick}
       >
-        {/* Content box — the largest rectangle matching the stream's real
-            aspect ratio that fits the container (100cqh = container height).
-            The video fills it exactly, and every overlay anchored to it
-            (title, LIVE badge, controls) hugs the actual feed. Residual space
-            around it shows the app panel background, not black bars. Until
-            the aspect is known the box just fills the container. */}
+        {/* Chrome band — full tile width, exactly as tall as the video, and
+            vertically centred on it (100cqw = tile width). It is transparent:
+            only the feed box inside it paints black, so the residual space
+            around the video still shows the app panel background rather than
+            letterbox bars.
+
+            The chrome (title, LIVE badge, controls) anchors HERE rather than
+            to the video rectangle. For a landscape stream the two are the
+            same width, so nothing moves. For a portrait stream the video is a
+            narrow strip with wide dead margins either side, and confining the
+            control row to that strip left room for only play/mute/fullscreen
+            — snapshot and settings dropped out entirely. Spanning the tile
+            reclaims the margins, and because the band is only as tall as the
+            video the chrome still sits on the feed's own top and bottom edges
+            instead of floating below it.
+
+            The band is also the query container the controls size themselves
+            against, so the breakpoints now measure the width they actually
+            get. 'inline-size' is enough — every query here is width-based. */}
         <div
-          className="relative bg-black"
+          className="relative flex justify-center"
           style={
             videoAspect
-              ? { aspectRatio: String(videoAspect), width: `min(100%, calc(100cqh * ${videoAspect}))` }
-              : { width: '100%', height: '100%' }
+              ? { width: '100%', height: `min(100%, calc(100cqw / ${videoAspect}))`, containerType: 'inline-size' }
+              : { width: '100%', height: '100%', containerType: 'inline-size' }
           }
         >
-        {/* Title overlay — transparent top-center label (clear of the corner
-            OSD burn-ins), legible via text shadow instead of a scrim */}
-        {title && (
-          <div
-            className={`absolute top-1.5 left-1/2 -translate-x-1/2 z-10 max-w-[60%] truncate text-sm leading-tight font-medium text-white/90 px-1.5 py-0.5 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)] transition-opacity duration-700 group-hover:opacity-100 ${
-              titleDimmed ? 'opacity-50' : 'opacity-100'
-            }`}
-          >
-            {title}
-          </div>
-        )}
+        {/* Feed box — the video rectangle itself, centred in the band. Width
+            follows from the band's height and the stream's aspect ratio.
+            min-w-0 keeps the video's intrinsic size from inflating it. */}
+        <div
+          className="relative h-full min-w-0 bg-black"
+          style={videoAspect ? { aspectRatio: String(videoAspect) } : { width: '100%' }}
+        >
 
-        {/* Live indicator — transparent: glowing dot + shadowed text so it
-            doesn't overshadow the stream like the old solid red chip */}
-        {isLive && !error && (
-          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 text-[10px] font-semibold tracking-wider text-red-400 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
-            <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse [box-shadow:0_0_5px_rgba(239,68,68,0.9)]" />
-            LIVE
-          </div>
-        )}
-
-        {/* Video element — the content box already matches its aspect ratio,
+        {/* Video element — the feed box already matches its aspect ratio,
             so object-contain leaves no internal bars once metadata is known */}
         <video
           ref={videoRef}
@@ -1093,6 +1093,43 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           </div>
         )}
 
+        {/* Caller-provided overlay (PTZ pad etc.) — hugs the feed, since it is
+            aimed at the picture rather than the tile */}
+        {overlay}
+        </div>
+
+        {/* Title overlay — transparent top-centre label (clear of the corner
+            OSD burn-ins), legible via text shadow instead of a scrim. Centred
+            on the band, which is centred on the video, so it stays visually
+            attached to the feed while free to run wider than it — the old cap
+            measured a narrow video strip and cut ordinary camera names to a
+            few characters.
+
+            The width cap reserves a fixed gutter rather than a percentage.
+            Being centred, the title's right edge sits at (100% - gutter/2),
+            so a gutter wider than the LIVE badge means the two can never
+            collide at any tile size; a percentage cap only holds until the
+            tile gets small enough for the badge to outgrow its share. */}
+        {title && (
+          <div
+            className={`absolute top-1.5 left-1/2 -translate-x-1/2 z-10 truncate text-sm @max-[300px]:text-xs leading-tight font-medium text-white/90 px-1.5 py-0.5 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)] transition-opacity duration-700 group-hover:opacity-100 ${
+              isLive && !error ? 'max-w-[calc(100%_-_110px)]' : 'max-w-[85%]'
+            } ${titleDimmed ? 'opacity-50' : 'opacity-100'}`}
+          >
+            {title}
+          </div>
+        )}
+
+        {/* Live indicator — transparent: glowing dot + shadowed text so it
+            doesn't overshadow the stream like the old solid red chip. Pinned
+            to the band's corner so a long title can never run under it. */}
+        {isLive && !error && (
+          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 text-[10px] font-semibold tracking-wider text-red-400 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
+            <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse [box-shadow:0_0_5px_rgba(239,68,68,0.9)]" />
+            LIVE
+          </div>
+        )}
+
         {/* Custom controls */}
         <div className={`transition-opacity duration-200 ${showControls || !isPlaying ? 'opacity-100' : 'opacity-0'}`}>
           <VideoControls
@@ -1122,9 +1159,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             ptzActive={ptzActive}
           />
         </div>
-
-        {/* Caller-provided overlay (PTZ pad etc.) — anchored to the feed box */}
-        {overlay}
         </div>
       </div>
     )
