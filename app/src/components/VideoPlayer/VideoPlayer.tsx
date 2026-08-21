@@ -744,6 +744,28 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
       const onPlay = () => setIsPlaying(true)
       const onPause = () => setIsPlaying(false)
+      // Frames are actually flowing, so any retry state left over from
+      // getting here is stale. 'playing' rather than 'play', which only
+      // means play() was called and fires even while the stream is stalled.
+      //
+      // Cancelling the pending timer matters as much as hiding the overlay:
+      // a retry scheduled while the stream was failing would otherwise fire
+      // afterwards and tear down a stream that has since recovered. The
+      // hls.js path clears this itself on MANIFEST_PARSED/FRAG_LOADED, but
+      // native playback — which is the path Chrome takes for HLS — has no
+      // such hook, so it used to keep showing "Reconnecting…" over a
+      // perfectly healthy picture until the operator hit refresh.
+      const onPlaying = () => {
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current)
+          retryTimerRef.current = null
+        }
+        retryCountRef.current = 0
+        offlinePollingRef.current = false
+        setIsReconnecting(false)
+        setIsLoading(false)
+        setError(null)
+      }
       const onTimeUpdate = () => setCurrentTime(el.currentTime)
       const onDurationChange = () => setDuration(el.duration || 0)
       const onLoadedData = () => setIsLoading(false)
@@ -787,6 +809,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
 
       el.addEventListener('play', onPlay)
+      el.addEventListener('playing', onPlaying)
       el.addEventListener('pause', onPause)
       el.addEventListener('timeupdate', onTimeUpdate)
       el.addEventListener('durationchange', onDurationChange)
@@ -799,6 +822,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
       return () => {
         el.removeEventListener('play', onPlay)
+        el.removeEventListener('playing', onPlaying)
         el.removeEventListener('pause', onPause)
         el.removeEventListener('timeupdate', onTimeUpdate)
         el.removeEventListener('durationchange', onDurationChange)
