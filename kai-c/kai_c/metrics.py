@@ -543,12 +543,56 @@ class MetricsRollup:
                 d = val - oldest.domain.get(key, 0.0)
                 domain[key] = round(val if d < 0 else d, 4)
 
+        # Trend keys for the UI's domain sparklines — bounded to 6 series
+        # so the payload stays small at 60 samples: derived averages for
+        # _sum/_count pairs first (e.g. realtime factor — the efficiency
+        # trend), then the busiest counters by windowed delta.
+        avg_stems = sorted(
+            k[:-4] for k in domain
+            if k.endswith("_sum") and (k[:-4] + "_count") in domain
+        )[:2]
+        counter_keys = sorted(
+            (k for k in domain if not k.endswith("_sum") and not k.endswith("_count")),
+            key=lambda k: domain[k], reverse=True,
+        )
+        domain_trend_keys = (
+            [s + "_avg" for s in avg_stems] + counter_keys[: 6 - len(avg_stems)]
+        )
+
+        def _domain_point(prev_s: MetricsSample, cur: MetricsSample) -> dict[str, float | None]:
+            """Per-interval domain values for one series point: counter
+            deltas (reset → None) and _sum/_count-derived interval
+            averages (no observations in the interval → None)."""
+            out: dict[str, float | None] = {}
+            for key in domain_trend_keys:
+                if key.endswith("_avg"):
+                    stem = key[:-4]
+                    ds = cur.domain.get(stem + "_sum", 0.0) - prev_s.domain.get(stem + "_sum", 0.0)
+                    dc = cur.domain.get(stem + "_count", 0.0) - prev_s.domain.get(stem + "_count", 0.0)
+                    out[key] = round(ds / dc, 4) if dc > 0 and ds >= 0 else None
+                else:
+                    cur_v = cur.domain.get(key)
+                    prev_v = prev_s.domain.get(key)
+                    if cur_v is None or prev_v is None or cur_v < prev_v:
+                        out[key] = None
+                    else:
+                        out[key] = round(cur_v - prev_v, 4)
+            return out
+
+        # Second pass over the already-built series points: inject the
+        # per-interval domain values (series[i] pairs samples[i-1]→[i]).
+        if domain_trend_keys and len(samples) > 1:
+            series[0]["domain"] = {k: None for k in domain_trend_keys}
+            for i in range(1, len(samples)):
+                series[i]["domain"] = _domain_point(samples[i - 1], samples[i])
+
         newest_hw = samples[-1] if samples else None
         return {
             "adapter": adapter,
             "window_s": WINDOW_SECONDS,
             "model_info": model_info,
             "domain": domain,
+            "domain_trend_keys": domain_trend_keys,
             "latency_ms": latency_ms,
             "outcomes": outcomes,
             "inflight": inflight,

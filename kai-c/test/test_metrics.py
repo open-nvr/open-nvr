@@ -127,6 +127,7 @@ def test_rollup_snapshot_with_no_samples_is_all_null():
         "window_s": 3600,
         "model_info": {},
         "domain": {},
+        "domain_trend_keys": [],
         "latency_ms": {"p50": None, "p95": None, "p99": None},
         "outcomes": {},
         "inflight": None,
@@ -586,3 +587,34 @@ def test_proxy_metrics_unknown_result_folds_to_exception():
     pm = ProxyMetrics()
     pm.record("x", "weird", 0.1)
     assert 'kaic_proxy_infer_total{adapter="x",result="exception"} 1' in pm.render()
+
+
+def test_domain_trend_series_points_carry_interval_values():
+    """Series points get per-interval domain deltas + derived averages,
+    ordered avg-first, capped at 6 keys; sample 0 is all-None."""
+    rollup = MetricsRollup()
+    t1 = (
+        'adapter_detections_total{label="person"} 10\n'
+        'adapter_realtime_factor_sum 2.0\n'
+        'adapter_realtime_factor_count 4\n'
+    )
+    t2 = (
+        'adapter_detections_total{label="person"} 22\n'
+        'adapter_realtime_factor_sum 5.0\n'
+        'adapter_realtime_factor_count 10\n'
+    )
+    rollup.record_sample("whisper", parse_adapter_metrics(t1, scraped_at=100.0))
+    rollup.record_sample("whisper", parse_adapter_metrics(t2, scraped_at=160.0))
+    snap = rollup.snapshot("whisper")
+    keys = snap["domain_trend_keys"]
+    assert keys[0] == "adapter_realtime_factor_avg"          # avg first
+    assert 'adapter_detections_total{label="person"}' in keys
+    pts = snap["series"]
+    assert all(v is None for v in pts[0]["domain"].values())  # no prior sample
+    assert pts[1]["domain"]["adapter_realtime_factor_avg"] == pytest.approx(0.5)
+    assert pts[1]["domain"]['adapter_detections_total{label="person"}'] == 12.0
+    # counter reset inside an interval → None for that point, not negative
+    t3 = 'adapter_detections_total{label="person"} 3\n'
+    rollup.record_sample("whisper", parse_adapter_metrics(t3, scraped_at=220.0))
+    snap = rollup.snapshot("whisper")
+    assert snap["series"][2]["domain"]['adapter_detections_total{label="person"}'] is None

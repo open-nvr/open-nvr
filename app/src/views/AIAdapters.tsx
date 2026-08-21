@@ -120,6 +120,9 @@ type SeriesPoint = {
   memory_bytes: number | null
   gpu_utilization: number | null
   gpu_memory_bytes: number | null
+  // SDK ≥1.2: per-interval domain values for the trend keys
+  // (counter deltas; `_avg` keys are _sum/_count-derived averages).
+  domain?: Record<string, number | null>
 }
 
 type AdapterMetricsResp = {
@@ -144,6 +147,7 @@ type AdapterMetricsResp = {
   // realtime factor…) as windowed deltas keyed by series identity.
   model_info?: Record<string, string>
   domain?: Record<string, number>
+  domain_trend_keys?: string[]
 }
 
 // ── Domain-series presentation ──────────────────────────────────────
@@ -151,16 +155,21 @@ type AdapterMetricsResp = {
 // `adapter_audio_seconds_total`. `_sum`/`_count` pairs (histograms)
 // collapse into a windowed average row; everything else shows its
 // windowed delta. Top rows by value; model-specific by construction.
+function niceDomainKey(raw: string): string {
+  const avg = raw.endsWith('_avg')
+  const stem = avg ? raw.slice(0, -4) : raw
+  const m = stem.match(/^([a-z0-9_]+?)(?:_total)?(?:\{(\w+)="([^"]*)"\})?$/i)
+  const base = (m?.[1] ?? stem).replace(/^adapter_/, '').replace(/_/g, ' ')
+  const named = m?.[3] ? `${base} · ${m[3]}` : base
+  return avg ? `${named} (avg)` : named
+}
+
 function domainRows(domain: Record<string, number>): { label: string; value: string }[] {
   const entries = Object.entries(domain)
   const counts = new Map<string, number>()
   for (const [k, v] of entries) if (k.endsWith('_count')) counts.set(k.slice(0, -6), v)
   const rows: { label: string; value: string; sort: number }[] = []
-  const nice = (raw: string) => {
-    const m = raw.match(/^([a-z0-9_]+?)(?:_total)?(?:\{(\w+)="([^"]*)"\})?$/i)
-    const base = (m?.[1] ?? raw).replace(/^adapter_/, '').replace(/_/g, ' ')
-    return m?.[3] ? `${base} · ${m[3]}` : base
-  }
+  const nice = niceDomainKey
   for (const [k, v] of entries) {
     if (k.endsWith('_count')) continue
     if (k.endsWith('_sum')) {
@@ -611,6 +620,22 @@ function AdapterMetricsSection({ name }: { name: string }) {
                         latest={String((m.series ?? []).filter(pt => pt.rpm != null).slice(-1)[0]?.rpm ?? '—')} />
                       <SparkRow label="inflight" points={(m.series ?? []).map(pt => pt.inflight)}
                         latest={`${m.inflight ?? '—'}${m.max_inflight ? `/${m.max_inflight}` : ''}`} />
+                    </div>
+                  </MetricPanel>
+                )}
+                {(m.domain_trend_keys?.length ?? 0) > 0 && (m.series?.length ?? 0) > 1 && (
+                  <MetricPanel title="Output trends — last hour" decision="is the model's output drifting; when did a class start flooding">
+                    <div className="space-y-1.5">
+                      {(m.domain_trend_keys ?? []).map(k => {
+                        const pts = (m.series ?? []).map(pt => pt.domain?.[k] ?? null)
+                        const last = [...pts].reverse().find(v => v != null)
+                        const latest = k.endsWith('_avg')
+                          ? (last != null ? last.toFixed(2) : '—')
+                          : String(m.domain?.[k] ?? last ?? '—')
+                        return (
+                          <SparkRow key={k} label={niceDomainKey(k)} points={pts} latest={latest} labelClass="w-32" />
+                        )
+                      })}
                     </div>
                   </MetricPanel>
                 )}
