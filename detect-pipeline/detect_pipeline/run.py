@@ -340,8 +340,8 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = config_from_env(os.environ)
     # Cap OpenCV's intra-op threads. cv2.dnn defaults to every core, which
-    # starves CPU-bound co-tenants (llama.cpp/whisper.cpp in the lite stack)
-    # far more than it helps a 320px detector. 0 disables the cap.
+    # starves CPU-bound co-tenants (the camera-agent's adapters) far more
+    # than it helps a 320px detector. 0 disables the cap.
     threads = int(os.environ.get("DETECT_CV_THREADS", "2") or 0)
     if threads > 0:
         try:

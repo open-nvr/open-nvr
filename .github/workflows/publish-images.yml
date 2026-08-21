@@ -61,7 +61,6 @@ on:
       - "app/**"
       - "docker-entrypoint.sh"
       - "examples/camera-agent/**"
-      - "examples/camera-agent-lite/**"
       - "supervisord.conf"
       - ".github/workflows/publish-images.yml"
   workflow_dispatch:
@@ -265,8 +264,8 @@ jobs:
           exit 1
 
   # ------------------------------------------------------------------
-  # Example agent apps (work item C + PR #168): the camera-agent and
-  # camera-agent-lite images. Same trigger/tag policy as opennvr-core:
+  # Example agent apps (work item C + PR #168): the camera-agent
+  # image. Same trigger/tag policy as opennvr-core:
   # every branch push publishes :<branch> + :sha-<short>; main/release
   # tags publish :latest. PRs build without pushing.
   # ------------------------------------------------------------------
@@ -281,8 +280,7 @@ jobs:
       fail-fast: false
       matrix:
         agent:
-          - { dir: examples/camera-agent,      image: camera-agent }
-          - { dir: examples/camera-agent-lite, image: camera-agent-lite }
+          - { dir: examples/camera-agent, image: camera-agent }
     steps:
       - name: Checkout
         uses: actions/checkout@v4

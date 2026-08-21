@@ -86,10 +86,7 @@ the owner of the single camera connection), runs Tier-0 per camera, and publishe
 detections to the existing `opennvr.inference.tier0.<camera_id>.completed` NATS
 subjects. It changes nothing about ingest, recording, or serving.
 
-**On by default** in the full stack. The camera-agent-lite overlay puts this
-service behind the `tier0` compose profile instead — the lite family is fully
-CPU-bound and co-running an uncapped detector starves it — so the lite
-quickstart does not start Tier-0; add `--profile tier0` to run both.
+**On by default** in the full stack.
 **Why is my CPU high? → check for a pinned stationary object, lower
 `DETECT_FPS`, then configure the substream.** As of stationary-track
 gating, an object that stops moving (parked car, person sitting still)
