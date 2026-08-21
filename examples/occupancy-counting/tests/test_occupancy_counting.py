@@ -249,9 +249,89 @@ def test_explicit_cameras_still_win(tmp_path, monkeypatch):
     assert called["n"] == 0, "must not call OpenNVR when cameras are pinned"
 
 
-def test_no_cameras_and_no_discovery_is_a_clear_error(tmp_path, monkeypatch):
+def test_no_cameras_and_nowhere_to_ask_is_a_clear_error(tmp_path, monkeypatch):
+    """No list AND no opennvr_url is a genuine misconfiguration."""
     import pytest
 
     monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
-    with pytest.raises(ValueError, match="discovered"):
+    with pytest.raises(ValueError, match="opennvr_url"):
         oc.load_config(_write_config(tmp_path, "cameras: []\n"))
+
+
+def test_core_reachable_but_no_cameras_yet_boots_empty(tmp_path, monkeypatch):
+    """A fresh install where the app was enabled before any camera exists
+    must boot and wait — exiting here would crash-loop the container
+    forever over something the operator fixes in the UI a minute later."""
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert cfg.cameras == {} and cfg.cameras_auto_derived is True
+
+
+def test_cameras_added_after_boot_are_picked_up(tmp_path, monkeypatch):
+    """A set captured once at boot would silently never watch a camera
+    added tomorrow."""
+    live = [{"camera_id": "cam1"}]
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert sorted(cfg.cameras) == ["cam1"]
+
+    live.append({"camera_id": "cam2"})                 # operator adds a camera
+    added, removed = counter.refresh_cameras()
+    assert added == ["cam2"] and removed == []
+    # ...and it is counted immediately, with the app-level threshold.
+    fired = counter.handle_event(_tier0_event(6, camera_id="cam2"))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 6
+
+    live.remove({"camera_id": "cam1"})                 # ...and removes one
+    added, removed = counter.refresh_cameras()
+    assert added == [] and removed == ["cam1"]
+    assert "cam1" not in cfg.cameras
+
+
+def test_refresh_ignores_an_empty_discovery_blip(tmp_path, monkeypatch):
+    """Core answering with nothing mid-poll must not delete every camera."""
+    live = [{"camera_id": "cam1"}]
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    live.clear()
+    assert counter.refresh_cameras() == ([], [])
+    assert sorted(cfg.cameras) == ["cam1"], "a blip must not stop the app watching"
+
+
+def test_pinned_cameras_are_never_refreshed(tmp_path, monkeypatch):
+    called = {"n": 0}
+
+    def _count(*a, **k):
+        called["n"] += 1
+        return [{"camera_id": "cam9"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _count)
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert counter.refresh_cameras() == ([], [])
+    assert called["n"] == 0 and list(cfg.cameras) == ["cam1"]
+
+
+def test_discovered_cameras_require_an_app_level_ceiling(tmp_path, monkeypatch):
+    """A camera the refresh loop adds later has no per-camera threshold to
+    fall back on — without an app-level default it would silently get 0 and
+    alert on the first person past. Missing max_occupancy must fail the
+    same way it does when a camera exists at boot."""
+    import pytest
+
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    p = tmp_path / "config.yml"
+    p.write_text('nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\ncameras: []\n')
+    with pytest.raises(ValueError, match="max_occupancy"):
+        oc.load_config(str(p))
