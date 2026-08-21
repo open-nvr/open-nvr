@@ -13,6 +13,7 @@ entrypoint, keeping this pure and testable.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 
 from .pipeline import FrameResult
@@ -34,7 +35,14 @@ def build_payload(camera_id: str, result: FrameResult, frame) -> dict:
         "adapter": ADAPTER,
         "camera_id": camera_id,
         "seq": getattr(frame, "seq", None),
+        # ``ts`` is the frame's time.monotonic() reading — fine for measuring
+        # intervals, USELESS as a date: it counts from an arbitrary origin
+        # (typically boot), so a consumer storing it as a timestamp would file
+        # every event near 1970. ``wall_ts`` is the epoch-seconds stamp
+        # consumers need to answer "what happened at 3am"; both ship so
+        # nothing that already reads ``ts`` changes meaning.
         "ts": getattr(frame, "ts", None),
+        "wall_ts": time.time(),
         # Frame size lets consumers normalize the pixel-space track boxes into
         # the contract's NormalizedBBox (x/y/w/h in 0-1) — see the App SDK's
         # tier0_to_detections bridge.
@@ -96,7 +104,14 @@ def build_gate_payload(camera_id: str, result, frame) -> dict:
         "adapter": ADAPTER,
         "camera_id": camera_id,
         "seq": getattr(frame, "seq", None),
+        # ``ts`` is the frame's time.monotonic() reading — fine for measuring
+        # intervals, USELESS as a date: it counts from an arbitrary origin
+        # (typically boot), so a consumer storing it as a timestamp would file
+        # every event near 1970. ``wall_ts`` is the epoch-seconds stamp
+        # consumers need to answer "what happened at 3am"; both ship so
+        # nothing that already reads ``ts`` changes meaning.
         "ts": getattr(frame, "ts", None),
+        "wall_ts": time.time(),
         # Frame size lets consumers normalize the pixel-space track boxes into
         # the contract's NormalizedBBox (x/y/w/h in 0-1) — see the App SDK's
         # tier0_to_detections bridge.

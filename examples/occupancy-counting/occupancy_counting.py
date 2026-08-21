@@ -176,6 +176,15 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
+    # Consume the always-on Tier-0 detector (docs/tier0-consumption.md).
+    # ON by default: Tier-0 ships enabled in the standard stack and is the
+    # only detection stream a default install produces, so an app that
+    # ignored it would sit silent forever. The SDK's own default is off
+    # (contract compatibility); an app that also subscribes to a heavy
+    # adapter should narrow ``subject_pattern`` to
+    # ``opennvr.inference.tier0.>`` — as the shipped config does — or turn
+    # this off, otherwise the same object is counted from both streams.
+    consume_tier0: bool = True
 
     # App contract (spec §03) — all optional; see the SDK's contract
     # module. ``contract_port`` serves /health /manifest /state;
@@ -316,6 +325,7 @@ def load_config(path: str) -> AppConfig:
         ),
         contract_bind_host=raw.get("contract_bind_host"),
         contract_host=raw.get("contract_host"),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
         opennvr_url=raw.get("opennvr_url"),
         opennvr_token=raw.get("opennvr_token"),
     )
@@ -356,6 +366,10 @@ class OccupancyCounter(Detector):
 
     def setup(self) -> None:
         self._states: dict[str, _ZoneState] = {}
+        # Camera ids seen on the bus that this app has no config for —
+        # tracked so the "not my camera" warning fires once each, not per
+        # frame (Tier-0 publishes continuously).
+        self._unknown_cameras: set[str] = set()
 
     # ── Pure helpers (testable without NATS) ──────────────────────
 
@@ -397,6 +411,18 @@ class OccupancyCounter(Detector):
         camera = self._config.cameras.get(camera_id)
         if camera is None:
             # Another monitoring app may be watching this camera; we're not.
+            # But an id that matches NOTHING configured is the difference
+            # between "not my camera" and "this app counts nothing, forever"
+            # — and the two look identical from outside. Say it once per
+            # unknown id so a config/id mismatch (the classic ``cam-1`` vs
+            # ``cam1``) is one log line instead of a silent no-op.
+            if camera_id not in self._unknown_cameras:
+                self._unknown_cameras.add(camera_id)
+                logger.warning(
+                    "receiving events for camera %r, which is not in my config "
+                    "— nothing will be counted for it. Configured cameras: %s",
+                    camera_id, sorted(self._config.cameras) or "(none)",
+                )
             return []
 
         count = self.count_in_zone(camera, detections)

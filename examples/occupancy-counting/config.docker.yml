@@ -18,7 +18,14 @@ nats_url: "nats://nats:4222"
 # The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
 nats_token: "${INTERNAL_API_KEY}"
 
-subject_pattern: "opennvr.inference.>"
+# Tier-0 ONLY by default: the always-on detect-pipeline is the
+# detection stream a standard install actually produces. Narrowing
+# the subject (rather than the wildcard) means an adapter you add
+# later cannot double-count the same object through both streams.
+# Widen to "opennvr.inference.>" if you want adapter events too.
+subject_pattern: "opennvr.inference.tier0.>"
+# Bridge Tier-0 tracks into contract-shaped detections.
+consume_tier0: true
 
 # ── What to count / thresholds — EDIT for your scene ───────────────
 watch_labels:

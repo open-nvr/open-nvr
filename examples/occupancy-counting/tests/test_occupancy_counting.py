@@ -113,3 +113,83 @@ def test_debounce_requires_persistence():
 def test_unknown_camera_ignored():
     c = _counter(_camera())
     assert c.handle_event(_event(9, camera_id="cam-unknown")) == []
+
+
+# ── Tier-0 consumption (the always-on detector) ────────────────────
+#
+# A default OpenNVR install runs detect-pipeline and NO per-frame adapter
+# loop, so Tier-0 events are the ONLY detections on the bus. These tests
+# drive the app with the real Tier-0 payload shape (detect_pipeline's
+# bus.build_payload) rather than adapter-shaped events.
+
+
+def _tier0_event(n_people: int, *, camera_id="cam-1", w=1920, h=1080) -> dict:
+    """A Tier-0 event as detect-pipeline publishes it: top-level ``tracks``
+    with PIXEL boxes and a ``frame`` size — no ``result`` block at all."""
+    return {
+        "schema": "opennvr.tier0.v1",
+        "adapter": "tier0",
+        "camera_id": camera_id,
+        "seq": 41,
+        "ts": 1234.5,                 # monotonic — never a date
+        "wall_ts": 1_755_700_000.0,   # epoch seconds
+        "frame": {"w": w, "h": h},
+        "calibrating": False,
+        "tracks": [
+            {"id": i + 1, "label": "person", "score": 0.9,
+             # centred box: 0.4-0.5 of the frame in both axes
+             "box": [int(w * 0.4), int(h * 0.4), int(w * 0.5), int(h * 0.5)],
+             "stationary": False, "best": True}
+            for i in range(n_people)
+        ],
+    }
+
+
+def test_tier0_events_are_counted_and_fire():
+    """The regression this whole slice exists for: on a stock install the
+    app saw Tier-0 events and silently dropped every one."""
+    counter = _counter(_camera(max_occ=2))
+    assert counter.consume_tier0 is True, "app default must consume Tier-0"
+    assert counter.handle_event(_tier0_event(2)) == []      # at the ceiling
+    alerts = counter.handle_event(_tier0_event(3))          # over it
+    assert len(alerts) == 1
+    assert alerts[0].evidence["level"] == "over"
+    assert alerts[0].evidence["count"] == 3
+
+
+def test_tier0_pixel_boxes_map_into_the_zone():
+    """Tracks carry PIXEL boxes; the SDK bridge normalises them and the app
+    scales back into zone space. A track outside the zone must not count."""
+    zone = Zone.from_config("left-half", [[0, 0], [960, 0], [960, 1080], [0, 1080]])
+    camera = oc.CameraZone(camera_id="cam-1", zone=zone, frame_width=1920,
+                           frame_height=1080, max_occupancy=0, min_occupancy=None)
+    counter = _counter(camera)
+    # One person centred at 45% width → inside the left half → over max(0).
+    fired = counter.handle_event(_tier0_event(1))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 1
+    # Same person on the right half → not counted, so no alert and the
+    # state machine returns to normal.
+    right = _tier0_event(1)
+    right["tracks"][0]["box"] = [1500, 400, 1700, 600]
+    assert counter.handle_event(right) == []
+    assert counter._states["cam-1"].last_count == 0
+
+
+def test_tier0_can_be_turned_off():
+    """Operators who also drive a heavy adapter can opt out and keep the
+    single (adapter) stream — no double counting."""
+    camera = _camera(max_occ=0)
+    cfg = _config(camera)
+    cfg.consume_tier0 = False
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert counter.handle_event(_tier0_event(3)) == []
+
+
+def test_unknown_camera_id_warns_once(caplog):
+    """``cam-1`` vs ``cam1`` used to be a silent no-op forever."""
+    counter = _counter(_camera())
+    with caplog.at_level("WARNING"):
+        counter.handle_event(_tier0_event(1, camera_id="cam1"))
+        counter.handle_event(_tier0_event(1, camera_id="cam1"))
+    warnings = [r for r in caplog.records if "not in my config" in r.message]
+    assert len(warnings) == 1, "warn once per unknown camera, not per frame"
