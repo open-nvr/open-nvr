@@ -1465,6 +1465,23 @@ class AlarmManager:
         self._rearm = rearm_cooldown
         self._max = max_alarms
 
+    def find_duplicate(self, *, target: str, camera_ids: list[str],
+                       after_min: int | None, before_min: int | None,
+                       ring: str) -> "Alarm | None":
+        """An ACTIVE alarm with the same target, camera set, window and
+        level. Create-time dedup: the arm button gives slow feedback on a
+        busy box, the natural reaction is clicking again, and without this
+        every extra click armed an identical alarm — each its own polling
+        loop, and a list where ✕ visibly 'didn't work' because killing one
+        left its twins."""
+        want = (target.strip().lower(), frozenset(camera_ids),
+                after_min, before_min, ring)
+        for a in self._alarms.values():
+            if a.active and (a.target, frozenset(a.camera_ids),
+                             a.after_min, a.before_min, a.ring) == want:
+                return a
+        return None
+
     def create(self, *, name: str, target: str, camera_ids: list[str],
                after_min: int | None = None, before_min: int | None = None,
                emergency_contact: str | None = None,
@@ -1501,6 +1518,16 @@ class AlarmManager:
         if t:
             t.cancel()
         return True
+
+    def remove(self, alarm_id: int) -> bool:
+        """Stop AND forget the alarm. What the UI's ✕ and a spoken
+        'stop alarm N' mean: the alarm is gone from the list, not parked
+        as an inactive row that lingers until restart."""
+        ok = self.stop(alarm_id)
+        self._alarms.pop(alarm_id, None)
+        if alarm_id in self._order:
+            self._order.remove(alarm_id)
+        return ok
 
     def acknowledge(self, alarm_id: int | None = None) -> int:
         """Silence one alarm (or all when id is None). Returns how many."""
@@ -3251,13 +3278,26 @@ class CameraAgentRuntime:
             # Site-configurable default (built-ins: fire-grade → siren);
             # everything unmapped is a doorbell-style chime.
             ring = self.ring_defaults().get(target, "chime")
+        existing = self.alarms.find_duplicate(
+            target=target, camera_ids=cams,
+            after_min=after_min, before_min=before_min, ring=ring,
+        )
+        if existing is not None:
+            return (f"Alarm #{existing.id} '{existing.name}' already covers "
+                    f"that — same target, cameras and window. It stays armed; "
+                    f"nothing new was added.")
         alarm = self.alarms.create(
             name=name, target=target, camera_ids=cams,
             after_min=after_min, before_min=before_min, emergency_contact=contact,
             ring=ring,
         )
         self.persist()
-        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        # "all cameras" reads wrong on a single-camera install (the one
+        # camera IS the fleet, but the operator armed it on THAT camera
+        # and expects to hear its name back).
+        _fleet = {c.camera_id for c in self.cfg.cameras}
+        where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
+                 else ", ".join(cams))
         window = alarm.window_label()
         when = "" if window == "any time" else f" ({window})"
         extra = f" If it fires I'll flag the emergency contact ({contact})." if contact else ""
@@ -3277,9 +3317,10 @@ class CameraAgentRuntime:
         if action == "silence":
             return ("Silenced." if self.alarms.acknowledge(aid)
                     else f"Alarm #{aid} isn't currently ringing.")
-        ok = self.alarms.stop(aid)
+        ok = self.alarms.remove(aid)
         self.persist()
-        return (f"Disarmed alarm #{aid}." if ok else f"I don't have an alarm #{aid}.")
+        return (f"Disarmed and removed alarm #{aid}." if ok
+                else f"I don't have an alarm #{aid}.")
 
     async def _handle_create_report(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Report"
@@ -3465,7 +3506,12 @@ class CameraAgentRuntime:
             return (f"ERROR: I couldn't set that watch up — this build "
                     f"doesn't include the '{rule}' rule library.")
         self.persist()
-        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        # "all cameras" reads wrong on a single-camera install (the one
+        # camera IS the fleet, but the operator armed it on THAT camera
+        # and expects to hear its name back).
+        _fleet = {c.camera_id for c in self.cfg.cameras}
+        where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
+                 else ", ".join(cams))
         if kind == "notify":
             return (f"Done — watch #{mon.id} is live. I'll let you know whenever "
                     f"I see a {target} on {where}.")
@@ -4763,7 +4809,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/alarms/{alarm_id}")
     async def _delete_alarm(alarm_id: int) -> JSONResponse:
-        ok = runtime.alarms.stop(alarm_id)
+        """The UI's ✕: stop AND forget (see AlarmManager.remove)."""
+        ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
         return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
 
