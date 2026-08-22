@@ -238,6 +238,19 @@ class Camera(Base):
     location = Column(String(200), nullable=True)
     vlan = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="unknown")
+    # Per-camera capability assignment — the ONE source of truth for
+    # "what is this camera for" (docs/design/per-camera-assignment.md).
+    # A list of {"skill": "<capability>", "labels": [..]?} entries, e.g.
+    # [{"skill": "license_plate_recognition"},
+    #  {"skill": "object_detection", "labels": ["person", "truck"]}].
+    # Written ONLY by the camera settings surface; served additively on the
+    # internal camera-agent endpoint so consumers (Tier-0 reconcile, the
+    # App SDK's cameras_for_skill, the catalog UI) can opt in one by one.
+    # NULL/[] = nothing assigned — every consumer must treat that as
+    # "no restriction declared", never as "do nothing" (back-compat).
+    # Nullable so the additive column self-heal can add it to old
+    # create_all databases.
+    assignments = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
