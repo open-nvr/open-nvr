@@ -1,0 +1,133 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Build + publish the example APP container images to GHCR.
+#
+# Why this exists
+# ---------------
+# The App Catalog's curated index (server/config/apps_index.yml)
+# advertises ``ghcr.io/open-nvr/<app>:latest`` for every catalog app,
+# and the one-click installer's reconciler pulls exactly those refs —
+# but until this workflow, nothing ever PUSHED them: app-images-smoke.yml
+# builds with ``push: false`` (it exists to catch Dockerfile breakage on
+# PRs, and deliberately does not publish). So the index advertised
+# images that did not exist, and one-click install could only work on
+# the local-build path. This workflow closes that gap: every app image
+# the index names gets published, multi-arch, with the same tag policy
+# as the core image.
+#
+# Division of labour
+#   - app-images-smoke.yml  → PR-time build + in-image import smoke (no push)
+#   - THIS workflow         → post-merge publish (main), release publish (v*)
+#
+# Tag policy (mirrors publish-images.yml for ghcr.io/open-nvr/core):
+#   - push to main → :main, :sha-<short>, :latest
+#     (:latest tracks main for v0.x — the catalog index pins :latest, so
+#     the one-click promise depends on it existing; the reconciler's
+#     digest pinning is the reproducibility story, not the tag)
+#   - tag v*       → :<version>, :<major>.<minor>, :sha-<short>, :latest
+#
+# Architecture: linux/amd64 + linux/arm64, same rationale as the core
+# image (Apple Silicon and Raspberry Pi are first-class Tier 0 targets;
+# an amd64-only manifest makes ``docker pull`` fail there with a bare
+# daemon error). All ten images are python:3.11-slim + the in-repo SDK
+# with no heavy native deps, so the QEMU arm64 leg is cheap.
+#
+# To add a new catalog app: add it to apps_index.yml, to the smoke
+# matrix in app-images-smoke.yml, and to the matrix below.
+
+name: publish-app-images
+
+on:
+  # No ``paths`` filter on push — GitHub applies push path filters to
+  # both branches AND tags, so a release tag on a commit that didn't
+  # touch examples/ would silently skip publishing (same landmine
+  # publish-images.yml documents). Main-push builds are cheap with the
+  # GHA layer cache; correctness wins.
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-app-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: abandoned-object,           title: Abandoned Object }
+          - { app: footage-search,             title: Footage Search }
+          - { app: home-assistant-relay,       title: Home Assistant Relay }
+          - { app: intrusion-detection,        title: Intrusion Detection }
+          - { app: license-plate-recognition,  title: License Plate Recognition }
+          - { app: line-crossing,              title: Line Crossing }
+          - { app: loitering-detection,        title: Loitering Detection }
+          - { app: occupancy-counting,         title: Occupancy Counting }
+          - { app: package-delivery,           title: Package Delivery }
+          - { app: smart-doorbell,             title: Smart Doorbell }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (cross-arch emulation for the arm64 build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/${{ matrix.app }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Same v0.x policy as the core image: :latest tracks main and
+            # release tags, because apps_index.yml advertises :latest and
+            # the one-click catalog install depends on it existing.
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR ${{ matrix.title }}
+            org.opencontainers.image.description=OpenNVR catalog app — ${{ matrix.title }} (App SDK example).
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.vendor=OpenNVR
+            org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/examples/${{ matrix.app }}/README.md
+
+      - name: Build + push ${{ matrix.app }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: examples/${{ matrix.app }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Same cache scope the PR smoke workflow warms — a merge
+          # usually finds every layer already built.
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,scope=${{ matrix.app }},mode=max
