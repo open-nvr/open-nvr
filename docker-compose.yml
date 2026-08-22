@@ -289,7 +289,7 @@ services:
       # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
       # For an accelerator, set backend=ort + providers (and install the matching
       # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
-      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-auto}
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
       # Decode-side frame skip (-skip_frame): nonref (default — provably
