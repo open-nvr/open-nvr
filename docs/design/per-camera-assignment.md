@@ -160,6 +160,12 @@ Each slice is independently shippable and useful on its own:
    the Tier-0 stream feeds non-detection consumers too)*
 4. **Retire `AIModel`'s polling loop** in favour of assignment + the
    publish/subscribe path, removing the second inference route entirely.
+   *(shipped — the live and cloud polling loops are removed from
+   InferenceManager; POST /start-inference answers 410 Gone with the
+   migration pointer; the AI Models and camera-settings UIs point at
+   Assignments instead of a Start button. The on-demand RECORDING
+   analysis remains — a forensic pass over recorded files was never a
+   second live path.)*
 
 Slices 1–2 make the goal expressible; slice 3 makes it efficient; slice 4
 removes the architectural exception that undermines the whole model.
