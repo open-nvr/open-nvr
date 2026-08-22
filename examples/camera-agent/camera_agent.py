@@ -349,6 +349,48 @@ _DEFAULT_SYSTEM_PROMPT = (
 # value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
 
+# Targets an alarm/watch may match beyond COCO: the fire-grade ring
+# defaults are armable intents even though the stock detector can't see
+# them (a fire-capable detector may be registered; presets grey them out
+# in the UI, but a spoken arm is allowed).
+_EXTRA_ALARM_TARGETS: frozenset[str] = frozenset({"fire", "smoke", "flame", "gas"})
+
+_TARGET_PLURALS: dict[str, str] = {"people": "person", "persons": "person"}
+
+
+def _normalize_watch_target(raw: str, extra_labels: "set[str] | None" = None
+                            ) -> "str | None":
+    """Reduce what the LLM sent as ``target`` to a single detectable label.
+
+    Field bug: a small LLM armed an alarm with target='alert when you see
+    a person on this camera' — the WHOLE SENTENCE. Matching is exact
+    label equality, so that alarm could never fire, silently. The server
+    is the last line of defence: accept an exact label; otherwise scan
+    the phrase for known labels (simple plural folding) and accept a
+    UNIQUE hit; ambiguous or label-free phrases return None — the caller
+    asks instead of arming a dud."""
+    known = set(_COCO80_LABELS) | _EXTRA_ALARM_TARGETS | set(extra_labels or ())
+    t = (raw or "").strip().lower()
+    if not t:
+        return None
+    t = _TARGET_PLURALS.get(t, t)
+    if t in known:
+        return t
+    words = [w.strip(".,!?'\"") for w in t.replace("/", " ").split()]
+    hits: list[str] = []
+    for w in words:
+        w = _TARGET_PLURALS.get(w, w)
+        if w not in known and w.endswith("s") and w[:-1] in known:
+            w = w[:-1]
+        if w in known and w not in hits:
+            hits.append(w)
+    # Two-word labels ("traffic light", "cell phone", …) — check bigrams.
+    for a, b in zip(words, words[1:]):
+        bigram = f"{a} {b}"
+        if bigram in known and bigram not in hits:
+            hits.append(bigram)
+    return hits[0] if len(hits) == 1 else None
+
 # The COCO-80 vocabulary of the standard ``default`` YOLOv8 detection
 # adapter — the labels alarm polling can actually match. Alarm-preset
 # availability is checked against this set (plus the config's
@@ -1637,17 +1679,35 @@ class AlarmManager:
             return mins >= a
         return mins < b
 
+    # How many consecutive poll cycles an alarm may yield to interactive
+    # turns before polling anyway. The yield keeps voice-turn latency
+    # snappy on CPU, but UNBOUNDED it silently pauses a safety feature:
+    # on a busy box each turn runs tens of seconds, so chained
+    # conversation kept alarms unpolled for minutes — the field report
+    # was 'armed a siren, walked in, nothing... it fired much later'.
+    # 4 skips at the 5s interval bounds worst-case added delay to ~20s.
+    _MAX_BUSY_SKIPS = 4
+
     async def _loop(self, alarm: Alarm) -> None:
+        busy_skips = 0
         try:
             while alarm.active and not self._runtime._stop_event.is_set():
-                # Yield to an in-flight interactive turn — a skipped cycle is
-                # caught on the next one (self._interval later). Stand-down and
-                # window logic still run so timing stays correct.
-                if self._in_window(alarm) and not self._runtime.interactive_busy():
-                    for cam in alarm.camera_ids:
-                        if not alarm.active:
-                            break
-                        await self._poll(alarm, cam)
+                if self._in_window(alarm):
+                    if (self._runtime.interactive_busy()
+                            and busy_skips < self._MAX_BUSY_SKIPS):
+                        busy_skips += 1
+                    else:
+                        if busy_skips >= self._MAX_BUSY_SKIPS:
+                            log_fn = logger.info
+                            log_fn("alarm #%d: polling despite an active turn "
+                                   "(yielded %d cycles — a safety check must "
+                                   "not wait out a conversation)",
+                                   alarm.id, busy_skips)
+                        busy_skips = 0
+                        for cam in alarm.camera_ids:
+                            if not alarm.active:
+                                break
+                            await self._poll(alarm, cam)
                 self._maybe_stand_down(alarm)
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:  # pragma: no cover
@@ -3331,9 +3391,21 @@ class CameraAgentRuntime:
 
     async def _handle_create_alarm(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Alarm"
-        target = str(args.get("target") or "").strip().lower()
+        raw_target = str(args.get("target") or "").strip()
+        # Site ring-default keys (a farm's "snake", a bank's custom class)
+        # are armable intents too — site policy extends the vocabulary.
+        _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
+        _extra |= set(self.ring_defaults().keys())
+        target = _normalize_watch_target(raw_target, _extra)
         if not target:
+            if raw_target:
+                return (f"I couldn't pick one detectable thing out of "
+                        f"{raw_target!r} — what exactly should set off the "
+                        f"alarm (a person, a car, fire)?")
             return "What should set off the alarm (e.g. fire, a person)?"
+        if name == "Alarm" or raw_target.lower() not in (target, ""):
+            # Keep the stored name honest when we reduced a phrase.
+            name = name if name != "Alarm" else f"Alarm: {target}"
         cams = self.tools._resolve_cameras(args)
         if isinstance(cams, str):  # ERROR:
             return cams
@@ -3547,8 +3619,15 @@ class CameraAgentRuntime:
         kind = str(args.get("kind") or "").strip().lower()
         if kind not in ("notify", "count", "crossing"):
             return "I can 'notify' you, keep a 'count', or count line 'crossing's — which would you like?"
-        target = str(args.get("target") or "").strip().lower()
+        raw_target = str(args.get("target") or "").strip()
+        _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
+        _extra |= set(self.ring_defaults().keys())
+        target = _normalize_watch_target(raw_target, _extra)
         if not target:
+            if raw_target:
+                return (f"I couldn't pick one detectable thing out of "
+                        f"{raw_target!r} — what exactly should I watch for "
+                        f"(a person, a car, a truck)?")
             return "What should I watch for (e.g. a person, a car)?"
         cams = self.tools._resolve_cameras(args)
         if isinstance(cams, str):  # ERROR:
@@ -4844,10 +4923,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see MonitorManager.remove)."""
+        """The UI's ✕: stop AND forget — idempotent, same contract as
+        DELETE /alarms/{id} (already-gone is success)."""
         ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/alarms")
     async def _alarms() -> dict[str, Any]:
@@ -4903,10 +4983,17 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/alarms/{alarm_id}")
     async def _delete_alarm(alarm_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see AlarmManager.remove)."""
+        """The UI's ✕: stop AND forget (see AlarmManager.remove).
+
+        IDEMPOTENT: deleting an alarm that is already gone is success,
+        not an error. A slow refresh can leave a removed alarm's row on
+        screen; every extra click then hit 404 and the UI reported
+        'couldn't remove' six times for an alarm that WAS removed —
+        alarming (sic) and wrong. Deletion's contract is 'make it not
+        exist', and it already doesn't."""
         ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/reports")
     async def _reports() -> dict[str, Any]:
@@ -4933,10 +5020,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/reports/{report_id}")
     async def _delete_report(report_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see ReportScheduler.remove)."""
+        """The UI's ✕: stop AND forget — idempotent like the others."""
         ok = runtime.reports.remove(report_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/people")
     async def _people() -> JSONResponse:

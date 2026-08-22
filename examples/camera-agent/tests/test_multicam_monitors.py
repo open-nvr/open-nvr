@@ -144,6 +144,8 @@ def test_monitors_endpoints():
     assert body["monitors"] and body["monitors"][0]["kind"] == "count"
     mid = body["monitors"][0]["id"]
     assert client.delete(f"/monitors/{mid}").status_code == 200
-    assert client.delete("/monitors/9999").status_code == 404
+    # Idempotent delete, same contract as /alarms: already-gone = success.
+    gone = client.delete("/monitors/9999")
+    assert gone.status_code == 200 and gone.json()["already_gone"] is True
     # invalid create
     assert client.post("/monitors", json={"kind": "bogus", "target": "x", "camera_id": "cam1"}).status_code == 400

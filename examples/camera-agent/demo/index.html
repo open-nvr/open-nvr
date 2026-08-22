@@ -1510,12 +1510,17 @@
         if(!cam||!target){ $("paTarget").focus(); return; }
         const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
                     ring:$("paRing").value, ...alarmWindow("pa")};
+        // Close the popup IMMEDIATELY — the form lingering while the POST
+        // ran read as "did it take?" and invited another click (the
+        // server dedups, but the UI shouldn't tempt it). The verdict lands as
+        // a chat line either way.
+        $("paTarget").value=""; closePops();
         try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
           addMsg(r.ok?(d.message||("Armed on "+cam+" for "+target+".")):("Couldn't arm the alarm: "+(d.error||("HTTP "+r.status))),"sys");
         }catch(err){ addMsg("Couldn't arm the alarm: "+err.message,"sys"); }
-        $("paTarget").value=""; closePops(); pollAlarms(); loadCamScoped(cam); }); })();
+        pollAlarms(); loadCamScoped(cam); }); })();
     // deep link: /demo/camera/{id} opens that camera once the strip knows roles
     function openDeepLinkedCamera(){
       const m=location.pathname.match(/\/demo\/camera\/([^/]+)$/);
@@ -1687,8 +1692,9 @@
           q.innerHTML=`${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`; }
         else { q.textContent=`${cams} for ${m.target}`; }
         d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
-        s.addEventListener("click",()=>stopMonitor(m.id)); d.appendChild(s); monitorListEl.appendChild(d); } }
-    async function stopMonitor(id){
+        s.addEventListener("click",()=>stopMonitor(m.id,d)); d.appendChild(s); monitorListEl.appendChild(d); } }
+    async function stopMonitor(id, rowEl){
+      if(rowEl) rowEl.remove();               // optimistic, like alarms
       try{
         const r=await fetch("/monitors/"+id,{method:"DELETE"});
         if(!r.ok) addMsg(`Couldn't remove watch #${id} (HTTP ${r.status}${r.status===403?" — operator login required":""}).`,"sys");
@@ -1741,10 +1747,14 @@
         const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":(a.ring==="pulse"?" · ⚠️":""));
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
-        s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
+        s.addEventListener("click",()=>disarmAlarm(a.id,d)); d.appendChild(s); alarmListEl.appendChild(d); } }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
       alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
-    async function disarmAlarm(id){
+    async function disarmAlarm(id, rowEl){
+      // Optimistic: the row disappears on click (deletion is idempotent
+      // server-side — already-gone is success), and only a REAL failure
+      // brings it back with a message.
+      if(rowEl) rowEl.remove();
       try{
         const r=await fetch("/alarms/"+id,{method:"DELETE"});
         if(!r.ok) addMsg(`Couldn't remove alarm #${id} (HTTP ${r.status}${r.status===403?" — operator login required":""}).`,"sys");
