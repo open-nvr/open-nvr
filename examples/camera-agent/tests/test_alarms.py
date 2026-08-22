@@ -472,3 +472,44 @@ def test_spoken_pm_window_gates_polling():
         assert rt.alarms._in_window(a) is True
     finally:
         datetime.datetime = real_dt
+
+
+# ── Parity: watches, reports, tasks get the same anti-double-wiring ──
+#
+# A duplicated WATCH is worse than a duplicated alarm: for converged
+# kinds it is a second hosted rule instance doing double inference and
+# double notifications. Reports fire twice per slot into every channel.
+
+
+def test_duplicate_watch_is_refused_and_delete_removes():
+    rt = _runtime()
+    first = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "#1" in first
+    second = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "already covers" in second
+    assert len([m for m in rt.monitors.list() if m["active"]]) == 1
+    assert rt.monitors.remove(1) is True
+    assert all(not m["active"] for m in rt.monitors.list())
+    # Removed means forgotten — re-creating works, no stale dedup hit.
+    again = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "already covers" not in again
+
+
+def test_duplicate_report_is_refused_and_remove_forgets():
+    rt = _runtime()
+    first = asyncio.run(rt._handle_create_report(
+        {"name": "Morning", "query": "summarise overnight activity"}))
+    assert "#1" in first
+    dup = asyncio.run(rt._handle_create_report(
+        {"name": "Different name", "query": "summarise overnight activity"}))
+    assert "already runs" in dup
+    # A DIFFERENT cadence is a different report.
+    other = asyncio.run(rt._handle_create_report(
+        {"name": "Hourly", "query": "summarise overnight activity",
+         "every_minutes": 60}))
+    assert "already runs" not in other
+    assert rt.reports.remove(1) is True
+    assert all(r["id"] != 1 for r in rt.reports.list())

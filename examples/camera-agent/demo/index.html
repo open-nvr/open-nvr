@@ -1676,7 +1676,12 @@
         else { q.textContent=`${cams} for ${m.target}`; }
         d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
         s.addEventListener("click",()=>stopMonitor(m.id)); d.appendChild(s); monitorListEl.appendChild(d); } }
-    async function stopMonitor(id){ try{ await fetch("/monitors/"+id,{method:"DELETE"}); }catch{} pollMonitors(); }
+    async function stopMonitor(id){
+      try{
+        const r=await fetch("/monitors/"+id,{method:"DELETE"});
+        if(!r.ok) addMsg(`Couldn't remove watch #${id} (HTTP ${r.status}${r.status===403?" — operator login required":""}).`,"sys");
+      }catch(err){ addMsg(`Couldn't remove watch #${id}: ${err.message}`,"sys"); }
+      pollMonitors(); }
 
     // ── scheduled reports ──
     async function pollReports(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/reports")).json(); }catch{ return; }
