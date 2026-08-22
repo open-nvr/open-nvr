@@ -230,6 +230,24 @@ class Settings(BaseSettings):
     # where MediaMTX and KAI-C are on different hosts. See V-019.
     inference_use_mediamtx_tap: bool = True
 
+    # Which MediaMTX stream Tier-0's detect-pipeline (and the agent's frame
+    # grabs) tap when a camera HAS a substream:
+    #   auto  (default) — substream on CPU-only decode, MAIN stream when
+    #           hardware decode is configured (detect_hwaccel != cpu): a
+    #           GPU box can afford full-res decode and gets full-res
+    #           evidence crops; a CPU box gets the ~5x saving. Detection
+    #           accuracy is equal either way (the model input is a fixed
+    #           square; what matters is an object's fraction of frame).
+    #   sub   — always the substream when one exists.
+    #   main  — always the main stream (full-res evidence crops).
+    # Cameras with no substream use the main stream regardless.
+    inference_tap_stream: str = "auto"
+
+    # Mirror of the detect-pipeline's DETECT_HWACCEL (compose passes the
+    # same env to both containers) — the 'auto' signal above. "cpu" (the
+    # default) means software decode.
+    detect_hwaccel: str = "cpu"
+
     # Give the camera-agent a low-res substream (derived from vendor URL
     # conventions) instead of the full-res feed, to save CPU on a single box.
     # Off by default since not every camera exposes a substream.

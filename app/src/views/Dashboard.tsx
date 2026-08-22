@@ -16,15 +16,14 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Camera, ChartArea, ChartBar, CircleCheck, CircleDashed, RefreshCw, AlertTriangle, HardDrive, Play, Info } from 'lucide-react'
+import { Camera, ChartArea, ChartBar, CircleCheck, RefreshCw, AlertTriangle, HardDrive, Play, Info } from 'lucide-react'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, BarChart, Bar, Cell } from 'recharts'
-import { apiService } from '../lib/apiService'
 import SystemNetworkMonitoring from './SystemNetworkMonitoring'
-import { isMediaMtxHealthy } from '../lib/mtxHealth'
 import { Card, CardHeader, CardTitle, CardContent, Badge, Button, Skeleton, ErrorCard, StatusDot } from '../components/ui'
 import { extractApiError } from '../lib/apiError'
+import { useCameraStatusConnected } from '../hooks/useCameraStatus'
 import { useCameras, useRecordingsByDate, useSuricataStats, useSystemResources, type CameraItem } from '../lib/queries'
 import { StatTile, UsageBar } from '../components/ui/stats'
 import { formatDuration, localDayStart, todayLocalKey } from '../lib/time'
@@ -39,29 +38,6 @@ function fmtDay(date: string): string {
     month: 'short',
     day: 'numeric',
   })
-}
-
-type MediaMtxStatus = {
-  camera_id: number
-  camera_name?: string
-  path_configured?: boolean
-  path_active?: boolean
-  path_status?: any
-  active_path?: any
-  recording_status?: { recording_enabled?: boolean }
-}
-
-function usePolling(enabled: boolean, intervalMs: number, fn: () => void) {
-  // The callback lives in a ref so an unstable fn identity can't restart the
-  // interval (and re-fire fn) on every render.
-  const fnRef = useRef(fn)
-  fnRef.current = fn
-  useEffect(() => {
-    if (!enabled) return
-    fnRef.current()
-    const id = setInterval(() => fnRef.current(), intervalMs)
-    return () => clearInterval(id)
-  }, [enabled, intervalMs])
 }
 
 function KpiCard({ icon, label, value, help, tone = 'neutral', onClick }: { icon: React.ReactNode; label: string; value: string | number; help?: string; tone?: 'neutral' | 'success' | 'warning' | 'destructive'; onClick?: () => void }) {
@@ -151,74 +127,39 @@ export function Dashboard() {
   const alertsErr = alertsQuery.isError ? extractApiError(alertsQuery.error, 'No alert endpoint configured') : null
   const loadingAlerts = alertsQuery.isPending
 
-  const [polling, setPolling] = useState<boolean>(false)
   const refreshing = camsQuery.isFetching || recsQuery.isFetching || alertsQuery.isFetching
-
-  // Per-camera live status (from media-server)
-  const [liveStatuses, setLiveStatuses] = useState<Record<number, MediaMtxStatus>>({})
-
-  const fetchLiveStatuses = useCallback(async (cameras: CameraItem[]) => {
-    // Query all cameras for accurate counts
-    const results: Record<number, MediaMtxStatus> = {}
-    await Promise.all(
-      cameras.map(async (c) => {
-        try {
-          const { data } = await apiService.getCameraMediaMTXStatus(c.id)
-          results[c.id] = data as MediaMtxStatus
-        } catch {
-          results[c.id] = { camera_id: c.id }
-        }
-      })
-    )
-    setLiveStatuses((prev) => ({ ...prev, ...results }))
-  }, [])
+  const liveUpdates = useCameraStatusConnected()
 
   const refreshAll = useCallback(async () => {
     await Promise.all([camsQuery.refetch(), recsQuery.refetch(), alertsQuery.refetch()])
   }, [camsQuery.refetch, recsQuery.refetch, alertsQuery.refetch])
 
-  useEffect(() => {
-    if (cams && cams.length) {
-      const id = setTimeout(async () => {
-        const healthy = await isMediaMtxHealthy(15000)
-        if (!healthy) return
-        fetchLiveStatuses(cams)
-      }, 500)
-      return () => clearTimeout(id)
-    }
-  }, [cams, fetchLiveStatuses])
-
-  usePolling(polling, 30000, refreshAll)
-
-  const onlineCount = useMemo(() => {
-    if (!cams) return 0
-    let count = 0
-    for (const c of cams) {
-      const st = liveStatuses[c.id]
-      // Online = active_path.details shows ready:true && bytesReceived > 0
-      const details = st?.active_path?.details
-      if (details?.ready === true && (details?.bytesReceived || 0) > 0) count++
-    }
-    return count
-  }, [cams, liveStatuses])
+  // Camera liveness rides in on the camera list itself, which refreshes on its
+  // own interval and whenever the events socket reports a transition. This
+  // used to be a per-camera /mediamtx-status fan-out fired once, 500ms after
+  // the list arrived — so the KPI and the chart below were pinned to whatever
+  // was true when the page opened, and the "Polling" toggle that was supposed
+  // to fix that refetched the queries without ever re-running the fan-out.
+  const onlineCount = useMemo(
+    () => (cams ?? []).filter((c) => c.live_online === true).length,
+    [cams],
+  )
 
   const statusOf = useCallback((c: CameraItem): 'online' | 'offline' | 'degraded' | 'error' => {
     // Check camera.status for error/failed first
     if (c.status && ['error', 'failed'].includes(c.status)) return 'error'
 
-    const st = liveStatuses[c.id]
-    const details = st?.active_path?.details
+    if (c.live_online === true) return 'online'
+    if (c.live_online === false) return 'offline'
 
-    // Online = active_path.details.ready && bytesReceived > 0 (real data flowing)
-    if (details?.ready === true && (details?.bytesReceived || 0) > 0) return 'online'
-
-    // Degraded = camera is provisioned/configured but no data flowing
-    // path_configured means MediaMTX has a path, or camera status indicates it should be provisioned
-    if (st?.path_configured || c.status === 'provisioned' || c.status === 'active') return 'degraded'
+    // Liveness unknown — the recorder restarted and has not re-seeded, or this
+    // camera has never been seen. Provisioned-but-unknown is degraded, not
+    // offline, so a restart doesn't briefly report the fleet as down.
+    if (c.status === 'provisioned' || c.status === 'active') return 'degraded'
 
     // Offline = camera not provisioned or no path/config
     return 'offline'
-  }, [liveStatuses])
+  }, [])
 
   // Charts data
   const recordingsByDay = useMemo(() => {
@@ -268,8 +209,15 @@ export function Dashboard() {
       <div className="flex items-center gap-2">
         <h1 className="text-lg font-semibold">Dashboard</h1>
         <div className="ml-auto flex items-center gap-2">
+          {/* Camera status arrives over the events socket and no longer needs
+              a manual poll. Say so when that socket is down, since the cards
+              are then only as fresh as the list's own refetch interval. */}
+          {!liveUpdates && (
+            <span className="text-xs text-[var(--text-dim)]" title="Reconnecting to the live event stream; status may lag by up to a minute">
+              Live updates reconnecting…
+            </span>
+          )}
           <Button onClick={refreshAll} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh</Button>
-          <Button onClick={() => setPolling((s) => !s)}>{polling ? <CircleCheck size={14} /> : <CircleDashed size={14} />} {polling ? 'Polling: On' : 'Polling: Off'}</Button>
         </div>
       </div>
 
@@ -465,11 +413,11 @@ export function Dashboard() {
               ))}
             </div>
           ) : camsErr ? (
-            <ErrorCard title="Cameras" message={camsErr} onRetry={fetchCameras} />
+            <ErrorCard title="Cameras" message={camsErr} onRetry={() => camsQuery.refetch()} />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {(cams || []).slice(0, 9).map((c) => (
-                <CameraTile key={c.id} cam={c} status={statusOf(c)} recording={!!liveStatuses[c.id]?.recording_status?.recording_enabled} />
+                <CameraTile key={c.id} cam={c} status={statusOf(c)} recording={c.recording_state === 'recording'} />
               ))}
             </div>
           )}

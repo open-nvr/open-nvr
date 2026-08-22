@@ -203,7 +203,7 @@ export function LiveView() {
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
   // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
-  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string}>>([])
+  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null}>>([])
   
   // Camera display order - array of camera IDs in display sequence
   // This determines which camera appears in which tile position
@@ -268,7 +268,12 @@ export function LiveView() {
   const loadCameras = () => {
     apiService.getCameras().then(({ data }) => {
       const cameras = data.cameras || data || []
-      const cameraList = cameras.map((cam: any) => ({ id: cam.id, name: cam.name }))
+      // live_online is kept so a tile that mounts while its camera is already
+      // down can say so on first paint. The events socket only reports
+      // transitions, so without this the overlay waits for the camera to
+      // change state — which, for one that is simply still offline, never
+      // happens, and the tile just shows a dead player.
+      const cameraList = cameras.map((cam: any) => ({ id: cam.id, name: cam.name, live_online: cam.live_online }))
       setAvailableCameras(cameraList)
       
       // Update display order: add new cameras, remove deleted ones
@@ -649,7 +654,7 @@ function Tile({
   canManage = false
 }: { 
   index: number
-  availableCameras: Array<{id: number, name: string}>
+  availableCameras: Array<{id: number, name: string, live_online?: boolean | null}>
   assignedCameraId?: number | null
   onCameraSelected?: (cameraId: number) => void
   onCameraAdded?: () => void
@@ -672,6 +677,16 @@ function Tile({
   // 60-min stream token) and remounting the player so the stream resumes
   // without any user action.
   const { status: connectivity, version: streamVersion } = useCameraStatus(assignedCameraId)
+  // The socket carries transitions, so `connectivity` stays undefined for a
+  // camera that was already down when this mounted. Fall back to the state the
+  // camera list reported. Deliberately NOT fed into streamVersion: the player
+  // remount on recovery has to stay driven by a real transition, or a list
+  // refresh would tear down a healthy stream and re-mint its token.
+  const effectiveConnectivity =
+    connectivity ??
+    (availableCameras.find(c => c.id === assignedCameraId)?.live_online === false
+      ? 'offline'
+      : undefined)
   // Bumped when the player reports an auth-rejected stream request — the
   // 60-min token expired mid-session (e.g. a stream hiccup hours in; the
   // backend never saw the camera go offline, so streamVersion won't bump).
@@ -816,10 +831,11 @@ function Tile({
           )}
         </div>
 
-        {/* Offline overlay — driven by backend camera_status events. Clears
-            itself (and the player restarts via the key above) when the
-            camera comes back; no user interaction needed. */}
-        {cameraId && connectivity === 'offline' && (
+        {/* Offline overlay — from the camera list on first paint, then from
+            backend camera_status events. Clears itself (and the player
+            restarts via the key above) when the camera comes back; no user
+            interaction needed. */}
+        {cameraId && effectiveConnectivity === 'offline' && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
             <AlertCircle size={24} className="text-yellow-400" />
             <div className="text-xs uppercase tracking-wide text-yellow-300">Camera offline</div>

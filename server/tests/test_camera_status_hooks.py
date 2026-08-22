@@ -332,3 +332,167 @@ def test_reconciler_skips_when_mediamtx_unreachable(
 
     assert published == []
     assert service.is_online(cam.id) is True
+
+
+# ---------------------------------------------------------------------------
+# snapshot(): the batch read GET /cameras/ uses to attach live_online.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_reports_unknown_for_unseen_cameras(service):
+    """Never-seen ids must come back None, not False.
+
+    This is the guard on the restart window: _status is empty until the first
+    reconcile pass, and reporting False there would paint the whole fleet
+    "Disconnected" for RECONCILE_INITIAL_DELAY_SECONDS after every restart.
+    """
+    assert service.snapshot([1, 2, 3]) == {1: None, 2: None, 3: None}
+    assert service.snapshot([]) == {}
+
+
+def test_snapshot_reflects_committed_transitions(db_env, service, published):
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        assert service.snapshot([cam.id]) == {cam.id: True}
+
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=False, reason="hook",
+        )
+        await _drain(service)
+        assert service.snapshot([cam.id]) == {cam.id: False}
+
+    asyncio.run(run())
+
+
+def test_snapshot_is_unknown_during_offline_debounce(db_env, service, monkeypatch):
+    """A camera mid-debounce still reads as its last committed state.
+
+    The badge must not flip before the transition commits, or it would
+    disagree with the toast the operator sees.
+    """
+    monkeypatch.setattr(css, "OFFLINE_DEBOUNCE_SECONDS", 30.0)
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=False, reason="hook",
+        )
+        # Pending, not committed — still online.
+        assert service.snapshot([cam.id]) == {cam.id: True}
+        for task in service._pending_offline.values():
+            task.cancel()
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# online_since — the floor recording health uses to tell "just reconnected"
+# apart from "streaming fine, recorder dead".
+# ---------------------------------------------------------------------------
+
+
+def test_ready_time_parsing_handles_go_nanoseconds():
+    """MediaMTX is Go, so readyTime carries nanoseconds; fromisoformat caps at
+    microseconds and would otherwise reject the whole timestamp."""
+    from services.camera_status_service import _parse_ready_time
+
+    parsed = _parse_ready_time("2026-08-22T17:01:56.44637033+05:30")
+    assert parsed is not None and parsed.microsecond == 446370
+    assert _parse_ready_time("2026-08-22T17:01:56Z") is not None
+    # Anything unusable degrades to None rather than exploding the reconcile.
+    for junk in (None, "", "garbage", 123):
+        assert _parse_ready_time(junk) is None
+
+
+def test_online_since_is_stamped_and_cleared(db_env, service, published):
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        assert service.online_since([cam.id])[cam.id] is not None
+
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=False, reason="hook",
+        )
+        await _drain(service)
+        # Nothing is streaming, so there is no floor to apply.
+        assert service.online_since([cam.id])[cam.id] is None
+
+    asyncio.run(run())
+
+
+def test_repeated_ready_does_not_advance_online_since(db_env, service, published):
+    """A re-delivered ready for a source that never dropped must not keep
+    pushing the floor forward — that would mask a genuinely dead recorder
+    indefinitely, which is the exact failure the stall badge exists to catch.
+    """
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        first = service.online_since([cam.id])[cam.id]
+
+        for _ in range(3):
+            await service.handle_signal(
+                camera_id=cam.id, camera_name=cam.name, path="cam-1",
+                online=True, reason="reconciler",
+            )
+        assert service.online_since([cam.id])[cam.id] == first
+
+    asyncio.run(run())
+
+
+def test_reconciler_seeds_online_since_from_mediamtx_ready_time(
+    db_env, service, published, monkeypatch
+):
+    """After a backend restart the source has often been up for hours.
+
+    Seeding the floor with "now" would claim it had only just started and
+    suppress stall reporting for a few minutes; MediaMTX's own readyTime is
+    the truth and survives our restart.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from services.mediamtx_admin_service import MediaMtxAdminService
+    from services.stream_service import _build_stream_name
+
+    cam = db_env.camera
+    path = _build_stream_name(settings.mediamtx_stream_prefix, cam.id, cam.ip_address)
+    ready_at = datetime.now(UTC) - timedelta(hours=3)
+
+    async def fake_list():
+        return {
+            "status": "ok",
+            "details": {"items": [{
+                "name": path,
+                "ready": True,
+                "bytesReceived": 1234,
+                "readyTime": ready_at.isoformat(),
+            }]},
+        }
+
+    monkeypatch.setattr(MediaMtxAdminService, "list_active_paths", fake_list)
+
+    asyncio.run(service.reconcile_once())
+
+    seeded = service.online_since([cam.id])[cam.id]
+    assert seeded is not None
+    assert abs((seeded - ready_at).total_seconds()) < 1
