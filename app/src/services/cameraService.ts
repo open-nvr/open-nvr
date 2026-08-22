@@ -47,6 +47,8 @@ export const cameraService = {
   createCamera: (payload: any, opts: { force?: boolean } = {}) =>
     api.post('/api/v1/cameras/', payload, opts.force ? { params: { force: true } } : undefined),
   updateCamera: (cameraId: number, payload: any) => api.put(`/api/v1/cameras/${cameraId}`, payload),
+  // Suggestions + live availability for the camera Assignments editor.
+  getAssignableSkills: () => api.get('/api/v1/cameras/assignable-skills'),
   deleteCamera: (cameraId: number) => api.delete(`/api/v1/cameras/${cameraId}`),
   // Bin (irreversibly soft-deleted cameras)
   getDeletedCameras: () => api.get('/api/v1/cameras/deleted'),

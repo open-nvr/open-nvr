@@ -37,6 +37,17 @@ import { Modal } from '../components/Modal'
 // settings surface); consumers read it from the internal endpoint.
 type CameraAssignment = { skill: string; labels?: string[] | null }
 
+// One row of GET /cameras/assignable-skills: a known skill with live
+// availability. available === null means "couldn't tell" (KAI-C
+// unreachable) and must never grey anything out.
+type AssignableSkill = {
+  skill: string
+  label: string
+  source: string
+  available: boolean | null
+  hint: string
+}
+
 type Camera = {
   id: number
   name: string
@@ -125,6 +136,24 @@ export function Cameras() {
   // in flight left the button disabled and looking broken.
   const [saving, setSaving] = useState(false)
   const [scanQr, setScanQr] = useState(false)
+
+  // Known skills for the Assignments editor — fetched once per dialog
+  // open; [] until loaded (the editor stays free-text either way).
+  const [assignableSkills, setAssignableSkills] = useState<AssignableSkill[]>([])
+
+  const loadAssignableSkills = async () => {
+    try {
+      const { data } = await apiService.getAssignableSkills()
+      setAssignableSkills(data?.skills || [])
+    } catch {
+      setAssignableSkills([])
+    }
+  }
+
+  const skillInfo = (raw: string): AssignableSkill | undefined => {
+    const s = raw.trim().toLowerCase()
+    return s ? assignableSkills.find(k => k.skill === s) : undefined
+  }
 
   const [form, setForm] = useState<CameraForm>({
     name: '',
@@ -427,6 +456,7 @@ export function Cameras() {
       })),
     })
     setShowEditDialog(true)
+    loadAssignableSkills()
   }
 
   const closeEditDialog = () => {
@@ -743,6 +773,13 @@ export function Cameras() {
                   restriction declared. Consumers (Tier-0, apps) adopt these
                   incrementally.
                 </p>
+                <datalist id="assignable-skills">
+                  {assignableSkills.map(k => (
+                    <option key={k.skill} value={k.skill}>
+                      {`${k.label}${k.available === false ? ' (not installed)' : ''}`}
+                    </option>
+                  ))}
+                </datalist>
                 {form.assignments.map((row, i) => (
                   <div key={i} className="flex gap-2 items-center">
                     <input
@@ -753,6 +790,7 @@ export function Cameras() {
                         assignments: form.assignments.map((r, j) => j === i ? { ...r, skill: e.target.value } : r),
                       })}
                       placeholder="skill, e.g. object_detection"
+                      list="assignable-skills"
                       aria-label={`Assignment ${i + 1} skill`}
                     />
                     <input
@@ -774,6 +812,29 @@ export function Cameras() {
                     >✕</button>
                   </div>
                 ))}
+                {form.assignments.map((row, i) => {
+                  const info = skillInfo(row.skill)
+                  if (!row.skill.trim()) return null
+                  // Only ANNOTATE — never block: available === false gets an
+                  // amber "what to install" note; null (unknown) and true
+                  // stay quiet; an unknown spelling gets a gentle nudge.
+                  if (info && info.available === false) {
+                    return (
+                      <p key={`hint-${i}`} className="text-xs text-amber-500">
+                        {info.label}: {info.hint}
+                      </p>
+                    )
+                  }
+                  if (!info && assignableSkills.length > 0) {
+                    return (
+                      <p key={`hint-${i}`} className="text-xs text-[var(--muted)]">
+                        “{row.skill.trim()}” isn’t a known skill on this install —
+                        it will be stored, but nothing consumes it yet.
+                      </p>
+                    )
+                  }
+                  return null
+                })}
                 <button
                   type="button"
                   className="px-3 py-1.5 border border-[var(--border)] bg-[var(--panel-2)] rounded text-xs"
