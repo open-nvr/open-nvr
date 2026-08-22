@@ -193,12 +193,15 @@ warning above fires. Teardown (`desired="absent"`) passes no override —
 
 Pinning is fully **wired and takes effect** the moment the curated index
 carries an `image_digest` for an app *and* that image is published to a
-registry the host can pull from. **Today, the shipped apps ship as a
-local `build:` overlay with `:local-build` tags and NO published digest
-in `apps_index.yml`** — so installing one of them right now logs the
-UNPINNED warning and uses the local build. That is expected, not a bug:
-the missing piece is a published, digest-pinned registry (see *What is
-deferred*), not the pinning mechanism, which is complete and tested.
+registry the host can pull from. **The app images ARE now published**:
+`.github/workflows/publish-app-images.yml` pushes every catalog app to
+`ghcr.io/open-nvr/<id>` on each main push and release tag (multi-arch,
+same tag policy as core), so the index's `image` refs resolve. What the
+index still ships WITHOUT is a per-entry `image_digest` — so an install
+today logs the UNPINNED warning and pulls the tag. Recording digests in
+the index at release time is the remaining step to make pinning bite;
+the mechanism itself is complete and tested, and the local `build:`
+overlay with `:local-build` tags remains the dev / air-gapped path.
 
 ---
 
