@@ -146,10 +146,12 @@ Each slice is independently shippable and useful on its own:
 
 1. **Schema + endpoint.** `assignments` on the camera record, written by the
    camera settings page, served by the internal endpoint. Nothing consumes
-   it yet.
+   it yet. *(shipped — PR #275)*
 2. **SDK `cameras_for_skill()`.** Apps opt in; occupancy switches from
    "watch every camera" to "watch my assigned cameras", explicit config
-   still winning.
+   still winning. *(shipped — `filter_cameras_for_skill` /
+   `cameras_for_skill` in `opennvr_app_sdk.cameras`; occupancy is the
+   reference consumer, re-scoping on every discovery refresh)*
 3. **Tier-0 per-camera labels/analyze.** The class-selection case from the
    goal, plus the CPU saving of not analysing unassigned cameras.
 4. **Retire `AIModel`'s polling loop** in favour of assignment + the
