@@ -147,15 +147,20 @@ settings), or lower the main stream's resolution.
 Even with the substream and a low `DETECT_FPS`, the decoder still
 decompresses the camera's FULL frame rate — the `fps` filter drops frames
 *after* they're decoded. `-skip_frame` moves the drop into the decoder so
-skipped frames are never decompressed at all: `bidir` skips B-frames
-(moderate saving, granularity preserved), `nonref` skips non-reference
-frames, and `nokey` decodes keyframes only — roughly one frame per GOP
-(usually 0.5-1 fps), cutting decode cost by about the GOP length. With
-`nokey`, real motion/track granularity IS the keyframe rate: plenty for
-presence alarms and counting, coarse for fast-moving events — which is why
-the default stays `none`. The `fps` filter pads the gap by duplicating
-frames, which is nearly free downstream (zero pixel diff, so the motion
-gate skips them).
+skipped frames are never decompressed at all. The default is `nonref` —
+skip frames that no other frame references — because it is provably
+lossless: a dropped frame is by definition one nothing depends on, and the
+analyzed rate stays far above `DETECT_FPS`. It saves wherever the stream
+carries such frames and costs nothing where it doesn't (many IP cameras
+encode without B-frames, so there may be nothing to skip — check with
+ffprobe). Deeper cuts are opt-in: `bidir` drops ALL B-frames (can artifact
+on the rare b-pyramid stream that uses B-frames as references), and
+`nokey` decodes keyframes only — roughly one frame per GOP (usually
+0.5-1 fps), cutting decode cost by about the GOP length, with real
+motion/track granularity becoming the keyframe rate: plenty for presence
+alarms and counting, coarse for fast-moving events. The `fps` filter pads
+gaps by duplicating frames, which is nearly free downstream (zero pixel
+diff, so the motion gate skips them). `none` restores full decode.
 
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
@@ -164,7 +169,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
-DETECT_DECODE_SKIP=none           # none | bidir | nonref | nokey — decode-side frame skip (dial 4)
+DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)

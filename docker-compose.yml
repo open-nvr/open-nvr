@@ -292,10 +292,10 @@ services:
       - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
-      # Decode-side frame skip (-skip_frame): none | bidir | nonref | nokey.
-      # nokey = keyframes only — the deepest CPU cut on CPU-only hosts, at
-      # the cost of motion/track granularity (≈ the stream's GOP rate).
-      - DETECT_DECODE_SKIP=${DETECT_DECODE_SKIP:-none}
+      # Decode-side frame skip (-skip_frame): nonref (default — provably
+      # lossless, drops only frames nothing references) | bidir | nokey
+      # (keyframes only: deepest CPU cut, granularity ≈ the GOP rate) | none.
+      - DETECT_DECODE_SKIP=${DETECT_DECODE_SKIP:-nonref}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).

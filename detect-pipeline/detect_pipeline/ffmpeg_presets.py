@@ -125,9 +125,11 @@ def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
 # camera's full frame rate is decoded even though only DETECT_FPS frames/s are
 # analyzed (the ``fps`` filter runs POST-decode). ``-skip_frame`` moves the
 # drop to the DECODER, so skipped frames are never decompressed at all:
-#   none    decode every frame (default — full motion/track granularity)
+#   none    decode every frame — full motion/track granularity (this function's
+#           default; the SERVICE defaults to nonref via DETECT_DECODE_SKIP)
 #   bidir   skip B-frames — moderate saving, output still ≥ typical DETECT_FPS
-#   nonref  skip non-reference frames — bigger saving where streams carry them
+#   nonref  skip non-reference frames — PROVABLY lossless (a dropped frame is
+#           one nothing else depends on); the service default
 #   nokey   decode keyframes ONLY — the big one (~one frame per GOP, usually
 #           0.5-1 fps): decode cost drops by roughly the stream's GOP length.
 #           The ``fps`` filter then pads by duplicating frames, which is

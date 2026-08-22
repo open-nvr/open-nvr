@@ -23,7 +23,7 @@ Env:
                             "OpenVINOExecutionProvider" (Intel N100) or
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
-  DETECT_DECODE_SKIP        none | bidir | nonref | nokey (decode-side CPU dial)
+  DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
@@ -91,7 +91,7 @@ def _decode_skip_from_env(env: dict) -> str:
     invalid value logs loudly and falls back to full decode."""
     from .ffmpeg_presets import DECODE_SKIP_MODES
 
-    value = str(env.get("DETECT_DECODE_SKIP", "none")).strip().lower()
+    value = str(env.get("DETECT_DECODE_SKIP", "nonref")).strip().lower()
     if value not in DECODE_SKIP_MODES:
         log.warning(
             "DETECT_DECODE_SKIP=%r is not one of %s; using 'none' (full decode)",
