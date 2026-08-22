@@ -13,14 +13,40 @@ stated otherwise.
 
 ---
 
+## Skills and tasks — the two words that matter
+
+Everything the agent does is built from two ideas. Get these two and
+the rest of this guide is detail.
+
+A **skill** is a capability the agent *has* — something it knows how to
+do. Seeing and analysing a live stream is a skill. Counting objects is
+a skill. Searching recorded footage is a skill. Recognising faces is a
+skill. Skills are the agent's verbs, and the set is designed to grow:
+if a *calling* skill were added tomorrow (dial a VoIP/SIP number),
+nothing else about the agent would change — there would simply be one
+more thing it knows how to do, and every assignment built on it would
+light up.
+
+A **task** is an assignment *you* give, built out of those skills.
+"Send me a report at 8 AM every day of how many trucks entered" is a
+task: the agent takes it and keeps doing it — the counting skill plus a
+schedule. "If someone comes to the office gate after 6 pm, call me on
+my SIP URI" would be a task too: the detection skill composed with that
+future calling skill, standing until you cancel it.
+
+So: **skills are what the agent can do; tasks are what you've asked it
+to keep doing with them.** Adding a skill upgrades what every future
+task can be made of; adding a task never requires new code — it's just
+you talking.
+
+---
+
 ## Skills
 
-A **skill** is a user-facing capability the agent carries — "see what's
-happening", "count people", "search recorded footage". Each skill maps
-to one or more **tools** (the functions the LLM can call). Switching a
-skill off drops its tools from the advertised set, so the model can no
-longer call them — the agent genuinely reconfigures, it doesn't just
-refuse politely.
+A skill maps to one or more **tools** (the functions the LLM can
+call). Switching a skill off drops its tools from the advertised set,
+so the model can no longer call them — the agent genuinely
+reconfigures, it doesn't just refuse politely.
 
 | Skill | Ask it… | Voice default | Chat default | Needs |
 |---|---|---|---|---|
@@ -59,6 +85,31 @@ refuse politely.
    — e.g. faces shows "needs a face-recognition adapter" and links to
    the AI Adapters page to register one. The greyed state is honest:
    it reflects what is actually registered in KAI-C right now.
+
+## Tasks — the assignments you can give
+
+Every assignment the agent accepts is one of four shapes. They differ
+on just two axes: **when it runs** (once, continuously, or on a clock)
+and **how loudly the outcome arrives** (an answer, a notification, or a
+latching ring):
+
+| Shape | Runs | Outcome | Example | Tool |
+|---|---|---|---|---|
+| **Background run** | once, then done | answer back in chat | "Check every camera for anyone in a red shirt." | `create_background_task` |
+| **Watch** | continuously until stopped | notification when the condition is met | "Watch the driveway and tell me if more than 3 cars show up." | `create_monitor` |
+| **Alarm** | continuously until stopped | **rings until a human acknowledges** | "Alarm me if someone is at the door after 10 pm." | `create_alarm` |
+| **Report** | on a schedule, forever | a delivered summary, each time | "Every day at 8 AM, tell me how many trucks entered." | `create_report` |
+
+Why is a watch not just a task? Because "once" and "forever" are
+different promises: a background run finishes and is gone; a watch is a
+*standing* assignment that keeps consuming the stream until you cancel
+it. And why does the alarm get its own name when it's shaped like a
+watch? **Urgency.** A watch informs — read it when you like. An alarm
+interrupts — it latches and rings until a person deals with it. Same
+engine, opposite contract with your attention. The four shapes are one
+family; the names just tell you which promise you're getting.
+
+Each shape is detailed in its own section below.
 
 ## Alarms
 
@@ -148,7 +199,32 @@ search, which reads the persistent index. The skill's deeper tools —
 docker allowlists (prompt size); add them to `enabled_tools` to let the
 agent narrate a specific event or time window.
 
-## Alerts & notifications
+## Events, alerts, and alarms — the attention ladder
+
+Three words that sound alike but mean three different demands on your
+attention. From quietest to loudest:
+
+* An **event** is a recorded fact: *"person seen on cam2 at 14:02."*
+  The detection stream produces them continuously. Nobody is notified —
+  events are the raw material the agent (and every app) reasons over.
+  You query them ("did anyone come to the door in the last 30
+  minutes?"); they never come to you.
+* An **alert** is an event that matched something someone *said they
+  care about* — a watch's condition, an app's rule (the occupancy
+  counter crossing its limit), a report arriving. It's delivered as a
+  notification: informational, read it when you like, nothing latches.
+* A **critical alert** is an alert that demands a human *now* — and
+  **alarms are how you ask for one**. An alarm's siren latches and
+  rings until acknowledged; that's the whole difference. (An alarm
+  created at the *chime* or *silent* level is really asking for an
+  ordinary alert on an alarm's engine — the level, not the word, sets
+  the urgency. **siren** and **pulse** are the critical grades.)
+
+So: events happen, alerts inform, alarms interrupt. A fact climbs the
+ladder only because a rule you created (watch, app, alarm) said it
+should.
+
+## Where alerts reach you
 
 Three streams end up in front of you:
 
@@ -195,10 +271,13 @@ and forget people. Details: [FACES.md](FACES.md).
 
 ## Reports
 
-"Every morning at 7, summarise overnight activity" — a scheduled query
-whose answer lands in the Reports card and the notification feed. Off
-in both docker demos; enable by adding `create_report` / `stop_report`
-to `enabled_tools`.
+The scheduled task shape: "every morning at 7, summarise overnight
+activity", or "every day at 8 AM, tell me how many trucks entered" — a
+standing query the agent re-runs on its clock, with each answer landing
+in the Reports card and the notification feed (and any configured
+external channel). Create by voice/chat, stop the same way ("stop the
+morning report"). Off in both docker demos; enable by adding
+`create_report` / `stop_report` to `enabled_tools`.
 
 ## Access tiers
 
