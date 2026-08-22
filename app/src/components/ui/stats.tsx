@@ -55,10 +55,10 @@ export function Sparkline({ points, height = 28, className }: {
   )
 }
 
-export function SparkRow({ label, points, latest }: { label: string; points: Array<number | null>; latest: string }) {
+export function SparkRow({ label, points, latest, labelClass = 'w-14' }: { label: string; points: Array<number | null>; latest: string; labelClass?: string }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="font-mono text-[11px] text-[var(--text-dim)] w-14 shrink-0">{label}</span>
+      <span className={`font-mono text-[11px] text-[var(--text-dim)] shrink-0 truncate ${labelClass}`} title={label}>{label}</span>
       <div className="flex-1 text-[var(--accent,#5eb3f6)] opacity-90"><Sparkline points={points} /></div>
       <span className="font-mono text-[11px] tabular-nums w-16 text-right shrink-0">{latest}</span>
     </div>
