@@ -85,6 +85,46 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '/api'),
       },
+
+      // Streaming paths. In production nginx serves the SPA and proxies these
+      // to MediaMTX (see nginx/opennvr.conf); the UI relies on that by
+      // rebasing every backend-supplied stream URL onto its own origin
+      // (src/lib/streamUrl.ts). Under `npm run dev` that origin is this Vite
+      // server, so without these entries a WHEP POST hits Vite itself and
+      // 404s — live view stays dark. The prefix strips below mirror the
+      // `rewrite` directives in the matching nginx locations.
+      //
+      // Defaults target the Docker stack, which publishes MediaMTX on
+      // loopback and serves HLS/WebRTC over HTTPS with a self-signed cert
+      // (hlsEncryption/webrtcEncryption: yes in mediamtx.docker.yml) — hence
+      // secure:false. A bare-metal MediaMTX (mediamtx.local.yml) has both set
+      // to `no`, so point the VITE_MEDIAMTX_* vars at http:// URLs there.
+      '/webrtc': {
+        target: process.env.VITE_MEDIAMTX_WEBRTC_URL || 'https://127.0.0.1:8889',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/webrtc/, ''),
+      },
+      '/hls': {
+        target: process.env.VITE_MEDIAMTX_HLS_URL || 'https://127.0.0.1:8888',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/hls/, ''),
+      },
+
+      // Recording playback. Only MediaMTX's two real endpoints are proxied,
+      // matching nginx's exact-match locations, so SPA routes like /playback
+      // and /playback/sync still load the UI instead of 404ing here.
+      '/playback/get': {
+        target: process.env.VITE_MEDIAMTX_PLAYBACK_URL || 'http://127.0.0.1:9996',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/playback/, ''),
+      },
+      '/playback/list': {
+        target: process.env.VITE_MEDIAMTX_PLAYBACK_URL || 'http://127.0.0.1:9996',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/playback/, ''),
+      },
     },
   },
 })
