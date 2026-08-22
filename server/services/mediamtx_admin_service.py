@@ -876,11 +876,18 @@ class MediaMtxAdminService:
                     },
                 )
 
-            # Best-effort low-res substream for the camera-agent's live view
-            # (settings.agent_live_use_substream). A sub failure must NEVER
-            # affect the main path's result — the agent falls back to the
-            # main stream / stills.
-            if settings.agent_live_use_substream and result.get("http_status") in (200, 201):
+            # Best-effort low-res substream path. Provisioned WHENEVER a sub
+            # source exists (stored substream_url or a derivable vendor
+            # convention) — not only for the agent live view: Tier-0's
+            # detect-pipeline taps this path to decode the cheap stream
+            # instead of the full main stream (the ~5x CPU difference its
+            # README documents). The path is sourceOnDemand, so it costs
+            # nothing until something actually pulls it, and
+            # settings.agent_live_use_substream stays what it always was:
+            # the AGENT's choice of which path to WATCH, not a gate on the
+            # path existing. A sub failure must NEVER affect the main
+            # path's result — consumers fall back to the main stream.
+            if result.get("http_status") in (200, 201):
                 try:
                     await MediaMtxAdminService._provision_substream(
                         camera_id, camera_ip, config
@@ -1075,19 +1082,20 @@ class MediaMtxAdminService:
                         "http_status": result.get("http_status"),
                     },
                 )
-                # Keep the agent substream in sync with the (possibly new)
-                # source URL. Best-effort, same contract as provision_path.
-                if settings.agent_live_use_substream:
-                    try:
-                        await MediaMtxAdminService._provision_substream(
-                            camera_id, camera_ip, config
-                        )
-                    except Exception:  # pragma: no cover - defensive
-                        mediamtx_logger.warning(
-                            f"substream refresh raised for {name}; main path unaffected",
-                            extra={"camera_id": camera_id, "path": name,
-                                   "action": "mediamtx.substream_provision_error"},
-                        )
+                # Keep the substream path in sync with the (possibly new)
+                # source URL. Best-effort, same contract as provision_path —
+                # and same rule: the path exists whenever a sub source does,
+                # regardless of the agent live-view setting.
+                try:
+                    await MediaMtxAdminService._provision_substream(
+                        camera_id, camera_ip, config
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    mediamtx_logger.warning(
+                        f"substream refresh raised for {name}; main path unaffected",
+                        extra={"camera_id": camera_id, "path": name,
+                               "action": "mediamtx.substream_provision_error"},
+                    )
             else:
                 mediamtx_logger.error(
                     f"MediaMTX path replace failed: {name}",
