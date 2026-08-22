@@ -103,6 +103,24 @@ class CameraSpec:
     height: int | None = None
     fps: int = 5
     hwaccel: str = "cpu"
+    # Per-camera label set from the camera's ``object_detection`` assignment
+    # ("camera 4 wants person + truck"). None = no per-camera declaration →
+    # the global DETECT_LABELS applies, exactly as before assignments
+    # existed. Set by the provider from the internal endpoint's
+    # ``assignments`` field; a change restarts the worker on the next
+    # reconcile tick (see WorkerManager.reconcile).
+    labels: frozenset[str] | None = None
+
+
+def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
+    """The label allowlist THIS camera's pipeline should run with.
+
+    The camera's assignment wins when declared; else the global env
+    (DETECT_LABELS, defaulting to the curated track set). Factored out of
+    the worker so the precedence is testable without opening a stream."""
+    if spec.labels is not None:
+        return spec.labels
+    return _env_labels("DETECT_LABELS", DEFAULT_TRACK_LABELS)
 
 
 class CameraProvider(Protocol):
@@ -226,8 +244,13 @@ class CameraWorker:
             model_size=(self.model_size, self.model_size),
             stationary_interval=_env_int("DETECT_STATIONARY_INTERVAL", 10),
             max_regions=_env_int("DETECT_MAX_REGIONS", 8),
-            allowed_labels=_env_labels("DETECT_LABELS", DEFAULT_TRACK_LABELS),
+            allowed_labels=allowed_labels_for(self.spec),
         )
+        if self.spec.labels is not None:
+            log.info(
+                "tier0 %s: per-camera assignment labels active: %s",
+                self.spec.camera_id, ", ".join(sorted(self.spec.labels)) or "-",
+            )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
         prev_seq: int | None = None
@@ -361,6 +384,12 @@ class WorkerManager:
         self._visit_poster = visit_poster
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
+        # The spec each running worker was built with — reconcile compares
+        # ONLY the fields a worker bakes in at start (today: labels) so a
+        # settings-page change takes effect within one tick. Deliberately
+        # not whole-spec equality: frame_url carries a freshly minted JWT
+        # on every fetch and would restart every worker every tick.
+        self._specs: dict[str, CameraSpec] = {}
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
@@ -400,21 +429,36 @@ class WorkerManager:
 
         for cid in list(self._workers):
             worker = self._workers[cid]
-            if cid not in desired or not worker.is_alive():
+            labels_changed = (
+                cid in desired
+                and self._specs.get(cid) is not None
+                and desired[cid].labels != self._specs[cid].labels
+            )
+            if cid not in desired or not worker.is_alive() or labels_changed:
                 worker.stop()
                 del self._workers[cid]
+                self._specs.pop(cid, None)
+                if labels_changed:
+                    log.info(
+                        "tier0: restarting %s — per-camera labels changed to %s",
+                        cid,
+                        sorted(desired[cid].labels) if desired[cid].labels is not None
+                        else "(global default)",
+                    )
 
         for cid, spec in desired.items():
             if cid not in self._workers:
                 worker = self._factory(spec, self.sink)
                 worker.start()
                 self._workers[cid] = worker
+                self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
 
     def _stop_all(self) -> None:
         for worker in self._workers.values():
             worker.stop()
         self._workers.clear()
+        self._specs.clear()
 
     def stop(self) -> None:
         self._stop_all()

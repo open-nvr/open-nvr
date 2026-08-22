@@ -78,19 +78,82 @@ def _default_fps() -> int:
     return max(1, min(30, fps))
 
 
+# Skills whose consumers ride the Tier-0 detection stream. Used ONLY by the
+# opt-in DETECT_SKIP_UNASSIGNED mode: a camera whose assignments contain
+# none of these (e.g. LPR-only) can skip Tier-0 analysis entirely — a CPU
+# saving. Kept deliberately broad, and the mode ships OFF, because Tier-0
+# feeds many subscribers (footage-search indexes everything, the agent's
+# events skill reads every camera): skipping must be an explicit operator
+# choice, never an inference.
+DETECTION_SHAPED_SKILLS: frozenset[str] = frozenset({
+    "object_detection", "occupancy_counting", "people_counting",
+    "line_crossing", "intrusion_detection", "loitering_detection",
+    "abandoned_object", "package_delivery", "smart_doorbell",
+    "footage_search", "motion_detection",
+})
+
+
+def _skip_unassigned() -> bool:
+    """DETECT_SKIP_UNASSIGNED=true opts in to skipping cameras whose
+    assignments are detection-free. Default OFF (see above)."""
+    return os.environ.get("DETECT_SKIP_UNASSIGNED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool]:
+    """(per-camera labels, analyze) from a camera dict's ``assignments``.
+
+    Labels come from an ``object_detection`` assignment carrying labels —
+    "camera 4 wants person + truck" — and REPLACE the global DETECT_LABELS
+    for that camera only (unset → global applies, as ever). ``analyze``
+    stays True unless the opt-in skip mode is on AND the camera carries
+    assignments, none of them detection-shaped. The back-compat rule
+    everywhere: NO assignments = no restriction declared = analyze with
+    global labels, exactly as before assignments existed.
+    """
+    assignments = c.get("assignments")
+    if not isinstance(assignments, list) or not assignments:
+        return None, True
+    labels: frozenset[str] | None = None
+    skills: set[str] = set()
+    for a in assignments:
+        if not isinstance(a, dict):
+            continue
+        skill = str(a.get("skill", "")).strip().lower()
+        if not skill:
+            continue
+        skills.add(skill)
+        if skill == "object_detection" and a.get("labels"):
+            labels = frozenset(
+                str(s).strip().lower() for s in a["labels"] if str(s).strip()
+            ) or None
+    analyze = True
+    if _skip_unassigned() and skills and not (skills & DETECTION_SHAPED_SKILLS):
+        analyze = False
+        log.info(
+            "tier0: skipping %s — assignments (%s) need no Tier-0 detection "
+            "and DETECT_SKIP_UNASSIGNED is on",
+            c.get("camera_id"), ", ".join(sorted(skills)),
+        )
+    return labels, analyze
+
+
 def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
     # is honoured if the endpoint ever adds per-camera opt-out.
+    labels, assignment_analyze = _assignment_view(c)
     return CameraSpec(
         camera_id=str(c["camera_id"]),
         name=c.get("name", str(c["camera_id"])),
         substream_url=c["frame_url"],
-        analyze=bool(c.get("analyze", True)),
+        analyze=bool(c.get("analyze", True)) and assignment_analyze,
         width=c.get("width"),
         height=c.get("height"),
         fps=int(c.get("fps", _default_fps())),
         hwaccel=c.get("hwaccel", "cpu"),
+        labels=labels,
     )
 
 
