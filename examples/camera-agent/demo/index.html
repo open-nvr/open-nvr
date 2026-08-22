@@ -209,6 +209,8 @@
     .log:empty{align-items:center; justify-content:center;}
     .log:empty::after{content:"Ask your cameras anything — tap Talk or type below."; color:var(--faint); font-size:0.85rem;}
     .msg{max-width:82%;} .msg .who{font-weight:600; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; display:block; margin-bottom:3px;}
+    .msg .when{font-weight:400; font-size:0.64rem; color:var(--faint); text-transform:none; letter-spacing:0; margin-left:0.45rem;}
+    .msg.sys .when{margin-left:0.35rem; font-style:normal;}
     .msg.user{align-self:flex-end; background:linear-gradient(180deg,rgba(94,179,246,0.18),rgba(61,157,243,0.12));
       border:1px solid rgba(94,179,246,0.22); border-radius:14px 14px 4px 14px; padding:0.55rem 0.75rem;}
     .msg.user .who{color:var(--user);}
@@ -985,9 +987,19 @@
     function setAvatar(s){ ramEl.className="ram "+(avatarVideoOk?"has-video ":"")+s;
       if(avatarVideoOk) setAvatarClip(s==="speaking"?"speaking":(s==="thinking"?"thinking":"idle")); }
     function setStatus(t,k=""){ statusEl.textContent=t; statusEl.className="status"+(k?(" "+k):""); }
+    function msgTime(){
+      // HH:MM next to every message; the full date rides the tooltip.
+      const now=new Date();
+      const t=document.createElement("span"); t.className="when";
+      t.textContent=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      t.title=now.toLocaleString();
+      return t; }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
-      if(who==="sys"){d.textContent=text;} else { const label=who==="user"?"you":"agent";
-        d.innerHTML=`<span class="who">${label}</span>`; d.appendChild(document.createTextNode(text));
+      if(who==="sys"){ d.textContent=text; d.appendChild(msgTime()); }
+      else { const label=who==="user"?"you":"agent";
+        d.innerHTML=`<span class="who">${label}</span>`;
+        d.querySelector(".who").appendChild(msgTime());
+        d.appendChild(document.createTextNode(text));
         // Show the frame(s) the agent actually looked at, inline in the bubble.
         if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
           frames.forEach(f=>{ const wrap=document.createElement("div");
