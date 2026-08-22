@@ -867,6 +867,27 @@ async def health():
     }
 
 
+@app.get("/metrics")
+async def kaic_prometheus_metrics():
+    """KAI-C's OWN Prometheus exposition — the client-side vantage point.
+
+    Serves what KAI-C observes about the fleet: per-adapter proxied-
+    inference counts and client-observed latency (network + adapter
+    queue + inference, measured around the HTTP hop — still recorded
+    when an adapter is too wedged to answer its own /metrics), plus
+    per-adapter up/health-failure gauges from the 60 s poll. Point an
+    external Prometheus here for the fleet view; scrape the adapters
+    directly for their self-reported + domain series
+    (docs/OBSERVABILITY.md has the scrape config)."""
+    from fastapi.responses import PlainTextResponse
+    from kai_c.metrics import proxy_metrics
+    summaries = get_registry().list_summaries()
+    return PlainTextResponse(
+        proxy_metrics.render(summaries),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 @app.get("/adapters/health")
 async def check_adapters_health():
     """
