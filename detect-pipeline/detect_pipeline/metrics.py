@@ -169,6 +169,12 @@ def record_frame(
     else:
         metrics.inc("tier0_detector_skipped_total", {"camera": camera_id, "reason": "no_motion"})
     metrics.gauge("tier0_tracks_active", float(len(result.tracks)), cam)
+    # Bounded-load guards (#track-explosion) — never cap silently:
+    if getattr(result, "regions_capped", False):
+        metrics.inc("tier0_regions_capped_total", cam)
+    skipped = int(getattr(result, "skipped_stationary", 0) or 0)
+    if skipped:
+        metrics.inc("tier0_stationary_skipped_total", cam, value=float(skipped))
     for det in getattr(result, "detections", None) or []:
         metrics.inc("tier0_detections_total", {"camera": camera_id, "label": det.label})
     if latency_s is not None:

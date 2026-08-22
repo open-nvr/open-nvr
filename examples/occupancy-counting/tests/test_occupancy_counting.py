@@ -113,3 +113,306 @@ def test_debounce_requires_persistence():
 def test_unknown_camera_ignored():
     c = _counter(_camera())
     assert c.handle_event(_event(9, camera_id="cam-unknown")) == []
+
+
+# ── Tier-0 consumption (the always-on detector) ────────────────────
+#
+# A default OpenNVR install runs detect-pipeline and NO per-frame adapter
+# loop, so Tier-0 events are the ONLY detections on the bus. These tests
+# drive the app with the real Tier-0 payload shape (detect_pipeline's
+# bus.build_payload) rather than adapter-shaped events.
+
+
+def _tier0_event(n_people: int, *, camera_id="cam-1", w=1920, h=1080) -> dict:
+    """A Tier-0 event as detect-pipeline publishes it: top-level ``tracks``
+    with PIXEL boxes and a ``frame`` size — no ``result`` block at all."""
+    return {
+        "schema": "opennvr.tier0.v1",
+        "adapter": "tier0",
+        "camera_id": camera_id,
+        "seq": 41,
+        "ts": 1234.5,                 # monotonic — never a date
+        "wall_ts": 1_755_700_000.0,   # epoch seconds
+        "frame": {"w": w, "h": h},
+        "calibrating": False,
+        "tracks": [
+            {"id": i + 1, "label": "person", "score": 0.9,
+             # centred box: 0.4-0.5 of the frame in both axes
+             "box": [int(w * 0.4), int(h * 0.4), int(w * 0.5), int(h * 0.5)],
+             "stationary": False, "best": True}
+            for i in range(n_people)
+        ],
+    }
+
+
+def test_tier0_events_are_counted_and_fire():
+    """The regression this whole slice exists for: on a stock install the
+    app saw Tier-0 events and silently dropped every one."""
+    counter = _counter(_camera(max_occ=2))
+    assert counter.consume_tier0 is True, "app default must consume Tier-0"
+    assert counter.handle_event(_tier0_event(2)) == []      # at the ceiling
+    alerts = counter.handle_event(_tier0_event(3))          # over it
+    assert len(alerts) == 1
+    assert alerts[0].evidence["level"] == "over"
+    assert alerts[0].evidence["count"] == 3
+
+
+def test_tier0_pixel_boxes_map_into_the_zone():
+    """Tracks carry PIXEL boxes; the SDK bridge normalises them and the app
+    scales back into zone space. A track outside the zone must not count."""
+    zone = Zone.from_config("left-half", [[0, 0], [960, 0], [960, 1080], [0, 1080]])
+    camera = oc.CameraZone(camera_id="cam-1", zone=zone, frame_width=1920,
+                           frame_height=1080, max_occupancy=0, min_occupancy=None)
+    counter = _counter(camera)
+    # One person centred at 45% width → inside the left half → over max(0).
+    fired = counter.handle_event(_tier0_event(1))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 1
+    # Same person on the right half → not counted, so no alert and the
+    # state machine returns to normal.
+    right = _tier0_event(1)
+    right["tracks"][0]["box"] = [1500, 400, 1700, 600]
+    assert counter.handle_event(right) == []
+    assert counter._states["cam-1"].last_count == 0
+
+
+def test_tier0_can_be_turned_off():
+    """Operators who also drive a heavy adapter can opt out and keep the
+    single (adapter) stream — no double counting."""
+    camera = _camera(max_occ=0)
+    cfg = _config(camera)
+    cfg.consume_tier0 = False
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert counter.handle_event(_tier0_event(3)) == []
+
+
+def test_unknown_camera_id_warns_once(caplog):
+    """``cam-1`` vs ``cam1`` used to be a silent no-op forever."""
+    counter = _counter(_camera())
+    with caplog.at_level("WARNING"):
+        counter.handle_event(_tier0_event(1, camera_id="cam1"))
+        counter.handle_event(_tier0_event(1, camera_id="cam1"))
+    warnings = [r for r in caplog.records if "not in my config" in r.message]
+    assert len(warnings) == 1, "warn once per unknown camera, not per frame"
+
+
+# ── Camera auto-derivation ─────────────────────────────────────────
+#
+# Hand-copying camera ids is how this app ends up counting nothing:
+# OpenNVR names cameras ``cam1``, hand-written configs say ``cam-1``.
+# With no cameras listed, the app asks OpenNVR instead of refusing.
+
+
+def _write_config(tmp_path, body: str) -> str:
+    p = tmp_path / "config.yml"
+    p.write_text(
+        'nats_url: "nats://x:4222"\n'
+        "max_occupancy: 5\n" + body
+    )
+    return str(p)
+
+
+def test_cameras_are_derived_from_opennvr_when_unlisted(tmp_path, monkeypatch):
+    import opennvr_app_sdk.cameras as sdk_cameras
+
+    monkeypatch.setattr(
+        oc, "discover_cameras",
+        lambda url, api_key=None: [{"camera_id": "cam1"}, {"camera_id": "cam2"}],
+    )
+    cfg = oc.load_config(_write_config(tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+    cam = cfg.cameras["cam1"]
+    # Whole-frame zone in the SDK's unit space — correct at any real
+    # resolution because detector boxes are normalised before comparison.
+    assert cam.frame_width == sdk_cameras.UNIT_FRAME
+    assert cam.max_occupancy == 5                      # app-level default applies
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    fired = counter.handle_event(_tier0_event(6, camera_id="cam1"))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 6
+
+
+def test_explicit_cameras_still_win(tmp_path, monkeypatch):
+    called = {"n": 0}
+
+    def _never(*a, **k):
+        called["n"] += 1
+        return [{"camera_id": "cam9"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _never)
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    assert list(cfg.cameras) == ["cam1"]
+    assert called["n"] == 0, "must not call OpenNVR when cameras are pinned"
+
+
+def test_no_cameras_and_nowhere_to_ask_is_a_clear_error(tmp_path, monkeypatch):
+    """No list AND no opennvr_url is a genuine misconfiguration."""
+    import pytest
+
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    with pytest.raises(ValueError, match="opennvr_url"):
+        oc.load_config(_write_config(tmp_path, "cameras: []\n"))
+
+
+def test_core_reachable_but_no_cameras_yet_boots_empty(tmp_path, monkeypatch):
+    """A fresh install where the app was enabled before any camera exists
+    must boot and wait — exiting here would crash-loop the container
+    forever over something the operator fixes in the UI a minute later."""
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert cfg.cameras == {} and cfg.cameras_auto_derived is True
+
+
+def test_cameras_added_after_boot_are_picked_up(tmp_path, monkeypatch):
+    """A set captured once at boot would silently never watch a camera
+    added tomorrow."""
+    live = [{"camera_id": "cam1"}]
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert sorted(cfg.cameras) == ["cam1"]
+
+    live.append({"camera_id": "cam2"})                 # operator adds a camera
+    added, removed = counter.refresh_cameras()
+    assert added == ["cam2"] and removed == []
+    # ...and it is counted immediately, with the app-level threshold.
+    fired = counter.handle_event(_tier0_event(6, camera_id="cam2"))
+    assert len(fired) == 1 and fired[0].evidence["count"] == 6
+
+    live.remove({"camera_id": "cam1"})                 # ...and removes one
+    added, removed = counter.refresh_cameras()
+    assert added == [] and removed == ["cam1"]
+    assert "cam1" not in cfg.cameras
+
+
+def test_refresh_ignores_an_empty_discovery_blip(tmp_path, monkeypatch):
+    """Core answering with nothing mid-poll must not delete every camera."""
+    live = [{"camera_id": "cam1"}]
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    live.clear()
+    assert counter.refresh_cameras() == ([], [])
+    assert sorted(cfg.cameras) == ["cam1"], "a blip must not stop the app watching"
+
+
+def test_pinned_cameras_are_never_refreshed(tmp_path, monkeypatch):
+    called = {"n": 0}
+
+    def _count(*a, **k):
+        called["n"] += 1
+        return [{"camera_id": "cam9"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _count)
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert counter.refresh_cameras() == ([], [])
+    assert called["n"] == 0 and list(cfg.cameras) == ["cam1"]
+
+
+def test_discovered_cameras_require_an_app_level_ceiling(tmp_path, monkeypatch):
+    """A camera the refresh loop adds later has no per-camera threshold to
+    fall back on — without an app-level default it would silently get 0 and
+    alert on the first person past. Missing max_occupancy must fail the
+    same way it does when a camera exists at boot."""
+    import pytest
+
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [])
+    p = tmp_path / "config.yml"
+    p.write_text('nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\ncameras: []\n')
+    with pytest.raises(ValueError, match="max_occupancy"):
+        oc.load_config(str(p))
+
+
+# ── Review-nit fixes ───────────────────────────────────────────────
+#
+# Three small holes found on a post-merge review pass: refresh must
+# present the same credentials boot did; refresh's dict mutation must be
+# runnable on the event loop with a pre-fetched list (no cross-thread
+# writes); and a missing ceiling with DISCOVERED cameras must not blame
+# a YAML "camera entry 0" that does not exist.
+
+
+def test_refresh_uses_the_same_api_key_boot_did(tmp_path, monkeypatch):
+    """Boot honoured a YAML ``internal_api_key``; a refresh that falls
+    back to the env var would discover cameras once and never again."""
+    seen_keys = []
+
+    def _spy(url, api_key=None):
+        seen_keys.append(api_key)
+        return [{"camera_id": "cam1"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _spy)
+    cfg = oc.load_config(_write_config(
+        tmp_path,
+        'opennvr_url: "http://core:8000"\n'
+        'internal_api_key: "yaml-secret"\n'
+        "cameras: []\n",
+    ))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    counter.refresh_cameras()
+    assert seen_keys == ["yaml-secret", "yaml-secret"], (
+        "boot and refresh must present the same credentials"
+    )
+
+
+def test_refresh_accepts_a_prefetched_camera_list(tmp_path, monkeypatch):
+    """``refresh_cameras(discovered=...)`` must apply the set without a
+    network call — the discovery loop fetches in a worker thread and
+    mutates on the event loop, so the mutation path alone must never
+    touch the network."""
+    calls = {"n": 0}
+
+    def _boot_only(url, api_key=None):
+        calls["n"] += 1
+        return [{"camera_id": "cam1"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _boot_only)
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert calls["n"] == 1                              # boot discovery only
+
+    added, removed = counter.refresh_cameras(
+        discovered=[{"camera_id": "cam1"}, {"camera_id": "cam2"}]
+    )
+    assert added == ["cam2"] and removed == []
+    assert calls["n"] == 1, "a supplied list must not trigger a fetch"
+    # Blip immunity holds on the pre-fetched path too.
+    assert counter.refresh_cameras(discovered=[]) == ([], [])
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+
+
+def test_missing_ceiling_with_discovered_cameras_names_the_real_cause(
+    tmp_path, monkeypatch
+):
+    """With cameras FOUND by discovery and no app-level max_occupancy,
+    the error must describe the discovery case — not "camera entry 0
+    malformed", an entry that does not exist in the operator's YAML."""
+    import pytest
+
+    monkeypatch.setattr(
+        oc, "discover_cameras", lambda url, api_key=None: [{"camera_id": "cam1"}]
+    )
+    p = tmp_path / "config.yml"
+    p.write_text(
+        'nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\ncameras: []\n'
+    )
+    with pytest.raises(ValueError, match="discovered from OpenNVR"):
+        oc.load_config(str(p))
+    with pytest.raises(ValueError) as excinfo:
+        oc.load_config(str(p))
+    assert "camera entry 0" not in str(excinfo.value)

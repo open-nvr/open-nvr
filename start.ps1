@@ -48,7 +48,13 @@ function Get-ComposeArgs {
     $exampleCompose = Get-EnvVar "OPENNVR_EXAMPLE_COMPOSE"
     $exampleProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
     if ($exampleCompose) {
-        if (-not (Test-Path $exampleCompose)) { throw "Configured example Compose file not found: $exampleCompose" }
+        if (-not (Test-Path $exampleCompose)) {
+            if ($exampleCompose -like "*camera-agent-lite*") {
+                Write-Color "camera-agent-lite was removed - the camera-agent example (with OLLAMA_EXTERNAL_URL for host Ollama) replaces it." Yellow
+                Write-Color "Fix: re-run scripts\install.ps1 reconfigure, or clear the OPENNVR_EXAMPLE* lines in .env." Yellow
+            }
+            throw "Configured example Compose file not found: $exampleCompose"
+        }
         $args += @("-f", $exampleCompose)
         # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that skips
         # the bundled ollama container and points the agent at the operator's
@@ -340,10 +346,6 @@ function Show-RunningInfo {
     if ($exProfile -in @('camera-agent', 'camera-agent-chat') -or $example -eq 'camera-agent') {
         Write-Color "  Camera Agent   → https://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan
         Write-Color "  Camera Agent (LAN) → https://<this-host-ip>:9100/demo  (OpenNVR login)" Cyan
-    }
-    if ($exProfile -eq 'camera-agent-lite' -or $example -eq 'camera-agent-lite') {
-        Write-Color "  Camera Agent Lite → https://localhost:9101/demo  (ask your cameras - chat or voice)" Cyan
-        Write-Color "  Camera Agent Lite (LAN) → https://<this-host-ip>:9101/demo  (OpenNVR login)" Cyan
     }
     Write-Color "  First-time setup page opens automatically on first visit." DarkGray
 }

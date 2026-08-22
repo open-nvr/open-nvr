@@ -68,6 +68,7 @@ Run::
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -81,10 +82,20 @@ from opennvr_app_sdk import (
     StateView,
     app,
 )
+from opennvr_app_sdk.cameras import (
+    UNIT_FRAME,
+    discover_cameras,
+    full_frame_polygon,
+)
 from opennvr_app_sdk.config import load_yaml
 from opennvr_app_sdk.geometry import Zone, bbox_center
 
 logger = logging.getLogger("occupancy-counting")
+
+# How often an auto-derived camera set is re-checked against OpenNVR.
+# Cameras get added and removed while the app runs; a set captured once
+# at boot would silently never watch camera 5 added tomorrow.
+DISCOVERY_REFRESH_S: int = 300
 
 
 MANIFEST = AppManifest(
@@ -176,6 +187,29 @@ class AppConfig:
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
+    # Consume the always-on Tier-0 detector (docs/tier0-consumption.md).
+    # ON by default: Tier-0 ships enabled in the standard stack and is the
+    # only detection stream a default install produces, so an app that
+    # ignored it would sit silent forever. The SDK's own default is off
+    # (contract compatibility); an app that also subscribes to a heavy
+    # adapter should narrow ``subject_pattern`` to
+    # ``opennvr.inference.tier0.>`` — as the shipped config does — or turn
+    # this off, otherwise the same object is counted from both streams.
+    consume_tier0: bool = True
+    # True when 'cameras' came from OpenNVR rather than the YAML — only
+    # then is the set refreshed at runtime (an explicit list is the
+    # operator's word and is never second-guessed).
+    cameras_auto_derived: bool = False
+    # App-level thresholds, kept so a camera discovered AFTER boot gets
+    # the same defaults the ones discovered at boot did.
+    default_max: int = 0
+    default_min: int | None = None
+    opennvr_url_for_discovery: str = ""
+    # The key used for BOOT discovery, kept so the refresh loop presents
+    # the same credentials. Boot honouring a YAML ``internal_api_key``
+    # while refresh silently fell back to the env var was a real (if
+    # docker-invisible) way to discover cameras once and never again.
+    internal_api_key: str | None = None
 
     # App contract (spec §03) — all optional; see the SDK's contract
     # module. ``contract_port`` serves /health /manifest /state;
@@ -185,6 +219,26 @@ class AppConfig:
     contract_host: str | None = None
     opennvr_url: str | None = None
     opennvr_token: str | None = None
+
+
+def _auto_camera_zone(
+    camera_id: str, max_occupancy: int, min_occupancy: int | None
+) -> CameraZone:
+    """A whole-frame zone for a camera nobody drew a zone for.
+
+    Expressed in the SDK's unit space, which is exactly right at any real
+    resolution: Tier-0's pixel boxes are normalised by the bridge and
+    scaled back by these same dimensions, so point and polygon always
+    share one coordinate system.
+    """
+    return CameraZone(
+        camera_id=camera_id,
+        zone=Zone.from_config(name="full-frame (auto)", vertices=full_frame_polygon()),
+        frame_width=UNIT_FRAME,
+        frame_height=UNIT_FRAME,
+        max_occupancy=max_occupancy,
+        min_occupancy=min_occupancy,
+    )
 
 
 def load_config(path: str) -> AppConfig:
@@ -230,8 +284,79 @@ def load_config(path: str) -> AppConfig:
             )
 
     cameras_raw = raw.get("cameras") or []
+    auto_derived = not cameras_raw
     if not cameras_raw:
-        raise ValueError("config: at least one camera entry is required")
+        # No cameras listed → ASK OpenNVR which ones exist instead of
+        # refusing to boot. Hand-copying camera ids is the most common way
+        # this app ends up counting nothing: OpenNVR names them ``cam1``,
+        # a hand-written config almost always says ``cam-1``, and the two
+        # look identical until you notice nothing has ever fired. Each
+        # discovered camera gets a whole-frame zone in the SDK's unit
+        # space, which is exactly correct at any real resolution (see
+        # opennvr_app_sdk.cameras). Draw a real zone in the catalog UI —
+        # or list cameras explicitly here — to override.
+        discovered = discover_cameras(
+            str(raw.get("opennvr_url") or ""),
+            api_key=raw.get("internal_api_key"),
+        )
+        cameras_raw = [
+            {
+                "camera_id": c["camera_id"],
+                "zone_name": "full-frame (auto)",
+                "zone": full_frame_polygon(),
+                "frame_width": UNIT_FRAME,
+                "frame_height": UNIT_FRAME,
+            }
+            for c in discovered
+        ]
+        if cameras_raw:
+            if default_max is None:
+                # Auto-derived cameras have no per-camera value to fall back
+                # on, so the app-level default is mandatory. Raise HERE with
+                # a message naming the actual situation — letting the
+                # per-camera loop below catch it produces "camera entry 0
+                # malformed", pointing the operator at a YAML entry that
+                # does not exist.
+                raise ValueError(
+                    "config: 'max_occupancy' is required when cameras are "
+                    "discovered from OpenNVR — set it as an app-level "
+                    "default (auto-derived cameras have no per-camera value)"
+                )
+            logger.info(
+                "no cameras configured — watching all %d camera(s) OpenNVR "
+                "knows about with a whole-frame zone: %s",
+                len(cameras_raw), ", ".join(c["camera_id"] for c in cameras_raw),
+            )
+        elif not str(raw.get("opennvr_url") or "").strip():
+            # Nothing listed AND nowhere to ask: a genuine misconfiguration,
+            # worth failing loudly at startup.
+            raise ValueError(
+                "config: no 'cameras' entries and no 'opennvr_url' to discover "
+                "them from — set opennvr_url (and OPENNVR_INTERNAL_API_KEY), "
+                "or list cameras explicitly"
+            )
+        elif default_max is None:
+            # Booting empty is fine, but a camera the refresh loop adds
+            # later still needs a ceiling. Without an app-level default it
+            # would silently get 0 and alert on the first person to walk
+            # past — while the SAME missing setting is a hard error when a
+            # camera exists at boot. Fail the same way in both cases.
+            raise ValueError(
+                "config: 'max_occupancy' is required when cameras are "
+                "discovered from OpenNVR — cameras added later have no "
+                "per-camera value to fall back on"
+            )
+        else:
+            # Core is reachable but has no cameras yet — the normal state of a
+            # fresh install where the app was enabled before any camera was
+            # added. Booting with none and re-checking (see _discovery_loop) is
+            # right; exiting here would crash-loop the container forever over
+            # something the operator fixes in the UI a minute later.
+            logger.warning(
+                "no cameras configured and OpenNVR reports none yet — "
+                "watching nothing for now; will re-check every %d minutes",
+                DISCOVERY_REFRESH_S // 60,
+            )
     cameras: dict[str, CameraZone] = {}
     for idx, c in enumerate(cameras_raw):
         try:
@@ -316,6 +441,12 @@ def load_config(path: str) -> AppConfig:
         ),
         contract_bind_host=raw.get("contract_bind_host"),
         contract_host=raw.get("contract_host"),
+        consume_tier0=bool(raw.get("consume_tier0", True)),
+        cameras_auto_derived=auto_derived,
+        default_max=int(default_max or 0),
+        default_min=int(default_min) if default_min is not None else None,
+        opennvr_url_for_discovery=str(raw.get("opennvr_url") or ""),
+        internal_api_key=raw.get("internal_api_key") or None,
         opennvr_url=raw.get("opennvr_url"),
         opennvr_token=raw.get("opennvr_token"),
     )
@@ -356,6 +487,90 @@ class OccupancyCounter(Detector):
 
     def setup(self) -> None:
         self._states: dict[str, _ZoneState] = {}
+        # Only auto-derived camera sets are refreshed; an explicit list is
+        # the operator's word and is never second-guessed.
+        self._auto_cameras: bool = bool(
+            getattr(self._config, "cameras_auto_derived", False)
+        )
+        # Camera ids seen on the bus that this app has no config for —
+        # tracked so the "not my camera" warning fires once each, not per
+        # frame (Tier-0 publishes continuously).
+        self._unknown_cameras: set[str] = set()
+
+    # ── Camera-set refresh ────────────────────────────────────────
+
+    def refresh_cameras(
+        self, discovered: list[dict[str, Any]] | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Re-derive the watched camera set from OpenNVR. Returns
+        ``(added, removed)``. No-op (and no network call) when the set was
+        pinned in config. Separated from the timer so it is testable
+        without a running loop.
+
+        ``discovered`` lets the caller supply an already-fetched camera
+        list so the dict mutation runs on the event loop while only the
+        blocking HTTP call runs in a worker thread (see
+        ``_discovery_loop``) — mutating ``_config.cameras`` / ``_states``
+        from another thread could race a concurrent ``/state`` snapshot.
+        Discovery presents the same credentials boot did (a YAML
+        ``internal_api_key`` wins, else the env var)."""
+        if not self._auto_cameras:
+            return [], []
+        if discovered is None:
+            discovered = discover_cameras(
+                self._config.opennvr_url_for_discovery,
+                api_key=self._config.internal_api_key,
+            )
+        ids = {c["camera_id"] for c in discovered}
+        if not ids:
+            # Treat "core answered with nothing" as no news rather than
+            # "delete every camera": a transient blip mid-poll must not
+            # silently stop the app watching everything it was watching.
+            return [], []
+        current = set(self._config.cameras)
+        added = sorted(ids - current)
+        removed = sorted(current - ids)
+        for cam_id in added:
+            self._config.cameras[cam_id] = _auto_camera_zone(
+                cam_id, self._config.default_max, self._config.default_min
+            )
+        for cam_id in removed:
+            self._config.cameras.pop(cam_id, None)
+            self._states.pop(cam_id, None)
+            self._unknown_cameras.discard(cam_id)
+        if added or removed:
+            logger.info("camera set refreshed: +%s -%s (now watching %s)",
+                        added or "-", removed or "-",
+                        sorted(self._config.cameras) or "(none)")
+        return added, removed
+
+    async def _discovery_loop(self, interval_s: int = DISCOVERY_REFRESH_S) -> None:
+        """Keep an auto-derived camera set current. Best-effort: a failed
+        refresh must never take the counter down."""
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                # Blocking HTTP in a worker thread; the dict mutation then
+                # happens here on the loop, serialized with on_detections
+                # and state_snapshot — no cross-thread writes.
+                discovered = await asyncio.to_thread(
+                    discover_cameras,
+                    self._config.opennvr_url_for_discovery,
+                    api_key=self._config.internal_api_key,
+                )
+                self.refresh_cameras(discovered=discovered)
+            except Exception:
+                logger.warning("camera refresh failed", exc_info=True)
+
+    async def run(self, *, once: bool = False) -> None:
+        refresher: asyncio.Task | None = None
+        if not once and self._auto_cameras:
+            refresher = asyncio.create_task(self._discovery_loop())
+        try:
+            await super().run(once=once)
+        finally:
+            if refresher is not None:
+                refresher.cancel()
 
     # ── Pure helpers (testable without NATS) ──────────────────────
 
@@ -397,6 +612,18 @@ class OccupancyCounter(Detector):
         camera = self._config.cameras.get(camera_id)
         if camera is None:
             # Another monitoring app may be watching this camera; we're not.
+            # But an id that matches NOTHING configured is the difference
+            # between "not my camera" and "this app counts nothing, forever"
+            # — and the two look identical from outside. Say it once per
+            # unknown id so a config/id mismatch (the classic ``cam-1`` vs
+            # ``cam1``) is one log line instead of a silent no-op.
+            if camera_id not in self._unknown_cameras:
+                self._unknown_cameras.add(camera_id)
+                logger.warning(
+                    "receiving events for camera %r, which is not in my config "
+                    "— nothing will be counted for it. Configured cameras: %s",
+                    camera_id, sorted(self._config.cameras) or "(none)",
+                )
             return []
 
         count = self.count_in_zone(camera, detections)

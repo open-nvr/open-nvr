@@ -68,6 +68,9 @@ class FrameResult:
     # Stationary tracks whose region was NOT scanned this frame (the PR B
     # saving, made visible for metrics/tests).
     skipped_stationary: int = 0
+    # True when the per-frame region budget dropped at least one candidate
+    # this frame (exported as tier0_regions_capped_total — no silent caps).
+    regions_capped: bool = False
     # Per-stage wall time for the frame (decode/motion/region/detect/track) — lets
     # the test-bed see *where* time goes, not just the end-to-end total.
     stage_latency_s: dict[str, float] = field(default_factory=dict)
@@ -92,17 +95,31 @@ def select_regions(
     min_region: int,
     multiplier: float = 1.35,
     dedup_iou: float = 0.7,
-) -> list[Box]:
+    max_regions: int | None = None,
+) -> tuple[list[Box], bool]:
     """One square region per motion box and per active track, de-duplicated.
 
-    Bounds how much is ever sent to the detector each frame.
+    Bounds how much is ever sent to the detector each frame. ``max_regions``
+    is the hard per-frame budget (#track-explosion): motion boxes are listed
+    first so live activity always wins a slot over track re-verification;
+    candidates beyond the budget are simply not scanned this frame — the
+    tracker's ``scanned_regions`` contract makes their tracks coast, and the
+    caller rotates ``track_boxes`` so the budget round-robins across frames.
+
+    Returns ``(regions, capped)`` — ``capped`` is True when at least one
+    candidate was dropped by the budget (never silently: the service exports
+    it as ``tier0_regions_capped_total``).
     """
     kept: list[Box] = []
+    capped = False
     for b in list(motion_boxes) + list(track_boxes):
+        if max_regions is not None and len(kept) >= max_regions:
+            capped = True
+            break
         r = calculate_region(frame_shape, b[0], b[1], b[2], b[3], min_region, multiplier)
         if all(intersection_over_union(r, k) < dedup_iou for k in kept):
             kept.append(r)
-    return kept
+    return kept, capped
 
 
 class DetectPipeline:
@@ -118,6 +135,8 @@ class DetectPipeline:
         model_size: tuple[int, int] = (320, 320),
         region_multiplier: float = 1.35,
         stationary_interval: int = 10,
+        max_regions: int = 8,
+        allowed_labels: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.frame_source = frame_source
         self.motion = motion
@@ -131,6 +150,14 @@ class DetectPipeline:
         # the pre-PR-B behavior. Kept well below the tracker's disappearance
         # budget so a skipped track can never age out between verifications.
         self.stationary_interval = max(0, int(stationary_interval))
+        # Per-frame detector budget (#track-explosion): the worst-case number
+        # of region crops YOLO ever runs on one frame, no matter how many
+        # tracks accumulate. 0 disables (unbounded, the pre-guard behavior).
+        self.max_regions = max(0, int(max_regions))
+        # Labels worth TRACKING. An NVR watching a cluttered desk has no
+        # business confirming tracks for "kite"/"banana" wire false
+        # positives — every phantom is a standing re-verify cost. None = all.
+        self.allowed_labels = frozenset(allowed_labels) if allowed_labels else None
         self._frame_idx = 0
 
     def process_frame(self, frame) -> FrameResult:
@@ -168,9 +195,15 @@ class DetectPipeline:
                 skipped += 1
                 continue
             track_boxes.append(t.box)
+        # Rotate the track-region candidates by frame index so the per-frame
+        # budget round-robins across tracks instead of starving the tail.
+        if self.max_regions > 0 and len(track_boxes) > 1:
+            off = self._frame_idx % len(track_boxes)
+            track_boxes = track_boxes[off:] + track_boxes[:off]
         _t = time.monotonic()
-        regions = select_regions(
-            motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier
+        regions, regions_capped = select_regions(
+            motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier,
+            max_regions=self.max_regions or None,
         )
         stages["region"] = time.monotonic() - _t
 
@@ -186,6 +219,8 @@ class DetectPipeline:
                 crop = crop_and_resize(bgr, region, self.model_size[0], self.model_size[1])
                 raws = self.detector.detect(crop)
                 dets.extend(detections_to_frame(raws, region))
+            if self.allowed_labels is not None:
+                dets = [d for d in dets if d.label in self.allowed_labels]
             dets = nms(dets)
             detect_latency_s = time.monotonic() - _t   # pure detector time (this model)
             stages["detect"] = detect_latency_s
@@ -198,7 +233,7 @@ class DetectPipeline:
         return FrameResult(
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
-            skipped_stationary=skipped,
+            skipped_stationary=skipped, regions_capped=regions_capped,
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:

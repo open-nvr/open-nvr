@@ -34,6 +34,7 @@ from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import HwAccel
 from .metrics import (
+    metrics as _metrics,
     record_frame,
     record_gate,
     record_processing_fps,
@@ -47,6 +48,47 @@ from .pipeline import DetectPipeline, FrameResult
 from .tracking import TrackConfig, Tracker
 
 log = logging.getLogger("detect_pipeline.service")
+
+# Labels Tier-0 TRACKS by default (#track-explosion). yolov8n predicts all 80
+# COCO classes, but an NVR only cares about a handful — and every tracked
+# phantom ("kite" on a wall of wires) is a standing per-frame re-verify cost.
+# Frigate ships `person`-only for the same reason; we default a little wider.
+# Override with DETECT_LABELS (comma-separated); "all" tracks everything.
+DEFAULT_TRACK_LABELS = "person,car,truck,bus,motorcycle,bicycle,cat,dog"
+
+
+def _env_int(name: str, default: int) -> int:
+    import os as _os
+    raw = (_os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an integer; using %d", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    import os as _os
+    raw = (_os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
+
+
+def _env_labels(name: str, default_csv: str) -> frozenset[str] | None:
+    """Parse a comma-separated label allowlist; "all"/"*" → None (no filter)."""
+    import os as _os
+    raw = (_os.environ.get(name) or "").strip() or default_csv
+    if raw.lower() in ("all", "*"):
+        return None
+    labels = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+    return labels or None
 
 
 @dataclass(frozen=True)
@@ -173,18 +215,18 @@ class CameraWorker:
         from .events_poster import VisitLifecycle
         lifecycle = VisitLifecycle(self.spec.camera_id)
         motion = MotionDetector((h, w), MotionConfig())
-        tracker = Tracker((h, w), TrackConfig(fps=self.spec.fps))
-        import os as _os
-        try:
-            _stationary_interval = int(_os.environ.get("DETECT_STATIONARY_INTERVAL", "10"))
-        except ValueError:
-            log.warning("DETECT_STATIONARY_INTERVAL=%r is not an integer; using 10",
-                        _os.environ.get("DETECT_STATIONARY_INTERVAL"))
-            _stationary_interval = 10
+        tracker = Tracker((h, w), TrackConfig(
+            fps=self.spec.fps,
+            max_tracks=_env_int("DETECT_MAX_TRACKS", 50),
+            coast_ttl_seconds=float(_env_int("DETECT_TRACK_TTL", 300)),
+            min_spawn_score=_env_float("DETECT_MIN_SPAWN_SCORE", 0.5),
+        ))
         pipe = DetectPipeline(
             None, motion, self.detector, tracker,
             model_size=(self.model_size, self.model_size),
-            stationary_interval=_stationary_interval,
+            stationary_interval=_env_int("DETECT_STATIONARY_INTERVAL", 10),
+            max_regions=_env_int("DETECT_MAX_REGIONS", 8),
+            allowed_labels=_env_labels("DETECT_LABELS", DEFAULT_TRACK_LABELS),
         )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
@@ -209,6 +251,12 @@ class CameraWorker:
                     detector_latency_s=getattr(result, "detect_latency_s", None),
                     stage_latency_s=getattr(result, "stage_latency_s", None),
                     model=self.model_id,
+                )
+                # Bounded-load observability: spawns refused by the track
+                # cap / spawn-score floor (monotonic; exported as a gauge).
+                _metrics.gauge(
+                    "tier0_track_spawns_dropped", float(tracker.spawns_dropped),
+                    {"camera": self.spec.camera_id},
                 )
                 # Retain each track's best crop for on-demand fetch (best-frame
                 # store) — cheap: a reference, encoded lazily only if requested.

@@ -254,7 +254,7 @@ image at a time.
 
 **Fixing it depends on which image is named:**
 
-- **`core`, `detect-pipeline`, `camera-agent`, `camera-agent-lite`** — built
+- **`core`, `detect-pipeline`, `camera-agent`** — built
   in this repo and published for `linux/amd64` **and** `linux/arm64`. If one
   of these is named, you are on a tag published before ARM64 support landed;
   move to `:main`/`:latest` or a release tag newer than that.
@@ -264,12 +264,6 @@ image at a time.
   `.env.example` pin); tags 0.1.1 and earlier are amd64-only. If you are
   named one of these, your `.env` carries a stale `ADAPTER_TAG` — raise it
   to `0.1.3` or later, or run the adapters emulated.
-- **`llamacpp-adapter` / `smolvlm-adapter`** (camera-agent-lite only) — these
-  two have no ARM64 build and will not get one soon: they derive from
-  `ghcr.io/ggml-org/llama.cpp:server`, which upstream publishes for amd64
-  only ([ggml-org/llama.cpp#19177](https://github.com/ggml-org/llama.cpp/issues/19177)).
-  The core NVR and the standard YOLOv8 stack are unaffected — only the
-  camera-agent-lite overlay needs emulation on ARM.
 
 **Running the amd64 images under emulation** works and is the fastest way to
 get a demo up on an M-series Mac, at a real cost in inference latency:

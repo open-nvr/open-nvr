@@ -69,6 +69,11 @@ class ServiceConfig:
     # #10 Tier-1 dispatch — off unless a KAI-C URL is set; only fires in enforce.
     dispatch_kaic_url: str
     dispatch_task: str
+    # Bounded-load guards (#track-explosion): detector confidence floor.
+    # yolov8n at 0.25 on a cluttered scene (wires, boards) hallucinates
+    # kites/bananas endlessly; each becomes a standing track. 0.4 keeps real
+    # people/vehicles (typically >0.6) while starving the phantom supply.
+    detect_conf: float = 0.4
     visits_enabled: bool = True
 
 
@@ -120,7 +125,19 @@ def config_from_env(env: dict) -> ServiceConfig:
         metrics_port=int(env.get("DETECT_METRICS_PORT", "9109")),
         dispatch_kaic_url=env.get("DETECT_DISPATCH_KAIC_URL", ""),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
+        detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
+
+
+def _env_float(env: dict, name: str, default: float) -> float:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
 
 
 def _gate_factory(cfg: ServiceConfig):
@@ -181,6 +198,7 @@ def _detector_factory(cfg: ServiceConfig):
                 return OnnxYoloDetector(
                     model_path=cfg.onnx_model, input_size=cfg.onnx_input,
                     backend=backend, providers=providers,
+                    conf_threshold=cfg.detect_conf,
                 )
             except Exception:
                 log.warning(
@@ -322,8 +340,8 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = config_from_env(os.environ)
     # Cap OpenCV's intra-op threads. cv2.dnn defaults to every core, which
-    # starves CPU-bound co-tenants (llama.cpp/whisper.cpp in the lite stack)
-    # far more than it helps a 320px detector. 0 disables the cap.
+    # starves CPU-bound co-tenants (the camera-agent's adapters) far more
+    # than it helps a 320px detector. 0 disables the cap.
     threads = int(os.environ.get("DETECT_CV_THREADS", "2") or 0)
     if threads > 0:
         try:

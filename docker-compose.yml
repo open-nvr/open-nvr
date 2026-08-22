@@ -309,6 +309,20 @@ services:
       # (staggered per track; motion near the object re-checks immediately).
       # 0 = pre-gating behavior. See .env.example.
       - DETECT_STATIONARY_INTERVAL=${DETECT_STATIONARY_INTERVAL:-10}
+      # Bounded-load guards — keep Tier-0's worst case flat no matter how
+      # cluttered the scene is (see .env.example for the full story):
+      #   DETECT_LABELS       classes worth tracking ("all" = every COCO class)
+      #   DETECT_CONF         detector confidence floor
+      #   DETECT_MAX_REGIONS  detector crops per frame, hard cap (0 = off)
+      #   DETECT_MAX_TRACKS   live tracks per camera, hard cap
+      #   DETECT_TRACK_TTL    seconds an unverified track may live (0 = off)
+      #   DETECT_MIN_SPAWN_SCORE  score needed to CREATE a track
+      - DETECT_LABELS=${DETECT_LABELS:-}
+      - DETECT_CONF=${DETECT_CONF:-}
+      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-}
+      - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
+      - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
+      - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
       - OMP_NUM_THREADS=${DETECT_CV_THREADS:-2}
       # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
       # to run the gated model on enforce escalations, governed + audited by KAI-C.

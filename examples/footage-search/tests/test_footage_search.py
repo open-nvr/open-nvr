@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import time
 
 from query import parse_heuristic
 from store import FootageStore, Keyframe, keyframe_from_event
@@ -169,3 +170,114 @@ def test_search_action_validates_params():
         indexer.on_action("search", {"query": "x", "limit": 0})
     with _pytest.raises(KeyError):
         indexer.on_action("enroll-face", {})
+
+
+# ── Tier-0 events (the always-on detector) ─────────────────────────
+#
+# A stock OpenNVR install runs detect-pipeline and no per-frame adapter
+# loop, so Tier-0 events are the ONLY thing on the bus. They carry
+# top-level ``tracks`` and NO ``result`` block — the shape the indexer
+# used to walk straight past, leaving the index permanently empty.
+
+def _tier0_event(labels, *, camera_id="cam-1", wall_ts=1_755_700_000.0):
+    return {
+        "schema": "opennvr.tier0.v1",
+        "adapter": "tier0",
+        "camera_id": camera_id,
+        "seq": 7,
+        "ts": 1234.5,            # time.monotonic() — NOT a date
+        "wall_ts": wall_ts,
+        "frame": {"w": 1920, "h": 1080},
+        "tracks": [
+            {"id": i + 1, "label": lab, "score": 0.9,
+             "box": [10, 10, 50, 50], "stationary": False, "best": True}
+            for i, lab in enumerate(labels)
+        ],
+    }
+
+
+def test_tier0_tracks_are_indexed_with_deduped_labels():
+    kf = keyframe_from_event(_tier0_event(["person", "person", "car"]))
+    assert kf is not None, "Tier-0 events must produce a keyframe"
+    assert kf.labels == ["person", "car"]      # one frame, four people → "person" once
+    assert kf.adapter == "tier0"
+    assert kf.camera_id == "cam-1"
+
+
+def test_tier0_keyframe_uses_wall_clock_not_monotonic():
+    """``ts`` is a monotonic reading; storing it would date every keyframe
+    from the machine's boot origin and break every time-window search."""
+    kf = keyframe_from_event(_tier0_event(["person"]))
+    assert kf.ts == 1_755_700_000.0
+
+
+def test_monotonic_leak_is_rejected_in_favour_of_now():
+    import time as _t
+    ev = _tier0_event(["person"], wall_ts=1234.5)   # a monotonic value leaked in
+    kf = keyframe_from_event(ev)
+    assert kf.ts > 1_700_000_000, "a pre-2001 stamp must fall back to now"
+    assert abs(kf.ts - _t.time()) < 5
+
+
+def test_tier0_event_with_no_tracks_is_not_indexed():
+    assert keyframe_from_event(_tier0_event([])) is None
+# ── Retention ──────────────────────────────────────────────────────
+#
+# The index grows with every detection, and Tier-0 publishes
+# continuously — unbounded growth is a slow disk leak on an active
+# camera, which is why footage-search can be left running.
+
+def _kf(store, *, ts, cam="cam-1", corr="", labels=("person",)):
+    store.add(Keyframe(camera_id=cam, ts=ts, correlation_id=corr,
+                       adapter="tier0", labels=list(labels), caption=""))
+
+
+def test_prune_removes_only_rows_older_than_the_cutoff(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"))
+    now = 1_755_700_000.0
+    _kf(store, ts=now - 10 * 86_400, corr="old")
+    _kf(store, ts=now - 40 * 86_400, corr="older")
+    _kf(store, ts=now, corr="fresh")
+    assert store.count() == 3
+    removed = store.prune(now - 30 * 86_400)
+    assert removed == 1 and store.count() == 2
+    store.close()
+
+
+def test_prune_on_empty_store_is_a_noop(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"))
+    assert store.prune(1_755_700_000.0) == 0
+    store.close()
+
+
+def test_retention_disabled_keeps_everything(tmp_path):
+    import footage_search as fs
+    store = FootageStore(str(tmp_path / "idx.sqlite3"))
+    _kf(store, ts=1.0, corr="ancient")          # 1970
+    cfg = fs.AppConfig(
+        db_path=str(tmp_path / "idx.sqlite3"), nats_url="nats://x:4222",
+        nats_token=None, subject_pattern="opennvr.inference.>",
+        extra_labels=[], camera_aliases={},
+        ollama=fs.OllamaConfig(), result_limit=25, retention_days=0,
+    )
+    indexer = fs.Indexer(cfg, store)
+    assert indexer.prune_now() == 0
+    assert store.count() == 1
+    store.close()
+
+
+def test_retention_window_prunes_ancient_rows(tmp_path):
+    import footage_search as fs
+    store = FootageStore(str(tmp_path / "idx.sqlite3"))
+    _kf(store, ts=1.0, corr="ancient")           # 1970 — far outside any window
+    _kf(store, ts=time.time(), corr="now")
+    cfg = fs.AppConfig(
+        db_path=str(tmp_path / "idx.sqlite3"), nats_url="nats://x:4222",
+        nats_token=None, subject_pattern="opennvr.inference.>",
+        extra_labels=[], camera_aliases={},
+        ollama=fs.OllamaConfig(), result_limit=25, retention_days=30,
+    )
+    indexer = fs.Indexer(cfg, store)
+    assert indexer.prune_now() == 1
+    assert store.count() == 1
+    store.close()

@@ -23,7 +23,14 @@ nats_token: null
 
 # Subject pattern. ``opennvr.inference.>`` catches every adapter;
 # narrow to ``opennvr.inference.yolov8.>`` for object detection only.
-subject_pattern: "opennvr.inference.>"
+# Tier-0 ONLY by default: the always-on detect-pipeline is the
+# detection stream a standard install actually produces. Narrowing
+# the subject (rather than the wildcard) means an adapter you add
+# later cannot double-count the same object through both streams.
+# Widen to "opennvr.inference.>" if you want adapter events too.
+subject_pattern: "opennvr.inference.tier0.>"
+# Bridge Tier-0 tracks into contract-shaped detections.
+consume_tier0: true
 
 # ── What to count ─────────────────────────────────────────────────
 #
@@ -71,37 +78,22 @@ webhook_url: null
 nats_alerts_url: null
 nats_alerts_token: null
 
-# ── Cameras / zones ───────────────────────────────────────────────
+# ── Cameras ───────────────────────────────────────────────────────
+# LEAVE EMPTY to watch every camera OpenNVR knows about, each with a
+# whole-frame zone — the app reads the live camera list from
+# ``opennvr_url`` on boot, so the ids always match what Tier-0
+# publishes (OpenNVR names them cam1, cam2 — NOT cam-1).
 #
-# One entry per camera × zone you want to count. Each needs:
-#   camera_id     — must match the camera_id KAI-C uses in event
-#                   subjects (what the upstream inference driver passed).
-#   frame_width / frame_height — pixel dimensions (to convert
-#                   normalized bboxes back to pixels for zone math).
-#   zone_name     — human label shown in alerts.
-#   zone          — polygon vertices in pixel coords (>= 3).
-#   max_occupancy / min_occupancy — optional per-camera overrides of
-#                   the app-level defaults above.
-cameras:
-  - camera_id: "cam-lobby"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "lobby"
-    max_occupancy: 25          # fire when > 25 people in the lobby
-    zone:
-      - [200, 200]
-      - [1700, 200]
-      - [1700, 950]
-      - [200, 950]
-
-  - camera_id: "cam-guard-post"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "guard-post"
-    max_occupancy: 4
-    min_occupancy: 1           # post must always have >= 1 person
-    zone:
-      - [700, 400]
-      - [1200, 400]
-      - [1200, 900]
-      - [700, 900]
+# Draw real zones in the App Catalog UI, or pin them here to override.
+# Coordinates are in whatever space you choose: the detector's boxes
+# are normalised before they are compared, so a zone drawn in a
+# 1000x1000 space works on a 4K camera.
+#
+# cameras:
+#   - camera_id: "cam1"
+#     zone_name: "doorway"
+#     frame_width: 1000
+#     frame_height: 1000
+#     max_occupancy: 3
+#     zone: [[100, 100], [900, 100], [900, 900], [100, 900]]
+cameras: []

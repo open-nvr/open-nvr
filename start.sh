@@ -81,6 +81,12 @@ compose_args() {
     if [[ -n "$example_compose" ]]; then
         [[ -f "$example_compose" ]] || {
             echo "Configured example Compose file not found: $example_compose" >&2
+            if [[ "$example_compose" == *camera-agent-lite* ]]; then
+                echo "camera-agent-lite was removed — the camera-agent example (with" >&2
+                echo "OLLAMA_EXTERNAL_URL for host-GPU/CPU Ollama) replaces it." >&2
+                echo "Fix: re-run ./scripts/install.sh reconfigure, or clear the" >&2
+                echo "OPENNVR_EXAMPLE* lines in .env." >&2
+            fi
             return 1
         }
         args="$args -f $example_compose"
@@ -878,12 +884,6 @@ print_access_urls() {
         camera-agent:*|camera-agent-chat:*|*:camera-agent)
             echo -e "  Camera Agent    → ${CYAN}https://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
             echo -e "  Camera Agent (LAN) → ${CYAN}https://<server-ip>:9100/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
-            ;;
-    esac
-    case "${_ex_profile}:${_ex}" in
-        camera-agent-lite:*|*:camera-agent-lite)
-            echo -e "  Camera Agent Lite → ${CYAN}https://localhost:9101/demo${NC}  ${GRAY}(ask your cameras — chat or voice)${NC}"
-            echo -e "  Camera Agent Lite (LAN) → ${CYAN}https://<server-ip>:9101/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
             ;;
     esac
     echo ""
