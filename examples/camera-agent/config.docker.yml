@@ -75,6 +75,12 @@ enabled_tools:
   - detect_objects
   - describe_camera
   - search_footage
+  # The app door (read-only, backed by opennvr_api_url below): lets the
+  # agent answer about the default-on catalog apps — "is the occupancy
+  # counter healthy?", "any occupancy alerts this morning?".
+  - list_apps
+  - app_status
+  - recent_app_alerts
 
 # LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml default —
 # ~1 GB of RAM, snappy on CPU, Apache-2.0, and NON-thinking (the right choice on

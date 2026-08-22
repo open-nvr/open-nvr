@@ -102,6 +102,20 @@ compose_args() {
         fi
     fi
     [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
+    # Default-on apps: occupancy-counting + footage-search ride the always-on
+    # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
+    # install runs them (profile ``default-apps`` in docker-compose.apps.yml).
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env. Lowercasing via ``tr``
+    # (not ${var,,}) so macOS bash 3.2 works.
+    local default_apps
+    default_apps=$(get_env_var "OPENNVR_DEFAULT_APPS" 2>/dev/null)
+    case "$(printf '%s' "$default_apps" | tr '[:upper:]' '[:lower:]')" in
+        off|false|0|no) ;;
+        *)
+            [[ "$example_compose" != *docker-compose.apps.yml ]] &&                 args="$args -f docker-compose.apps.yml"
+            args="$args --profile default-apps"
+            ;;
+    esac
     echo "$args"
 }
 

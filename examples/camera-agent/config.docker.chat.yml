@@ -41,6 +41,10 @@ enabled_tools:
   # Reads the footage-search app's index (mounted read-only at /footage);
   # reports cleanly until the apps overlay has built it.
   - search_footage
+  # The app door (read-only): answers about the default-on catalog apps.
+  - list_apps
+  - app_status
+  - recent_app_alerts
 
 # See config.docker.yml — same read-only mount, same self-healing reader.
 footage_index_path: /footage/footage_index.sqlite3
