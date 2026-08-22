@@ -105,7 +105,7 @@ def test_provider_maps_camera_agent_endpoint_to_specs():
     assert specs[0].name == "Front"
     assert specs[0].substream_url == "rtsp://mediamtx:8554/cam-1?jwt=x"   # MediaMTX tap
     assert all(s.analyze for s in specs)                                 # on by default
-    assert all(s.fps == 5 for s in specs)                                # default rate
+    assert all(s.fps == 2 for s in specs)                                # default rate
 
 
 def test_detect_fps_env_sets_default_rate(monkeypatch):
@@ -117,8 +117,8 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
 
     cam = {"camera_id": "c1", "frame_url": "rtsp://x/main"}
 
-    monkeypatch.setenv("DETECT_FPS", "2")
-    assert _to_spec(cam).fps == 2
+    monkeypatch.setenv("DETECT_FPS", "3")   # ≠ the built-in default (2), so this proves env wins
+    assert _to_spec(cam).fps == 3
     # explicit per-camera fps beats the env default
     assert _to_spec({**cam, "fps": 7}).fps == 7
     # clamped to [1, 30]
@@ -126,11 +126,11 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
     assert _to_spec(cam).fps == 1
     monkeypatch.setenv("DETECT_FPS", "99")
     assert _to_spec(cam).fps == 30
-    # non-integer falls back to 5, never raises
+    # non-integer falls back to the default (2), never raises
     monkeypatch.setenv("DETECT_FPS", "fast")
-    assert _to_spec(cam).fps == 5
+    assert _to_spec(cam).fps == 2
     monkeypatch.delenv("DETECT_FPS")
-    assert _to_spec(cam).fps == 5
+    assert _to_spec(cam).fps == 2
 
 
 def test_provider_returns_empty_on_failure():

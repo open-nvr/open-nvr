@@ -125,11 +125,13 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 5. On CPU-only hosts (laptops; any
-macOS/Windows Docker install, where the VM has no GPU) set `DETECT_FPS=1`
-or `2`: a fraction of the CPU, at the cost of coarser motion/track
-granularity and a smaller candidate pool for best-frame selection. An
-explicit per-camera `fps` from the discovery endpoint still wins.
+analysis rate — `DETECT_FPS`, default 2 (the CPU-friendly setting that
+behaves well on laptops and any macOS/Windows Docker install, where the
+VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
+hosts — can raise it to 5-10 for finer motion/track granularity and a
+larger candidate pool for best-frame selection; dropping to 1 buys a
+last bit of CPU back. An explicit per-camera `fps` from the discovery
+endpoint still wins.
 
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
@@ -147,7 +149,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=5                      # frames analyzed /s /camera (1-30) — the main CPU dial
+DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)

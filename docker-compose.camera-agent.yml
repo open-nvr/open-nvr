@@ -157,7 +157,10 @@ services:
   # ──────────────────────────────────────────────────────────────
   caption-adapter:
     profiles: [camera-agent, camera-agent-chat]
-    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${ADAPTER_TAG:-latest}
+    # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than the
+    # pinned ADAPTER_TAG — needed while the default (ollamavlm) exists only in
+    # post-0.1.3 builds. Falls back to ADAPTER_TAG when unset/empty.
+    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${CAPTION_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
     container_name: opennvr_caption_adapter
     restart: unless-stopped
     command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-moondream}.main:app", "--host", "0.0.0.0", "--port", "9006"]

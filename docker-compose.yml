@@ -304,7 +304,7 @@ services:
       - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
-      - DETECT_FPS=${DETECT_FPS:-5}
+      - DETECT_FPS=${DETECT_FPS:-2}
       # Re-verify stationary tracks every Nth frame instead of every frame
       # (staggered per track; motion near the object re-checks immediately).
       # 0 = pre-gating behavior. See .env.example.
