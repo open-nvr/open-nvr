@@ -143,6 +143,20 @@ The service warns per camera at startup and exposes
 expensive path. Fix: set the camera's substream URL in OpenNVR (Camera
 settings), or lower the main stream's resolution.
 
+**Fourth dial: skip frames inside the decoder (`DETECT_DECODE_SKIP`).**
+Even with the substream and a low `DETECT_FPS`, the decoder still
+decompresses the camera's FULL frame rate — the `fps` filter drops frames
+*after* they're decoded. `-skip_frame` moves the drop into the decoder so
+skipped frames are never decompressed at all: `bidir` skips B-frames
+(moderate saving, granularity preserved), `nonref` skips non-reference
+frames, and `nokey` decodes keyframes only — roughly one frame per GOP
+(usually 0.5-1 fps), cutting decode cost by about the GOP length. With
+`nokey`, real motion/track granularity IS the keyframe rate: plenty for
+presence alarms and counting, coarse for fast-moving events — which is why
+the default stays `none`. The `fps` filter pads the gap by duplicating
+frames, which is nearly free downstream (zero pixel diff, so the motion
+gate skips them).
+
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 
@@ -150,6 +164,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_DECODE_SKIP=none           # none | bidir | nonref | nokey — decode-side frame skip (dial 4)
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)

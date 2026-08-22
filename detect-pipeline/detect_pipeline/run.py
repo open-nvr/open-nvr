@@ -23,6 +23,7 @@ Env:
                             "OpenVINOExecutionProvider" (Intel N100) or
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
+  DETECT_DECODE_SKIP        none | bidir | nonref | nokey (decode-side CPU dial)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
@@ -55,6 +56,9 @@ class ServiceConfig:
     onnx_providers: str
     hwaccel: str
     device: str
+    # ffmpeg -skip_frame: none | bidir | nonref | nokey. Moves the frame drop
+    # from the fps filter (post-decode) into the DECODER — see ffmpeg_presets.
+    decode_skip: str
     model_size: int
     model_id: str            # detector identity for benchmarking labels (see below)
     refresh_seconds: float
@@ -79,6 +83,22 @@ class ServiceConfig:
 
 def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _decode_skip_from_env(env: dict) -> str:
+    """DETECT_DECODE_SKIP, degraded safely: a typo must not kill every worker
+    at spawn time (build_decode_command raises on unknown modes), so an
+    invalid value logs loudly and falls back to full decode."""
+    from .ffmpeg_presets import DECODE_SKIP_MODES
+
+    value = str(env.get("DETECT_DECODE_SKIP", "none")).strip().lower()
+    if value not in DECODE_SKIP_MODES:
+        log.warning(
+            "DETECT_DECODE_SKIP=%r is not one of %s; using 'none' (full decode)",
+            env.get("DETECT_DECODE_SKIP"), list(DECODE_SKIP_MODES),
+        )
+        return "none"
+    return value
 
 
 def _derive_model_id(env: dict) -> str:
@@ -114,6 +134,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
+        decode_skip=_decode_skip_from_env(env),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
@@ -260,6 +281,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         model_id=cfg.model_id,
         best_frames=best_frames,
         device=cfg.device,
+        decode_skip=cfg.decode_skip,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
         dispatcher=dispatcher,

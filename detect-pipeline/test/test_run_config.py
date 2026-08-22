@@ -220,3 +220,13 @@ def test_apply_gate_change_stops_workers_and_swaps_factory():
     assert mgr.running_ids() == set()      # next reconcile rebuilds them
     assert mgr._gate_factory is new_factory
     assert mgr._dispatcher == "d" and mgr._router == "r"
+
+
+def test_decode_skip_from_env_and_invalid_falls_back():
+    """DETECT_DECODE_SKIP flows into the config; a typo degrades to full
+    decode instead of killing every worker at ffmpeg-spawn time."""
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_skip == "none"
+    assert config_from_env({"DETECT_DECODE_SKIP": "NoKey "}).decode_skip == "nokey"
+    assert config_from_env({"DETECT_DECODE_SKIP": "keyframes"}).decode_skip == "none"

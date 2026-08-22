@@ -157,6 +157,7 @@ class CameraWorker:
         model_id: str | None = None,             # detector identity for benchmarking labels
         best_frames=None,                        # shared BestFrameStore (on-demand best frame)
         device: str = "/dev/dri/renderD128",
+        decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
         gate_sink=None,                          # publishes gate decisions (audit)
@@ -171,6 +172,7 @@ class CameraWorker:
         self.model_id = model_id
         self.best_frames = best_frames
         self.device = device
+        self.decode_skip = decode_skip
         self._frame_source = frame_source
         self.gate = gate
         self.gate_sink = gate_sink
@@ -206,6 +208,7 @@ class CameraWorker:
         src = FrameSource(
             self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
             hwaccel=HwAccel(self.spec.hwaccel), device=self.device,
+            decode_skip=self.decode_skip,
         )
         return src, w, h
 
@@ -359,6 +362,7 @@ class WorkerManager:
         model_id: str | None = None,                      # detector identity (benchmark labels)
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
+        decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
         dispatcher=None,                                  # Tier-1 dispatch (#10), shared
@@ -375,6 +379,7 @@ class WorkerManager:
         self._model_id = model_id
         self._best_frames = best_frames
         self._device = device
+        self._decode_skip = decode_skip
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
         self._gate_sink = gate_sink
@@ -396,6 +401,7 @@ class WorkerManager:
             spec, sink, detector=self._detector_factory(),
             model_size=self._model_size, model_id=self._model_id,
             best_frames=self._best_frames, device=self._device,
+            decode_skip=self._decode_skip,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,

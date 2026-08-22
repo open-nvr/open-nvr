@@ -120,6 +120,23 @@ def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
     )
 
 
+# Decoder frame-skip levels (ffmpeg ``-skip_frame``, an input option placed
+# before ``-i``). Decode — not detection — is Tier-0's dominant CPU cost: the
+# camera's full frame rate is decoded even though only DETECT_FPS frames/s are
+# analyzed (the ``fps`` filter runs POST-decode). ``-skip_frame`` moves the
+# drop to the DECODER, so skipped frames are never decompressed at all:
+#   none    decode every frame (default — full motion/track granularity)
+#   bidir   skip B-frames — moderate saving, output still ≥ typical DETECT_FPS
+#   nonref  skip non-reference frames — bigger saving where streams carry them
+#   nokey   decode keyframes ONLY — the big one (~one frame per GOP, usually
+#           0.5-1 fps): decode cost drops by roughly the stream's GOP length.
+#           The ``fps`` filter then pads by duplicating frames, which is
+#           nearly free downstream (zero pixel diff → the motion gate skips
+#           them), but real motion/track granularity IS the keyframe rate —
+#           fine for "is someone there" alarms, coarse for fast events.
+DECODE_SKIP_MODES = ("none", "bidir", "nonref", "nokey")
+
+
 def build_decode_command(
     rtsp_url: str,
     *,
@@ -130,6 +147,7 @@ def build_decode_command(
     device: str = "/dev/dri/renderD128",
     codec: str = "h264",
     rtsp_transport: str = "tcp",
+    decode_skip: str = "none",
 ) -> list[str]:
     """
     Full ffmpeg argv that pulls ``rtsp_url`` (MediaMTX substream republish),
@@ -139,11 +157,17 @@ def build_decode_command(
     """
     if not rtsp_url.startswith(("rtsp://", "rtsps://")):
         raise ValueError(f"expected an rtsp(s):// substream URL, got {rtsp_url!r}")
+    if decode_skip not in DECODE_SKIP_MODES:
+        raise ValueError(
+            f"decode_skip must be one of {DECODE_SKIP_MODES}, got {decode_skip!r}"
+        )
+    skip_args = [] if decode_skip == "none" else ["-skip_frame", decode_skip]
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "warning",
         "-rtsp_transport", rtsp_transport,
+        *skip_args,
         *decode_args(hwaccel, device=device, codec=codec, width=width, height=height),
         "-i", rtsp_url,
         "-vf", scale_filter(hwaccel, width=width, height=height, fps=fps),

@@ -86,3 +86,38 @@ def test_build_command_rejects_non_rtsp_url():
 def test_scale_rejects_nonpositive_fps():
     with pytest.raises(ValueError):
         scale_filter(HwAccel.CPU, width=640, height=360, fps=0)
+
+
+# ── decode-side frame skip (DETECT_DECODE_SKIP) ────────────────────────
+
+
+def test_decode_skip_default_adds_nothing():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5)
+    assert "-skip_frame" not in cmd
+
+
+def test_decode_skip_inserts_before_input():
+    """-skip_frame is an input (decoder) option — it must precede -i, and
+    must precede the hwaccel decode args so it applies to the decoder."""
+    cmd = build_decode_command(
+        RTSP, width=640, height=360, fps=5, decode_skip="nokey",
+    )
+    i_idx = cmd.index("-i")
+    s_idx = cmd.index("-skip_frame")
+    assert s_idx < i_idx
+    assert cmd[s_idx + 1] == "nokey"
+
+
+def test_decode_skip_all_modes_accepted():
+    for mode in ("bidir", "nonref", "nokey"):
+        cmd = build_decode_command(
+            RTSP, width=640, height=360, fps=5, decode_skip=mode,
+        )
+        assert cmd[cmd.index("-skip_frame") + 1] == mode
+
+
+def test_decode_skip_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        build_decode_command(
+            RTSP, width=640, height=360, fps=5, decode_skip="keyframes",
+        )

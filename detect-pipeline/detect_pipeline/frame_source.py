@@ -108,6 +108,7 @@ class FrameSource:
         hwaccel: HwAccel = HwAccel.CPU,
         device: str = "/dev/dri/renderD128",
         codec: str = "h264",
+        decode_skip: str = "none",
         spawn: SpawnFn | None = None,
         max_restarts: int | None = None,
         max_fruitless_restarts: int = 5,
@@ -121,6 +122,7 @@ class FrameSource:
         self.hwaccel = hwaccel
         self.device = device
         self.codec = codec
+        self.decode_skip = decode_skip
         self._spawn = spawn or _default_spawn
         # None = restart forever (production); an int caps restarts (tests).
         self.max_restarts = max_restarts
@@ -142,6 +144,7 @@ class FrameSource:
             hwaccel=self.hwaccel,
             device=self.device,
             codec=self.codec,
+            decode_skip=self.decode_skip,
         )
 
     def stream(self) -> Iterator[Frame]:
