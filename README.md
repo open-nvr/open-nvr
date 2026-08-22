@@ -297,7 +297,7 @@ Eight reference adapters and a one-command scaffold to start your own live in th
 
 ## Applications ship on top of it
 
-Adapters are *capabilities*; applications are *solutions*. Each example below is a working application — adapter(s) + a pipeline + alert rules — that you install, point at a camera, and adapt. Replace the predicate (the zone check, the dwell timer, the plate watchlist) with your domain logic and you have a purpose-built NVR. This is the platform's direction: a catalog of installable applications, not a fixed feature set.
+Adapters are *capabilities*; applications are *solutions*. And every camera can be given a *job*: assign camera 1 to LPR and cameras 2–3 to people counting on the camera's settings page, and the capabilities point themselves at the right cameras — while streaming, recording, and default detection continue on all of them ([how assignments work](docs/CAMERA_ASSIGNMENTS.md)). Each example below is a working application — adapter(s) + a pipeline + alert rules — that you install, point at a camera, and adapt. Replace the predicate (the zone check, the dwell timer, the plate watchlist) with your domain logic and you have a purpose-built NVR. This is the platform's direction: a catalog of installable applications, not a fixed feature set.
 
 | Application | What you'll build | Difficulty |
 |---|---|---|
@@ -325,7 +325,7 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 ## Documentation
 
-**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
+**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Camera assignments — give each camera a job](docs/CAMERA_ASSIGNMENTS.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
 
 **Architecture & security** — [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) · [Edge autonomy & robotics](docs/EDGE_AUTONOMY.md)
 
