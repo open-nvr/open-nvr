@@ -49,6 +49,15 @@ result_limit: 25
 # 6h. Set 0 to keep everything forever (you own the disk).
 retention_days: 30
 
+# One row per EPISODE, not per frame: Tier-0 publishes an event per
+# analyzed frame, so without this a person sitting in view at 2 fps is
+# 7,200 identical "person" rows an hour — and a search returns 25
+# consecutive frames instead of 25 distinct sightings. Caption-less
+# repeats of the same label set on a camera within this many seconds
+# merge into one row (its timestamp advances). Set 0 to index every
+# frame separately.
+coalesce_seconds: 60
+
 # ── Optional LLM query parsing (Ollama) ────────────────────────────
 # When enabled, queries are parsed by a local Ollama model (e.g. the
 # camera-agent overlay's ``ollama`` service) instead of the built-in

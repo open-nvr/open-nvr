@@ -40,22 +40,41 @@ class FootageIndex:
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._conn: sqlite3.Connection | None = None
-        if Path(db_path).exists():
-            try:
-                # Open read-only via URI so we never create or mutate the
-                # indexer's database from the agent process.
-                self._conn = sqlite3.connect(
-                    f"file:{db_path}?mode=ro", uri=True, check_same_thread=False
-                )
-                self._conn.row_factory = sqlite3.Row
-                # Probe the expected table; if absent, treat as unavailable.
-                self._conn.execute("SELECT 1 FROM keyframes LIMIT 1")
-            except sqlite3.Error:
-                self._conn = None
+        self._ensure_open()
+
+    def _ensure_open(self) -> bool:
+        """Open (or re-try opening) the index. Lazy on purpose: on a stock
+        install the agent and the footage-search indexer start together, and
+        the agent usually probes BEFORE the indexer has created its schema.
+        A one-shot probe at boot would leave ``search_footage`` reporting
+        "unavailable" forever until an agent restart — so every call re-tries
+        until the index exists. Cheap when it doesn't: a Path.exists check."""
+        if self._conn is not None:
+            return True
+        if not Path(self._path).exists():
+            return False
+        try:
+            # Open read-only via URI so we never create or mutate the
+            # indexer's database from the agent process.
+            conn = sqlite3.connect(
+                f"file:{self._path}?mode=ro", uri=True, check_same_thread=False
+            )
+        except sqlite3.Error:
+            return False
+        conn.row_factory = sqlite3.Row
+        try:
+            # Probe the expected table; the file can exist before the
+            # indexer has created its schema — treat that as not-yet.
+            conn.execute("SELECT 1 FROM keyframes LIMIT 1")
+        except sqlite3.Error:
+            conn.close()
+            return False
+        self._conn = conn
+        return True
 
     @property
     def available(self) -> bool:
-        return self._conn is not None
+        return self._ensure_open()
 
     def search(
         self,
@@ -68,7 +87,7 @@ class FootageIndex:
         """Find keyframes where every keyword appears in the labels or
         the caption, optionally within a recent time window and on one
         camera. Newest-first."""
-        if self._conn is None:
+        if not self._ensure_open():
             return []
         clauses: list[str] = []
         params: list[object] = []
@@ -94,6 +113,9 @@ class FootageIndex:
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.Error:
+            # A failing query (index file replaced or truncated mid-read)
+            # drops the handle so the next call re-opens fresh.
+            self.close()
             return []
         return [
             IndexHit(

@@ -2649,8 +2649,9 @@ class CameraAgentRuntime:
             else:
                 logger.info(
                     "camera-agent: footage_index_path set (%s) but the index "
-                    "isn't readable yet; search_footage will report it's "
-                    "unavailable until the footage-search indexer has run",
+                    "isn't readable yet — search_footage lights up "
+                    "automatically once the footage-search indexer has "
+                    "created it (the reader re-tries on every call)",
                     cfg.footage_index_path,
                 )
 
@@ -2776,6 +2777,12 @@ class CameraAgentRuntime:
         # handlers degrade gracefully if the registry is momentarily down.
         if not self.skill_requirement_met("apps"):
             excluded.update(SKILL_TOOLS["apps"])
+        # Same principle for footage: with no footage_index_path configured
+        # there is nothing the tool could ever read, so the LLM shouldn't
+        # see it. When the path IS set, the tool stays advertised and
+        # degrades cleanly until the indexer has built the file.
+        if not self.skill_requirement_met("footage"):
+            excluded.update(SKILL_TOOLS["footage"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -2869,8 +2876,12 @@ class CameraAgentRuntime:
         if req == "events":
             return bool(self.cfg.nats_inference_url)
         if req == "footage":
-            return bool(getattr(self, "footage_index", None)
-                        and self.footage_index.available)
+            # Configuration presence is the gate (same principle as the app
+            # door): the reader re-tries opening on every call, so an index
+            # the footage-search container creates AFTER the agent booted
+            # lights the tool up without an agent restart. When the index
+            # isn't readable yet the tool itself says so, cleanly.
+            return getattr(self, "footage_index", None) is not None
         if req == "apps":
             # The app door is wired iff the OpenNVR server base URL is set —
             # then the AppRegistryClient exists. Configuration presence is the

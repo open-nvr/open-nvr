@@ -396,6 +396,13 @@ services:
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
+      # Read-only view of the footage-search index → enables the
+      # search_footage voice tool ("did a red truck come by earlier?").
+      # Same named volume the apps overlay's footage-search service
+      # writes (compose runs from the same project, so the names meet).
+      # Without the apps overlay it's just an empty dir and the tool
+      # reports cleanly that the index hasn't been built.
+      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
@@ -478,6 +485,8 @@ services:
     volumes:
       - opennvr_camera_agent_config_chat:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
+      # Same read-only footage-search index view as the voice agent.
+      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
@@ -485,6 +494,12 @@ services:
       - opennvr_internal
 
 volumes:
+  # footage-search's SQLite index. Declared here as well as in
+  # docker-compose.apps.yml so this overlay works standalone: same name +
+  # same compose project → the SAME volume, so when the apps overlay runs
+  # the footage-search indexer, the agent's search_footage tool reads what
+  # it writes. Without the apps overlay it stays an empty dir (harmless).
+  opennvr_footage_search_data:
   # Ollama model store — persisted so the LLM survives ``compose down``.
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.

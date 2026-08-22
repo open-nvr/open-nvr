@@ -57,7 +57,14 @@ class FootageStore:
     process doesn't trip over it.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, coalesce_seconds: float = 60.0) -> None:
+        # Tier-0 publishes an event per analyzed frame and its events carry
+        # no correlation_id, so nothing merges: a person sitting in frame at
+        # 2 fps would insert 7,200 identical "person" rows per hour. Rows
+        # that repeat the previous row's label set within this window are
+        # coalesced into it (its timestamp advances) — one row per
+        # *episode*, not per frame. 0 disables.
+        self._coalesce_seconds = max(0.0, float(coalesce_seconds))
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -89,8 +96,11 @@ class FootageStore:
         correlation_id. Merging them onto one row is what lets a query
         like "red truck" match — ``truck`` from the detector's labels and
         ``red`` from the captioner's text end up on the same row. A
-        keyframe with no correlation_id can't be merged, so it's always
-        inserted fresh.
+        keyframe with no correlation_id can't be merged that way; instead,
+        a caption-less one that repeats the previous row's label set on the
+        same camera within ``coalesce_seconds`` is treated as the same
+        episode continuing (the row's timestamp advances) — anything else
+        is inserted fresh.
         """
         labels = " ".join(sorted({s.lower() for s in kf.labels}))
         caption = kf.caption.lower()
@@ -119,6 +129,32 @@ class FootageStore:
                     "UPDATE keyframes SET labels = ?, caption = ?, adapter = ? "
                     "WHERE id = ?",
                     (merged_labels, merged_caption, adapters, existing["id"]),
+                )
+                self._conn.commit()
+                return
+
+        elif self._coalesce_seconds > 0 and not caption:
+            # No correlation_id (Tier-0's continuous per-frame stream) and
+            # nothing to merge: if the SAME camera already has a row with the
+            # SAME label set inside the window, this event is the previous
+            # one continuing, not a new episode — advance that row's
+            # timestamp instead of inserting. Search results then read as
+            # distinct episodes, and a person sitting in frame is one row
+            # per window instead of one per analyzed frame. Comparing
+            # against the newest row *with these labels* (not the newest row
+            # overall) keeps alternating scenes — person / person+car —
+            # from defeating the window. Caption-carrying rows are exempt:
+            # captions differ frame to frame and deserve their own rows.
+            existing = self._conn.execute(
+                "SELECT id, ts FROM keyframes "
+                "WHERE camera_id = ? AND correlation_id = '' AND labels = ? "
+                "AND caption = '' ORDER BY ts DESC LIMIT 1",
+                (kf.camera_id, labels),
+            ).fetchone()
+            if existing is not None and 0 <= kf.ts - existing["ts"] <= self._coalesce_seconds:
+                self._conn.execute(
+                    "UPDATE keyframes SET ts = ? WHERE id = ?",
+                    (kf.ts, existing["id"]),
                 )
                 self._conn.commit()
                 return
