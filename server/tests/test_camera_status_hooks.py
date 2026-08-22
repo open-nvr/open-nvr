@@ -332,3 +332,65 @@ def test_reconciler_skips_when_mediamtx_unreachable(
 
     assert published == []
     assert service.is_online(cam.id) is True
+
+
+# ---------------------------------------------------------------------------
+# snapshot(): the batch read GET /cameras/ uses to attach live_online.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_reports_unknown_for_unseen_cameras(service):
+    """Never-seen ids must come back None, not False.
+
+    This is the guard on the restart window: _status is empty until the first
+    reconcile pass, and reporting False there would paint the whole fleet
+    "Disconnected" for RECONCILE_INITIAL_DELAY_SECONDS after every restart.
+    """
+    assert service.snapshot([1, 2, 3]) == {1: None, 2: None, 3: None}
+    assert service.snapshot([]) == {}
+
+
+def test_snapshot_reflects_committed_transitions(db_env, service, published):
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        assert service.snapshot([cam.id]) == {cam.id: True}
+
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=False, reason="hook",
+        )
+        await _drain(service)
+        assert service.snapshot([cam.id]) == {cam.id: False}
+
+    asyncio.run(run())
+
+
+def test_snapshot_is_unknown_during_offline_debounce(db_env, service, monkeypatch):
+    """A camera mid-debounce still reads as its last committed state.
+
+    The badge must not flip before the transition commits, or it would
+    disagree with the toast the operator sees.
+    """
+    monkeypatch.setattr(css, "OFFLINE_DEBOUNCE_SECONDS", 30.0)
+    cam = db_env.camera
+
+    async def run():
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=True, reason="hook",
+        )
+        await service.handle_signal(
+            camera_id=cam.id, camera_name=cam.name, path="cam-1",
+            online=False, reason="hook",
+        )
+        # Pending, not committed — still online.
+        assert service.snapshot([cam.id]) == {cam.id: True}
+        for task in service._pending_offline.values():
+            task.cancel()
+
+    asyncio.run(run())

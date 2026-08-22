@@ -56,6 +56,7 @@ from schemas import (
 from services.audit_service import write_audit_log
 from services.camera_identity import path_name_for_camera, read_marker
 from services.camera_service import CameraService
+from services.camera_status_service import get_camera_status_service
 from services.mediamtx_admin_service import MediaMtxAdminService
 from services.recording_watchdog import (
     GRACE_PERIOD_SECONDS,
@@ -516,6 +517,10 @@ def get_cameras(
     # Two page-scoped grouped queries before the loop, never per-camera — this
     # list serves up to `limit` rows.
     camera_ids = [c.id for c in cameras]
+    # Live connectivity comes straight off the in-memory tracker — a dict read
+    # per row, no query and no MediaMTX round trip. This is what lets the UI
+    # drop its per-camera /mediamtx-status fan-out (3 MediaMTX calls each).
+    live_status = get_camera_status_service().snapshot(camera_ids)
     latest_recordings: dict[int, datetime] = {}
     recording_configs: dict[int, bool] = {}
     if camera_ids:
@@ -558,6 +563,12 @@ def get_cameras(
         c_resp.recording_state = _derive_recording_state(
             c, c_resp.recording_enabled, latest, now
         )
+
+        # Paused cameras have no MediaMTX path, so the reconciler never walks
+        # them and they never enter the tracker. Reporting False there would
+        # render them "Disconnected" instead of "paused"; None keeps them in
+        # the unknown bucket the UI already has wording for.
+        c_resp.live_online = live_status.get(c.id) if c.is_active else None
 
         results.append(c_resp)
 

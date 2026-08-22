@@ -66,6 +66,21 @@ class CameraStatusService:
     def is_online(self, camera_id: int) -> bool | None:
         return self._status.get(camera_id)
 
+    def snapshot(self, camera_ids: list[int]) -> dict[int, bool | None]:
+        """Last-known connectivity for a page of cameras.
+
+        Missing == unknown (None): the process restarted and the first
+        reconcile pass has not run yet, or the camera has never been seen.
+        Callers must render unknown distinctly from offline — reporting it as
+        "offline" would flap the whole fleet red for the first
+        RECONCILE_INITIAL_DELAY_SECONDS after every restart.
+
+        Plain dict reads, so this is safe to call from a sync (threadpool)
+        request handler. Per-process state, like the event bus and the
+        /events/ws ticket store: it assumes a single uvicorn worker.
+        """
+        return {cid: self._status.get(cid) for cid in camera_ids}
+
     async def handle_signal(
         self,
         *,

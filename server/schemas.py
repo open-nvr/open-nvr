@@ -571,6 +571,12 @@ class CameraResponse(CameraBase):
     # not compute it, which callers must read as "unknown", not "off".
     recording_state: str | None = None
     last_recording_at: datetime | None = None
+    # Live connectivity from the in-memory tracker (CameraStatusService:
+    # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
+    # the backend restarted and the first reconcile pass has not landed yet,
+    # the camera is paused, or it has never been seen. Rendering unknown as
+    # offline would show the whole fleet as down after every restart.
+    live_online: bool | None = None
 
     class Config:
         from_attributes = True
