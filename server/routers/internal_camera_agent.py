@@ -279,7 +279,7 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
         .order_by(Camera.id.asc())
         .all()
     )
-    out: list[dict[str, str]] = []
+    out: list[dict[str, object]] = []
     for cam in cameras:
         stream_name = _build_stream_name(
             settings.mediamtx_stream_prefix,
@@ -318,6 +318,11 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
                 "frame_url": frame_url,
                 "role": role,
                 "source": source,
+                # Per-camera capability assignment (slice 1 of
+                # docs/design/per-camera-assignment.md). Additive: existing
+                # consumers ignore it. [] = nothing assigned — consumers must
+                # read that as "no restriction declared", never "do nothing".
+                "assignments": list(cam.assignments or []),
             }
         )
 
