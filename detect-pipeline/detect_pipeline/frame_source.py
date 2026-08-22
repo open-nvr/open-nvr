@@ -108,6 +108,9 @@ class FrameSource:
         hwaccel: HwAccel = HwAccel.CPU,
         device: str = "/dev/dri/renderD128",
         codec: str = "h264",
+        decode_skip: str = "none",
+        decode_threads: int = 2,
+        fast_decode: bool = False,
         spawn: SpawnFn | None = None,
         max_restarts: int | None = None,
         max_fruitless_restarts: int = 5,
@@ -121,6 +124,9 @@ class FrameSource:
         self.hwaccel = hwaccel
         self.device = device
         self.codec = codec
+        self.decode_skip = decode_skip
+        self.decode_threads = decode_threads
+        self.fast_decode = fast_decode
         self._spawn = spawn or _default_spawn
         # None = restart forever (production); an int caps restarts (tests).
         self.max_restarts = max_restarts
@@ -132,6 +138,8 @@ class FrameSource:
         self.max_fruitless_restarts = max_fruitless_restarts
         self.backoff_seconds = backoff_seconds
         self._sleep = _sleep
+        self._current_proc = None
+        self._skip_backoff_once = False
 
     def command(self) -> list[str]:
         return build_decode_command(
@@ -142,7 +150,21 @@ class FrameSource:
             hwaccel=self.hwaccel,
             device=self.device,
             codec=self.codec,
+            decode_skip=self.decode_skip,
+            decode_threads=self.decode_threads,
+            fast_decode=self.fast_decode,
         )
+
+    def set_decode_skip(self, mode: str) -> None:
+        """Adaptive decode: change the skip mode for the NEXT ffmpeg spawn and
+        terminate the current process so the built-in restart loop picks the
+        new mode up immediately (without the restart backoff — this is a
+        deliberate flip, not a stream failure). Called from the same worker
+        thread that consumes ``stream()``, between frames."""
+        self.decode_skip = mode
+        self._skip_backoff_once = True
+        if self._current_proc is not None:
+            _terminate(self._current_proc)
 
     def stream(self) -> Iterator[Frame]:
         """Yield frames until the source is unrecoverable.
@@ -158,12 +180,14 @@ class FrameSource:
         fruitless = 0
         while True:
             proc = self._spawn(self.command())
+            self._current_proc = proc
             got_frame = False
             try:
                 for frame in read_frames(proc.stdout, self.width, self.height):
                     got_frame = True
                     yield frame
             finally:
+                self._current_proc = None
                 _terminate(proc)
             fruitless = 0 if got_frame else fruitless + 1
             if fruitless >= self.max_fruitless_restarts:
@@ -177,6 +201,12 @@ class FrameSource:
             if self.max_restarts is not None and restarts >= self.max_restarts:
                 return
             restarts += 1
+            if self._skip_backoff_once:
+                # Deliberate decode-mode flip — restart immediately, quietly.
+                self._skip_backoff_once = False
+                log.info("frame source for %s: decode mode -> %s",
+                         self.rtsp_url, self.decode_skip)
+                continue
             log.warning("frame source for %s ended; restart #%d", self.rtsp_url, restarts)
             self._sleep(self.backoff_seconds)
 
@@ -193,6 +223,17 @@ class VideoFileSource:
     def __init__(self, path: str, *, max_frames: int | None = None) -> None:
         self.path = path
         self.max_frames = max_frames
+
+    def set_decode_skip(self, mode: str) -> None:
+        """Adaptive decode: change the skip mode for the NEXT ffmpeg spawn and
+        terminate the current process so the built-in restart loop picks the
+        new mode up immediately (without the restart backoff — this is a
+        deliberate flip, not a stream failure). Called from the same worker
+        thread that consumes ``stream()``, between frames."""
+        self.decode_skip = mode
+        self._skip_backoff_once = True
+        if self._current_proc is not None:
+            _terminate(self._current_proc)
 
     def stream(self) -> Iterator[Frame]:
         import cv2  # local import: only the demo path needs OpenCV here

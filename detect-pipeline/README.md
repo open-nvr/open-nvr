@@ -143,6 +143,62 @@ The service warns per camera at startup and exposes
 expensive path. Fix: set the camera's substream URL in OpenNVR (Camera
 settings), or lower the main stream's resolution.
 
+**Fourth dial: skip frames inside the decoder (`DETECT_DECODE_SKIP`).**
+Even with the substream and a low `DETECT_FPS`, the decoder still
+decompresses the camera's FULL frame rate — the `fps` filter drops frames
+*after* they're decoded. `-skip_frame` moves the drop into the decoder so
+skipped frames are never decompressed at all. The default is `nonref` —
+skip frames that no other frame references — because it is provably
+lossless: a dropped frame is by definition one nothing depends on, and the
+analyzed rate stays far above `DETECT_FPS`. It saves wherever the stream
+carries such frames and costs nothing where it doesn't (many IP cameras
+encode without B-frames, so there may be nothing to skip — check with
+ffprobe). Deeper cuts are opt-in: `bidir` drops ALL B-frames (can artifact
+on the rare b-pyramid stream that uses B-frames as references), and
+`nokey` decodes keyframes only — roughly one frame per GOP (usually
+0.5-1 fps), cutting decode cost by about the GOP length, with real
+motion/track granularity becoming the keyframe rate: plenty for presence
+alarms and counting, coarse for fast-moving events. The `fps` filter pads
+gaps by duplicating frames, which is nearly free downstream (zero pixel
+diff, so the motion gate skips them). `none` restores full decode.
+
+**Fifth dial: decoder threads (`DETECT_DECODE_THREADS`, default 2).**
+ffmpeg's auto default spawns up to 16 frame threads *per camera* — pure
+scheduling overhead on substream-sized video, multiplied across the fleet
+(Frigate pins 2 for the same reason). Thread count never changes decoded
+output, so the cap is lossless; `0` restores ffmpeg auto for a single
+high-res camera on a big machine.
+
+**Opt-in extra: `DETECT_DECODE_FAST=true`** skips the h264/h265 in-loop
+deblocking filter (`-skip_loop_filter all -flags2 fast`) — worth ~10-20%
+of software-decode CPU. Deblocking exists for viewing quality; detection
+is robust to the blockiness, but decoded pixels drift slightly from the
+encoder between keyframes, so it's not bit-exact and stays off by
+default. CPU decode only (hardware decoders deblock in silicon for free).
+
+**The free lever is in the camera.** Decode cost scales with the
+*source* frame rate before any of these dials apply: a substream encoded
+at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
+analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
+settings — do that first; it's the cheapest CPU you'll ever save.
+
+**Sixth dial: adaptive decode (`DETECT_DECODE_IDLE`, default `nokey`).**
+The pattern Blue Iris ships as "limit decoding unless required", ON by
+default: a camera whose scene is quiet decodes ONLY keyframes (~one frame
+per GOP) — near-zero cost — while motion is still watched at that rate.
+The first motion box or live track flips the camera back to full decode by
+respawning its ffmpeg against the local MediaMTX republish (sub-second, no
+backoff); after `DETECT_DECODE_IDLE_AFTER` quiet seconds (default 60) it
+idles again. `tier0_decode_idle{camera=...}` on `/metrics` shows who is
+idling. Recording is unaffected — the full main stream is always recorded;
+this shapes only what the detector looks at. The trade the default accepts:
+the detector's reaction to a brand-new event on a quiet scene can lag up to
+one GOP (~1-2 s), and an event briefer than the keyframe interval can pass
+undetected while idle (it is still in the recording). Set
+`DETECT_DECODE_IDLE=none` for always-full decode when sub-second detector
+reaction matters more than CPU.
+
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 
@@ -150,6 +206,11 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
+DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
+DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
+DETECT_DECODE_IDLE=nokey          # adaptive decode while quiet (dial 6, default on; none = off)
+DETECT_DECODE_IDLE_AFTER=60       # quiet seconds before a camera idles
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)

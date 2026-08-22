@@ -220,3 +220,34 @@ def test_apply_gate_change_stops_workers_and_swaps_factory():
     assert mgr.running_ids() == set()      # next reconcile rebuilds them
     assert mgr._gate_factory is new_factory
     assert mgr._dispatcher == "d" and mgr._router == "r"
+
+
+def test_decode_skip_from_env_and_invalid_falls_back():
+    """DETECT_DECODE_SKIP flows into the config; a typo degrades to full
+    decode instead of killing every worker at ffmpeg-spawn time."""
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_skip == "nonref"   # safe-by-default saving
+    assert config_from_env({"DETECT_DECODE_SKIP": "NoKey "}).decode_skip == "nokey"
+    assert config_from_env({"DETECT_DECODE_SKIP": "keyframes"}).decode_skip == "none"
+
+
+def test_decode_threads_and_fast_from_env():
+    from detect_pipeline.run import config_from_env
+
+    cfg = config_from_env({})
+    assert cfg.decode_threads == 2 and cfg.fast_decode is False
+    cfg = config_from_env({"DETECT_DECODE_THREADS": "0", "DETECT_DECODE_FAST": "true"})
+    assert cfg.decode_threads == 0 and cfg.fast_decode is True
+    assert config_from_env({"DETECT_DECODE_THREADS": "lots"}).decode_threads == 2
+
+
+def test_decode_idle_from_env():
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_idle == "nokey"                  # adaptive ON by default
+    cfg = config_from_env({"DETECT_DECODE_IDLE": "nokey",
+                           "DETECT_DECODE_IDLE_AFTER": "30"})
+    assert cfg.decode_idle == "nokey" and cfg.decode_idle_after == 30.0
+    assert config_from_env({"DETECT_DECODE_IDLE": "off"}).decode_idle == ""
+    assert config_from_env({"DETECT_DECODE_IDLE": "keyframes"}).decode_idle == ""
