@@ -205,6 +205,11 @@ class AppConfig:
     default_max: int = 0
     default_min: int | None = None
     opennvr_url_for_discovery: str = ""
+    # The key used for BOOT discovery, kept so the refresh loop presents
+    # the same credentials. Boot honouring a YAML ``internal_api_key``
+    # while refresh silently fell back to the env var was a real (if
+    # docker-invisible) way to discover cameras once and never again.
+    internal_api_key: str | None = None
 
     # App contract (spec §03) — all optional; see the SDK's contract
     # module. ``contract_port`` serves /health /manifest /state;
@@ -305,6 +310,18 @@ def load_config(path: str) -> AppConfig:
             for c in discovered
         ]
         if cameras_raw:
+            if default_max is None:
+                # Auto-derived cameras have no per-camera value to fall back
+                # on, so the app-level default is mandatory. Raise HERE with
+                # a message naming the actual situation — letting the
+                # per-camera loop below catch it produces "camera entry 0
+                # malformed", pointing the operator at a YAML entry that
+                # does not exist.
+                raise ValueError(
+                    "config: 'max_occupancy' is required when cameras are "
+                    "discovered from OpenNVR — set it as an app-level "
+                    "default (auto-derived cameras have no per-camera value)"
+                )
             logger.info(
                 "no cameras configured — watching all %d camera(s) OpenNVR "
                 "knows about with a whole-frame zone: %s",
@@ -429,6 +446,7 @@ def load_config(path: str) -> AppConfig:
         default_max=int(default_max or 0),
         default_min=int(default_min) if default_min is not None else None,
         opennvr_url_for_discovery=str(raw.get("opennvr_url") or ""),
+        internal_api_key=raw.get("internal_api_key") or None,
         opennvr_url=raw.get("opennvr_url"),
         opennvr_token=raw.get("opennvr_token"),
     )
@@ -481,17 +499,28 @@ class OccupancyCounter(Detector):
 
     # ── Camera-set refresh ────────────────────────────────────────
 
-    def refresh_cameras(self) -> tuple[list[str], list[str]]:
+    def refresh_cameras(
+        self, discovered: list[dict[str, Any]] | None = None
+    ) -> tuple[list[str], list[str]]:
         """Re-derive the watched camera set from OpenNVR. Returns
         ``(added, removed)``. No-op (and no network call) when the set was
         pinned in config. Separated from the timer so it is testable
-        without a running loop."""
+        without a running loop.
+
+        ``discovered`` lets the caller supply an already-fetched camera
+        list so the dict mutation runs on the event loop while only the
+        blocking HTTP call runs in a worker thread (see
+        ``_discovery_loop``) — mutating ``_config.cameras`` / ``_states``
+        from another thread could race a concurrent ``/state`` snapshot.
+        Discovery presents the same credentials boot did (a YAML
+        ``internal_api_key`` wins, else the env var)."""
         if not self._auto_cameras:
             return [], []
-        discovered = discover_cameras(
-            self._config.opennvr_url_for_discovery,
-            api_key=None,
-        )
+        if discovered is None:
+            discovered = discover_cameras(
+                self._config.opennvr_url_for_discovery,
+                api_key=self._config.internal_api_key,
+            )
         ids = {c["camera_id"] for c in discovered}
         if not ids:
             # Treat "core answered with nothing" as no news rather than
@@ -521,7 +550,15 @@ class OccupancyCounter(Detector):
         while True:
             await asyncio.sleep(interval_s)
             try:
-                await asyncio.to_thread(self.refresh_cameras)
+                # Blocking HTTP in a worker thread; the dict mutation then
+                # happens here on the loop, serialized with on_detections
+                # and state_snapshot — no cross-thread writes.
+                discovered = await asyncio.to_thread(
+                    discover_cameras,
+                    self._config.opennvr_url_for_discovery,
+                    api_key=self._config.internal_api_key,
+                )
+                self.refresh_cameras(discovered=discovered)
             except Exception:
                 logger.warning("camera refresh failed", exc_info=True)
 
