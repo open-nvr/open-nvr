@@ -18,6 +18,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react'
 import { apiService } from '../lib/apiService'
+import { queryClient } from '../lib/queries'
 import { useAuth } from '../auth/AuthContext'
 import { useSnackbar } from '../components/Snackbar'
 
@@ -73,6 +74,18 @@ interface SystemHealthState {
 
 const SystemHealthContext = createContext<SystemHealthState>({ recentAlerts: [], diskCritical: false })
 
+// Separate context so a socket flap re-renders only the "reconnecting" chips,
+// not every live tile subscribed to CameraStatusContext. Defaults to true:
+// before the socket has ever been opened (logged out, still mounting) there is
+// nothing wrong to report, and a chip that flashes on every page load is noise.
+const ConnectionContext = createContext<boolean>(true)
+
+// A fleet-wide event (an uplink dying takes every camera with it) must not fire
+// one refetch per camera. The first event opens a window and schedules a single
+// invalidation at the end of it; everything arriving inside the window rides
+// along. Long enough to swallow a burst, short enough to stay imperceptible.
+const REFRESH_COALESCE_MS = 750
+
 // Alert types that flip the persistent disk banner rather than just toasting.
 const DISK_CRITICAL_TYPES = new Set(['disk_low', 'disk_purge_exhausted'])
 // Re-toasting the same still-active alert type is suppressed for this long
@@ -92,6 +105,7 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
   const { showWarning, showSuccess, showError } = useSnackbar()
   const [state, setState] = useState<CameraStatusState>({ statuses: {}, versions: {} })
   const [health, setHealth] = useState<SystemHealthState>({ recentAlerts: [], diskCritical: false })
+  const [connected, setConnected] = useState(true)
   const lastToastAt = useRef<Record<string, number>>({})
 
   // The snackbar setters are stable (useCallback in the provider), but keep
@@ -106,8 +120,28 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let closedByUnmount = false
     let reconnectAttempt = 0
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    let everConnected = false
     const reconnectDelayMs = () =>
       Math.min(60000, 1000 * Math.pow(2, reconnectAttempt))
+
+    /**
+     * Pull the camera list again because something on it just changed.
+     *
+     * The socket is the trigger, the REST list stays the truth: patching the
+     * cached rows from the event payload would leave the client maintaining a
+     * derived copy of server state, could not update `recording_state`, and
+     * would do nothing for an event about a camera outside the current page.
+     * `active` limits the refetch to mounted queries, so background pages and
+     * stale pagination variants stay quiet.
+     */
+    const scheduleCameraRefresh = () => {
+      if (refreshTimer) return
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null
+        queryClient.invalidateQueries({ queryKey: ['cameras'], refetchType: 'active' })
+      }, REFRESH_COALESCE_MS)
+    }
 
     const scheduleReconnect = () => {
       if (closedByUnmount) return
@@ -121,6 +155,11 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
       const status = evt.payload?.status
       if (cameraId == null || (status !== 'online' && status !== 'offline')) return
       const name = evt.payload?.camera_name || `Camera ${cameraId}`
+
+      // Refresh the tables even when this is a duplicate delivery the dedupe
+      // below swallows — the toast is about the transition, the refetch is
+      // about the badges, and only one of those tolerates being skipped.
+      scheduleCameraRefresh()
 
       setState(prev => {
         // Dedupe: the backend only publishes real transitions, but a WS
@@ -165,6 +204,12 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
         camera_id: evt.camera_id,
         camera_name: p.camera_name as string | undefined,
         received_at: new Date().toISOString(),
+      }
+
+      // A recording stall changes the Recording badge on the list, which is
+      // served by the same query as the stream badge.
+      if (evt.event_type === 'camera_event' && evt.task === 'recording_stalled') {
+        scheduleCameraRefresh()
       }
 
       setHealth(prev => {
@@ -213,6 +258,13 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
 
       ws.onopen = () => {
         reconnectAttempt = 0
+        setConnected(true)
+        // Only on a RE-connect: a gap in the socket means transitions were
+        // missed, so badges painted before the drop can't be trusted. On the
+        // first connect the pages have just fetched their own data and a
+        // refresh here would only double every page load.
+        if (everConnected) scheduleCameraRefresh()
+        everConnected = true
       }
 
       ws.onmessage = (msg) => {
@@ -229,6 +281,7 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
 
       ws.onclose = () => {
         ws = null
+        setConnected(false)
         scheduleReconnect()
       }
     }
@@ -238,6 +291,7 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
     return () => {
       closedByUnmount = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (refreshTimer) clearTimeout(refreshTimer)
       if (ws) {
         ws.onclose = null
         ws.close()
@@ -248,7 +302,9 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
   return (
     <CameraStatusContext.Provider value={state}>
       <SystemHealthContext.Provider value={health}>
-        {children}
+        <ConnectionContext.Provider value={connected}>
+          {children}
+        </ConnectionContext.Provider>
       </SystemHealthContext.Provider>
     </CameraStatusContext.Provider>
   )
@@ -261,6 +317,17 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
  */
 export function useSystemAlerts(): SystemHealthState {
   return useContext(SystemHealthContext)
+}
+
+/**
+ * Whether the live events socket is currently up.
+ *
+ * False means pushed updates are not arriving, so anything derived from them
+ * is only as fresh as the camera list's own refetch interval. Surface it —
+ * a silently stale status page is worse than one that admits it.
+ */
+export function useCameraStatusConnected(): boolean {
+  return useContext(ConnectionContext)
 }
 
 /**
