@@ -69,13 +69,18 @@ what's actually installed arrives with the catalog-UI integration.
   one call — `filter_cameras_for_skill(discovered, "my_skill")` /
   `cameras_for_skill(url, "my_skill")` — following the same
   `None` = "no restriction declared" contract.
+* **Tier-0 (the always-on detector)**: an `object_detection` assignment
+  with labels narrows that camera's detected classes ("camera 4 wants
+  person + truck") — the global `DETECT_LABELS` still applies to every
+  camera without a declaration, and a label change on the settings page
+  restarts just that camera's worker within one reconcile tick. And with
+  `DETECT_SKIP_UNASSIGNED=true` in `.env` (off by default), a camera
+  whose assignments are all detection-free — say an LPR-only camera —
+  skips Tier-0 analysis entirely, a straight CPU saving. Cameras with no
+  assignments are never skipped.
 
 ## What's coming (the remaining slices)
 
-* **Tier-0 per-camera classes**: `object_detection` + labels on a
-  camera will narrow the always-on detector's classes for that camera
-  ("camera 4 also wants trucks"), and a camera assigned nothing
-  detection-shaped will be skippable entirely — a CPU saving, opt-in.
 * **Catalog-UI validation**: the camera settings page will grey out a
   skill whose capability isn't installed, with a pointer to what to
   install ("LPR needs the plate adapter — not installed").

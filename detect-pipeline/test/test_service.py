@@ -200,3 +200,56 @@ def test_camera_worker_records_restart_and_stores_best_frame(monkeypatch):
     assert len(store) >= 1
     assert store.latest_jpeg("cam-front") is not None
     metrics.reset()
+
+
+# ── Per-camera assignment labels (slice 3) ──────────────────────────
+#
+# "Camera 4 wants person + truck": the camera's object_detection
+# assignment sets THAT worker's allowlist; every other camera keeps the
+# global DETECT_LABELS. A label change on the settings page restarts
+# just that worker on the next reconcile tick.
+
+
+def test_allowed_labels_precedence(monkeypatch):
+    from detect_pipeline.service import allowed_labels_for
+
+    monkeypatch.setenv("DETECT_LABELS", "person,car")
+    assigned = CameraSpec("a", "a", "rtsp://h/a", labels=frozenset({"truck"}))
+    unassigned = CameraSpec("b", "b", "rtsp://h/b")
+    assert allowed_labels_for(assigned) == frozenset({"truck"})
+    assert allowed_labels_for(unassigned) == frozenset({"person", "car"})
+
+
+def test_reconcile_restarts_worker_when_labels_change():
+    made = []
+
+    def factory(spec, sink):
+        w = _FakeWorker(spec, sink)
+        made.append(w)
+        return w
+
+    prov = _FakeProvider([_spec("a"), _spec("b")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=factory)
+    mgr.reconcile()
+    assert len(made) == 2
+
+    # Same cameras next tick → nothing restarts (frame_url JWT churn and
+    # friends must never bounce workers).
+    prov.specs = [_spec("a"), _spec("b")]
+    mgr.reconcile()
+    assert len(made) == 2
+
+    # Operator narrows camera a to trucks → only a's worker is rebuilt.
+    prov.specs = [
+        CameraSpec("a", "a", "rtsp://h/a", labels=frozenset({"truck"})),
+        _spec("b"),
+    ]
+    mgr.reconcile()
+    assert len(made) == 3
+    assert made[2].spec.labels == frozenset({"truck"})
+    assert made[0].stopped and not made[1].stopped
+
+    # ...and un-assigning restores the global default via one more restart.
+    prov.specs = [_spec("a"), _spec("b")]
+    mgr.reconcile()
+    assert len(made) == 4 and made[3].spec.labels is None

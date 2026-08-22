@@ -154,6 +154,10 @@ Each slice is independently shippable and useful on its own:
    reference consumer, re-scoping on every discovery refresh)*
 3. **Tier-0 per-camera labels/analyze.** The class-selection case from the
    goal, plus the CPU saving of not analysing unassigned cameras.
+   *(shipped — provider parses ``assignments`` into per-camera labels;
+   label changes restart just that worker on the reconcile tick; the
+   skip is opt-in via ``DETECT_SKIP_UNASSIGNED``, off by default because
+   the Tier-0 stream feeds non-detection consumers too)*
 4. **Retire `AIModel`'s polling loop** in favour of assignment + the
    publish/subscribe path, removing the second inference route entirely.
 
