@@ -417,3 +417,99 @@ def test_single_camera_message_names_the_camera():
     msg = asyncio.run(rt._handle_create_alarm(
         {"name": "Porch", "target": "person", "camera_id": "cam1"}))
     assert "cam1" in msg and "all cameras" not in msg
+# ── Spoken time forms + the silent-window bug ──────────────────────
+#
+# "Ring an alarm when you see a person after 12:10 pm" — three ways that
+# sentence used to fail quietly: the container clock ran UTC (fixed in
+# compose: TZ now follows the site), '12:10 pm' didn't parse (silently
+# became NO window — all day, the opposite of what was asked), and the
+# quiet 'chime' default could swallow an explicit request to RING (tool
+# schema now steers the LLM to siren/pulse for explicit loudness).
+
+
+def test_parse_hhmm_accepts_spoken_am_pm_forms():
+    assert _parse_hhmm("12:10 pm") == 12 * 60 + 10   # noon-ten stays 12:10
+    assert _parse_hhmm("12:10 am") == 10             # midnight-ten -> 00:10
+    assert _parse_hhmm("7pm") == 19 * 60
+    assert _parse_hhmm("07:00 PM") == 19 * 60
+    assert _parse_hhmm("7 am") == 7 * 60
+    assert _parse_hhmm("11:59pm") == 23 * 60 + 59
+    # 24h forms unchanged; junk still None (never a phantom window).
+    assert _parse_hhmm("18:00") == 18 * 60
+    assert _parse_hhmm("25:00") is None
+    assert _parse_hhmm("noonish") is None
+
+
+def test_spoken_pm_window_gates_polling():
+    """An 'after 12:10 pm' alarm armed from speech must be OUT of window
+    at 11:00 and IN at 13:00 (site-local — the compose TZ fix makes the
+    container clock the site clock)."""
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Afternoon person", "target": "person",
+         "camera_id": "cam1", "after": "12:10 pm"}))
+    [a] = [x for x in rt.alarms._alarms.values()]
+    assert a.after_min == 12 * 60 + 10
+    import datetime
+
+    class _At:
+        def __init__(self, h, m): self._t = datetime.time(h, m)
+        def time(self): return self._t
+
+    real_dt = datetime.datetime
+    try:
+        class _FakeDT(datetime.datetime):
+            _now = None
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls._now
+
+        datetime.datetime = _FakeDT
+        _FakeDT._now = real_dt(2026, 8, 22, 11, 0)
+        assert rt.alarms._in_window(a) is False
+        _FakeDT._now = real_dt(2026, 8, 22, 13, 0)
+        assert rt.alarms._in_window(a) is True
+    finally:
+        datetime.datetime = real_dt
+
+
+# ── Parity: watches, reports, tasks get the same anti-double-wiring ──
+#
+# A duplicated WATCH is worse than a duplicated alarm: for converged
+# kinds it is a second hosted rule instance doing double inference and
+# double notifications. Reports fire twice per slot into every channel.
+
+
+def test_duplicate_watch_is_refused_and_delete_removes():
+    rt = _runtime()
+    first = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "#1" in first
+    second = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "already covers" in second
+    assert len([m for m in rt.monitors.list() if m["active"]]) == 1
+    assert rt.monitors.remove(1) is True
+    assert all(not m["active"] for m in rt.monitors.list())
+    # Removed means forgotten — re-creating works, no stale dedup hit.
+    again = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert "already covers" not in again
+
+
+def test_duplicate_report_is_refused_and_remove_forgets():
+    rt = _runtime()
+    first = asyncio.run(rt._handle_create_report(
+        {"name": "Morning", "query": "summarise overnight activity"}))
+    assert "#1" in first
+    dup = asyncio.run(rt._handle_create_report(
+        {"name": "Different name", "query": "summarise overnight activity"}))
+    assert "already runs" in dup
+    # A DIFFERENT cadence is a different report.
+    other = asyncio.run(rt._handle_create_report(
+        {"name": "Hourly", "query": "summarise overnight activity",
+         "every_minutes": 60}))
+    assert "already runs" not in other
+    assert rt.reports.remove(1) is True
+    assert all(r["id"] != 1 for r in rt.reports.list())

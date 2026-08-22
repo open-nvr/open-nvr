@@ -1089,6 +1089,31 @@ class MonitorManager:
             default_interval_s=default_interval,
         )
 
+    def find_duplicate(self, *, kind: str, camera_ids: list[str],
+                       target: str, line: list[float] | None = None,
+                       ) -> "Monitor | None":
+        """An ACTIVE watch with the same kind, target, camera set (and
+        line, for crossings). Same rationale as AlarmManager: slow
+        feedback invites a second click, and a duplicated watch is not
+        just a list entry — for converged kinds it is a SECOND hosted
+        rule instance doing double inference and double notifications."""
+        want = (kind, target.strip().lower(), frozenset(camera_ids),
+                tuple(line) if line else None)
+        for m in self._monitors.values():
+            if m.active and (m.kind, m.target, frozenset(m.camera_ids),
+                             tuple(m.line) if m.line else None) == want:
+                return m
+        return None
+
+    def remove(self, monitor_id: int) -> bool:
+        """Stop AND forget — the UI's ✕ and a spoken 'stop the watch'
+        both mean gone, not parked inactive until restart."""
+        ok = self.stop(monitor_id)
+        self._monitors.pop(monitor_id, None)
+        if monitor_id in self._order:
+            self._order.remove(monitor_id)
+        return ok
+
     def create(self, *, kind: str, camera_ids: list[str], target: str,
                description: str = "", interval_s: float | None = None,
                line: list[float] | None = None) -> Monitor:
@@ -1377,16 +1402,34 @@ def _stop_monitor_tool() -> dict[str, Any]:
 
 
 def _parse_hhmm(value: Any) -> int | None:
-    """Parse 'HH:MM' (24h) to minutes-since-midnight, else None."""
+    """Parse a time of day to minutes-since-midnight, else None.
+
+    Accepts 24h 'HH:MM' plus the forms people actually SPEAK — '12:10 pm',
+    '7pm', '07:00 PM'. am/pm follows clock convention: 12am -> 00:xx,
+    12pm -> 12:xx. Silent tolerance was a real bug: an unparseable
+    'after 12:10 pm' quietly became NO window (all day) — the opposite of
+    what was asked."""
     if not value:
         return None
+    raw = str(value).strip().lower()
+    meridian = None
+    if raw.endswith(("am", "pm")):
+        meridian = raw[-2:]
+        raw = raw[:-2].strip().rstrip(".")
     try:
-        h, m = str(value).strip().split(":")
-        h, m = int(h), int(m)
-        if 0 <= h < 24 and 0 <= m < 60:
-            return h * 60 + m
+        if ":" in raw:
+            h_s, m_s = raw.split(":")
+            h, m = int(h_s), int(m_s)
+        else:
+            h, m = int(raw), 0          # '7pm' -> 7, 0
     except (ValueError, AttributeError):
-        pass
+        return None
+    if meridian == "am" and h == 12:
+        h = 0
+    elif meridian == "pm" and 1 <= h <= 11:
+        h += 12
+    if 0 <= h < 24 and 0 <= m < 60:
+        return h * 60 + m
     return None
 
 
@@ -1693,8 +1736,8 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "target": {"type": "string", "description": "What triggers it, e.g. 'fire', 'person', 'smoke'."},
                     "camera_id": {"type": "string", "enum": camera_enum_all, "description": "A camera id, or 'all'."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
-                    "after": {"type": "string", "description": "Only active after this 24h time 'HH:MM' (e.g. '18:00' for after 6pm)."},
-                    "before": {"type": "string", "description": "Only active before this 24h time 'HH:MM'."},
+                    "after": {"type": "string", "description": "Only active after this time of day, in the SITE's local time. 24h 'HH:MM' preferred (e.g. '18:00' for after 6pm; '12:10' for after 12:10 pm); '12:10 pm' style also accepted. The window repeats daily."},
+                    "before": {"type": "string", "description": "Only active before this time of day (site-local; 24h 'HH:MM' preferred). With 'after' later than 'before' the window wraps midnight."},
                     "ring": {"type": "string",
                              "enum": ["siren", "pulse", "chime", "silent"],
                              "description": "How it announces. 'siren' rings until "
@@ -1703,7 +1746,11 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                                             "minute then stands down — urgent, not "
                                             "evacuation. 'chime' dings once — visitors, "
                                             "deliveries, vehicles. 'silent' = notifications "
-                                            "only. Omit to pick by the site's defaults."},
+                                            "only. If the user explicitly asks it to RING, "
+                                            "sound loudly, or wake them, choose 'siren' (or "
+                                            "'pulse') — do not let a quiet default swallow "
+                                            "an explicit request to be alerted out loud. "
+                                            "Omit only when the user expressed no loudness."},
                 },
                 "required": ["name", "target", "camera_id"],
             },
@@ -1972,6 +2019,26 @@ class ReportScheduler:
             self._schedules.pop(old, None)
         logger.info("report #%d %r scheduled (%s)", sched.id, sched.name, sched.schedule_label())
         return sched
+
+    def find_duplicate(self, *, query: str, at_min: int | None,
+                       every_minutes: int | None) -> "ReportSchedule | None":
+        """An ACTIVE schedule with the same query and cadence — a
+        duplicated report fires twice per slot into the feed and every
+        alert channel."""
+        want = (query.strip().lower(), at_min, every_minutes)
+        for r in self._schedules.values():
+            if r.active and (r.query.strip().lower(), r.at_min,
+                             r.every_minutes) == want:
+                return r
+        return None
+
+    def remove(self, report_id: int) -> bool:
+        """Stop AND forget (the UI's ✕ / a spoken cancel)."""
+        ok = self.stop(report_id)
+        self._schedules.pop(report_id, None)
+        if report_id in self._order:
+            self._order.remove(report_id)
+        return ok
 
     def stop(self, report_id: int) -> bool:
         sched = self._schedules.get(report_id)
@@ -3333,6 +3400,13 @@ class CameraAgentRuntime:
             every = int(every) if every else None
         except (TypeError, ValueError):
             every = None
+        # Mirror create's own default so dedup compares what will be stored.
+        _at = at_min if (at_min is not None or every) else 8 * 60
+        dup = self.reports.find_duplicate(query=query, at_min=_at,
+                                          every_minutes=every)
+        if dup is not None:
+            return (f"Report #{dup.id} '{dup.name}' already runs that exact "
+                    f"query on that schedule; nothing new was added.")
         sched = self.reports.create(name=name, query=query, at_min=at_min, every_minutes=every)
         self.persist()
         return (f"Scheduled report #{sched.id} '{name}' — {sched.schedule_label()}. "
@@ -3343,9 +3417,10 @@ class CameraAgentRuntime:
             rid = int(args.get("report_id"))
         except (TypeError, ValueError):
             return "Which report? Tell me its number."
-        ok = self.reports.stop(rid)
+        ok = self.reports.remove(rid)
         self.persist()
-        return (f"Cancelled report #{rid}." if ok else f"I don't have a report #{rid}.")
+        return (f"Cancelled and removed report #{rid}." if ok
+                else f"I don't have a report #{rid}.")
 
     async def _handle_enroll_face(self, args: dict[str, Any]) -> str:
         if not self.faces:
@@ -3484,6 +3559,14 @@ class CameraAgentRuntime:
                 return ("For crossing counts I need a line as [x1,y1,x2,y2] in "
                         "0-1 frame coordinates — where should the line go?")
             line = [float(v) for v in line]
+        dup = self.monitors.find_duplicate(
+            kind=kind, camera_ids=cams, target=target,
+            line=line if kind == "crossing" else None,
+        )
+        if dup is not None:
+            return (f"Watch #{dup.id} already covers that — same kind, "
+                    f"target and cameras. It keeps running; nothing new "
+                    f"was added.")
         try:
             mon = self.monitors.create(
                 kind=kind, camera_ids=cams, target=target,
@@ -3526,9 +3609,10 @@ class CameraAgentRuntime:
             mid = int(args.get("monitor_id"))
         except (TypeError, ValueError):
             return "Which watch should I stop? Tell me its number."
-        ok = self.monitors.stop(mid)
+        ok = self.monitors.remove(mid)
         self.persist()
-        return (f"Stopped watch #{mid}." if ok else f"I don't have a watch #{mid} running.")
+        return (f"Stopped and removed watch #{mid}." if ok
+                else f"I don't have a watch #{mid} running.")
 
     # ── App door handlers (read-only) ─────────────────────────────
     # Relay installed catalog apps + their state. NO enable/disable/config
@@ -3697,6 +3781,15 @@ class CameraAgentRuntime:
         query = str(args.get("query") or args.get("description") or "").strip()
         if not query:
             return "I need a bit more detail about what to look for."
+        running = next(
+            (t for t in self.tasks._tasks.values()
+             if t.status == "running"
+             and t.query.strip().lower() == query.lower()),
+            None,
+        )
+        if running is not None:
+            return (f"Task #{running.id} is already running that exact "
+                    f"search — I'll report when it finishes.")
         task = self.tasks.create(query)
         return (
             f"That one needs a closer look, so I've started it as background "
@@ -4751,7 +4844,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
-        ok = runtime.monitors.stop(monitor_id)
+        """The UI's ✕: stop AND forget (see MonitorManager.remove)."""
+        ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
         return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
 
@@ -4839,7 +4933,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/reports/{report_id}")
     async def _delete_report(report_id: int) -> JSONResponse:
-        ok = runtime.reports.stop(report_id)
+        """The UI's ✕: stop AND forget (see ReportScheduler.remove)."""
+        ok = runtime.reports.remove(report_id)
+        runtime.persist()
         return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
 
     @app.get("/people")

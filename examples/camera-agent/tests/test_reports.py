@@ -114,7 +114,10 @@ def test_stop_report_handler():
     async def go():
         s = rt.reports.create(name="r", query="q", every_minutes=10)
         assert f"#{s.id}" in await rt._handle_stop_report({"report_id": s.id})
-        assert rt.reports.get(s.id).active is False
+        # Cancel now REMOVES the schedule (stop-and-forget parity with
+        # alarms/watches) — it must be gone, not parked inactive.
+        assert rt.reports.get(s.id) is None
+        assert all(r["id"] != s.id for r in rt.reports.list())
 
     asyncio.run(go())
 
