@@ -84,8 +84,11 @@ what's actually installed arrives with the catalog-UI integration.
 * **Catalog-UI validation**: the camera settings page will grey out a
   skill whose capability isn't installed, with a pointer to what to
   install ("LPR needs the plate adapter — not installed").
-* **Retiring the per-model polling loop** in favour of assignments +
-  the publish/subscribe path.
+
+(The old per-model polling loop — a Start button that drove live
+inference on a timer per camera — has been retired: live detection now
+flows one way, Tier-0 → event bus → apps, and assignments are how you
+point it. Recording analysis is unaffected.)
 
 ## For app developers
 
