@@ -3911,11 +3911,18 @@ class CameraAgentRuntime:
 
     def _register_opennvr_cameras(self, specs: list[CameraSpec]) -> list[CameraSpec]:
         """Register OpenNVR-sourced camera specs that aren't known yet, wiring
-        each one's frame source. ADD-ONLY on purpose: a transient empty or
-        failed fetch must never tear down cameras that are already working."""
+        each one's frame source. ADD-ONLY for camera *identity*: a transient
+        empty or failed fetch must never tear down cameras that are already
+        working. But a known camera's ``frame_url`` IS refreshed when OpenNVR
+        serves a new one — the URL embeds a short-lived MediaMTX JWT
+        (~60 min), so keeping the boot-time URL means every frame fetch
+        starts 401ing within the hour and the camera tile shows "no frame"
+        forever (describe still works — KAI-C mints its own token — which
+        made this bug look like a UI problem instead of an expired URL)."""
         added: list[CameraSpec] = []
         for spec in specs:
             if self.context.known_camera(spec.camera_id):
+                self._refresh_frame_url(spec)
                 continue
             self.context.add_camera(spec)
             self.context.register_frame_source(
@@ -3925,6 +3932,34 @@ class CameraAgentRuntime:
             self.cfg.cameras.append(spec)
             added.append(spec)
         return added
+
+    def _refresh_frame_url(self, spec: CameraSpec) -> None:
+        """Swap a known camera's frame source when its URL changed.
+
+        OpenNVR re-mints the MediaMTX JWT baked into ``frame_url`` on every
+        reconcile fetch, so the URL differs each cycle by design; rebuilding
+        the frame source is just replacing a URL-holder object (no worker or
+        connection to bounce), so replace-on-change is cheap and keeps the
+        agent's tap token perpetually fresh. Cameras with a static URL
+        (config-file sources, local devices) compare equal and are left
+        untouched."""
+        if not spec.frame_url:
+            return
+        known = next(
+            (c for c in self.cfg.cameras if c.camera_id == spec.camera_id), None
+        )
+        if known is None or known.frame_url == spec.frame_url:
+            return
+        known.frame_url = spec.frame_url
+        # The context may hold a distinct spec object for boot-time cameras;
+        # keep it in step so UI listings show the live URL too.
+        ctx_spec = self.context.get_camera(spec.camera_id)
+        if ctx_spec is not None:
+            ctx_spec.frame_url = spec.frame_url
+        self.context.register_frame_source(
+            spec.camera_id,
+            build_frame_source(camera_id=spec.camera_id, url=spec.frame_url),
+        )
 
     def interactive_busy(self) -> bool:
         """True while a voice/chat turn is being served. Background detection
