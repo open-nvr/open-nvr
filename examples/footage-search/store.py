@@ -221,6 +221,23 @@ def keyframe_from_event(event: dict) -> Keyframe | None:
                 if lab:
                     labels.append(str(lab))
 
+    # Tier-0 events carry their objects as top-level ``tracks`` and have no
+    # ``result`` block at all — the always-on detector is the ONLY stream a
+    # default install produces, so without this branch the index stays
+    # permanently empty on a stock system. Labels are de-duplicated: one
+    # frame with four people is searchable as "person", not "person" x4.
+    if not labels:
+        tracks = event.get("tracks")
+        if isinstance(tracks, list):
+            seen: set[str] = set()
+            for tr in tracks:
+                if not isinstance(tr, dict):
+                    continue
+                lab = tr.get("label")
+                if lab and str(lab) not in seen:
+                    seen.add(str(lab))
+                    labels.append(str(lab))
+
     caption = result.get("caption")
     caption = str(caption).strip() if isinstance(caption, str) else ""
 
@@ -229,7 +246,11 @@ def keyframe_from_event(event: dict) -> Keyframe | None:
 
     return Keyframe(
         camera_id=str(camera_id),
-        ts=_event_ts(event.get("completed_at")),
+        # Tier-0 stamps the FRAME's epoch seconds in ``ts``; adapter events
+        # carry an ISO ``completed_at``. Prefer whichever the event has so a
+        # search for "around 3am" lands on when it was SEEN, not when it was
+        # indexed.
+        ts=_event_ts(event.get("completed_at"), event.get("wall_ts")),
         correlation_id=str(event.get("correlation_id") or ""),
         adapter=str(event.get("adapter") or "unknown"),
         labels=labels,
@@ -237,7 +258,16 @@ def keyframe_from_event(event: dict) -> Keyframe | None:
     )
 
 
-def _event_ts(raw: object) -> float:
+def _event_ts(raw: object, wall_ts: object = None) -> float:
+    """Best available WALL-CLOCK stamp for an event.
+
+    ``raw`` is an adapter event's ISO ``completed_at``; ``wall_ts`` is
+    Tier-0's epoch-seconds stamp. Tier-0's other time field (``ts``) is a
+    ``time.monotonic()`` reading and is deliberately NOT accepted here —
+    storing it would date every keyframe from the machine's boot origin,
+    breaking every time-window search. Falls back to now: indexing happens
+    within milliseconds of the event.
+    """
     import datetime as _dt
     if isinstance(raw, str):
         try:
@@ -247,4 +277,8 @@ def _event_ts(raw: object) -> float:
             return ts.timestamp()
         except ValueError:
             pass
+    # Epoch seconds (Tier-0's wall_ts). Bounded below by 2001-01-01: a
+    # smaller number is a monotonic reading that leaked in, not a date.
+    if isinstance(wall_ts, (int, float)) and wall_ts > 978_307_200:
+        return float(wall_ts)
     return time.time()
