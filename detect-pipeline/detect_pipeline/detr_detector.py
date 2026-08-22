@@ -60,6 +60,7 @@ for _i, _lbl in zip(
     COCO_LABELS,
 ):
     COCO91_LABELS[_i] = _lbl
+del _i, _lbl
 
 
 def labels_for_c(num_classes: int) -> list[str | None]:
@@ -76,7 +77,11 @@ def labels_for_c(num_classes: int) -> list[str | None]:
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
+    # Extreme logits overflow float32 exp() into a RuntimeWarning; the result
+    # (0.0 / 1.0) is still correct, so silence the noise rather than warn per
+    # frame on a confident model.
+    with np.errstate(over="ignore"):
+        return 1.0 / (1.0 + np.exp(-x))
 
 
 def _clamp01(v: float) -> float:
@@ -107,6 +112,10 @@ def postprocess_detr(
     if scores.ndim == 3:
         scores = scores[0]
     if boxes.ndim != 2 or scores.ndim != 2 or boxes.shape[0] != scores.shape[0]:
+        return []
+    if boxes.shape[1] != 4 or scores.shape[1] < 1:
+        # Malformed export (wrong box width) must yield nothing, not a
+        # ValueError that kills the worker's frame loop.
         return []
     q, c = scores.shape
     table = labels if labels is not None else labels_for_c(c)

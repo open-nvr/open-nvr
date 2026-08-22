@@ -97,3 +97,23 @@ def test_detector_identifies_outputs_by_shape_either_order():
 def test_detector_empty_on_missing_outputs():
     det = OnnxDetrDetector(backend_impl=_FakeBackend([]), input_size=32)
     assert det.detect(np.zeros((64, 64, 3), dtype=np.uint8)) == []
+
+
+def test_postprocess_survives_extreme_logits_without_warnings():
+    import warnings
+
+    dets = np.array([[[0.5, 0.5, 0.2, 0.2]]], dtype=np.float32)
+    logits = np.full((1, 1, 91), -1000.0, dtype=np.float32)
+    logits[0, 0, 1] = 1000.0                       # saturated confidence
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")             # any warning fails the test
+        (d,) = postprocess_detr(dets, logits, conf_threshold=0.4)
+    assert d.label == "person" and d.score == 1.0
+
+
+def test_postprocess_rejects_malformed_box_width():
+    """A wrong-width dets tensor (broken export) yields nothing — never a
+    ValueError that would kill the camera worker's frame loop."""
+    dets = np.zeros((1, 3, 5), dtype=np.float32)
+    logits = np.zeros((1, 3, 91), dtype=np.float32)
+    assert postprocess_detr(dets, logits) == []
