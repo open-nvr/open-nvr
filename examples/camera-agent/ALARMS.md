@@ -22,8 +22,14 @@ Time windows are 24h `HH:MM`. A window where `after > before` (e.g.
 `22:00`–`06:00`) wraps across midnight. The agent silences with `stop_alarm`
 (`action: silence`) or removes with `stop_alarm` (`action: disarm`).
 
-The UI also offers one-tap **preset** alarms (Fire; After-hours person) and an
-"add alarm" path via `POST /alarms`.
+The UI also offers one-tap **preset** alarms and an "add alarm" path via
+`POST /alarms`. Presets come from `GET /alarm-presets` with **honest,
+capability-aware availability**: each preset's target is checked against what
+the detection path can actually see (the standard YOLOv8/COCO-80 vocabulary
+plus the config's `detector_extra_labels`). Detectable presets — After-hours
+person, Person, Car, Truck, Dog — arm in one click; the safety presets (Fire,
+Smoke, Gas leak) are greyed out on a stock stack because COCO has no such
+classes, and clicking one explains what to register to enable it.
 
 ## How it works
 
