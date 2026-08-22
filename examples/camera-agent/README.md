@@ -45,6 +45,12 @@ On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
 
 ### Read in detail
 
+- [**User guide**](GUIDE.md) — starts with the two words that matter
+  (**skills** = capabilities the agent has, like seeing live streams or
+  searching footage; **tasks** = assignments you give it, like "report
+  truck counts at 8 AM daily"), then covers the four task shapes,
+  alarms & alert levels, the events → alerts → alarms attention ladder,
+  what's on by default, and how to enable the rest.
 - [**Models & latency**](MODELS_AND_LATENCY.md) — how model choices were weighed
   for CPU latency and good UX, plus the efficient model picks.
 - [**Alarms**](ALARMS.md) — ringing alarms, time windows, presets, and the

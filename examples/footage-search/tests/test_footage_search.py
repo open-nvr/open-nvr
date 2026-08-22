@@ -281,3 +281,68 @@ def test_retention_window_prunes_ancient_rows(tmp_path):
     assert indexer.prune_now() == 1
     assert store.count() == 1
     store.close()
+
+
+# ── Episode coalescing ─────────────────────────────────────────────
+#
+# Tier-0 publishes an event per analyzed frame and its events carry no
+# correlation_id, so nothing merges by correlation: without coalescing a
+# person sitting in frame at 2 fps is 7,200 identical rows an hour, and a
+# search returns 25 consecutive frames instead of 25 distinct sightings.
+
+
+def test_repeated_tier0_frames_coalesce_into_one_episode(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
+    base = 1_755_700_000.0
+    for i in range(10):                      # 10 frames over 45 seconds
+        _kf(store, ts=base + i * 5)
+    assert store.count() == 1, "one episode, not one row per frame"
+    hit = store.search(labels=["person"])[0]
+    assert hit.ts == base + 45, "the episode's timestamp advances to the latest frame"
+    store.close()
+
+
+def test_a_gap_beyond_the_window_starts_a_new_episode(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
+    base = 1_755_700_000.0
+    _kf(store, ts=base)
+    _kf(store, ts=base + 61)                 # outside the window
+    assert store.count() == 2
+    store.close()
+
+
+def test_different_label_sets_do_not_coalesce_and_alternation_survives(tmp_path):
+    """person / person+car alternating each frame must not defeat the
+    window: each set coalesces against ITS OWN newest row."""
+    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
+    base = 1_755_700_000.0
+    for i in range(6):
+        labels = ("person",) if i % 2 == 0 else ("car", "person")
+        _kf(store, ts=base + i * 5, labels=labels)
+    assert store.count() == 2, "one episode per distinct label set"
+    store.close()
+
+
+def test_caption_and_correlation_rows_are_exempt_from_coalescing(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
+    base = 1_755_700_000.0
+    # Caption-carrying keyframes (no correlation_id) each keep their row —
+    # captions differ frame to frame and are the searchable payload.
+    store.add(Keyframe(camera_id="cam-1", ts=base, correlation_id="",
+                       adapter="blip", labels=["person"], caption="a red coat"))
+    store.add(Keyframe(camera_id="cam-1", ts=base + 5, correlation_id="",
+                       adapter="blip", labels=["person"], caption="a blue coat"))
+    # Correlation-id keyframes keep the merge-by-correlation behavior.
+    _kf(store, ts=base + 10, corr="A")
+    _kf(store, ts=base + 15, corr="B")
+    assert store.count() == 4
+    store.close()
+
+
+def test_coalescing_can_be_disabled(tmp_path):
+    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=0)
+    base = 1_755_700_000.0
+    _kf(store, ts=base)
+    _kf(store, ts=base + 1)
+    assert store.count() == 2
+    store.close()

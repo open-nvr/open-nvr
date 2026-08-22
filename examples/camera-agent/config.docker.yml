@@ -64,15 +64,32 @@ recognition_adapter: insightface
 caption_adapter: ${CAPTION_ADAPTER}   # moondream (default) — auto-registered by caption-adapter-register
 
 # Tools advertised to the LLM. standard stack only registers the YOLOv8 object
-# detector, so the demo exposes just the two tools that actually work:
-# detect_objects (counts people/cars/…) and describe_camera (which falls
-# back to the detector when no caption adapter is present). This keeps the
-# prompt short (faster CPU prefill) and stops the model calling face
-# recognition / footage search whose adapters aren't deployed. Add names
-# here once you register BLIP / InsightFace / the footage index.
+# detector, so the demo exposes the tools that actually work: detect_objects
+# (counts people/cars/…), describe_camera (which falls back to the detector
+# when no caption adapter is present), and search_footage (reads the
+# footage-search app's index — mounted read-only at /footage; reports
+# cleanly until the apps overlay has built it). This keeps the prompt short
+# (faster CPU prefill) and stops the model calling face recognition whose
+# adapter isn't deployed. Add names here once you register BLIP / InsightFace.
 enabled_tools:
   - detect_objects
   - describe_camera
+  - search_footage
+  # The app door (read-only, backed by opennvr_api_url below): lets the
+  # agent answer about the default-on catalog apps — "is the occupancy
+  # counter healthy?", "any occupancy alerts this morning?".
+  - list_apps
+  - app_status
+  - recent_app_alerts
+  # Voice parity with the chat demo: look back at recent events, watch a
+  # camera over time, and arm/disarm alarms by voice ("alarm me if someone
+  # is at the door after 10pm"). All ride the streams the standard stack
+  # already runs — no extra adapter or model.
+  - recent_events
+  - create_monitor
+  - stop_monitor
+  - create_alarm
+  - stop_alarm
 
 # LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml default —
 # ~1 GB of RAM, snappy on CPU, Apache-2.0, and NON-thinking (the right choice on
@@ -100,6 +117,14 @@ event_ring_size: 256
 # last 30 minutes?". The token matches the NATS --auth value in the
 # standard stack compose (which uses INTERNAL_API_KEY).
 nats_inference_url: nats://nats:4222
+
+# The footage-search app's SQLite index, mounted read-only by the compose
+# overlay (volume opennvr_footage_search_data → /footage). Enables the
+# search_footage tool — "did a red truck come by earlier today?". The
+# reader re-tries on every call, so the tool lights up automatically once
+# the apps overlay's indexer has created the file; until then it reports
+# the index hasn't been built yet.
+footage_index_path: /footage/footage_index.sqlite3
 nats_inference_token: ${INTERNAL_API_KEY}
 
 # Load cameras from OpenNVR. OpenNVR returns internal MediaMTX frame-source

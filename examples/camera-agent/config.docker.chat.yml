@@ -37,7 +37,19 @@ enabled_tools:
   - describe_camera
   - recent_events
   - create_monitor
+  - stop_monitor
   - create_alarm
+  - stop_alarm
+  # Reads the footage-search app's index (mounted read-only at /footage);
+  # reports cleanly until the apps overlay has built it.
+  - search_footage
+  # The app door (read-only): answers about the default-on catalog apps.
+  - list_apps
+  - app_status
+  - recent_app_alerts
+
+# See config.docker.yml — same read-only mount, same self-healing reader.
+footage_index_path: /footage/footage_index.sqlite3
 
 frame_cache_ttl_seconds: 2.0
 event_ring_size: 256

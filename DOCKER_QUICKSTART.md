@@ -135,7 +135,7 @@ overlay using repeated `-f` flags and the overlay's `--profile`.
 | File | What it is | How to use |
 |---|---|---|
 | `docker-compose.yml` | **Core stack** — Postgres, MediaMTX, NATS, the YOLOv8 adapter, `opennvr-core` (backend + frontend + KAI-C), and nginx. | `docker compose -f docker-compose.yml up -d` |
-| `docker-compose.apps.yml` | **Detector apps overlay** — the example SDK apps (intrusion, loitering, LPR, …). | add `-f docker-compose.apps.yml --profile apps` |
+| `docker-compose.apps.yml` | **Detector apps overlay** — the example SDK apps (intrusion, loitering, LPR, …). Two of them — occupancy-counting and footage-search — are ON BY DEFAULT via `start.sh`/`start.ps1` (profile `default-apps`; they ride the always-on Tier-0 stream, no extra adapter/model/GPU; opt out with `OPENNVR_DEFAULT_APPS=off` in `.env`). | everything else: add `-f docker-compose.apps.yml --profile apps` |
 | `docker-compose.camera-agent.yml` | **Camera-agent overlay** — the voice/chat agent plus its Whisper/Piper/caption/Ollama adapters. | add `-f docker-compose.camera-agent.yml --profile camera-agent` (or `camera-agent-chat`) |
 | `docker-compose.installer.yml` | **App-installer** — the single privileged reconciler for one-click installs (holds the Docker socket). Opt-in only. | add `-f docker-compose.installer.yml --profile app-installer` |
 

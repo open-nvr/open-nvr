@@ -109,6 +109,10 @@ MANIFEST = AppManifest(
         Param("result_limit", int, default=25),
         Param("retention_days", int, default=30,
               description="Delete indexed keyframes older than this. 0 keeps everything."),
+        Param("coalesce_seconds", int, default=60,
+              description="Merge caption-less repeats of the same label set on "
+                          "a camera within this window into one row (Tier-0 "
+                          "publishes per frame). 0 disables."),
     ],
     emits=[],  # writes an index; fires no alerts
     # Declarative live-state views — rendered generically by the catalog.
@@ -163,6 +167,12 @@ class AppConfig:
     # unbounded index is a slow disk leak on an active camera. 0
     # disables pruning (an operator who wants a permanent archive).
     retention_days: int = 30
+    # Tier-0 publishes an event per analyzed frame with no correlation_id;
+    # without coalescing a person sitting in frame is thousands of identical
+    # rows and a search returns 25 consecutive frames instead of 25 distinct
+    # episodes. Repeats of the same label set within this window advance the
+    # existing row's timestamp instead of inserting. 0 disables.
+    coalesce_seconds: int = 60
 
     # App contract (spec §03) — all optional; see the SDK's contract
     # module. ``contract_port`` serves /health /manifest /state AND the
@@ -219,6 +229,7 @@ def load_config(path: str) -> AppConfig:
         ollama=ollama,
         result_limit=result_limit,
         retention_days=max(0, int(raw.get("retention_days", 30) or 0)),
+        coalesce_seconds=max(0, int(raw.get("coalesce_seconds", 60) or 0)),
         contract_port=(
             int(contract_port_raw) if contract_port_raw is not None else None
         ),
@@ -458,7 +469,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    store = FootageStore(config.db_path)
+    store = FootageStore(
+        config.db_path, coalesce_seconds=float(config.coalesce_seconds)
+    )
     try:
         if args.command == "search":
             results = run_search(config, store, args.query)

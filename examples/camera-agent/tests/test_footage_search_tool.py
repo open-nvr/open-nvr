@@ -133,3 +133,39 @@ async def test_tool_requires_keywords(tmp_path):
     tools = _tools(FootageIndex(db))
     out = await tools.search_footage({"keywords": []})
     assert "ERROR" in out
+
+
+# ── Lazy (re-)open ─────────────────────────────────────────────────
+#
+# On a stock install the agent and the footage-search indexer start
+# together, and the agent probes BEFORE the indexer has created its
+# schema. A one-shot probe at boot left search_footage "unavailable"
+# forever until an agent restart; the reader now re-tries on every call.
+
+
+def test_index_created_after_boot_lights_up_without_restart(tmp_path):
+    db = str(tmp_path / "late.sqlite3")
+    idx = FootageIndex(db)                    # agent boots first
+    assert idx.available is False
+    _build_index(db, [                         # indexer catches up later
+        ("cam-dock", time.time() - 60, "A", "tier0", "truck", ""),
+    ])
+    assert idx.available is True, "reader must re-try, not remember failure"
+    hits = idx.search(keywords=["truck"])
+    assert len(hits) == 1 and hits[0].camera_id == "cam-dock"
+
+
+def test_file_present_but_schema_not_yet_is_not_yet(tmp_path):
+    """The DB file can exist before the indexer has created its table
+    (sqlite creates the file on connect). Treat that as not-yet, then
+    succeed once the schema lands."""
+    db = str(tmp_path / "empty.sqlite3")
+    sqlite3.connect(db).close()               # zero-byte file, no schema
+    idx = FootageIndex(db)
+    assert idx.available is False
+    assert idx.search(keywords=["truck"]) == []
+    _build_index(db, [
+        ("cam-gate", time.time() - 30, "B", "tier0", "person", ""),
+    ])
+    assert idx.available is True
+    assert len(idx.search(keywords=["person"])) == 1
