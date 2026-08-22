@@ -138,6 +138,17 @@ export function VideoControls({
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0
 
+  // The transport the chip switches to when clicked — the next one in the
+  // list, wrapping, so it flips with the usual two. null when there is
+  // nothing to switch to, which is what turns the chip back into a label.
+  // An unknown current transport falls back to the first available.
+  const nextStreamType =
+    availableStreamTypes.length > 1
+      ? availableStreamTypes[
+          (availableStreamTypes.indexOf(streamType as 'webrtc' | 'hls') + 1) % availableStreamTypes.length
+        ]
+      : null
+
   return (
     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-8 pb-2 px-3 @max-[300px]:px-1.5 @max-[300px]:pb-1 transition-opacity group-hover:opacity-100 opacity-0">
       {/* Progress bar (hidden for live) */}
@@ -166,10 +177,13 @@ export function VideoControls({
         </div>
       )}
 
-      {/* Controls row — container-queried against the player root
-          (containerType: 'size'): low-priority controls drop out as the tile
-          narrows so the essentials (play, mute, fullscreen) never clip. */}
-      <div className="flex items-center gap-2 @max-[300px]:gap-0.5">
+      {/* Controls row — container-queried against the chrome band, which is
+          the width these controls are actually laid out in. Low-priority
+          controls drop out as the tile narrows, in reverse order of how much
+          an operator needs them (snapshot outlives PTZ and refresh), and
+          below 300px the remaining icons shrink rather than clip, so play,
+          mute and fullscreen survive at any size. */}
+      <div className="flex items-center gap-2 @max-[300px]:gap-0.5 @max-[300px]:[&_button:not(.menu-item)]:p-1 @max-[300px]:[&_svg]:w-4 @max-[300px]:[&_svg]:h-4">
         {/* Play/Pause */}
         <button
           onClick={isPlaying ? onPause : onPlay}
@@ -209,7 +223,7 @@ export function VideoControls({
         {isLive && onRefresh && (
           <button
             onClick={onRefresh}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[280px]:hidden"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[260px]:hidden"
             title="Refresh stream"
           >
             <RefreshCw size={18} />
@@ -247,7 +261,7 @@ export function VideoControls({
           >
             {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </button>
-          <div className={`flex items-center overflow-hidden transition-all duration-200 @max-[320px]:hidden ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
+          <div className={`flex items-center overflow-hidden transition-all duration-200 @max-[420px]:hidden ${showVolumeSlider ? 'w-20 ml-1' : 'w-0'}`}>
             <input
               type="range"
               min="0"
@@ -270,27 +284,49 @@ export function VideoControls({
         {/* Spacer */}
         <div className="flex-1 min-w-0" />
 
-        {/* Stream type indicator (live only) */}
+        {/* Transport chip (live only). Where there is more than one transport
+            this IS the switcher — clicking flips to the next — so the chip
+            styling that already made it look like a button is now honest,
+            and swapping transport costs one click instead of finding it in a
+            menu. That matters when the camera's audio codec rules one of them
+            out: AAC cannot travel over WebRTC, so HLS is the one with sound.
+            With a single transport there is nothing to switch to, so it drops
+            the button styling and renders as a plain status label. */}
         {isLive && streamType && (
-          <span className="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded @max-[360px]:hidden">
-            {streamType}
-          </span>
+          nextStreamType && onStreamTypeChange ? (
+            <button
+              onClick={() => onStreamTypeChange(nextStreamType)}
+              className="text-[10px] uppercase tracking-wider bg-white/20 hover:bg-white/30 px-1.5 py-0.5 rounded transition-colors @max-[220px]:hidden"
+              title={`Streaming over ${streamType.toUpperCase()} — switch to ${nextStreamType.toUpperCase()}`}
+            >
+              {streamType}
+            </button>
+          ) : (
+            <span className="text-[10px] uppercase tracking-wider text-white/50 px-1 @max-[360px]:hidden">
+              {streamType}
+            </span>
+          )
         )}
 
         {/* Snapshot */}
         {onSnapshot && (
           <button
             onClick={onSnapshot}
-            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[320px]:hidden"
+            className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[180px]:hidden"
             title="Take snapshot"
           >
             <Camera size={18} />
           </button>
         )}
 
-        {/* Settings */}
-        {(availableStreamTypes.length > 1 || !isLive) && (
-          <div className="relative @max-[280px]:hidden" ref={settingsRef}>
+        {/* Settings — playback only. Its menu had exactly two sections, one
+            gated on live and one on playback, so with the transport switcher
+            moved onto the chip a live tile's gear would open an empty menu.
+            Speed is the only thing left, and that is playback-only. Dropping
+            it from live tiles also hands a control's worth of width back to
+            the row, which is scarce on a narrow tile. */}
+        {!isLive && (
+          <div className="relative @max-[220px]:hidden" ref={settingsRef}>
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="p-1.5 hover:bg-white/20 rounded transition-colors"
@@ -300,26 +336,8 @@ export function VideoControls({
             </button>
             {showSettings && (
               <div className="absolute bottom-full right-0 mb-2 bg-[var(--panel)] border border-neutral-700 rounded shadow-lg min-w-[140px] py-1 text-sm">
-                {/* Stream type switcher (live only) */}
-                {isLive && availableStreamTypes.length > 1 && onStreamTypeChange && (
-                  <div className="px-3 py-1.5 border-b border-neutral-700">
-                    <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">Stream</div>
-                    {availableStreamTypes.map((type) => (
-                      <button
-                        key={type}
-                        onClick={() => {
-                          onStreamTypeChange(type)
-                          setShowSettings(false)
-                        }}
-                        className={`block w-full text-left px-2 py-1 rounded text-xs ${streamType === type ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
-                      >
-                        {type.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {/* Playback speed (playback only) */}
-                {!isLive && videoRef.current && (
+                {/* Playback speed */}
+                {videoRef.current && (
                   <div className="px-3 py-1.5">
                     <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">Speed</div>
                     {[0.5, 1, 1.5, 2].map((speed) => (
@@ -329,7 +347,7 @@ export function VideoControls({
                           if (videoRef.current) videoRef.current.playbackRate = speed
                           setShowSettings(false)
                         }}
-                        className={`block w-full text-left px-2 py-1 rounded text-xs ${videoRef.current?.playbackRate === speed ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
+                        className={`menu-item block w-full text-left px-2 py-1 rounded text-xs ${videoRef.current?.playbackRate === speed ? 'bg-[var(--accent)]/30 text-[var(--accent)]' : 'hover:bg-white/10'}`}
                       >
                         {speed}x
                       </button>

@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
@@ -32,7 +32,15 @@ from core.config import settings
 from core.database import get_db
 from core.logging_config import camera_logger
 from core.permissions import get_camera_or_403
-from models import Camera, CameraEvent, CameraPermission, Recording, TimelineEvent, User
+from models import (
+    Camera,
+    CameraConfig,
+    CameraEvent,
+    CameraPermission,
+    Recording,
+    TimelineEvent,
+    User,
+)
 from schemas import (
     CameraCreate,
     CameraHardDeleteRequest,
@@ -49,12 +57,53 @@ from services.audit_service import write_audit_log
 from services.camera_identity import path_name_for_camera, read_marker
 from services.camera_service import CameraService
 from services.mediamtx_admin_service import MediaMtxAdminService
+from services.recording_watchdog import (
+    GRACE_PERIOD_SECONDS,
+    STALL_THRESHOLD_SECONDS,
+)
 from services.storage_service import get_effective_recordings_base_path
 from services.stream_service import _build_stream_name, build_secure_whep_url_for_user
 from utils.mfa_guard import require_mfa_code
 from utils.url_redaction import redact_url_credentials
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+
+def _derive_recording_state(
+    camera: Camera,
+    recording_enabled: bool | None,
+    latest_recording: datetime | None,
+    now: datetime,
+) -> str:
+    """Observed recording health for one camera.
+
+    ``recording_enabled`` only says recording is configured — on an NVR that
+    is true for everything provisioned and cannot be turned off, so it can sit
+    next to a dead stream claiming to record. This reports what the recorder
+    has actually written instead: MediaMTX's recorder is publisher-driven, so
+    when a source drops it stops emitting segments while its config stays
+    untouched, and the newest indexed segment is the only honest signal.
+
+    Deliberately built on the recording watchdog's own thresholds so this
+    badge and the ``recording_stalled`` alert can never disagree — a camera
+    shown as stalled here is exactly one the watchdog will alarm on.
+    """
+    if not recording_enabled:
+        return "off"
+
+    # A camera added moments ago has not had time to close its first segment.
+    created = getattr(camera, "created_at", None)
+    if created is not None:
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        if (now - created).total_seconds() < GRACE_PERIOD_SECONDS:
+            return "recording"
+
+    if latest_recording is None:
+        return "never"
+    if (now - latest_recording).total_seconds() > STALL_THRESHOLD_SECONDS:
+        return "stalled"
+    return "recording"
 
 
 def _log_camera_creation_start(
@@ -464,6 +513,31 @@ def get_cameras(
             ip_address=request.client.host if request and request.client else None,
         )
 
+    # Two page-scoped grouped queries before the loop, never per-camera — this
+    # list serves up to `limit` rows.
+    camera_ids = [c.id for c in cameras]
+    latest_recordings: dict[int, datetime] = {}
+    recording_configs: dict[int, bool] = {}
+    if camera_ids:
+        # Newest indexed segment per camera, for the observed state below.
+        # Same shape the recording watchdog uses, narrowed to this page and
+        # served by ix_recordings_camera_start.
+        latest_recordings = dict(
+            db.query(Recording.camera_id, func.max(Recording.start_time))
+            .filter(Recording.camera_id.in_(camera_ids))
+            .group_by(Recording.camera_id)
+            .all()
+        )
+        # Batched because `camera.config` is a lazy relationship: reading it
+        # inside the loop cost one extra SELECT per row.
+        recording_configs = dict(
+            db.query(CameraConfig.camera_id, CameraConfig.recording_enabled)
+            .filter(CameraConfig.camera_id.in_(camera_ids))
+            .all()
+        )
+
+    now = datetime.now(UTC)
+
     # Populate extra fields for response
     results = []
     for c in cameras:
@@ -474,10 +548,16 @@ def get_cameras(
         c_resp.mediamtx_provisioned = c.status == "provisioned"
 
         # Get recording status from config if available
-        if c.config:
-            c_resp.recording_enabled = c.config.recording_enabled
-        else:
-            c_resp.recording_enabled = False
+        c_resp.recording_enabled = bool(recording_configs.get(c.id, False))
+
+        latest = latest_recordings.get(c.id)
+        if latest is not None and latest.tzinfo is None:
+            # SQLite hands back naive datetimes; the column is stored UTC.
+            latest = latest.replace(tzinfo=UTC)
+        c_resp.last_recording_at = latest
+        c_resp.recording_state = _derive_recording_state(
+            c, c_resp.recording_enabled, latest, now
+        )
 
         results.append(c_resp)
 
@@ -1199,13 +1279,15 @@ async def get_camera_mediamtx_status(
     if isinstance(details, dict):
         # Check if bytes are being received (actual data flowing)
         bytes_received = details.get("bytesReceived", 0)
-        # Also check if source is ready AND has received data
-        source_ready = details.get("sourceReady", False)
+        # Also check if source is ready AND has received data. The field is
+        # `ready` — /v3/paths/get has no `sourceReady`, so reading that name
+        # made path_active false even for healthy cameras.
+        source_ready = details.get("ready", False)
         is_streaming = source_ready and bytes_received > 0
 
         # Debug logging to see what MediaMTX is actually returning
         camera_logger.info(
-            f"Camera {camera_id} ({camera.name}) MediaMTX status: sourceReady={source_ready}, bytesReceived={bytes_received}, is_streaming={is_streaming}"
+            f"Camera {camera_id} ({camera.name}) MediaMTX status: ready={source_ready}, bytesReceived={bytes_received}, is_streaming={is_streaming}"
         )
         camera_logger.debug(f"Camera {camera_id} full details: {details}")
 

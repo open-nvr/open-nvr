@@ -23,9 +23,13 @@ import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
-import { Unplug } from 'lucide-react'
+import { CameraOff, Pencil, Trash2, Unplug, Video } from 'lucide-react'
+import { Badge, Button, EmptyState, PageHeader, Skeleton, Table, THead, TBody, TR, TH, TD } from '../components/ui'
+import type { BadgeVariant } from '../components/ui'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
+import { parseCameraQr } from '../lib/cameraQr'
+import { formatDuration } from '../lib/time'
 import { Modal } from '../components/Modal'
 
 type Camera = {
@@ -45,7 +49,13 @@ type Camera = {
   is_active: boolean
   deleted_at?: string | null
   mediamtx_provisioned?: boolean | null
+  // Configuration intent — always true for a provisioned camera and not
+  // switchable, so it says nothing about whether footage is being written.
   recording_enabled?: boolean | null
+  // Observed recording health, derived server-side from the newest indexed
+  // segment. Absent (undefined) means the endpoint didn't compute it.
+  recording_state?: 'recording' | 'stalled' | 'never' | 'off' | null
+  last_recording_at?: string | null
   // ONVIF device metadata
   manufacturer?: string | null
   model?: string | null
@@ -71,7 +81,7 @@ type CameraForm = {
 
 export function Cameras() {
   const navigate = useNavigate()
-  const { token, loading: authLoading, user: me } = useAuth()
+  const { token, loading: authLoading } = useAuth()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
   const { showError, showSuccess, showInfo } = useSnackbar()
@@ -154,11 +164,62 @@ export function Cameras() {
     setStreamStatuses(results)
   }, [])
 
+  // The five stream states, unchanged from the hand-rolled badges this
+  // replaced — only the styling moved onto the shared Badge, whose colours
+  // come from the --badge-* tokens and so survive the light theme.
+  const streamState = (c: Camera): { variant: BadgeVariant; label: string; title?: string; icon?: boolean } => {
+    if (mediamtxAvailable === false) {
+      return { variant: 'warning', label: 'Disconnected', title: 'Media Server is not running', icon: true }
+    }
+    const status = streamStatuses[c.id]
+    if (status?.ready && status?.bytesReceived > 0) return { variant: 'success', label: 'Ready' }
+    if (c.mediamtx_provisioned === true) {
+      return { variant: 'warning', label: 'Disconnected', title: 'Provisioned but not streaming' }
+    }
+    if (c.mediamtx_provisioned === false) return { variant: 'destructive', label: 'Error' }
+    return { variant: 'neutral', label: 'Not configured' }
+  }
+
+  // Observed recording health, not the config flag. `recording_enabled` is
+  // true for every provisioned camera and cannot be switched off, so it used
+  // to claim "Recording" beside a dead stream. The server derives this from
+  // the newest written segment instead, using the recording watchdog's own
+  // thresholds, so this badge agrees with the stall alert.
+  const recordingState = (c: Camera): { variant: BadgeVariant; label: string; title?: string } => {
+    const at = c.last_recording_at ? new Date(c.last_recording_at) : null
+    const agoSeconds = at ? Math.max(0, (Date.now() - at.getTime()) / 1000) : null
+    const seenAt = at ? `Last segment ${at.toLocaleString()}` : undefined
+
+    switch (c.recording_state) {
+      case 'recording':
+        return { variant: 'success', label: 'Recording', title: seenAt }
+      case 'stalled': {
+        // formatDuration never rolls up to days, so a multi-day stall would
+        // render "Stalled 74h 12m" and overflow the column.
+        const age =
+          agoSeconds === null ? null : agoSeconds >= 86400 ? '>24h' : formatDuration(agoSeconds)
+        return {
+          variant: 'warning',
+          label: age ? `Stalled ${age}` : 'Stalled',
+          title: seenAt ? `${seenAt} — nothing written since` : undefined,
+        }
+      }
+      case 'never':
+        return { variant: 'warning', label: 'No data', title: 'No recording has ever been indexed for this camera' }
+      case 'off':
+        return { variant: 'neutral', label: 'Off' }
+      default:
+        // Endpoints that don't compute it leave this unset — say so rather
+        // than implying recording is off.
+        return { variant: 'neutral', label: '—', title: 'Recording state unavailable' }
+    }
+  }
+
   // Load cameras
   useEffect(() => {
     if (authLoading) return
     let alive = true
-    ;(async () => {
+    const run = async () => {
       try {
         setLoading(true)
         if (token) api.setToken(token)
@@ -189,8 +250,12 @@ export function Cameras() {
       } finally {
         if (alive) setLoading(false)
       }
-    })()
-    return () => { alive = false }
+    }
+    // Debounced so typing in the search box costs one request after a pause
+    // rather than one per keystroke — the same two lines the user-search
+    // effect below already uses.
+    const t = setTimeout(run, 250)
+    return () => { alive = false; clearTimeout(t) }
   }, [token, authLoading, skip, limit, activeOnly, query, fetchStreamStatuses])
 
   // User search for bulk assign
@@ -351,50 +416,56 @@ export function Cameras() {
   return (
     <section className="space-y-4">
       {/* Header */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <h1 className="text-lg font-semibold">Cameras</h1>
-        <div className="ml-auto flex items-center gap-2 text-sm flex-wrap">
-          <input
-            className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1"
-            placeholder="Search name or IP"
-            value={query}
-            onChange={(e) => { setPage(1); setQuery(e.target.value) }}
-          />
-          {canManageCameras && selected.size > 0 && (
-            <div className="flex items-center gap-2">
-              <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={onBulkDelete} disabled={loading}>
-                Delete Selected ({selected.size})
-              </button>
-              <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => setShowBulkAssign((s) => !s)} disabled={loading}>
-                Assign Permissions
-              </button>
-            </div>
-          )}
-          <label className="inline-flex items-center gap-1">
-            <input type="checkbox" className="accent-[var(--accent)]" checked={activeOnly} onChange={(e) => { setPage(1); setActiveOnly(e.target.checked) }} /> Active only
-          </label>
-          <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
-            {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
-          </select>
-          {canManageCameras && (
-            <button className="px-2 py-1 bg-[var(--accent)] text-white" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>Add Camera</button>
-          )}
-        </div>
+      <PageHeader
+        title="Cameras"
+        description="Every camera registered with this recorder, with its live stream and recording state."
+        actions={canManageCameras ? (
+          <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
+            Add Camera
+          </Button>
+        ) : undefined}
+      />
+
+      {/* Filters. Bulk actions appear here only with a selection, so the row
+          stays quiet in the common case. */}
+      <div className="flex items-center gap-2 text-sm flex-wrap">
+        <input
+          className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1 rounded"
+          placeholder="Search name or IP"
+          value={query}
+          onChange={(e) => { setPage(1); setQuery(e.target.value) }}
+        />
+        <label className="inline-flex items-center gap-1">
+          <input type="checkbox" className="accent-[var(--accent)]" checked={activeOnly} onChange={(e) => { setPage(1); setActiveOnly(e.target.checked) }} /> Active only
+        </label>
+        <select className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1 rounded" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
+          {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
+        </select>
+        {canManageCameras && selected.size > 0 && (
+          <div className="flex items-center gap-2 ml-auto">
+            <Button variant="danger" onClick={onBulkDelete} disabled={loading}>
+              Delete Selected ({selected.size})
+            </Button>
+            <Button variant="outline" onClick={() => setShowBulkAssign((s) => !s)} disabled={loading}>
+              Assign Permissions
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Bulk Assign Panel */}
       {canManageCameras && showBulkAssign && selected.size > 0 && (
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-3 text-sm flex items-center gap-3 flex-wrap">
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-3 text-sm flex items-center gap-3 flex-wrap">
           <div className="text-[var(--text-dim)]">Assign to user</div>
           <div className="relative">
             <input
-              className="bg-[var(--panel)] border border-neutral-700 px-2 py-1 w-56"
+              className="bg-[var(--panel)] border border-[var(--border)] px-2 py-1 w-56"
               placeholder="Type username or email"
               value={userQuery}
               onChange={(e) => { setUserQuery(e.target.value); setBulkUserId('') }}
             />
             {userQuery && (
-              <div className="absolute z-10 mt-1 w-full bg-[var(--panel)] border border-neutral-700 max-h-56 overflow-auto">
+              <div className="absolute z-10 mt-1 w-full bg-[var(--panel)] border border-[var(--border)] max-h-56 overflow-auto">
                 {usersLoading ? (
                   <div className="px-2 py-1 text-[var(--text-dim)]">Searching…</div>
                 ) : userOptions.length === 0 ? (
@@ -422,7 +493,7 @@ export function Cameras() {
             <input type="checkbox" className="accent-[var(--accent)]" checked={bulkCanManage} onChange={(e) => setBulkCanManage(e.target.checked)} /> can_manage
           </label>
           <button className="px-3 py-1 bg-[var(--accent)] text-white" onClick={onBulkAssign} disabled={loading || bulkUserId === ''}>Apply to {selected.size} selected</button>
-          <button className="px-3 py-1 bg-[var(--panel)] border border-neutral-700" onClick={() => setShowBulkAssign(false)}>Cancel</button>
+          <button className="px-3 py-1 bg-[var(--panel)] border border-[var(--border)]" onClick={() => setShowBulkAssign(false)}>Cancel</button>
         </div>
       )}
 
@@ -435,12 +506,41 @@ export function Cameras() {
         />
       )}
 
-      {/* Cameras Table */}
-      <div className="overflow-auto border border-neutral-700">
-        <table className="w-full text-sm">
-          <thead className="bg-[var(--panel-2)] text-left">
-            <tr>
-              <th className="p-2 w-8">
+      {/* Cameras table. table-fixed with explicit widths is what keeps this
+          from ever scrolling sideways: the fixed columns come to ~560px and
+          Camera absorbs the rest, so content length no longer drives layout.
+          Anything too long truncates and reveals in full via title. */}
+      {/* Skeletons only on a cold load. `loading` is also set by delete and
+          the debounced re-search, and swapping a populated table for
+          skeletons on every one of those flashes the whole page — so once
+          there are rows to show, a later load just dims them instead. */}
+      {loading && cameras.length === 0 ? (
+        <div className="space-y-2">
+          {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
+        </div>
+      ) : cameras.length === 0 ? (
+        <EmptyState
+          icon={<CameraOff size={28} />}
+          title="No cameras"
+          description={query || activeOnly
+            ? 'No cameras match the current search or filter. Try clearing them.'
+            : 'Add a camera to start recording.'}
+          action={canManageCameras ? (
+            <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
+              Add Camera
+            </Button>
+          ) : undefined}
+        />
+      ) : (
+        /* min-w is the floor, not the target. The fixed columns take ~570px,
+           so below roughly 760px of table area the Camera column would be
+           squeezed to nothing; past that point letting the wrapper scroll is
+           the lesser evil. At any normal window width the table fits and no
+           scrollbar appears. */
+        <Table className={`table-fixed min-w-[760px] ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
+          <THead>
+            <TR>
+              <TH className="w-10">
                 <input
                   type="checkbox"
                   className="accent-[var(--accent)]"
@@ -453,31 +553,27 @@ export function Cameras() {
                     }
                   }}
                 />
-              </th>
-              <th className="p-2">Name</th>
-              <th className="p-2">IP</th>
-              <th className="p-2">Port</th>
-              <th className="p-2">Manufacturer</th>
-              <th className="p-2">Model</th>
-              <th className="p-2">Serial #</th>
-              <th className="p-2">Firmware</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Stream Status</th>
-              <th className="p-2">Recording</th>
-              {me?.is_superuser && <th className="p-2">Owner ID</th>}
-              <th className="p-2">Active</th>
-              <th className="p-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td className="p-2 text-[var(--text-dim)]" colSpan={14}>Loading…</td>
-              </tr>
-            ) : cameras.length > 0 ? (
-              cameras.map((c) => (
-                <tr key={c.id} className="odd:bg-[var(--bg-2)] even:bg-[var(--panel)]">
-                  <td className="p-2">
+              </TH>
+              <TH>Camera</TH>
+              <TH className="w-[170px]">Address</TH>
+              <TH className="w-[150px]">Stream</TH>
+              <TH className="w-[150px]">Recording</TH>
+              <TH className="w-[110px]">Actions</TH>
+            </TR>
+          </THead>
+          <TBody striped>
+            {cameras.map((c) => {
+              const stream = streamState(c)
+              const rec = recordingState(c)
+              // Model and serial lost their own columns; keep every field
+              // reachable from the hover text rather than dropping it.
+              const device = [c.manufacturer, c.model].filter(Boolean).join(' ')
+              const deviceLine = [device, c.firmware_version].filter(Boolean).join(' · ')
+              const deviceTitle = [c.manufacturer, c.model, c.serial_number, c.firmware_version]
+                .filter(Boolean).join(' · ')
+              return (
+                <TR key={c.id} className={c.is_active ? undefined : 'opacity-60'}>
+                  <TD>
                     <input
                       type="checkbox"
                       className="accent-[var(--accent)]"
@@ -488,130 +584,82 @@ export function Cameras() {
                         setSelected(next)
                       }}
                     />
-                  </td>
-                  <td className="p-2">{c.name}</td>
-                  <td className="p-2">{c.ip_address}</td>
-                  <td className="p-2">{c.port}</td>
-                  <td className="p-2 text-xs text-[var(--text-dim)]">{c.manufacturer || '—'}</td>
-                  <td className="p-2 text-xs text-[var(--text-dim)]">{c.model || '—'}</td>
-                  <td className="p-2 text-xs text-[var(--text-dim)]" title={c.serial_number || undefined}>{c.serial_number ? (c.serial_number.length > 12 ? c.serial_number.slice(0, 12) + '…' : c.serial_number) : '—'}</td>
-                  <td className="p-2 text-xs text-[var(--text-dim)]">{c.firmware_version || '—'}</td>
-                  <td className="p-2">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${c.status === 'provisioned' ? 'bg-green-900/50 text-green-400' :
-                      c.status === 'unknown' ? 'bg-gray-900/50 text-gray-400' :
-                        'bg-yellow-900/50 text-yellow-400'
-                      }`}>
-                      {c.status || 'unknown'}
-                    </span>
-                  </td>
-                  <td className="p-2">
-                    {mediamtxAvailable === false ? (
-                      <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-amber-900/50 text-amber-400" title="Media Server is not running">
-                        <Unplug size={12} />
-                        Disconnected
-                      </span>
-                    ) : (() => {
-                      const status = streamStatuses[c.id]
-                      const isStreaming = status?.ready && status?.bytesReceived > 0
-                      
-                      if (isStreaming) {
-                        return (
-                          <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-green-900/50 text-green-400">
-                            ✓ Ready
-                          </span>
-                        )
-                      } else if (c.mediamtx_provisioned === true) {
-                        return (
-                          <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-amber-900/50 text-amber-400" title="Provisioned but not streaming">
-                            ⚠ Disconnected
-                          </span>
-                        )
-                      } else if (c.mediamtx_provisioned === false) {
-                        return (
-                          <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-red-900/50 text-red-400">
-                            ✗ Error
-                          </span>
-                        )
-                      } else {
-                        return (
-                          <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-gray-900/50 text-gray-400">
-                            — Not configured
-                          </span>
-                        )
-                      }
-                    })()}
-                  </td>
-                  <td className="p-2">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${c.recording_enabled === true ? 'bg-red-900/50 text-red-400' :
-                      'bg-gray-900/50 text-gray-400'
-                      }`}>
-                      {c.recording_enabled === true ? '🔴 Recording' : '⚫ Off'}
-                    </span>
-                  </td>
-                  {me?.is_superuser && <td className="p-2">{c.owner_id}</td>}
-                  <td className="p-2">{c.is_active ? 'Yes' : 'No'}</td>
-                  <td className="p-2">
-                    <div className="flex items-center gap-1">
+                  </TD>
+                  <TD className="truncate">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-medium" title={c.name}>{c.name}</span>
+                      {/* The Active column is gone, so with "Active only"
+                          unticked this badge is the only thing distinguishing
+                          a deactivated camera. */}
+                      {!c.is_active && <Badge variant="neutral" className="shrink-0">Inactive</Badge>}
+                    </div>
+                    <div className="text-xs text-[var(--text-dim)] truncate" title={deviceTitle || undefined}>
+                      {deviceLine || '—'}
+                    </div>
+                  </TD>
+                  <TD className="whitespace-nowrap truncate" title={`${c.ip_address}:${c.port}`}>
+                    {c.ip_address}<span className="text-[var(--text-dim)]">:{c.port}</span>
+                  </TD>
+                  <TD>
+                    <Badge variant={stream.variant} title={stream.title}>
+                      {stream.icon && <Unplug size={12} />}
+                      {stream.label}
+                    </Badge>
+                  </TD>
+                  <TD>
+                    <Badge variant={rec.variant} title={rec.title}>{rec.label}</Badge>
+                  </TD>
+                  <TD>
+                    <div className="flex items-center justify-end gap-1">
                       {canManageCameras && (
-                        <button
-                          className="p-1.5 border border-neutral-700 bg-[var(--panel-2)] hover:bg-neutral-700 transition-colors rounded"
-                          onClick={() => startEdit(c)}
-                          title="Edit Camera"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                          </svg>
+                        <button className={ICON_BTN} onClick={() => startEdit(c)} title="Edit camera" aria-label={`Edit ${c.name}`}>
+                          <Pencil size={15} />
                         </button>
                       )}
+                      {/* Recording is automatic on an NVR — no manual
+                          start/stop control. The Recording column shows its
+                          live status, derived from the newest written
+                          segment rather than the config flag. */}
                       {c.mediamtx_provisioned === true && (
-                        <>
-                          {/* Recording is automatic on an NVR — no manual
-                              start/stop control. The Recording column shows its
-                              live status. */}
-                          <button
-                            className="p-1.5 border border-blue-600 bg-blue-900/20 text-blue-400 hover:bg-blue-900/40 transition-colors rounded"
-                            onClick={() => navigate(`/live?camera=${c.id}`)}
-                            title="View Live"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                          </button>
-                        </>
+                        <button
+                          className={`${ICON_BTN} border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)]/10`}
+                          onClick={() => navigate(`/live?camera=${c.id}`)}
+                          title="View live"
+                          aria-label={`View ${c.name} live`}
+                        >
+                          <Video size={15} />
+                        </button>
                       )}
                       {canManageCameras && (
                         <button
-                          className="p-1.5 border border-neutral-700 bg-[var(--panel-2)] hover:bg-red-900/40 hover:border-red-600 hover:text-red-400 transition-colors rounded"
+                          className={`${ICON_BTN} hover:border-red-600 hover:bg-red-900/30 hover:text-red-400`}
                           onClick={() => onDelete(c)}
-                          title="Delete Camera"
+                          title="Delete camera"
+                          aria-label={`Delete ${c.name}`}
                         >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
+                          <Trash2 size={15} />
                         </button>
                       )}
                     </div>
-                  </td>
-                </tr>
-              ))
-            ) : (
-              <tr>
-                <td className="p-2 text-[var(--text-dim)]" colSpan={14}>No cameras</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                  </TD>
+                </TR>
+              )
+            })}
+          </TBody>
+        </Table>
+      )}
 
       {/* Pagination */}
       <div className="flex items-center gap-2 text-sm">
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
+        <Button disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
+        {/* activeOnly filters client-side of the count the backend returns, so
+            totalPages would lie — fall back to the hasNext probe there. */}
         {activeOnly ? (
           <span>Page {page}</span>
         ) : (
           <span>Page {page} / {totalPages}</span>
         )}
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={activeOnly ? !hasNext : page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
+        <Button disabled={activeOnly ? !hasNext : page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
       </div>
 
       {/* Edit Camera Dialog */}
@@ -673,7 +721,19 @@ export function Cameras() {
           {scanQr && (
             <QrScanner
               title="Scan the QR from the OpenNVR Cam app"
-              onResult={(text) => { setForm({ ...form, rtsp_url: text }); setScanQr(false) }}
+              onResult={(text) => {
+                // Same unpacking as the add dialog: the scanned rtsp:// URL
+                // carries host, port and credentials, so fill those fields
+                // instead of leaving them for the operator to retype. The
+                // name of a camera being edited is never overwritten.
+                const scanned = parseCameraQr(text)
+                setForm(f => ({
+                  ...f,
+                  ...scanned,
+                  name: f.name.trim() || scanned.name || f.name,
+                }))
+                setScanQr(false)
+              }}
               onClose={() => setScanQr(false)}
             />
           )}
@@ -685,6 +745,15 @@ export function Cameras() {
 
 const EDIT_INPUT =
   'bg-[var(--panel-2)] border border-[var(--border)] px-3 py-2 rounded text-sm'
+
+// A plain button rather than the Button primitive, deliberately. Button bakes
+// in px-3 py-1.5, and clsx is not tailwind-merge — both classes reach the DOM
+// and Tailwind emits utilities in ascending order, so .px-3 lands after
+// .px-1.5 and wins at equal specificity. A className can therefore only make
+// a Button bigger, never smaller, and three full-size buttons overflow this
+// column.
+const ICON_BTN =
+  'inline-flex items-center justify-center rounded border border-[var(--border)] bg-[var(--panel-2)] p-1.5 text-[var(--text-dim)] transition-colors hover:bg-[var(--panel)] hover:text-[var(--text)]'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

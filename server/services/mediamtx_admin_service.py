@@ -1285,9 +1285,12 @@ class MediaMtxAdminService:
         if not cam:
             return {"recording_enabled": False, "message": "Camera not found"}
 
-        path_info = await MediaMtxAdminService.get_active_path(
-            camera_id, cam.ip_address
-        )
+        # The recording keys below live on the CONFIG object. get_active_path
+        # returns the RUNTIME one (/v3/paths/get: ready, readyTime, tracks,
+        # bytesReceived, ...), which has no `record` at all — so this read
+        # silently returned False for every camera, and the Dashboard's REC
+        # badge never appeared for anyone.
+        path_info = await MediaMtxAdminService.path_status(camera_id, cam.ip_address)
 
         # Extract recording status from path configuration
         if path_info and path_info.get("status") == "ok" and "details" in path_info:

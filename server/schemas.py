@@ -561,7 +561,16 @@ class CameraResponse(CameraBase):
     updated_at: datetime | None = None
     # Optional MediaMTX provisioning info (populated at creation time)
     mediamtx_provisioned: bool | None = None
+    # Configuration intent: recording is turned on for this camera. On an NVR
+    # this is true for everything provisioned and cannot be switched off, so it
+    # says nothing about whether footage is actually being written — use
+    # recording_state for that.
     recording_enabled: bool | None = None
+    # Observed recording health, derived from the newest indexed segment.
+    # 'recording' | 'stalled' | 'never' | 'off'. None where an endpoint does
+    # not compute it, which callers must read as "unknown", not "off".
+    recording_state: str | None = None
+    last_recording_at: datetime | None = None
 
     class Config:
         from_attributes = True
