@@ -513,3 +513,55 @@ def test_duplicate_report_is_refused_and_remove_forgets():
     assert "already runs" not in other
     assert rt.reports.remove(1) is True
     assert all(r["id"] != 1 for r in rt.reports.list())
+
+
+# ── Target normalization: never arm an alarm that can't fire ────────
+#
+# Field bug: the LLM armed target='alert when you see a person on this
+# camera' — the whole sentence. Matching is exact label equality, so the
+# alarm silently could never fire. The server now reduces the phrase to
+# one detectable label or asks back instead of arming a dud.
+
+
+def test_sentence_target_is_reduced_to_the_label():
+    rt = _runtime()
+    msg = asyncio.run(rt._handle_create_alarm(
+        {"name": "Alarm", "camera_id": "cam1",
+         "target": "alert when you see a person on this camera"}))
+    assert "Armed alarm" in msg
+    [a] = rt.alarms._alarms.values()
+    assert a.target == "person", "the alarm must match what the detector emits"
+
+
+def test_plurals_and_exact_labels_still_work():
+    rt = _runtime()
+    m1 = asyncio.run(rt._handle_create_alarm(
+        {"name": "Cars", "camera_id": "cam1", "target": "cars"}))
+    assert "Armed alarm" in m1
+    m2 = asyncio.run(rt._handle_create_alarm(
+        {"name": "Fire", "camera_id": "cam1", "target": "fire"}))
+    assert "Armed alarm" in m2
+    targets = {a.target for a in rt.alarms._alarms.values()}
+    assert targets == {"car", "fire"}
+
+
+def test_ambiguous_or_labelless_target_asks_back():
+    rt = _runtime()
+    # No detectable label in the phrase → ask, don't arm.
+    none_msg = asyncio.run(rt._handle_create_alarm(
+        {"name": "X", "camera_id": "cam1", "target": "anything suspicious"}))
+    assert none_msg.endswith("?") and not rt.alarms._alarms
+    # TWO labels → ambiguous → ask, don't guess.
+    two_msg = asyncio.run(rt._handle_create_alarm(
+        {"name": "X", "camera_id": "cam1", "target": "a person or a car"}))
+    assert two_msg.endswith("?") and not rt.alarms._alarms
+
+
+def test_watch_targets_are_normalized_too():
+    rt = _runtime()
+    msg = asyncio.run(rt._handle_create_monitor(
+        {"kind": "notify", "camera_id": "cam1",
+         "target": "watch for people walking by"}))
+    assert "ERROR" not in msg and not msg.endswith("?")
+    [m] = rt.monitors._monitors.values()
+    assert m.target == "person"
