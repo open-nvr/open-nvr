@@ -135,6 +135,22 @@ class FootageStore:
         cur = self._conn.execute("SELECT COUNT(*) AS n FROM keyframes")
         return int(cur.fetchone()["n"])
 
+    def prune(self, older_than_ts: float) -> int:
+        """Delete keyframes older than ``older_than_ts`` (epoch seconds).
+        Returns the number of rows removed.
+
+        Retention is not optional housekeeping here: this index grows with
+        every detection forever. Tier-0 publishes continuously on an active
+        camera, so an un-pruned index on a busy scene is an unbounded write
+        to the operator's disk — the same failure mode recordings retention
+        exists to prevent. The ts index makes this a cheap range delete.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM keyframes WHERE ts < ?", (float(older_than_ts),)
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
     def search(
         self,
         *,

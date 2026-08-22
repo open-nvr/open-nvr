@@ -43,24 +43,25 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras — EDIT: camera_id must match KAI-C's event subjects ────
-cameras:
-  - camera_id: "cam-1"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "full-frame"
-    max_occupancy: 10
-    zone:
-      - [0, 0]
-      - [1920, 0]
-      - [1920, 1080]
-      - [0, 1080]
-
-# ── App contract (spec §03) — powers the App Catalog ───────────────
-# The SDK serves /health /manifest /state on contract_port and
-# self-registers with the OpenNVR app registry on boot. The
-# registration token comes from the OPENNVR_INTERNAL_API_KEY
-# environment variable set by the overlay, so it is not templated here.
+# ── Cameras ───────────────────────────────────────────────────────
+# LEAVE EMPTY to watch every camera OpenNVR knows about, each with a
+# whole-frame zone — the app reads the live camera list from
+# ``opennvr_url`` on boot, so the ids always match what Tier-0
+# publishes (OpenNVR names them cam1, cam2 — NOT cam-1).
+#
+# Draw real zones in the App Catalog UI, or pin them here to override.
+# Coordinates are in whatever space you choose: the detector's boxes
+# are normalised before they are compared, so a zone drawn in a
+# 1000x1000 space works on a 4K camera.
+#
+# cameras:
+#   - camera_id: "cam1"
+#     zone_name: "doorway"
+#     frame_width: 1000
+#     frame_height: 1000
+#     max_occupancy: 3
+#     zone: [[100, 100], [900, 100], [900, 900], [100, 900]]
+cameras: []
 contract_port: 9201
 contract_bind_host: "0.0.0.0"
 contract_host: "occupancy-counting"   # the compose service name

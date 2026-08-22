@@ -73,6 +73,7 @@ import datetime as _dt
 import logging
 import signal
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -106,6 +107,8 @@ MANIFEST = AppManifest(
         Param("camera_aliases", dict, default={},
               description="word -> camera_id aliases ('dock' -> 'cam-dock')."),
         Param("result_limit", int, default=25),
+        Param("retention_days", int, default=30,
+              description="Delete indexed keyframes older than this. 0 keeps everything."),
     ],
     emits=[],  # writes an index; fires no alerts
     # Declarative live-state views — rendered generically by the catalog.
@@ -155,6 +158,11 @@ class AppConfig:
     camera_aliases: dict[str, str]
     ollama: OllamaConfig
     result_limit: int
+    # Days of index history to keep. The index grows with every
+    # detection forever, and Tier-0 publishes continuously — so an
+    # unbounded index is a slow disk leak on an active camera. 0
+    # disables pruning (an operator who wants a permanent archive).
+    retention_days: int = 30
 
     # App contract (spec §03) — all optional; see the SDK's contract
     # module. ``contract_port`` serves /health /manifest /state AND the
@@ -210,6 +218,7 @@ def load_config(path: str) -> AppConfig:
         camera_aliases=camera_aliases,
         ollama=ollama,
         result_limit=result_limit,
+        retention_days=max(0, int(raw.get("retention_days", 30) or 0)),
         contract_port=(
             int(contract_port_raw) if contract_port_raw is not None else None
         ),
@@ -334,14 +343,43 @@ class Indexer(Detector):
             ],
         }
 
+    def prune_now(self) -> int:
+        """Apply the retention window once. Returns rows deleted (0 when
+        retention is disabled). Separated from the timer so it is testable
+        without a running loop."""
+        days = int(getattr(self.cfg, "retention_days", 0) or 0)
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86_400
+        removed = self._store.prune(cutoff)
+        if removed:
+            logger.info("retention: pruned %d keyframes older than %d days",
+                        removed, days)
+        return removed
+
+    async def _retention_loop(self, interval_s: float = 6 * 3600) -> None:
+        """Prune on start and every 6h after. Best-effort: a failing prune
+        (locked db, disk hiccup) must never take the indexer down."""
+        while True:
+            try:
+                await asyncio.to_thread(self.prune_now)
+            except Exception:
+                logger.warning("retention pass failed", exc_info=True)
+            await asyncio.sleep(interval_s)
+
     async def run(self, *, once: bool = False) -> None:
         logger.info(
             "footage-search indexer started: db=%s, subject=%r (%d rows already indexed)",
             self.cfg.db_path, self.cfg.subject_pattern, self._store.count(),
         )
+        retention: asyncio.Task | None = None
+        if not once and int(getattr(self.cfg, "retention_days", 0) or 0) > 0:
+            retention = asyncio.create_task(self._retention_loop())
         try:
             await super().run(once=once)
         finally:
+            if retention is not None:
+                retention.cancel()
             logger.info("indexer stopped; %d keyframes this session", self._indexed)
 
 
