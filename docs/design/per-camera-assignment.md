@@ -115,6 +115,12 @@ explicit override, never as the thing an operator must fill in.
 manifest declares `requires_tasks`, can refuse an assignment whose
 capability isn't installed ("people counting needs object detection —
 Tier-0 provides it ✓" / "LPR needs the plate adapter — not installed").
+*(shipped — GET /cameras/assignable-skills composes the canonical task
+registry, live adapter tasks via KAI-C, and installed apps into a
+tri-state availability list; the editor suggests via datalist and
+annotates unavailable skills with a what-to-install note. Annotate,
+never refuse: the vocabulary stays open, and unknown availability —
+KAI-C unreachable — flags nothing.)*
 
 ## Rules that keep the concerns separate
 

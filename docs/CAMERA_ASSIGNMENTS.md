@@ -79,11 +79,14 @@ what's actually installed arrives with the catalog-UI integration.
   skips Tier-0 analysis entirely, a straight CPU saving. Cameras with no
   assignments are never skipped.
 
-## What's coming (the remaining slices)
-
-* **Catalog-UI validation**: the camera settings page will grey out a
-  skill whose capability isn't installed, with a pointer to what to
-  install ("LPR needs the plate adapter — not installed").
+The Assignments editor also **suggests and annotates**: typing in a
+skill row offers every skill the install knows (canonical adapter tasks
+plus installed catalog apps), and a skill whose capability isn't
+actually served shows an amber note naming what to install ("no
+registered adapter advertises license_plate_recognition — register one
+on the AI Adapters page"). It annotates, it never blocks — the
+vocabulary stays open, and when adapter status can't be determined
+(KAI-C unreachable) nothing is flagged.
 
 (The old per-model polling loop — a Start button that drove live
 inference on a timer per camera — has been retired: live detection now
