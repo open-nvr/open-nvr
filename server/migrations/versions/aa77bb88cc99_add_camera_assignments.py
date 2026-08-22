@@ -27,7 +27,7 @@ opt in in later slices.
 Nullable, no default: existing rows keep NULL, which every consumer must
 read as "no restriction declared" (back-compat), never as "do nothing".
 
-Revision ID: aa11bb22cc33
+Revision ID: aa77bb88cc99
 Revises: ff66aa77bb88
 Create Date: 2026-08-22 00:00:00.000000
 
@@ -39,7 +39,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "aa11bb22cc33"
+revision: str = "aa77bb88cc99"
 down_revision: str | None = "ff66aa77bb88"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
