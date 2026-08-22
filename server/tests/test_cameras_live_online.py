@@ -248,3 +248,119 @@ def test_list_serves_without_mediamtx(env):
 
     rows = _rows(env, "admin")
     assert rows[cam.id]["live_online"] is True
+
+
+# ---------------------------------------------------------------------------
+# recording_state vs live_online — the two badges must never contradict.
+# ---------------------------------------------------------------------------
+
+
+def _recording_on(env, cam):
+    """Turn recording on for `cam`.
+
+    `recording_enabled` is read from the camera's config row, not the camera,
+    and without one every state below collapses to "off".
+    """
+    from models import CameraConfig
+
+    env.db.add(CameraConfig(camera_id=cam.id, recording_enabled=True))
+    env.db.commit()
+
+
+def _recent_recording(env, cam, seconds_ago: int):
+    """Index one segment `seconds_ago` in the past for `cam`."""
+    from datetime import UTC, datetime, timedelta
+
+    from models import Recording
+
+    env.db.add(Recording(
+        camera_id=cam.id,
+        filename=f"{cam.id}-seg.mp4",
+        file_path=f"/rec/{cam.id}-{seconds_ago}.mp4",
+        start_time=datetime.now(UTC) - timedelta(seconds=seconds_ago),
+    ))
+    env.db.commit()
+
+
+def test_offline_camera_never_reports_recording(env):
+    """A dead source cannot be recording, however fresh the last segment is.
+
+    Segment age lags: it keeps reading "recording" for the whole stall
+    threshold after a drop. That is what produced a "Recording" badge sitting
+    next to a "Disconnected" stream on the cameras page.
+    """
+    cam = env.make_camera()
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=30)
+    env.tracker._status[cam.id] = False
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["live_online"] is False
+    assert rows[cam.id]["recording_state"] == "not_recording"
+
+
+def test_online_camera_with_fresh_segment_still_reports_recording(env):
+    """The happy path must be untouched by the guard above."""
+    cam = env.make_camera()
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=30)
+    env.tracker._status[cam.id] = True
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["recording_state"] == "recording"
+
+
+def test_unknown_liveness_falls_back_to_segment_age(env):
+    """During the restart window the tracker has no opinion.
+
+    Segment age is all we have then, so a camera that was recording a moment
+    ago must not be downgraded just because state has not re-seeded.
+    """
+    cam = env.make_camera()
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=30)
+    # tracker deliberately left empty -> live_online None
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["live_online"] is None
+    assert rows[cam.id]["recording_state"] == "recording"
+
+
+def test_offline_camera_past_threshold_is_still_stalled(env):
+    """`not_recording` must not swallow `stalled`.
+
+    Once the watchdog would alarm, the badge has to say stalled — that
+    agreement is the whole reason this derivation uses the watchdog's own
+    thresholds.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from services.recording_watchdog import STALL_THRESHOLD_SECONDS
+
+    cam = env.make_camera()
+    # Backdated out of the grace period, which short-circuits ahead of the
+    # stall check — and a camera younger than its own segments is not a state
+    # that can occur in the field.
+    cam.created_at = datetime.now(UTC) - timedelta(hours=2)
+    env.db.commit()
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=int(STALL_THRESHOLD_SECONDS) + 60)
+    env.tracker._status[cam.id] = False
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["recording_state"] == "stalled"
+
+
+def test_brand_new_offline_camera_does_not_claim_recording(env):
+    """The grace period exists so a just-added camera isn't libelled as dead.
+
+    It must not become a licence to claim Recording for a camera we already
+    know never connected — which is exactly what a freshly added, unreachable
+    camera looked like.
+    """
+    cam = env.make_camera()  # created_at == now, well inside GRACE_PERIOD
+    _recording_on(env, cam)
+    env.tracker._status[cam.id] = False
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["recording_state"] == "not_recording"

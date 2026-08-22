@@ -59,7 +59,7 @@ type Camera = {
   recording_enabled?: boolean | null
   // Observed recording health, derived server-side from the newest indexed
   // segment. Absent (undefined) means the endpoint didn't compute it.
-  recording_state?: 'recording' | 'stalled' | 'never' | 'off' | null
+  recording_state?: 'recording' | 'not_recording' | 'stalled' | 'never' | 'off' | null
   last_recording_at?: string | null
   // ONVIF device metadata
   manufacturer?: string | null
@@ -217,8 +217,9 @@ export function Cameras() {
   // Observed recording health, not the config flag. `recording_enabled` is
   // true for every provisioned camera and cannot be switched off, so it used
   // to claim "Recording" beside a dead stream. The server derives this from
-  // the newest written segment instead, using the recording watchdog's own
-  // thresholds, so this badge agrees with the stall alert.
+  // the newest written segment and the stream's live state, using the
+  // recording watchdog's own thresholds, so this badge agrees both with the
+  // stall alert and with the Stream column beside it.
   const recordingState = (c: Camera): { variant: BadgeVariant; label: string; title?: string } => {
     const at = c.last_recording_at ? new Date(c.last_recording_at) : null
     const agoSeconds = at ? Math.max(0, (Date.now() - at.getTime()) / 1000) : null
@@ -227,6 +228,15 @@ export function Cameras() {
     switch (c.recording_state) {
       case 'recording':
         return { variant: 'success', label: 'Recording', title: seenAt }
+      case 'not_recording':
+        // The source is down but the last segment is too recent for the
+        // watchdog to call it stalled. Saying "Recording" here is what put
+        // this badge in direct contradiction with a Disconnected stream.
+        return {
+          variant: 'warning',
+          label: 'Not recording',
+          title: seenAt ? `${seenAt} — stream is down, nothing is being written` : 'Stream is down, nothing is being written',
+        }
       case 'stalled': {
         // formatDuration never rolls up to days, so a multi-day stall would
         // render "Stalled 74h 12m" and overflow the column.

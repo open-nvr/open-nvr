@@ -75,6 +75,7 @@ def _derive_recording_state(
     recording_enabled: bool | None,
     latest_recording: datetime | None,
     now: datetime,
+    live_online: bool | None = None,
 ) -> str:
     """Observed recording health for one camera.
 
@@ -85,26 +86,39 @@ def _derive_recording_state(
     when a source drops it stops emitting segments while its config stays
     untouched, and the newest indexed segment is the only honest signal.
 
+    That signal LAGS, though. "A segment landed recently" keeps reading as
+    "recording" for the whole stall threshold after a source dies, so on its
+    own it will happily report Recording beside a Disconnected stream. When
+    the connectivity tracker says the source is down we take its word for it,
+    because a publisher-driven recorder with no publisher is, definitionally,
+    writing nothing. ``live_online=None`` means the tracker has no opinion yet
+    (it re-seeds a little after startup), and then segment age is all we have.
+
     Deliberately built on the recording watchdog's own thresholds so this
     badge and the ``recording_stalled`` alert can never disagree — a camera
-    shown as stalled here is exactly one the watchdog will alarm on.
+    shown as stalled here is exactly one the watchdog will alarm on. Note that
+    "not_recording" is deliberately NOT "stalled": the watchdog has not
+    alarmed yet, and pre-empting it here would break that agreement.
     """
     if not recording_enabled:
         return "off"
 
-    # A camera added moments ago has not had time to close its first segment.
+    stream_down = live_online is False
+
+    # A camera added moments ago has not had time to close its first segment,
+    # so age alone would libel it — unless we already know nothing is arriving.
     created = getattr(camera, "created_at", None)
     if created is not None:
         if created.tzinfo is None:
             created = created.replace(tzinfo=UTC)
         if (now - created).total_seconds() < GRACE_PERIOD_SECONDS:
-            return "recording"
+            return "not_recording" if stream_down else "recording"
 
     if latest_recording is None:
         return "never"
     if (now - latest_recording).total_seconds() > STALL_THRESHOLD_SECONDS:
         return "stalled"
-    return "recording"
+    return "not_recording" if stream_down else "recording"
 
 
 def _log_camera_creation_start(
@@ -560,15 +574,17 @@ def get_cameras(
             # SQLite hands back naive datetimes; the column is stored UTC.
             latest = latest.replace(tzinfo=UTC)
         c_resp.last_recording_at = latest
-        c_resp.recording_state = _derive_recording_state(
-            c, c_resp.recording_enabled, latest, now
-        )
-
         # Paused cameras have no MediaMTX path, so the reconciler never walks
         # them and they never enter the tracker. Reporting False there would
         # render them "Disconnected" instead of "paused"; None keeps them in
         # the unknown bucket the UI already has wording for.
         c_resp.live_online = live_status.get(c.id) if c.is_active else None
+
+        # Derived after live_online, and from it: a dead stream cannot be
+        # recording, however recently the last segment landed.
+        c_resp.recording_state = _derive_recording_state(
+            c, c_resp.recording_enabled, latest, now, c_resp.live_online
+        )
 
         results.append(c_resp)
 
