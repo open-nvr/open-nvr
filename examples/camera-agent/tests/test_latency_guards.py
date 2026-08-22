@@ -58,16 +58,22 @@ async def test_alarm_loop_yields_during_interactive_turn():
 
     rt.detection_client.infer = counting_infer
 
-    # A turn is in flight before the alarm arms: the loop must not poll.
+    # A turn is in flight before the alarm arms: the first cycles yield…
     rt._interactive_turns = 1
     rt.alarms.create(name="a", target="fire", camera_ids=["cam1"], ring="chime")
-    await asyncio.sleep(0.15)
+    await asyncio.sleep(0.05)                 # < _MAX_BUSY_SKIPS cycles
     assert calls["n"] == 0                    # nothing inferred while busy
 
-    # Turn ends → the loop resumes polling within a cycle.
-    rt._interactive_turns = 0
-    await asyncio.sleep(0.15)
+    # …but the yield is BOUNDED: a safety check must not wait out a long
+    # conversation. Past the skip cap the loop polls even mid-turn.
+    await asyncio.sleep(0.2)                  # well past the cap
     assert calls["n"] > 0
+
+    # And with no turn in flight it keeps polling normally.
+    rt._interactive_turns = 0
+    before = calls["n"]
+    await asyncio.sleep(0.1)
+    assert calls["n"] > before
     rt.alarms.stop_all()
 
 

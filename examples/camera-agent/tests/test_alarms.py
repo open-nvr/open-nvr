@@ -159,7 +159,11 @@ def test_alarm_endpoints():
     aid = body["alarms"][0]["id"]
     assert client.post("/alarms/ack", json={}).json()["silenced"] >= 0
     assert client.delete(f"/alarms/{aid}").status_code == 200
-    assert client.delete("/alarms/9999").status_code == 404
+    # DELETE is idempotent now: already-gone is success, not a 404 for
+    # the UI to spam (the field bug: six "couldn't remove" messages for
+    # an alarm that WAS removed).
+    gone = client.delete("/alarms/9999")
+    assert gone.status_code == 200 and gone.json()["already_gone"] is True
     assert client.post("/alarms", json={"name": "x", "camera_id": "cam1"}).status_code == 400
 
 
@@ -565,3 +569,48 @@ def test_watch_targets_are_normalized_too():
     assert "ERROR" not in msg and not msg.endswith("?")
     [m] = rt.monitors._monitors.values()
     assert m.target == "person"
+
+
+# ── Bounded busy-yield + idempotent delete ─────────────────────────
+
+
+def test_delete_is_idempotent_already_gone_is_success():
+    """A slow refresh leaves a removed alarm's row on screen; the extra
+    clicks used to 404 six times for an alarm that WAS removed."""
+    rt = _runtime()
+    client = TestClient(build_app(rt))
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert client.delete("/alarms/1").json() == {"stopped": True, "already_gone": False}
+    again = client.delete("/alarms/1")
+    assert again.status_code == 200
+    assert again.json() == {"stopped": False, "already_gone": True}
+
+
+def test_busy_yield_is_bounded():
+    """Chained conversation must not pause a safety check forever: after
+    _MAX_BUSY_SKIPS skipped cycles the loop polls anyway."""
+    from camera_agent import AlarmManager
+
+    rt = _runtime(detections=[{"label": "person"}])
+    rt.interactive_busy = lambda: True          # a turn is ALWAYS in flight
+    mgr = AlarmManager(rt, interval=0.01)
+
+    async def run_some_cycles():
+        # create() spawns the loop task — must happen inside the loop.
+        alarm = mgr.create(name="P", target="person", camera_ids=["cam1"],
+                           ring="siren")
+        task = mgr._tasks[alarm.id]
+        # Enough wall-clock for well over _MAX_BUSY_SKIPS cycles.
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return alarm
+
+    alarm = asyncio.run(run_some_cycles())
+    assert alarm.triggered, (
+        "the capped yield must let the poll through and fire the alarm"
+    )

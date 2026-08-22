@@ -1679,17 +1679,35 @@ class AlarmManager:
             return mins >= a
         return mins < b
 
+    # How many consecutive poll cycles an alarm may yield to interactive
+    # turns before polling anyway. The yield keeps voice-turn latency
+    # snappy on CPU, but UNBOUNDED it silently pauses a safety feature:
+    # on a busy box each turn runs tens of seconds, so chained
+    # conversation kept alarms unpolled for minutes — the field report
+    # was 'armed a siren, walked in, nothing... it fired much later'.
+    # 4 skips at the 5s interval bounds worst-case added delay to ~20s.
+    _MAX_BUSY_SKIPS = 4
+
     async def _loop(self, alarm: Alarm) -> None:
+        busy_skips = 0
         try:
             while alarm.active and not self._runtime._stop_event.is_set():
-                # Yield to an in-flight interactive turn — a skipped cycle is
-                # caught on the next one (self._interval later). Stand-down and
-                # window logic still run so timing stays correct.
-                if self._in_window(alarm) and not self._runtime.interactive_busy():
-                    for cam in alarm.camera_ids:
-                        if not alarm.active:
-                            break
-                        await self._poll(alarm, cam)
+                if self._in_window(alarm):
+                    if (self._runtime.interactive_busy()
+                            and busy_skips < self._MAX_BUSY_SKIPS):
+                        busy_skips += 1
+                    else:
+                        if busy_skips >= self._MAX_BUSY_SKIPS:
+                            log_fn = logger.info
+                            log_fn("alarm #%d: polling despite an active turn "
+                                   "(yielded %d cycles — a safety check must "
+                                   "not wait out a conversation)",
+                                   alarm.id, busy_skips)
+                        busy_skips = 0
+                        for cam in alarm.camera_ids:
+                            if not alarm.active:
+                                break
+                            await self._poll(alarm, cam)
                 self._maybe_stand_down(alarm)
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:  # pragma: no cover
@@ -4905,10 +4923,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see MonitorManager.remove)."""
+        """The UI's ✕: stop AND forget — idempotent, same contract as
+        DELETE /alarms/{id} (already-gone is success)."""
         ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/alarms")
     async def _alarms() -> dict[str, Any]:
@@ -4964,10 +4983,17 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/alarms/{alarm_id}")
     async def _delete_alarm(alarm_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see AlarmManager.remove)."""
+        """The UI's ✕: stop AND forget (see AlarmManager.remove).
+
+        IDEMPOTENT: deleting an alarm that is already gone is success,
+        not an error. A slow refresh can leave a removed alarm's row on
+        screen; every extra click then hit 404 and the UI reported
+        'couldn't remove' six times for an alarm that WAS removed —
+        alarming (sic) and wrong. Deletion's contract is 'make it not
+        exist', and it already doesn't."""
         ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/reports")
     async def _reports() -> dict[str, Any]:
@@ -4994,10 +5020,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/reports/{report_id}")
     async def _delete_report(report_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see ReportScheduler.remove)."""
+        """The UI's ✕: stop AND forget — idempotent like the others."""
         ok = runtime.reports.remove(report_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/people")
     async def _people() -> JSONResponse:
