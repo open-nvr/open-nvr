@@ -553,7 +553,18 @@
                   <option value="siren">🚨 Critical — siren until silenced</option>
                   <option value="silent">🤫 Silent — notifications only</option>
                 </select>
-                <label class="addform-lbl">Only after <input id="paAfter" type="time"></label>
+                <label class="addform-lbl">When
+              <select id="paWhen" aria-label="Alarm time window">
+                <option value="">All day, every day</option>
+                <option value="night">Night (22:00–06:00, daily)</option>
+                <option value="afterhours">After hours (18:00–08:00, daily)</option>
+                <option value="custom">Custom window…</option>
+              </select>
+            </label>
+            <span id="paCustomWin" hidden>
+              <label class="addform-lbl">From <input id="paAfter" type="time"></label>
+              <label class="addform-lbl">Until <input id="paBefore" type="time"></label>
+            </span>
                 <button class="go" id="paGo" type="button">Arm alarm</button>
               </div>
             </div>
@@ -620,7 +631,18 @@
               <option value="siren">🚨 Critical — siren until silenced (fire, break-in)</option>
               <option value="silent">🤫 Silent — notifications only</option>
             </select>
-            <label class="addform-lbl">Only after <input id="alarmAfter" type="time"></label>
+            <label class="addform-lbl">When
+              <select id="alarmWhen" aria-label="Alarm time window">
+                <option value="">All day, every day</option>
+                <option value="night">Night (22:00–06:00, daily)</option>
+                <option value="afterhours">After hours (18:00–08:00, daily)</option>
+                <option value="custom">Custom window…</option>
+              </select>
+            </label>
+            <span id="alarmCustomWin" hidden>
+              <label class="addform-lbl">From <input id="alarmAfter" type="time"></label>
+              <label class="addform-lbl">Until <input id="alarmBefore" type="time"></label>
+            </span>
             <button class="ghost primary" id="alarmArm" type="button">Arm alarm</button>
           </div>
           <div class="notifyrow" id="notifyRow" hidden>
@@ -1475,8 +1497,7 @@
         const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
         if(!cam||!target){ $("paTarget").focus(); return; }
         const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
-                    ring:$("paRing").value};
-        const after=$("paAfter").value; if(after) body.after=after;
+                    ring:$("paRing").value, ...alarmWindow("pa")};
         try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
@@ -1706,9 +1727,22 @@
         s.addEventListener("click",()=>disarmAlarm(a.id)); d.appendChild(s); alarmListEl.appendChild(d); } }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
       alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
-    async function disarmAlarm(id){ try{ await fetch("/alarms/"+id,{method:"DELETE"});}catch{} pollAlarms(); }
+    async function disarmAlarm(id){
+      try{
+        const r=await fetch("/alarms/"+id,{method:"DELETE"});
+        if(!r.ok) addMsg(`Couldn't remove alarm #${id} (HTTP ${r.status}${r.status===403?" — operator login required":""}).`,"sys");
+      }catch(err){ addMsg(`Couldn't remove alarm #${id}: ${err.message}`,"sys"); }
+      pollAlarms(); }
     async function addAlarm(body){ ensureOutputAudio();
-      try{ await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); addMsg(`Armed alarm: ${body.name}.`,"sys"); }catch{}
+      // Truthful feedback: relay the SERVER's message (it may report a
+      // duplicate was skipped) and never claim success on an error —
+      // the old unconditional "Armed alarm" + silence on failure is what
+      // made people click again and stack duplicates.
+      try{
+        const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        const d=await r.json().catch(()=>({}));
+        addMsg(r.ok?(d.message||`Armed alarm: ${body.name}.`):`Couldn't arm the alarm: ${d.error||("HTTP "+r.status)}`,"sys");
+      }catch(err){ addMsg(`Couldn't arm the alarm: ${err.message}`,"sys"); }
       if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500); pollAlarms(); }
 
     // ── live updates (WebSocket push; HTTP polling is the fallback) ──
@@ -1977,15 +2011,38 @@
     wireRingPreselect("alarmTarget","alarmRing");
     wireRingPreselect("paTarget","paRing");
 
+    // Alarm time windows: the window repeats DAILY by nature (after/before
+    // are times of day; overnight ranges wrap midnight server-side). "All
+    // day" = no window at all — the common case, so it is the default and
+    // nothing is required. Speaking works too: "alarm if a person shows up
+    // after 10pm", "…between 10pm and 6am".
+    function alarmWindow(prefix){
+      const mode=($(prefix+"When")||{}).value||"";
+      if(mode==="night") return {after:"22:00", before:"06:00"};
+      if(mode==="afterhours") return {after:"18:00", before:"08:00"};
+      if(mode==="custom"){
+        const w={}, a=$(prefix+"After"), b=$(prefix+"Before");
+        if(a&&a.value) w.after=a.value;
+        if(b&&b.value) w.before=b.value;
+        return w;
+      }
+      return {};
+    }
+    function wireWindowSelect(prefix){
+      const sel=$(prefix+"When"), custom=$(prefix+"CustomWin");
+      if(sel&&custom) sel.addEventListener("change",()=>{ custom.hidden=sel.value!=="custom"; });
+    }
+    wireWindowSelect("alarm"); wireWindowSelect("pa");
+
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
         if(!target){ $("alarmTarget").focus(); return; }
         const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam(),
-                    ring:$("alarmRing").value};
-        const after=$("alarmAfter").value; if(after) body.after=after; addAlarm(body);
-        $("alarmName").value=""; $("alarmTarget").value=""; $("alarmAfter").value=""; f.hidden=true; add.classList.remove("open"); }); })();
+                    ring:$("alarmRing").value, ...alarmWindow("alarm")};
+        addAlarm(body);
+        $("alarmName").value=""; $("alarmTarget").value=""; f.hidden=true; add.classList.remove("open"); }); })();
 
     // ── hardware: what the ENABLED skills run on vs. what makes them fast.
     // Advisory (fallbacks always work); recomputed whenever skills change.

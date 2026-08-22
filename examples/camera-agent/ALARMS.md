@@ -18,9 +18,17 @@ By voice (the agent routes these to `create_alarm`):
 - "Alert me loudly if a car enters between 10pm and 6am on all cameras" →
   `target=car, after=22:00, before=06:00, camera_id=all`
 
-Time windows are 24h `HH:MM`. A window where `after > before` (e.g.
-`22:00`–`06:00`) wraps across midnight. The agent silences with `stop_alarm`
-(`action: silence`) or removes with `stop_alarm` (`action: disarm`).
+Time windows are 24h `HH:MM`, and a window **repeats daily** by nature
+(`after`/`before` are times of day). No window at all means **all day,
+every day** — the default; nothing about time is required. A window
+where `after > before` (e.g. `22:00`–`06:00`) wraps across midnight.
+The UI offers the same choices as quick picks: All day (default), Night
+(22:00–06:00), After hours (18:00–08:00), or a custom from/until pair.
+The agent silences with `stop_alarm` (`action: silence`) or removes with
+`stop_alarm` (`action: disarm`) — disarming deletes the alarm from the
+list. Arming the exact same alarm twice (same target, cameras, window,
+level) is refused with a pointer at the existing one, so a double-click
+can never stack duplicates.
 
 The UI also offers one-tap **preset** alarms and an "add alarm" path via
 `POST /alarms`. Presets come from `GET /alarm-presets` with **honest,

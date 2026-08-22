@@ -353,3 +353,67 @@ def test_presets_endpoint_serves_the_list():
     assert "fire" in ids and "person" in ids
     fire = next(p for p in d["presets"] if p["id"] == "fire")
     assert fire["available"] is False and fire["requires"]
+
+
+# ── Alarm UX fixes: dedup, true removal, honest single-camera wording ──
+
+
+def test_duplicate_create_is_refused_with_the_existing_id():
+    """Slow feedback invites double-clicks; each used to arm an identical
+    alarm (its own polling loop), and ✕ visibly 'didn't work' because
+    killing one left its twins."""
+    rt = _runtime()
+    first = asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert "Armed alarm #1" in first
+    second = asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert "already covers" in second and "#1" in second
+    assert len(rt.alarms.list()) == 1
+    # A DIFFERENT window is a different alarm — allowed.
+    third = asyncio.run(rt._handle_create_alarm(
+        {"name": "Night porch", "target": "person", "camera_id": "cam1",
+         "after": "22:00", "before": "06:00"}))
+    assert "Armed alarm #2" in third
+
+
+def test_delete_removes_the_alarm_from_the_list():
+    """✕ means GONE — not parked as an inactive row until restart."""
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert len(rt.alarms.list()) == 1
+    assert rt.alarms.remove(1) is True
+    assert rt.alarms.list() == []
+    # ...and re-arming after removal works (no stale dedup hit).
+    again = asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert "Armed alarm" in again
+
+
+def test_voice_disarm_also_removes():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_alarm({"alarm_id": 1}))
+    assert "removed" in msg.lower()
+    assert rt.alarms.list() == []
+
+
+def test_delete_endpoint_removes(client_factory=None):
+    rt = _runtime()
+    client = TestClient(build_app(rt))
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    r = client.delete("/alarms/1")
+    assert r.status_code == 200
+    assert client.get("/alarms").json()["alarms"] == []
+
+
+def test_single_camera_message_names_the_camera():
+    """One camera IS the whole fleet, but the operator armed THAT camera
+    and expects its name back — 'all cameras' reads like a scoping bug."""
+    rt = _runtime()
+    msg = asyncio.run(rt._handle_create_alarm(
+        {"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    assert "cam1" in msg and "all cameras" not in msg
