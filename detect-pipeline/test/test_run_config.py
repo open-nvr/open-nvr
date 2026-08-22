@@ -245,7 +245,7 @@ def test_decode_threads_and_fast_from_env():
 def test_decode_idle_from_env():
     from detect_pipeline.run import config_from_env
 
-    assert config_from_env({}).decode_idle == ""                       # off by default
+    assert config_from_env({}).decode_idle == "nokey"                  # adaptive ON by default
     cfg = config_from_env({"DETECT_DECODE_IDLE": "nokey",
                            "DETECT_DECODE_IDLE_AFTER": "30"})
     assert cfg.decode_idle == "nokey" and cfg.decode_idle_after == 30.0

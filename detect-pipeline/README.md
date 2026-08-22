@@ -183,17 +183,21 @@ analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
 substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
 settings — do that first; it's the cheapest CPU you'll ever save.
 
-**Sixth dial: adaptive decode (`DETECT_DECODE_IDLE`).** The pattern Blue
-Iris ships as "limit decoding unless required": set `DETECT_DECODE_IDLE=nokey`
-and a camera whose scene is quiet decodes ONLY keyframes (~one frame per
-GOP) — near-zero cost — while motion is still watched at that rate. The
-first motion box or live track flips the camera back to full decode by
+**Sixth dial: adaptive decode (`DETECT_DECODE_IDLE`, default `nokey`).**
+The pattern Blue Iris ships as "limit decoding unless required", ON by
+default: a camera whose scene is quiet decodes ONLY keyframes (~one frame
+per GOP) — near-zero cost — while motion is still watched at that rate.
+The first motion box or live track flips the camera back to full decode by
 respawning its ffmpeg against the local MediaMTX republish (sub-second, no
 backoff); after `DETECT_DECODE_IDLE_AFTER` quiet seconds (default 60) it
 idles again. `tier0_decode_idle{camera=...}` on `/metrics` shows who is
-idling. The trade: promotion can cost up to one GOP (~1-2 s) of latency on
-the first frames of an event, so it is opt-in — but for CPU-only boxes
-watching mostly-quiet scenes it is the single biggest saving in this list.
+idling. Recording is unaffected — the full main stream is always recorded;
+this shapes only what the detector looks at. The trade the default accepts:
+the detector's reaction to a brand-new event on a quiet scene can lag up to
+one GOP (~1-2 s), and an event briefer than the keyframe interval can pass
+undetected while idle (it is still in the recording). Set
+`DETECT_DECODE_IDLE=none` for always-full decode when sub-second detector
+reaction matters more than CPU.
 
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
@@ -205,7 +209,7 @@ DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2)
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
-DETECT_DECODE_IDLE=               # e.g. nokey — adaptive decode while quiet (dial 6, opt-in)
+DETECT_DECODE_IDLE=nokey          # adaptive decode while quiet (dial 6, default on; none = off)
 DETECT_DECODE_IDLE_AFTER=60       # quiet seconds before a camera idles
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub

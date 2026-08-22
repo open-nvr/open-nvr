@@ -26,7 +26,7 @@ Env:
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_DECODE_FAST        true = skip h264 loop filter (CPU decode only; opt-in)
-  DETECT_DECODE_IDLE        skip mode while quiet, e.g. nokey ("" = off) — adaptive
+  DETECT_DECODE_IDLE        adaptive decode while quiet (default nokey; none = off)
   DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
@@ -174,7 +174,7 @@ def _decode_idle_from_env(env: dict) -> str:
     disable rather than killing workers at spawn time."""
     from .ffmpeg_presets import DECODE_SKIP_MODES
 
-    value = str(env.get("DETECT_DECODE_IDLE", "")).strip().lower()
+    value = str(env.get("DETECT_DECODE_IDLE", "nokey")).strip().lower()
     if value in ("", "none", "off", "false"):
         return ""
     if value not in DECODE_SKIP_MODES:

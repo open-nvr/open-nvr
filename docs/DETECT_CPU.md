@@ -24,7 +24,10 @@ the same idea: **decompress fewer pixels**.
 
 ## On by default — because they cannot lose anything
 
-These ship enabled because each one is provably lossless for detection:
+These ship enabled. All but the last are provably lossless for detection;
+adaptive decode is default-on for a different reason — recording never goes
+through the detector, so its trade is bounded to detector latency, never to
+lost footage:
 
 **The substream tap.** Tier-0 decodes the camera's low-res second stream, not
 the recording-quality main stream (store the substream URL on the camera's
@@ -48,6 +51,22 @@ threads *per camera*, which on substream-sized video is pure scheduling
 overhead multiplied across the fleet (Frigate pins 2 for the same reason).
 Thread count never changes decoded output.
 
+**`DETECT_DECODE_IDLE=nokey` (adaptive decode).** The pattern Blue Iris
+ships as "limit decoding unless required," and the biggest saving on a
+CPU-only box: while a camera's scene is quiet, decode *keyframes only*
+(~one frame per GOP — near-zero cost) and keep watching motion at that
+rate; the first motion box or live track flips the camera back to full
+decode by respawning its ffmpeg against the local MediaMTX republish
+(sub-second), and after `DETECT_DECODE_IDLE_AFTER` quiet seconds it idles
+again. This is on by default because **recording is unaffected** — the
+full main stream is always recorded, so nothing is ever lost; what the
+default accepts is that the *detector's* reaction to a brand-new event on
+a quiet scene can lag up to one GOP (~1–2 s), and an event briefer than
+the keyframe interval can pass undetected while idle (it remains in the
+recording). Set `DETECT_DECODE_IDLE=none` when sub-second detector
+reaction matters more than CPU. `tier0_decode_idle{camera}` on `/metrics`
+shows who is idling.
+
 **Motion/stationary gating and bounded load** (`DETECT_STATIONARY_INTERVAL`,
 `DETECT_MAX_REGIONS`, `DETECT_MAX_TRACKS`, `DETECT_LABELS`, `DETECT_CONF`).
 The detector runs only where motion or a live track justifies it, parked
@@ -55,20 +74,6 @@ objects are re-verified on an interval instead of every frame, and worst-case
 work per frame is capped no matter what the scene contains.
 
 ## Opt-in dials — because each one trades something, and the trade is yours
-
-**`DETECT_DECODE_IDLE=nokey` (adaptive decode).** The pattern Blue Iris
-ships as "limit decoding unless required," and the biggest saving available
-on a CPU-only box: while a camera's scene is quiet, decode *keyframes only*
-(~one frame per GOP — near-zero cost) and keep watching motion at that rate;
-the first motion box or live track flips the camera back to full decode by
-respawning its ffmpeg against the local MediaMTX republish (sub-second), and
-after `DETECT_DECODE_IDLE_AFTER` quiet seconds it idles again. A camera
-that's quiet 95% of the day costs keyframe decode 95% of the day. The trade:
-the first frames of an event can lag by up to one GOP (~1–2 s), and an event
-briefer than the GOP interval could fall between keyframes while idle. Right
-for mostly-quiet scenes with presence-shaped alarms; wrong for scenes where
-sub-second reaction matters. `tier0_decode_idle{camera}` on `/metrics` shows
-who is idling.
 
 **`DETECT_DECODE_SKIP=nokey` (static).** The same keyframes-only decode,
 permanently — simpler than adaptive, same trade all the time.
@@ -112,6 +117,8 @@ headroom.
 2. Lower the substream's encode fps in the camera itself (5–10 fps).
 3. Check for perpetual motion: a burned-in OSD clock ticking every second
    defeats motion gating — disable the overlay or mask it.
-4. Turn on adaptive decode for quiet cameras (`DETECT_DECODE_IDLE=nokey`).
+4. Confirm adaptive decode is on (`DETECT_DECODE_IDLE=nokey`, the default)
+   and check `tier0_decode_idle` — a camera that never idles has perpetual
+   motion (see 3) or a genuinely busy scene.
 5. `DETECT_DECODE_FAST=true` on CPU-only hosts.
 6. Attach a hardware decoder (`DETECT_HWACCEL`) — the structural fix.
