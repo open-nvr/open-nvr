@@ -323,6 +323,9 @@ services:
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
+      # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
+      # cameras whose assignments are all detection-free. Empty = off.
+      - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}
       - OMP_NUM_THREADS=${DETECT_CV_THREADS:-2}
       # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
       # to run the gated model on enforce escalations, governed + audited by KAI-C.
