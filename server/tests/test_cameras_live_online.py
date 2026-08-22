@@ -255,6 +255,18 @@ def test_list_serves_without_mediamtx(env):
 # ---------------------------------------------------------------------------
 
 
+def _backdate_creation(env, cam, hours: int = 2):
+    """Push the camera out of its creation grace period.
+
+    That branch short-circuits ahead of everything below, so any test about
+    steady-state behaviour has to leave it first.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    cam.created_at = datetime.now(UTC) - timedelta(hours=hours)
+    env.db.commit()
+
+
 def _recording_on(env, cam):
     """Turn recording on for `cam`.
 
@@ -364,3 +376,82 @@ def test_brand_new_offline_camera_does_not_claim_recording(env):
 
     rows = _rows(env, "admin")
     assert rows[cam.id]["recording_state"] == "not_recording"
+
+
+# ---------------------------------------------------------------------------
+# The reconnect window: stream up, newest INDEXED segment still pre-outage.
+# ---------------------------------------------------------------------------
+
+
+def _online_since(env, cam, seconds_ago: int):
+    from datetime import UTC, datetime, timedelta
+
+    env.tracker._status[cam.id] = True
+    env.tracker._online_since[cam.id] = datetime.now(UTC) - timedelta(seconds=seconds_ago)
+
+
+def test_just_reconnected_camera_is_not_reported_stalled(env):
+    """Ready + "Stalled 18m" was the mirror of the Disconnected+Recording bug.
+
+    MediaMTX indexes a segment only when it closes, so for a segment duration
+    after a source returns, the newest indexed one still predates the outage.
+    Judging on age alone calls a demonstrably streaming camera stalled.
+    """
+    cam = env.make_camera()
+    _backdate_creation(env, cam)
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=18 * 60)   # last pre-outage segment
+    _online_since(env, cam, seconds_ago=30)            # came back 30s ago
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["live_online"] is True
+    assert rows[cam.id]["recording_state"] == "recording"
+
+
+def test_long_running_stream_with_no_segments_is_still_stalled(env):
+    """The floor must not become a blanket amnesty.
+
+    Stream up well past the threshold with nothing written is a genuine
+    recorder failure — the case the watchdog exists to catch.
+    """
+    from services.recording_watchdog import STALL_THRESHOLD_SECONDS
+
+    cam = env.make_camera()
+    _backdate_creation(env, cam)
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=int(STALL_THRESHOLD_SECONDS) * 3)
+    _online_since(env, cam, seconds_ago=int(STALL_THRESHOLD_SECONDS) * 2)
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["live_online"] is True
+    assert rows[cam.id]["recording_state"] == "stalled"
+
+
+def test_paused_camera_is_off_not_stalled(env):
+    """A paused camera's stale segments are expected, not an incident.
+
+    The watchdog skips inactive cameras entirely, so reporting "Stalled 3h"
+    here invented an alarm state nothing else in the system agreed with.
+    """
+    cam = env.make_camera(is_active=False)
+    _backdate_creation(env, cam)
+    _recording_on(env, cam)
+    _recent_recording(env, cam, seconds_ago=3 * 60 * 60)
+
+    rows = _rows(env, "admin", active_only=False)
+    assert rows[cam.id]["live_online"] is None
+    assert rows[cam.id]["recording_state"] == "off"
+
+
+def test_never_recorded_camera_stays_no_data_when_stream_is_old(env):
+    """"never" outranks "stalled": nothing was ever written, and saying so is
+    more useful to an operator than a stall age computed off the stream."""
+    from services.recording_watchdog import STALL_THRESHOLD_SECONDS
+
+    cam = env.make_camera()
+    _backdate_creation(env, cam)
+    _recording_on(env, cam)
+    _online_since(env, cam, seconds_ago=int(STALL_THRESHOLD_SECONDS) * 2)
+
+    rows = _rows(env, "admin")
+    assert rows[cam.id]["recording_state"] == "never"

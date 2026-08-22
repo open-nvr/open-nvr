@@ -39,6 +39,7 @@ reconcile pass re-seeds silently so a reboot never produces an alert storm.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -55,16 +56,50 @@ RECONCILE_INTERVAL_SECONDS = 30.0
 RECONCILE_INITIAL_DELAY_SECONDS = 30.0
 
 
+_NANOS = re.compile(r"(\.\d{6})\d+")
+
+
+def _parse_ready_time(value: Any) -> datetime | None:
+    """Parse MediaMTX's readyTime, or None if it is absent/unusable.
+
+    Go emits nanosecond precision ("...:56.44637033+05:30"); fromisoformat
+    accepts at most microseconds, so the fraction is trimmed rather than
+    letting the whole timestamp fail to parse.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    trimmed = _NANOS.sub(lambda m: m.group(1), value)
+    try:
+        parsed = datetime.fromisoformat(trimmed)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 class CameraStatusService:
     def __init__(self) -> None:
         # camera_id -> online? Cameras absent from the map are unknown: their
         # first signal seeds state silently instead of raising an alert.
         self._status: dict[int, bool] = {}
+        # camera_id -> when the source most recently came up. Consumers use it
+        # as a floor on "should something have been recorded by now?": a
+        # segment cannot predate the stream that produced it.
+        self._online_since: dict[int, datetime] = {}
         self._pending_offline: dict[int, asyncio.Task] = {}
         self._seeded = False
 
     def is_online(self, camera_id: int) -> bool | None:
         return self._status.get(camera_id)
+
+    def online_since(self, camera_ids: list[int]) -> dict[int, datetime | None]:
+        """When each camera's source last came up; None if it is not up.
+
+        MediaMTX only indexes a segment once it CLOSES, so for one segment
+        duration after a reconnect the newest indexed segment still predates
+        the outage. Callers that judge recording health by segment age need
+        this floor, or a camera that just came back looks stalled.
+        """
+        return {cid: self._online_since.get(cid) for cid in camera_ids}
 
     def snapshot(self, camera_ids: list[int]) -> dict[int, bool | None]:
         """Last-known connectivity for a page of cameras.
@@ -89,14 +124,25 @@ class CameraStatusService:
         path: str,
         online: bool,
         reason: str,
+        online_since: datetime | None = None,
     ) -> None:
-        """Ingest a ready/not-ready signal for a camera's main path."""
+        """Ingest a ready/not-ready signal for a camera's main path.
+
+        ``online_since`` is MediaMTX's own readyTime where the caller has it
+        (the reconciler does); hooks fire at the moment of the transition, so
+        they leave it None and get ``now``.
+        """
         if online:
             pending = self._pending_offline.pop(camera_id, None)
             if pending is not None:
                 pending.cancel()
             previous = self._status.get(camera_id)
             self._status[camera_id] = True
+            # Only stamp on an actual rise; a repeated ready signal for a
+            # source that never dropped must not keep pushing the floor
+            # forward and mask a genuinely dead recorder.
+            if previous is not True or camera_id not in self._online_since:
+                self._online_since[camera_id] = online_since or datetime.now(UTC)
             if previous is False:
                 await self._emit(
                     camera_id=camera_id,
@@ -111,6 +157,7 @@ class CameraStatusService:
             # Already offline, or never seen online (e.g. still connecting at
             # boot) — record state, don't alert.
             self._status[camera_id] = False
+            self._online_since.pop(camera_id, None)
             return
         if camera_id in self._pending_offline:
             return
@@ -119,6 +166,7 @@ class CameraStatusService:
             try:
                 await asyncio.sleep(OFFLINE_DEBOUNCE_SECONDS)
                 self._status[camera_id] = False
+                self._online_since.pop(camera_id, None)
                 await self._emit(
                     camera_id=camera_id,
                     camera_name=camera_name,
@@ -218,6 +266,7 @@ class CameraStatusService:
             return
 
         ready_by_path: dict[str, bool] = {}
+        ready_at_by_path: dict[str, datetime | None] = {}
         for item in result.get("details", {}).get("items", []):
             name = item.get("name")
             if not name:
@@ -225,6 +274,11 @@ class CameraStatusService:
             ready_by_path[name] = bool(item.get("ready")) and (
                 int(item.get("bytesReceived") or 0) > 0
             )
+            # MediaMTX's own notion of when the source came up. Preferred over
+            # "now" because it survives a backend restart: after one, seeding
+            # with `now` would claim every long-running stream had only just
+            # started and suppress genuine stall reporting for a few minutes.
+            ready_at_by_path[name] = _parse_ready_time(item.get("readyTime"))
 
         db = SessionLocal()
         try:
@@ -247,8 +301,11 @@ class CameraStatusService:
         seeding = not self._seeded
         for camera_id, camera_name, path in cam_info:
             online = ready_by_path.get(path, False)
+            ready_at = ready_at_by_path.get(path)
             if seeding:
                 self._status[camera_id] = online
+                if online:
+                    self._online_since[camera_id] = ready_at or datetime.now(UTC)
                 continue
             if camera_id in self._pending_offline:
                 # A hook-driven offline is already debouncing; the pending task
@@ -262,6 +319,7 @@ class CameraStatusService:
                 path=path,
                 online=online,
                 reason="reconciler",
+                online_since=ready_at,
             )
         self._seeded = True
 

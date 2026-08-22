@@ -76,6 +76,7 @@ def _derive_recording_state(
     latest_recording: datetime | None,
     now: datetime,
     live_online: bool | None = None,
+    online_since: datetime | None = None,
 ) -> str:
     """Observed recording health for one camera.
 
@@ -99,7 +100,19 @@ def _derive_recording_state(
     shown as stalled here is exactly one the watchdog will alarm on. Note that
     "not_recording" is deliberately NOT "stalled": the watchdog has not
     alarmed yet, and pre-empting it here would break that agreement.
+
+    ``online_since`` is when the source came up, and exists because the two
+    signals settle on different timescales: connectivity is instantaneous,
+    while segment age lags by up to a segment duration in one direction and a
+    whole stall threshold in the other. Without it the badge contradicts the
+    stream beside it every time a camera reconnects.
     """
+    # A paused camera is not supposed to be recording, so its stale segments
+    # are expected, not a fault. The watchdog skips inactive cameras for the
+    # same reason; reporting "Stalled 3h" beside a "paused" stream badge
+    # invents an incident out of a deliberate act.
+    if not getattr(camera, "is_active", True):
+        return "off"
     if not recording_enabled:
         return "off"
 
@@ -114,11 +127,31 @@ def _derive_recording_state(
         if (now - created).total_seconds() < GRACE_PERIOD_SECONDS:
             return "not_recording" if stream_down else "recording"
 
-    if latest_recording is None:
+    if stream_down:
+        if latest_recording is None:
+            return "never"
+        if (now - latest_recording).total_seconds() > STALL_THRESHOLD_SECONDS:
+            return "stalled"
+        return "not_recording"
+
+    # Stream is up (or unknown). Segment age alone is not enough here: MediaMTX
+    # indexes a segment only when it CLOSES, so for one segment duration after
+    # a reconnect the newest indexed segment still predates the outage and the
+    # camera reads as stalled while it is demonstrably streaming. Take the
+    # later of "last segment" and "stream came up" — nothing can have been
+    # recorded before there was a source to record.
+    reference = latest_recording
+    if online_since is not None and (reference is None or online_since > reference):
+        reference = online_since
+
+    if reference is None:
         return "never"
-    if (now - latest_recording).total_seconds() > STALL_THRESHOLD_SECONDS:
-        return "stalled"
-    return "not_recording" if stream_down else "recording"
+    if (now - reference).total_seconds() > STALL_THRESHOLD_SECONDS:
+        # Past the threshold with the stream up is a genuine recorder failure,
+        # which is exactly what the watchdog alarms on. "never" stays "never":
+        # nothing was ever written, and saying so is more use than "stalled".
+        return "stalled" if latest_recording is not None else "never"
+    return "recording"
 
 
 def _log_camera_creation_start(
@@ -534,7 +567,11 @@ def get_cameras(
     # Live connectivity comes straight off the in-memory tracker — a dict read
     # per row, no query and no MediaMTX round trip. This is what lets the UI
     # drop its per-camera /mediamtx-status fan-out (3 MediaMTX calls each).
-    live_status = get_camera_status_service().snapshot(camera_ids)
+    _status_svc = get_camera_status_service()
+    live_status = _status_svc.snapshot(camera_ids)
+    # When each source came up, so recording health can tell "just reconnected,
+    # first segment still open" apart from "streaming fine, recorder dead".
+    online_since = _status_svc.online_since(camera_ids)
     latest_recordings: dict[int, datetime] = {}
     recording_configs: dict[int, bool] = {}
     if camera_ids:
@@ -583,7 +620,8 @@ def get_cameras(
         # Derived after live_online, and from it: a dead stream cannot be
         # recording, however recently the last segment landed.
         c_resp.recording_state = _derive_recording_state(
-            c, c_resp.recording_enabled, latest, now, c_resp.live_online
+            c, c_resp.recording_enabled, latest, now, c_resp.live_online,
+            online_since.get(c.id),
         )
 
         results.append(c_resp)
