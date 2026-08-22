@@ -24,6 +24,8 @@ Env:
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
+  DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
+  DETECT_DECODE_FAST        true = skip h264 loop filter (CPU decode only; opt-in)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
@@ -59,6 +61,10 @@ class ServiceConfig:
     # ffmpeg -skip_frame: none | bidir | nonref | nokey. Moves the frame drop
     # from the fps filter (post-decode) into the DECODER — see ffmpeg_presets.
     decode_skip: str
+    # ffmpeg decoder thread cap (0 = ffmpeg auto, up to 16/camera) and the
+    # opt-in loop-filter skip — see ffmpeg_presets.build_decode_command.
+    decode_threads: int
+    fast_decode: bool
     model_size: int
     model_id: str            # detector identity for benchmarking labels (see below)
     refresh_seconds: float
@@ -135,6 +141,8 @@ def config_from_env(env: dict) -> ServiceConfig:
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         decode_skip=_decode_skip_from_env(env),
+        decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
+        fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
@@ -148,6 +156,17 @@ def config_from_env(env: dict) -> ServiceConfig:
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
+
+
+def _env_int(env: dict, name: str, default: int) -> int:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log.warning("%s=%r is not an integer; using %s", name, raw, default)
+        return default
 
 
 def _env_float(env: dict, name: str, default: float) -> float:
@@ -282,6 +301,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         best_frames=best_frames,
         device=cfg.device,
         decode_skip=cfg.decode_skip,
+        decode_threads=cfg.decode_threads,
+        fast_decode=cfg.fast_decode,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
         dispatcher=dispatcher,

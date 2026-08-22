@@ -158,6 +158,8 @@ class CameraWorker:
         best_frames=None,                        # shared BestFrameStore (on-demand best frame)
         device: str = "/dev/dri/renderD128",
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
+        decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
+        fast_decode: bool = False,               # skip h264 loop filter (opt-in)
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
         gate_sink=None,                          # publishes gate decisions (audit)
@@ -173,6 +175,8 @@ class CameraWorker:
         self.best_frames = best_frames
         self.device = device
         self.decode_skip = decode_skip
+        self.decode_threads = decode_threads
+        self.fast_decode = fast_decode
         self._frame_source = frame_source
         self.gate = gate
         self.gate_sink = gate_sink
@@ -209,6 +213,8 @@ class CameraWorker:
             self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
             hwaccel=HwAccel(self.spec.hwaccel), device=self.device,
             decode_skip=self.decode_skip,
+            decode_threads=self.decode_threads,
+            fast_decode=self.fast_decode,
         )
         return src, w, h
 
@@ -363,6 +369,8 @@ class WorkerManager:
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
+        decode_threads: int = 2,                          # ffmpeg decoder thread cap (0 = auto)
+        fast_decode: bool = False,                        # skip h264 loop filter (opt-in)
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
         dispatcher=None,                                  # Tier-1 dispatch (#10), shared
@@ -380,6 +388,8 @@ class WorkerManager:
         self._best_frames = best_frames
         self._device = device
         self._decode_skip = decode_skip
+        self._decode_threads = decode_threads
+        self._fast_decode = fast_decode
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
         self._gate_sink = gate_sink
@@ -402,6 +412,8 @@ class WorkerManager:
             model_size=self._model_size, model_id=self._model_id,
             best_frames=self._best_frames, device=self._device,
             decode_skip=self._decode_skip,
+            decode_threads=self._decode_threads,
+            fast_decode=self._fast_decode,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,

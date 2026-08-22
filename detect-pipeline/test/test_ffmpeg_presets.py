@@ -121,3 +121,38 @@ def test_decode_skip_rejects_unknown_mode():
         build_decode_command(
             RTSP, width=640, height=360, fps=5, decode_skip="keyframes",
         )
+
+
+# ── decoder thread cap + fast decode ───────────────────────────────────
+
+
+def test_decode_threads_default_two_before_input():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5)
+    t_idx = cmd.index("-threads")
+    assert cmd[t_idx + 1] == "2"
+    assert t_idx < cmd.index("-i")
+
+
+def test_decode_threads_zero_means_ffmpeg_auto():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5, decode_threads=0)
+    assert "-threads" not in cmd
+
+
+def test_fast_decode_cpu_only():
+    """The loop-filter skip applies to software decode only — hw decoders
+    ignore these AVOptions (deblocking is done in silicon)."""
+    cmd = build_decode_command(
+        RTSP, width=640, height=360, fps=5, fast_decode=True,
+    )
+    lf_idx = cmd.index("-skip_loop_filter")
+    assert cmd[lf_idx + 1] == "all"
+    assert "-flags2" in cmd and lf_idx < cmd.index("-i")
+    hw = build_decode_command(
+        RTSP, width=640, height=360, fps=5, fast_decode=True, hwaccel=HwAccel.VAAPI,
+    )
+    assert "-skip_loop_filter" not in hw
+
+
+def test_fast_decode_off_by_default():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5)
+    assert "-skip_loop_filter" not in cmd

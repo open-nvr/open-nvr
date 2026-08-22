@@ -150,6 +150,8 @@ def build_decode_command(
     codec: str = "h264",
     rtsp_transport: str = "tcp",
     decode_skip: str = "none",
+    decode_threads: int = 2,
+    fast_decode: bool = False,
 ) -> list[str]:
     """
     Full ffmpeg argv that pulls ``rtsp_url`` (MediaMTX substream republish),
@@ -164,12 +166,30 @@ def build_decode_command(
             f"decode_skip must be one of {DECODE_SKIP_MODES}, got {decode_skip!r}"
         )
     skip_args = [] if decode_skip == "none" else ["-skip_frame", decode_skip]
+    # Decoder thread cap (before -i). ffmpeg's default is AUTO — up to 16
+    # frame threads PER CAMERA, which on a small substream is pure scheduling
+    # overhead multiplied by the fleet (Frigate pins -threads 2 for the same
+    # reason). Thread count never changes decoded output, so capping is
+    # lossless. 0 = ffmpeg auto (omit the flag).
+    thread_args = ["-threads", str(decode_threads)] if decode_threads > 0 else []
+    # Opt-in software-decode shortcuts: skip the h264/h265 in-loop deblocking
+    # filter and allow non-spec-compliant speedups. Deblocking exists for
+    # VIEWING quality; detection is robust to the slight blockiness, but the
+    # decoder drifts a little from the encoder between keyframes, so this is
+    # NOT bit-exact — hence opt-in, and CPU decode only (hw decoders ignore
+    # these AVOptions or handle deblocking in silicon for free).
+    fast_args = (
+        ["-skip_loop_filter", "all", "-flags2", "fast"]
+        if fast_decode and hwaccel is HwAccel.CPU else []
+    )
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "warning",
         "-rtsp_transport", rtsp_transport,
+        *thread_args,
         *skip_args,
+        *fast_args,
         *decode_args(hwaccel, device=device, codec=codec, width=width, height=height),
         "-i", rtsp_url,
         "-vf", scale_filter(hwaccel, width=width, height=height, fps=fps),

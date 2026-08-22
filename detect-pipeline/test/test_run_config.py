@@ -230,3 +230,13 @@ def test_decode_skip_from_env_and_invalid_falls_back():
     assert config_from_env({}).decode_skip == "nonref"   # safe-by-default saving
     assert config_from_env({"DETECT_DECODE_SKIP": "NoKey "}).decode_skip == "nokey"
     assert config_from_env({"DETECT_DECODE_SKIP": "keyframes"}).decode_skip == "none"
+
+
+def test_decode_threads_and_fast_from_env():
+    from detect_pipeline.run import config_from_env
+
+    cfg = config_from_env({})
+    assert cfg.decode_threads == 2 and cfg.fast_decode is False
+    cfg = config_from_env({"DETECT_DECODE_THREADS": "0", "DETECT_DECODE_FAST": "true"})
+    assert cfg.decode_threads == 0 and cfg.fast_decode is True
+    assert config_from_env({"DETECT_DECODE_THREADS": "lots"}).decode_threads == 2

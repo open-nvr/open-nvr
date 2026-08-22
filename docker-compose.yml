@@ -296,6 +296,11 @@ services:
       # lossless, drops only frames nothing references) | bidir | nokey
       # (keyframes only: deepest CPU cut, granularity ≈ the GOP rate) | none.
       - DETECT_DECODE_SKIP=${DETECT_DECODE_SKIP:-nonref}
+      # Decoder thread cap (lossless — output is identical at any thread
+      # count; ffmpeg's auto default spawns up to 16/camera) and the opt-in
+      # loop-filter skip (small extra CPU cut, tiny pixel drift; CPU decode only).
+      - DETECT_DECODE_THREADS=${DETECT_DECODE_THREADS:-2}
+      - DETECT_DECODE_FAST=${DETECT_DECODE_FAST:-false}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).

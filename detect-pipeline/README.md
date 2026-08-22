@@ -162,6 +162,27 @@ alarms and counting, coarse for fast-moving events. The `fps` filter pads
 gaps by duplicating frames, which is nearly free downstream (zero pixel
 diff, so the motion gate skips them). `none` restores full decode.
 
+**Fifth dial: decoder threads (`DETECT_DECODE_THREADS`, default 2).**
+ffmpeg's auto default spawns up to 16 frame threads *per camera* — pure
+scheduling overhead on substream-sized video, multiplied across the fleet
+(Frigate pins 2 for the same reason). Thread count never changes decoded
+output, so the cap is lossless; `0` restores ffmpeg auto for a single
+high-res camera on a big machine.
+
+**Opt-in extra: `DETECT_DECODE_FAST=true`** skips the h264/h265 in-loop
+deblocking filter (`-skip_loop_filter all -flags2 fast`) — worth ~10-20%
+of software-decode CPU. Deblocking exists for viewing quality; detection
+is robust to the blockiness, but decoded pixels drift slightly from the
+encoder between keyframes, so it's not bit-exact and stays off by
+default. CPU decode only (hardware decoders deblock in silicon for free).
+
+**The free lever is in the camera.** Decode cost scales with the
+*source* frame rate before any of these dials apply: a substream encoded
+at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
+analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
+settings — do that first; it's the cheapest CPU you'll ever save.
+
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 
@@ -170,6 +191,8 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
 DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
+DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
+DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)

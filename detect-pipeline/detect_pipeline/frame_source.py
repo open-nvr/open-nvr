@@ -109,6 +109,8 @@ class FrameSource:
         device: str = "/dev/dri/renderD128",
         codec: str = "h264",
         decode_skip: str = "none",
+        decode_threads: int = 2,
+        fast_decode: bool = False,
         spawn: SpawnFn | None = None,
         max_restarts: int | None = None,
         max_fruitless_restarts: int = 5,
@@ -123,6 +125,8 @@ class FrameSource:
         self.device = device
         self.codec = codec
         self.decode_skip = decode_skip
+        self.decode_threads = decode_threads
+        self.fast_decode = fast_decode
         self._spawn = spawn or _default_spawn
         # None = restart forever (production); an int caps restarts (tests).
         self.max_restarts = max_restarts
@@ -145,6 +149,8 @@ class FrameSource:
             device=self.device,
             codec=self.codec,
             decode_skip=self.decode_skip,
+            decode_threads=self.decode_threads,
+            fast_decode=self.fast_decode,
         )
 
     def stream(self) -> Iterator[Frame]:
