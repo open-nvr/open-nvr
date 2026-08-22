@@ -121,6 +121,14 @@ The headline themes are *new AI capabilities* and *operator polish*.
 - **Audio events** — PANNs or YAMNet for gunshot / glass-break / dog-
   bark detection. The audio-input shape isn't represented in v0.1's
   shipped adapters.
+- **Lightweight CPU-first Tier-0 detector** — an alternative to YOLOv8
+  for low-power boxes with no hardware accelerator (NanoDet-Plus /
+  MobileNet-SSD-class, selectable via the existing `DETECT_DETECTOR`
+  switch). Trades some accuracy for a pipeline that stays in
+  single-digit CPU per camera; complements — doesn't replace — the
+  substream tap and `DETECT_HWACCEL` paths, and pairs with the
+  accelerator detector adapters (Coral / Hailo / RKNN) tracked in
+  `detect-pipeline/FOLLOWUPS.md`.
 
 ### Operator polish
 - **Active Directory / SAML SSO** for staff authentication. v0.1 uses
