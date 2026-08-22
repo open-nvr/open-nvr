@@ -355,6 +355,59 @@ class UserUpdate(BaseModel):
     role_id: int | None = None
 
 
+class CameraAssignment(BaseModel):
+    """One per-camera capability assignment — "this camera does <skill>".
+
+    ``skill`` names a capability (``license_plate_recognition``,
+    ``object_detection``, ``occupancy_counting``, …). Deliberately an open
+    vocabulary in slice 1: the catalog UI's requires_tasks validation
+    (consumer 3 in docs/design/per-camera-assignment.md) is where "is this
+    capability actually installed?" gets enforced, so an assignment can be
+    declared before its adapter/app exists. ``labels`` optionally NARROWS
+    a detection-shaped skill to specific classes ("camera 4 also wants
+    trucks") — it may narrow configuration, never replace it.
+    """
+
+    skill: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    labels: list[str] | None = None
+
+    @field_validator("labels")
+    @classmethod
+    def validate_labels(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            s = str(raw).strip().lower()
+            if not s:
+                raise ValueError("labels must not contain empty strings")
+            if len(s) > 64:
+                raise ValueError("label too long (max 64 chars)")
+            if s not in seen:
+                seen.add(s)
+                cleaned.append(s)
+        if len(cleaned) > 32:
+            raise ValueError("too many labels (max 32)")
+        return cleaned
+
+
+def _validate_assignments(
+    v: list[CameraAssignment] | None,
+) -> list[CameraAssignment] | None:
+    """Shared assignments rules: bounded count, one entry per skill."""
+    if v is None:
+        return v
+    if len(v) > 8:
+        raise ValueError("too many assignments (max 8 per camera)")
+    seen: set[str] = set()
+    for a in v:
+        if a.skill in seen:
+            raise ValueError(f"duplicate assignment for skill {a.skill!r}")
+        seen.add(a.skill)
+    return v
+
+
 class CameraUpdate(BaseModel):
     """Schema for updating a camera."""
 
@@ -370,6 +423,16 @@ class CameraUpdate(BaseModel):
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)
     is_active: bool | None = None
+    # Per-camera capability assignment (see CameraAssignment). Send the FULL
+    # list each time — this replaces, it does not merge. [] clears.
+    assignments: list[CameraAssignment] | None = None
+
+    @field_validator("assignments")
+    @classmethod
+    def validate_assignments(
+        cls, v: list[CameraAssignment] | None
+    ) -> list[CameraAssignment] | None:
+        return _validate_assignments(v)
 
     @field_validator("ip_address")
     @classmethod
@@ -556,6 +619,9 @@ class CameraResponse(CameraBase):
     id: int
     owner_id: int
     is_active: bool
+    # Per-camera capability assignment; None and [] both mean "nothing
+    # assigned" (read as: no restriction declared).
+    assignments: list[CameraAssignment] | None = None
     deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None

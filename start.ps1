@@ -66,6 +66,18 @@ function Get-ComposeArgs {
         }
     }
     if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
+    # Default-on apps: occupancy-counting + footage-search ride the always-on
+    # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
+    # install runs them (profile default-apps in docker-compose.apps.yml).
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env. Mirrors compose_args
+    # in start.sh.
+    $defaultApps = Get-EnvVar "OPENNVR_DEFAULT_APPS"
+    if (@("off", "false", "0", "no") -notcontains "$defaultApps".ToLower()) {
+        if (-not ($exampleCompose -like "*docker-compose.apps.yml")) {
+            $args += @("-f", "docker-compose.apps.yml")
+        }
+        $args += @("--profile", "default-apps")
+    }
     return $args
 }
 

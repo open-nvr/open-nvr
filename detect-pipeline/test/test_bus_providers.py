@@ -139,3 +139,56 @@ def test_provider_returns_empty_on_failure():
 
     prov = HttpCameraProvider("http://core:8000", opener=boom)
     assert prov.list_cameras() == []                    # never raises; retries next tick
+
+
+# ── Assignments → per-camera labels + opt-in skip (slice 3) ─────────
+
+
+def _cam(cid="cam4", assignments=None):
+    c = {"camera_id": cid, "name": cid, "frame_url": f"rtsp://m/{cid}"}
+    if assignments is not None:
+        c["assignments"] = assignments
+    return c
+
+
+def test_object_detection_assignment_labels_become_per_camera(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+
+    spec = _to_spec(_cam(assignments=[
+        {"skill": "object_detection", "labels": ["Person", "TRUCK", ""]},
+        {"skill": "occupancy_counting"},
+    ]))
+    assert spec.labels == frozenset({"person", "truck"})
+    assert spec.analyze is True
+
+
+def test_no_assignments_means_global_labels_and_analyze(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+
+    assert _to_spec(_cam()).labels is None
+    assert _to_spec(_cam()).analyze is True
+    # An object_detection assignment WITHOUT labels declares intent but no
+    # narrowing — global DETECT_LABELS still applies.
+    spec = _to_spec(_cam(assignments=[{"skill": "object_detection"}]))
+    assert spec.labels is None and spec.analyze is True
+
+
+def test_skip_unassigned_is_opt_in(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+
+    lpr_only = _cam(assignments=[{"skill": "license_plate_recognition"}])
+    # Default: an LPR-only camera is STILL analyzed — Tier-0 feeds many
+    # subscribers (footage-search, the agent's events) beyond detection apps.
+    monkeypatch.delenv("DETECT_SKIP_UNASSIGNED", raising=False)
+    assert _to_spec(lpr_only).analyze is True
+
+    # Opt-in: the operator declares the CPU saving is worth it.
+    monkeypatch.setenv("DETECT_SKIP_UNASSIGNED", "true")
+    assert _to_spec(lpr_only).analyze is False
+    # A detection-shaped assignment keeps the camera analyzed even then...
+    assert _to_spec(_cam(assignments=[
+        {"skill": "license_plate_recognition"}, {"skill": "occupancy_counting"},
+    ])).analyze is True
+    # ...and NO assignments at all is never skipped (no restriction declared).
+    assert _to_spec(_cam()).analyze is True
+    assert _to_spec(_cam(assignments=[])).analyze is True

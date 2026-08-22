@@ -400,174 +400,43 @@ async def delete_ai_model(
         )
 
 
-# Start Background Inference
+# Start Background Inference — RETIRED (slice 4 of
+# docs/design/per-camera-assignment.md). The live polling loop was a second
+# inference path that bypassed the publish/subscribe design: it drove
+# per-camera inference on a timer, which is how a CPU-only box ends up with
+# a VLM pinned at 600%. Live detection now flows one way only:
+# Tier-0 (always-on, assignment-aware) -> NATS -> subscribing apps, with
+# heavier models dispatched through KAI-C's governed gate. Recording
+# analysis (the on-demand forensic pass over recorded files) is unaffected
+# — it lives on its own endpoint and was never a second LIVE path.
+RETIRED_LIVE_INFERENCE_DETAIL = (
+    "Live model polling has been retired. Live detection runs continuously "
+    "through the built-in Tier-0 detector and flows to apps over the event "
+    "bus — give this camera a job instead: Cameras -> edit -> Assignments "
+    "(see docs/CAMERA_ASSIGNMENTS.md). Recording analysis is unaffected."
+)
+
+
 @router.post("/{model_id}/start-inference")
 async def start_inference(
     model_id: int,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Start background inference for a model."""
-    # Get model
-    ai_model = db.query(AIModel).filter(AIModel.id == model_id).first()
+    """RETIRED: returns 410 Gone with the migration pointer.
 
+    Kept as an endpoint (rather than deleted) so an older UI or script gets
+    an actionable sentence instead of a bare 404."""
+    ai_model = db.query(AIModel).filter(AIModel.id == model_id).first()
     if not ai_model:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"AI model with ID {model_id} not found",
         )
-
-    if not ai_model.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Model is disabled"
-        )
-
-    if not ai_model.assigned_camera_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No camera assigned to this model",
-        )
-
-    # Check if this is a cloud model (format: "cloud:1")
-    is_cloud_model = ai_model.model_name.startswith("cloud:")
-
-    if is_cloud_model:
-        # Extract cloud model ID
-        try:
-            cloud_model_id = int(ai_model.model_name.split(":")[1])
-        except (IndexError, ValueError):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid cloud model format: {ai_model.model_name}",
-            )
-
-        # Get cloud model configuration
-        from models import CloudProviderModel
-
-        cloud_model = (
-            db.query(CloudProviderModel)
-            .filter(
-                CloudProviderModel.id == cloud_model_id,
-                CloudProviderModel.user_id == current_user.id,
-            )
-            .first()
-        )
-
-        if not cloud_model:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Cloud model {cloud_model_id} not found",
-            )
-
-        # Get camera config for RTSP URL
-        camera_config = (
-            db.query(CameraConfig)
-            .filter(CameraConfig.camera_id == ai_model.assigned_camera_id)
-            .first()
-        )
-
-        if not camera_config or not camera_config.source_url:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Camera does not have a source URL configured",
-            )
-
-        # Start cloud inference in background
-        inference_manager = get_inference_manager()
-
-        if inference_manager.is_running(model_id):
-            return {
-                "message": "Inference already running for this model",
-                "running": True,
-            }
-
-        try:
-            await inference_manager.start_cloud_inference(
-                model_id=model_id,
-                camera_id=ai_model.assigned_camera_id,
-                rtsp_url=camera_config.source_url,
-                cloud_model_id=cloud_model_id,
-                interval=ai_model.inference_interval or 2,
-                user_id=current_user.id,
-            )
-
-            # Audit log
-            try:
-                write_audit_log(
-                    db,
-                    action="ai_model.start_inference",
-                    user_id=current_user.id,
-                    entity_type="ai_model",
-                    entity_id=model_id,
-                    details={"model": ai_model.name, "type": "cloud"},
-                )
-            except Exception:
-                pass
-
-            return {
-                "message": f"Cloud inference started for model '{ai_model.name}'",
-                "running": True,
-            }
-
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to start cloud inference: {e!s}",
-            )
-
-    # Get camera and config (for local models)
-    camera_config = (
-        db.query(CameraConfig)
-        .filter(CameraConfig.camera_id == ai_model.assigned_camera_id)
-        .first()
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=RETIRED_LIVE_INFERENCE_DETAIL,
     )
-
-    if not camera_config or not camera_config.source_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Camera does not have a source URL configured",
-        )
-
-    # Start inference in background
-    inference_manager = get_inference_manager()
-
-    if inference_manager.is_running(model_id):
-        return {"message": "Inference already running for this model", "running": True}
-
-    try:
-        await inference_manager.start_inference(
-            model_id=model_id,
-            camera_id=ai_model.assigned_camera_id,
-            rtsp_url=camera_config.source_url,
-            model_name=ai_model.model_name,
-            task=ai_model.task,
-            interval=ai_model.inference_interval or 2,
-            config=ai_model.config,
-        )
-
-        # Audit log
-        try:
-            write_audit_log(
-                db,
-                action="ai_model.start_inference",
-                user_id=current_user.id,
-                entity_type="ai_model",
-                entity_id=model_id,
-                details={"model": ai_model.name},
-            )
-        except Exception:
-            pass
-
-        return {
-            "message": f"Inference started for model '{ai_model.name}'",
-            "running": True,
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start inference: {e!s}",
-        )
 
 
 # Stop Background Inference

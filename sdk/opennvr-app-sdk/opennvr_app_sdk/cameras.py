@@ -93,3 +93,66 @@ def discover_cameras(
 def full_frame_polygon(size: int = UNIT_FRAME) -> list[list[int]]:
     """The whole-frame zone, in the unit space auto-derived zones use."""
     return [[0, 0], [size, 0], [size, size], [0, size]]
+
+
+# ── Per-camera capability assignment (slice 2) ─────────────────────
+#
+# Operators can declare "camera 1 does LPR, cameras 2-3 count people" on
+# the camera settings page; the internal endpoint serves it as an
+# ``assignments`` list on each camera. An assignment is ADDITIVE intent:
+# the camera keeps streaming, recording, and Tier-0 detection regardless
+# — it only tells interested apps WHERE to point their attention.
+#
+# The back-compat rule every consumer must honour: restriction exists
+# only once at least one camera carries THIS skill. No camera assigned
+# the skill (or no assignments feature at all — an older core) means
+# "no restriction declared", and the app behaves exactly as before
+# assignments existed: watch everything.
+
+
+def filter_cameras_for_skill(
+    cameras: list[dict[str, Any]], skill: str
+) -> list[str] | None:
+    """Which of ``cameras`` (a :func:`discover_cameras` payload) are
+    assigned ``skill``.
+
+    Returns ``None`` when NO camera carries the skill — "no restriction
+    declared": the caller must fall back to watching everything, exactly
+    as before assignments existed. Returns the (possibly empty-labelled)
+    camera-id list once at least one camera is assigned the skill —
+    from then on the operator's declaration is the whole truth.
+
+    Pure — feed it the list you already fetched instead of fetching
+    twice (the occupancy example's refresh loop does exactly this).
+    """
+    want = str(skill).strip().lower()
+    if not want:
+        return None
+    out: list[str] = []
+    for cam in cameras:
+        if not isinstance(cam, dict):
+            continue
+        for a in cam.get("assignments") or []:
+            if isinstance(a, dict) and str(a.get("skill", "")).lower() == want:
+                out.append(str(cam["camera_id"]))
+                break
+    return out or None
+
+
+def cameras_for_skill(
+    opennvr_url: str,
+    skill: str,
+    *,
+    api_key: str | None = None,
+    timeout: float = 5.0,
+) -> list[str] | None:
+    """Fetch-and-filter convenience: the camera ids assigned ``skill``.
+
+    ``None`` means "no restriction declared" — either no camera carries
+    the skill, or discovery failed (both cases mean: keep current
+    behaviour, don't narrow). Use :func:`filter_cameras_for_skill` when
+    you already hold a :func:`discover_cameras` result.
+    """
+    return filter_cameras_for_skill(
+        discover_cameras(opennvr_url, api_key=api_key, timeout=timeout), skill
+    )

@@ -33,6 +33,15 @@ Use it for room/venue capacity, queue and concourse crowding, loading-bay
 vehicle limits, or a guard post that must always be staffed
 (`min_occupancy: 1`).
 
+## Per-camera assignment
+
+Leave `cameras: []` and the app watches every camera OpenNVR knows
+about — unless the camera settings page assigns the
+`occupancy_counting` skill to specific cameras, in which case the app
+scopes to exactly those (re-checked every discovery refresh, no
+restart). No assignment anywhere = no restriction. See
+[docs/CAMERA_ASSIGNMENTS.md](../../docs/CAMERA_ASSIGNMENTS.md).
+
 ## Run it
 
 ```bash

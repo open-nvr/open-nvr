@@ -260,7 +260,12 @@ def test_alarm_ring_levels_wired(script: str, html: str) -> None:
     assert "function wireRingPreselect" in script
     assert "flashChime" in script and 'playChime("bell")' in script
     assert ".alarmbar.chime" in html, "chime banner style missing"
-    assert 'data-ring="siren"' in html, "presets lost their siren grade"
+    # Presets are server-rendered now (GET /alarm-presets, honest
+    # availability); the siren grade rides in each preset's payload and
+    # the click handler forwards it into the arm body.
+    assert "/alarm-presets" in script, "presets no longer server-driven"
+    assert "body.ring=p.ring" in script.replace(" ", ""), (
+        "preset click no longer forwards the ring grade")
 
 
 def test_ring_defaults_editor_wired(script: str, html: str) -> None:

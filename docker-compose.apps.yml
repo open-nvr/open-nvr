@@ -106,7 +106,12 @@ services:
   # zone. Contract surface on :9201.
   # ──────────────────────────────────────────────────────────────
   occupancy-counting-config-init:
-    profiles: [apps]
+    # In BOTH profiles: ``apps`` (the everything-on profile / the
+    # reconciler's) and ``default-apps`` — the profile start.sh/start.ps1
+    # enable on every stock install, because these apps ride the Tier-0
+    # stream that is always on and need no extra adapter, model, or GPU.
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
+    profiles: [apps, default-apps]
     image: alpine:3.20
     container_name: opennvr_occupancy_config_init
     restart: "no"
@@ -127,7 +132,12 @@ services:
       - opennvr_occupancy_config:/generated
 
   occupancy-counting:
-    profiles: [apps]
+    # In BOTH profiles: ``apps`` (the everything-on profile / the
+    # reconciler's) and ``default-apps`` — the profile start.sh/start.ps1
+    # enable on every stock install, because these apps ride the Tier-0
+    # stream that is always on and need no extra adapter, model, or GPU.
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
+    profiles: [apps, default-apps]
     build:
       context: .
       dockerfile: examples/occupancy-counting/Dockerfile
@@ -533,7 +543,12 @@ services:
   # Contract surface on :9208 (health/state/actions + registration).
   # ──────────────────────────────────────────────────────────────
   footage-search-config-init:
-    profiles: [apps]
+    # In BOTH profiles: ``apps`` (the everything-on profile / the
+    # reconciler's) and ``default-apps`` — the profile start.sh/start.ps1
+    # enable on every stock install, because these apps ride the Tier-0
+    # stream that is always on and need no extra adapter, model, or GPU.
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
+    profiles: [apps, default-apps]
     image: alpine:3.20
     container_name: opennvr_footage_search_config_init
     restart: "no"
@@ -554,7 +569,12 @@ services:
       - opennvr_footage_search_config:/generated
 
   footage-search:
-    profiles: [apps]
+    # In BOTH profiles: ``apps`` (the everything-on profile / the
+    # reconciler's) and ``default-apps`` — the profile start.sh/start.ps1
+    # enable on every stock install, because these apps ride the Tier-0
+    # stream that is always on and need no extra adapter, model, or GPU.
+    # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
+    profiles: [apps, default-apps]
     build:
       context: .
       dockerfile: examples/footage-search/Dockerfile

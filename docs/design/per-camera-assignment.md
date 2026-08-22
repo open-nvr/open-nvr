@@ -115,6 +115,12 @@ explicit override, never as the thing an operator must fill in.
 manifest declares `requires_tasks`, can refuse an assignment whose
 capability isn't installed ("people counting needs object detection —
 Tier-0 provides it ✓" / "LPR needs the plate adapter — not installed").
+*(shipped — GET /cameras/assignable-skills composes the canonical task
+registry, live adapter tasks via KAI-C, and installed apps into a
+tri-state availability list; the editor suggests via datalist and
+annotates unavailable skills with a what-to-install note. Annotate,
+never refuse: the vocabulary stays open, and unknown availability —
+KAI-C unreachable — flags nothing.)*
 
 ## Rules that keep the concerns separate
 
@@ -146,14 +152,26 @@ Each slice is independently shippable and useful on its own:
 
 1. **Schema + endpoint.** `assignments` on the camera record, written by the
    camera settings page, served by the internal endpoint. Nothing consumes
-   it yet.
+   it yet. *(shipped — PR #275)*
 2. **SDK `cameras_for_skill()`.** Apps opt in; occupancy switches from
    "watch every camera" to "watch my assigned cameras", explicit config
-   still winning.
+   still winning. *(shipped — `filter_cameras_for_skill` /
+   `cameras_for_skill` in `opennvr_app_sdk.cameras`; occupancy is the
+   reference consumer, re-scoping on every discovery refresh)*
 3. **Tier-0 per-camera labels/analyze.** The class-selection case from the
    goal, plus the CPU saving of not analysing unassigned cameras.
+   *(shipped — provider parses ``assignments`` into per-camera labels;
+   label changes restart just that worker on the reconcile tick; the
+   skip is opt-in via ``DETECT_SKIP_UNASSIGNED``, off by default because
+   the Tier-0 stream feeds non-detection consumers too)*
 4. **Retire `AIModel`'s polling loop** in favour of assignment + the
    publish/subscribe path, removing the second inference route entirely.
+   *(shipped — the live and cloud polling loops are removed from
+   InferenceManager; POST /start-inference answers 410 Gone with the
+   migration pointer; the AI Models and camera-settings UIs point at
+   Assignments instead of a Start button. The on-demand RECORDING
+   analysis remains — a forensic pass over recorded files was never a
+   second live path.)*
 
 Slices 1–2 make the goal expressible; slice 3 makes it efficient; slice 4
 removes the architectural exception that undermines the whole model.

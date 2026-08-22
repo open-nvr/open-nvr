@@ -69,15 +69,77 @@ services:
   # the sibling ai-adapter checkout and are mounted where the current
   # PiperService resolves MODEL_WEIGHTS_DIR/piper.
   # ──────────────────────────────────────────────────────────────
+  # One-shot: fetch the Piper voice into a named volume on first up.
+  # The piper image ships NO voice (voices are large and interchangeable),
+  # and the old bind mount (../ai-adapter/model_weights/piper) silently
+  # expected the operator to have the ai-adapter repo checked out as a
+  # sibling AND to have manually downloaded the voice — nobody is told to,
+  # so on a stock install the adapter booted healthy and then 503'd every
+  # synthesis forever ("voice replies unavailable"). Same init pattern as
+  # yolov8-weights-init: idempotent (skips when the files are present and
+  # non-empty), so restarts cost nothing. Needs internet on FIRST up only
+  # (huggingface.co, like the Ollama model pull); air-gapped installs
+  # pre-place the two files in the opennvr_piper_voices volume instead.
+  piper-voices-init:
+    profiles: [camera-agent]
+    image: curlimages/curl:8.10.1
+    container_name: opennvr_piper_voices_init
+    restart: "no"
+    # The curl image runs as a non-root user, but a fresh named volume is
+    # root-owned — without this the very first download fails on a
+    # permission error.
+    user: "0:0"
+    # BEST-EFFORT by design: this init must ALWAYS exit 0. The adapter
+    # (and the whole voice profile behind it) depends_on this completing —
+    # if a download failure propagated, a machine without internet on
+    # first up would lose the entire voice stack instead of just the
+    # voice. On failure the adapter boots voiceless-but-healthy (exactly
+    # the pre-init behavior, with a clear log) and the next
+    # ``docker compose up`` retries the download.
+    # List-form command (see yolov8-weights-init's NOTE): a string command
+    # gets word-split and only the first token runs.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        VOICE=en_US-libritts-high
+        BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high
+        cd /voices || exit 0
+        for f in "$$VOICE.onnx" "$$VOICE.onnx.json"; do
+          if [ -s "$$f" ]; then
+            echo "$$f already present ($$(wc -c < "$$f") bytes); skipping."
+            continue
+          fi
+          echo "Downloading $$f ..."
+          if curl -fSL --retry 3 -o "$$f.part" "$$BASE/$$f"; then
+            mv "$$f.part" "$$f"
+            echo "Wrote $$(wc -c < "$$f") bytes to /voices/$$f."
+          else
+            rm -f "$$f.part"
+            echo "WARNING: could not download $$f (no internet?). Voice replies"
+            echo "stay text-only until it succeeds — re-run 'docker compose up'"
+            echo "with internet, or place the file in the opennvr_piper_voices"
+            echo "volume manually."
+          fi
+        done
+        exit 0
+    volumes:
+      - opennvr_piper_voices:/voices
+
   piper-adapter:
     profiles: [camera-agent]
     image: ghcr.io/open-nvr/piper-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_piper_adapter
     restart: unless-stopped
+    depends_on:
+      piper-voices-init:
+        condition: service_completed_successfully
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
     volumes:
-      - ../ai-adapter/model_weights/piper:/app/model_weights/piper:ro
+      # The adapter resolves MODEL_WEIGHTS_DIR/piper -> /app/model_weights/piper.
+      # Custom/extra voices: drop .onnx + .onnx.json pairs into the
+      # opennvr_piper_voices volume (or override this mount with a bind).
+      - opennvr_piper_voices:/app/model_weights/piper:ro
       - opennvr_piper_audio:/app/audio
     networks:
       - opennvr_internal
@@ -396,6 +458,13 @@ services:
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
+      # Read-only view of the footage-search index → enables the
+      # search_footage voice tool ("did a red truck come by earlier?").
+      # Same named volume the apps overlay's footage-search service
+      # writes (compose runs from the same project, so the names meet).
+      # Without the apps overlay it's just an empty dir and the tool
+      # reports cleanly that the index hasn't been built.
+      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
@@ -478,6 +547,8 @@ services:
     volumes:
       - opennvr_camera_agent_config_chat:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
+      # Same read-only footage-search index view as the voice agent.
+      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
@@ -485,6 +556,12 @@ services:
       - opennvr_internal
 
 volumes:
+  # footage-search's SQLite index. Declared here as well as in
+  # docker-compose.apps.yml so this overlay works standalone: same name +
+  # same compose project → the SAME volume, so when the apps overlay runs
+  # the footage-search indexer, the agent's search_footage tool reads what
+  # it writes. Without the apps overlay it stays an empty dir (harmless).
+  opennvr_footage_search_data:
   # Ollama model store — persisted so the LLM survives ``compose down``.
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.
@@ -493,6 +570,8 @@ volumes:
   opennvr_caption_cache:
   # Piper writes generated WAVs here before optionally returning inline
   # base64 audio to the camera-agent.
+  # Piper voice files, fetched once by piper-voices-init.
+  opennvr_piper_voices:
   opennvr_piper_audio:
   # Generated voice config.yml (mounted read-only by the camera-agent).
   opennvr_camera_agent_config:

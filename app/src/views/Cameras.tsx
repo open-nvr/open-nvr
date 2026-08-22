@@ -33,6 +33,22 @@ import { parseCameraQr } from '../lib/cameraQr'
 import { formatDuration } from '../lib/time'
 import { Modal } from '../components/Modal'
 
+// Per-camera capability assignment ("camera 1 does LPR") — slice 1 of
+// docs/design/per-camera-assignment.md. Written only here (the camera
+// settings surface); consumers read it from the internal endpoint.
+type CameraAssignment = { skill: string; labels?: string[] | null }
+
+// One row of GET /cameras/assignable-skills: a known skill with live
+// availability. available === null means "couldn't tell" (KAI-C
+// unreachable) and must never grey anything out.
+type AssignableSkill = {
+  skill: string
+  label: string
+  source: string
+  available: boolean | null
+  hint: string
+}
+
 type Camera = {
   id: number
   name: string
@@ -67,7 +83,11 @@ type Camera = {
   firmware_version?: string | null
   serial_number?: string | null
   hardware_id?: string | null
+  assignments?: CameraAssignment[] | null
 }
+
+// Form-side assignment row: labels edited as a comma-separated string.
+type AssignmentRow = { skill: string; labels: string }
 
 type CameraForm = {
   name: string
@@ -82,6 +102,7 @@ type CameraForm = {
   vlan?: string
   status?: string
   is_active?: boolean
+  assignments: AssignmentRow[]
 }
 
 export function Cameras() {
@@ -157,6 +178,24 @@ export function Cameras() {
   const [saving, setSaving] = useState(false)
   const [scanQr, setScanQr] = useState(false)
 
+  // Known skills for the Assignments editor — fetched once per dialog
+  // open; [] until loaded (the editor stays free-text either way).
+  const [assignableSkills, setAssignableSkills] = useState<AssignableSkill[]>([])
+
+  const loadAssignableSkills = async () => {
+    try {
+      const { data } = await apiService.getAssignableSkills()
+      setAssignableSkills(data?.skills || [])
+    } catch {
+      setAssignableSkills([])
+    }
+  }
+
+  const skillInfo = (raw: string): AssignableSkill | undefined => {
+    const s = raw.trim().toLowerCase()
+    return s ? assignableSkills.find(k => k.skill === s) : undefined
+  }
+
   const [form, setForm] = useState<CameraForm>({
     name: '',
     description: '',
@@ -169,6 +208,7 @@ export function Cameras() {
     location: '',
     vlan: '',
     status: 'unknown',
+    assignments: [],
   })
 
   const resetForm = () => setForm({
@@ -183,6 +223,7 @@ export function Cameras() {
     location: '',
     vlan: '',
     status: 'unknown',
+    assignments: [],
   })
 
   // Observed stream state. `live_online` is tracked by the recorder off
@@ -303,6 +344,15 @@ export function Cameras() {
         vlan: form.vlan || null,
         status: form.status || undefined,
         is_active: form.is_active,
+        // Full replace ([] clears): rows with an empty skill are dropped;
+        // labels split on commas, blanks removed.
+        assignments: form.assignments
+          .map(r => ({
+            skill: r.skill.trim().toLowerCase(),
+            labels: r.labels.split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
+          }))
+          .filter(r => r.skill)
+          .map(r => (r.labels.length ? r : { skill: r.skill })),
       }
       Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k])
       await apiService.updateCamera(editing.id, payload)
@@ -397,8 +447,13 @@ export function Cameras() {
       vlan: c.vlan || '',
       status: c.status || 'unknown',
       is_active: c.is_active,
+      assignments: (c.assignments || []).map(a => ({
+        skill: a.skill,
+        labels: (a.labels || []).join(', '),
+      })),
     })
     setShowEditDialog(true)
+    loadAssignableSkills()
   }
 
   const closeEditDialog = () => {
@@ -717,6 +772,87 @@ export function Cameras() {
             </Field>
             <Field label="Substream URL">
               <input className={EDIT_INPUT} value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
+            </Field>
+
+            <Field label="Assignments">
+              <div className="space-y-2">
+                <p className="text-xs text-[var(--muted)]">
+                  What this camera is <em>for</em> — e.g. skill{' '}
+                  <code>license_plate_recognition</code>, or{' '}
+                  <code>object_detection</code> narrowed to labels{' '}
+                  <code>person, truck</code>. Nothing assigned = no
+                  restriction declared. Consumers (Tier-0, apps) adopt these
+                  incrementally.
+                </p>
+                <datalist id="assignable-skills">
+                  {assignableSkills.map(k => (
+                    <option key={k.skill} value={k.skill}>
+                      {`${k.label}${k.available === false ? ' (not installed)' : ''}`}
+                    </option>
+                  ))}
+                </datalist>
+                {form.assignments.map((row, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <input
+                      className={`flex-1 ${EDIT_INPUT}`}
+                      value={row.skill}
+                      onChange={(e) => setForm({
+                        ...form,
+                        assignments: form.assignments.map((r, j) => j === i ? { ...r, skill: e.target.value } : r),
+                      })}
+                      placeholder="skill, e.g. object_detection"
+                      list="assignable-skills"
+                      aria-label={`Assignment ${i + 1} skill`}
+                    />
+                    <input
+                      className={`flex-1 ${EDIT_INPUT}`}
+                      value={row.labels}
+                      onChange={(e) => setForm({
+                        ...form,
+                        assignments: form.assignments.map((r, j) => j === i ? { ...r, labels: e.target.value } : r),
+                      })}
+                      placeholder="labels (optional), e.g. person, truck"
+                      aria-label={`Assignment ${i + 1} labels`}
+                    />
+                    <button
+                      type="button"
+                      className="px-2 py-2 border border-[var(--border)] bg-[var(--panel-2)] rounded text-xs"
+                      onClick={() => setForm({ ...form, assignments: form.assignments.filter((_, j) => j !== i) })}
+                      title="Remove assignment"
+                      aria-label={`Remove assignment ${i + 1}`}
+                    >✕</button>
+                  </div>
+                ))}
+                {form.assignments.map((row, i) => {
+                  const info = skillInfo(row.skill)
+                  if (!row.skill.trim()) return null
+                  // Only ANNOTATE — never block: available === false gets an
+                  // amber "what to install" note; null (unknown) and true
+                  // stay quiet; an unknown spelling gets a gentle nudge.
+                  if (info && info.available === false) {
+                    return (
+                      <p key={`hint-${i}`} className="text-xs text-amber-500">
+                        {info.label}: {info.hint}
+                      </p>
+                    )
+                  }
+                  if (!info && assignableSkills.length > 0) {
+                    return (
+                      <p key={`hint-${i}`} className="text-xs text-[var(--muted)]">
+                        “{row.skill.trim()}” isn’t a known skill on this install —
+                        it will be stored, but nothing consumes it yet.
+                      </p>
+                    )
+                  }
+                  return null
+                })}
+                <button
+                  type="button"
+                  className="px-3 py-1.5 border border-[var(--border)] bg-[var(--panel-2)] rounded text-xs"
+                  onClick={() => setForm({ ...form, assignments: [...form.assignments, { skill: '', labels: '' }] })}
+                  disabled={form.assignments.length >= 8}
+                >+ Add assignment</button>
+              </div>
             </Field>
 
             <label className="flex items-center gap-2 text-sm">

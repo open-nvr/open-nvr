@@ -279,7 +279,7 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
         .order_by(Camera.id.asc())
         .all()
     )
-    out: list[dict[str, str]] = []
+    out: list[dict[str, object]] = []
     for cam in cameras:
         stream_name = _build_stream_name(
             settings.mediamtx_stream_prefix,
@@ -288,14 +288,49 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
         )
         if settings.inference_use_mediamtx_tap:
             base = (settings.mediamtx_rtsp_url or "rtsp://mediamtx:8554").rstrip("/")
-            frame_url = f"{base}/{stream_name}"
+            # Serve the LOW-RES SUBSTREAM tap when this camera has a sub
+            # source (stored substream_url or a derivable vendor path —
+            # mirroring exactly the condition under which the provisioner
+            # creates the {name}-sub MediaMTX path) AND the tap policy says
+            # so. Policy (settings.inference_tap_stream): 'auto' picks the
+            # substream on CPU-only decode and the MAIN stream when
+            # hardware decode is configured (a GPU box can afford full-res
+            # decode and gets full-res evidence crops; detection accuracy
+            # is equal either way — the model input is a fixed square);
+            # 'sub'/'main' force it. Cameras with no sub source keep the
+            # main tap regardless. This is what makes "configure the
+            # camera's substream" actually reach Tier-0: decoding the sub
+            # instead of the full main stream is the ~5x CPU difference
+            # the detect-pipeline README documents.
+            from services.stream_service import substream_name
+
+            # STORED substream_url ONLY — deliberately narrower than the
+            # provisioner (which also derives vendor-convention URLs for
+            # the agent's on-demand live view, where a wrong guess merely
+            # falls back to stills). Tier-0 is ALWAYS-ON: handing it a
+            # derived URL that happens to be wrong — a Hikvision-shaped
+            # path on a camera whose substream is disabled — would kill
+            # detection for that camera outright. The operator's stored
+            # URL is their explicit, presumably verified word; a guess is
+            # not, so a guess never steers the detector.
+            has_sub = bool((cam.substream_url or "").strip())
+            mode = (settings.inference_tap_stream or "auto").strip().lower()
+            if mode == "main":
+                use_sub = False
+            elif mode == "sub":
+                use_sub = has_sub
+            else:  # auto (and any unknown value degrades to auto)
+                hw = (settings.detect_hwaccel or "cpu").strip().lower()
+                use_sub = has_sub and hw in ("", "cpu")
+            tap_name = substream_name(stream_name) if use_sub else stream_name
+            frame_url = f"{base}/{tap_name}"
             # Append JWT so the camera-agent can authenticate with MediaMTX.
             # Fall back to bare URL when minting failed (keys not configured,
             # test environment, etc.) — agent will still start, just unable
             # to fetch frames for the tap path.
             if mediamtx_jwt:
                 frame_url = f"{frame_url}?jwt={urlquote(mediamtx_jwt, safe='.')}"
-            source = "mediamtx"
+            source = "mediamtx-sub" if use_sub else "mediamtx"
         elif cam.rtsp_url:
             frame_url = str(cam.rtsp_url)
             source = "camera"
@@ -318,6 +353,11 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
                 "frame_url": frame_url,
                 "role": role,
                 "source": source,
+                # Per-camera capability assignment (slice 1 of
+                # docs/design/per-camera-assignment.md). Additive: existing
+                # consumers ignore it. [] = nothing assigned — consumers must
+                # read that as "no restriction declared", never "do nothing".
+                "assignments": list(cam.assignments or []),
             }
         )
 

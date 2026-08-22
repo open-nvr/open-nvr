@@ -33,12 +33,14 @@
 # path failed with "no such service"; all 8 have since been restored
 # WITH their service blocks). See docs/CONTRIBUTING_APPS.md.
 #
-# IMAGES ARE NOT PUBLISHED YET. Unlike the adapters and core (which pull
-# from ghcr.io/open-nvr/*), the detector apps ship only as a build
-# overlay today (docker-compose.apps.yml uses `build:` +
-# opennvr/<id>:local-build). The `image` field below records the
-# CANONICAL intended GHCR ref (ghcr.io/open-nvr/<id>:latest) for when
-# publishing lands; `build_context` names the source folder explicitly.
+# IMAGES ARE PUBLISHED by .github/workflows/publish-app-images.yml:
+# every push to main (and every v* release tag) pushes each app image
+# to its `image` ref below — ghcr.io/open-nvr/<id>:latest, multi-arch
+# (amd64 + arm64), same tag policy as the core image. The local
+# `build:` overlay (docker-compose.apps.yml, opennvr/<id>:local-build)
+# remains the dev / air-gapped path; `build_context` names the source
+# folder explicitly. For releases, record an `image_digest` per entry
+# so the reconciler's pinning takes effect.
 #
 # NO SECRETS in this file — the compose snippets reference
 # ${INTERNAL_API_KEY} from the operator's .env, never a literal.

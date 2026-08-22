@@ -80,7 +80,10 @@ nats_alerts_token: null
 
 # ── Cameras ───────────────────────────────────────────────────────
 # LEAVE EMPTY to watch every camera OpenNVR knows about, each with a
-# whole-frame zone — the app reads the live camera list from
+# whole-frame zone. If the camera settings page assigns the
+# ``occupancy_counting`` skill to specific cameras, the app scopes to
+# exactly those (re-checked every refresh); with no such assignment
+# anywhere, nothing is restricted and every camera is watched — the app reads the live camera list from
 # ``opennvr_url`` on boot, so the ids always match what Tier-0
 # publishes (OpenNVR names them cam1, cam2 — NOT cam-1).
 #

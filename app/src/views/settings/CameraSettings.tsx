@@ -589,19 +589,18 @@ function AiTab({ cameraId }: { cameraId: number }) {
   }, [load])
 
   const running = (m: any) => m.is_running ?? m.enabled ?? false
-  const toggle = async (m: any) => {
+  // Live polling is retired (see docs/CAMERA_ASSIGNMENTS.md): live
+  // detection runs continuously through Tier-0 and reaches apps over the
+  // event bus. Stop stays available for anything still running from
+  // before the upgrade; Start is replaced by the Assignments pointer.
+  const stop = async (m: any) => {
     setBusy(m.id)
     try {
-      if (running(m)) {
-        await apiService.stopInference(m.id)
-        showSuccess('Detector stopped')
-      } else {
-        await apiService.startInference(m.id)
-        showSuccess('Detector started')
-      }
+      await apiService.stopInference(m.id)
+      showSuccess('Detector stopped')
       await load()
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to change detector')
+      showError(e?.data?.detail || e?.message || 'Failed to stop detector')
     } finally {
       setBusy(0)
     }
@@ -612,7 +611,7 @@ function AiTab({ cameraId }: { cameraId: number }) {
     return (
       <EmptyState
         title="No detectors assigned to this camera"
-        description="Assign an AI model to this camera in the AI section to run detection on its live stream."
+        description="Live detection runs continuously through the built-in Tier-0 detector. Give this camera a job in its edit dialog under Assignments (e.g. object_detection with the labels you care about)."
       />
     )
   return (
@@ -631,13 +630,18 @@ function AiTab({ cameraId }: { cameraId: number }) {
           <Badge variant={running(m) ? 'success' : 'neutral'}>
             {running(m) ? 'Running' : 'Stopped'}
           </Badge>
-          <Button
-            variant={running(m) ? 'danger' : 'primary'}
-            onClick={() => toggle(m)}
-            disabled={busy === m.id}
-          >
-            {busy === m.id ? '…' : running(m) ? 'Stop' : 'Start'}
-          </Button>
+          {running(m) ? (
+            <Button variant="danger" onClick={() => stop(m)} disabled={busy === m.id}>
+              {busy === m.id ? '…' : 'Stop'}
+            </Button>
+          ) : (
+            <span
+              className="text-xs text-[var(--text-dim)]"
+              title="Live detection runs continuously through the built-in Tier-0 detector. Give this camera a job in its edit dialog under Assignments."
+            >
+              via Tier-0 + assignments
+            </span>
+          )}
         </div>
       ))}
     </div>

@@ -714,6 +714,112 @@ def get_deleted_cameras(
     return DeletedCameraList(cameras=items, total=len(items))
 
 
+# ── Assignable skills (per-camera assignment, consumer 3) ───────────
+#
+# The camera edit dialog's Assignments editor asks this endpoint what
+# skills EXIST and whether each is actually served right now, so it can
+# offer suggestions and flag "LPR needs the plate adapter — not
+# installed" instead of leaving the operator to guess spellings.
+# Composed from three sources, none authoritative over the others:
+#   * the canonical task registry (server/config/tasks.yml) — every
+#     adapter-shaped capability, available when a registered adapter
+#     advertises the task (or an alias). object_detection is special:
+#     the always-on Tier-0 detector provides it on every install.
+#   * the installed-apps registry — every registered catalog app is a
+#     skill (id with '-' -> '_'), available when enabled.
+# ``available`` is a TRI-STATE: true / false / null, where null means
+# "couldn't tell" (KAI-C unreachable) — the UI must never grey a skill
+# on null, the same advisory rule the agent's skills panel follows.
+# The vocabulary stays OPEN: this endpoint suggests and annotates; it
+# never becomes a validation gate (an assignment may be declared before
+# its capability is installed).
+
+
+def _assignable_task_entries(tasks_advertised: set[str] | None) -> list[dict]:
+    import yaml as _yaml
+
+    registry_path = Path(__file__).resolve().parents[1] / "config" / "tasks.yml"
+    try:
+        registry = _yaml.safe_load(registry_path.read_text()) or []
+    except Exception:
+        camera_logger.warning("assignable-skills: tasks.yml unreadable", exc_info=True)
+        registry = []
+    out: list[dict] = []
+    for entry in registry:
+        if not isinstance(entry, dict) or not entry.get("task"):
+            continue
+        task = str(entry["task"])
+        names = {task, *(str(a) for a in entry.get("aliases") or [])}
+        if task == "object_detection":
+            available: bool | None = True
+            hint = "Provided by the built-in Tier-0 detector on every install."
+        elif tasks_advertised is None:
+            available = None
+            hint = "Adapter status unknown (KAI-C unreachable) — not greyed out."
+        elif names & tasks_advertised:
+            available = True
+            hint = "An installed adapter advertises this task."
+        else:
+            available = False
+            suggested = ", ".join(entry.get("suggested_adapters") or []) or "an adapter"
+            hint = (
+                f"No registered adapter advertises {task!r} — register one "
+                f"(suggested: {suggested}) on the AI Adapters page."
+            )
+        out.append({
+            "skill": task,
+            "label": str(entry.get("label") or task),
+            "source": "tier0" if task == "object_detection" else "adapter",
+            "available": available,
+            "hint": hint,
+        })
+    return out
+
+
+@router.get("/assignable-skills")
+async def assignable_skills(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Suggestions + live availability for the Assignments editor."""
+    # Adapter tasks via KAI-C — advisory: unreachable = unknown, not empty.
+    tasks_advertised: set[str] | None = None
+    try:
+        from services.kai_c_service import get_kai_c_service
+
+        capabilities = await get_kai_c_service().get_capabilities()
+        tasks_advertised = set()
+        for entry in (capabilities.get("adapters") or {}).values():
+            caps = (entry or {}).get("capabilities") or {}
+            tasks_advertised.update(str(t) for t in caps.get("tasks_advertised") or [])
+    except Exception:
+        camera_logger.info("assignable-skills: KAI-C unreachable; availability unknown")
+
+    skills = _assignable_task_entries(tasks_advertised)
+
+    # Installed catalog apps — each is a skill; available when enabled.
+    from models import InstalledApp
+
+    for app_row in db.query(InstalledApp).all():
+        skill = str(app_row.id).replace("-", "_")
+        skills.append({
+            "skill": skill,
+            "label": str(app_row.name or skill),
+            "source": "app",
+            "available": bool(app_row.enabled),
+            "hint": (
+                "App installed and enabled." if app_row.enabled
+                else "App installed but disabled — enable it in the App Catalog."
+            ),
+        })
+
+    # One entry per skill; a later (app) entry wins over a task twin.
+    merged: dict[str, dict] = {}
+    for entry in skills:
+        merged[entry["skill"]] = entry
+    return {"skills": sorted(merged.values(), key=lambda e: e["skill"])}
+
+
 @router.get("/{camera_id}", response_model=CameraResponse)
 def get_camera(
     camera_id: int,

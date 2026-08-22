@@ -185,6 +185,14 @@ class AppConfig:
     # example's ``index`` subcommand.
     footage_index_path: str | None = None
 
+    # Labels the deployment's detection adapter can see BEYOND the standard
+    # YOLOv8/COCO-80 set. Alarm presets (GET /alarm-presets) are greyed out
+    # when their target isn't detectable — a "Fire" preset that could never
+    # fire is worse than none. An operator who registers a fire/smoke-capable
+    # detector lists its extra labels here (e.g. ["fire", "smoke"]) and the
+    # matching presets light up.
+    detector_extra_labels: list[str] = field(default_factory=list)
+
     # Optional OpenNVR camera discovery. Docker uses this so camera-agent can
     # reuse cameras configured in OpenNVR instead of duplicating RTSP URLs.
     opennvr_cameras_url: str | None = None
@@ -340,6 +348,27 @@ _DEFAULT_SYSTEM_PROMPT = (
 # metadata and the OPTIONAL wake word — it keeps the legacy "Camera Agent"
 # value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
+
+# The COCO-80 vocabulary of the standard ``default`` YOLOv8 detection
+# adapter — the labels alarm polling can actually match. Alarm-preset
+# availability is checked against this set (plus the config's
+# ``detector_extra_labels``) so the UI never offers an alarm that could
+# never ring: note there is NO fire, smoke, or gas in here.
+_COCO80_LABELS: frozenset[str] = frozenset({
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+})
 DEFAULT_VOICE_GENDER = "neutral"
 
 # ── Skills ──────────────────────────────────────────────────────────
@@ -1436,6 +1465,23 @@ class AlarmManager:
         self._rearm = rearm_cooldown
         self._max = max_alarms
 
+    def find_duplicate(self, *, target: str, camera_ids: list[str],
+                       after_min: int | None, before_min: int | None,
+                       ring: str) -> "Alarm | None":
+        """An ACTIVE alarm with the same target, camera set, window and
+        level. Create-time dedup: the arm button gives slow feedback on a
+        busy box, the natural reaction is clicking again, and without this
+        every extra click armed an identical alarm — each its own polling
+        loop, and a list where ✕ visibly 'didn't work' because killing one
+        left its twins."""
+        want = (target.strip().lower(), frozenset(camera_ids),
+                after_min, before_min, ring)
+        for a in self._alarms.values():
+            if a.active and (a.target, frozenset(a.camera_ids),
+                             a.after_min, a.before_min, a.ring) == want:
+                return a
+        return None
+
     def create(self, *, name: str, target: str, camera_ids: list[str],
                after_min: int | None = None, before_min: int | None = None,
                emergency_contact: str | None = None,
@@ -1472,6 +1518,16 @@ class AlarmManager:
         if t:
             t.cancel()
         return True
+
+    def remove(self, alarm_id: int) -> bool:
+        """Stop AND forget the alarm. What the UI's ✕ and a spoken
+        'stop alarm N' mean: the alarm is gone from the list, not parked
+        as an inactive row that lingers until restart."""
+        ok = self.stop(alarm_id)
+        self._alarms.pop(alarm_id, None)
+        if alarm_id in self._order:
+            self._order.remove(alarm_id)
+        return ok
 
     def acknowledge(self, alarm_id: int | None = None) -> int:
         """Silence one alarm (or all when id is None). Returns how many."""
@@ -2437,6 +2493,11 @@ def load_config(path: str | Path) -> AppConfig:
         nats_inference_url=raw.get("nats_inference_url"),
         nats_inference_token=raw.get("nats_inference_token"),
         footage_index_path=raw.get("footage_index_path"),
+        detector_extra_labels=[
+            str(s).strip().lower()
+            for s in (raw.get("detector_extra_labels") or [])
+            if str(s).strip()
+        ],
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
         opennvr_api_url=_opennvr_api_url,
@@ -2649,8 +2710,9 @@ class CameraAgentRuntime:
             else:
                 logger.info(
                     "camera-agent: footage_index_path set (%s) but the index "
-                    "isn't readable yet; search_footage will report it's "
-                    "unavailable until the footage-search indexer has run",
+                    "isn't readable yet — search_footage lights up "
+                    "automatically once the footage-search indexer has "
+                    "created it (the reader re-tries on every call)",
                     cfg.footage_index_path,
                 )
 
@@ -2776,6 +2838,12 @@ class CameraAgentRuntime:
         # handlers degrade gracefully if the registry is momentarily down.
         if not self.skill_requirement_met("apps"):
             excluded.update(SKILL_TOOLS["apps"])
+        # Same principle for footage: with no footage_index_path configured
+        # there is nothing the tool could ever read, so the LLM shouldn't
+        # see it. When the path IS set, the tool stays advertised and
+        # degrades cleanly until the indexer has built the file.
+        if not self.skill_requirement_met("footage"):
+            excluded.update(SKILL_TOOLS["footage"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -2806,6 +2874,75 @@ class CameraAgentRuntime:
 
     _RING_BUILTIN_DEFAULTS = {"fire": "siren", "smoke": "siren",
                               "flame": "siren", "gas": "siren"}
+
+    # ── Alarm presets ─────────────────────────────────────────────
+    # Curated one-click alarms for the demo's Alarms card. Availability is
+    # HONEST: a preset is offered only when the detection path that alarm
+    # polling actually uses (the ``default`` adapter, COCO-80 labels unless
+    # ``detector_extra_labels`` widens it) can see the target. The safety
+    # presets (fire/smoke/gas) are therefore GREYED OUT on a stock stack —
+    # a Fire alarm that could never ring is worse than none — and the
+    # payload says exactly what to run to light them up.
+    _ALARM_PRESETS: list[dict[str, Any]] = [
+        {"id": "fire", "name": "Fire", "target": "fire",
+         "ring": "siren", "safety": True},
+        {"id": "smoke", "name": "Smoke", "target": "smoke",
+         "ring": "siren", "safety": True},
+        {"id": "gas", "name": "Gas leak", "target": "gas",
+         "ring": "siren", "safety": True},
+        {"id": "after-hours", "name": "After-hours person", "target": "person",
+         "ring": "siren", "after": "18:00", "safety": False},
+        {"id": "person", "name": "Person", "target": "person",
+         "ring": "chime", "safety": False},
+        {"id": "vehicle", "name": "Car", "target": "car",
+         "ring": "chime", "safety": False},
+        {"id": "truck", "name": "Truck", "target": "truck",
+         "ring": "chime", "safety": False},
+        {"id": "dog", "name": "Dog", "target": "dog",
+         "ring": "chime", "safety": False},
+    ]
+
+    def _detectable_labels(self) -> set[str]:
+        """What the alarm-polling detector can actually see: the standard
+        YOLOv8/COCO-80 vocabulary plus any ``detector_extra_labels`` the
+        operator declared for a custom detector."""
+        return set(_COCO80_LABELS) | set(
+            getattr(self.cfg, "detector_extra_labels", []) or [])
+
+    def alarm_presets(self) -> list[dict[str, Any]]:
+        """The Alarms card's preset list, with honest availability.
+
+        A preset is ``available`` when an object-detection adapter is live
+        (per the KAI-C capabilities view; unknown = assume live, the same
+        advisory fallback the skills panel uses) AND its target is in the
+        detectable label set. Unavailable presets carry a ``requires``
+        sentence naming exactly what to run/register."""
+        labels = self._detectable_labels()
+        live_tasks = self.kaic_capabilities.tasks_advertised
+        det_live = live_tasks is None or bool(
+            {"object_detection", "detect_objects", "object-detection"} & live_tasks)
+        out: list[dict[str, Any]] = []
+        for p in self._ALARM_PRESETS:
+            entry = dict(p)
+            if not det_live:
+                entry["available"] = False
+                entry["requires"] = (
+                    "Needs an object-detection adapter registered in KAI-C — "
+                    "the standard stack's YOLOv8 adapter provides it."
+                )
+            elif p["target"] not in labels:
+                entry["available"] = False
+                entry["requires"] = (
+                    f"The standard YOLOv8 detector can't see {p['target']!r}. "
+                    "Register a detection adapter trained for it (AI Adapters "
+                    "page), then list its label under 'detector_extra_labels' "
+                    "in the agent config to enable this preset."
+                )
+            else:
+                entry["available"] = True
+                entry["requires"] = None
+            out.append(entry)
+        return out
 
     def ring_defaults(self) -> dict[str, str]:
         """Target→annunciation defaults: built-ins overlaid with the
@@ -2869,8 +3006,12 @@ class CameraAgentRuntime:
         if req == "events":
             return bool(self.cfg.nats_inference_url)
         if req == "footage":
-            return bool(getattr(self, "footage_index", None)
-                        and self.footage_index.available)
+            # Configuration presence is the gate (same principle as the app
+            # door): the reader re-tries opening on every call, so an index
+            # the footage-search container creates AFTER the agent booted
+            # lights the tool up without an agent restart. When the index
+            # isn't readable yet the tool itself says so, cleanly.
+            return getattr(self, "footage_index", None) is not None
         if req == "apps":
             # The app door is wired iff the OpenNVR server base URL is set —
             # then the AppRegistryClient exists. Configuration presence is the
@@ -3137,13 +3278,26 @@ class CameraAgentRuntime:
             # Site-configurable default (built-ins: fire-grade → siren);
             # everything unmapped is a doorbell-style chime.
             ring = self.ring_defaults().get(target, "chime")
+        existing = self.alarms.find_duplicate(
+            target=target, camera_ids=cams,
+            after_min=after_min, before_min=before_min, ring=ring,
+        )
+        if existing is not None:
+            return (f"Alarm #{existing.id} '{existing.name}' already covers "
+                    f"that — same target, cameras and window. It stays armed; "
+                    f"nothing new was added.")
         alarm = self.alarms.create(
             name=name, target=target, camera_ids=cams,
             after_min=after_min, before_min=before_min, emergency_contact=contact,
             ring=ring,
         )
         self.persist()
-        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        # "all cameras" reads wrong on a single-camera install (the one
+        # camera IS the fleet, but the operator armed it on THAT camera
+        # and expects to hear its name back).
+        _fleet = {c.camera_id for c in self.cfg.cameras}
+        where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
+                 else ", ".join(cams))
         window = alarm.window_label()
         when = "" if window == "any time" else f" ({window})"
         extra = f" If it fires I'll flag the emergency contact ({contact})." if contact else ""
@@ -3163,9 +3317,10 @@ class CameraAgentRuntime:
         if action == "silence":
             return ("Silenced." if self.alarms.acknowledge(aid)
                     else f"Alarm #{aid} isn't currently ringing.")
-        ok = self.alarms.stop(aid)
+        ok = self.alarms.remove(aid)
         self.persist()
-        return (f"Disarmed alarm #{aid}." if ok else f"I don't have an alarm #{aid}.")
+        return (f"Disarmed and removed alarm #{aid}." if ok
+                else f"I don't have an alarm #{aid}.")
 
     async def _handle_create_report(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Report"
@@ -3351,7 +3506,12 @@ class CameraAgentRuntime:
             return (f"ERROR: I couldn't set that watch up — this build "
                     f"doesn't include the '{rule}' rule library.")
         self.persist()
-        where = "all cameras" if set(cams) == {c.camera_id for c in self.cfg.cameras} else ", ".join(cams)
+        # "all cameras" reads wrong on a single-camera install (the one
+        # camera IS the fleet, but the operator armed it on THAT camera
+        # and expects to hear its name back).
+        _fleet = {c.camera_id for c in self.cfg.cameras}
+        where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
+                 else ", ".join(cams))
         if kind == "notify":
             return (f"Done — watch #{mon.id} is live. I'll let you know whenever "
                     f"I see a {target} on {where}.")
@@ -4615,6 +4775,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                     a["triggered"] and a["active"] for a in alarms) else None)),
         }
 
+    @app.get("/alarm-presets")
+    async def _alarm_presets() -> dict[str, Any]:
+        """Curated one-click alarms with HONEST availability: presets whose
+        target the live detection path can't see come back with
+        ``available: false`` and a ``requires`` sentence naming what to
+        run — the UI greys them out instead of arming an alarm that could
+        never ring. Read-only, viewer tier."""
+        return {"presets": runtime.alarm_presets()}
+
     @app.post("/alarms")
     async def _create_alarm(request: Request) -> JSONResponse:
         """Arm an alarm (UI presets + 'add alarm' use this)."""
@@ -4640,7 +4809,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/alarms/{alarm_id}")
     async def _delete_alarm(alarm_id: int) -> JSONResponse:
-        ok = runtime.alarms.stop(alarm_id)
+        """The UI's ✕: stop AND forget (see AlarmManager.remove)."""
+        ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
         return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
 

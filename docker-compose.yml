@@ -323,6 +323,9 @@ services:
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
+      # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
+      # cameras whose assignments are all detection-free. Empty = off.
+      - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}
       - OMP_NUM_THREADS=${DETECT_CV_THREADS:-2}
       # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
       # to run the gated model on enforce escalations, governed + audited by KAI-C.
@@ -387,6 +390,11 @@ services:
       - MEDIAMTX_HLS_URL=http://mediamtx:8888
       - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
+      # Tier-0 tap selection (auto | sub | main) + the hardware-decode
+      # signal 'auto' keys off — same DETECT_HWACCEL the detect-pipeline
+      # container gets, so both sides agree on what the hardware can do.
+      - INFERENCE_TAP_STREAM=${INFERENCE_TAP_STREAM:-auto}
+      - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
       - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       # Browser-facing URLs go through nginx (TLS, any LAN device).

@@ -220,30 +220,6 @@ export function AIModelsBYOM() {
     }
   }
 
-  // Start inference for a model (backend manages it)
-  async function startInference(model: AIModel) {
-    if (!model.assigned_camera_id) {
-      setError('Please assign a camera to this model first')
-      return
-    }
-
-    setInferenceLoading(prev => new Set(prev).add(model.id))
-    
-    try {
-      const res = await apiService.startModelInference(model.id)
-      setNotice(res.data.message)
-      await loadRunningInference() // Refresh status
-    } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to start inference')
-    } finally {
-      setInferenceLoading(prev => {
-        const next = new Set(prev)
-        next.delete(model.id)
-        return next
-      })
-    }
-  }
-
   // Stop inference for a model (backend manages it)
   async function stopInference(modelId: number) {
     setInferenceLoading(prev => new Set(prev).add(modelId))
@@ -260,15 +236,6 @@ export function AIModelsBYOM() {
         next.delete(modelId)
         return next
       })
-    }
-  }
-
-  // Toggle inference on/off
-  async function toggleInference(model: AIModel) {
-    if (runningModels.has(model.id)) {
-      await stopInference(model.id)
-    } else {
-      await startInference(model)
     }
   }
 
@@ -964,35 +931,14 @@ export function AIModelsBYOM() {
                     </td>
                     <td className="p-3 text-center">
                       {model.source_type === 'live' ? (
-                        // Live camera inference control
-                        model.assigned_camera_id && model.enabled ? (
-                          <>
-                            <button
-                              onClick={() => toggleInference(model)}
-                              disabled={inferenceLoading.has(model.id)}
-                              className={`px-3 py-1 rounded text-xs font-medium disabled:opacity-50 ${
-                                runningModels.has(model.id)
-                                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                                  : 'bg-green-600 hover:bg-green-700 text-white'
-                              }`}
-                            >
-                              {inferenceLoading.has(model.id) ? (
-                                '⏳ Loading...'
-                              ) : runningModels.has(model.id) ? (
-                                '⏹ Stop'
-                              ) : (
-                                '▶ Start'
-                              )}
-                            </button>
-                            {runningModels.has(model.id) && !inferenceLoading.has(model.id) && (
-                              <div className="text-[10px] text-green-400 mt-1">● Running</div>
-                            )}
-                          </>
-                        ) : (
-                          <span className="text-xs text-neutral-500">
-                            {!model.enabled ? 'Disabled' : 'No camera'}
-                          </span>
-                        )
+                        // Live polling is retired: live detection runs
+                        // continuously through Tier-0 and reaches apps over
+                        // the event bus. Point the capability at cameras via
+                        // Cameras → edit → Assignments instead of a per-model
+                        // Start button (docs/CAMERA_ASSIGNMENTS.md).
+                        <span className="text-xs text-neutral-500" title="Live detection runs continuously through the built-in Tier-0 detector. Give the camera a job under Cameras → edit → Assignments.">
+                          via Tier-0 + assignments
+                        </span>
                       ) : (
                         // Recording inference - shows running status like live
                         model.recording_path && model.enabled ? (
