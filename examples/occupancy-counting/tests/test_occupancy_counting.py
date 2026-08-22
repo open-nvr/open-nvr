@@ -416,3 +416,94 @@ def test_missing_ceiling_with_discovered_cameras_names_the_real_cause(
     with pytest.raises(ValueError) as excinfo:
         oc.load_config(str(p))
     assert "camera entry 0" not in str(excinfo.value)
+
+
+# ── Per-camera assignment scoping (slice 2) ────────────────────────
+#
+# "Cameras 2-3 count people" on the settings page must scope this app to
+# exactly those cameras — additively: nothing assigned anywhere means
+# watch everything, exactly as before assignments existed.
+
+
+def _discovered(*specs):
+    out = []
+    for spec in specs:
+        cam_id, *skills = spec.split(":")
+        cam = {"camera_id": cam_id}
+        if skills and skills[0]:
+            cam["assignments"] = [{"skill": s} for s in skills[0].split("+")]
+        out.append(cam)
+    return out
+
+
+def test_boot_scopes_to_assigned_cameras(tmp_path, monkeypatch):
+    """cam1 is for LPR, cams 2-3 for occupancy → watch exactly 2 and 3."""
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: _discovered(
+        "cam1:license_plate_recognition",
+        "cam2:occupancy_counting",
+        "cam3:occupancy_counting+object_detection",
+        "cam4:",
+    ))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert sorted(cfg.cameras) == ["cam2", "cam3"]
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    # The unassigned camera's events are "not my camera", not counted.
+    assert counter.handle_event(_tier0_event(6, camera_id="cam4")) == []
+    fired = counter.handle_event(_tier0_event(6, camera_id="cam2"))
+    assert len(fired) == 1
+
+
+def test_no_assignments_anywhere_means_watch_everything(tmp_path, monkeypatch):
+    """Back-compat: assignments that exist for OTHER skills only do not
+    restrict this app either way — restriction starts with OUR skill."""
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: _discovered(
+        "cam1:", "cam2:",
+    ))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+
+
+def test_refresh_follows_assignment_changes(tmp_path, monkeypatch):
+    """Assigning / un-assigning on the settings page takes effect within
+    one refresh — including un-assigning the LAST camera, which lifts the
+    restriction entirely (back to watch-everything, by the rule)."""
+    live = _discovered("cam1:", "cam2:")
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [dict(c) for c in live])
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+
+    # Operator assigns occupancy to cam2 only → scope narrows.
+    live[:] = _discovered("cam1:", "cam2:occupancy_counting")
+    added, removed = counter.refresh_cameras()
+    assert removed == ["cam1"] and added == []
+    assert sorted(cfg.cameras) == ["cam2"]
+
+    # Operator removes the assignment again → restriction lifts.
+    live[:] = _discovered("cam1:", "cam2:")
+    added, removed = counter.refresh_cameras()
+    assert added == ["cam1"] and removed == []
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+
+
+def test_explicit_camera_list_ignores_assignments(tmp_path, monkeypatch):
+    """A pinned YAML camera list is the operator's word — assignments
+    never second-guess it (and no discovery call is made at all)."""
+    called = {"n": 0}
+
+    def _count(*a, **k):
+        called["n"] += 1
+        return _discovered("cam9:occupancy_counting")
+
+    monkeypatch.setattr(oc, "discover_cameras", _count)
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    assert list(cfg.cameras) == ["cam1"] and called["n"] == 0

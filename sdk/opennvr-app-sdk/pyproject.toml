@@ -3,7 +3,7 @@
 
 [project]
 name = "opennvr-app-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared SDK for OpenNVR monitoring apps: §11.5 alert dispatch, zone geometry, keyed TTL state, app manifests, and the Detector / FrameApp base loops."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

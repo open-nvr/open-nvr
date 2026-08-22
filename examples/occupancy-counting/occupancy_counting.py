@@ -85,6 +85,7 @@ from opennvr_app_sdk import (
 from opennvr_app_sdk.cameras import (
     UNIT_FRAME,
     discover_cameras,
+    filter_cameras_for_skill,
     full_frame_polygon,
 )
 from opennvr_app_sdk.config import load_yaml
@@ -96,6 +97,33 @@ logger = logging.getLogger("occupancy-counting")
 # Cameras get added and removed while the app runs; a set captured once
 # at boot would silently never watch camera 5 added tomorrow.
 DISCOVERY_REFRESH_S: int = 300
+
+# The capability name this app answers to in per-camera assignments
+# ("camera 2 and 3 do occupancy_counting" on the camera settings page).
+# When at least one camera is assigned this skill, auto-derivation scopes
+# to exactly those cameras; when none is, nothing is restricted and the
+# app watches every camera, exactly as before assignments existed.
+SKILL: str = "occupancy_counting"
+
+
+def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
+    """Narrow a discover_cameras() payload to this app's assigned cameras.
+
+    No camera assigned SKILL -> no restriction declared -> unchanged.
+    Assignments are additive intent: they point THIS app's attention;
+    streaming/recording/Tier-0 on the other cameras are unaffected.
+    """
+    assigned = filter_cameras_for_skill(discovered, SKILL)
+    if assigned is None:
+        return discovered
+    keep = set(assigned)
+    scoped = [c for c in discovered if str(c.get("camera_id")) in keep]
+    logger.info(
+        "per-camera assignment active: %d of %d camera(s) assigned %r (%s)",
+        len(scoped), len(discovered), SKILL,
+        ", ".join(sorted(keep)) or "-",
+    )
+    return scoped
 
 
 MANIFEST = AppManifest(
@@ -295,10 +323,10 @@ def load_config(path: str) -> AppConfig:
         # space, which is exactly correct at any real resolution (see
         # opennvr_app_sdk.cameras). Draw a real zone in the catalog UI —
         # or list cameras explicitly here — to override.
-        discovered = discover_cameras(
+        discovered = _scope_to_assignment(discover_cameras(
             str(raw.get("opennvr_url") or ""),
             api_key=raw.get("internal_api_key"),
-        )
+        ))
         cameras_raw = [
             {
                 "camera_id": c["camera_id"],
@@ -521,6 +549,10 @@ class OccupancyCounter(Detector):
                 self._config.opennvr_url_for_discovery,
                 api_key=self._config.internal_api_key,
             )
+        # Assignment scoping runs on every refresh, so assigning or
+        # un-assigning a camera on the settings page takes effect within
+        # one refresh interval — no app restart.
+        discovered = _scope_to_assignment(discovered)
         ids = {c["camera_id"] for c in discovered}
         if not ids:
             # Treat "core answered with nothing" as no news rather than
