@@ -301,6 +301,11 @@ services:
       # loop-filter skip (small extra CPU cut, tiny pixel drift; CPU decode only).
       - DETECT_DECODE_THREADS=${DETECT_DECODE_THREADS:-2}
       - DETECT_DECODE_FAST=${DETECT_DECODE_FAST:-false}
+      # Adaptive decode: keyframes-only while a camera is quiet, full decode
+      # from the first motion box until DETECT_DECODE_IDLE_AFTER quiet seconds.
+      # Off by default (promotion can cost up to one GOP of latency).
+      - DETECT_DECODE_IDLE=${DETECT_DECODE_IDLE:-}
+      - DETECT_DECODE_IDLE_AFTER=${DETECT_DECODE_IDLE_AFTER:-60}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).

@@ -240,3 +240,14 @@ def test_decode_threads_and_fast_from_env():
     cfg = config_from_env({"DETECT_DECODE_THREADS": "0", "DETECT_DECODE_FAST": "true"})
     assert cfg.decode_threads == 0 and cfg.fast_decode is True
     assert config_from_env({"DETECT_DECODE_THREADS": "lots"}).decode_threads == 2
+
+
+def test_decode_idle_from_env():
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_idle == ""                       # off by default
+    cfg = config_from_env({"DETECT_DECODE_IDLE": "nokey",
+                           "DETECT_DECODE_IDLE_AFTER": "30"})
+    assert cfg.decode_idle == "nokey" and cfg.decode_idle_after == 30.0
+    assert config_from_env({"DETECT_DECODE_IDLE": "off"}).decode_idle == ""
+    assert config_from_env({"DETECT_DECODE_IDLE": "keyframes"}).decode_idle == ""

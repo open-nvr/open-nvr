@@ -26,6 +26,8 @@ Env:
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_DECODE_FAST        true = skip h264 loop filter (CPU decode only; opt-in)
+  DETECT_DECODE_IDLE        skip mode while quiet, e.g. nokey ("" = off) — adaptive
+  DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
@@ -65,6 +67,12 @@ class ServiceConfig:
     # opt-in loop-filter skip — see ffmpeg_presets.build_decode_command.
     decode_threads: int
     fast_decode: bool
+    # Adaptive decode (Blue Iris-style "limit decoding unless required"):
+    # DETECT_DECODE_IDLE names the skip mode used while a camera is quiet
+    # ("" = off). Promotion back to full decode happens on the first motion
+    # box / track; demotion after DETECT_DECODE_IDLE_AFTER quiet seconds.
+    decode_idle: str
+    decode_idle_after: float
     model_size: int
     model_id: str            # detector identity for benchmarking labels (see below)
     refresh_seconds: float
@@ -143,6 +151,8 @@ def config_from_env(env: dict) -> ServiceConfig:
         decode_skip=_decode_skip_from_env(env),
         decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
+        decode_idle=_decode_idle_from_env(env),
+        decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
@@ -156,6 +166,24 @@ def config_from_env(env: dict) -> ServiceConfig:
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
+
+
+def _decode_idle_from_env(env: dict) -> str:
+    """DETECT_DECODE_IDLE: a skip mode used while the camera is quiet, or
+    empty/none/off = adaptive decode disabled. Invalid values warn and
+    disable rather than killing workers at spawn time."""
+    from .ffmpeg_presets import DECODE_SKIP_MODES
+
+    value = str(env.get("DETECT_DECODE_IDLE", "")).strip().lower()
+    if value in ("", "none", "off", "false"):
+        return ""
+    if value not in DECODE_SKIP_MODES:
+        log.warning(
+            "DETECT_DECODE_IDLE=%r is not one of %s; adaptive decode disabled",
+            env.get("DETECT_DECODE_IDLE"), list(DECODE_SKIP_MODES),
+        )
+        return ""
+    return value
 
 
 def _env_int(env: dict, name: str, default: int) -> int:
@@ -303,6 +331,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         decode_skip=cfg.decode_skip,
         decode_threads=cfg.decode_threads,
         fast_decode=cfg.fast_decode,
+        decode_idle=cfg.decode_idle,
+        decode_idle_after=cfg.decode_idle_after,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
         dispatcher=dispatcher,

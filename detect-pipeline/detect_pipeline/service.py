@@ -142,6 +142,71 @@ class Worker(Protocol):
     def is_alive(self) -> bool: ...
 
 
+# ── adaptive decode (Blue Iris-style "limit decoding unless required") ──
+
+class AdaptiveDecode:
+    """Per-camera decode-depth state machine.
+
+    IDLE decodes with ``idle_skip`` (normally ``nokey`` — keyframes only, ~one
+    frame per GOP) so a quiet scene costs almost nothing while motion is still
+    watched at the keyframe rate. The FIRST motion box, live track, or
+    calibration phase promotes to ACTIVE (the configured normal decode) by
+    restarting the ffmpeg source; after ``idle_after`` seconds with no
+    activity it demotes back. The restart is a reconnect to the LOCAL
+    MediaMTX republish — sub-second — but promotion still costs one GOP of
+    latency in the worst case (the event lands just after a keyframe), which
+    is why this is opt-in rather than default.
+
+    Pure logic — the worker owns the actual source restarts — so it unit-tests
+    with a fake clock and hand-built results.
+    """
+
+    ACTIVE = "active"
+    IDLE = "idle"
+
+    def __init__(
+        self,
+        idle_skip: str,
+        active_skip: str,
+        idle_after: float = 60.0,
+        *,
+        _clock=time.monotonic,
+    ) -> None:
+        self.idle_skip = idle_skip
+        self.active_skip = active_skip
+        self.idle_after = max(1.0, float(idle_after))
+        self._clock = _clock
+        # Start ACTIVE: prove the full chain at boot and catch whatever is
+        # already in front of the camera before the first quiet period.
+        self.mode = self.ACTIVE
+        self._last_activity = _clock()
+
+    @property
+    def skip(self) -> str:
+        return self.idle_skip if self.mode == self.IDLE else self.active_skip
+
+    def observe(self, result, now: float | None = None) -> bool:
+        """Feed one FrameResult; returns True when the mode flipped (the
+        caller must then rebuild its source with the new ``skip``)."""
+        if now is None:
+            now = self._clock()
+        active = bool(
+            getattr(result, "tracks", None)
+            or getattr(result, "motion_boxes", None)
+            or getattr(result, "calibrating", False)
+        )
+        if active:
+            self._last_activity = now
+            if self.mode == self.IDLE:
+                self.mode = self.ACTIVE
+                return True
+            return False
+        if self.mode == self.ACTIVE and now - self._last_activity >= self.idle_after:
+            self.mode = self.IDLE
+            return True
+        return False
+
+
 # ── the real per-camera worker ──────────────────────────────────────
 
 class CameraWorker:
@@ -160,6 +225,8 @@ class CameraWorker:
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
+        decode_idle: str = "",                   # idle skip mode ("" = adaptive off)
+        decode_idle_after: float = 60.0,         # quiet seconds before idling
         frame_source=None,                       # injectable for tests
         gate: Gate | None = None,                # per-camera Tier-1 gate (PR B)
         gate_sink=None,                          # publishes gate decisions (audit)
@@ -177,6 +244,8 @@ class CameraWorker:
         self.decode_skip = decode_skip
         self.decode_threads = decode_threads
         self.fast_decode = fast_decode
+        self.decode_idle = decode_idle
+        self.decode_idle_after = decode_idle_after
         self._frame_source = frame_source
         self.gate = gate
         self.gate_sink = gate_sink
@@ -200,7 +269,7 @@ class CameraWorker:
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def _make_source(self):
+    def _make_source(self, decode_skip: str | None = None):
         if self._frame_source is not None:
             return self._frame_source, self._frame_source.width, self._frame_source.height
         w, h = self.spec.width, self.spec.height
@@ -212,7 +281,7 @@ class CameraWorker:
         src = FrameSource(
             self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
             hwaccel=HwAccel(self.spec.hwaccel), device=self.device,
-            decode_skip=self.decode_skip,
+            decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
         )
@@ -261,6 +330,18 @@ class CameraWorker:
                 self.spec.camera_id, ", ".join(sorted(self.spec.labels)) or "-",
             )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
+        adaptive: AdaptiveDecode | None = None
+        if self.decode_idle and self._frame_source is None:
+            adaptive = AdaptiveDecode(
+                self.decode_idle, self.decode_skip, self.decode_idle_after
+            )
+            _metrics.gauge(
+                "tier0_decode_idle", 0.0, {"camera": self.spec.camera_id}
+            )
+            log.info(
+                "tier0 %s: adaptive decode on (idle=%s after %.0fs quiet)",
+                self.spec.camera_id, self.decode_idle, self.decode_idle_after,
+            )
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
         prev_seq: int | None = None
         win_t0 = time.monotonic()
@@ -319,6 +400,21 @@ class CameraWorker:
                     log.debug("tier0 %s: sink error", self.spec.camera_id, exc_info=True)
                 if self.gate is not None:
                     self._run_gate(result, frame)
+                # Adaptive decode: promote on the first sign of activity,
+                # demote after the quiet period. The flip terminates the
+                # current ffmpeg; the source's restart loop respawns it with
+                # the new -skip_frame immediately (no backoff).
+                if adaptive is not None and adaptive.observe(result):
+                    idle = adaptive.mode == AdaptiveDecode.IDLE
+                    _metrics.gauge(
+                        "tier0_decode_idle", 1.0 if idle else 0.0,
+                        {"camera": self.spec.camera_id},
+                    )
+                    log.info(
+                        "tier0 %s: decode %s (skip=%s)",
+                        self.spec.camera_id, adaptive.mode, adaptive.skip,
+                    )
+                    src.set_decode_skip(adaptive.skip)
         except Exception:
             log.exception("tier0 %s: worker loop crashed", self.spec.camera_id)
         finally:
@@ -371,6 +467,8 @@ class WorkerManager:
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                          # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,                        # skip h264 loop filter (opt-in)
+        decode_idle: str = "",                            # idle skip mode ("" = adaptive off)
+        decode_idle_after: float = 60.0,                  # quiet seconds before idling
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
         gate_sink=None,
         dispatcher=None,                                  # Tier-1 dispatch (#10), shared
@@ -390,6 +488,8 @@ class WorkerManager:
         self._decode_skip = decode_skip
         self._decode_threads = decode_threads
         self._fast_decode = fast_decode
+        self._decode_idle = decode_idle
+        self._decode_idle_after = decode_idle_after
         # The gate is stateful per camera, so each worker gets its own instance.
         self._gate_factory = gate_factory
         self._gate_sink = gate_sink
@@ -414,6 +514,8 @@ class WorkerManager:
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,
             fast_decode=self._fast_decode,
+            decode_idle=self._decode_idle,
+            decode_idle_after=self._decode_idle_after,
             gate=self._gate_factory() if self._gate_factory else None,
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,
