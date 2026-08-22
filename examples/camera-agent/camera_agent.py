@@ -1377,16 +1377,34 @@ def _stop_monitor_tool() -> dict[str, Any]:
 
 
 def _parse_hhmm(value: Any) -> int | None:
-    """Parse 'HH:MM' (24h) to minutes-since-midnight, else None."""
+    """Parse a time of day to minutes-since-midnight, else None.
+
+    Accepts 24h 'HH:MM' plus the forms people actually SPEAK — '12:10 pm',
+    '7pm', '07:00 PM'. am/pm follows clock convention: 12am -> 00:xx,
+    12pm -> 12:xx. Silent tolerance was a real bug: an unparseable
+    'after 12:10 pm' quietly became NO window (all day) — the opposite of
+    what was asked."""
     if not value:
         return None
+    raw = str(value).strip().lower()
+    meridian = None
+    if raw.endswith(("am", "pm")):
+        meridian = raw[-2:]
+        raw = raw[:-2].strip().rstrip(".")
     try:
-        h, m = str(value).strip().split(":")
-        h, m = int(h), int(m)
-        if 0 <= h < 24 and 0 <= m < 60:
-            return h * 60 + m
+        if ":" in raw:
+            h_s, m_s = raw.split(":")
+            h, m = int(h_s), int(m_s)
+        else:
+            h, m = int(raw), 0          # '7pm' -> 7, 0
     except (ValueError, AttributeError):
-        pass
+        return None
+    if meridian == "am" and h == 12:
+        h = 0
+    elif meridian == "pm" and 1 <= h <= 11:
+        h += 12
+    if 0 <= h < 24 and 0 <= m < 60:
+        return h * 60 + m
     return None
 
 
@@ -1693,8 +1711,8 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "target": {"type": "string", "description": "What triggers it, e.g. 'fire', 'person', 'smoke'."},
                     "camera_id": {"type": "string", "enum": camera_enum_all, "description": "A camera id, or 'all'."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
-                    "after": {"type": "string", "description": "Only active after this 24h time 'HH:MM' (e.g. '18:00' for after 6pm)."},
-                    "before": {"type": "string", "description": "Only active before this 24h time 'HH:MM'."},
+                    "after": {"type": "string", "description": "Only active after this time of day, in the SITE's local time. 24h 'HH:MM' preferred (e.g. '18:00' for after 6pm; '12:10' for after 12:10 pm); '12:10 pm' style also accepted. The window repeats daily."},
+                    "before": {"type": "string", "description": "Only active before this time of day (site-local; 24h 'HH:MM' preferred). With 'after' later than 'before' the window wraps midnight."},
                     "ring": {"type": "string",
                              "enum": ["siren", "pulse", "chime", "silent"],
                              "description": "How it announces. 'siren' rings until "
@@ -1703,7 +1721,11 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                                             "minute then stands down — urgent, not "
                                             "evacuation. 'chime' dings once — visitors, "
                                             "deliveries, vehicles. 'silent' = notifications "
-                                            "only. Omit to pick by the site's defaults."},
+                                            "only. If the user explicitly asks it to RING, "
+                                            "sound loudly, or wake them, choose 'siren' (or "
+                                            "'pulse') — do not let a quiet default swallow "
+                                            "an explicit request to be alerted out loud. "
+                                            "Omit only when the user expressed no loudness."},
                 },
                 "required": ["name", "target", "camera_id"],
             },

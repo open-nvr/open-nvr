@@ -393,6 +393,13 @@ services:
       # LAN edge (https) — bind host follows nginx; auth: OpenNVR login +
       # device firewall (auth_mode: opennvr in config.docker.yml).
       - "${NGINX_BIND_HOST:-0.0.0.0}:9100:9100"
+    environment:
+      # Alarm / watch / report time windows are times of DAY ("after
+      # 12:10 pm") compared against THIS container's clock. Without TZ the
+      # container runs UTC and every spoken window fires hours off — an
+      # "after 12:10 pm" alarm on an IST site stayed dormant until
+      # 12:10 UTC (= 5:40 pm local). Must match the mediamtx/core TZ.
+      - TZ=${TZ:-UTC}
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
@@ -482,6 +489,9 @@ services:
     ports:
       # LAN edge (https) — see the voice variant's comment.
       - "${NGINX_BIND_HOST:-0.0.0.0}:9100:9100"
+    environment:
+      # Same rule as the voice agent: time windows tick in the site's zone.
+      - TZ=${TZ:-UTC}
     volumes:
       - opennvr_camera_agent_config_chat:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro

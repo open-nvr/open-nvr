@@ -417,3 +417,58 @@ def test_single_camera_message_names_the_camera():
     msg = asyncio.run(rt._handle_create_alarm(
         {"name": "Porch", "target": "person", "camera_id": "cam1"}))
     assert "cam1" in msg and "all cameras" not in msg
+# ── Spoken time forms + the silent-window bug ──────────────────────
+#
+# "Ring an alarm when you see a person after 12:10 pm" — three ways that
+# sentence used to fail quietly: the container clock ran UTC (fixed in
+# compose: TZ now follows the site), '12:10 pm' didn't parse (silently
+# became NO window — all day, the opposite of what was asked), and the
+# quiet 'chime' default could swallow an explicit request to RING (tool
+# schema now steers the LLM to siren/pulse for explicit loudness).
+
+
+def test_parse_hhmm_accepts_spoken_am_pm_forms():
+    assert _parse_hhmm("12:10 pm") == 12 * 60 + 10   # noon-ten stays 12:10
+    assert _parse_hhmm("12:10 am") == 10             # midnight-ten -> 00:10
+    assert _parse_hhmm("7pm") == 19 * 60
+    assert _parse_hhmm("07:00 PM") == 19 * 60
+    assert _parse_hhmm("7 am") == 7 * 60
+    assert _parse_hhmm("11:59pm") == 23 * 60 + 59
+    # 24h forms unchanged; junk still None (never a phantom window).
+    assert _parse_hhmm("18:00") == 18 * 60
+    assert _parse_hhmm("25:00") is None
+    assert _parse_hhmm("noonish") is None
+
+
+def test_spoken_pm_window_gates_polling():
+    """An 'after 12:10 pm' alarm armed from speech must be OUT of window
+    at 11:00 and IN at 13:00 (site-local — the compose TZ fix makes the
+    container clock the site clock)."""
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm(
+        {"name": "Afternoon person", "target": "person",
+         "camera_id": "cam1", "after": "12:10 pm"}))
+    [a] = [x for x in rt.alarms._alarms.values()]
+    assert a.after_min == 12 * 60 + 10
+    import datetime
+
+    class _At:
+        def __init__(self, h, m): self._t = datetime.time(h, m)
+        def time(self): return self._t
+
+    real_dt = datetime.datetime
+    try:
+        class _FakeDT(datetime.datetime):
+            _now = None
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls._now
+
+        datetime.datetime = _FakeDT
+        _FakeDT._now = real_dt(2026, 8, 22, 11, 0)
+        assert rt.alarms._in_window(a) is False
+        _FakeDT._now = real_dt(2026, 8, 22, 13, 0)
+        assert rt.alarms._in_window(a) is True
+    finally:
+        datetime.datetime = real_dt
