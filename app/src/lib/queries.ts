@@ -20,7 +20,7 @@
 // these instead of calling apiService in a useEffect, so concurrent mounts
 // share one request and one cache entry.
 
-import { QueryClient, useQueries, useQuery } from '@tanstack/react-query'
+import { QueryClient, keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
 import { apiService } from './apiService'
 import { todayLocalKey } from './time'
 
@@ -39,18 +39,75 @@ export type CameraItem = {
   name: string
   ip_address: string
   is_active: boolean
+  /** Provisioning lifecycle ('provisioned' | 'active' | 'error' | ...), NOT liveness. */
   status?: string | null
+  mediamtx_provisioned?: boolean | null
+  /**
+   * Live connectivity from the backend's in-memory tracker.
+   * `null`/absent means UNKNOWN, not offline — the recorder restarted and has
+   * not re-seeded yet, or the camera is paused. Render it distinctly.
+   */
+  live_online?: boolean | null
+  /** Observed recording health: 'recording' | 'stalled' | 'never' | 'off'. */
+  recording_state?: string | null
+  last_recording_at?: string | null
 }
 
 export type CameraListResp = { cameras: CameraItem[]; total: number }
 
-export function useCameras(params: { limit?: number; active_only?: boolean } = { limit: 100, active_only: true }) {
+export type CameraListParams = {
+  skip?: number
+  limit?: number
+  active_only?: boolean
+  q?: string
+}
+
+/**
+ * The camera list, and the only place the UI learns a camera's live state.
+ *
+ * Kept fresh two ways. The events socket invalidates this key on every
+ * `camera_status` transition (see CameraStatusProvider), which covers
+ * connects and disconnects within a second or so. The interval below is the
+ * floor under that, and it is not optional:
+ *
+ * * `recording_state` is TIME-derived — a camera silently crosses the
+ *   watchdog's stall threshold with no event on the bus, so push alone can
+ *   never keep that badge honest;
+ * * a camera already streaming when the backend restarted seeds silently
+ *   (handle_signal only emits when the previous state was False), so no
+ *   transition is ever published for it.
+ */
+export function useCameras(
+  params: CameraListParams = { limit: 100, active_only: true },
+) {
   return useQuery({
     queryKey: ['cameras', params],
     queryFn: async () => {
       const { data } = await apiService.getCameras(params)
       return data as CameraListResp
     },
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    // Paginating or typing in the search box swaps the query key; without
+    // this the table would blank out and remount on every keystroke pause.
+    placeholderData: keepPreviousData,
+  })
+}
+
+/**
+ * Media-server reachability, shared so every caller resolves to one request.
+ * When this is down every camera's stream badge is meaningless, so the UI
+ * says so once rather than reporting each camera as individually broken.
+ */
+export function useMediaMtxHealth() {
+  return useQuery({
+    queryKey: ['mtx-health'],
+    queryFn: async () => {
+      const { data } = await apiService.mtxHealth()
+      return data as { status?: string }
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
   })
 }
 

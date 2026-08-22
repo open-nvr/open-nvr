@@ -632,11 +632,19 @@ class CameraResponse(CameraBase):
     # says nothing about whether footage is actually being written — use
     # recording_state for that.
     recording_enabled: bool | None = None
-    # Observed recording health, derived from the newest indexed segment.
-    # 'recording' | 'stalled' | 'never' | 'off'. None where an endpoint does
-    # not compute it, which callers must read as "unknown", not "off".
+    # Observed recording health, derived from the newest indexed segment and
+    # from live_online below: 'recording' | 'not_recording' | 'stalled' |
+    # 'never' | 'off'. 'not_recording' is a known-dead source, which the
+    # watchdog has not alarmed on yet; 'stalled' is one it has. None where an
+    # endpoint does not compute it, which callers must read as "unknown".
     recording_state: str | None = None
     last_recording_at: datetime | None = None
+    # Live connectivity from the in-memory tracker (CameraStatusService:
+    # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
+    # the backend restarted and the first reconcile pass has not landed yet,
+    # the camera is paused, or it has never been seen. Rendering unknown as
+    # offline would show the whole fleet as down after every restart.
+    live_online: bool | None = None
 
     class Config:
         from_attributes = True

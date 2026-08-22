@@ -16,11 +16,12 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
-import { useAuth } from '../auth/AuthContext'
-import { api } from '../lib/api'
+import { queryClient, useCameras, useMediaMtxHealth } from '../lib/queries'
+import { useCameraStatusConnected } from '../hooks/useCameraStatus'
+import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
 import { CameraOff, Pencil, Trash2, Unplug, Video } from 'lucide-react'
@@ -65,12 +66,16 @@ type Camera = {
   is_active: boolean
   deleted_at?: string | null
   mediamtx_provisioned?: boolean | null
+  // Live connectivity as tracked by the recorder (MediaMTX path ready AND
+  // bytes flowing). null/undefined means UNKNOWN — not offline. See
+  // streamState below for why that distinction has to survive to the badge.
+  live_online?: boolean | null
   // Configuration intent — always true for a provisioned camera and not
   // switchable, so it says nothing about whether footage is being written.
   recording_enabled?: boolean | null
   // Observed recording health, derived server-side from the newest indexed
   // segment. Absent (undefined) means the endpoint didn't compute it.
-  recording_state?: 'recording' | 'stalled' | 'never' | 'off' | null
+  recording_state?: 'recording' | 'not_recording' | 'stalled' | 'never' | 'off' | null
   last_recording_at?: string | null
   // ONVIF device metadata
   manufacturer?: string | null
@@ -102,21 +107,58 @@ type CameraForm = {
 
 export function Cameras() {
   const navigate = useNavigate()
-  const { token, loading: authLoading } = useAuth()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
   const { showError, showSuccess, showInfo } = useSnackbar()
-  const [loading, setLoading] = useState(false)
-  const [cameras, setCameras] = useState<Camera[]>([])
-  const [total, setTotal] = useState(0)
+  // A mutation (delete / bulk op) is in flight. Distinct from the list's own
+  // fetching state: the list now refreshes on its own in the background, and
+  // that must never disable the buttons.
+  const [mutating, setMutating] = useState(false)
   const [activeOnly, setActiveOnly] = useState(true)
   const [limit, setLimit] = useState(20)
   const [page, setPage] = useState(1)
   const skip = useMemo(() => (page - 1) * limit, [page, limit])
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [mediamtxAvailable, setMediamtxAvailable] = useState<boolean | null>(null)
-  const [streamStatuses, setStreamStatuses] = useState<Record<number, { ready: boolean; bytesReceived: number }>>({})
+  const liveUpdates = useCameraStatusConnected()
+
+  // One request per pause in typing, not one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 250)
+    return () => clearTimeout(t)
+  }, [query])
+
+  const camsQuery = useCameras({
+    skip,
+    limit,
+    active_only: activeOnly,
+    q: debouncedQuery || undefined,
+  })
+  const cameras = useMemo<Camera[]>(
+    () => (camsQuery.data?.cameras ?? []) as Camera[],
+    [camsQuery.data],
+  )
+  const total = camsQuery.data?.total ?? 0
+
+  const mtxQuery = useMediaMtxHealth()
+  // null while we genuinely don't know yet — the "Media Server is not running"
+  // banner must not flash during the first round trip.
+  const mediamtxAvailable = mtxQuery.isPending ? null : mtxQuery.data?.status === 'ok'
+
+  useEffect(() => {
+    if (camsQuery.isError) {
+      showError(extractApiError(camsQuery.error, 'Failed to load cameras'))
+    }
+  }, [camsQuery.isError, camsQuery.error, showError])
+
+  // A selection is scoped to what is currently listed, so changing the listing
+  // drops it. Deliberately keyed on the view parameters and not on the data:
+  // the list refetches itself every minute now, and wiping a half-made
+  // selection on a background refresh would be maddening.
+  useEffect(() => {
+    setSelected(new Set())
+  }, [skip, limit, activeOnly, debouncedQuery])
 
   // Bulk assign state
   const [showBulkAssign, setShowBulkAssign] = useState(false)
@@ -131,9 +173,8 @@ export function Cameras() {
   const [editing, setEditing] = useState<Camera | null>(null)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
-  // Dedicated to the edit form. Previously the Update button was bound to the
-  // shared `loading` flag, which the camera-list effect also sets — a refresh
-  // in flight left the button disabled and looking broken.
+  // Dedicated to the edit form, so a delete elsewhere on the page cannot
+  // disable the Update button and make it look broken.
   const [saving, setSaving] = useState(false)
   const [scanQr, setScanQr] = useState(false)
 
@@ -185,37 +226,30 @@ export function Cameras() {
     assignments: [],
   })
 
-  // Fetch streaming status for cameras
-  const fetchStreamStatuses = useCallback(async (cameraList: Camera[]) => {
-    const results: Record<number, { ready: boolean; bytesReceived: number }> = {}
-    await Promise.all(
-      cameraList.map(async (c) => {
-        try {
-          const { data } = await apiService.getCameraMediaMTXStatus(c.id)
-          const details = data?.active_path?.details
-          results[c.id] = {
-            ready: details?.ready === true,
-            bytesReceived: details?.bytesReceived || 0
-          }
-        } catch {
-          results[c.id] = { ready: false, bytesReceived: 0 }
-        }
-      })
-    )
-    setStreamStatuses(results)
-  }, [])
-
-  // The five stream states, unchanged from the hand-rolled badges this
-  // replaced — only the styling moved onto the shared Badge, whose colours
-  // come from the --badge-* tokens and so survive the light theme.
+  // Observed stream state. `live_online` is tracked by the recorder off
+  // MediaMTX's ready/not-ready hooks and arrives on the camera row itself —
+  // this used to cost one /mediamtx-status probe per camera per page load,
+  // three MediaMTX round trips each, and still went stale the moment a camera
+  // dropped because nothing refetched it.
   const streamState = (c: Camera): { variant: BadgeVariant; label: string; title?: string; icon?: boolean } => {
     if (mediamtxAvailable === false) {
       return { variant: 'warning', label: 'Disconnected', title: 'Media Server is not running', icon: true }
     }
-    const status = streamStatuses[c.id]
-    if (status?.ready && status?.bytesReceived > 0) return { variant: 'success', label: 'Ready' }
+    // A paused camera has no path at all, so it is neither live nor broken.
+    // Checked before the unknown case below, which it would otherwise fall
+    // into and sit on "Checking…" forever.
+    if (!c.is_active) {
+      return { variant: 'neutral', label: '—', title: 'Camera is paused' }
+    }
+    if (c.live_online === true) return { variant: 'success', label: 'Ready' }
+    if (c.live_online === false) {
+      return { variant: 'warning', label: 'Disconnected', title: 'Stream not receiving data' }
+    }
+    // Unknown, NOT offline: the recorder keeps this state in memory and
+    // re-seeds it a short while after starting. Claiming "Disconnected" here
+    // would show the whole fleet as down every time the server restarts.
     if (c.mediamtx_provisioned === true) {
-      return { variant: 'warning', label: 'Disconnected', title: 'Provisioned but not streaming' }
+      return { variant: 'neutral', label: 'Checking…', title: 'Live state not yet known' }
     }
     if (c.mediamtx_provisioned === false) return { variant: 'destructive', label: 'Error' }
     return { variant: 'neutral', label: 'Not configured' }
@@ -224,8 +258,9 @@ export function Cameras() {
   // Observed recording health, not the config flag. `recording_enabled` is
   // true for every provisioned camera and cannot be switched off, so it used
   // to claim "Recording" beside a dead stream. The server derives this from
-  // the newest written segment instead, using the recording watchdog's own
-  // thresholds, so this badge agrees with the stall alert.
+  // the newest written segment and the stream's live state, using the
+  // recording watchdog's own thresholds, so this badge agrees both with the
+  // stall alert and with the Stream column beside it.
   const recordingState = (c: Camera): { variant: BadgeVariant; label: string; title?: string } => {
     const at = c.last_recording_at ? new Date(c.last_recording_at) : null
     const agoSeconds = at ? Math.max(0, (Date.now() - at.getTime()) / 1000) : null
@@ -234,6 +269,15 @@ export function Cameras() {
     switch (c.recording_state) {
       case 'recording':
         return { variant: 'success', label: 'Recording', title: seenAt }
+      case 'not_recording':
+        // The source is down but the last segment is too recent for the
+        // watchdog to call it stalled. Saying "Recording" here is what put
+        // this badge in direct contradiction with a Disconnected stream.
+        return {
+          variant: 'warning',
+          label: 'Not recording',
+          title: seenAt ? `${seenAt} — stream is down, nothing is being written` : 'Stream is down, nothing is being written',
+        }
       case 'stalled': {
         // formatDuration never rolls up to days, so a multi-day stall would
         // render "Stalled 74h 12m" and overflow the column.
@@ -256,49 +300,6 @@ export function Cameras() {
     }
   }
 
-  // Load cameras
-  useEffect(() => {
-    if (authLoading) return
-    let alive = true
-    const run = async () => {
-      try {
-        setLoading(true)
-        if (token) api.setToken(token)
-        
-        // Check MediaMTX availability
-        let mtxHealthy = false
-        try {
-          const { data: healthData } = await apiService.mtxHealth()
-          mtxHealthy = healthData?.status === 'ok'
-          if (alive) setMediamtxAvailable(mtxHealthy)
-        } catch {
-          if (alive) setMediamtxAvailable(false)
-        }
-        
-        const { data } = await apiService.getCameras({ skip, limit, active_only: activeOnly, q: query || undefined })
-        if (alive) {
-          setCameras(data.cameras)
-          setTotal(data.total ?? 0)
-          setSelected(new Set())
-          
-          // Fetch streaming status for each camera if MediaMTX is available
-          if (mtxHealthy && data.cameras?.length) {
-            fetchStreamStatuses(data.cameras)
-          }
-        }
-      } catch (e: any) {
-        if (alive) showError(e?.data?.detail || e?.message || 'Failed to load cameras')
-      } finally {
-        if (alive) setLoading(false)
-      }
-    }
-    // Debounced so typing in the search box costs one request after a pause
-    // rather than one per keystroke — the same two lines the user-search
-    // effect below already uses.
-    const t = setTimeout(run, 250)
-    return () => { alive = false; clearTimeout(t) }
-  }, [token, authLoading, skip, limit, activeOnly, query, fetchStreamStatuses])
-
   // User search for bulk assign
   useEffect(() => {
     let alive = true
@@ -319,15 +320,11 @@ export function Cameras() {
     return () => { alive = false; clearTimeout(t) }
   }, [userQuery])
 
-  const refreshCameras = async () => {
-    const { data } = await apiService.getCameras({ skip, limit, active_only: activeOnly, q: query || undefined })
-    setCameras(data.cameras)
-    setTotal(data.total ?? 0)
-    // Refresh streaming status if MediaMTX is available
-    if (mediamtxAvailable && data.cameras?.length) {
-      fetchStreamStatuses(data.cameras)
-    }
-  }
+  // Every mutation funnels through here. Invalidating the key rather than
+  // refetching this component's params keeps the Dashboard's copy of the list
+  // honest too, since both read the same cache.
+  const refreshCameras = () =>
+    queryClient.invalidateQueries({ queryKey: ['cameras'] })
 
   const onUpdate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -379,14 +376,14 @@ export function Cameras() {
       'recordings stay viewable there until retention removes them.'
     )) return
     try {
-      setLoading(true)
+      setMutating(true)
       await apiService.deleteCamera(c.id)
       await refreshCameras()
       showSuccess('Camera deleted')
     } catch (e: any) {
       showError(e?.data?.detail || e?.message || 'Failed to delete camera')
     } finally {
-      setLoading(false)
+      setMutating(false)
     }
   }
 
@@ -400,7 +397,7 @@ export function Cameras() {
       'recordings stay viewable there until retention removes them.'
     )) return
     try {
-      setLoading(true)
+      setMutating(true)
       for (const id of ids) {
         try { await apiService.deleteCamera(id) } catch { }
       }
@@ -410,7 +407,7 @@ export function Cameras() {
     } catch (e: any) {
       showError(e?.data?.detail || e?.message || 'Bulk delete failed')
     } finally {
-      setLoading(false)
+      setMutating(false)
     }
   }
 
@@ -418,7 +415,7 @@ export function Cameras() {
     const ids = Array.from(selected)
     if (!ids.length || bulkUserId === '') return
     try {
-      setLoading(true)
+      setMutating(true)
       for (const id of ids) {
         try {
           await apiService.assignCameraPermission(id, { user_id: Number(bulkUserId), can_view: bulkCanView, can_manage: bulkCanManage })
@@ -430,7 +427,7 @@ export function Cameras() {
     } catch (e: any) {
       showError(e?.data?.detail || e?.message || 'Bulk assign failed')
     } finally {
-      setLoading(false)
+      setMutating(false)
     }
   }
 
@@ -474,11 +471,24 @@ export function Cameras() {
       <PageHeader
         title="Cameras"
         description="Every camera registered with this recorder, with its live stream and recording state."
-        actions={canManageCameras ? (
-          <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
-            Add Camera
-          </Button>
-        ) : undefined}
+        actions={
+          <div className="flex items-center gap-3">
+            {/* Say so when pushed updates have stopped. The list still
+                refreshes on its own timer, so the badges are not frozen —
+                but they are no longer near-instant, and a status page that
+                hides that is worse than one that admits it. */}
+            {!liveUpdates && (
+              <span className="text-xs text-[var(--text-dim)]" title="Reconnecting to the live event stream; status may lag by up to a minute">
+                Live updates reconnecting…
+              </span>
+            )}
+            {canManageCameras && (
+              <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
+                Add Camera
+              </Button>
+            )}
+          </div>
+        }
       />
 
       {/* Filters. Bulk actions appear here only with a selection, so the row
@@ -498,10 +508,10 @@ export function Cameras() {
         </select>
         {canManageCameras && selected.size > 0 && (
           <div className="flex items-center gap-2 ml-auto">
-            <Button variant="danger" onClick={onBulkDelete} disabled={loading}>
+            <Button variant="danger" onClick={onBulkDelete} disabled={mutating}>
               Delete Selected ({selected.size})
             </Button>
-            <Button variant="outline" onClick={() => setShowBulkAssign((s) => !s)} disabled={loading}>
+            <Button variant="outline" onClick={() => setShowBulkAssign((s) => !s)} disabled={mutating}>
               Assign Permissions
             </Button>
           </div>
@@ -547,7 +557,7 @@ export function Cameras() {
           <label className="inline-flex items-center gap-2">
             <input type="checkbox" className="accent-[var(--accent)]" checked={bulkCanManage} onChange={(e) => setBulkCanManage(e.target.checked)} /> can_manage
           </label>
-          <button className="px-3 py-1 bg-[var(--accent)] text-white" onClick={onBulkAssign} disabled={loading || bulkUserId === ''}>Apply to {selected.size} selected</button>
+          <button className="px-3 py-1 bg-[var(--accent)] text-white" onClick={onBulkAssign} disabled={mutating || bulkUserId === ''}>Apply to {selected.size} selected</button>
           <button className="px-3 py-1 bg-[var(--panel)] border border-[var(--border)]" onClick={() => setShowBulkAssign(false)}>Cancel</button>
         </div>
       )}
@@ -565,11 +575,12 @@ export function Cameras() {
           from ever scrolling sideways: the fixed columns come to ~560px and
           Camera absorbs the rest, so content length no longer drives layout.
           Anything too long truncates and reveals in full via title. */}
-      {/* Skeletons only on a cold load. `loading` is also set by delete and
-          the debounced re-search, and swapping a populated table for
-          skeletons on every one of those flashes the whole page — so once
-          there are rows to show, a later load just dims them instead. */}
-      {loading && cameras.length === 0 ? (
+      {/* Skeletons only on a cold load — `isPending` is true only when there
+          is nothing cached to show. Every later fetch (a page change, the
+          debounced re-search, the background refresh) keeps the previous rows
+          on screen and just dims them, because swapping a populated table for
+          skeletons flashes the whole page. */}
+      {camsQuery.isPending ? (
         <div className="space-y-2">
           {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
         </div>
@@ -592,7 +603,7 @@ export function Cameras() {
            squeezed to nothing; past that point letting the wrapper scroll is
            the lesser evil. At any normal window width the table fits and no
            scrollbar appears. */
-        <Table className={`table-fixed min-w-[760px] ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
+        <Table className={`table-fixed min-w-[760px] ${camsQuery.isFetching || mutating ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
           <THead>
             <TR>
               <TH className="w-10">
