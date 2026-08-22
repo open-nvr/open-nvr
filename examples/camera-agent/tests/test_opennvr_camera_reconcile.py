@@ -140,3 +140,53 @@ async def test_reconcile_survives_a_fetch_exception(monkeypatch):
     rt._stop_event.set()
     await asyncio.wait_for(task, timeout=2.0)
     assert rt.context.known_camera("cam1")               # recovered after the error
+
+
+# ── frame_url refresh (the "no frame after an hour" bug) ───────────────
+
+
+def test_register_refreshes_frame_url_of_known_camera():
+    """OpenNVR bakes a ~60-min MediaMTX JWT into frame_url, so the reconcile
+    must swap a known camera's frame source when the served URL changes —
+    otherwise previews die within the hour and never recover ("no frame"
+    even after a browser refresh, until someone restarts the agent)."""
+    rt = _runtime()
+    old = CameraSpec(camera_id="cam1",
+                     frame_url="http://mtx/cam1/frame.jpg?jwt=OLD", role="front")
+    rt._register_opennvr_cameras([old])
+    src_before = rt.context._frame_sources["cam1"]
+
+    fresh = CameraSpec(camera_id="cam1",
+                       frame_url="http://mtx/cam1/frame.jpg?jwt=FRESH", role="front")
+    # still add-only for identity: nothing NEW is reported…
+    assert rt._register_opennvr_cameras([fresh]) == []
+    assert len(rt.cfg.cameras) == 1
+    # …but the URL and the frame source now carry the fresh token
+    assert rt.cfg.cameras[0].frame_url.endswith("jwt=FRESH")
+    assert rt.context.get_camera("cam1").frame_url.endswith("jwt=FRESH")
+    assert rt.context._frame_sources["cam1"] is not src_before
+
+
+def test_register_leaves_static_url_source_untouched():
+    """A camera whose URL didn't change (config-file/static sources) keeps its
+    existing frame source object — no needless churn."""
+    rt = _runtime()
+    spec = CameraSpec(camera_id="cam1", frame_url="rtsp://mtx/cam1", role="front")
+    rt._register_opennvr_cameras([spec])
+    src_before = rt.context._frame_sources["cam1"]
+    same = CameraSpec(camera_id="cam1", frame_url="rtsp://mtx/cam1", role="front")
+    assert rt._register_opennvr_cameras([same]) == []
+    assert rt.context._frame_sources["cam1"] is src_before
+
+
+def test_refresh_updates_boot_time_camera_specs_too():
+    """Boot-time cameras enter via AppConfig, not the reconcile — their spec
+    objects in the context must still pick up the fresh URL."""
+    boot = CameraSpec(camera_id="cam1",
+                      frame_url="http://mtx/cam1/frame.jpg?jwt=BOOT", role="front")
+    rt = _runtime(cameras=[boot])
+    fresh = CameraSpec(camera_id="cam1",
+                       frame_url="http://mtx/cam1/frame.jpg?jwt=NEW", role="front")
+    assert rt._register_opennvr_cameras([fresh]) == []
+    assert rt.context.get_camera("cam1").frame_url.endswith("jwt=NEW")
+    assert rt.cfg.cameras[0].frame_url.endswith("jwt=NEW")
