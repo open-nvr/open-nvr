@@ -335,3 +335,84 @@ def test_discovered_cameras_require_an_app_level_ceiling(tmp_path, monkeypatch):
     p.write_text('nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\ncameras: []\n')
     with pytest.raises(ValueError, match="max_occupancy"):
         oc.load_config(str(p))
+
+
+# ── Review-nit fixes ───────────────────────────────────────────────
+#
+# Three small holes found on a post-merge review pass: refresh must
+# present the same credentials boot did; refresh's dict mutation must be
+# runnable on the event loop with a pre-fetched list (no cross-thread
+# writes); and a missing ceiling with DISCOVERED cameras must not blame
+# a YAML "camera entry 0" that does not exist.
+
+
+def test_refresh_uses_the_same_api_key_boot_did(tmp_path, monkeypatch):
+    """Boot honoured a YAML ``internal_api_key``; a refresh that falls
+    back to the env var would discover cameras once and never again."""
+    seen_keys = []
+
+    def _spy(url, api_key=None):
+        seen_keys.append(api_key)
+        return [{"camera_id": "cam1"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _spy)
+    cfg = oc.load_config(_write_config(
+        tmp_path,
+        'opennvr_url: "http://core:8000"\n'
+        'internal_api_key: "yaml-secret"\n'
+        "cameras: []\n",
+    ))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    counter.refresh_cameras()
+    assert seen_keys == ["yaml-secret", "yaml-secret"], (
+        "boot and refresh must present the same credentials"
+    )
+
+
+def test_refresh_accepts_a_prefetched_camera_list(tmp_path, monkeypatch):
+    """``refresh_cameras(discovered=...)`` must apply the set without a
+    network call — the discovery loop fetches in a worker thread and
+    mutates on the event loop, so the mutation path alone must never
+    touch the network."""
+    calls = {"n": 0}
+
+    def _boot_only(url, api_key=None):
+        calls["n"] += 1
+        return [{"camera_id": "cam1"}]
+
+    monkeypatch.setattr(oc, "discover_cameras", _boot_only)
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert calls["n"] == 1                              # boot discovery only
+
+    added, removed = counter.refresh_cameras(
+        discovered=[{"camera_id": "cam1"}, {"camera_id": "cam2"}]
+    )
+    assert added == ["cam2"] and removed == []
+    assert calls["n"] == 1, "a supplied list must not trigger a fetch"
+    # Blip immunity holds on the pre-fetched path too.
+    assert counter.refresh_cameras(discovered=[]) == ([], [])
+    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+
+
+def test_missing_ceiling_with_discovered_cameras_names_the_real_cause(
+    tmp_path, monkeypatch
+):
+    """With cameras FOUND by discovery and no app-level max_occupancy,
+    the error must describe the discovery case — not "camera entry 0
+    malformed", an entry that does not exist in the operator's YAML."""
+    import pytest
+
+    monkeypatch.setattr(
+        oc, "discover_cameras", lambda url, api_key=None: [{"camera_id": "cam1"}]
+    )
+    p = tmp_path / "config.yml"
+    p.write_text(
+        'nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\ncameras: []\n'
+    )
+    with pytest.raises(ValueError, match="discovered from OpenNVR"):
+        oc.load_config(str(p))
+    with pytest.raises(ValueError) as excinfo:
+        oc.load_config(str(p))
+    assert "camera entry 0" not in str(excinfo.value)
