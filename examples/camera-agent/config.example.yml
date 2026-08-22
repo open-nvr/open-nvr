@@ -113,6 +113,13 @@ event_ring_size: 256
 # indexer writes to.
 # footage_index_path: /data/footage_index.sqlite3
 
+# Labels your detection adapter can see BEYOND the standard YOLOv8/COCO-80
+# set. Alarm presets (the demo's one-click Fire / Smoke / Gas leak buttons)
+# stay greyed out until their target is detectable — a Fire alarm that could
+# never ring is worse than none. Registered a fire/smoke-capable detector?
+# List its labels here and the matching presets light up.
+# detector_extra_labels: ["fire", "smoke"]
+
 # Optional: auto-discover cameras from a running OpenNVR instance.
 # When set and the `cameras` list below is empty, the agent calls
 # GET <opennvr_cameras_url> (auth: X-Internal-Api-Key) and builds

@@ -185,6 +185,14 @@ class AppConfig:
     # example's ``index`` subcommand.
     footage_index_path: str | None = None
 
+    # Labels the deployment's detection adapter can see BEYOND the standard
+    # YOLOv8/COCO-80 set. Alarm presets (GET /alarm-presets) are greyed out
+    # when their target isn't detectable — a "Fire" preset that could never
+    # fire is worse than none. An operator who registers a fire/smoke-capable
+    # detector lists its extra labels here (e.g. ["fire", "smoke"]) and the
+    # matching presets light up.
+    detector_extra_labels: list[str] = field(default_factory=list)
+
     # Optional OpenNVR camera discovery. Docker uses this so camera-agent can
     # reuse cameras configured in OpenNVR instead of duplicating RTSP URLs.
     opennvr_cameras_url: str | None = None
@@ -340,6 +348,27 @@ _DEFAULT_SYSTEM_PROMPT = (
 # metadata and the OPTIONAL wake word — it keeps the legacy "Camera Agent"
 # value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
+
+# The COCO-80 vocabulary of the standard ``default`` YOLOv8 detection
+# adapter — the labels alarm polling can actually match. Alarm-preset
+# availability is checked against this set (plus the config's
+# ``detector_extra_labels``) so the UI never offers an alarm that could
+# never ring: note there is NO fire, smoke, or gas in here.
+_COCO80_LABELS: frozenset[str] = frozenset({
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+})
 DEFAULT_VOICE_GENDER = "neutral"
 
 # ── Skills ──────────────────────────────────────────────────────────
@@ -2437,6 +2466,11 @@ def load_config(path: str | Path) -> AppConfig:
         nats_inference_url=raw.get("nats_inference_url"),
         nats_inference_token=raw.get("nats_inference_token"),
         footage_index_path=raw.get("footage_index_path"),
+        detector_extra_labels=[
+            str(s).strip().lower()
+            for s in (raw.get("detector_extra_labels") or [])
+            if str(s).strip()
+        ],
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
         opennvr_api_key=raw.get("opennvr_api_key"),
         opennvr_api_url=_opennvr_api_url,
@@ -2813,6 +2847,75 @@ class CameraAgentRuntime:
 
     _RING_BUILTIN_DEFAULTS = {"fire": "siren", "smoke": "siren",
                               "flame": "siren", "gas": "siren"}
+
+    # ── Alarm presets ─────────────────────────────────────────────
+    # Curated one-click alarms for the demo's Alarms card. Availability is
+    # HONEST: a preset is offered only when the detection path that alarm
+    # polling actually uses (the ``default`` adapter, COCO-80 labels unless
+    # ``detector_extra_labels`` widens it) can see the target. The safety
+    # presets (fire/smoke/gas) are therefore GREYED OUT on a stock stack —
+    # a Fire alarm that could never ring is worse than none — and the
+    # payload says exactly what to run to light them up.
+    _ALARM_PRESETS: list[dict[str, Any]] = [
+        {"id": "fire", "name": "Fire", "target": "fire",
+         "ring": "siren", "safety": True},
+        {"id": "smoke", "name": "Smoke", "target": "smoke",
+         "ring": "siren", "safety": True},
+        {"id": "gas", "name": "Gas leak", "target": "gas",
+         "ring": "siren", "safety": True},
+        {"id": "after-hours", "name": "After-hours person", "target": "person",
+         "ring": "siren", "after": "18:00", "safety": False},
+        {"id": "person", "name": "Person", "target": "person",
+         "ring": "chime", "safety": False},
+        {"id": "vehicle", "name": "Car", "target": "car",
+         "ring": "chime", "safety": False},
+        {"id": "truck", "name": "Truck", "target": "truck",
+         "ring": "chime", "safety": False},
+        {"id": "dog", "name": "Dog", "target": "dog",
+         "ring": "chime", "safety": False},
+    ]
+
+    def _detectable_labels(self) -> set[str]:
+        """What the alarm-polling detector can actually see: the standard
+        YOLOv8/COCO-80 vocabulary plus any ``detector_extra_labels`` the
+        operator declared for a custom detector."""
+        return set(_COCO80_LABELS) | set(
+            getattr(self.cfg, "detector_extra_labels", []) or [])
+
+    def alarm_presets(self) -> list[dict[str, Any]]:
+        """The Alarms card's preset list, with honest availability.
+
+        A preset is ``available`` when an object-detection adapter is live
+        (per the KAI-C capabilities view; unknown = assume live, the same
+        advisory fallback the skills panel uses) AND its target is in the
+        detectable label set. Unavailable presets carry a ``requires``
+        sentence naming exactly what to run/register."""
+        labels = self._detectable_labels()
+        live_tasks = self.kaic_capabilities.tasks_advertised
+        det_live = live_tasks is None or bool(
+            {"object_detection", "detect_objects", "object-detection"} & live_tasks)
+        out: list[dict[str, Any]] = []
+        for p in self._ALARM_PRESETS:
+            entry = dict(p)
+            if not det_live:
+                entry["available"] = False
+                entry["requires"] = (
+                    "Needs an object-detection adapter registered in KAI-C — "
+                    "the standard stack's YOLOv8 adapter provides it."
+                )
+            elif p["target"] not in labels:
+                entry["available"] = False
+                entry["requires"] = (
+                    f"The standard YOLOv8 detector can't see {p['target']!r}. "
+                    "Register a detection adapter trained for it (AI Adapters "
+                    "page), then list its label under 'detector_extra_labels' "
+                    "in the agent config to enable this preset."
+                )
+            else:
+                entry["available"] = True
+                entry["requires"] = None
+            out.append(entry)
+        return out
 
     def ring_defaults(self) -> dict[str, str]:
         """Target→annunciation defaults: built-ins overlaid with the
@@ -4625,6 +4728,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 for a in alarms) else ("pulse" if any(
                     a["triggered"] and a["active"] for a in alarms) else None)),
         }
+
+    @app.get("/alarm-presets")
+    async def _alarm_presets() -> dict[str, Any]:
+        """Curated one-click alarms with HONEST availability: presets whose
+        target the live detection path can't see come back with
+        ``available: false`` and a ``requires`` sentence naming what to
+        run — the UI greys them out instead of arming an alarm that could
+        never ring. Read-only, viewer tier."""
+        return {"presets": runtime.alarm_presets()}
 
     @app.post("/alarms")
     async def _create_alarm(request: Request) -> JSONResponse:

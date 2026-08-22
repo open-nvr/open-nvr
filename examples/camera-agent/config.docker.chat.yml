@@ -37,7 +37,9 @@ enabled_tools:
   - describe_camera
   - recent_events
   - create_monitor
+  - stop_monitor
   - create_alarm
+  - stop_alarm
   # Reads the footage-search app's index (mounted read-only at /footage);
   # reports cleanly until the apps overlay has built it.
   - search_footage

@@ -305,3 +305,51 @@ def test_alarm_defaults_endpoints_and_admin_gate():
     assert ok.status_code == 200 and ok.json()["defaults"]["snake"] == "siren"
     assert c.put("/alarm-defaults", json={"overrides": "nope"},
                  headers=h("tok-admin")).status_code == 400
+
+
+# ── Alarm presets (GET /alarm-presets) ─────────────────────────────
+#
+# Availability must be HONEST: the stock detection path is YOLOv8/COCO-80,
+# which cannot see fire/smoke/gas — those presets must come back greyed
+# with a "what to run" sentence, not armable. Detectable targets (person,
+# car, …) are available out of the box.
+
+
+def test_presets_stock_availability():
+    rt = _runtime()
+    by_id = {p["id"]: p for p in rt.alarm_presets()}
+    for sid in ("fire", "smoke", "gas"):
+        assert by_id[sid]["available"] is False, sid
+        assert "detector" in by_id[sid]["requires"].lower(), sid
+    for sid in ("person", "after-hours", "vehicle", "truck", "dog"):
+        assert by_id[sid]["available"] is True, sid
+        assert by_id[sid]["requires"] is None, sid
+    # The after-hours preset carries its window so one click arms 18:00+.
+    assert by_id["after-hours"]["after"] == "18:00"
+
+
+def test_presets_extra_labels_light_up_safety_alarms():
+    rt = _runtime()
+    rt.cfg.detector_extra_labels = ["fire", "smoke"]
+    by_id = {p["id"]: p for p in rt.alarm_presets()}
+    assert by_id["fire"]["available"] is True
+    assert by_id["smoke"]["available"] is True
+    assert by_id["gas"]["available"] is False, "gas still needs a detector"
+
+
+def test_presets_grey_out_when_no_detection_adapter():
+    rt = _runtime()
+    rt.kaic_capabilities._tasks = {"image_captioning"}   # live view, no detector
+    assert all(p["available"] is False for p in rt.alarm_presets())
+    rt.kaic_capabilities._tasks = None                   # unknown → assume live
+    assert any(p["available"] for p in rt.alarm_presets())
+
+
+def test_presets_endpoint_serves_the_list():
+    rt = _runtime()
+    client = TestClient(build_app(rt))
+    d = client.get("/alarm-presets").json()
+    ids = [p["id"] for p in d["presets"]]
+    assert "fire" in ids and "person" in ids
+    fire = next(p for p in d["presets"] if p["id"] == "fire")
+    assert fire["available"] is False and fire["requires"]

@@ -81,6 +81,15 @@ enabled_tools:
   - list_apps
   - app_status
   - recent_app_alerts
+  # Voice parity with the chat demo: look back at recent events, watch a
+  # camera over time, and arm/disarm alarms by voice ("alarm me if someone
+  # is at the door after 10pm"). All ride the streams the standard stack
+  # already runs — no extra adapter or model.
+  - recent_events
+  - create_monitor
+  - stop_monitor
+  - create_alarm
+  - stop_alarm
 
 # LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml default —
 # ~1 GB of RAM, snappy on CPU, Apache-2.0, and NON-thinking (the right choice on
