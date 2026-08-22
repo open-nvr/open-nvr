@@ -73,9 +73,10 @@ detector runs on regions (not the whole frame), track IDs stay stable as objects
 move, and the banner shows the detector standing down during lighting changes.
 
 Detectors: `onnx` (YOLOv8/YOLO11 via cv2.dnn — the production default; pass
-`--model yolov8n.onnx`), `hog` (people, no model download; the CLI default for a
-zero-asset demo), `blob` (deterministic, for smoke checks), `stub` (motion +
-regions only).
+`--model yolov8n.onnx`), `rfdetr` (RF-DETR family via ONNX Runtime — see
+"Candidate detectors & the eval harness" below), `hog` (people, no model
+download; the CLI default for a zero-asset demo), `blob` (deterministic, for
+smoke checks), `stub` (motion + regions only).
 
 ## As an OpenNVR service (integrated)
 
@@ -198,6 +199,48 @@ one GOP (~1-2 s), and an event briefer than the keyframe interval can pass
 undetected while idle (it is still in the recording). Set
 `DETECT_DECODE_IDLE=none` for always-full decode when sub-second detector
 reaction matters more than CPU.
+
+## Candidate detectors & the eval harness
+
+YOLOv8n is the shipped default, but the detector rides a seam — and the
+ROADMAP names candidates (RF-DETR nano first). Two pieces make trying one a
+measured decision instead of vibes:
+
+**The `rfdetr` detector.** RF-DETR's NMS-free DETR head is implemented
+behind `DETECT_DETECTOR=rfdetr`: ImageNet-normalized RGB input, `dets`
+(cxcywh, normalized) + `labels` (logits → sigmoid → top-k) outputs, COCO-91
+class mapping. Transformer exports exceed cv2.dnn's operator coverage, so
+this family defaults to the `ort` backend (`DETECT_ONNX_BACKEND=auto`
+resolves per family; an explicit `cvdnn` is attempted and falls back to
+`ort` automatically). Weights are never vendored — export locally:
+
+```bash
+pip install rfdetr onnxruntime
+python -c "from rfdetr import RFDETRNano; RFDETRNano().export()"   # → onnx file
+# .env
+DETECT_DETECTOR=rfdetr
+DETECT_ONNX_MODEL=/app/model_weights/rfdetr-nano.onnx   # mount it into the volume
+DETECT_ONNX_INPUT=384                                   # the variant's resolution
+```
+
+**The eval harness.** Replays a clip (or recorded site footage) through two
+or more detectors and prints per-frame latency, per-label volume, and
+agreement vs a reference (matched / missed / extra at IoU ≥ 0.5, same
+label). With a stronger reference (yolov8m) the "missed" column is a recall
+proxy; between peers it is drift to eyeball:
+
+```bash
+python -m detect_pipeline.evalcmp --source footage.mp4 \
+  --model yolov8n=weights/yolov8n.onnx:yolo:cvdnn:640 \
+  --model rfdetr=weights/rfdetr-nano.onnx:detr:ort:384 \
+  --reference yolov8m=weights/yolov8m.onnx:yolo:cvdnn:640 \
+  --json eval.json
+```
+
+The swap rule stays the same as every default in
+[`docs/DETECT_CPU.md`](../docs/DETECT_CPU.md): a candidate becomes the
+default only when the harness shows equal-or-better recall on real footage
+at equal-or-less cost.
 
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:

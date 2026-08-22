@@ -17,8 +17,9 @@ Env:
   NATS_TOKEN                bus auth token; defaults to INTERNAL_API_KEY (the
                             compose broker runs with --auth $INTERNAL_API_KEY)
   DETECT_CV_THREADS         cv2 intra-op thread cap (default 2; 0 = uncapped)
-  DETECT_DETECTOR           onnx | hog | blob | stub (default onnx)
-  DETECT_ONNX_BACKEND       cvdnn (default, zero-dep CPU) | ort (ONNX Runtime)
+  DETECT_DETECTOR           onnx (YOLO) | rfdetr (DETR) | hog | blob | stub
+  DETECT_ONNX_BACKEND       auto (default: cvdnn for onnx, ort for rfdetr)
+                            | cvdnn | ort
   DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.
                             "OpenVINOExecutionProvider" (Intel N100) or
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
@@ -144,7 +145,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         detector=env.get("DETECT_DETECTOR", "onnx"),
         onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
         onnx_input=int(env.get("DETECT_ONNX_INPUT", "640")),
-        onnx_backend=env.get("DETECT_ONNX_BACKEND", "cvdnn"),
+        onnx_backend=env.get("DETECT_ONNX_BACKEND", "auto"),
         onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
@@ -231,6 +232,20 @@ def _gate_factory(cfg: ServiceConfig):
     return lambda: Gate(gcfg)
 
 
+def _resolve_onnx_backend(configured: str, family_default: str) -> str:
+    """DETECT_ONNX_BACKEND: '' / 'auto' resolve per detector family — cvdnn
+    for the YOLO head (runs everywhere, zero deps), ort for the DETR head
+    (transformer exports exceed cv2.dnn's operator coverage). An explicit
+    cvdnn/ort is honored; anything else warns and uses the family default."""
+    value = (configured or "auto").strip().lower()
+    if value in ("", "auto"):
+        return family_default
+    if value in ("cvdnn", "ort"):
+        return value
+    log.warning("unknown DETECT_ONNX_BACKEND=%r; using %s", configured, family_default)
+    return family_default
+
+
 def _stub_factory():
     from .detector import StubDetector
     return StubDetector
@@ -251,10 +266,7 @@ def _detector_factory(cfg: ServiceConfig):
         from .onnx_detector import OnnxYoloDetector
 
         providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
-        backend = (cfg.onnx_backend or "cvdnn").lower()
-        if backend not in ("cvdnn", "ort"):
-            log.warning("unknown DETECT_ONNX_BACKEND=%r; falling back to cvdnn", cfg.onnx_backend)
-            backend = "cvdnn"
+        backend = _resolve_onnx_backend(cfg.onnx_backend, "cvdnn")
         if providers and backend != "ort":
             log.warning(
                 "DETECT_ONNX_PROVIDERS is set but backend=%s ignores it "
@@ -277,6 +289,44 @@ def _detector_factory(cfg: ServiceConfig):
                 return StubDetector()
 
         return make_onnx
+    if name == "rfdetr":
+        # RF-DETR family (NMS-free DETR head). Reuses DETECT_ONNX_MODEL /
+        # DETECT_ONNX_INPUT / DETECT_ONNX_BACKEND — point the model path at an
+        # rf-detr ONNX export and set the input to the variant's resolution
+        # (nano 384). Transformer exports usually exceed cv2.dnn's operator
+        # coverage, so the backend default for this family is ort.
+        if not cfg.onnx_model or not os.path.exists(cfg.onnx_model):
+            log.warning("RF-DETR model not found at %s; using stub detector", cfg.onnx_model)
+            return _stub_factory()
+        from .detr_detector import OnnxDetrDetector
+
+        providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
+        backend = _resolve_onnx_backend(cfg.onnx_backend, "ort")
+        if backend == "cvdnn":
+            log.warning(
+                "DETECT_DETECTOR=rfdetr with backend=cvdnn: cv2.dnn often lacks "
+                "the transformer ops this export uses — will fall back to ort "
+                "automatically if loading fails"
+            )
+
+        def make_rfdetr():
+            for attempt in ([backend, "ort"] if backend == "cvdnn" else [backend]):
+                try:
+                    return OnnxDetrDetector(
+                        model_path=cfg.onnx_model, input_size=cfg.onnx_input,
+                        backend=attempt, providers=providers,
+                        conf_threshold=cfg.detect_conf,
+                    )
+                except Exception:
+                    log.warning(
+                        "failed to load RF-DETR model %s (backend=%s)",
+                        cfg.onnx_model, attempt, exc_info=True,
+                    )
+            log.warning("RF-DETR unavailable on any backend; using stub detector")
+            from .detector import StubDetector
+            return StubDetector()
+
+        return make_rfdetr
     if name == "hog":
         from .detectors_local import HogPersonDetector, hog_available
         if hog_available():
