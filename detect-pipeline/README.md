@@ -73,9 +73,10 @@ detector runs on regions (not the whole frame), track IDs stay stable as objects
 move, and the banner shows the detector standing down during lighting changes.
 
 Detectors: `onnx` (YOLOv8/YOLO11 via cv2.dnn — the production default; pass
-`--model yolov8n.onnx`), `hog` (people, no model download; the CLI default for a
-zero-asset demo), `blob` (deterministic, for smoke checks), `stub` (motion +
-regions only).
+`--model yolov8n.onnx`), `rfdetr` (RF-DETR family via ONNX Runtime — see
+"Candidate detectors & the eval harness" below), `hog` (people, no model
+download; the CLI default for a zero-asset demo), `blob` (deterministic, for
+smoke checks), `stub` (motion + regions only).
 
 ## As an OpenNVR service (integrated)
 
@@ -125,11 +126,13 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 5. On CPU-only hosts (laptops; any
-macOS/Windows Docker install, where the VM has no GPU) set `DETECT_FPS=1`
-or `2`: a fraction of the CPU, at the cost of coarser motion/track
-granularity and a smaller candidate pool for best-frame selection. An
-explicit per-camera `fps` from the discovery endpoint still wins.
+analysis rate — `DETECT_FPS`, default 2 (the CPU-friendly setting that
+behaves well on laptops and any macOS/Windows Docker install, where the
+VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
+hosts — can raise it to 5-10 for finer motion/track granularity and a
+larger candidate pool for best-frame selection; dropping to 1 buys a
+last bit of CPU back. An explicit per-camera `fps` from the discovery
+endpoint still wins.
 
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
@@ -141,13 +144,116 @@ The service warns per camera at startup and exposes
 expensive path. Fix: set the camera's substream URL in OpenNVR (Camera
 settings), or lower the main stream's resolution.
 
+**Fourth dial: skip frames inside the decoder (`DETECT_DECODE_SKIP`).**
+Even with the substream and a low `DETECT_FPS`, the decoder still
+decompresses the camera's FULL frame rate — the `fps` filter drops frames
+*after* they're decoded. `-skip_frame` moves the drop into the decoder so
+skipped frames are never decompressed at all. The default is `nonref` —
+skip frames that no other frame references — because it is provably
+lossless: a dropped frame is by definition one nothing depends on, and the
+analyzed rate stays far above `DETECT_FPS`. It saves wherever the stream
+carries such frames and costs nothing where it doesn't (many IP cameras
+encode without B-frames, so there may be nothing to skip — check with
+ffprobe). Deeper cuts are opt-in: `bidir` drops ALL B-frames (can artifact
+on the rare b-pyramid stream that uses B-frames as references), and
+`nokey` decodes keyframes only — roughly one frame per GOP (usually
+0.5-1 fps), cutting decode cost by about the GOP length, with real
+motion/track granularity becoming the keyframe rate: plenty for presence
+alarms and counting, coarse for fast-moving events. The `fps` filter pads
+gaps by duplicating frames, which is nearly free downstream (zero pixel
+diff, so the motion gate skips them). `none` restores full decode.
+
+**Fifth dial: decoder threads (`DETECT_DECODE_THREADS`, default 2).**
+ffmpeg's auto default spawns up to 16 frame threads *per camera* — pure
+scheduling overhead on substream-sized video, multiplied across the fleet
+(Frigate pins 2 for the same reason). Thread count never changes decoded
+output, so the cap is lossless; `0` restores ffmpeg auto for a single
+high-res camera on a big machine.
+
+**Opt-in extra: `DETECT_DECODE_FAST=true`** skips the h264/h265 in-loop
+deblocking filter (`-skip_loop_filter all -flags2 fast`) — worth ~10-20%
+of software-decode CPU. Deblocking exists for viewing quality; detection
+is robust to the blockiness, but decoded pixels drift slightly from the
+encoder between keyframes, so it's not bit-exact and stays off by
+default. CPU decode only (hardware decoders deblock in silicon for free).
+
+**The free lever is in the camera.** Decode cost scales with the
+*source* frame rate before any of these dials apply: a substream encoded
+at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
+analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
+settings — do that first; it's the cheapest CPU you'll ever save.
+
+**Sixth dial: adaptive decode (`DETECT_DECODE_IDLE`, default `nokey`).**
+The pattern Blue Iris ships as "limit decoding unless required", ON by
+default: a camera whose scene is quiet decodes ONLY keyframes (~one frame
+per GOP) — near-zero cost — while motion is still watched at that rate.
+The first motion box or live track flips the camera back to full decode by
+respawning its ffmpeg against the local MediaMTX republish (sub-second, no
+backoff); after `DETECT_DECODE_IDLE_AFTER` quiet seconds (default 60) it
+idles again. `tier0_decode_idle{camera=...}` on `/metrics` shows who is
+idling. Recording is unaffected — the full main stream is always recorded;
+this shapes only what the detector looks at. The trade the default accepts:
+the detector's reaction to a brand-new event on a quiet scene can lag up to
+one GOP (~1-2 s), and an event briefer than the keyframe interval can pass
+undetected while idle (it is still in the recording). Set
+`DETECT_DECODE_IDLE=none` for always-full decode when sub-second detector
+reaction matters more than CPU.
+
+## Candidate detectors & the eval harness
+
+YOLOv8n is the shipped default, but the detector rides a seam — and the
+ROADMAP names candidates (RF-DETR nano first). Two pieces make trying one a
+measured decision instead of vibes:
+
+**The `rfdetr` detector.** RF-DETR's NMS-free DETR head is implemented
+behind `DETECT_DETECTOR=rfdetr`: ImageNet-normalized RGB input, `dets`
+(cxcywh, normalized) + `labels` (logits → sigmoid → top-k) outputs, COCO-91
+class mapping. Transformer exports exceed cv2.dnn's operator coverage, so
+this family defaults to the `ort` backend (`DETECT_ONNX_BACKEND=auto`
+resolves per family; an explicit `cvdnn` is attempted and falls back to
+`ort` automatically). Weights are never vendored — export locally:
+
+```bash
+pip install rfdetr onnxruntime
+python -c "from rfdetr import RFDETRNano; RFDETRNano().export()"   # → onnx file
+# .env
+DETECT_DETECTOR=rfdetr
+DETECT_ONNX_MODEL=/app/model_weights/rfdetr-nano.onnx   # mount it into the volume
+DETECT_ONNX_INPUT=384                                   # the variant's resolution
+```
+
+**The eval harness.** Replays a clip (or recorded site footage) through two
+or more detectors and prints per-frame latency, per-label volume, and
+agreement vs a reference (matched / missed / extra at IoU ≥ 0.5, same
+label). With a stronger reference (yolov8m) the "missed" column is a recall
+proxy; between peers it is drift to eyeball:
+
+```bash
+python -m detect_pipeline.evalcmp --source footage.mp4 \
+  --model yolov8n=weights/yolov8n.onnx:yolo:cvdnn:640 \
+  --model rfdetr=weights/rfdetr-nano.onnx:detr:ort:384 \
+  --reference yolov8m=weights/yolov8m.onnx:yolo:cvdnn:640 \
+  --json eval.json
+```
+
+The swap rule stays the same as every default in
+[`docs/DETECT_CPU.md`](../docs/DETECT_CPU.md): a candidate becomes the
+default only when the harness shows equal-or-better recall on real footage
+at equal-or-less cost.
+
 **To turn the measurements into savings** (enforce + Tier-1 dispatch), follow
 the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy:
 
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=5                      # frames analyzed /s /camera (1-30) — the main CPU dial
+DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
+DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
+DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
+DETECT_DECODE_IDLE=nokey          # adaptive decode while quiet (dial 6, default on; none = off)
+DETECT_DECODE_IDLE_AFTER=60       # quiet seconds before a camera idles
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
@@ -240,7 +346,7 @@ so the backend is interchangeable):
 | Intel N100 / iGPU / NPU | `pip install onnxruntime-openvino` | `DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider` |
 | Nvidia / Jetson | `pip install onnxruntime-gpu` | `DETECT_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider` |
 | Apple Silicon | `pip install onnxruntime` | `DETECT_ONNX_PROVIDERS=CoreMLExecutionProvider` |
-| Any CPU | `pip install 'detect-pipeline[onnxruntime]'` | `DETECT_ONNX_BACKEND=ort` |
+| Any CPU | already in the container image (`[service]` extra); bare pip installs: `pip install 'detect-pipeline[onnxruntime]'` | `DETECT_ONNX_BACKEND=ort` |
 
 ```bash
 # .env — Intel N100 example

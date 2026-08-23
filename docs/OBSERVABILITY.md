@@ -141,3 +141,50 @@ histogram_quantile(0.95, sum by (le) (rate(adapter_infer_latency_seconds_bucket[
 A fingerprint label change on a running adapter is the same §11.3 drift
 signal KAI-C's tamper detection audits — visible on a chart as a series
 break.
+
+
+## Logs
+
+Every container's stdout is its log, and every service in the compose files
+now carries a bounded rotation policy — three 10 MB json files (~30 MB per
+container, always). Two consequences: `docker logs --since 1h <container>`
+always has the recent story when something goes wrong, and no container can
+ever fill the disk by being chatty. There is no flag to turn logging off —
+bounded-by-default replaces on/off, because the log you turned off is always
+the one you needed.
+
+Reading them, three ways:
+
+**One container, after an incident** (the usual case):
+
+```bash
+docker logs --since 1h opennvr_camera_agent
+docker logs --since 1h opennvr_detect_pipeline | grep -iE "error|warn"
+```
+
+**Everything at once, into a shareable snapshot** — attach this to a bug
+report and the whole stack's last hour travels as one file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
+  logs --since 1h --no-color > opennvr-logs-$(date +%Y%m%d-%H%M).txt
+```
+
+**Live, centrally, in a browser** — opt-in profile `logs` adds
+[Dozzle](https://dozzle.dev) at `http://127.0.0.1:9999`, streaming every
+`opennvr_*` container side by side with search:
+
+```bash
+COMPOSE_PROFILES=logs ./start.sh up      # or add --profile logs to compose
+```
+
+Security note, stated plainly: Dozzle mounts the Docker socket read-only,
+and any socket access is host-level visibility. That is why the viewer is
+OFF by default, binds to loopback only, and belongs on a dev/operator
+machine — never on an exposed host. The bounded per-container logs above
+need no socket, no extra container, and are always there.
+
+Verbosity per unit: the core honors `OPENNVR_DEBUG=true`, the agent and
+pipeline log at INFO with WARN/ERROR reserved for real degradation (see the
+system self-check — every silent failure mode is a named ERROR line at
+boot), so grep-for-ERROR is a meaningful triage step, not noise.

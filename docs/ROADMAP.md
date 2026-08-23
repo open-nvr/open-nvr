@@ -121,6 +121,38 @@ The headline themes are *new AI capabilities* and *operator polish*.
 - **Audio events** — PANNs or YAMNet for gunshot / glass-break / dog-
   bark detection. The audio-input shape isn't represented in v0.1's
   shipped adapters.
+- **Lightweight CPU-first Tier-0 detector** — an alternative to YOLOv8
+  for low-power boxes with no hardware accelerator, selectable via the
+  existing `DETECT_DETECTOR` switch. Every candidate exports to ONNX and
+  rides the pipeline's existing cv2.dnn/ort path — the per-model work is
+  an output-decoding head next to the YOLOv8 one. Candidates, in rough
+  preference order:
+  - *RF-DETR nano* (Apache-2.0) — the friendliest license; the RF-DETR
+    family is the first real-time line past 60 mAP on COCO, with strong
+    domain transfer.
+  - *YOLO26n* (AGPL-3.0) — the strongest pure-CPU story: up to ~43%
+    faster CPU inference than YOLO11-N, NMS-free end-to-end output
+    (simpler decode head, stable fp16/fp32).
+  - *RTMDet-tiny* (MIT) — throughput specialist.
+  - *NanoDet-Plus / PP-PicoDet* — the ultra-light legacy tier for very
+    weak boxes.
+  Licensing note: "we only use the model" is not an exemption — AGPL
+  weights/code carry copyleft on distribution and network use. That is
+  compatible with OpenNVR's AGPL core, but weights must stay
+  runtime-downloaded (as yolov8n is today), never vendored into
+  Apache-licensed components. Trades some accuracy for a pipeline that
+  stays in single-digit CPU per camera; complements — doesn't replace —
+  the substream tap and `DETECT_HWACCEL` paths, and pairs with the
+  accelerator detector adapters (Coral / Hailo / RKNN) tracked in
+  `detect-pipeline/FOLLOWUPS.md`.
+- **Detector / VLM eval harness** — a scripted benchmark that replays
+  recorded site footage (or a labeled clip set) through candidate
+  detectors and caption VLMs and reports recall / precision per label,
+  CPU cost per frame, and describe-quality spot checks side by side —
+  so a `DETECT_DETECTOR` or `OLLAMA_VLM_MODEL` swap is a measured
+  decision, not vibes. Motivating case: moondream answering "appears to
+  be empty" on a frame with a person directly in front of the lens,
+  where qwen3-vl:4b answers correctly.
 
 ### Operator polish
 - **Active Directory / SAML SSO** for staff authentication. v0.1 uses

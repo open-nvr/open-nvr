@@ -40,6 +40,7 @@ import math
 import re
 import signal
 import subprocess
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -348,6 +349,48 @@ _DEFAULT_SYSTEM_PROMPT = (
 # metadata and the OPTIONAL wake word — it keeps the legacy "Camera Agent"
 # value for infra/wake-word compat. The voice is a separate choice.
 DEFAULT_AGENT_NAME = "Camera Agent"
+
+# Targets an alarm/watch may match beyond COCO: the fire-grade ring
+# defaults are armable intents even though the stock detector can't see
+# them (a fire-capable detector may be registered; presets grey them out
+# in the UI, but a spoken arm is allowed).
+_EXTRA_ALARM_TARGETS: frozenset[str] = frozenset({"fire", "smoke", "flame", "gas"})
+
+_TARGET_PLURALS: dict[str, str] = {"people": "person", "persons": "person"}
+
+
+def _normalize_watch_target(raw: str, extra_labels: "set[str] | None" = None
+                            ) -> "str | None":
+    """Reduce what the LLM sent as ``target`` to a single detectable label.
+
+    Field bug: a small LLM armed an alarm with target='alert when you see
+    a person on this camera' — the WHOLE SENTENCE. Matching is exact
+    label equality, so that alarm could never fire, silently. The server
+    is the last line of defence: accept an exact label; otherwise scan
+    the phrase for known labels (simple plural folding) and accept a
+    UNIQUE hit; ambiguous or label-free phrases return None — the caller
+    asks instead of arming a dud."""
+    known = set(_COCO80_LABELS) | _EXTRA_ALARM_TARGETS | set(extra_labels or ())
+    t = (raw or "").strip().lower()
+    if not t:
+        return None
+    t = _TARGET_PLURALS.get(t, t)
+    if t in known:
+        return t
+    words = [w.strip(".,!?'\"") for w in t.replace("/", " ").split()]
+    hits: list[str] = []
+    for w in words:
+        w = _TARGET_PLURALS.get(w, w)
+        if w not in known and w.endswith("s") and w[:-1] in known:
+            w = w[:-1]
+        if w in known and w not in hits:
+            hits.append(w)
+    # Two-word labels ("traffic light", "cell phone", …) — check bigrams.
+    for a, b in zip(words, words[1:]):
+        bigram = f"{a} {b}"
+        if bigram in known and bigram not in hits:
+            hits.append(bigram)
+    return hits[0] if len(hits) == 1 else None
 
 # The COCO-80 vocabulary of the standard ``default`` YOLOv8 detection
 # adapter — the labels alarm polling can actually match. Alarm-preset
@@ -1637,17 +1680,35 @@ class AlarmManager:
             return mins >= a
         return mins < b
 
+    # How many consecutive poll cycles an alarm may yield to interactive
+    # turns before polling anyway. The yield keeps voice-turn latency
+    # snappy on CPU, but UNBOUNDED it silently pauses a safety feature:
+    # on a busy box each turn runs tens of seconds, so chained
+    # conversation kept alarms unpolled for minutes — the field report
+    # was 'armed a siren, walked in, nothing... it fired much later'.
+    # 4 skips at the 5s interval bounds worst-case added delay to ~20s.
+    _MAX_BUSY_SKIPS = 4
+
     async def _loop(self, alarm: Alarm) -> None:
+        busy_skips = 0
         try:
             while alarm.active and not self._runtime._stop_event.is_set():
-                # Yield to an in-flight interactive turn — a skipped cycle is
-                # caught on the next one (self._interval later). Stand-down and
-                # window logic still run so timing stays correct.
-                if self._in_window(alarm) and not self._runtime.interactive_busy():
-                    for cam in alarm.camera_ids:
-                        if not alarm.active:
-                            break
-                        await self._poll(alarm, cam)
+                if self._in_window(alarm):
+                    if (self._runtime.interactive_busy()
+                            and busy_skips < self._MAX_BUSY_SKIPS):
+                        busy_skips += 1
+                    else:
+                        if busy_skips >= self._MAX_BUSY_SKIPS:
+                            log_fn = logger.info
+                            log_fn("alarm #%d: polling despite an active turn "
+                                   "(yielded %d cycles — a safety check must "
+                                   "not wait out a conversation)",
+                                   alarm.id, busy_skips)
+                        busy_skips = 0
+                        for cam in alarm.camera_ids:
+                            if not alarm.active:
+                                break
+                            await self._poll(alarm, cam)
                 self._maybe_stand_down(alarm)
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:  # pragma: no cover
@@ -2861,6 +2922,10 @@ class CameraAgentRuntime:
             "recent_app_alerts": self._handle_recent_app_alerts,
         }
 
+        # Pipeline trace of the most recent conversation turn (see
+        # _run_conversation_turn) — served to the UI by /ask and /converse.
+        self.last_turn_trace: list[dict[str, Any]] = []
+
         self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
         self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events,
@@ -3331,9 +3396,21 @@ class CameraAgentRuntime:
 
     async def _handle_create_alarm(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Alarm"
-        target = str(args.get("target") or "").strip().lower()
+        raw_target = str(args.get("target") or "").strip()
+        # Site ring-default keys (a farm's "snake", a bank's custom class)
+        # are armable intents too — site policy extends the vocabulary.
+        _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
+        _extra |= set(self.ring_defaults().keys())
+        target = _normalize_watch_target(raw_target, _extra)
         if not target:
+            if raw_target:
+                return (f"I couldn't pick one detectable thing out of "
+                        f"{raw_target!r} — what exactly should set off the "
+                        f"alarm (a person, a car, fire)?")
             return "What should set off the alarm (e.g. fire, a person)?"
+        if name == "Alarm" or raw_target.lower() not in (target, ""):
+            # Keep the stored name honest when we reduced a phrase.
+            name = name if name != "Alarm" else f"Alarm: {target}"
         cams = self.tools._resolve_cameras(args)
         if isinstance(cams, str):  # ERROR:
             return cams
@@ -3547,8 +3624,15 @@ class CameraAgentRuntime:
         kind = str(args.get("kind") or "").strip().lower()
         if kind not in ("notify", "count", "crossing"):
             return "I can 'notify' you, keep a 'count', or count line 'crossing's — which would you like?"
-        target = str(args.get("target") or "").strip().lower()
+        raw_target = str(args.get("target") or "").strip()
+        _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
+        _extra |= set(self.ring_defaults().keys())
+        target = _normalize_watch_target(raw_target, _extra)
         if not target:
+            if raw_target:
+                return (f"I couldn't pick one detectable thing out of "
+                        f"{raw_target!r} — what exactly should I watch for "
+                        f"(a person, a car, a truck)?")
             return "What should I watch for (e.g. a person, a car)?"
         cams = self.tools._resolve_cameras(args)
         if isinstance(cams, str):  # ERROR:
@@ -3832,11 +3916,18 @@ class CameraAgentRuntime:
 
     def _register_opennvr_cameras(self, specs: list[CameraSpec]) -> list[CameraSpec]:
         """Register OpenNVR-sourced camera specs that aren't known yet, wiring
-        each one's frame source. ADD-ONLY on purpose: a transient empty or
-        failed fetch must never tear down cameras that are already working."""
+        each one's frame source. ADD-ONLY for camera *identity*: a transient
+        empty or failed fetch must never tear down cameras that are already
+        working. But a known camera's ``frame_url`` IS refreshed when OpenNVR
+        serves a new one — the URL embeds a short-lived MediaMTX JWT
+        (~60 min), so keeping the boot-time URL means every frame fetch
+        starts 401ing within the hour and the camera tile shows "no frame"
+        forever (describe still works — KAI-C mints its own token — which
+        made this bug look like a UI problem instead of an expired URL)."""
         added: list[CameraSpec] = []
         for spec in specs:
             if self.context.known_camera(spec.camera_id):
+                self._refresh_frame_url(spec)
                 continue
             self.context.add_camera(spec)
             self.context.register_frame_source(
@@ -3846,6 +3937,155 @@ class CameraAgentRuntime:
             self.cfg.cameras.append(spec)
             added.append(spec)
         return added
+
+    def _refresh_frame_url(self, spec: CameraSpec) -> None:
+        """Swap a known camera's frame source when its URL changed.
+
+        OpenNVR re-mints the MediaMTX JWT baked into ``frame_url`` on every
+        reconcile fetch, so the URL differs each cycle by design; rebuilding
+        the frame source is just replacing a URL-holder object (no worker or
+        connection to bounce), so replace-on-change is cheap and keeps the
+        agent's tap token perpetually fresh. Cameras with a static URL
+        (config-file sources, local devices) compare equal and are left
+        untouched."""
+        if not spec.frame_url:
+            return
+        known = next(
+            (c for c in self.cfg.cameras if c.camera_id == spec.camera_id), None
+        )
+        if known is None or known.frame_url == spec.frame_url:
+            return
+        known.frame_url = spec.frame_url
+        # The context may hold a distinct spec object for boot-time cameras;
+        # keep it in step so UI listings show the live URL too.
+        ctx_spec = self.context.get_camera(spec.camera_id)
+        if ctx_spec is not None:
+            ctx_spec.frame_url = spec.frame_url
+        self.context.register_frame_source(
+            spec.camera_id,
+            build_frame_source(camera_id=spec.camera_id, url=spec.frame_url),
+        )
+
+    async def run_system_check(self):
+        """Exercise every REAL capability path with a REAL payload and return
+        a SystemReport. Process healthchecks say "up"; this says "works" —
+        built after a field incident where the caption adapter was healthy,
+        registered, and had never received a single inference (KAI-C 403)."""
+        import httpx
+
+        from system_check import DEGRADED, DOWN, OK, run_checks
+
+        cam_ids = [c.camera_id for c in self.cfg.cameras]
+        frame_holder: dict[str, bytes] = {}
+
+        async def check_frame():
+            if not cam_ids:
+                return DEGRADED, "no cameras configured"
+            jpeg = await self.context.get_frame(cam_ids[0])
+            frame_holder["jpeg"] = jpeg
+            return OK, f"live frame from {cam_ids[0]} ({len(jpeg)} bytes)"
+
+        async def check_detection():
+            frame = frame_holder.get("jpeg")
+            if frame is None:
+                return DOWN, "skipped: no live frame to test with"
+            resp = await self.tools._detect.infer(frame_jpeg=frame)
+            dets = (resp.get("result") or {}).get("detections") or []
+            labels = ", ".join(sorted({str(d.get("label")) for d in dets})) or "none"
+            return OK, f"object detector answered (labels this frame: {labels})"
+
+        async def check_vision():
+            frame = frame_holder.get("jpeg")
+            if frame is None:
+                return DOWN, "skipped: no live frame to test with"
+            try:
+                resp = await self.tools._caption.infer(
+                    frame_jpeg=frame, extra={"task": "scene_caption"})
+            except Exception as exc:
+                reason = self.tools._vision_error_reason(exc)
+                return DOWN, (f"caption/VQA path failed: {reason} "
+                              f"({type(exc).__name__}: {str(exc)[:120]}) — "
+                              f"describe answers are detector-only until fixed")
+            result = resp.get("result") or {}
+            caption = (result.get("answer") or result.get("caption") or "").strip()
+            if not caption:
+                return DEGRADED, "caption adapter answered but returned no text"
+            return OK, f"VLM answered: \"{caption[:80]}\""
+
+        async def check_llm():
+            if self.cfg.llm_provider.strip().lower() == "openai":
+                return OK, "external OpenAI-compatible endpoint (not probed)"
+            url = f"{self.cfg.ollama_url.rstrip('/')}/api/tags"
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                models = [m.get("name") for m in (resp.json().get("models") or [])]
+            want = self.cfg.llm_model
+            if any(want == m or str(m).startswith(want) for m in models if m):
+                return OK, f"Ollama reachable; model {want} present"
+            return DEGRADED, (f"Ollama reachable but model {want!r} not pulled "
+                              f"(have: {', '.join(models[:5]) or 'none'})")
+
+        async def _http_ok(name, base_url):
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(f"{base_url.rstrip('/')}/health")
+                resp.raise_for_status()
+            return OK, f"{name} reachable"
+
+        async def check_stt():
+            return await _http_ok("whisper (speech-to-text)", self.cfg.whisper_url)
+
+        async def check_tts():
+            return await _http_ok("piper (voice)", self.cfg.piper_url)
+
+        async def check_alarms():
+            armed = len(list(getattr(self.alarms, "_alarms", {}) or {}))
+            task = getattr(self.alarms, "_task", None)
+            running = bool(task is not None and not task.done())
+            if armed and not running:
+                return DOWN, f"{armed} alarm(s) armed but the poll engine is NOT running"
+            state = "engine running" if running else "engine idle (starts with the first alarm)"
+            return OK, f"{armed} alarm(s) armed; {state}"
+
+        async def check_events():
+            task = self._subscriber_task
+            if self.cfg.nats_inference_url and (task is None or task.done()):
+                return DOWN, "NATS subscriber is not running — no detection events reach the agent"
+            newest = None
+            for cid in cam_ids:
+                ev = self.context.latest_inference(cid, adapter="tier0")
+                if ev is not None:
+                    age = time.time() - ev.received_at
+                    newest = age if newest is None else min(newest, age)
+            if newest is None:
+                return DEGRADED, ("subscriber up, but no Tier-0 events received yet "
+                                  "(quiet scene, or detect-pipeline down)")
+            return OK, f"Tier-0 events flowing (newest {newest:.0f}s ago)"
+
+        return await run_checks({
+            "camera frame": check_frame,
+            "object detection": check_detection,
+            "vision (VLM describe)": check_vision,
+            "language model": check_llm,
+            "speech-to-text": check_stt,
+            "text-to-speech": check_tts,
+            "alarms": check_alarms,
+            "detection events": check_events,
+        })
+
+    async def _startup_system_check(self) -> None:
+        """One self-check shortly after boot, logged as a board — every
+        silent-degradation bug becomes a named startup line instead of a
+        confused user report days later."""
+        await asyncio.sleep(25)          # let adapters/models finish warming
+        try:
+            report = await self.run_system_check()
+        except Exception:
+            logger.exception("startup system check failed to run")
+            return
+        logger.info("system check: %s", report.summary)
+        for line in report.lines():
+            (logger.info if "✅" in line else logger.error)("system check: %s", line)
 
     def interactive_busy(self) -> bool:
         """True while a voice/chat turn is being served. Background detection
@@ -3987,6 +4227,9 @@ class CameraAgentRuntime:
                 self._reconcile_opennvr_cameras(),
                 name="camera-agent-opennvr-camera-reconcile",
             )
+        # Boot-time capability board (see run_system_check).
+        asyncio.create_task(self._startup_system_check(),
+                            name="camera-agent-startup-system-check")
 
     async def _prewarm_llm(self) -> None:
         try:
@@ -4431,6 +4674,14 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
 
+    @app.get("/system-check")
+    async def _system_check() -> dict:
+        """Exercise every real capability path (frame → detector → VLM → LLM →
+        STT/TTS → alarms → events) and return the board. Slow by design (it
+        runs real inference); the demo UI calls it on demand."""
+        report = await runtime.run_system_check()
+        return report.as_dict()
+
     @app.get("/frame/{camera_id}")
     async def _frame(camera_id: str, at: float | None = None) -> Response:
         """JPEG for one camera. No ``at`` → the CURRENT frame (rides the
@@ -4844,10 +5095,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see MonitorManager.remove)."""
+        """The UI's ✕: stop AND forget — idempotent, same contract as
+        DELETE /alarms/{id} (already-gone is success)."""
         ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/alarms")
     async def _alarms() -> dict[str, Any]:
@@ -4903,10 +5155,17 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/alarms/{alarm_id}")
     async def _delete_alarm(alarm_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see AlarmManager.remove)."""
+        """The UI's ✕: stop AND forget (see AlarmManager.remove).
+
+        IDEMPOTENT: deleting an alarm that is already gone is success,
+        not an error. A slow refresh can leave a removed alarm's row on
+        screen; every extra click then hit 404 and the UI reported
+        'couldn't remove' six times for an alarm that WAS removed —
+        alarming (sic) and wrong. Deletion's contract is 'make it not
+        exist', and it already doesn't."""
         ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/reports")
     async def _reports() -> dict[str, Any]:
@@ -4933,10 +5192,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.delete("/reports/{report_id}")
     async def _delete_report(report_id: int) -> JSONResponse:
-        """The UI's ✕: stop AND forget (see ReportScheduler.remove)."""
+        """The UI's ✕: stop AND forget — idempotent like the others."""
         ok = runtime.reports.remove(report_id)
         runtime.persist()
-        return JSONResponse({"stopped": ok}, status_code=200 if ok else 404)
+        return JSONResponse({"stopped": ok, "already_gone": not ok})
 
     @app.get("/people")
     async def _people() -> JSONResponse:
@@ -5062,6 +5321,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "reply": reply,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": frames,
+            "trace": list(runtime.last_turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
 
@@ -5243,6 +5503,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": _frames_for(runtime),
+            "trace": list(runtime.last_turn_trace) if not armed else [],
             "timings_ms": timings, "invoked": True, "armed": armed,
             "tts_error": tts_error,
         })
@@ -5437,15 +5698,35 @@ async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any]) -> t
     handler = runtime.tool_handlers.get(name)
     if handler is None:
         return name, f"ERROR: tool '{name}' is not registered."
+    _tool_t0 = time.perf_counter()
     try:
         result = await handler(args)
     except Exception:
         logger.exception("Tool %s raised", name)
+        _trace_tool(runtime, name, args, "ERROR", _tool_t0)
         return name, f"ERROR: tool '{name}' failed unexpectedly."
     result = str(result)
+    _trace_tool(runtime, name, args, None, _tool_t0)
     if len(result) > 1200:
         result = result[:1200] + " …(truncated)"
     return name, result
+
+
+def _trace_tool(runtime, name: str, args: dict, note: str | None, t0: float) -> None:
+    """Append one tool execution to the current turn's pipeline trace."""
+    trace = getattr(runtime, "last_turn_trace", None)
+    if trace is None:
+        return
+    detail = str(args.get("camera_id") or args.get("camera") or "").strip()
+    if name == "describe_camera":
+        # Name the path that actually answered: full vision, or the honest
+        # detector fallback (tools.last_vision_error is set per describe).
+        err = getattr(runtime.tools, "last_vision_error", None)
+        detail = (detail + (" · detector-fallback" if err else " · vlm")).strip(" ·")
+    if note:
+        detail = (detail + f" · {note}").strip(" ·")
+    trace.append({"step": name, "detail": detail,
+                  "ms": int((time.perf_counter() - t0) * 1000)})
 
 
 # Words that mean "this is a question about a camera / the scene". If the
@@ -5617,6 +5898,13 @@ async def _run_conversation_turn(
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
+    # Per-turn pipeline trace: ordered (step, detail, ms) of everything this
+    # turn executed — LLM iterations, every tool, forced groundings — so the
+    # UI can show "llm → describe_camera → llm" and a slow or degraded turn
+    # explains itself. Overwritten each turn (turns are serialized).
+    trace: list[dict[str, Any]] = []
+    runtime.last_turn_trace = trace
+
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
@@ -5626,12 +5914,15 @@ async def _run_conversation_turn(
     #                        (small/thinking models sometimes do), so the user
     #                        gets the real detection/caption instead of "Sorry".
     for iteration in range(max_iterations):
+        _llm_t0 = time.perf_counter()
         response = await runtime.ollama.chat(
             messages=messages,
             tools=tools,
             temperature=runtime.cfg.llm_temperature,
             max_tokens=runtime.cfg.llm_max_tokens,
         )
+        trace.append({"step": "llm", "detail": f"iter {iteration + 1}",
+                      "ms": int((time.perf_counter() - _llm_t0) * 1000)})
         message = response.get("message") or {}
         tool_calls = message.get("tool_calls") or []
         content = (message.get("content") or "").strip()

@@ -5,8 +5,14 @@
 
 Beyond loopback, checks the adapter's declared ``permissions.network_egress``:
 
-* ``local_only``    — URL must be loopback AND network_egress empty (a non-empty
-                       list means it's a cloud-proxy → refused).
+* ``local_only``    — URL must be on this machine AND every declared
+                       network_egress host must ALSO be on this machine
+                       (loopback, the Docker bridge subnet, or the container
+                       runtime's host alias ``host.docker.internal``). An
+                       adapter that proxies to a host-local runtime — the
+                       ollamavlm adapter calling the operator's own Ollama —
+                       keeps the AI on this box and passes; anything pointing
+                       off-machine is a cloud/LAN proxy → refused.
 * ``federated``     — network_egress may be non-empty but must enumerate every
                        host explicitly; wildcards are refused.
 * ``cloud_allowed`` — no checks.
@@ -35,6 +41,14 @@ VALID_SOVEREIGNTY_MODES = frozenset({"local_only", "federated", "cloud_allowed"}
 # (bridge traffic stays in-kernel). Operator-configurable for non-standard
 # bridge ranges. See V-022 and DESIGN_NOTES: KAI-C sovereignty & the Docker bridge.
 _DOCKER_BRIDGE_SUBNET = os.getenv("OPENNVR_DOCKER_SUBNET", "172.28.0.0/16")
+
+# The container runtime's aliases for the DOCKER HOST itself. By definition
+# these point at the machine running Docker — the same box KAI-C runs on — so
+# for sovereignty purposes they are "this machine" even though they resolve
+# OUTSIDE the bridge subnet (Docker Desktop hands out e.g. 192.168.65.x).
+# This is what lets an adapter proxy to a host-local runtime (the operator's
+# own Ollama on host.docker.internal) under local_only.
+_HOST_ALIAS_NAMES = frozenset({"host.docker.internal", "gateway.docker.internal"})
 
 
 class SovereigntyViolation(Exception):
@@ -91,7 +105,10 @@ def host_is_on_this_machine(host: str | None) -> bool:
       * a host/IP inside the operator's own Docker bridge subnet
         (``OPENNVR_DOCKER_SUBNET``, default ``172.28.0.0/16``) — traffic
         between bridge-network containers stays inside this host's kernel
-        networking stack, so it never leaves the box.
+        networking stack, so it never leaves the box; or
+      * the container runtime's host aliases (``host.docker.internal`` /
+        ``gateway.docker.internal``) — by definition the machine running
+        Docker, even though they resolve outside the bridge subnet.
 
     Everything else is rejected, including non-bridge RFC1918 / ULA / LAN
     addresses (those are peer hosts on the same LAN, which V-022
@@ -104,6 +121,10 @@ def host_is_on_this_machine(host: str | None) -> bool:
         return True
     if not host:
         return False
+    if host.strip("[]").lower() in _HOST_ALIAS_NAMES:
+        # The container runtime defines these names as "the machine running
+        # Docker" — this host, by construction, wherever they resolve.
+        return True
     bridge_net = _docker_bridge_net()
     if bridge_net is None:
         return False
@@ -192,13 +213,33 @@ def check_adapter(
             )
         if capabilities is not None:
             egress = capabilities.permissions.network_egress
-            if egress:
+            # Judge each declared egress DESTINATION, not the existence of
+            # egress: an adapter proxying to a runtime on this same machine
+            # (the ollamavlm adapter → the operator's host Ollama) keeps the
+            # AI plane local and is exactly what local_only protects. Only a
+            # destination off this machine makes it a cloud/LAN proxy.
+            if _has_wildcard(egress):
                 raise SovereigntyViolation(
                     f"AI_SOVEREIGNTY=local_only refuses adapter "
-                    f"{capabilities.adapter.name!r}: declared "
-                    f"permissions.network_egress={egress!r} is non-empty "
-                    f"(cloud-proxy adapter)."
+                    f"{capabilities.adapter.name!r}: "
+                    f"permissions.network_egress contains wildcard entries "
+                    f"({egress!r})."
                 )
+            for entry in egress:
+                entry_host = _url_host(entry) if "://" in entry else entry.split(":", 1)[0]
+                if not host_is_on_this_machine(entry_host):
+                    raise SovereigntyViolation(
+                        f"AI_SOVEREIGNTY=local_only refuses adapter "
+                        f"{capabilities.adapter.name!r}: declared "
+                        f"network_egress entry {entry!r} (host={entry_host}) "
+                        f"is not on this "
+                        f"machine. Loopback, the Docker bridge subnet "
+                        f"({_DOCKER_BRIDGE_SUBNET}), and the runtime's host "
+                        f"aliases ({', '.join(sorted(_HOST_ALIAS_NAMES))}) "
+                        f"stay local; anything else needs "
+                        f"AI_SOVEREIGNTY=federated (enumerated hosts) or "
+                        f"cloud_allowed."
+                    )
         return
 
     # mode == "federated"

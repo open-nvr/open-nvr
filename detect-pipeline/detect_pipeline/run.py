@@ -17,12 +17,18 @@ Env:
   NATS_TOKEN                bus auth token; defaults to INTERNAL_API_KEY (the
                             compose broker runs with --auth $INTERNAL_API_KEY)
   DETECT_CV_THREADS         cv2 intra-op thread cap (default 2; 0 = uncapped)
-  DETECT_DETECTOR           onnx | hog | blob | stub (default onnx)
-  DETECT_ONNX_BACKEND       cvdnn (default, zero-dep CPU) | ort (ONNX Runtime)
+  DETECT_DETECTOR           onnx (YOLO) | rfdetr (DETR) | hog | blob | stub
+  DETECT_ONNX_BACKEND       auto (default: cvdnn for onnx, ort for rfdetr)
+                            | cvdnn | ort
   DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.
                             "OpenVINOExecutionProvider" (Intel N100) or
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
+  DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
+  DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
+  DETECT_DECODE_FAST        true = skip h264 loop filter (CPU decode only; opt-in)
+  DETECT_DECODE_IDLE        adaptive decode while quiet (default nokey; none = off)
+  DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
   DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
@@ -55,6 +61,19 @@ class ServiceConfig:
     onnx_providers: str
     hwaccel: str
     device: str
+    # ffmpeg -skip_frame: none | bidir | nonref | nokey. Moves the frame drop
+    # from the fps filter (post-decode) into the DECODER — see ffmpeg_presets.
+    decode_skip: str
+    # ffmpeg decoder thread cap (0 = ffmpeg auto, up to 16/camera) and the
+    # opt-in loop-filter skip — see ffmpeg_presets.build_decode_command.
+    decode_threads: int
+    fast_decode: bool
+    # Adaptive decode (Blue Iris-style "limit decoding unless required"):
+    # DETECT_DECODE_IDLE names the skip mode used while a camera is quiet
+    # ("" = off). Promotion back to full decode happens on the first motion
+    # box / track; demotion after DETECT_DECODE_IDLE_AFTER quiet seconds.
+    decode_idle: str
+    decode_idle_after: float
     model_size: int
     model_id: str            # detector identity for benchmarking labels (see below)
     refresh_seconds: float
@@ -79,6 +98,22 @@ class ServiceConfig:
 
 def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _decode_skip_from_env(env: dict) -> str:
+    """DETECT_DECODE_SKIP, degraded safely: a typo must not kill every worker
+    at spawn time (build_decode_command raises on unknown modes), so an
+    invalid value logs loudly and falls back to full decode."""
+    from .ffmpeg_presets import DECODE_SKIP_MODES
+
+    value = str(env.get("DETECT_DECODE_SKIP", "nonref")).strip().lower()
+    if value not in DECODE_SKIP_MODES:
+        log.warning(
+            "DETECT_DECODE_SKIP=%r is not one of %s; using 'none' (full decode)",
+            env.get("DETECT_DECODE_SKIP"), list(DECODE_SKIP_MODES),
+        )
+        return "none"
+    return value
 
 
 def _derive_model_id(env: dict) -> str:
@@ -110,10 +145,15 @@ def config_from_env(env: dict) -> ServiceConfig:
         detector=env.get("DETECT_DETECTOR", "onnx"),
         onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
         onnx_input=int(env.get("DETECT_ONNX_INPUT", "640")),
-        onnx_backend=env.get("DETECT_ONNX_BACKEND", "cvdnn"),
+        onnx_backend=env.get("DETECT_ONNX_BACKEND", "auto"),
         onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
+        decode_skip=_decode_skip_from_env(env),
+        decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
+        fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
+        decode_idle=_decode_idle_from_env(env),
+        decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
         model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
         model_id=_derive_model_id(env),
         refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
@@ -127,6 +167,35 @@ def config_from_env(env: dict) -> ServiceConfig:
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
+
+
+def _decode_idle_from_env(env: dict) -> str:
+    """DETECT_DECODE_IDLE: a skip mode used while the camera is quiet, or
+    empty/none/off = adaptive decode disabled. Invalid values warn and
+    disable rather than killing workers at spawn time."""
+    from .ffmpeg_presets import DECODE_SKIP_MODES
+
+    value = str(env.get("DETECT_DECODE_IDLE", "nokey")).strip().lower()
+    if value in ("", "none", "off", "false"):
+        return ""
+    if value not in DECODE_SKIP_MODES:
+        log.warning(
+            "DETECT_DECODE_IDLE=%r is not one of %s; adaptive decode disabled",
+            env.get("DETECT_DECODE_IDLE"), list(DECODE_SKIP_MODES),
+        )
+        return ""
+    return value
+
+
+def _env_int(env: dict, name: str, default: int) -> int:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log.warning("%s=%r is not an integer; using %s", name, raw, default)
+        return default
 
 
 def _env_float(env: dict, name: str, default: float) -> float:
@@ -163,6 +232,20 @@ def _gate_factory(cfg: ServiceConfig):
     return lambda: Gate(gcfg)
 
 
+def _resolve_onnx_backend(configured: str, family_default: str) -> str:
+    """DETECT_ONNX_BACKEND: '' / 'auto' resolve per detector family — cvdnn
+    for the YOLO head (runs everywhere, zero deps), ort for the DETR head
+    (transformer exports exceed cv2.dnn's operator coverage). An explicit
+    cvdnn/ort is honored; anything else warns and uses the family default."""
+    value = (configured or "auto").strip().lower()
+    if value in ("", "auto"):
+        return family_default
+    if value in ("cvdnn", "ort"):
+        return value
+    log.warning("unknown DETECT_ONNX_BACKEND=%r; using %s", configured, family_default)
+    return family_default
+
+
 def _stub_factory():
     from .detector import StubDetector
     return StubDetector
@@ -183,10 +266,7 @@ def _detector_factory(cfg: ServiceConfig):
         from .onnx_detector import OnnxYoloDetector
 
         providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
-        backend = (cfg.onnx_backend or "cvdnn").lower()
-        if backend not in ("cvdnn", "ort"):
-            log.warning("unknown DETECT_ONNX_BACKEND=%r; falling back to cvdnn", cfg.onnx_backend)
-            backend = "cvdnn"
+        backend = _resolve_onnx_backend(cfg.onnx_backend, "cvdnn")
         if providers and backend != "ort":
             log.warning(
                 "DETECT_ONNX_PROVIDERS is set but backend=%s ignores it "
@@ -195,20 +275,77 @@ def _detector_factory(cfg: ServiceConfig):
 
         def make_onnx():
             try:
-                return OnnxYoloDetector(
+                det = OnnxYoloDetector(
                     model_path=cfg.onnx_model, input_size=cfg.onnx_input,
                     backend=backend, providers=providers,
                     conf_threshold=cfg.detect_conf,
                 )
+                log.info(
+                    "tier0 detector loaded: family=yolo model=%s backend=%s input=%d",
+                    os.path.basename(cfg.onnx_model), det.backend_name, cfg.onnx_input,
+                )
+                return det
             except Exception:
                 log.warning(
-                    "failed to load ONNX model %s (backend=%s); using stub",
+                    "failed to load ONNX model %s (backend=%s)",
                     cfg.onnx_model, cfg.onnx_backend, exc_info=True,
+                )
+                log.error(
+                    "DETECTION IS OFF for this worker: running the STUB detector "
+                    "(motion/tracking only, no objects). Fix the model/backend."
                 )
                 from .detector import StubDetector
                 return StubDetector()
 
         return make_onnx
+    if name == "rfdetr":
+        # RF-DETR family (NMS-free DETR head). Reuses DETECT_ONNX_MODEL /
+        # DETECT_ONNX_INPUT / DETECT_ONNX_BACKEND — point the model path at an
+        # rf-detr ONNX export and set the input to the variant's resolution
+        # (nano 384). Transformer exports usually exceed cv2.dnn's operator
+        # coverage, so the backend default for this family is ort.
+        if not cfg.onnx_model or not os.path.exists(cfg.onnx_model):
+            log.warning("RF-DETR model not found at %s; using stub detector", cfg.onnx_model)
+            return _stub_factory()
+        from .detr_detector import OnnxDetrDetector
+
+        providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
+        backend = _resolve_onnx_backend(cfg.onnx_backend, "ort")
+        if backend == "cvdnn":
+            log.warning(
+                "DETECT_DETECTOR=rfdetr with backend=cvdnn: cv2.dnn often lacks "
+                "the transformer ops this export uses — will fall back to ort "
+                "automatically if loading fails"
+            )
+
+        def make_rfdetr():
+            for attempt in ([backend, "ort"] if backend == "cvdnn" else [backend]):
+                try:
+                    det = OnnxDetrDetector(
+                        model_path=cfg.onnx_model, input_size=cfg.onnx_input,
+                        backend=attempt, providers=providers,
+                        conf_threshold=cfg.detect_conf,
+                    )
+                    log.info(
+                        "tier0 detector loaded: family=detr model=%s backend=%s input=%d",
+                        os.path.basename(cfg.onnx_model), det.backend_name, cfg.onnx_input,
+                    )
+                    return det
+                except Exception:
+                    log.warning(
+                        "failed to load RF-DETR model %s (backend=%s)",
+                        cfg.onnx_model, attempt, exc_info=True,
+                    )
+            log.error(
+                "DETECTION IS OFF for this worker: RF-DETR could not load on any "
+                "backend — running the STUB detector (motion/tracking only, no "
+                "objects). Fix the model path/backend; do not mistake this for a "
+                "working detector."
+            )
+            from .detector import StubDetector
+            return StubDetector()
+
+        return make_rfdetr
     if name == "hog":
         from .detectors_local import HogPersonDetector, hog_available
         if hog_available():
@@ -260,6 +397,11 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         model_id=cfg.model_id,
         best_frames=best_frames,
         device=cfg.device,
+        decode_skip=cfg.decode_skip,
+        decode_threads=cfg.decode_threads,
+        fast_decode=cfg.fast_decode,
+        decode_idle=cfg.decode_idle,
+        decode_idle_after=cfg.decode_idle_after,
         gate_factory=_gate_factory(cfg),
         gate_sink=gate_sink,
         dispatcher=dispatcher,

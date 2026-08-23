@@ -37,6 +37,17 @@
 # service until a dedicated ghcr.io/open-nvr/ollama-adapter image is published.
 # ==========================================
 
+# Bounded per-container logs (see docs/OBSERVABILITY.md "Logs"): every
+# service keeps a rolling ~30MB of its own history (3 x 10MB json files), so
+# `docker logs --since 1h <name>` always has the recent story after an
+# incident, and a chatty container can never fill the disk. Opt-in central
+# viewer: `COMPOSE_PROFILES=logs` adds a localhost-only Dozzle at :9999.
+x-default-logging: &svc-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ──────────────────────────────────────────────────────────────
   # Whisper STT — VOICE only. Pulled from GHCR. The image eagerly loads the
@@ -47,6 +58,7 @@ services:
     profiles: [camera-agent]
     image: ghcr.io/open-nvr/whisper-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_whisper_adapter
+    logging: *svc-logs
     restart: unless-stopped
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
@@ -84,6 +96,7 @@ services:
     profiles: [camera-agent]
     image: curlimages/curl:8.10.1
     container_name: opennvr_piper_voices_init
+    logging: *svc-logs
     restart: "no"
     # The curl image runs as a non-root user, but a fresh named volume is
     # root-owned — without this the very first download fails on a
@@ -129,6 +142,7 @@ services:
     profiles: [camera-agent]
     image: ghcr.io/open-nvr/piper-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_piper_adapter
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       piper-voices-init:
@@ -157,8 +171,12 @@ services:
   # ──────────────────────────────────────────────────────────────
   caption-adapter:
     profiles: [camera-agent, camera-agent-chat]
-    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${ADAPTER_TAG:-latest}
+    # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than the
+    # pinned ADAPTER_TAG — needed while the default (ollamavlm) exists only in
+    # post-0.1.3 builds. Falls back to ADAPTER_TAG when unset/empty.
+    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${CAPTION_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
     container_name: opennvr_caption_adapter
+    logging: *svc-logs
     restart: unless-stopped
     command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-moondream}.main:app", "--host", "0.0.0.0", "--port", "9006"]
     environment:
@@ -196,6 +214,7 @@ services:
     profiles: [camera-agent, camera-agent-chat]
     image: alpine:3.20
     container_name: opennvr_caption_register
+    logging: *svc-logs
     restart: "no"
     depends_on:
       opennvr-core:
@@ -239,6 +258,7 @@ services:
     profiles: [camera-agent]
     image: alpine:3.20
     container_name: opennvr_voice_register
+    logging: *svc-logs
     restart: "no"
     depends_on:
       opennvr-core:
@@ -282,6 +302,7 @@ services:
     profiles: [camera-agent, camera-agent-chat]
     image: ollama/ollama:0.21.2
     container_name: opennvr_ollama
+    logging: *svc-logs
     restart: unless-stopped
     environment:
       # Keep the model resident in RAM indefinitely. Without this Ollama
@@ -316,6 +337,7 @@ services:
     profiles: [camera-agent, camera-agent-chat]
     image: ollama/ollama:0.21.2
     container_name: opennvr_ollama_pull
+    logging: *svc-logs
     restart: "no"
     depends_on:
       ollama:
@@ -351,6 +373,7 @@ services:
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_camera_agent_certs_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -384,6 +407,7 @@ services:
     profiles: [camera-agent]
     image: alpine:3.20
     container_name: opennvr_camera_agent_config_init
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -433,6 +457,7 @@ services:
     # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
     image: ghcr.io/open-nvr/camera-agent:${CORE_TAG:-latest}
     container_name: opennvr_camera_agent
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       camera-agent-config-init:
@@ -487,6 +512,7 @@ services:
     profiles: [camera-agent-chat]
     image: alpine:3.20
     container_name: opennvr_camera_agent_config_init_chat
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -531,6 +557,7 @@ services:
       dockerfile: examples/camera-agent/Dockerfile
     image: opennvr/camera-agent:local-build
     container_name: opennvr_camera_agent_chat
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       camera-agent-config-init-chat:

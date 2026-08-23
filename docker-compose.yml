@@ -15,6 +15,17 @@
 # and docs/ARCHITECTURE.md.
 # ==========================================
 
+# Bounded per-container logs (see docs/OBSERVABILITY.md "Logs"): every
+# service keeps a rolling ~30MB of its own history (3 x 10MB json files), so
+# `docker logs --since 1h <name>` always has the recent story after an
+# incident, and a chatty container can never fill the disk. Opt-in central
+# viewer: `COMPOSE_PROFILES=logs` adds a localhost-only Dozzle at :9999.
+x-default-logging: &svc-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ──────────────────────────────────────────────────────────────
   # PostgreSQL — persistence for cameras, alerts, audit logs.
@@ -22,6 +33,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: opennvr_db
+    logging: *svc-logs
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -46,6 +58,7 @@ services:
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_mediamtx_certs_init
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -104,6 +117,7 @@ services:
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
+    logging: *svc-logs
     restart: unless-stopped
     # Run as the same uid as the opennvr-core backend (Dockerfile useradd -u
     # 1000). MediaMTX used to run as root, so every segment dir it created
@@ -180,6 +194,7 @@ services:
   nats:
     image: nats:2-alpine
     container_name: opennvr_nats
+    logging: *svc-logs
     restart: unless-stopped
     command:
       - --name
@@ -207,6 +222,7 @@ services:
     image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
+    logging: *svc-logs
     restart: "no"
     # NOTE: entrypoint is list-form ["sh","-ec"] and command is a
     # single-item LIST (the "- |" below), not a bare "command: |"
@@ -239,6 +255,7 @@ services:
   yolov8-adapter:
     image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_yolov8_adapter
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       yolov8-weights-init:
@@ -280,6 +297,7 @@ services:
     # component directly (see detect-pipeline/README.md).
     image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
     container_name: opennvr_detect_pipeline
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       opennvr-core:
@@ -303,9 +321,25 @@ services:
       # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
       # For an accelerator, set backend=ort + providers (and install the matching
       # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
-      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-cvdnn}
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-auto}
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
+      # Decode-side frame skip (-skip_frame): nonref (default — provably
+      # lossless, drops only frames nothing references) | bidir | nokey
+      # (keyframes only: deepest CPU cut, granularity ≈ the GOP rate) | none.
+      - DETECT_DECODE_SKIP=${DETECT_DECODE_SKIP:-nonref}
+      # Decoder thread cap (lossless — output is identical at any thread
+      # count; ffmpeg's auto default spawns up to 16/camera) and the opt-in
+      # loop-filter skip (small extra CPU cut, tiny pixel drift; CPU decode only).
+      - DETECT_DECODE_THREADS=${DETECT_DECODE_THREADS:-2}
+      - DETECT_DECODE_FAST=${DETECT_DECODE_FAST:-false}
+      # Adaptive decode (ON by default): keyframes-only while a camera is
+      # quiet, full decode from the first motion box until
+      # DETECT_DECODE_IDLE_AFTER quiet seconds. Recording is unaffected.
+      # Set DETECT_DECODE_IDLE=none for always-full decode (sub-second
+      # detector reaction at all times).
+      - DETECT_DECODE_IDLE=${DETECT_DECODE_IDLE:-nokey}
+      - DETECT_DECODE_IDLE_AFTER=${DETECT_DECODE_IDLE_AFTER:-60}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
@@ -318,7 +352,7 @@ services:
       - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
-      - DETECT_FPS=${DETECT_FPS:-5}
+      - DETECT_FPS=${DETECT_FPS:-2}
       # Re-verify stationary tracks every Nth frame instead of every frame
       # (staggered per track; motion near the object re-checks immediately).
       # 0 = pre-gating behavior. See .env.example.
@@ -370,6 +404,7 @@ services:
   opennvr-core:
     image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
     container_name: opennvr_core
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       db:
@@ -492,6 +527,7 @@ services:
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_nginx_certs_init
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -528,6 +564,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     container_name: opennvr_nginx
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       nginx-certs-init:
@@ -562,6 +599,29 @@ services:
 # ==========================================
 # Networks
 # ==========================================
+  # ──────────────────────────────────────────────────────────────
+  # Central log viewer — OPT-IN (COMPOSE_PROFILES=logs). Dozzle streams every
+  # container's stdout in one localhost-only web UI (http://127.0.0.1:9999),
+  # filtered to this project's containers. SECURITY: it mounts the Docker
+  # socket read-only, which is still host-level visibility — that is exactly
+  # why this ships OFF by default, binds to loopback only, and belongs on a
+  # dev/operator box, never an exposed host. For always-on bounded history
+  # without any extra container, every service already keeps ~30MB of
+  # rotated logs: `docker logs --since 1h <container>`.
+  # ──────────────────────────────────────────────────────────────
+  log-viewer:
+    profiles: [logs]
+    image: amir20/dozzle:v8.9.1
+    container_name: opennvr_log_viewer
+    logging: *svc-logs
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9999:8080"
+    environment:
+      - DOZZLE_FILTER=name=opennvr
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
 networks:
   opennvr_internal:
     driver: bridge
@@ -576,6 +636,7 @@ networks:
 # ==========================================
 # Volumes
 # ==========================================
+
 volumes:
   opennvr_db_data:
   shared_frames:

@@ -34,7 +34,13 @@ COMPOSE_GLOBS = ("docker-compose*.yml",)
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 GHCR_PREFIX = "ghcr.io/open-nvr/"
 
-_VAR = re.compile(r"\$\{(?P<name>[A-Z0-9_]+)(?::-(?P<default>[^}]*))?\}")
+# A single ``${VAR}`` / ``${VAR:-default}`` whose default contains NO further
+# ``${``-expansion — i.e. an *innermost* substitution. Nested defaults like
+# ``${CAPTION_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}`` (valid compose, used by
+# the camera-agent caption image) are handled by ``substitute`` resolving
+# innermost-first until a fixpoint; a default-stops-at-first-``}`` regex
+# would leave a stray trailing brace in the tag and 404 every check.
+_VAR = re.compile(r"\$\{(?P<name>[A-Z0-9_]+)(?::-(?P<default>[^{}]*))?\}")
 
 
 def load_env_pins(path: Path) -> dict[str, str]:
@@ -54,10 +60,22 @@ def load_env_pins(path: Path) -> dict[str, str]:
 
 
 def substitute(ref: str, pins: dict[str, str]) -> str:
-    """Resolve ${VAR:-default} exactly like compose would with this .env."""
+    """Resolve ${VAR:-default} exactly like compose would with this .env.
+
+    Resolves innermost expansions first and repeats until nothing changes,
+    so nested defaults (``${A:-${B:-x}}``) reduce the same way compose
+    reduces them: a set/pinned outer VAR wins outright, and only an
+    unset/empty one falls through to the (already-resolved) inner default.
+    Terminates because every pass either removes a ``${...}`` group or
+    changes nothing.
+    """
     def repl(m: re.Match) -> str:
         return pins.get(m.group("name")) or (m.group("default") or "")
-    return _VAR.sub(repl, ref)
+    prev = None
+    while prev != ref:
+        prev = ref
+        ref = _VAR.sub(repl, ref)
+    return ref
 
 
 def collect_image_refs() -> list[str]:

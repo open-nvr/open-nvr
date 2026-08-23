@@ -15,7 +15,7 @@ def test_defaults_are_enabled_with_onnx():
     assert cfg.detector == "onnx"                 # ONNX is the default detector
     assert cfg.onnx_model.endswith("yolov8n.onnx")
     assert cfg.onnx_input == 640
-    assert cfg.onnx_backend == "cvdnn"            # zero-dep default backend
+    assert cfg.onnx_backend == "auto"             # per-family resolution (onnx→cvdnn)
     assert cfg.onnx_providers == ""
 
 
@@ -220,3 +220,70 @@ def test_apply_gate_change_stops_workers_and_swaps_factory():
     assert mgr.running_ids() == set()      # next reconcile rebuilds them
     assert mgr._gate_factory is new_factory
     assert mgr._dispatcher == "d" and mgr._router == "r"
+
+
+def test_decode_skip_from_env_and_invalid_falls_back():
+    """DETECT_DECODE_SKIP flows into the config; a typo degrades to full
+    decode instead of killing every worker at ffmpeg-spawn time."""
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_skip == "nonref"   # safe-by-default saving
+    assert config_from_env({"DETECT_DECODE_SKIP": "NoKey "}).decode_skip == "nokey"
+    assert config_from_env({"DETECT_DECODE_SKIP": "keyframes"}).decode_skip == "none"
+
+
+def test_decode_threads_and_fast_from_env():
+    from detect_pipeline.run import config_from_env
+
+    cfg = config_from_env({})
+    assert cfg.decode_threads == 2 and cfg.fast_decode is False
+    cfg = config_from_env({"DETECT_DECODE_THREADS": "0", "DETECT_DECODE_FAST": "true"})
+    assert cfg.decode_threads == 0 and cfg.fast_decode is True
+    assert config_from_env({"DETECT_DECODE_THREADS": "lots"}).decode_threads == 2
+
+
+def test_decode_idle_from_env():
+    from detect_pipeline.run import config_from_env
+
+    assert config_from_env({}).decode_idle == "nokey"                  # adaptive ON by default
+    cfg = config_from_env({"DETECT_DECODE_IDLE": "nokey",
+                           "DETECT_DECODE_IDLE_AFTER": "30"})
+    assert cfg.decode_idle == "nokey" and cfg.decode_idle_after == 30.0
+    assert config_from_env({"DETECT_DECODE_IDLE": "off"}).decode_idle == ""
+    assert config_from_env({"DETECT_DECODE_IDLE": "keyframes"}).decode_idle == ""
+
+
+def test_detector_factory_rfdetr(tmp_path, monkeypatch):
+    """DETECT_DETECTOR=rfdetr builds the DETR detector; backend 'auto'
+    resolves to ort for this family; a missing model degrades to the stub."""
+    from detect_pipeline.run import _detector_factory, config_from_env
+
+    cfg = config_from_env({"DETECT_DETECTOR": "rfdetr",
+                           "DETECT_ONNX_MODEL": str(tmp_path / "nope.onnx")})
+    assert type(_detector_factory(cfg)()).__name__ == "StubDetector"
+
+    model = tmp_path / "rfdetr-nano.onnx"
+    model.write_bytes(b"stub")
+    import detect_pipeline.detr_detector as dd
+
+    built = {}
+    monkeypatch.setattr(dd, "OnnxDetrDetector",
+                        lambda **kw: built.update(kw) or object())
+    cfg = config_from_env({
+        "DETECT_DETECTOR": "rfdetr",
+        "DETECT_ONNX_MODEL": str(model),
+        "DETECT_ONNX_INPUT": "384",
+    })
+    _detector_factory(cfg)()
+    assert built["model_path"] == str(model)
+    assert built["input_size"] == 384
+    assert built["backend"] == "ort"          # family default via 'auto'
+
+
+def test_resolve_onnx_backend_auto_and_explicit():
+    from detect_pipeline.run import _resolve_onnx_backend
+
+    assert _resolve_onnx_backend("auto", "cvdnn") == "cvdnn"
+    assert _resolve_onnx_backend("", "ort") == "ort"
+    assert _resolve_onnx_backend("cvdnn", "ort") == "cvdnn"   # explicit wins
+    assert _resolve_onnx_backend("tensorflow", "cvdnn") == "cvdnn"

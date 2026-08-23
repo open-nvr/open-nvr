@@ -120,6 +120,25 @@ def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
     )
 
 
+# Decoder frame-skip levels (ffmpeg ``-skip_frame``, an input option placed
+# before ``-i``). Decode — not detection — is Tier-0's dominant CPU cost: the
+# camera's full frame rate is decoded even though only DETECT_FPS frames/s are
+# analyzed (the ``fps`` filter runs POST-decode). ``-skip_frame`` moves the
+# drop to the DECODER, so skipped frames are never decompressed at all:
+#   none    decode every frame — full motion/track granularity (this function's
+#           default; the SERVICE defaults to nonref via DETECT_DECODE_SKIP)
+#   bidir   skip B-frames — moderate saving, output still ≥ typical DETECT_FPS
+#   nonref  skip non-reference frames — PROVABLY lossless (a dropped frame is
+#           one nothing else depends on); the service default
+#   nokey   decode keyframes ONLY — the big one (~one frame per GOP, usually
+#           0.5-1 fps): decode cost drops by roughly the stream's GOP length.
+#           The ``fps`` filter then pads by duplicating frames, which is
+#           nearly free downstream (zero pixel diff → the motion gate skips
+#           them), but real motion/track granularity IS the keyframe rate —
+#           fine for "is someone there" alarms, coarse for fast events.
+DECODE_SKIP_MODES = ("none", "bidir", "nonref", "nokey")
+
+
 def build_decode_command(
     rtsp_url: str,
     *,
@@ -130,6 +149,9 @@ def build_decode_command(
     device: str = "/dev/dri/renderD128",
     codec: str = "h264",
     rtsp_transport: str = "tcp",
+    decode_skip: str = "none",
+    decode_threads: int = 2,
+    fast_decode: bool = False,
 ) -> list[str]:
     """
     Full ffmpeg argv that pulls ``rtsp_url`` (MediaMTX substream republish),
@@ -139,11 +161,35 @@ def build_decode_command(
     """
     if not rtsp_url.startswith(("rtsp://", "rtsps://")):
         raise ValueError(f"expected an rtsp(s):// substream URL, got {rtsp_url!r}")
+    if decode_skip not in DECODE_SKIP_MODES:
+        raise ValueError(
+            f"decode_skip must be one of {DECODE_SKIP_MODES}, got {decode_skip!r}"
+        )
+    skip_args = [] if decode_skip == "none" else ["-skip_frame", decode_skip]
+    # Decoder thread cap (before -i). ffmpeg's default is AUTO — up to 16
+    # frame threads PER CAMERA, which on a small substream is pure scheduling
+    # overhead multiplied by the fleet (Frigate pins -threads 2 for the same
+    # reason). Thread count never changes decoded output, so capping is
+    # lossless. 0 = ffmpeg auto (omit the flag).
+    thread_args = ["-threads", str(decode_threads)] if decode_threads > 0 else []
+    # Opt-in software-decode shortcuts: skip the h264/h265 in-loop deblocking
+    # filter and allow non-spec-compliant speedups. Deblocking exists for
+    # VIEWING quality; detection is robust to the slight blockiness, but the
+    # decoder drifts a little from the encoder between keyframes, so this is
+    # NOT bit-exact — hence opt-in, and CPU decode only (hw decoders ignore
+    # these AVOptions or handle deblocking in silicon for free).
+    fast_args = (
+        ["-skip_loop_filter", "all", "-flags2", "fast"]
+        if fast_decode and hwaccel is HwAccel.CPU else []
+    )
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "warning",
         "-rtsp_transport", rtsp_transport,
+        *thread_args,
+        *skip_args,
+        *fast_args,
         *decode_args(hwaccel, device=device, codec=codec, width=width, height=height),
         "-i", rtsp_url,
         "-vf", scale_filter(hwaccel, width=width, height=height, fps=fps),
