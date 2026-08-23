@@ -208,7 +208,7 @@
       padding:0.9rem; font-size:0.92rem; line-height:1.5; display:flex; flex-direction:column; gap:0.45rem;}
     .log:empty{align-items:center; justify-content:center;}
     .log:empty::after{content:"Ask your cameras anything — tap Talk or type below."; color:var(--faint); font-size:0.85rem;}
-    .msg{max-width:82%;} .msg .who{font-weight:600; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; display:block; margin-bottom:3px;}
+    .msg{max-width:82%; white-space:pre-line;} .msg .who{font-weight:600; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; display:block; margin-bottom:3px;}
     .msg .when{font-weight:400; font-size:0.64rem; color:var(--faint); text-transform:none; letter-spacing:0; margin-left:0.45rem;}
     .msg.sys .when{margin-left:0.35rem; font-style:normal;}
     .msg.user{align-self:flex-end; background:linear-gradient(180deg,rgba(94,179,246,0.18),rgba(61,157,243,0.12));
@@ -587,6 +587,7 @@
             <div class="status" id="status">Ready.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
+            <button id="sysCheck" class="ghost" type="button" title="Exercise every capability path — frame, detector, VLM, LLM, voice, alarms, events — and report what actually works">System check</button>
             <button id="reset" class="ghost" type="button">Reset</button>
           </div>
 
@@ -830,6 +831,20 @@
       for(const id of ["loginUser","loginPass","loginTotp"]){ const el=$(id);
         if(el) el.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); }); } })();
     const talkBtn=$("talk"), resetBtn=$("reset"), statusEl=$("status"), logEl=$("log");
+    const sysCheckBtn=$("sysCheck");
+    if(sysCheckBtn) sysCheckBtn.addEventListener("click", async ()=>{
+      sysCheckBtn.disabled=true; sysCheckBtn.textContent="Checking…";
+      addMsg("Running a full system check — exercising each capability with a real payload…","sys");
+      try{
+        const r=await fetch("/system-check"); const rep=await r.json();
+        const lines=(rep.checks||[]).map(c=>{
+          const icon=c.status==="ok"?"✅":(c.status==="degraded"?"⚠️":"❌");
+          return icon+" "+c.name+" — "+c.detail+" ("+c.latency_ms+" ms)";
+        });
+        addMsg("System check: "+(rep.summary||"?")+"\n"+lines.join("\n"),"sys");
+      }catch(e){ addMsg("System check failed to run: "+e,"sys"); }
+      finally{ sysCheckBtn.disabled=false; sysCheckBtn.textContent="System check"; }
+    });
     const camboxEl=$("cambox"), ramEl=$("ram"), workingEl=$("working");
     const alarmbarEl=$("alarmbar"), alarmTextEl=$("alarmText"), silenceBtn=$("silence");
     const alarmListEl=$("alarmList"), monitorListEl=$("monitorList"), taskListEl=$("taskList"), reportListEl=$("reportList");
@@ -994,6 +1009,18 @@
       t.textContent=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       t.title=now.toLocaleString();
       return t; }
+    function addFlow(trace,timings){
+      // One muted line under the reply: the pipeline this turn actually ran,
+      // e.g.  stt → llm → describe_camera (cam1 · vlm) → llm → tts
+      if(!trace||!trace.length) return;
+      const steps=trace.map(s=>s.step+(s.detail?" ("+s.detail+")":""));
+      if(timings&&timings.stt!=null) steps.unshift("stt");
+      if(timings&&timings.tts!=null) steps.push("tts");
+      const d=document.createElement("div"); d.className="msg sys flowline";
+      d.title=trace.map(s=>s.step+": "+s.ms+" ms").join("\n");
+      d.textContent="⛓ "+steps.join(" → ");
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+    }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
       if(who==="sys"){ d.textContent=text; d.appendChild(msgTime()); }
       else { const label=who==="user"?"you":"agent";
@@ -1074,7 +1101,7 @@
           body:JSON.stringify(body)});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent",d.frames); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
@@ -1608,6 +1635,7 @@
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.armed) armedUntil=Date.now()+20000;     // "Yes?" — next utterance needs no name
         if(data.reply) addMsg(data.reply,"agent",data.frames);
+        addFlow(data.trace,data.timings_ms);
         if(data.reply && !data.audio_b64 && data.tts_error && !ttsWarned){ ttsWarned=true;
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }

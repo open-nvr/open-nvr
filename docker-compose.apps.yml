@@ -30,6 +30,17 @@
 # template's cameras/zones for your scene, then re-run ``up``.
 # ==========================================
 
+# Bounded per-container logs (see docs/OBSERVABILITY.md "Logs"): every
+# service keeps a rolling ~30MB of its own history (3 x 10MB json files), so
+# `docker logs --since 1h <name>` always has the recent story after an
+# incident, and a chatty container can never fill the disk. Opt-in central
+# viewer: `COMPOSE_PROFILES=logs` adds a localhost-only Dozzle at :9999.
+x-default-logging: &svc-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ──────────────────────────────────────────────────────────────
   # Loitering detection — dwell-time alerts for watched labels in
@@ -39,6 +50,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_loitering_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -72,6 +84,7 @@ services:
     # used. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${LOITERING_DETECTION_IMAGE:-opennvr/loitering-detection:local-build}
     container_name: opennvr_loitering_detection
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       loitering-detection-config-init:
@@ -114,6 +127,7 @@ services:
     profiles: [apps, default-apps]
     image: alpine:3.20
     container_name: opennvr_occupancy_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -149,6 +163,7 @@ services:
     # used. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${OCCUPANCY_COUNTING_IMAGE:-opennvr/occupancy-counting:local-build}
     container_name: opennvr_occupancy_counting
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       occupancy-counting-config-init:
@@ -180,6 +195,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_line_crossing_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -208,6 +224,7 @@ services:
     # instead of using the build. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${LINE_CROSSING_IMAGE:-opennvr/line-crossing:local-build}
     container_name: opennvr_line_crossing
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       line-crossing-config-init:
@@ -241,6 +258,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_abandoned_object_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -266,6 +284,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${ABANDONED_OBJECT_IMAGE:-opennvr/abandoned-object:local-build}
     container_name: opennvr_abandoned_object
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       abandoned-object-config-init:
@@ -299,6 +318,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_intrusion_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -324,6 +344,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${INTRUSION_DETECTION_IMAGE:-opennvr/intrusion-detection:local-build}
     container_name: opennvr_intrusion_detection
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       intrusion-detection-config-init:
@@ -366,6 +387,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_license_plate_recognition_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -391,6 +413,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${LICENSE_PLATE_RECOGNITION_IMAGE:-opennvr/license-plate-recognition:local-build}
     container_name: opennvr_license_plate_recognition
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       license-plate-recognition-config-init:
@@ -425,6 +448,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_doorbell_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -450,6 +474,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${SMART_DOORBELL_IMAGE:-opennvr/smart-doorbell:local-build}
     container_name: opennvr_smart_doorbell
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       smart-doorbell-config-init:
@@ -489,6 +514,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_package_delivery_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -514,6 +540,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${PACKAGE_DELIVERY_IMAGE:-opennvr/package-delivery:local-build}
     container_name: opennvr_package_delivery
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       package-delivery-config-init:
@@ -551,6 +578,7 @@ services:
     profiles: [apps, default-apps]
     image: alpine:3.20
     container_name: opennvr_footage_search_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -581,6 +609,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${FOOTAGE_SEARCH_IMAGE:-opennvr/footage-search:local-build}
     container_name: opennvr_footage_search
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       footage-search-config-init:
@@ -621,6 +650,7 @@ services:
     profiles: [apps]
     image: alpine:3.20
     container_name: opennvr_home_assistant_relay_config_init
+    logging: *svc-logs
     restart: "no"
     command:
       - sh
@@ -660,6 +690,7 @@ services:
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${HOME_ASSISTANT_RELAY_IMAGE:-opennvr/home-assistant-relay:local-build}
     container_name: opennvr_home_assistant_relay
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       home-assistant-relay-config-init:

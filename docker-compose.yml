@@ -15,6 +15,17 @@
 # and docs/ARCHITECTURE.md.
 # ==========================================
 
+# Bounded per-container logs (see docs/OBSERVABILITY.md "Logs"): every
+# service keeps a rolling ~30MB of its own history (3 x 10MB json files), so
+# `docker logs --since 1h <name>` always has the recent story after an
+# incident, and a chatty container can never fill the disk. Opt-in central
+# viewer: `COMPOSE_PROFILES=logs` adds a localhost-only Dozzle at :9999.
+x-default-logging: &svc-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ──────────────────────────────────────────────────────────────
   # PostgreSQL — persistence for cameras, alerts, audit logs.
@@ -22,6 +33,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: opennvr_db
+    logging: *svc-logs
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -46,6 +58,7 @@ services:
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_mediamtx_certs_init
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -104,6 +117,7 @@ services:
         COPY --from=mediamtx-base /mediamtx /mediamtx
         ENTRYPOINT ["/mediamtx"]
     container_name: opennvr_mediamtx
+    logging: *svc-logs
     restart: unless-stopped
     # Run as the same uid as the opennvr-core backend (Dockerfile useradd -u
     # 1000). MediaMTX used to run as root, so every segment dir it created
@@ -166,6 +180,7 @@ services:
   nats:
     image: nats:2-alpine
     container_name: opennvr_nats
+    logging: *svc-logs
     restart: unless-stopped
     command:
       - --name
@@ -193,6 +208,7 @@ services:
     image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
+    logging: *svc-logs
     restart: "no"
     # NOTE: entrypoint is list-form ["sh","-ec"] and command is a
     # single-item LIST (the "- |" below), not a bare "command: |"
@@ -225,6 +241,7 @@ services:
   yolov8-adapter:
     image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_yolov8_adapter
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       yolov8-weights-init:
@@ -266,6 +283,7 @@ services:
     # component directly (see detect-pipeline/README.md).
     image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
     container_name: opennvr_detect_pipeline
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       opennvr-core:
@@ -372,6 +390,7 @@ services:
   opennvr-core:
     image: ghcr.io/open-nvr/core:${CORE_TAG:-latest}
     container_name: opennvr_core
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       db:
@@ -494,6 +513,7 @@ services:
     image: alpine/openssl:3.3.2
     entrypoint: []
     container_name: opennvr_nginx_certs_init
+    logging: *svc-logs
     command:
       - sh
       - -c
@@ -530,6 +550,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     container_name: opennvr_nginx
+    logging: *svc-logs
     restart: unless-stopped
     depends_on:
       nginx-certs-init:
@@ -564,6 +585,29 @@ services:
 # ==========================================
 # Networks
 # ==========================================
+  # ──────────────────────────────────────────────────────────────
+  # Central log viewer — OPT-IN (COMPOSE_PROFILES=logs). Dozzle streams every
+  # container's stdout in one localhost-only web UI (http://127.0.0.1:9999),
+  # filtered to this project's containers. SECURITY: it mounts the Docker
+  # socket read-only, which is still host-level visibility — that is exactly
+  # why this ships OFF by default, binds to loopback only, and belongs on a
+  # dev/operator box, never an exposed host. For always-on bounded history
+  # without any extra container, every service already keeps ~30MB of
+  # rotated logs: `docker logs --since 1h <container>`.
+  # ──────────────────────────────────────────────────────────────
+  log-viewer:
+    profiles: [logs]
+    image: amir20/dozzle:v8.9.1
+    container_name: opennvr_log_viewer
+    logging: *svc-logs
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9999:8080"
+    environment:
+      - DOZZLE_FILTER=name=opennvr
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
 networks:
   opennvr_internal:
     driver: bridge
@@ -578,6 +622,7 @@ networks:
 # ==========================================
 # Volumes
 # ==========================================
+
 volumes:
   opennvr_db_data:
   shared_frames:
