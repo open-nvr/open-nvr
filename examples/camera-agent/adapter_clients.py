@@ -119,6 +119,25 @@ class KaicAdapterClient(_ReusableClientMixin):
                 resp.raise_for_status()
                 return resp.json()
             except httpx.HTTPError as exc:
+                # Surface KAI-C's response body in the error: a bare
+                # "403 Forbidden" hides WHICH gate refused (permission
+                # approval vs sovereignty vs auth), and the field cost of
+                # that ambiguity was a multi-hour hunt. The detail string
+                # travels into tools' degradation reason and the user's
+                # answer.
+                detail = ""
+                resp_obj = getattr(exc, "response", None)
+                if resp_obj is not None:
+                    try:
+                        detail = str((resp_obj.json() or {}).get("detail") or "")[:300]
+                    except Exception:
+                        detail = (resp_obj.text or "")[:300]
+                if detail:
+                    exc = httpx.HTTPStatusError(
+                        f"{exc} — KAI-C detail: {detail}",
+                        request=getattr(exc, "request", None),
+                        response=resp_obj,
+                    ) if isinstance(exc, httpx.HTTPStatusError) else exc
                 last_exc = exc
                 if attempt < self._retries:
                     logger.warning(

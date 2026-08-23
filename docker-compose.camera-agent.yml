@@ -208,7 +208,15 @@ services:
   # Caption-adapter auto-registration (test-report S-5) — VOICE + CHAT. On a
   # clean install the caption adapter was NOT registered with KAI-C, so
   # describe_camera silently fell back to the detector. This one-shot registers
-  # the adapter selected by CAPTION_ADAPTER.
+  # the adapter selected by CAPTION_ADAPTER — and then GRANTS its declared
+  # permissions (§8/§11): an adapter that declares scope (ollamavlm declares
+  # egress to the operator's own Ollama) otherwise sits pending_approval and
+  # 403s every inference on a fresh install, with the reason visible only in
+  # the audit trail. Running this profile IS the operator's install-time
+  # consent; the grant is issued with the operator's INTERNAL_API_KEY and
+  # lands in the audit log with actor=install, exactly as governance
+  # intends. Post-install scope changes still require a fresh grant: KAI-C
+  # re-pends an adapter that re-declares more scope than was approved.
   # ──────────────────────────────────────────────────────────────
   caption-adapter-register:
     profiles: [camera-agent, camera-agent-chat]
@@ -239,7 +247,16 @@ services:
                --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
                --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
                http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
-            echo "Registered caption adapter '$$name'."; exit 0
+            echo "Registered caption adapter '$$name'."
+            # Grant declared permissions (install-time operator consent —
+            # see the service comment). Best-effort: an adapter with no
+            # declared scope is already approved and this is a no-op.
+            if wget -q -O-                  --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}"                  --header="X-Actor: install"                  --post-data=""                  "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if inference 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
           fi
           i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
         done
