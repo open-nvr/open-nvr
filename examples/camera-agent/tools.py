@@ -487,8 +487,24 @@ class CameraTools:
             return "refused by KAI-C (403)"
         if "404" in text or "not registered" in text.lower():
             return "caption adapter not registered with KAI-C"
+        # A 503 from KAI-C is the adapter ANSWERING that it isn't ready yet
+        # — not a transport failure. Reporting the auto-pull window as
+        # "unreachable" sent an operator hunting Docker networking for a
+        # model that was simply still downloading; name the real state so
+        # the answer is "wait" rather than "debug the network".
+        if "model_not_pulled" in lowered or "auto-pull" in lowered:
+            return "vision model still downloading (auto-pull running — retry shortly)"
+        if "503" in text:
+            return "caption adapter warming up (503 — retry shortly)"
         if "timed out" in text.lower() or "timeout" in text.lower():
             return "caption adapter timed out"
+        # KAI-C proxies /infer with its own 30s budget: a 502 means KAI-C
+        # got no answer from the adapter in time. That is a down adapter OR
+        # a VLM too slow for this host (a large model on CPU can take
+        # minutes per frame), and the operator needs to know it's both.
+        if "502" in text:
+            return ("caption adapter gave KAI-C no answer in time "
+                    "(adapter down, or the VLM is too slow for this host)")
         return "caption adapter unreachable"
 
     async def _describe_via_detection(
