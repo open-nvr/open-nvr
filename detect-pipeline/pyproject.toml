@@ -19,9 +19,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The container service also needs a NATS client to publish detections.
+# The container service also needs a NATS client to publish detections —
+# and ships plain (CPU) onnxruntime so both detector families work out of
+# the box: rfdetr REQUIRES ort (transformer ops exceed cv2.dnn), and the
+# YOLO family can opt into the faster ort CPU engine. Accelerator wheels
+# (onnxruntime-openvino / onnxruntime-gpu) CONFLICT with plain onnxruntime:
+# a derived accelerator image must `pip uninstall onnxruntime` first.
 service = [
     "nats-py>=2.6",
+    "onnxruntime>=1.17",
 ]
 # Optional ONNX Runtime backend (DETECT_ONNX_BACKEND=ort / --backend ort). The
 # default detector runs on cv2.dnn with no extra install; install this for the
