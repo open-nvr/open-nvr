@@ -239,10 +239,21 @@ async def probe_onvif_device(
 # port's SYN-ACK can arrive late, which is how real cameras got missed).
 _GATE_TIMEOUT = 2.5
 
-# Any normal TCP stack answers a SYN on a *closed* port with an RST, so one or
-# two silent ports are enough to call a host dead. 80/443 are the universal
-# web ports; a camera serving ONVIF only on e.g. 8899 still RSTs these.
-_LIVENESS_PORTS = (80, 443)
+# Any normal TCP stack answers a SYN on a *closed* port with an RST, so a few
+# silent ports are enough to call a host dead. 80/443 are the universal web
+# ports; 8000 is the most common alternate ONVIF control port.
+#
+# 8000 is in this list for RELIABILITY, not coverage -- phase 2 sweeps it
+# anyway. A camera listening on NONE of the liveness ports is judged alive
+# purely by how fast its RST comes back, and under sweep load Docker Desktop's
+# NAT relay delivers that RST *later* than _GATE_TIMEOUT: both liveness ports
+# read "dead", the host is dropped, and phase 2 never probes the port the
+# camera actually serves. Measured on a /24 against a camera serving ONVIF on
+# 8000 only (nothing on 80/443): 80/443 alone found it in 2 of 5 sweeps;
+# adding 8000 found it in 5 of 5, costing ~9s on a /24. An open port answers
+# with a SYN-ACK from the device itself, so it doesn't depend on RST latency --
+# positive evidence beats waiting for silence to be disproved.
+_LIVENESS_PORTS = (80, 443, 8000)
 
 
 async def _tcp_state(ip: str, port: int, timeout: float = _GATE_TIMEOUT) -> str:

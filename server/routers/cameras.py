@@ -341,7 +341,19 @@ async def create_camera(
             onvif_port = derived.get("onvif_port")
             control_scheme = derived.get("control_scheme")
             identity = derived
-            camera_create = camera_create.model_copy(update={"rtsp_url": derived["rtsp_url"]})
+            updates: dict = {"rtsp_url": derived["rtsp_url"]}
+            # Store the camera's OWN substream by default (it came from the
+            # device's ONVIF profiles, not a guess) — so Tier-0 taps the
+            # low-res stream out of the box instead of silently decoding the
+            # full main stream (~5x the CPU) until an operator pastes a URL.
+            # An operator-supplied substream_url always wins.
+            if not camera_create.substream_url and derived.get("substream_url"):
+                updates["substream_url"] = derived["substream_url"]
+                camera_logger.info(
+                    "camera %s: auto-stored ONVIF substream for Tier-0",
+                    camera_create.name,
+                )
+            camera_create = camera_create.model_copy(update=updates)
         else:
             # URL supplied — embed the credentials into it when they aren't already
             # part of the URL. MediaMTX authenticates using the userinfo in the RTSP

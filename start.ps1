@@ -78,6 +78,14 @@ function Get-ComposeArgs {
         }
         $args += @("--profile", "default-apps")
     }
+    # Opt-in host-side debug ports for mediamtx. Off by default because
+    # Docker's publishing is all-or-nothing per container — see the header
+    # of docker-compose.debug-ports.yml and #298. Mirrors compose_args
+    # in start.sh.
+    $debugPorts = Get-EnvVar "OPENNVR_DEBUG_PORTS"
+    if (@("1", "true", "on", "yes") -contains "$debugPorts".ToLower()) {
+        $args += @("-f", "docker-compose.debug-ports.yml")
+    }
     return $args
 }
 
@@ -86,6 +94,212 @@ function Test-PortInUse {
     param([int]$Port)
     $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
     return ($listeners | Where-Object { $_.Port -eq $Port }).Count -gt 0
+}
+
+# ── WebRTC ICE port selection ──────────────────────────────
+# "Is anything listening on this port" is NOT the question that matters
+# here. Windows WinNAT/Hyper-V reserves port ranges (see
+# `netsh interface ipv4 show excludedportrange`) that are re-rolled at
+# every boot; a port inside one is unbindable while appearing completely
+# free to Test-PortInUse. Docker then fails to publish it — and because a
+# single failed binding aborts EVERY port publication for that container,
+# one reserved ICE port silently takes MediaMTX's entire port set down.
+# The stack still reports healthy and only WebRTC dies, with WHEP sessions
+# timing out as "deadline exceeded while waiting connection".
+#
+# So probe by actually binding, on BOTH protocols: the ranges are tracked
+# separately per protocol, and we publish the ICE port as TCP and UDP.
+# $Protocol must match what compose actually publishes: probing UDP for a
+# TCP-only publication would reject a perfectly good port whose UDP twin
+# happens to be reserved.
+function Test-PortBindable {
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both')
+    $tcp = $null
+    $udp = $null
+    try {
+        if ($Protocol -ne 'udp') {
+            # ExclusiveAddressUse defaults to true, which is what we want:
+            # a shared bind would report success on a port already in use.
+            $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+            $tcp.Start()
+        }
+        if ($Protocol -ne 'tcp') {
+            $udp = New-Object System.Net.Sockets.UdpClient($Port)
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($tcp) { try { $tcp.Stop() } catch {} }
+        if ($udp) { try { $udp.Close() } catch {} }
+    }
+}
+
+# A port held by our OWN MediaMTX container is not a conflict — the stack is
+# simply already running, and Docker releases the port when the container is
+# recreated. Without this, re-running the launcher against a live stack would
+# either refuse to start (explicit port) or silently drift to the next
+# candidate and move the ICE port on every single restart.
+function Test-PortOwnedByStack {
+    param([int]$Port)
+    try {
+        $names = & docker ps --filter "publish=$Port" --format "{{.Names}}" 2>$null
+        if (-not $names) { return $false }
+        return [bool](@($names) -match '^opennvr_')
+    } catch {
+        # No docker on PATH / daemon down: fall back to "not ours".
+        return $false
+    }
+}
+
+function Test-PortHasListener {
+    param([int]$Port)
+    $props = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+    if ($props.GetActiveTcpListeners() | Where-Object { $_.Port -eq $Port }) { return $true }
+    if ($props.GetActiveUdpListeners() | Where-Object { $_.Port -eq $Port }) { return $true }
+    return $false
+}
+
+function Test-PortUsable {
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both', [int]$WaitSeconds = 6)
+    if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
+    if (Test-PortOwnedByStack -Port $Port) { return $true }
+
+    # The bind failed. Which reason matters:
+    #   nothing listening  -> the port is RESERVED (WinNAT). Waiting cannot
+    #                         help, so answer immediately.
+    #   something listening -> may be a container teardown still in flight.
+    #                         Docker frees published ports asynchronously, so
+    #                         `down` immediately followed by `up` races: the
+    #                         container is already gone from `docker ps` (so
+    #                         it is not "ours") while the proxy still holds
+    #                         the socket. Without this wait, a routine
+    #                         stop/start would hard-fail on an explicit port
+    #                         or silently drift to the next candidate.
+    if (-not (Test-PortHasListener -Port $Port)) { return $false }
+
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
+    }
+    return $false
+}
+
+# Pre-flight every port the resolved compose config will publish.
+#
+# The ICE port probe only protects one port, but Docker's publishing is
+# all-or-nothing per container: a single unbindable port aborts every
+# publication for that service, so a reserved 8322 would take the
+# carefully-chosen ICE port down with it. These ports are referenced in
+# docs and dev config, so they are deliberately NOT auto-moved — the goal
+# is to replace an opaque daemon error
+#     "ports are not available: ... bind: An attempt was made to access a
+#      socket in a way forbidden by its access permissions."
+# with a message naming the port and telling the operator what to do.
+#
+# Reads the resolved config so overlays and profiles are included and this
+# stays correct as compose changes. Any failure to read or parse it is
+# non-fatal — a missing pre-flight must never block a working start.
+function Invoke-PreflightPublishedPorts {
+    param([string[]]$ComposeArgs)
+
+    $json = & docker compose @ComposeArgs config --format json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return $true }
+    try { $cfg = ($json | Out-String | ConvertFrom-Json) } catch { return $true }
+    if (-not $cfg.services) { return $true }
+
+    $seen = @{}
+    $blocked = @()
+    foreach ($svc in $cfg.services.PSObject.Properties) {
+        foreach ($p in @($svc.Value.ports)) {
+            if (-not $p -or -not $p.published) { continue }
+            $pub = "$($p.published)"
+            # Ranges ("8888-8889") are not worth expanding here; compose
+            # normalises our entries to single ports anyway.
+            if ($pub -notmatch '^\d+$') { continue }
+            $proto = if ($p.protocol) { "$($p.protocol)" } else { 'tcp' }
+            $key = "$pub/$proto"
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            if (-not (Test-PortUsable -Port ([int]$pub) -Protocol $proto)) { $blocked += $key }
+        }
+    }
+
+    if ($blocked.Count -eq 0) { return $true }
+
+    Write-Color "  These published ports cannot be bound on this host:" Red
+    Write-Color "      $($blocked -join ', ')" Red
+    Write-Color "    Docker publishing is all-or-nothing per container, so the" DarkGray
+    Write-Color "    affected service would fail to publish ANY of its ports." DarkGray
+    Write-Color "    A port can be unbindable while nothing is listening on it:" DarkGray
+    Write-Color "    WinNAT reserves ranges that are re-rolled at every boot," DarkGray
+    Write-Color "    loopback publications included. Inspect them with:" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
+    Write-Color "    Free the port, or reserve it permanently (admin):" DarkGray
+    Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent" DarkGray
+    return $false
+}
+
+# Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
+# compose interpolation in docker-compose.yml. Returns $false if no usable
+# port could be found, so the caller can fail with a clear message instead
+# of letting `docker compose up` die on an opaque daemon error.
+function Set-WebRtcIcePort {
+    # Fixed, ordered candidate list rather than a random free port: the set
+    # of ports an operator may need to allow through a firewall has to stay
+    # small and documentable. Spread far apart because the reserved ranges
+    # are allocated as runs of contiguous 100-port blocks.
+    $candidates = @(8189, 18189, 28189, 38189)
+    $preferred = $candidates[0]
+
+    # An explicit operator choice is never silently overridden — it is
+    # usually mirrored by a firewall rule or router port-forward, so moving
+    # off it would break remote viewing in a way that is very hard to trace.
+    $explicit = $env:WEBRTC_ICE_PORT
+    if ([string]::IsNullOrWhiteSpace($explicit)) { $explicit = Get-EnvVar "WEBRTC_ICE_PORT" }
+
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) {
+        $port = 0
+        if (-not [int]::TryParse($explicit.Trim(), [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+            Write-Color "  WEBRTC_ICE_PORT='$($explicit.Trim())' is not a valid port (1024-65535)." Red
+            return $false
+        }
+        if (-not (Test-PortUsable -Port $port -Protocol both)) {
+            Write-Color "  WEBRTC_ICE_PORT=$port cannot be bound on this host." Red
+            Write-Color "    MediaMTX would fail to publish ALL of its ports, not just this one." DarkGray
+            Write-Color "    Reserved ranges (a port inside one is unbindable even when idle):" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
+            Write-Color "    Either pick a free port, or reserve this one permanently (admin):" DarkGray
+            Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
+            Write-Color "      netsh int ipv4 add excludedportrange protocol=udp startport=$port numberofports=1 store=persistent" DarkGray
+            return $false
+        }
+        $env:WEBRTC_ICE_PORT = "$port"
+        return $true
+    }
+
+    foreach ($port in $candidates) {
+        if (-not (Test-PortUsable -Port $port -Protocol both)) { continue }
+        $env:WEBRTC_ICE_PORT = "$port"
+        if ($port -ne $preferred) {
+            # Loud on purpose: a silently drifting port is how this turns
+            # into an unexplainable firewall problem weeks later.
+            Write-Color "  WebRTC ICE port $preferred is unavailable — using $port for this run." Yellow
+            Write-Color "    Usually a WinNAT/Hyper-V reserved range, which is re-rolled at every boot:" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+            Write-Color "    For a port that stays put across reboots, set WEBRTC_ICE_PORT in .env and" DarkGray
+            Write-Color "    reserve it (admin): netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
+        }
+        return $true
+    }
+
+    Write-Color "  No usable WebRTC ICE port found (tried: $($candidates -join ', '))." Red
+    Write-Color "    Set WEBRTC_ICE_PORT in .env to a port outside every reserved range:" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    return $false
 }
 
 # ── Pre-flight validation ──────────────────────────────────
@@ -491,8 +705,10 @@ function Invoke-Up {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Starting all services ..." Green
     docker compose @ca up -d --remove-orphans
     Show-RunningInfo
@@ -507,8 +723,10 @@ function Invoke-Build {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build
     docker compose @ca up -d --remove-orphans
@@ -558,6 +776,26 @@ switch ($Command) {
 
     "up"    { Invoke-Up }
     "build" { Invoke-Build }
+
+    "restart" {
+        # Deliberately not `docker compose restart` / `docker restart`: those
+        # replay the port bindings frozen into the container at creation time
+        # and never re-run the ICE probe or the port pre-flight. That matters
+        # most after a reboot, which is exactly when WinNAT re-rolls its
+        # reserved ranges - the one moment the chosen port may need to change
+        # is the one moment those commands cannot change it.
+        #
+        # Stopping first also frees the ports, so the probe can return to the
+        # preferred ICE port when a previous run had to fall back.
+        if (-not (Test-Path ".env")) {
+            Write-Color "  No .env found. Run .\start.ps1 (no arguments) to set up." Red
+            exit 1
+        }
+        $ca = Get-ComposeArgs
+        Write-Color "  Stopping all services ..." Yellow
+        docker compose @ca stop
+        Invoke-Up
+    }
 
     "down" {
         Show-Banner
@@ -611,7 +849,7 @@ switch ($Command) {
 
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
+        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
         exit 1
     }
 }
