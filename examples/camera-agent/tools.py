@@ -366,6 +366,9 @@ class CameraTools:
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
+        # Why the last describe fell back from the VLM ("" = it didn't) —
+        # surfaced by the system self-check so degradation is visible.
+        self.last_vision_error: str | None = None
 
     # ── describe_camera ────────────────────────────────────────────
 
@@ -451,29 +454,61 @@ class CameraTools:
             caption = (result.get("answer") or result.get("caption") or "").strip()
             if caption:
                 return f"{camera_id}: {caption}"
-        except Exception:
-            # No caption adapter registered (e.g. the standard stack ships
-            # only the object detector). Fall back to describing the scene
-            # from detected objects so the user still gets a useful answer
-            # instead of an error.
+        except Exception as exc:
+            # No caption adapter reachable (not registered, sovereignty 403,
+            # adapter down). Fall back to the object detector — but say so:
+            # a fallback that talks like full vision invents details the
+            # system never saw (field case: a confident wrong shirt color
+            # while the VLM had never received a single request).
+            reason = self._vision_error_reason(exc)
+            self.last_vision_error = f"{type(exc).__name__}: {exc}"[:300]
             logger.warning(
                 "VISION DEGRADED: describe_camera caption adapter unavailable for %s "
-                "(not registered with KAI-C?); falling back to object detection",
-                camera_id,
+                "(%s); falling back to object detection",
+                camera_id, reason,
+            )
+            return await self._describe_via_detection(
+                camera_id, frame, degraded_reason=reason
             )
         return await self._describe_via_detection(camera_id, frame)
 
-    async def _describe_via_detection(self, camera_id: str, frame: bytes) -> str:
+    @staticmethod
+    def _vision_error_reason(exc: Exception) -> str:
+        """One short, operator-meaningful phrase for WHY vision is degraded."""
+        text = str(exc)
+        if "403" in text:
+            return "blocked by KAI-C (sovereignty policy?)"
+        if "404" in text or "not registered" in text.lower():
+            return "caption adapter not registered with KAI-C"
+        if "timed out" in text.lower() or "timeout" in text.lower():
+            return "caption adapter timed out"
+        return "caption adapter unreachable"
+
+    async def _describe_via_detection(
+        self, camera_id: str, frame: bytes, degraded_reason: str | None = None,
+    ) -> str:
         """Best-effort scene description built from the object detector,
-        used when no caption adapter is available."""
+        used when no caption adapter is available. When this IS a degraded
+        fallback, the answer says so — honesty about a missing subsystem
+        beats a confident guess."""
         try:
             response = await self._detect.infer(frame_jpeg=frame)
         except Exception:
             logger.exception("describe_camera: detection fallback failed")
+            if degraded_reason:
+                return (f"{camera_id}: I can't see right now — my vision model "
+                        f"is unavailable ({degraded_reason}) and object "
+                        f"detection also failed")
             return f"{camera_id}: scene description unavailable right now"
         summary = self._summarize_detections(
             (response.get("result") or {}).get("detections") or []
         )
+        if degraded_reason:
+            base = (f"I can see {summary}" if summary
+                    else "no objects detected")
+            return (f"{camera_id}: {base} — note: my vision model is "
+                    f"unavailable ({degraded_reason}), so I'm answering from "
+                    f"object detection only and can't describe details")
         if not summary:
             return f"{camera_id}: nothing notable visible"
         return f"{camera_id}: I can see {summary}"

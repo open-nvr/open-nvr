@@ -3961,6 +3961,127 @@ class CameraAgentRuntime:
             build_frame_source(camera_id=spec.camera_id, url=spec.frame_url),
         )
 
+    async def run_system_check(self):
+        """Exercise every REAL capability path with a REAL payload and return
+        a SystemReport. Process healthchecks say "up"; this says "works" —
+        built after a field incident where the caption adapter was healthy,
+        registered, and had never received a single inference (KAI-C 403)."""
+        import httpx
+
+        from system_check import DEGRADED, DOWN, OK, run_checks
+
+        cam_ids = [c.camera_id for c in self.cfg.cameras]
+        frame_holder: dict[str, bytes] = {}
+
+        async def check_frame():
+            if not cam_ids:
+                return DEGRADED, "no cameras configured"
+            jpeg = await self.context.get_frame(cam_ids[0])
+            frame_holder["jpeg"] = jpeg
+            return OK, f"live frame from {cam_ids[0]} ({len(jpeg)} bytes)"
+
+        async def check_detection():
+            frame = frame_holder.get("jpeg")
+            if frame is None:
+                return DOWN, "skipped: no live frame to test with"
+            resp = await self.tools._detect.infer(frame_jpeg=frame)
+            dets = (resp.get("result") or {}).get("detections") or []
+            labels = ", ".join(sorted({str(d.get("label")) for d in dets})) or "none"
+            return OK, f"object detector answered (labels this frame: {labels})"
+
+        async def check_vision():
+            frame = frame_holder.get("jpeg")
+            if frame is None:
+                return DOWN, "skipped: no live frame to test with"
+            try:
+                resp = await self.tools._caption.infer(
+                    frame_jpeg=frame, extra={"task": "scene_caption"})
+            except Exception as exc:
+                reason = self.tools._vision_error_reason(exc)
+                return DOWN, (f"caption/VQA path failed: {reason} "
+                              f"({type(exc).__name__}: {str(exc)[:120]}) — "
+                              f"describe answers are detector-only until fixed")
+            result = resp.get("result") or {}
+            caption = (result.get("answer") or result.get("caption") or "").strip()
+            if not caption:
+                return DEGRADED, "caption adapter answered but returned no text"
+            return OK, f"VLM answered: \"{caption[:80]}\""
+
+        async def check_llm():
+            if self.cfg.llm_provider.strip().lower() == "openai":
+                return OK, "external OpenAI-compatible endpoint (not probed)"
+            url = f"{self.cfg.ollama_url.rstrip('/')}/api/tags"
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                models = [m.get("name") for m in (resp.json().get("models") or [])]
+            want = self.cfg.llm_model
+            if any(want == m or str(m).startswith(want) for m in models if m):
+                return OK, f"Ollama reachable; model {want} present"
+            return DEGRADED, (f"Ollama reachable but model {want!r} not pulled "
+                              f"(have: {', '.join(models[:5]) or 'none'})")
+
+        async def _http_ok(name, base_url):
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(f"{base_url.rstrip('/')}/health")
+                resp.raise_for_status()
+            return OK, f"{name} reachable"
+
+        async def check_stt():
+            return await _http_ok("whisper (speech-to-text)", self.cfg.whisper_url)
+
+        async def check_tts():
+            return await _http_ok("piper (voice)", self.cfg.piper_url)
+
+        async def check_alarms():
+            armed = len(list(getattr(self.alarms, "_alarms", {}) or {}))
+            task = getattr(self.alarms, "_task", None)
+            running = bool(task is not None and not task.done())
+            if armed and not running:
+                return DOWN, f"{armed} alarm(s) armed but the poll engine is NOT running"
+            state = "engine running" if running else "engine idle (starts with the first alarm)"
+            return OK, f"{armed} alarm(s) armed; {state}"
+
+        async def check_events():
+            task = self._subscriber_task
+            if self.cfg.nats_inference_url and (task is None or task.done()):
+                return DOWN, "NATS subscriber is not running — no detection events reach the agent"
+            newest = None
+            for cid in cam_ids:
+                ev = self.context.latest_inference(cid, adapter="tier0")
+                if ev is not None:
+                    age = time.time() - ev.received_at
+                    newest = age if newest is None else min(newest, age)
+            if newest is None:
+                return DEGRADED, ("subscriber up, but no Tier-0 events received yet "
+                                  "(quiet scene, or detect-pipeline down)")
+            return OK, f"Tier-0 events flowing (newest {newest:.0f}s ago)"
+
+        return await run_checks({
+            "camera frame": check_frame,
+            "object detection": check_detection,
+            "vision (VLM describe)": check_vision,
+            "language model": check_llm,
+            "speech-to-text": check_stt,
+            "text-to-speech": check_tts,
+            "alarms": check_alarms,
+            "detection events": check_events,
+        })
+
+    async def _startup_system_check(self) -> None:
+        """One self-check shortly after boot, logged as a board — every
+        silent-degradation bug becomes a named startup line instead of a
+        confused user report days later."""
+        await asyncio.sleep(25)          # let adapters/models finish warming
+        try:
+            report = await self.run_system_check()
+        except Exception:
+            logger.exception("startup system check failed to run")
+            return
+        logger.info("system check: %s", report.summary)
+        for line in report.lines():
+            (logger.info if "✅" in line else logger.error)("system check: %s", line)
+
     def interactive_busy(self) -> bool:
         """True while a voice/chat turn is being served. Background detection
         loops check this and skip their (expensive) frame-fetch + inference for
@@ -4101,6 +4222,9 @@ class CameraAgentRuntime:
                 self._reconcile_opennvr_cameras(),
                 name="camera-agent-opennvr-camera-reconcile",
             )
+        # Boot-time capability board (see run_system_check).
+        asyncio.create_task(self._startup_system_check(),
+                            name="camera-agent-startup-system-check")
 
     async def _prewarm_llm(self) -> None:
         try:
@@ -4544,6 +4668,14 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     @app.get("/demo", response_class=HTMLResponse)
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
+
+    @app.get("/system-check")
+    async def _system_check() -> dict:
+        """Exercise every real capability path (frame → detector → VLM → LLM →
+        STT/TTS → alarms → events) and return the board. Slow by design (it
+        runs real inference); the demo UI calls it on demand."""
+        report = await runtime.run_system_check()
+        return report.as_dict()
 
     @app.get("/frame/{camera_id}")
     async def _frame(camera_id: str, at: float | None = None) -> Response:
