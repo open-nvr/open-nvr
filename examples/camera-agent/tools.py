@@ -416,6 +416,7 @@ class CameraTools:
         return await self._best_frame(camera_id)
 
     async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
+        self.last_vision_error = None    # per-call: set again only on fallback
         # "What do you see now" must look at a FRESH LIVE frame. Tier-0's best
         # frame is a curated crop of a RECENT detection — a clean, cheap stand-in
         # only while a track is ACTIVE right now; for a quiet/static scene it is a

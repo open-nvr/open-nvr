@@ -40,6 +40,7 @@ import math
 import re
 import signal
 import subprocess
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2921,6 +2922,10 @@ class CameraAgentRuntime:
             "recent_app_alerts": self._handle_recent_app_alerts,
         }
 
+        # Pipeline trace of the most recent conversation turn (see
+        # _run_conversation_turn) — served to the UI by /ask and /converse.
+        self.last_turn_trace: list[dict[str, Any]] = []
+
         self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
         self.notifier = Notifier(self, webhooks=cfg.notify_webhooks, events=cfg.notify_events,
@@ -5316,6 +5321,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "reply": reply,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": frames,
+            "trace": list(runtime.last_turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
 
@@ -5497,6 +5503,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": _frames_for(runtime),
+            "trace": list(runtime.last_turn_trace) if not armed else [],
             "timings_ms": timings, "invoked": True, "armed": armed,
             "tts_error": tts_error,
         })
@@ -5691,15 +5698,35 @@ async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any]) -> t
     handler = runtime.tool_handlers.get(name)
     if handler is None:
         return name, f"ERROR: tool '{name}' is not registered."
+    _tool_t0 = time.perf_counter()
     try:
         result = await handler(args)
     except Exception:
         logger.exception("Tool %s raised", name)
+        _trace_tool(runtime, name, args, "ERROR", _tool_t0)
         return name, f"ERROR: tool '{name}' failed unexpectedly."
     result = str(result)
+    _trace_tool(runtime, name, args, None, _tool_t0)
     if len(result) > 1200:
         result = result[:1200] + " …(truncated)"
     return name, result
+
+
+def _trace_tool(runtime, name: str, args: dict, note: str | None, t0: float) -> None:
+    """Append one tool execution to the current turn's pipeline trace."""
+    trace = getattr(runtime, "last_turn_trace", None)
+    if trace is None:
+        return
+    detail = str(args.get("camera_id") or args.get("camera") or "").strip()
+    if name == "describe_camera":
+        # Name the path that actually answered: full vision, or the honest
+        # detector fallback (tools.last_vision_error is set per describe).
+        err = getattr(runtime.tools, "last_vision_error", None)
+        detail = (detail + (" · detector-fallback" if err else " · vlm")).strip(" ·")
+    if note:
+        detail = (detail + f" · {note}").strip(" ·")
+    trace.append({"step": name, "detail": detail,
+                  "ms": int((time.perf_counter() - t0) * 1000)})
 
 
 # Words that mean "this is a question about a camera / the scene". If the
@@ -5871,6 +5898,13 @@ async def _run_conversation_turn(
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
+    # Per-turn pipeline trace: ordered (step, detail, ms) of everything this
+    # turn executed — LLM iterations, every tool, forced groundings — so the
+    # UI can show "llm → describe_camera → llm" and a slow or degraded turn
+    # explains itself. Overwritten each turn (turns are serialized).
+    trace: list[dict[str, Any]] = []
+    runtime.last_turn_trace = trace
+
     final = ""
     grounded = False   # did any tool actually run this turn?
     forced = False     # have we already injected a forced detection?
@@ -5880,12 +5914,15 @@ async def _run_conversation_turn(
     #                        (small/thinking models sometimes do), so the user
     #                        gets the real detection/caption instead of "Sorry".
     for iteration in range(max_iterations):
+        _llm_t0 = time.perf_counter()
         response = await runtime.ollama.chat(
             messages=messages,
             tools=tools,
             temperature=runtime.cfg.llm_temperature,
             max_tokens=runtime.cfg.llm_max_tokens,
         )
+        trace.append({"step": "llm", "detail": f"iter {iteration + 1}",
+                      "ms": int((time.perf_counter() - _llm_t0) * 1000)})
         message = response.get("message") or {}
         tool_calls = message.get("tool_calls") or []
         content = (message.get("content") or "").strip()

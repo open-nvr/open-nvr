@@ -1009,6 +1009,18 @@
       t.textContent=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       t.title=now.toLocaleString();
       return t; }
+    function addFlow(trace,timings){
+      // One muted line under the reply: the pipeline this turn actually ran,
+      // e.g.  stt → llm → describe_camera (cam1 · vlm) → llm → tts
+      if(!trace||!trace.length) return;
+      const steps=trace.map(s=>s.step+(s.detail?" ("+s.detail+")":""));
+      if(timings&&timings.stt!=null) steps.unshift("stt");
+      if(timings&&timings.tts!=null) steps.push("tts");
+      const d=document.createElement("div"); d.className="msg sys flowline";
+      d.title=trace.map(s=>s.step+": "+s.ms+" ms").join("\n");
+      d.textContent="⛓ "+steps.join(" → ");
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+    }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
       if(who==="sys"){ d.textContent=text; d.appendChild(msgTime()); }
       else { const label=who==="user"?"you":"agent";
@@ -1089,7 +1101,7 @@
           body:JSON.stringify(body)});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent",d.frames); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
@@ -1623,6 +1635,7 @@
         addMsg(data.transcript,"user"); lastActivity=performance.now(); showWorking(data.cameras_used); showLatency(data.timings_ms);
         if(data.armed) armedUntil=Date.now()+20000;     // "Yes?" — next utterance needs no name
         if(data.reply) addMsg(data.reply,"agent",data.frames);
+        addFlow(data.trace,data.timings_ms);
         if(data.reply && !data.audio_b64 && data.tts_error && !ttsWarned){ ttsWarned=true;
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
