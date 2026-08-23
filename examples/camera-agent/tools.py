@@ -477,8 +477,14 @@ class CameraTools:
     def _vision_error_reason(exc: Exception) -> str:
         """One short, operator-meaningful phrase for WHY vision is degraded."""
         text = str(exc)
+        lowered = text.lower()
+        if "await operator" in lowered or "approval" in lowered:
+            return ("adapter awaiting operator approval in KAI-C "
+                    "(AI models page → grant permissions)")
+        if "sovereign" in lowered or "egress" in lowered:
+            return "blocked by KAI-C sovereignty policy"
         if "403" in text:
-            return "blocked by KAI-C (sovereignty policy?)"
+            return "refused by KAI-C (403)"
         if "404" in text or "not registered" in text.lower():
             return "caption adapter not registered with KAI-C"
         if "timed out" in text.lower() or "timeout" in text.lower():

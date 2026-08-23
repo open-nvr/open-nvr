@@ -74,6 +74,7 @@ COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
 COPY examples/camera-agent/footage_index.py   ./footage_index.py
 COPY examples/camera-agent/monitor_host.py    ./monitor_host.py
+COPY examples/camera-agent/system_check.py    ./system_check.py
 # The count/crossing conversational monitors instantiate the SAME SDK rule
 # classes the standalone catalog apps use — one rule library, two front doors
 # (app-sdk-spec §07). monitor_host loads them by file path from OPENNVR_RULES_DIR

@@ -229,6 +229,32 @@ async def fetch_identity(
     return None
 
 
+def _pick_substream_uri(profiles: list[dict], main_uri: str) -> str | None:
+    """The camera's substream URI from its ONVIF profiles, or None.
+
+    The main stream is the first profile (unchanged, long-standing behavior);
+    the substream is chosen from the REMAINING profiles with a stream URI
+    that differs from the main one — preferring the smallest advertised
+    resolution when the camera reports dimensions (that IS the substream by
+    definition), else simply the next profile (ONVIF convention: profile 2
+    is the sub-encoding). No guessing: everything here came from the device
+    itself, which is what makes storing it by default safe.
+    """
+    main_plain = html.unescape(main_uri)
+    candidates = []
+    for p in profiles[1:]:
+        uri = html.unescape(p.get("stream_uri") or "")
+        if not uri or uri == main_plain:
+            continue
+        area = (p.get("width") or 0) * (p.get("height") or 0)
+        candidates.append((area if area > 0 else float("inf"), uri))
+    if not candidates:
+        return None
+    # Smallest known resolution first; unknown resolutions sort last.
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
+
+
 async def resolve_source(
     ip: str, username: str | None, password: str | None, rtsp_port: int = 554
 ) -> dict[str, Any] | None:
@@ -245,16 +271,23 @@ async def resolve_source(
     except Exception:
         info = None
     if info:
-        stream_uri = next(
-            (p.get("stream_uri") for p in info.get("profiles", []) if p.get("stream_uri")),
-            None,
-        )
+        with_uri = [p for p in info.get("profiles", []) if p.get("stream_uri")]
+        stream_uri = with_uri[0]["stream_uri"] if with_uri else None
         if stream_uri:
             # ONVIF returns the URI XML-escaped (e.g. &amp;) — unescape before use.
             stream_uri = html.unescape(stream_uri)
             dev = info.get("device_info", {}) or {}
+            sub_uri = _pick_substream_uri(with_uri, stream_uri)
             return {
                 "rtsp_url": inject_credentials(stream_uri, username, password),
+                # The camera's own SUBSTREAM, straight from ONVIF — stored by
+                # default so Tier-0 never silently decodes the full main
+                # stream on a fresh install (the ~5x CPU difference). None
+                # when the device advertises a single profile.
+                "substream_url": (
+                    inject_credentials(sub_uri, username, password)
+                    if sub_uri else None
+                ),
                 **_identity_from_device_info(
                     dev, info.get("port", 80), info.get("scheme", "http")
                 ),
