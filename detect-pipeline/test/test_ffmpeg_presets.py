@@ -109,11 +109,12 @@ def test_decode_skip_inserts_before_input():
 
 
 def test_decode_skip_all_modes_accepted():
-    for mode in ("bidir", "nonref", "nokey"):
+    # mode name -> the token ffmpeg's CLI accepts (nonref maps to noref)
+    for mode, token in (("bidir", "bidir"), ("nonref", "noref"), ("nokey", "nokey")):
         cmd = build_decode_command(
             RTSP, width=640, height=360, fps=5, decode_skip=mode,
         )
-        assert cmd[cmd.index("-skip_frame") + 1] == mode
+        assert cmd[cmd.index("-skip_frame") + 1] == token
 
 
 def test_decode_skip_rejects_unknown_mode():
@@ -156,3 +157,49 @@ def test_fast_decode_cpu_only():
 def test_fast_decode_off_by_default():
     cmd = build_decode_command(RTSP, width=640, height=360, fps=5)
     assert "-skip_loop_filter" not in cmd
+
+
+# ── the token ffmpeg ACTUALLY accepts (field regression) ───────────────
+# The nonref mode shipped emitting "-skip_frame nonref"; ffmpeg's CLI token
+# is "noref", so ffmpeg rejected the option and produced ZERO frames — every
+# worker crash-looped ("5 consecutive restarts with no frames"). These tests
+# pin the mapping, and the real-ffmpeg test proves every emitted token is
+# one ffmpeg accepts, so a token can never drift again.
+
+
+def test_nonref_mode_emits_ffmpeg_noref_token():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5,
+                               decode_skip="nonref")
+    assert cmd[cmd.index("-skip_frame") + 1] == "noref"
+
+
+def test_ffmpeg_own_spelling_accepted_as_alias():
+    cmd = build_decode_command(RTSP, width=640, height=360, fps=5,
+                               decode_skip="noref")
+    assert cmd[cmd.index("-skip_frame") + 1] == "noref"
+
+
+import shutil as _shutil
+import subprocess as _subprocess
+
+
+@pytest.mark.skipif(_shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_real_ffmpeg_accepts_every_emitted_skip_token():
+    """Feed each mode's EMITTED token to a real ffmpeg decode: the option
+    must parse (no 'Undefined constant' / 'Invalid argument' on stderr)."""
+    from detect_pipeline.ffmpeg_presets import DECODE_SKIP_MODES, _FFMPEG_SKIP_TOKEN
+
+    for mode in DECODE_SKIP_MODES:
+        if mode == "none":
+            continue
+        token = _FFMPEG_SKIP_TOKEN.get(mode, mode)
+        proc = _subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-skip_frame", token,
+             "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert proc.returncode == 0, (mode, token, proc.stderr)
+        assert "Undefined constant" not in proc.stderr, (mode, token, proc.stderr)
+        assert "Invalid" not in proc.stderr, (mode, token, proc.stderr)

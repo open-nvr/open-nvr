@@ -107,6 +107,8 @@ def _decode_skip_from_env(env: dict) -> str:
     from .ffmpeg_presets import DECODE_SKIP_MODES
 
     value = str(env.get("DETECT_DECODE_SKIP", "nonref")).strip().lower()
+    if value == "noref":                 # ffmpeg's own spelling of nonref
+        value = "nonref"
     if value not in DECODE_SKIP_MODES:
         log.warning(
             "DETECT_DECODE_SKIP=%r is not one of %s; using 'none' (full decode)",
@@ -176,6 +178,8 @@ def _decode_idle_from_env(env: dict) -> str:
     from .ffmpeg_presets import DECODE_SKIP_MODES
 
     value = str(env.get("DETECT_DECODE_IDLE", "nokey")).strip().lower()
+    if value == "noref":                 # ffmpeg's own spelling of nonref
+        value = "nonref"
     if value in ("", "none", "off", "false"):
         return ""
     if value not in DECODE_SKIP_MODES:
