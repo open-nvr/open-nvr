@@ -27,7 +27,9 @@ Quick reference for configuring OpenNVR NVR for local development in VS Code/IDE
 # Database - local PostgreSQL
 DATABASE_URL=postgresql://opennvr_admin:your_password@localhost:5432/opennvr
 
-# MediaMTX URLs - localhost
+# MediaMTX URLs - localhost. These ports are NOT published by default;
+# set OPENNVR_DEBUG_PORTS=1 in .env so the launcher adds
+# docker-compose.debug-ports.yml (see #298 for why they are opt-in).
 MEDIAMTX_API_URL=http://127.0.0.1:9997
 MEDIAMTX_PLAYBACK_URL=http://127.0.0.1:9996
 MEDIAMTX_EXTERNAL_BASE_URL=http://127.0.0.1:8889

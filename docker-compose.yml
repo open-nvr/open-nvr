@@ -121,11 +121,17 @@ services:
         condition: service_completed_successfully
     ports:
       # Host-loopback only (host-side debugging). See V-015.
+      # RTSPS stays published by default: it is user-facing (VLC / ffmpeg
+      # from the host, and MEDIAMTX_EXTERNAL_RTSPS_URL below points at it).
       - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
-      - "127.0.0.1:8888:8888" # HLS (browsers reach via nginx /hls/)
-      - "127.0.0.1:8889:8889" # WebRTC signalling (via nginx /webrtc/)
-      - "127.0.0.1:9997:9997" # MediaMTX admin API/metrics
-      - "127.0.0.1:9996:9996" # Recording playback (via nginx /playback/)
+      # HLS (8888), WHEP signalling (8889), playback (9996) and the admin
+      # API (9997) are NOT published by default. Browsers reach the first
+      # three through nginx (/hls/, /webrtc/, /playback/) and the container
+      # healthcheck talks to 9997 from inside, so nothing needs them on the
+      # host. Every extra publication is another chance for one unbindable
+      # port to abort ALL of this service's publications (see #298), so they
+      # are opt-in: set OPENNVR_DEBUG_PORTS=1 in .env, which makes the
+      # launcher add docker-compose.debug-ports.yml.
       # WebRTC ICE media (DTLS-SRTP over UDP, browser ↔ mediamtx direct, not via
       # nginx). Bound to NGINX_BIND_HOST so it stays on the operator NIC, off
       # the camera LAN. See V-015.

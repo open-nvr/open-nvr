@@ -116,6 +116,14 @@ compose_args() {
             args="$args --profile default-apps"
             ;;
     esac
+    # Opt-in host-side debug ports for mediamtx. Off by default because
+    # Docker's publishing is all-or-nothing per container — see the header
+    # of docker-compose.debug-ports.yml and #298.
+    local debug_ports
+    debug_ports=$(get_env_var "OPENNVR_DEBUG_PORTS" 2>/dev/null)
+    case "$(printf '%s' "$debug_ports" | tr '[:upper:]' '[:lower:]')" in
+        1|true|on|yes) args="$args -f docker-compose.debug-ports.yml" ;;
+    esac
     echo "$args"
 }
 
