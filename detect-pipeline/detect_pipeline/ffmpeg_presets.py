@@ -138,6 +138,15 @@ def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
 #           fine for "is someone there" alarms, coarse for fast events.
 DECODE_SKIP_MODES = ("none", "bidir", "nonref", "nokey")
 
+# Mode name → the token ffmpeg's CLI actually accepts. The mode is named
+# after libavcodec's constant (AVDISCARD_NONREF), but the CLI string is
+# "noref" — passing "nonref" makes ffmpeg reject the option and exit with
+# ZERO frames produced, which the worker sees as a dead stream and
+# crash-loops on (field-diagnosed via Dozzle on the first deployed build).
+# The real-ffmpeg regression test in test_ffmpeg_presets.py exists so a
+# token can never drift from what ffmpeg accepts again.
+_FFMPEG_SKIP_TOKEN = {"nonref": "noref"}
+
 
 def build_decode_command(
     rtsp_url: str,
@@ -161,11 +170,16 @@ def build_decode_command(
     """
     if not rtsp_url.startswith(("rtsp://", "rtsps://")):
         raise ValueError(f"expected an rtsp(s):// substream URL, got {rtsp_url!r}")
+    if decode_skip == "noref":          # accept ffmpeg's own spelling too
+        decode_skip = "nonref"
     if decode_skip not in DECODE_SKIP_MODES:
         raise ValueError(
             f"decode_skip must be one of {DECODE_SKIP_MODES}, got {decode_skip!r}"
         )
-    skip_args = [] if decode_skip == "none" else ["-skip_frame", decode_skip]
+    skip_args = (
+        [] if decode_skip == "none"
+        else ["-skip_frame", _FFMPEG_SKIP_TOKEN.get(decode_skip, decode_skip)]
+    )
     # Decoder thread cap (before -i). ffmpeg's default is AUTO — up to 16
     # frame threads PER CAMERA, which on a small substream is pure scheduling
     # overhead multiplied by the fleet (Frigate pins -threads 2 for the same

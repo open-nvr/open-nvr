@@ -79,7 +79,7 @@ def test_set_decode_skip_respawns_with_new_mode_and_no_backoff():
     frames = src.stream()
     next(frames)                                       # first spawn is live
     assert "-skip_frame" in spawned[0]
-    assert spawned[0][spawned[0].index("-skip_frame") + 1] == "nonref"
+    assert spawned[0][spawned[0].index("-skip_frame") + 1] == "noref"   # ffmpeg token for nonref
     src.set_decode_skip("nokey")                       # flip mid-stream
     for _ in frames:                                   # drain to the respawn
         pass
