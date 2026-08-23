@@ -139,21 +139,28 @@ python3_usable() {
     command -v python3 >/dev/null 2>&1 && python3 -c 'import socket' >/dev/null 2>&1
 }
 
-# ── Helper: can this port actually be BOUND (TCP *and* UDP)? ──────
+# ── Helper: can this port actually be BOUND? ──────────────────────
 # Deliberately different from port_in_use(): a port can have no listener
 # and still be unbindable. Windows/WSL hosts reserve ranges via WinNAT
 # (`netsh interface ipv4 show excludedportrange`) that are re-rolled at
-# every boot, and Docker cannot bind inside one. Because a single failed
-# binding aborts EVERY port publication for that container, one reserved
-# ICE port silently takes MediaMTX's whole port set down — the stack still
-# reports healthy and only WebRTC dies. Only a real bind() answers this.
+# every boot, and Docker cannot bind inside one — loopback publications
+# included, which is why 127.0.0.1-only ports are no safer. Because a
+# single failed binding aborts EVERY port publication for that container,
+# one reserved port silently takes a whole service's port set down. Only
+# a real bind() answers this.
+#
+# $2 selects the protocol (tcp|udp|both, default both). It has to match
+# what compose actually publishes: probing UDP for a TCP-only publication
+# would reject a perfectly good port whose UDP twin happens to be reserved.
 port_bindable() {
-    local port="$1"
+    local port="$1" proto="${2:-both}"
     if python3_usable; then
         python3 -c '
 import socket, sys
-p = int(sys.argv[1])
-for typ in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+p, proto = int(sys.argv[1]), sys.argv[2]
+types = {"tcp": [socket.SOCK_STREAM], "udp": [socket.SOCK_DGRAM]}.get(
+    proto, [socket.SOCK_STREAM, socket.SOCK_DGRAM])
+for typ in types:
     s = socket.socket(socket.AF_INET, typ)
     try:
         s.bind(("0.0.0.0", p))
@@ -161,7 +168,7 @@ for typ in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
         sys.exit(1)
     finally:
         s.close()
-' "$port" >/dev/null 2>&1
+' "$port" "$proto" >/dev/null 2>&1
         return $?
     fi
     # No python3: fall back to the weaker listener check. It cannot see
@@ -181,23 +188,98 @@ port_owned_by_stack() {
         | grep -q '^opennvr_'
 }
 
-# See the matching note in start.ps1. Distinguishes a RESERVED port (nothing
-# listening — waiting cannot help) from an IN-USE one (something listening —
-# possibly a container teardown still in flight, since Docker frees published
-# ports asynchronously). Without the wait, `down` immediately followed by
-# `up` races: the container is already gone from `docker ps` while the proxy
-# still holds the socket, so a routine stop/start would hard-fail on an
-# explicit port or silently drift to the next candidate.
-ice_port_usable() {
-    local port="$1" deadline
-    port_bindable "$port" && return 0
+# Distinguishes a RESERVED port (nothing listening — waiting cannot help)
+# from an IN-USE one (something listening — possibly a container teardown
+# still in flight, since Docker frees published ports asynchronously).
+# Without the wait, `down` immediately followed by `up` races: the container
+# is already gone from `docker ps` while the proxy still holds the socket,
+# so a routine stop/start would hard-fail or silently drift.
+port_usable() {
+    local port="$1" proto="${2:-both}" deadline
+    port_bindable "$port" "$proto" && return 0
     port_owned_by_stack "$port" && return 0
     port_in_use "$port" || return 1
     deadline=$(( $(date +%s) + 6 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 1
-        port_bindable "$port" && return 0
+        port_bindable "$port" "$proto" && return 0
     done
+    return 1
+}
+
+# Pre-flight every port the resolved compose config will publish.
+#
+# The ICE port probe only protects one port, but Docker's publishing is
+# all-or-nothing per container: a single unbindable port aborts every
+# publication for that service, so a reserved 8322 would take the
+# carefully-chosen ICE port down with it. These ports are referenced in
+# docs and dev config, so they are deliberately NOT auto-moved — the goal
+# is to replace an opaque daemon error
+#     "ports are not available: ... bind: An attempt was made to access a
+#      socket in a way forbidden by its access permissions."
+# with a message naming the port and telling the operator what to do.
+#
+# Reads the resolved config so overlays and profiles are included and this
+# stays correct as compose changes. Skipped (non-fatal) when no JSON parser
+# is available — a missing pre-flight must never block a working start.
+preflight_published_ports() {
+    local args="$1"
+    local json entries port proto blocked=""
+
+    json=$(docker compose $args config --format json 2>/dev/null) || return 0
+    [ -n "$json" ] || return 0
+
+    if python3_usable; then
+        entries=$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+seen = set()
+for svc in (cfg.get("services") or {}).values():
+    for p in (svc.get("ports") or []):
+        pub = str(p.get("published") or "")
+        # Ranges ("8888-8889") are not worth expanding here; compose
+        # normalises our entries to single ports anyway.
+        if not pub.isdigit():
+            continue
+        key = (pub, p.get("protocol") or "tcp")
+        if key not in seen:
+            seen.add(key)
+            print(key[0], key[1])
+')
+    elif command -v jq >/dev/null 2>&1; then
+        entries=$(printf '%s' "$json" \
+            | jq -r '.services[].ports[]? | select(.published != null)
+                     | "\(.published) \(.protocol // "tcp")"' 2>/dev/null \
+            | grep -E '^[0-9]+ ' | sort -u)
+    else
+        return 0
+    fi
+
+    [ -n "$entries" ] || return 0
+
+    while read -r port proto; do
+        [ -n "$port" ] || continue
+        port_usable "$port" "$proto" || blocked="${blocked}${port}/${proto} "
+    done <<EOF
+$entries
+EOF
+
+    [ -n "$blocked" ] || return 0
+
+    echo -e "  ${RED}These published ports cannot be bound on this host:${NC}" >&2
+    echo -e "  ${RED}    ${blocked}${NC}" >&2
+    echo -e "  ${GRAY}  Docker publishing is all-or-nothing per container, so the${NC}" >&2
+    echo -e "  ${GRAY}  affected service would fail to publish ANY of its ports.${NC}" >&2
+    echo -e "  ${GRAY}  A port can be unbindable while nothing is listening on it:${NC}" >&2
+    echo -e "  ${GRAY}  on Windows, WinNAT reserves ranges that are re-rolled at every${NC}" >&2
+    echo -e "  ${GRAY}  boot (loopback publications included). Inspect them with:${NC}" >&2
+    echo -e "  ${GRAY}    netsh interface ipv4 show excludedportrange protocol=tcp${NC}" >&2
+    echo -e "  ${GRAY}    netsh interface ipv4 show excludedportrange protocol=udp${NC}" >&2
+    echo -e "  ${GRAY}  Free the port, or reserve it permanently (admin):${NC}" >&2
+    echo -e "  ${GRAY}    netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent${NC}" >&2
     return 1
 }
 
@@ -230,7 +312,7 @@ configure_webrtc_ice_port() {
             echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} is out of range (1024-65535).${NC}" >&2
             return 1
         fi
-        if ! ice_port_usable "$explicit"; then
+        if ! port_usable "$explicit" both; then
             echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} cannot be bound on this host.${NC}" >&2
             echo -e "  ${GRAY}  MediaMTX would fail to publish ALL of its ports, not just this one,${NC}" >&2
             echo -e "  ${GRAY}  so Live View would break with no visible error.${NC}" >&2
@@ -242,7 +324,7 @@ configure_webrtc_ice_port() {
     fi
 
     for port in $candidates; do
-        if ice_port_usable "$port"; then
+        if port_usable "$port" both; then
             export WEBRTC_ICE_PORT="$port"
             if [ "$port" != "$preferred" ]; then
                 # Loud on purpose: a silently drifting port is how this
@@ -1202,6 +1284,7 @@ run_up() {
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
+    preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
     echo -e "  ${GREEN}Starting all services ...${NC}"
@@ -1224,6 +1307,7 @@ run_build() {
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
+    preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
@@ -1381,6 +1465,7 @@ case "$COMMAND" in
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
+    preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
     docker compose $ARGS up -d --remove-orphans

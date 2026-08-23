@@ -101,16 +101,23 @@ function Test-PortInUse {
 #
 # So probe by actually binding, on BOTH protocols: the ranges are tracked
 # separately per protocol, and we publish the ICE port as TCP and UDP.
+# $Protocol must match what compose actually publishes: probing UDP for a
+# TCP-only publication would reject a perfectly good port whose UDP twin
+# happens to be reserved.
 function Test-PortBindable {
-    param([int]$Port)
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both')
     $tcp = $null
     $udp = $null
     try {
-        # ExclusiveAddressUse defaults to true, which is what we want:
-        # a shared bind would report success on a port already in use.
-        $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
-        $tcp.Start()
-        $udp = New-Object System.Net.Sockets.UdpClient($Port)
+        if ($Protocol -ne 'udp') {
+            # ExclusiveAddressUse defaults to true, which is what we want:
+            # a shared bind would report success on a port already in use.
+            $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+            $tcp.Start()
+        }
+        if ($Protocol -ne 'tcp') {
+            $udp = New-Object System.Net.Sockets.UdpClient($Port)
+        }
         return $true
     } catch {
         return $false
@@ -145,9 +152,9 @@ function Test-PortHasListener {
     return $false
 }
 
-function Test-IcePortUsable {
-    param([int]$Port, [int]$WaitSeconds = 6)
-    if (Test-PortBindable -Port $Port) { return $true }
+function Test-PortUsable {
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both', [int]$WaitSeconds = 6)
+    if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
     if (Test-PortOwnedByStack -Port $Port) { return $true }
 
     # The bind failed. Which reason matters:
@@ -166,8 +173,64 @@ function Test-IcePortUsable {
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 400
-        if (Test-PortBindable -Port $Port) { return $true }
+        if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
     }
+    return $false
+}
+
+# Pre-flight every port the resolved compose config will publish.
+#
+# The ICE port probe only protects one port, but Docker's publishing is
+# all-or-nothing per container: a single unbindable port aborts every
+# publication for that service, so a reserved 8322 would take the
+# carefully-chosen ICE port down with it. These ports are referenced in
+# docs and dev config, so they are deliberately NOT auto-moved — the goal
+# is to replace an opaque daemon error
+#     "ports are not available: ... bind: An attempt was made to access a
+#      socket in a way forbidden by its access permissions."
+# with a message naming the port and telling the operator what to do.
+#
+# Reads the resolved config so overlays and profiles are included and this
+# stays correct as compose changes. Any failure to read or parse it is
+# non-fatal — a missing pre-flight must never block a working start.
+function Invoke-PreflightPublishedPorts {
+    param([string[]]$ComposeArgs)
+
+    $json = & docker compose @ComposeArgs config --format json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return $true }
+    try { $cfg = ($json | Out-String | ConvertFrom-Json) } catch { return $true }
+    if (-not $cfg.services) { return $true }
+
+    $seen = @{}
+    $blocked = @()
+    foreach ($svc in $cfg.services.PSObject.Properties) {
+        foreach ($p in @($svc.Value.ports)) {
+            if (-not $p -or -not $p.published) { continue }
+            $pub = "$($p.published)"
+            # Ranges ("8888-8889") are not worth expanding here; compose
+            # normalises our entries to single ports anyway.
+            if ($pub -notmatch '^\d+$') { continue }
+            $proto = if ($p.protocol) { "$($p.protocol)" } else { 'tcp' }
+            $key = "$pub/$proto"
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            if (-not (Test-PortUsable -Port ([int]$pub) -Protocol $proto)) { $blocked += $key }
+        }
+    }
+
+    if ($blocked.Count -eq 0) { return $true }
+
+    Write-Color "  These published ports cannot be bound on this host:" Red
+    Write-Color "      $($blocked -join ', ')" Red
+    Write-Color "    Docker publishing is all-or-nothing per container, so the" DarkGray
+    Write-Color "    affected service would fail to publish ANY of its ports." DarkGray
+    Write-Color "    A port can be unbindable while nothing is listening on it:" DarkGray
+    Write-Color "    WinNAT reserves ranges that are re-rolled at every boot," DarkGray
+    Write-Color "    loopback publications included. Inspect them with:" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
+    Write-Color "    Free the port, or reserve it permanently (admin):" DarkGray
+    Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent" DarkGray
     return $false
 }
 
@@ -195,7 +258,7 @@ function Set-WebRtcIcePort {
             Write-Color "  WEBRTC_ICE_PORT='$($explicit.Trim())' is not a valid port (1024-65535)." Red
             return $false
         }
-        if (-not (Test-IcePortUsable -Port $port)) {
+        if (-not (Test-PortUsable -Port $port -Protocol both)) {
             Write-Color "  WEBRTC_ICE_PORT=$port cannot be bound on this host." Red
             Write-Color "    MediaMTX would fail to publish ALL of its ports, not just this one." DarkGray
             Write-Color "    Reserved ranges (a port inside one is unbindable even when idle):" DarkGray
@@ -211,7 +274,7 @@ function Set-WebRtcIcePort {
     }
 
     foreach ($port in $candidates) {
-        if (-not (Test-IcePortUsable -Port $port)) { continue }
+        if (-not (Test-PortUsable -Port $port -Protocol both)) { continue }
         $env:WEBRTC_ICE_PORT = "$port"
         if ($port -ne $preferred) {
             # Loud on purpose: a silently drifting port is how this turns
@@ -637,6 +700,7 @@ function Invoke-Up {
     if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Starting all services ..." Green
     docker compose @ca up -d --remove-orphans
     Show-RunningInfo
@@ -654,6 +718,7 @@ function Invoke-Build {
     if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build
     docker compose @ca up -d --remove-orphans
