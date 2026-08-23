@@ -1,0 +1,29 @@
+# ==========================================
+# OpenNVR — MediaMTX host-side debug ports (opt-in overlay)
+# ==========================================
+# Publishes MediaMTX's internal HTTP endpoints on the host loopback. Nothing
+# in normal operation needs these: browsers reach HLS, WHEP and playback
+# through nginx (/hls/, /webrtc/, /playback/), and the container healthcheck
+# queries the admin API from inside the container.
+#
+# They are opt-in because Docker's port publishing is all-or-nothing per
+# container — a single unbindable port aborts EVERY publication for the
+# service. On Windows that is a live risk: WinNAT reserves port ranges that
+# are re-rolled at every boot, loopback publications included, so each extra
+# port is another chance to take the whole stack's media plane down. See #298.
+#
+# Enable with OPENNVR_DEBUG_PORTS=1 in .env (the launcher then appends this
+# file), or by hand:
+#     docker compose -f docker-compose.yml -f docker-compose.debug-ports.yml up -d
+#
+# Useful for: hitting the MediaMTX API directly, running the backend outside
+# Docker (see docs/LOCAL_DEV_CHECKLIST.md), or bypassing nginx while debugging.
+# ==========================================
+
+services:
+  mediamtx:
+    ports:
+      - "127.0.0.1:8888:8888" # HLS (browsers normally use nginx /hls/)
+      - "127.0.0.1:8889:8889" # WebRTC signalling (normally nginx /webrtc/)
+      - "127.0.0.1:9996:9996" # Recording playback (normally nginx /playback/)
+      - "127.0.0.1:9997:9997" # MediaMTX admin API / metrics
