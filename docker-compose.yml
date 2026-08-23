@@ -129,9 +129,9 @@ services:
       # WebRTC ICE media (DTLS-SRTP over UDP, browser ↔ mediamtx direct, not via
       # nginx). Bound to NGINX_BIND_HOST so it stays on the operator NIC, off
       # the camera LAN. See V-015.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/udp"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${WEBRTC_ICE_PORT:-8189}:${WEBRTC_ICE_PORT:-8189}/udp"
       # TCP fallback for WebRTC ICE when UDP is blocked.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/tcp"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${WEBRTC_ICE_PORT:-8189}:${WEBRTC_ICE_PORT:-8189}/tcp"
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
@@ -150,6 +150,14 @@ services:
       # reach UDP/8189). Set by start.sh from the detected topology; empty =
       # mediamtx auto-detects (fine on single-NIC, breaks behind NAT/multi-NIC).
       - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # ICE media listen port. Overridable because some Windows hosts have
+      # 8189 inside a WinNAT/Hyper-V reserved range (netsh interface ipv4
+      # show excludedportrange protocol=tcp), where Docker cannot bind it —
+      # one failed binding aborts ALL of this service's port publications.
+      # Must match the published port above so the advertised ICE candidate
+      # port is correct.
+      - MTX_WEBRTCLOCALUDPADDRESS=:${WEBRTC_ICE_PORT:-8189}
+      - MTX_WEBRTCLOCALTCPADDRESS=:${WEBRTC_ICE_PORT:-8189}
     networks:
       - opennvr_internal
     healthcheck:
