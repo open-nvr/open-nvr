@@ -52,6 +52,13 @@ cp .env.example .env
 docker compose -f docker-compose.yml up -d
 ```
 
+The launcher also picks a bindable WebRTC ICE port and pre-flights every
+published port before starting. Driving Compose by hand skips both, so on
+Windows — where WinNAT reserves port ranges that are re-rolled at every
+boot — a collision surfaces as an opaque `ports are not available` error
+rather than an explanation. Set `WEBRTC_ICE_PORT` in `.env` if you hit
+one. See #298.
+
 </details>
 
 The generate-secrets script writes cryptographically random values into
@@ -99,8 +106,14 @@ finish after their setup work is done.
 |---|---|
 | Web UI | <http://localhost:8000> |
 | API docs (OpenAPI / Swagger) | <http://localhost:8000/docs> |
-| MediaMTX HLS playback | <http://localhost:8888> |
-| MediaMTX WebRTC | <http://localhost:8889> |
+| MediaMTX HLS playback | <http://localhost:8888> — needs `OPENNVR_DEBUG_PORTS=1` |
+| MediaMTX WebRTC | <http://localhost:8889> — needs `OPENNVR_DEBUG_PORTS=1` |
+
+MediaMTX’s HLS, WebRTC, playback and admin ports are **not published on
+the host by default** — browsers reach them through nginx (`/hls/`,
+`/webrtc/`, `/playback/`), so publishing them only widens the surface for
+one unbindable port to take the whole service down. Set
+`OPENNVR_DEBUG_PORTS=1` in `.env` to publish them on loopback for debugging.
 
 The MediaMTX endpoints are gated by JWT — the frontend handles the
 exchange transparently when you open a stream from the web UI.
