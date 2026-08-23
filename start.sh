@@ -181,8 +181,24 @@ port_owned_by_stack() {
         | grep -q '^opennvr_'
 }
 
+# See the matching note in start.ps1. Distinguishes a RESERVED port (nothing
+# listening — waiting cannot help) from an IN-USE one (something listening —
+# possibly a container teardown still in flight, since Docker frees published
+# ports asynchronously). Without the wait, `down` immediately followed by
+# `up` races: the container is already gone from `docker ps` while the proxy
+# still holds the socket, so a routine stop/start would hard-fail on an
+# explicit port or silently drift to the next candidate.
 ice_port_usable() {
-    port_bindable "$1" || port_owned_by_stack "$1"
+    local port="$1" deadline
+    port_bindable "$port" && return 0
+    port_owned_by_stack "$port" && return 0
+    port_in_use "$port" || return 1
+    deadline=$(( $(date +%s) + 6 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 1
+        port_bindable "$port" && return 0
+    done
+    return 1
 }
 
 # Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the

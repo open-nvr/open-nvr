@@ -137,10 +137,38 @@ function Test-PortOwnedByStack {
     }
 }
 
-function Test-IcePortUsable {
+function Test-PortHasListener {
     param([int]$Port)
+    $props = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+    if ($props.GetActiveTcpListeners() | Where-Object { $_.Port -eq $Port }) { return $true }
+    if ($props.GetActiveUdpListeners() | Where-Object { $_.Port -eq $Port }) { return $true }
+    return $false
+}
+
+function Test-IcePortUsable {
+    param([int]$Port, [int]$WaitSeconds = 6)
     if (Test-PortBindable -Port $Port) { return $true }
-    return (Test-PortOwnedByStack -Port $Port)
+    if (Test-PortOwnedByStack -Port $Port) { return $true }
+
+    # The bind failed. Which reason matters:
+    #   nothing listening  -> the port is RESERVED (WinNAT). Waiting cannot
+    #                         help, so answer immediately.
+    #   something listening -> may be a container teardown still in flight.
+    #                         Docker frees published ports asynchronously, so
+    #                         `down` immediately followed by `up` races: the
+    #                         container is already gone from `docker ps` (so
+    #                         it is not "ours") while the proxy still holds
+    #                         the socket. Without this wait, a routine
+    #                         stop/start would hard-fail on an explicit port
+    #                         or silently drift to the next candidate.
+    if (-not (Test-PortHasListener -Port $Port)) { return $false }
+
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if (Test-PortBindable -Port $Port) { return $true }
+    }
+    return $false
 }
 
 # Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
