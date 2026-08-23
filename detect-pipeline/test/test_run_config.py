@@ -15,7 +15,7 @@ def test_defaults_are_enabled_with_onnx():
     assert cfg.detector == "onnx"                 # ONNX is the default detector
     assert cfg.onnx_model.endswith("yolov8n.onnx")
     assert cfg.onnx_input == 640
-    assert cfg.onnx_backend == "cvdnn"            # zero-dep default backend
+    assert cfg.onnx_backend == "auto"             # per-family resolution (onnx→cvdnn)
     assert cfg.onnx_providers == ""
 
 
@@ -251,3 +251,39 @@ def test_decode_idle_from_env():
     assert cfg.decode_idle == "nokey" and cfg.decode_idle_after == 30.0
     assert config_from_env({"DETECT_DECODE_IDLE": "off"}).decode_idle == ""
     assert config_from_env({"DETECT_DECODE_IDLE": "keyframes"}).decode_idle == ""
+
+
+def test_detector_factory_rfdetr(tmp_path, monkeypatch):
+    """DETECT_DETECTOR=rfdetr builds the DETR detector; backend 'auto'
+    resolves to ort for this family; a missing model degrades to the stub."""
+    from detect_pipeline.run import _detector_factory, config_from_env
+
+    cfg = config_from_env({"DETECT_DETECTOR": "rfdetr",
+                           "DETECT_ONNX_MODEL": str(tmp_path / "nope.onnx")})
+    assert type(_detector_factory(cfg)()).__name__ == "StubDetector"
+
+    model = tmp_path / "rfdetr-nano.onnx"
+    model.write_bytes(b"stub")
+    import detect_pipeline.detr_detector as dd
+
+    built = {}
+    monkeypatch.setattr(dd, "OnnxDetrDetector",
+                        lambda **kw: built.update(kw) or object())
+    cfg = config_from_env({
+        "DETECT_DETECTOR": "rfdetr",
+        "DETECT_ONNX_MODEL": str(model),
+        "DETECT_ONNX_INPUT": "384",
+    })
+    _detector_factory(cfg)()
+    assert built["model_path"] == str(model)
+    assert built["input_size"] == 384
+    assert built["backend"] == "ort"          # family default via 'auto'
+
+
+def test_resolve_onnx_backend_auto_and_explicit():
+    from detect_pipeline.run import _resolve_onnx_backend
+
+    assert _resolve_onnx_backend("auto", "cvdnn") == "cvdnn"
+    assert _resolve_onnx_backend("", "ort") == "ort"
+    assert _resolve_onnx_backend("cvdnn", "ort") == "cvdnn"   # explicit wins
+    assert _resolve_onnx_backend("tensorflow", "cvdnn") == "cvdnn"

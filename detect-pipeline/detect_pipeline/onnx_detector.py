@@ -149,6 +149,13 @@ class CvDnnBackend:
         self._net.setInput(blob)
         return self._net.forward()
 
+    def infer_all(self, blob: np.ndarray) -> list[np.ndarray]:
+        """All output tensors (multi-head models, e.g. DETR's dets+labels)."""
+        self._net.setInput(blob)
+        names = self._net.getUnconnectedOutLayersNames()
+        outs = self._net.forward(names) if names else [self._net.forward()]
+        return list(outs)
+
 
 def resolve_providers(requested, available) -> list[str]:
     """Pick ORT execution providers: ``requested ∩ available``, CPU always last.
@@ -206,6 +213,10 @@ class OrtBackend:
 
     def infer(self, blob: np.ndarray) -> np.ndarray:
         return self._sess.run(None, {self._input: blob})[0]
+
+    def infer_all(self, blob: np.ndarray) -> list[np.ndarray]:
+        """All output tensors (multi-head models, e.g. DETR's dets+labels)."""
+        return list(self._sess.run(None, {self._input: blob}))
 
 
 def build_backend(name: str, model_path: str | None = None, *, providers=None,
