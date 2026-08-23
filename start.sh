@@ -131,6 +131,118 @@ port_in_use() {
     fi
 }
 
+# `command -v python3` is not enough: Windows ships a "python3" App Execution
+# Alias stub that resolves on PATH but fails to run. Trusting it would make
+# every port look unbindable and hard-fail the launcher, so confirm the
+# interpreter actually works before relying on it.
+python3_usable() {
+    command -v python3 >/dev/null 2>&1 && python3 -c 'import socket' >/dev/null 2>&1
+}
+
+# ── Helper: can this port actually be BOUND (TCP *and* UDP)? ──────
+# Deliberately different from port_in_use(): a port can have no listener
+# and still be unbindable. Windows/WSL hosts reserve ranges via WinNAT
+# (`netsh interface ipv4 show excludedportrange`) that are re-rolled at
+# every boot, and Docker cannot bind inside one. Because a single failed
+# binding aborts EVERY port publication for that container, one reserved
+# ICE port silently takes MediaMTX's whole port set down — the stack still
+# reports healthy and only WebRTC dies. Only a real bind() answers this.
+port_bindable() {
+    local port="$1"
+    if python3_usable; then
+        python3 -c '
+import socket, sys
+p = int(sys.argv[1])
+for typ in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+    s = socket.socket(socket.AF_INET, typ)
+    try:
+        s.bind(("0.0.0.0", p))
+    except OSError:
+        sys.exit(1)
+    finally:
+        s.close()
+' "$port" >/dev/null 2>&1
+        return $?
+    fi
+    # No python3: fall back to the weaker listener check. It cannot see
+    # reserved-but-unbound ports, but that is a Windows phenomenon and
+    # this branch only runs on hosts without python3.
+    ! port_in_use "$port"
+}
+
+# A port held by our OWN stack is not a conflict: the stack is simply
+# already running, and Docker frees the port when the container is
+# recreated. Without this, re-running the launcher against a live stack
+# would either refuse to start (explicit port) or silently drift to the
+# next candidate and move the ICE port on every restart.
+port_owned_by_stack() {
+    local port="$1"
+    docker ps --filter "publish=${port}" --format '{{.Names}}' 2>/dev/null \
+        | grep -q '^opennvr_'
+}
+
+ice_port_usable() {
+    port_bindable "$1" || port_owned_by_stack "$1"
+}
+
+# Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
+# compose interpolation in docker-compose.yml. Returns non-zero when no
+# usable port exists, so the caller can fail with a clear message instead
+# of letting `docker compose up` die on an opaque daemon error.
+configure_webrtc_ice_port() {
+    # Fixed, ordered candidate list rather than any free port: the set of
+    # ports an operator may need to allow through a firewall has to stay
+    # small and documentable. Spread far apart because the reserved ranges
+    # are handed out as runs of contiguous 100-port blocks.
+    local candidates="8189 18189 28189 38189"
+    local preferred="8189"
+    local explicit port
+
+    explicit="${WEBRTC_ICE_PORT:-$(get_env_var WEBRTC_ICE_PORT 2>/dev/null || echo "")}"
+
+    # An explicit operator choice is never silently overridden — it is
+    # usually mirrored by a firewall rule or router port-forward, so moving
+    # off it would break remote viewing in a way that is very hard to trace.
+    if [ -n "$explicit" ]; then
+        case "$explicit" in
+            ''|*[!0-9]*)
+                echo -e "  ${RED}WEBRTC_ICE_PORT='${explicit}' is not a valid port (1024-65535).${NC}" >&2
+                return 1
+                ;;
+        esac
+        if [ "$explicit" -lt 1024 ] || [ "$explicit" -gt 65535 ]; then
+            echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} is out of range (1024-65535).${NC}" >&2
+            return 1
+        fi
+        if ! ice_port_usable "$explicit"; then
+            echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} cannot be bound on this host.${NC}" >&2
+            echo -e "  ${GRAY}  MediaMTX would fail to publish ALL of its ports, not just this one,${NC}" >&2
+            echo -e "  ${GRAY}  so Live View would break with no visible error.${NC}" >&2
+            echo -e "  ${GRAY}  Free the port, or pick another one via WEBRTC_ICE_PORT in .env.${NC}" >&2
+            return 1
+        fi
+        export WEBRTC_ICE_PORT="$explicit"
+        return 0
+    fi
+
+    for port in $candidates; do
+        if ice_port_usable "$port"; then
+            export WEBRTC_ICE_PORT="$port"
+            if [ "$port" != "$preferred" ]; then
+                # Loud on purpose: a silently drifting port is how this
+                # turns into an unexplainable firewall problem weeks later.
+                echo -e "  ${YELLOW}WebRTC ICE port ${preferred} is unavailable — using ${port} for this run.${NC}" >&2
+                echo -e "  ${GRAY}  To pin a stable port for firewall rules, set WEBRTC_ICE_PORT in .env.${NC}" >&2
+            fi
+            return 0
+        fi
+    done
+
+    echo -e "  ${RED}No usable WebRTC ICE port found (tried: ${candidates}).${NC}" >&2
+    echo -e "  ${GRAY}  Set WEBRTC_ICE_PORT in .env to a port that is free on this host.${NC}" >&2
+    return 1
+}
+
 # ── Pre-flight validation ──────────────────────────────────
 run_validate() {
     local errors=0
@@ -1073,6 +1185,7 @@ run_up() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
+    configure_webrtc_ice_port || exit 1
     export_camera_lan_ips
     write_net_hints
     echo -e "  ${GREEN}Starting all services ...${NC}"
@@ -1094,6 +1207,7 @@ run_build() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
+    configure_webrtc_ice_port || exit 1
     export_camera_lan_ips
     write_net_hints
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
@@ -1250,6 +1364,7 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
+    configure_webrtc_ice_port || exit 1
     export_camera_lan_ips
     write_net_hints
     docker compose $ARGS up -d --remove-orphans

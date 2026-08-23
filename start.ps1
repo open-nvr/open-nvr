@@ -88,6 +88,121 @@ function Test-PortInUse {
     return ($listeners | Where-Object { $_.Port -eq $Port }).Count -gt 0
 }
 
+# ── WebRTC ICE port selection ──────────────────────────────
+# "Is anything listening on this port" is NOT the question that matters
+# here. Windows WinNAT/Hyper-V reserves port ranges (see
+# `netsh interface ipv4 show excludedportrange`) that are re-rolled at
+# every boot; a port inside one is unbindable while appearing completely
+# free to Test-PortInUse. Docker then fails to publish it — and because a
+# single failed binding aborts EVERY port publication for that container,
+# one reserved ICE port silently takes MediaMTX's entire port set down.
+# The stack still reports healthy and only WebRTC dies, with WHEP sessions
+# timing out as "deadline exceeded while waiting connection".
+#
+# So probe by actually binding, on BOTH protocols: the ranges are tracked
+# separately per protocol, and we publish the ICE port as TCP and UDP.
+function Test-PortBindable {
+    param([int]$Port)
+    $tcp = $null
+    $udp = $null
+    try {
+        # ExclusiveAddressUse defaults to true, which is what we want:
+        # a shared bind would report success on a port already in use.
+        $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+        $tcp.Start()
+        $udp = New-Object System.Net.Sockets.UdpClient($Port)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($tcp) { try { $tcp.Stop() } catch {} }
+        if ($udp) { try { $udp.Close() } catch {} }
+    }
+}
+
+# A port held by our OWN MediaMTX container is not a conflict — the stack is
+# simply already running, and Docker releases the port when the container is
+# recreated. Without this, re-running the launcher against a live stack would
+# either refuse to start (explicit port) or silently drift to the next
+# candidate and move the ICE port on every single restart.
+function Test-PortOwnedByStack {
+    param([int]$Port)
+    try {
+        $names = & docker ps --filter "publish=$Port" --format "{{.Names}}" 2>$null
+        if (-not $names) { return $false }
+        return [bool](@($names) -match '^opennvr_')
+    } catch {
+        # No docker on PATH / daemon down: fall back to "not ours".
+        return $false
+    }
+}
+
+function Test-IcePortUsable {
+    param([int]$Port)
+    if (Test-PortBindable -Port $Port) { return $true }
+    return (Test-PortOwnedByStack -Port $Port)
+}
+
+# Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
+# compose interpolation in docker-compose.yml. Returns $false if no usable
+# port could be found, so the caller can fail with a clear message instead
+# of letting `docker compose up` die on an opaque daemon error.
+function Set-WebRtcIcePort {
+    # Fixed, ordered candidate list rather than a random free port: the set
+    # of ports an operator may need to allow through a firewall has to stay
+    # small and documentable. Spread far apart because the reserved ranges
+    # are allocated as runs of contiguous 100-port blocks.
+    $candidates = @(8189, 18189, 28189, 38189)
+    $preferred = $candidates[0]
+
+    # An explicit operator choice is never silently overridden — it is
+    # usually mirrored by a firewall rule or router port-forward, so moving
+    # off it would break remote viewing in a way that is very hard to trace.
+    $explicit = $env:WEBRTC_ICE_PORT
+    if ([string]::IsNullOrWhiteSpace($explicit)) { $explicit = Get-EnvVar "WEBRTC_ICE_PORT" }
+
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) {
+        $port = 0
+        if (-not [int]::TryParse($explicit.Trim(), [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+            Write-Color "  WEBRTC_ICE_PORT='$($explicit.Trim())' is not a valid port (1024-65535)." Red
+            return $false
+        }
+        if (-not (Test-IcePortUsable -Port $port)) {
+            Write-Color "  WEBRTC_ICE_PORT=$port cannot be bound on this host." Red
+            Write-Color "    MediaMTX would fail to publish ALL of its ports, not just this one." DarkGray
+            Write-Color "    Reserved ranges (a port inside one is unbindable even when idle):" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
+            Write-Color "    Either pick a free port, or reserve this one permanently (admin):" DarkGray
+            Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
+            Write-Color "      netsh int ipv4 add excludedportrange protocol=udp startport=$port numberofports=1 store=persistent" DarkGray
+            return $false
+        }
+        $env:WEBRTC_ICE_PORT = "$port"
+        return $true
+    }
+
+    foreach ($port in $candidates) {
+        if (-not (Test-IcePortUsable -Port $port)) { continue }
+        $env:WEBRTC_ICE_PORT = "$port"
+        if ($port -ne $preferred) {
+            # Loud on purpose: a silently drifting port is how this turns
+            # into an unexplainable firewall problem weeks later.
+            Write-Color "  WebRTC ICE port $preferred is unavailable — using $port for this run." Yellow
+            Write-Color "    Usually a WinNAT/Hyper-V reserved range, which is re-rolled at every boot:" DarkGray
+            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+            Write-Color "    For a port that stays put across reboots, set WEBRTC_ICE_PORT in .env and" DarkGray
+            Write-Color "    reserve it (admin): netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
+        }
+        return $true
+    }
+
+    Write-Color "  No usable WebRTC ICE port found (tried: $($candidates -join ', '))." Red
+    Write-Color "    Set WEBRTC_ICE_PORT in .env to a port outside every reserved range:" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    return $false
+}
+
 # ── Pre-flight validation ──────────────────────────────────
 function Invoke-Validate {
     $errors = 0; $warnings = 0
@@ -491,6 +606,7 @@ function Invoke-Up {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
     Write-Color "  Starting all services ..." Green
@@ -507,6 +623,7 @@ function Invoke-Build {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
+    if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
     Write-Color "  Building images and starting all services ..." Green
