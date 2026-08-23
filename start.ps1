@@ -777,6 +777,26 @@ switch ($Command) {
     "up"    { Invoke-Up }
     "build" { Invoke-Build }
 
+    "restart" {
+        # Deliberately not `docker compose restart` / `docker restart`: those
+        # replay the port bindings frozen into the container at creation time
+        # and never re-run the ICE probe or the port pre-flight. That matters
+        # most after a reboot, which is exactly when WinNAT re-rolls its
+        # reserved ranges - the one moment the chosen port may need to change
+        # is the one moment those commands cannot change it.
+        #
+        # Stopping first also frees the ports, so the probe can return to the
+        # preferred ICE port when a previous run had to fall back.
+        if (-not (Test-Path ".env")) {
+            Write-Color "  No .env found. Run .\start.ps1 (no arguments) to set up." Red
+            exit 1
+        }
+        $ca = Get-ComposeArgs
+        Write-Color "  Stopping all services ..." Yellow
+        docker compose @ca stop
+        Invoke-Up
+    }
+
     "down" {
         Show-Banner
         $ca = if (Test-Path ".env") { Get-ComposeArgs } else { @("-f", $ComposeFile) }
@@ -829,7 +849,7 @@ switch ($Command) {
 
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
+        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
         exit 1
     }
 }

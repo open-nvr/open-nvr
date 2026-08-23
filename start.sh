@@ -1382,6 +1382,22 @@ case "$COMMAND" in
     run_build
     ;;
 
+  restart)
+    # Deliberately not `docker compose restart` / `docker restart`: those
+    # replay the port bindings frozen into the container at creation time
+    # and never re-run the ICE probe or the port pre-flight. That matters
+    # most after a reboot, which is exactly when WinNAT re-rolls its
+    # reserved ranges — the one moment the chosen port may need to change
+    # is the one moment those commands cannot change it.
+    #
+    # Stopping first also frees the ports, so the probe can return to the
+    # preferred ICE port when a previous run had to fall back.
+    ARGS=$(compose_args) || exit 1
+    echo -e "  ${YELLOW}Stopping all services ...${NC}"
+    docker compose $ARGS stop
+    run_up
+    ;;
+
   down)
     print_banner
     ARGS=$(compose_args 2>/dev/null || echo "-f $COMPOSE_FILE")
@@ -1484,7 +1500,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|refresh-certs]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|refresh-certs]"
     exit 1
     ;;
 esac
