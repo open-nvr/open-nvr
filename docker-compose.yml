@@ -135,17 +135,23 @@ services:
         condition: service_completed_successfully
     ports:
       # Host-loopback only (host-side debugging). See V-015.
+      # RTSPS stays published by default: it is user-facing (VLC / ffmpeg
+      # from the host, and MEDIAMTX_EXTERNAL_RTSPS_URL below points at it).
       - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
-      - "127.0.0.1:8888:8888" # HLS (browsers reach via nginx /hls/)
-      - "127.0.0.1:8889:8889" # WebRTC signalling (via nginx /webrtc/)
-      - "127.0.0.1:9997:9997" # MediaMTX admin API/metrics
-      - "127.0.0.1:9996:9996" # Recording playback (via nginx /playback/)
+      # HLS (8888), WHEP signalling (8889), playback (9996) and the admin
+      # API (9997) are NOT published by default. Browsers reach the first
+      # three through nginx (/hls/, /webrtc/, /playback/) and the container
+      # healthcheck talks to 9997 from inside, so nothing needs them on the
+      # host. Every extra publication is another chance for one unbindable
+      # port to abort ALL of this service's publications (see #298), so they
+      # are opt-in: set OPENNVR_DEBUG_PORTS=1 in .env, which makes the
+      # launcher add docker-compose.debug-ports.yml.
       # WebRTC ICE media (DTLS-SRTP over UDP, browser ↔ mediamtx direct, not via
       # nginx). Bound to NGINX_BIND_HOST so it stays on the operator NIC, off
       # the camera LAN. See V-015.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/udp"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${WEBRTC_ICE_PORT:-8189}:${WEBRTC_ICE_PORT:-8189}/udp"
       # TCP fallback for WebRTC ICE when UDP is blocked.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:8189:8189/tcp"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${WEBRTC_ICE_PORT:-8189}:${WEBRTC_ICE_PORT:-8189}/tcp"
     volumes:
       - ./mediamtx.docker.yml:/mediamtx.yml:ro
       - ./mediamtx-certs:/etc/mediamtx-certs:ro
@@ -164,6 +170,14 @@ services:
       # reach UDP/8189). Set by start.sh from the detected topology; empty =
       # mediamtx auto-detects (fine on single-NIC, breaks behind NAT/multi-NIC).
       - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # ICE media listen port. Overridable because some Windows hosts have
+      # 8189 inside a WinNAT/Hyper-V reserved range (netsh interface ipv4
+      # show excludedportrange protocol=tcp), where Docker cannot bind it —
+      # one failed binding aborts ALL of this service's port publications.
+      # Must match the published port above so the advertised ICE candidate
+      # port is correct.
+      - MTX_WEBRTCLOCALUDPADDRESS=:${WEBRTC_ICE_PORT:-8189}
+      - MTX_WEBRTCLOCALTCPADDRESS=:${WEBRTC_ICE_PORT:-8189}
     networks:
       - opennvr_internal
     healthcheck:
