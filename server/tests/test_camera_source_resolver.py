@@ -219,3 +219,58 @@ async def test_sync_camera_time_returns_false_and_never_raises(monkeypatch):
     monkeypatch.setattr(ods, "resolve_control_endpoint", fake_resolve)
     monkeypatch.setattr(ods, "set_system_datetime", fake_set)
     assert await sync_camera_time("10.0.0.5", "admin", "pw") is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_onvif_returns_substream_by_lowest_resolution(monkeypatch):
+    """ONVIF advertises BOTH encodings; the resolver must hand back the
+    camera's own substream (smallest resolution) so a fresh install taps
+    the low-res stream by default instead of decoding full main (~5x CPU)
+    until an operator pastes a URL by hand."""
+    async def fake_connect(ip, u, p, port=None, scheme=None):
+        return {
+            "port": 80, "scheme": "http", "device_info": {},
+            "profiles": [
+                {"token": "main", "width": 1920, "height": 1080,
+                 "stream_uri": "rtsp://192.168.0.104:554/avstream/channel=1/stream=0.sdp"},
+                {"token": "third", "width": 704, "height": 576,
+                 "stream_uri": "rtsp://192.168.0.104:554/avstream/channel=1/stream=2.sdp"},
+                {"token": "sub", "width": 352, "height": 288,
+                 "stream_uri": "rtsp://192.168.0.104:554/avstream/channel=1/stream=1.sdp"},
+            ],
+        }
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await resolve_source("192.168.0.104", "admin", "pw", 554)
+    assert r["rtsp_url"].endswith("stream=0.sdp")            # main unchanged
+    assert r["substream_url"] == (
+        "rtsp://admin:pw@192.168.0.104:554/avstream/channel=1/stream=1.sdp"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_onvif_substream_none_when_single_profile(monkeypatch):
+    async def fake_connect(ip, u, p, port=None, scheme=None):
+        return {"port": 80, "scheme": "http", "device_info": {},
+                "profiles": [{"token": "only",
+                              "stream_uri": "rtsp://c/main"}]}
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await resolve_source("c", "u", "p", 554)
+    assert r["substream_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_onvif_substream_skips_duplicate_uri(monkeypatch):
+    """Some cameras report two profiles pointing at the SAME stream — that is
+    not a substream; storing it would double-tap main."""
+    async def fake_connect(ip, u, p, port=None, scheme=None):
+        return {"port": 80, "scheme": "http", "device_info": {},
+                "profiles": [
+                    {"token": "a", "stream_uri": "rtsp://c/main"},
+                    {"token": "b", "stream_uri": "rtsp://c/main"},
+                ]}
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await resolve_source("c", "u", "p", 554)
+    assert r["substream_url"] is None
