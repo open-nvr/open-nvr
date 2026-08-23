@@ -275,15 +275,24 @@ def _detector_factory(cfg: ServiceConfig):
 
         def make_onnx():
             try:
-                return OnnxYoloDetector(
+                det = OnnxYoloDetector(
                     model_path=cfg.onnx_model, input_size=cfg.onnx_input,
                     backend=backend, providers=providers,
                     conf_threshold=cfg.detect_conf,
                 )
+                log.info(
+                    "tier0 detector loaded: family=yolo model=%s backend=%s input=%d",
+                    os.path.basename(cfg.onnx_model), det.backend_name, cfg.onnx_input,
+                )
+                return det
             except Exception:
                 log.warning(
-                    "failed to load ONNX model %s (backend=%s); using stub",
+                    "failed to load ONNX model %s (backend=%s)",
                     cfg.onnx_model, cfg.onnx_backend, exc_info=True,
+                )
+                log.error(
+                    "DETECTION IS OFF for this worker: running the STUB detector "
+                    "(motion/tracking only, no objects). Fix the model/backend."
                 )
                 from .detector import StubDetector
                 return StubDetector()
@@ -312,17 +321,27 @@ def _detector_factory(cfg: ServiceConfig):
         def make_rfdetr():
             for attempt in ([backend, "ort"] if backend == "cvdnn" else [backend]):
                 try:
-                    return OnnxDetrDetector(
+                    det = OnnxDetrDetector(
                         model_path=cfg.onnx_model, input_size=cfg.onnx_input,
                         backend=attempt, providers=providers,
                         conf_threshold=cfg.detect_conf,
                     )
+                    log.info(
+                        "tier0 detector loaded: family=detr model=%s backend=%s input=%d",
+                        os.path.basename(cfg.onnx_model), det.backend_name, cfg.onnx_input,
+                    )
+                    return det
                 except Exception:
                     log.warning(
                         "failed to load RF-DETR model %s (backend=%s)",
                         cfg.onnx_model, attempt, exc_info=True,
                     )
-            log.warning("RF-DETR unavailable on any backend; using stub detector")
+            log.error(
+                "DETECTION IS OFF for this worker: RF-DETR could not load on any "
+                "backend — running the STUB detector (motion/tracking only, no "
+                "objects). Fix the model path/backend; do not mistake this for a "
+                "working detector."
+            )
             from .detector import StubDetector
             return StubDetector()
 

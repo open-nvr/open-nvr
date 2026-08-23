@@ -91,9 +91,9 @@ def test_local_only_refuses_wildcard_bind():
 
 
 def test_local_only_refuses_loopback_url_with_egress_declared():
-    """A2.4 tightening: under local_only, even loopback adapters get
-    refused if they advertise non-empty permissions.network_egress
-    (because that means they're a cloud-proxy)."""
+    """Under local_only, a loopback adapter is still refused when its
+    declared egress points OFF this machine (a cloud proxy). Host-local
+    egress is allowed — see the host-local egress tests below."""
     with pytest.raises(SovereigntyViolation, match="network_egress"):
         check_adapter(
             sovereignty_mode="local_only",
@@ -222,4 +222,49 @@ def test_invalid_mode_raises():
             sovereignty_mode="banana",
             adapter_url="http://127.0.0.1:9100",
             capabilities=None,
+        )
+
+
+# ── host-local egress under local_only (the ollamavlm case) ─────────
+
+
+def test_local_only_accepts_egress_to_docker_host_alias():
+    """The shipped default: the ollamavlm adapter declares egress to the
+    operator's own Ollama at host.docker.internal — the machine KAI-C
+    itself runs on. That keeps the AI plane local and MUST pass, else the
+    default caption adapter 403s on every default-sovereignty install."""
+    check_adapter(
+        sovereignty_mode="local_only",
+        adapter_url="http://127.0.0.1:9006",
+        capabilities=_caps(egress=["http://host.docker.internal:11434"]),
+    )
+
+
+def test_local_only_accepts_egress_to_bridge_service(monkeypatch):
+    """Egress to another bridge container (e.g. the bundled ollama
+    service) stays in-kernel on this host — allowed."""
+    _mock_resolver(monkeypatch, {"ollama": "172.28.0.9"})
+    check_adapter(
+        sovereignty_mode="local_only",
+        adapter_url="http://127.0.0.1:9006",
+        capabilities=_caps(egress=["http://ollama:11434"]),
+    )
+
+
+def test_local_only_refuses_egress_off_this_machine():
+    """A LAN / internet destination is still a proxy off this box."""
+    with pytest.raises(SovereigntyViolation, match="network_egress"):
+        check_adapter(
+            sovereignty_mode="local_only",
+            adapter_url="http://127.0.0.1:9006",
+            capabilities=_caps(egress=["http://192.168.1.50:11434"]),
+        )
+
+
+def test_local_only_refuses_wildcard_egress():
+    with pytest.raises(SovereigntyViolation, match="wildcard"):
+        check_adapter(
+            sovereignty_mode="local_only",
+            adapter_url="http://127.0.0.1:9006",
+            capabilities=_caps(egress=["*.example.com"]),
         )
