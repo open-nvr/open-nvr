@@ -1413,7 +1413,12 @@
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
+    let _liveInflight=false;   // 1 fps polling must never pile up behind a slow grab
     async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc||_playback) return;
+      if(_liveInflight) return;   // an RTSP still can take >1s (keyframe wait)
+      _liveInflight=true;
+      try{ await _refreshPlayerLiveInner(cam); } finally{ _liveInflight=false; } }
+    async function _refreshPlayerLiveInner(cam){
       const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
@@ -1483,13 +1488,16 @@
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
       refreshPlayerLive();   // instant first picture while WHEP negotiates
-      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },2000);
+      // 1 fps still refresh (was 2 s): the in-flight guard above means a
+      // slow RTSP grab degrades to "as fast as the source delivers", never
+      // a request pile-up. WebRTC (when it connects) replaces this anyway.
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },1000);
       const cam=window._camScreenCam;
       if(cam) tryWebrtcLive(cam).then((ok)=>{
         if(window._camScreenCam!==cam||_revTs||_playback) return;
         $("camTnote").textContent = ok
           ? "Live · real-time stream · marks = detections · drag to review"
-          : "Live preview — stills every 2 s"+(window._whepHadUrl
+          : "Live preview — up to 1 frame/s"+(window._whepHadUrl
              ? " (camera stream unreachable right now)"
              : (_authMode==="opennvr"
                 ? " (link this camera to OpenNVR for full-motion video)"

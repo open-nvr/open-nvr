@@ -125,7 +125,10 @@ llm_max_tokens: 128
 # headroom; KV-cache cost for a 1.5-2b model at 8k is a few hundred MB.
 llm_num_ctx: 8192
 
-frame_cache_ttl_seconds: 2.0
+# 1.0 (was 2.0) so the camera screen's 1 fps still refresh actually gets a
+# NEW frame each second — at TTL 2.0 every other poll returned the same
+# cached JPEG. Within one LLM turn several tools still share one grab.
+frame_cache_ttl_seconds: 1.0
 event_ring_size: 256
 
 # NATS broadcast — picks up inference events fanned out by KAI-C so

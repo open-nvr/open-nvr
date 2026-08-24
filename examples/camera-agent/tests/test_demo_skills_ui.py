@@ -292,7 +292,7 @@ def test_webrtc_live_player_wired(script: str, html: str) -> None:
         assert fn in script, f"webrtc handler missing: {fn!r}"
     assert "RTCPeerConnection" in script and '"application/sdp"' in script
     assert '"/streams/"' in script, "player no longer asks the agent proxy"
-    assert "Live preview — stills every 2" in script, (
+    assert "Live preview — up to 1 frame/s" in script, (
         "the stills fallback lost its honest label"
     )
     # review, recorded playback, and leaving the screen all stop the stream

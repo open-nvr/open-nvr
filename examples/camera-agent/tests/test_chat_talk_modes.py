@@ -172,6 +172,24 @@ def test_demo_state_animations_survive_the_redesign():
     assert "body:not(.ui-talk) .voicebar" not in _HTML
 
 
+def test_demo_live_stills_run_at_1fps_with_inflight_guard():
+    # Camera-screen still refresh: 1 s cadence (was 2 s), guarded so a slow
+    # RTSP grab (keyframe wait can exceed 1 s) degrades to "as fast as the
+    # source delivers" instead of piling up requests.
+    assert "refreshPlayerLive(); },1000)" in _HTML
+    assert "_liveInflight" in _HTML
+    assert "},2000)" not in _HTML.split("refreshPlayerLive")[2][:200]
+
+
+def test_configs_frame_ttl_matches_1fps():
+    # At TTL 2.0 every other 1 fps poll returned the same cached JPEG.
+    base = Path(__file__).resolve().parents[1]
+    for fname in ("config.docker.yml", "config.docker.chat.yml"):
+        text = (base / fname).read_text()
+        assert "frame_cache_ttl_seconds: 1.0" in text, fname
+        assert "frame_cache_ttl_seconds: 2.0" not in text, fname
+
+
 def test_demo_chat_dock_present_on_camera_screen_too():
     # The log + docked bar live OUTSIDE #mainScreen/#camScreen, after both —
     # so opening a single camera keeps the same chat dock below it.
