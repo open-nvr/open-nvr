@@ -512,18 +512,20 @@ function Choose-Example {
                 try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
             }
         }
-        # Ceiling = the tested envelope: never suggest beyond qwen2.5:3b
-        # (the largest model this agent is exercised with); bigger-is-
-        # runnable is detectable, bigger-is-better is not. VLM default is
-        # ALWAYS moondream — an untested model through the new ollamavlm
-        # adapter would stack unknowns; headroom is advertised in the
-        # prompt note instead.
+        # Ceiling = the tested envelope. qwen3:1.7b is field-tested with
+        # this agent and answers BETTER than the qwen2.5 set at similar
+        # speed (~3 GB; the shipped configs disable its thinking mode), so
+        # it is the suggestion wherever RAM allows. Likewise gemma3:4b was
+        # field-tested through ollamavlm and clearly beats moondream, so
+        # it is the VLM suggestion on >= 8 GB; moondream stays the tested
+        # low-RAM pick. Bigger-is-runnable is detectable, bigger-is-better
+        # is not — untested headroom stays a prompt note, never a default.
         $llmSuggest = if ($accel -ne 'cpu') {
-            if ($ramGb -ge 16) { 'qwen2.5:3b' } else { 'qwen2.5:1.5b' }
+            if ($ramGb -ge 8) { 'qwen3:1.7b' } else { 'qwen2.5:1.5b' }
         } else {
-            if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen2.5:1.5b' } else { 'qwen2.5:0.5b' }
+            if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen3:1.7b' } else { 'qwen2.5:0.5b' }
         }
-        $vlmSuggest = 'moondream'
+        $vlmSuggest = if ($ramGb -ge 8) { 'gemma3:4b' } else { 'moondream' }
         $hwDesc = "$(if ($accel -eq 'cuda') { 'NVIDIA GPU (CUDA), ' } else { 'CPU only, ' })$ramGb GB RAM, $cores cores"
         Ok "Detected: $hwDesc -> suggesting $llmSuggest"
 
@@ -565,7 +567,7 @@ function Choose-Example {
             'Describes what a camera sees. ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - the default in that case; needs an adapter tag newer than 0.1.3); moondream/blip run inside Docker (moondream answers questions, blip writes plain captions).' 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
-            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default.' 'yes' $vlmSuggest
+            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested - clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick.' 'yes' $vlmSuggest
             Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $ramGb)
         }
     } else {
