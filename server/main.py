@@ -306,17 +306,32 @@ async def lifespan(app: FastAPI):
 
                     for cfg, cam in rows:
                         payload = {
-                            "source_url": cfg.source_url,
+                            # The camera row wins over the config row. cfg.source_url
+                            # is a snapshot taken when the camera was first
+                            # provisioned; reading it here is what used to revert an
+                            # edited RTSP URL on every restart. Keeping it as the
+                            # fallback lets this loop self-heal rows that drifted
+                            # before the edit path started syncing it — no migration.
+                            "source_url": cam.rtsp_url or cfg.source_url,
+                            # Without this key _provision_substream falls back to
+                            # deriving the sub URL from vendor convention, silently
+                            # discarding an operator-stored one on every restart.
+                            "substream_url": cam.substream_url,
                             "rtsp_transport": cfg.rtsp_transport,
                             "recording_enabled": cfg.recording_enabled,
                             "recording_path": cfg.recording_path,
                             "recording_segment_seconds": cfg.recording_segment_seconds,
                         }
                         try:
-                            res = await _MtxAdmin.provision_path(
+                            # upsert, not add: when MediaMTX outlives a server
+                            # restart every path already exists, and a plain add
+                            # leaves each one on whatever config it had.
+                            res = await _MtxAdmin.upsert_path(
                                 cam.id, cam.ip_address, payload
                             )
-                            if res.get("status") == "success":
+                            # The service returns "ok", never "success" — this
+                            # counter used to log 0 successes on every startup.
+                            if res.get("status") == "ok":
                                 provisioned_count += 1
                             else:
                                 failed_count += 1

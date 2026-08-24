@@ -645,6 +645,16 @@ class CameraResponse(CameraBase):
     # the camera is paused, or it has never been seen. Rendering unknown as
     # offline would show the whole fleet as down after every restart.
     live_online: bool | None = None
+    # Populated only by PUT /cameras/{id}: what this edit did to the camera's
+    # MediaMTX path. 'none' | 'deactivate' | 'activate' | 'reprovision' |
+    # 'repathed'. None everywhere else.
+    stream_action: str | None = None
+    # Advisory: an is_active transition whose MediaMTX call failed. The flag is
+    # the source of truth, so the edit still stands (see update_camera). A
+    # failed SOURCE re-provision is NOT reported here — it rejects the whole
+    # edit with 409/502 instead, so the DB and MediaMTX cannot disagree about
+    # where a camera's video comes from.
+    stream_warning: str | None = None
 
     class Config:
         from_attributes = True

@@ -109,7 +109,7 @@ export function Cameras() {
   const navigate = useNavigate()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
-  const { showError, showSuccess, showInfo } = useSnackbar()
+  const { showError, showSuccess, showInfo, showWarning } = useSnackbar()
   // A mutation (delete / bulk op) is in flight. Distinct from the list's own
   // fetching state: the list now refreshes on its own in the background, and
   // that must never disable the buttons.
@@ -355,12 +355,23 @@ export function Cameras() {
           .map(r => (r.labels.length ? r : { skill: r.skill })),
       }
       Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k])
-      await apiService.updateCamera(editing.id, payload)
+      const { data } = await apiService.updateCamera(editing.id, payload)
       setShowEditDialog(false)
       setEditing(null)
       resetForm()
       await refreshCameras()
-      showSuccess('Camera updated')
+      // A changed stream source is pushed to the media server before the edit
+      // is committed, so reaching here means it landed. stream_warning only
+      // ever carries a best-effort pause/resume hiccup — the row is saved
+      // either way. A failed re-point never gets here: it throws 409/502 and
+      // nothing was written.
+      if (data?.stream_warning) {
+        showWarning(`Camera saved, but ${data.stream_warning}`)
+      } else if (data?.stream_action && data.stream_action !== 'none') {
+        showSuccess('Camera updated — stream re-provisioned')
+      } else {
+        showSuccess('Camera updated')
+      }
     } catch (e: any) {
       showError(e?.data?.detail || e?.message || 'Failed to update camera')
     } finally {

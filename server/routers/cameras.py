@@ -1010,28 +1010,54 @@ async def update_camera(
     )
 
     try:
-        # Note: We pass the pre-validated camera object to avoid duplicate DB query
-        # But CameraService needs update to support passing model instance
-        # For now, we rely on the service to re-check, or we update manually here.
-        # Ideally CameraService should have update_camera_instance method.
-        # Since we just want to remove duplication in router, let's keep service call
-        # but acknowledging the redundancy for now, OR modify service.
-        # Actually, let's modify the service call to skip the check if possible?
-        # No, let's just use the service as is, the router check is now declarative.
-        # Wait, if get_camera_or_403 raises 403, we won't reach here.
-        # So CameraService will succeed since permission is valid.
+        from models import CameraConfig
+        from services.camera_source_resolver import replace_credentials
+        from services.mediamtx_startup_service import MediaMtxStartupService
+        from services.transport_probe_service import TransportPolicyViolation
 
-        # Refactoring: Since we have the camera, we can use it.
-        # But we need to update it.
+        # Snapshot BEFORE the setattr loop. Two of these are load-bearing:
+        #  * before_ip keys the OLD MediaMTX path. Under MEDIAMTX_PATH_MODE=ip
+        #    the path name is derived from the address, so an edit that changes
+        #    the IP renames the path — tearing down with the post-edit IP would
+        #    delete a path that does not exist and orphan the live one.
+        #  * before_password reads through the decrypting property. Never
+        #    compare encrypted_password: Fernet is non-deterministic, so the
+        #    ciphertext differs on every write and would report a change always.
         was_active = bool(camera.is_active)
+        before_ip = camera.ip_address
+        before_rtsp_url = camera.rtsp_url
+        before_substream_url = camera.substream_url
+        before_username = camera.username
+        before_password = camera.password
+        old_path_name = _build_stream_name(
+            settings.mediamtx_stream_prefix, camera.id, before_ip
+        )
+
         update_fields = camera_update.model_dump(exclude_unset=True)
         for field, value in update_fields.items():
             setattr(camera, field, value)
+
+        # MediaMTX authenticates to the camera with the credentials embedded in
+        # the source URL; Camera.username/password never reach it. The edit form
+        # re-submits the URL it was prefilled with, so a password rotation would
+        # otherwise be stored on the row and never take effect on the stream.
+        # Rewriting here is offline and idempotent (a no-op when the client
+        # already sent a URL carrying the new credentials).
+        if camera.username != before_username or camera.password != before_password:
+            camera.rtsp_url = replace_credentials(
+                camera.rtsp_url, camera.username, camera.password
+            )
+            camera.substream_url = replace_credentials(
+                camera.substream_url, camera.username, camera.password
+            )
 
         # Re-point `port` whenever the stream URL moves, for the same reason the
         # create path derives it: MediaMTX pulls `rtsp_url`, so that URL's port
         # is the only one worth showing. A `port` sent in the same request loses
         # to the URL rather than leaving the two contradicting each other.
+        # Runs after the credential rewrite above so it reads the final URL;
+        # userinfo cannot move the port, but deriving from anything other than
+        # what MediaMTX will be handed is how these two drifted apart before.
         if "rtsp_url" in update_fields:
             from services.camera_source_resolver import rtsp_port_from_url
 
@@ -1045,18 +1071,224 @@ async def update_camera(
                 )
                 camera.port = stream_port
 
-        db.commit()
-        db.refresh(camera)
-
         now_active = bool(camera.is_active)
+        new_path_name = _build_stream_name(
+            settings.mediamtx_stream_prefix, camera.id, camera.ip_address
+        )
+        # Key the address case off the DERIVED PATH NAME, not the raw IP: in the
+        # default path mode ("id") the IP never reaches MediaMTX as data, so an
+        # address edit is a genuine no-op and must not cost a round trip. One
+        # expression covers both modes honestly.
+        path_renamed = new_path_name != old_path_name
+        # Presence in model_dump(exclude_unset=True) is NOT a change signal —
+        # the edit form always re-sends ip_address, port, username, rtsp_url,
+        # substream_url and is_active, so a pure rename would re-provision on
+        # every save. Diff the values. `port` is deliberately absent: it is
+        # create-time metadata for resolve_source, and the port MediaMTX
+        # actually dials lives inside rtsp_url.
+        stream_changed = (
+            camera.rtsp_url != before_rtsp_url
+            or camera.substream_url != before_substream_url
+        )
+
         stream_action = None
-        if was_active and not now_active:
+        stream_warning = None
+
+        if now_active and stream_changed and not camera.rtsp_url:
+            # The source was REMOVED. Same transactional contract, mirrored:
+            # the operator asked for this camera to stop streaming, so if the
+            # path cannot be torn down we must not report that it was. Leaving
+            # it up would keep MediaMTX pulling and recording from a camera the
+            # database says has no source at all.
+            db.flush()
+            stream_action = "unprovision"
+            try:
+                res = await MediaMtxAdminService.unprovision_path(camera.id, before_ip)
+            except Exception as e:
+                db.rollback()
+                camera_logger.error(
+                    f"Camera {camera_id} update rolled back; stream teardown failed: {e}",
+                    extra={
+                        "camera_id": camera_id,
+                        "action": "camera.update_unprovision_exception",
+                    },
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Camera not updated: the stream could not be stopped "
+                        f"after clearing its source ({e})."
+                    ),
+                ) from e
+            if res.get("status") not in ("ok", "success", "no_admin_api"):
+                db.rollback()
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Camera not updated: the stream could not be stopped "
+                        f"after clearing its source ({res.get('status')})."
+                    ),
+                )
+            cfg = (
+                db.query(CameraConfig)
+                .filter(CameraConfig.camera_id == camera.id)
+                .first()
+            )
+            if cfg:
+                cfg.source_url = None
+            camera.status = "unknown"
+            db.commit()
+            db.refresh(camera)
+
+        elif now_active and (stream_changed or path_renamed) and camera.rtsp_url:
+            # The source this camera streams from changed. Unlike the is_active
+            # branches below, this is TRANSACTIONAL: push it to MediaMTX first
+            # and only commit if it lands, so the database and the media server
+            # can never disagree about where a camera's video comes from.
+            #
+            # This is why the branch cannot reuse provision_camera_by_id, which
+            # opens a SessionLocal() of its own and so cannot see uncommitted
+            # rows. Flush instead — same session, same connection, new values
+            # visible to build_provision_config, still rollback-able.
+            db.flush()
+            stream_action = "repathed" if path_renamed else "reprovision"
+            cfg = (
+                db.query(CameraConfig)
+                .filter(CameraConfig.camera_id == camera.id)
+                .first()
+            )
+            provision_config = MediaMtxStartupService.build_provision_config(
+                camera, cfg, db
+            )
+            try:
+                res = await MediaMtxAdminService.upsert_path(
+                    camera.id,
+                    camera.ip_address,
+                    provision_config,
+                    transport_security=cfg.transport_security if cfg else None,
+                )
+            except TransportPolicyViolation as exc:
+                # Deterministic refusal (rtsps_required camera, plaintext URL).
+                # Raised before any HTTP, so MediaMTX is untouched. 409: the
+                # request is well-formed but conflicts with the stored policy.
+                db.rollback()
+                camera_logger.log_action(
+                    "camera.transport_policy_refused",
+                    message=(
+                        f"Refused to update camera {camera_id}: "
+                        f"policy={exc.policy} url_scheme={exc.scheme}"
+                    ),
+                    user_id=current_user.id,
+                    camera_id=camera_id,
+                    extra_data={"policy": exc.policy, "url_scheme": exc.scheme},
+                )
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except Exception as e:
+                db.rollback()
+                camera_logger.error(
+                    f"Camera {camera_id} update rolled back; MediaMTX unreachable: {e}",
+                    extra={
+                        "camera_id": camera_id,
+                        "action": "camera.update_reprovision_exception",
+                    },
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Camera not updated: the media server could not be "
+                        f"reached to re-point the stream ({e})."
+                    ),
+                ) from e
+
+            # "no_admin_api" means this deployment has no MediaMTX admin API at
+            # all — there is nothing to provision and editing must still work.
+            if res.get("status") not in ("ok", "no_admin_api"):
+                db.rollback()
+                detail = (
+                    res.get("details", {}).get("error")
+                    or res.get("message")
+                    or res.get("status")
+                )
+                camera_logger.log_action(
+                    "camera.update_reprovision_failed",
+                    user_id=current_user.id,
+                    camera_id=camera_id,
+                    message=(
+                        f"Camera {camera_id} update rejected; MediaMTX refused "
+                        f"the new stream config: {detail}"
+                    ),
+                    extra_data={"provision_result": res},
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Camera not updated: the stream could not be "
+                        f"re-pointed ({detail})."
+                    ),
+                )
+
+            if path_renamed:
+                # Create-new-then-delete-old, never the reverse: delete + re-add
+                # is not atomic and a lost race leaves the camera with no path
+                # at all (issue #218). Best-effort — the new path is already
+                # serving, so a failed cleanup is a leak, not an outage.
+                #
+                # Known limitation, ip mode only: the on-disk recordings dir is
+                # named from this same builder (camera_identity.path_name_for_camera),
+                # so the previous tree is orphaned here too. Recoverable via
+                # Settings -> Recording. Does not arise in the default id mode.
+                try:
+                    await MediaMtxAdminService.unprovision_path(camera.id, before_ip)
+                except Exception as e:  # pragma: no cover - best effort
+                    stream_warning = (
+                        f"stream moved to {new_path_name}, but the old path "
+                        f"{old_path_name} could not be removed: {e}"
+                    )
+                    camera_logger.error(
+                        f"Camera {camera_id} re-pathed but old path teardown failed: {e}",
+                        extra={
+                            "camera_id": camera_id,
+                            "action": "camera.repath_old_teardown_failed",
+                        },
+                        exc_info=True,
+                    )
+
+            # Keep CameraConfig.source_url honest, in the same transaction.
+            # It is what main.py's startup re-provisioner, _reconcile_stream
+            # (encoder changes) and camera_config_service.provision all read —
+            # leaving it stale is what made an edited URL revert on restart.
+            if cfg:
+                cfg.source_url = camera.rtsp_url
+                cfg.last_provisioned_at = func.now()
+            camera.status = "provisioned"
+
+            camera_logger.log_action(
+                "camera.update_reprovision",
+                user_id=current_user.id,
+                camera_id=camera_id,
+                message=(
+                    f"Camera {camera_id} stream re-provisioned "
+                    f"({res.get('action') or res.get('status')})"
+                ),
+                extra_data={"provision_result": res, "path_renamed": path_renamed},
+            )
+            db.commit()
+            db.refresh(camera)
+
+        elif was_active and not now_active:
             # Pause: stop the stream (and with it, recording) right now, not
             # at the next restart. Best-effort — see docstring.
+            db.commit()
+            db.refresh(camera)
             stream_action = "deactivate"
             try:
+                # before_ip, not camera.ip_address: "change the address and
+                # pause in one save" must tear down the path that actually
+                # exists.
                 res = await MediaMtxAdminService.unprovision_path(
-                    camera.id, camera.ip_address
+                    camera.id, before_ip
                 )
                 camera_logger.log_action(
                     "camera.deactivate_unprovision",
@@ -1066,20 +1298,29 @@ async def update_camera(
                     extra_data={"unprovision_result": res},
                 )
             except Exception as e:
+                stream_warning = f"camera paused, but the stream teardown failed: {e}"
                 camera_logger.error(
                     f"Camera {camera.id} deactivated but MediaMTX teardown failed: {e}",
                     extra={"camera_id": camera.id, "action": "camera.deactivate_unprovision_failed"},
                     exc_info=True,
                 )
         elif not was_active and now_active:
-            # Resume: re-provision. provision_camera_by_id re-reads the camera
-            # (post-commit, so the new is_active passes its filter) and is
-            # lenient about a missing CameraConfig row.
+            # Resume with an unchanged source: re-provision. Best-effort, and
+            # provision_camera_by_id re-reads the camera in its own session —
+            # so the commit must land first. (A resume that ALSO changed the
+            # source took the transactional branch above and never reaches
+            # here, so a camera is provisioned exactly once per edit.)
+            db.commit()
+            db.refresh(camera)
             stream_action = "activate"
-            from services.mediamtx_startup_service import MediaMtxStartupService
 
             try:
                 res = await MediaMtxStartupService.provision_camera_by_id(camera.id)
+                if res.get("status") != "success":
+                    stream_warning = (
+                        "camera resumed, but the stream did not come back: "
+                        f"{res.get('error') or res.get('status')}"
+                    )
                 camera_logger.log_action(
                     "camera.activate_provision",
                     user_id=current_user.id,
@@ -1088,11 +1329,31 @@ async def update_camera(
                     extra_data={"provision_result": res},
                 )
             except Exception as e:
+                stream_warning = f"camera resumed, but the stream did not come back: {e}"
                 camera_logger.error(
                     f"Camera {camera.id} reactivated but MediaMTX provisioning failed: {e}",
                     extra={"camera_id": camera.id, "action": "camera.activate_provision_failed"},
                     exc_info=True,
                 )
+            # provision_camera_by_id wrote camera.status in a session of its
+            # own; refresh so the response carries the real value.
+            db.refresh(camera)
+        else:
+            # Nothing stream-relevant changed, or the camera is paused. A paused
+            # camera has no MediaMTX path — do not resurrect it on a URL edit;
+            # it picks the new source up on resume. Still sync source_url so the
+            # change is not lost when it does resume, or at the next restart.
+            stream_action = "none"
+            if stream_changed:
+                cfg = (
+                    db.query(CameraConfig)
+                    .filter(CameraConfig.camera_id == camera.id)
+                    .first()
+                )
+                if cfg:
+                    cfg.source_url = camera.rtsp_url
+            db.commit()
+            db.refresh(camera)
 
         camera_logger.log_action(
             "camera.update_success",
@@ -1121,6 +1382,7 @@ async def update_camera(
                         k for k in camera_update.model_dump(exclude_unset=True).keys()
                     ],
                     **({"stream_action": stream_action} if stream_action else {}),
+                    **({"stream_warning": stream_warning} if stream_warning else {}),
                 },
                 ip=request.client.host if request and request.client else None,
                 user_agent=request.headers.get("user-agent") if request else None,
@@ -1128,7 +1390,15 @@ async def update_camera(
         except Exception as e:
             camera_logger.error(f"Failed to write audit log: {e}", exc_info=True)
 
-        return camera
+        # model_copy rather than setting attributes on the ORM instance: these
+        # two fields describe THIS request, not the camera row.
+        return CameraResponse.model_validate(camera).model_copy(
+            update={
+                "mediamtx_provisioned": camera.status == "provisioned",
+                "stream_action": stream_action,
+                "stream_warning": stream_warning,
+            }
+        )
 
     except HTTPException:
         raise
