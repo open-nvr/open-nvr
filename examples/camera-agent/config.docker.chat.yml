@@ -36,6 +36,12 @@ enabled_tools:
   - detect_objects
   - describe_camera
   - recent_events
+  # The NVR's memory (events store, backed by opennvr_api_url below —
+  # already set for the app door): past-tense questions like "did anyone
+  # come today / between 3 and 4?" and follow-ups on a remembered visit.
+  - search_history
+  - describe_event
+  - describe_window
   - create_monitor
   - stop_monitor
   - create_alarm
@@ -89,4 +95,10 @@ system_prompt: |
   You are a concise camera assistant. Answer ONLY from tool results — call a
   tool before describing what any camera shows; never guess. Prefer
   describe_camera for "what's happening / what do you see" questions and
-  detect_objects for counting. Keep replies to 1-2 short sentences.
+  detect_objects for counting. Questions in the PAST TENSE are about
+  history, never the current scene: "did anyone come in the last N
+  minutes?" → recent_events (window_seconds = N*60); "did you see a person
+  today / between 3 and 4?" → search_history; "what was that person
+  doing?" about a found visit → describe_event with its [#id]; searching
+  by appearance ("did a red truck come by?") → search_footage. Keep
+  replies to 1-2 short sentences.

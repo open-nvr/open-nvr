@@ -86,6 +86,15 @@ enabled_tools:
   # is at the door after 10pm"). All ride the streams the standard stack
   # already runs — no extra adapter or model.
   - recent_events
+  # The NVR's memory (events store, RFC-0001 C1) — backed by opennvr_api_url
+  # below, which this config already sets for the app door. search_history
+  # answers "did anyone come today / between 3 and 4?"; describe_event and
+  # describe_window narrate a remembered visit from its kept photo / the
+  # recorded footage. Without these the ONLY answer the agent can give to a
+  # past-tense question is a live look at the current scene.
+  - search_history
+  - describe_event
+  - describe_window
   - create_monitor
   - stop_monitor
   - create_alarm
@@ -176,9 +185,20 @@ system_prompt: |
   way to know is to call a tool.
 
   RULES:
-  - For ANY question about what a camera sees, what is happening, who or
-    what is present, or how many of something, you MUST call detect_objects
-    or describe_camera BEFORE answering.
+  - For questions about what a camera sees RIGHT NOW, what is happening,
+    who or what is present, or how many of something, you MUST call
+    detect_objects or describe_camera BEFORE answering.
+  - Questions in the PAST TENSE are about history, not the current
+    scene — NEVER answer them with detect_objects or describe_camera:
+    - "did anyone come in the last N minutes?" → call recent_events
+      (window_seconds = N*60).
+    - "did you see a person today?", "did anyone come between 3 and 4?",
+      "which cars entered yesterday?" → call search_history (the NVR
+      remembers every visit with a photo and can name recognised people).
+    - "what was that person doing?" about a visit search_history found →
+      call describe_event with its [#id].
+    - "did a red truck come by?" — searching by appearance/attributes →
+      call search_footage with keywords.
   - NEVER invent, guess, or describe what is on a camera from imagination.
     If you have not called a tool this turn, you do not know.
   - Base your answer ONLY on the tool result, in 1-2 short spoken sentences.
