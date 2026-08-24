@@ -5350,6 +5350,24 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                     a["triggered"] and a["active"] for a in alarms) else None)),
         }
 
+    @app.get("/alarm-targets")
+    async def _alarm_targets() -> dict[str, Any]:
+        """What can actually set off an alarm/watch on THIS install — feeds
+        the target inputs' pick-list so operators aren't left guessing what
+        the detector can see. ``targets`` = labels the live detection path
+        recognises (common security-relevant ones first, then the rest
+        alphabetically); ``special`` = armable intents (fire/smoke/…) that
+        need a dedicated detector or app before they can ever ring — the
+        presets row is where those surface, greyed, with the reason."""
+        detectable = runtime._detectable_labels()
+        common = [l for l in (
+            "person", "car", "truck", "motorcycle", "bicycle", "bus",
+            "dog", "cat", "bird", "backpack", "suitcase", "handbag",
+        ) if l in detectable]
+        rest = sorted(detectable - set(common))
+        return {"targets": common + rest,
+                "special": sorted(_EXTRA_ALARM_TARGETS - detectable)}
+
     @app.get("/alarm-presets")
     async def _alarm_presets() -> dict[str, Any]:
         """Curated one-click alarms with HONEST availability: presets whose

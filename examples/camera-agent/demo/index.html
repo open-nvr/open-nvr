@@ -535,6 +535,9 @@
 <body>
   <div class="ambient" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span></div>
   <div class="ambient-speak" aria-hidden="true"></div>
+  <!-- Shared pick-list behind every alarm/watch target input — filled from
+       /alarm-targets (the detector's real vocabulary on this install). -->
+  <datalist id="targetOpts"></datalist>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
@@ -615,12 +618,13 @@
               <div class="pop" id="popWatch">
                 <h4>Watch this camera</h4>
                 <select id="pwKind" aria-label="Watch kind"><option value="notify">Notify when seen</option><option value="count">Keep a live count</option></select>
-                <input id="pwTarget" type="text" placeholder="Watch for, e.g. car / person" autocomplete="off">
+                <input id="pwTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
                 <button class="go" id="pwGo" type="button">Start watch</button>
               </div>
               <div class="pop" id="popAlarm">
                 <h4>Alarm on this camera</h4>
-                <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
+                <input id="paName" type="text" placeholder="Name (optional), e.g. Porch person" autocomplete="off">
+                <input id="paTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
                 <select id="paRing" aria-label="Alert level">
                   <option value="chime">🔔 Notice — single chime</option>
                   <option value="pulse">⚠️ Urgent — loud 1 min, stands down</option>
@@ -727,7 +731,12 @@
           <div class="preset-hint" id="presetHint" hidden></div>
           <div class="addform" id="alarmForm" hidden>
             <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
-            <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <input id="alarmTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="alarmCam" aria-label="Which camera to arm">
+                <option value="all">All cameras</option>
+              </select>
+            </label>
             <select id="alarmRing" aria-label="Alert level">
               <option value="chime">🔔 Notice — a single chime (visitors, deliveries)</option>
               <option value="pulse">⚠️ Urgent — loud for a minute, then stands down</option>
@@ -1219,11 +1228,26 @@
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
       buildCamStrip(cams);
-      // History card's camera filter shares the same roster.
-      const hc=$("histCam");
-      if(hc) for(const cam of cams){ const o=document.createElement("option");
-        o.value=cam.camera_id; o.textContent=cam.camera_id; hc.appendChild(o); }
+      // History card's camera filter and the alarm form's camera picker
+      // share the same roster.
+      for(const sel of [$("histCam"), $("alarmCam")]){
+        if(!sel) continue;
+        for(const cam of cams){ const o=document.createElement("option");
+          o.value=cam.camera_id;
+          o.textContent=cam.camera_id+(cam.role?(" · "+String(cam.role).slice(0,22)):"");
+          sel.appendChild(o); } }
     }catch{} }
+
+    // ── what can set off an alarm/watch: the detector's real vocabulary ─
+    // Fills the shared <datalist> behind every target input, so operators
+    // pick from what THIS install can actually see instead of guessing.
+    // (fire/smoke are deliberately absent here — they need a dedicated
+    // detector/app; the greyed presets carry that story.)
+    async function loadAlarmTargets(){ const dl=$("targetOpts"); if(!dl) return;
+      try{ const d=await (await fetch("/alarm-targets")).json();
+        dl.innerHTML="";
+        for(const t of (d.targets||[])){ const o=document.createElement("option");
+          o.value=t; dl.appendChild(o); } }catch{} }
 
     // ── header health dot: reachability + last vision failure ───────
     // /health is an open path, so the dot works even behind the login.
@@ -1712,13 +1736,14 @@
       const ag=$("paGo"); if(ag) ag.addEventListener("click",async()=>{
         const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
         if(!cam||!target){ $("paTarget").focus(); return; }
-        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
+        const paName=($("paName")&&$("paName").value.trim())||("Alarm: "+target+" on "+cam);
+        const body={name:paName,target,camera_ids:[cam],
                     ring:$("paRing").value, ...alarmWindow("pa")};
         // Close the popup IMMEDIATELY — the form lingering while the POST
         // ran read as "did it take?" and invited another click (the
         // server dedups, but the UI shouldn't tempt it). The verdict lands as
         // a chat line either way.
-        $("paTarget").value=""; closePops();
+        $("paTarget").value=""; const pn=$("paName"); if(pn) pn.value=""; closePops();
         try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
@@ -2346,7 +2371,12 @@
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
         if(!target){ $("alarmTarget").focus(); return; }
-        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam(),
+        // The camera is an EXPLICIT choice now — the old form silently used
+        // whatever the main screen's checkboxes happened to say, so an
+        // alarm meant for the porch could quietly arm fleet-wide.
+        const camSel=$("alarmCam");
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,
+                    camera_id:(camSel&&camSel.value)||"all",
                     ring:$("alarmRing").value, ...alarmWindow("alarm")};
         addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; f.hidden=true; add.classList.remove("open"); }); })();
@@ -2427,7 +2457,7 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
     pollHealth(); setInterval(pollHealth, 15000);
     setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
