@@ -178,9 +178,9 @@ the equivalent logic in `scripts/install.ps1`.
 
 | Where the LLM runs | Hardware | LLM default | VLM default (ollamavlm) |
 |---|---|---|---|
-| Host, Apple Silicon / NVIDIA | ≥ 16 GB RAM | `qwen2.5:3b` | `moondream` |
-| Host, GPU, < 16 GB | | `qwen2.5:1.5b` | `moondream` |
-| Any CPU-only | ≥ 16 GB + ≥ 8 cores | `qwen2.5:1.5b` | `moondream` |
+| Host, Apple Silicon / NVIDIA | ≥ 8 GB RAM | `qwen3:1.7b` | `gemma3:4b` |
+| Host, GPU, < 8 GB | | `qwen2.5:1.5b` | `moondream` |
+| Any CPU-only | ≥ 16 GB + ≥ 8 cores | `qwen3:1.7b` | `gemma3:4b` (≥ 8 GB) |
 | Any CPU-only | smaller | `qwen2.5:0.5b` | `moondream` |
 | macOS, bundled container | sized to the Docker VM's RAM, always CPU tier | | |
 
@@ -190,10 +190,13 @@ only suggested where latency would otherwise make the agent unusable.
 The **ceiling** is the tested envelope: defaults never exceed the
 largest model this agent has actually been exercised with — "this
 hardware can run a bigger model" is detectable, "bigger will be better
-for this agent's tool-calling and voice latency" is not. Machines with
-headroom (≥ 32 GB GPU-backed) are told at the prompt that `qwen2.5:7b`
-and `qwen2.5vl:3b` are worth trying; promoting them to defaults should
-follow testing, not RAM arithmetic.
+for this agent's tool-calling and voice latency" is not. The
+`qwen3:1.7b` + `gemma3:4b` pair entered that envelope by exactly this
+route: field-tested against the `qwen2.5` + `moondream` defaults with
+this agent, found clearly better at similar cost, then promoted.
+Machines with headroom (≥ 32 GB GPU-backed) are told at the prompt that
+`qwen2.5:7b` and `qwen2.5vl:3b` are worth trying; promoting them to
+defaults should follow the same testing route, not RAM arithmetic.
 
 
 ## Model catalog (what each option is actually good at)
@@ -211,33 +214,35 @@ first contribution.
 | Model | ~RAM | Speed | Status | Good at |
 |---|---|---|---|---|
 | `qwen2.5:0.5b` | 1 GB | fastest | tested | Any CPU; simple questions; weakest at multi-step tool use |
-| `qwen2.5:1.5b` | 2 GB | fast | tested | The balanced default: reliable tool routing at low RAM |
-| `qwen2.5:3b` | 4 GB | medium | tested | Best answers in the tested set; wants GPU or strong CPU |
+| `qwen2.5:1.5b` | 2 GB | fast | tested | The balanced low-RAM default: reliable tool routing |
+| `qwen3:1.7b` | 3 GB | fast | tested | Field-tested: better answers than the qwen2.5 set at similar speed; the default where RAM allows |
+| `qwen2.5:3b` | 4 GB | medium | tested | Best of the qwen2.5 family; wants GPU or strong CPU |
 | `qwen2.5:7b` | 8 GB | slower | untested | Strongest family reasoning; ~2× slower per answer |
 | `llama3.2:3b` | 4 GB | medium | untested | Different family; conversational tone, solid tool calling |
-| `qwen3:1.7b` | 3 GB | fast | untested | Newer generation; better instruction-following per size |
 
 ### VLMs (the agent's eyes — used via `CAPTION_ADAPTER=ollamavlm`)
 
 These are Ollama-servable vision models; the installer annotates each
 with whether it fits your detected hardware. (`moondream` here is
 Ollama's moondream2 ~1.8b; the standalone moondream-adapter container
-ships the smaller 0.5b-int8 build — both are the same family and the
-tested default either way. `blip` remains available as a plain
+ships the smaller 0.5b-int8 build — both are the same family, tested,
+and the low-RAM pick either way. `blip` remains available as a plain
 captioner via its own adapter, outside this menu.)
 
 | Model | ~RAM | Speed | Status | Good at |
 |---|---|---|---|---|
-| `moondream` | 3 GB | fast | tested | Edge-optimized VQA at low cost; the tested default |
-| `gemma3:4b` | 4 GB | medium | untested | Well-rounded generalist; good descriptions, decent text reading |
+| `moondream` | 3 GB | fast | tested | Edge-optimized VQA at low cost; the tested low-RAM default |
+| `gemma3:4b` | 4 GB | medium | tested | Field-tested: clearly better scene answers than moondream; the default where RAM allows |
 | `qwen2.5vl:3b` | 5 GB | medium | untested | Best text READER of its size (signs, labels, plates) |
+| `qwen3-vl:4b` | 5 GB | medium | untested | Newest Qwen vision family; strong all-round scene + text reading |
 | `minicpm-v` | 6 GB | medium | untested | OCR standout: dense/small text (delivery labels, screens) |
 | `llava:7b` | 6 GB | slower | untested | Classic general VQA; most descriptive free-form answers |
 | `llama3.2-vision:11b` | 9 GB | slowest | untested | Strongest scene reasoning; wants a GPU with headroom |
 
 Picking for a security camera: **counting and "is something there" never
 needs a VLM** (YOLOv8 does that); the VLM answers "what/who/how does it
-look". `moondream` covers that cheaply. Reach for `qwen2.5vl:3b` or
+look". `gemma3:4b` is the tested all-rounder; `moondream` covers the
+same cheaply on small boxes. Reach for `qwen2.5vl:3b` or
 `minicpm-v` when your questions involve **reading** (plates, parcel
 labels, uniforms with text); reach for the big ones only when answer
 richness matters more than latency.
