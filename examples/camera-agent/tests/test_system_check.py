@@ -126,3 +126,60 @@ def test_vision_error_reason_names_the_actual_gate():
     assert "sovereignty" in r(sovereignty)
     assert r(RuntimeError("Client error '403 Forbidden'")) == "refused by KAI-C (403)"
     assert "timed out" in r(RuntimeError("request timed out"))
+
+
+def test_vision_error_reason_separates_warming_up_from_unreachable():
+    """A 503 is the adapter ANSWERING that it isn't ready — the opposite of
+    unreachable. Calling the auto-pull window "unreachable" sent an operator
+    hunting Docker networking while a multi-GB model was simply downloading."""
+    from tools import CameraTools as _T
+
+    r = _T._vision_error_reason
+    pulling = RuntimeError(
+        "Server error '503 Service Unavailable' for url "
+        "'http://opennvr-core:8100/api/v1/infer/ollamavlm' — KAI-C detail: "
+        "{'status': 'error', 'error': {'category': 'model_error', 'code': "
+        "'model_not_pulled', 'message': \"Ollama has no model 'gemma3:4b' "
+        "(auto-pull is running — retry shortly)\", 'transient': True, "
+        "'retry_after_ms': 5000}}")
+    reason = r(pulling)
+    assert "still downloading" in reason
+    assert "unreachable" not in reason
+
+    warming = r(RuntimeError("Server error '503 Service Unavailable'"))
+    assert "warming up" in warming and "unreachable" not in warming
+
+    # A 502 means KAI-C's own 30s proxy budget expired: adapter down OR a
+    # VLM too slow for this host. Both, because the operator can't tell.
+    slow = r(RuntimeError(
+        "Server error '502 Bad Gateway' — KAI-C detail: adapter unreachable: "))
+    assert "no answer in time" in slow and "too slow" in slow
+
+    # An unclassified failure still reads as unreachable.
+    assert r(RuntimeError("connection refused")) == "caption adapter unreachable"
+
+
+def test_infer_backoff_honours_server_retry_after():
+    """KAI-C's transient errors carry retry_after_ms. Ignoring it meant three
+    attempts 1.5s apart — ~3s against a multi-GB pull, so the cold-start
+    window the retry loop exists for was never actually bridged."""
+    import httpx
+    from adapter_clients import KaicAdapterClient
+
+    c = KaicAdapterClient(kaic_url="http://kaic", api_key="k",
+                          adapter_name="ollamavlm", retry_backoff_s=1.5)
+
+    def _resp(payload):
+        return httpx.Response(503, json=payload,
+                              request=httpx.Request("POST", "http://kaic"))
+
+    assert c._backoff_for(None) == 1.5                      # no response
+    assert c._backoff_for(_resp({"detail": "plain string"})) == 1.5
+    assert c._backoff_for(_resp({"detail": {"error": {}}})) == 1.5
+    assert c._backoff_for(
+        _resp({"detail": {"error": {"retry_after_ms": 5000}}})) == 5.0
+    # Never shorter than the local floor, never long enough to stall a turn.
+    assert c._backoff_for(
+        _resp({"detail": {"error": {"retry_after_ms": 200}}})) == 1.5
+    assert c._backoff_for(
+        _resp({"detail": {"error": {"retry_after_ms": 9_000_000}}})) == 10.0

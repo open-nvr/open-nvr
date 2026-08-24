@@ -72,6 +72,10 @@ class KaicAdapterClient(_ReusableClientMixin):
     etc.). The SDK body parser unwraps these into the service.
     """
 
+    # Ceiling on a server-supplied ``retry_after_ms``: the voice loop has a
+    # live user waiting, so a bogus or huge value must not stall a turn.
+    _MAX_RETRY_BACKOFF_S: float = 10.0
+
     def __init__(
         self,
         *,
@@ -140,14 +144,37 @@ class KaicAdapterClient(_ReusableClientMixin):
                     ) if isinstance(exc, httpx.HTTPStatusError) else exc
                 last_exc = exc
                 if attempt < self._retries:
+                    backoff = self._backoff_for(resp_obj)
                     logger.warning(
                         "KAI-C infer attempt %d/%d failed (%s); retrying in %.1fs "
                         "(adapter may still be warming up)",
-                        attempt + 1, self._retries + 1, exc, self._retry_backoff_s,
+                        attempt + 1, self._retries + 1, exc, backoff,
                     )
-                    await asyncio.sleep(self._retry_backoff_s)
+                    await asyncio.sleep(backoff)
         assert last_exc is not None
         raise last_exc
+
+    def _backoff_for(self, resp_obj: Any) -> float:
+        """Seconds to wait before the next attempt.
+
+        KAI-C's transient errors carry their own ``retry_after_ms`` (an
+        auto-pulling model asks for 5s). Ignoring it meant three attempts
+        1.5s apart — ~3s of retrying against a multi-GB download, so the
+        cold-start window the retry exists for was never actually bridged.
+        Honour the server's number when it gives one, floored at the local
+        backoff and capped so a bad value can't stall the voice loop.
+        """
+        if resp_obj is None:
+            return self._retry_backoff_s
+        try:
+            error = ((resp_obj.json() or {}).get("detail") or {}).get("error") or {}
+            retry_after_ms = float(error.get("retry_after_ms") or 0)
+        except Exception:
+            return self._retry_backoff_s
+        if retry_after_ms <= 0:
+            return self._retry_backoff_s
+        return min(max(retry_after_ms / 1000.0, self._retry_backoff_s),
+                   self._MAX_RETRY_BACKOFF_S)
 
 
 class KaicCapabilitiesClient(_ReusableClientMixin):
