@@ -117,6 +117,13 @@ llm_temperature: 0.4
 # model ramble for ~20s of CPU generation; 128 is plenty and noticeably
 # faster per turn.
 llm_max_tokens: 128
+# Context window. The default (4096) no longer fits this config's toolset:
+# 13 advertised tool schemas + the system prompt (rules, clock, roster, task
+# guidance) measure ~3.5-4.5k tokens BEFORE any conversation history — and
+# Ollama silently truncates from the TOP on overflow, dropping the system
+# prompt first, which quietly breaks tool routing. 8192 gives comfortable
+# headroom; KV-cache cost for a 1.5-2b model at 8k is a few hundred MB.
+llm_num_ctx: 8192
 
 frame_cache_ttl_seconds: 2.0
 event_ring_size: 256

@@ -24,6 +24,9 @@ llm_model: ${OLLAMA_MODEL}
 llm_think: false   # Qwen3 default: snappy non-thinking tool-calling
 llm_temperature: 0.3
 llm_max_tokens: 220
+# See config.docker.yml — 13 tool schemas + the system prompt overflow the
+# 4096 default, and Ollama truncates the system prompt first on overflow.
+llm_num_ctx: 8192
 
 # detect_objects -> YOLOv8 (name "default"); describe_camera -> the caption/VQA
 # adapter selected by CAPTION_ADAPTER (auto-registered by caption-adapter-register
