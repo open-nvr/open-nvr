@@ -219,6 +219,16 @@
     /* (Send used to be a .ghost styled blue here; it now has its own .send
        class above, so ghosts in the bar — Reset — stay quiet like ghosts
        should.) */
+    /* Phones: the bar's five elements (mic · input · Send · Talk · Reset)
+       cannot fit one line — Talk and Reset ended up pushed clean
+       off-canvas, unreachable. Wrap: input takes the full first line, the
+       buttons share the second. AFTER the base .askrow rules so the phone
+       flex wins the same-specificity fight. */
+    @media (max-width:900px){
+      .askrow{flex-wrap:wrap;}
+      .askrow input{flex:1 1 100%; order:-1; min-width:0;}
+      .askrow .send,.askrow .talk{flex:1;}
+    }
 
     /* ── conversation log + bubbles ──────────────────────────────────── */
     .log{margin-top:0.85rem; flex:1 1 auto; min-height:0; overflow-y:auto;
