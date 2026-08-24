@@ -219,6 +219,28 @@
     /* (Send used to be a .ghost styled blue here; it now has its own .send
        class above, so ghosts in the bar — Reset — stay quiet like ghosts
        should.) */
+    /* ── phone-only bottom tab bar (desktop never renders it) ────────── */
+    .mtabs{display:none;}
+    @media (max-width:900px){
+      .wrap{padding-bottom:66px;}   /* content never hides behind the bar */
+      .mtabs{position:fixed; bottom:0; left:0; right:0; z-index:60; display:flex;
+        background:rgba(11,17,28,0.96); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+        border-top:1px solid var(--stroke);
+        padding:0.3rem 0.35rem calc(0.3rem + env(safe-area-inset-bottom,0px));}
+      .mtabs button{flex:1; background:none; border:none; color:var(--faint); font-size:0.6rem;
+        display:flex; flex-direction:column; align-items:center; gap:2px; padding:0.2rem 0; cursor:pointer;}
+      .mtabs button .mi{font-size:1.05rem; line-height:1;}
+      .mtabs button.on{color:var(--accent);}
+      /* Tab-driven visibility: body[data-mtab] is set by JS at boot, so a
+         JS failure degrades to the old full stacked page, never to a blank
+         screen. Skills and Hardware share the Skills tab. */
+      body[data-mtab]:not([data-mtab="chat"]) .main-col{display:none;}
+      body[data-mtab]:not([data-mtab="activity"]) #eventsCard{display:none;}
+      body[data-mtab]:not([data-mtab="history"]) #historyCard{display:none;}
+      body[data-mtab]:not([data-mtab="auto"]) #autoCard{display:none;}
+      body[data-mtab]:not([data-mtab="skills"]) #skillsCard,
+      body[data-mtab]:not([data-mtab="skills"]) #hwCard{display:none;}
+    }
     /* Phones: the bar's five elements (mic · input · Send · Talk · Reset)
        cannot fit one line — Talk and Reset ended up pushed clean
        off-canvas, unreachable. Wrap: input takes the full first line, the
@@ -552,6 +574,16 @@
   <!-- Shared pick-list behind every alarm/watch target input — filled from
        /alarm-targets (the detector's real vocabulary on this install). -->
   <datalist id="targetOpts"></datalist>
+  <!-- Phone-only bottom tab bar: one long stacked page is desktop UX, not
+       mobile. Each tab shows ONE section; desktop never sees this (the CSS
+       lives entirely inside the max-width media query). -->
+  <nav class="mtabs" id="mtabs" aria-label="Sections">
+    <button type="button" data-tab="chat" class="on"><span class="mi">💬</span>Chat</button>
+    <button type="button" data-tab="activity"><span class="mi">🔔</span>Activity</button>
+    <button type="button" data-tab="history" id="mtabHistory"><span class="mi">🕘</span>History</button>
+    <button type="button" data-tab="auto"><span class="mi">⚡</span>Automations</button>
+    <button type="button" data-tab="skills"><span class="mi">✨</span>Skills</button>
+  </nav>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
@@ -1294,8 +1326,9 @@
         +"&camera_id="+encodeURIComponent(($("histCam")||{}).value||"all")
         +"&hours="+encodeURIComponent(($("histHours")||{}).value||"24"))).json(); }
       catch{ return; }
-      if(!d || d.available===false){ card.hidden=true; return; }
-      card.hidden=false;
+      const htab=$("mtabHistory");
+      if(!d || d.available===false){ card.hidden=true; if(htab) htab.hidden=true; return; }
+      card.hidden=false; if(htab) htab.hidden=false;
       for(const u of _histUrls) URL.revokeObjectURL(u); _histUrls=[];
       list.innerHTML="";
       if(d.ok===false){ list.innerHTML='<div class="empty-note">Couldn’t reach the history store just now.</div>'; return; }
@@ -2513,6 +2546,13 @@
     // sign-in the page reloads with a token and these run normally.
     loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
     pollHealth(); setInterval(pollHealth, 15000);
+    // Phone tab bar: pure show/hide via body[data-mtab]; boot on Chat.
+    (function(){ const bar=$("mtabs"); if(!bar) return;
+      document.body.dataset.mtab="chat";
+      bar.addEventListener("click",(e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) return;
+        document.body.dataset.mtab=b.dataset.tab;
+        bar.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));
+        window.scrollTo(0,0); }); })();
     setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarmsHttp, 2500);   // alarms ring even before Talk

@@ -126,6 +126,24 @@ def test_events_card_reads_activity():
     assert "<h2>Events</h2>" not in _HTML
 
 
+def test_phone_tab_bar_wired():
+    # Phone-only bottom tabs: one section at a time instead of the long
+    # stacked page. Desktop never renders it (base .mtabs is display:none;
+    # everything else lives inside the max-width media query), and the
+    # body[data-mtab] attribute is set by JS at boot — so with JS broken the
+    # page degrades to the old full stack, never to a blank screen.
+    assert 'id="mtabs"' in _HTML
+    for tab in ("chat", "activity", "history", "auto", "skills"):
+        assert f'data-tab="{tab}"' in _HTML, tab
+    assert ".mtabs{display:none;}" in _HTML
+    assert 'body[data-mtab]:not([data-mtab="chat"]) .main-col{display:none;}' in _HTML
+    assert 'document.body.dataset.mtab="chat"' in _HTML
+    # The History tab hides with the History card on installs without the
+    # events store.
+    assert 'id="mtabHistory"' in _HTML
+    assert "htab.hidden=true" in _HTML
+
+
 def test_popover_matches_rail_form():
     # Same components both places the operator can arm from: optional name,
     # target with pick-list, ring level, time window.
