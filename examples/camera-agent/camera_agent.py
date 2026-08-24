@@ -4766,7 +4766,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     # Streaming /ws is intentionally excluded: it's a long-lived session,
     # not a turn, so pausing background work for its whole lifetime would
     # be wrong.
-    _INTERACTIVE_PATHS = {"/converse", "/ask", "/say"}
+    _INTERACTIVE_PATHS = {"/converse", "/ask", "/say", "/transcribe"}
 
     @app.middleware("http")
     async def _interactive_priority(request: Request, call_next):
@@ -4826,6 +4826,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # not every registered handler (test-report #4).
             "tools": [t["function"]["name"] for t in runtime.tool_definitions],
             "llm_model": runtime.cfg.llm_model,
+            # For the demo header's health dot: the last describe attempt's
+            # failure reason (None = last look succeeded or none ran yet) and
+            # whether the events store (History) is wired.
+            "vision_error": getattr(runtime.tools, "last_vision_error", None),
+            "history": getattr(runtime, "events_client", None) is not None,
         }
 
     @app.get("/demo", response_class=HTMLResponse)
@@ -4950,6 +4955,68 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         Viewer tier: events are LOOK; acting on them stays operator+."""
         return {"events": runtime.events_feed()}
 
+    @app.get("/history")
+    async def _history(label: str = "", camera_id: str = "",
+                       hours: float = 24.0) -> dict[str, Any]:
+        """Remembered visits (the events store) for the demo's History card —
+        the browsable face of what search_history answers by voice. Viewer
+        tier (read-only look; the auth middleware gates GETs at viewer).
+
+        Response shapes are deliberately distinct (same honesty rule as the
+        tool): ``available: false`` = history isn't wired on this deployment;
+        ``ok: false`` = wired but the store couldn't be reached — which must
+        never read as "no visits"."""
+        client = getattr(runtime, "events_client", None)
+        if client is None:
+            return {"available": False, "ok": False, "events": []}
+        from datetime import datetime, timedelta
+        hours = max(0.25, min(float(hours or 24.0), 24.0 * 62))
+        start = (datetime.now().astimezone()
+                 - timedelta(hours=hours)).isoformat(timespec="seconds")
+        cam_num: int | None = None
+        if camera_id and camera_id not in ("all", "__any__"):
+            spec = runtime.context.get_camera(camera_id)
+            if spec is None:
+                return JSONResponse({"error": f"unknown camera {camera_id!r}"},
+                                    status_code=404)
+            if spec.opennvr_camera_id is None:
+                # A local/config camera the NVR doesn't record — an empty
+                # window is the truthful answer, not an error.
+                return {"available": True, "ok": True, "events": []}
+            cam_num = int(spec.opennvr_camera_id)
+        events = await client.search(label=(label or None), camera_id=cam_num,
+                                     start=start, limit=60)
+        if events is None:
+            return {"available": True, "ok": False, "events": []}
+        # Map server-side camera ids back to this agent's ids/roles so the
+        # card can say "the front door", not "camera 7".
+        by_srv = {int(c.opennvr_camera_id): c for c in runtime.cfg.cameras
+                  if c.opennvr_camera_id is not None}
+        rows = []
+        for e in events:
+            spec = by_srv.get(int(e.camera_id))
+            rows.append({
+                "id": e.id, "label": e.label,
+                "camera_id": spec.camera_id if spec else str(e.camera_id),
+                "role": (spec.role if spec else f"camera {e.camera_id}"),
+                "started_at": e.started_at, "ended_at": e.ended_at,
+                "plate_text": getattr(e, "plate_text", None),
+                "has_evidence": bool(e.has_evidence),
+            })
+        return {"available": True, "ok": True, "events": rows}
+
+    @app.get("/history/{event_id}/evidence")
+    async def _history_evidence(event_id: int) -> Response:
+        """A remembered visit's best-frame JPEG — the photo behind the
+        History card's thumbnail and the tool's '(photo kept)'."""
+        client = getattr(runtime, "events_client", None)
+        jpeg = await client.evidence(int(event_id)) if client else None
+        if not jpeg:
+            return JSONResponse({"error": "no evidence for that visit"},
+                                status_code=404)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=3600"})
+
     @app.get("/recordings/{camera_id}")
     async def _recordings_list(camera_id: str, request: Request) -> Any:
         """Recorded segments for one agent camera — the camera screen's
@@ -5069,6 +5136,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 else runtime.agent_name)
         return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
                 "text_mode": runtime.cfg.text_mode,
+                # Dictation (the input bar's mic → /transcribe): available on
+                # voice installs, where the Whisper adapter is deployed. Text
+                # installs ship no STT, so the mic button must not appear.
+                "stt_available": not runtime.cfg.text_mode,
                 "wake_phrase": f"Hey {wake.title()}",
                 "wake_required": runtime.cfg.wake_word_required,
                 "avatar_video": runtime.cfg.avatar_video,
@@ -5279,6 +5350,24 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                     a["triggered"] and a["active"] for a in alarms) else None)),
         }
 
+    @app.get("/alarm-targets")
+    async def _alarm_targets() -> dict[str, Any]:
+        """What can actually set off an alarm/watch on THIS install — feeds
+        the target inputs' pick-list so operators aren't left guessing what
+        the detector can see. ``targets`` = labels the live detection path
+        recognises (common security-relevant ones first, then the rest
+        alphabetically); ``special`` = armable intents (fire/smoke/…) that
+        need a dedicated detector or app before they can ever ring — the
+        presets row is where those surface, greyed, with the reason."""
+        detectable = runtime._detectable_labels()
+        common = [l for l in (
+            "person", "car", "truck", "motorcycle", "bicycle", "bus",
+            "dog", "cat", "bird", "backpack", "suitcase", "handbag",
+        ) if l in detectable]
+        rest = sorted(detectable - set(common))
+        return {"targets": common + rest,
+                "special": sorted(_EXTRA_ALARM_TARGETS - detectable)}
+
     @app.get("/alarm-presets")
     async def _alarm_presets() -> dict[str, Any]:
         """Curated one-click alarms with HONEST availability: presets whose
@@ -5482,6 +5571,35 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "trace": list(runtime.last_turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
+
+    @app.post("/transcribe")
+    async def _transcribe(request: Request) -> JSONResponse:
+        """Dictation: one audio blob in → {text} out. STT ONLY — no LLM turn,
+        no TTS. Powers the input bar's mic button (chat mode): the user
+        speaks, the words land in the text box for them to edit and send —
+        the Claude/ChatGPT mic pattern. Same transcode + noise filter as
+        /converse, so the two paths can't drift."""
+        blob = await request.body()
+        if not blob:
+            return JSONResponse({"error": "empty audio"}, status_code=400)
+        try:
+            wav = await asyncio.to_thread(_transcode_to_wav16k, blob)
+        except Exception as exc:
+            logger.warning("transcribe: transcode failed: %s", exc)
+            return JSONResponse({"error": "could not decode audio"},
+                                status_code=400)
+        try:
+            text = (await runtime.whisper.transcribe(wav)).strip()
+        except Exception:
+            logger.exception("transcribe: STT failed")
+            return JSONResponse(
+                {"error": "transcription failed (is the Whisper adapter running?)"},
+                status_code=502)
+        if not text or (runtime.cfg.stt_noise_filter and looks_like_noise(text)):
+            # Same honesty as /converse: silence/noise hallucinations
+            # ("Thank you.") must not land in the user's input box.
+            return JSONResponse({"text": "", "note": "nothing intelligible"})
+        return JSONResponse({"text": text})
 
     @app.post("/converse")
     async def _converse(request: Request) -> JSONResponse:
@@ -6002,15 +6120,33 @@ _HISTORY_LABELS: dict[str, str] = {
 
 
 def _is_past_question(text: str) -> bool:
-    """True when the utterance asks about history, not the current scene."""
-    return bool(_PAST_RE.search(text or ""))
+    """True when the utterance asks about history, not the current scene.
+
+    An absolute clock range ("from 2pm to 3pm") counts as history even
+    without past-tense wording — background-task queries are phrased that
+    way ("check the red truck on all cameras from 2pm to 3pm")."""
+    t = text or ""
+    return bool(_PAST_RE.search(t) or _CLOCK_RANGE_RE.search(t))
 
 
-def _window_from_text(text: str, now=None) -> tuple[str | None, int]:
+# Absolute clock ranges: "from 2pm to 3pm", "between 1 and 2pm",
+# "13:00-14:00", "2 pm till 3 pm". The first time may omit its am/pm and
+# inherit it from the second ("between 1 and 2pm" → 13:00-14:00).
+_CLOCK_RANGE_RE = re.compile(
+    r"\b(?:from|between)?\s*"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*"
+    r"(?:to|till|until|and|[-–])\s*"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+    re.IGNORECASE,
+)
+
+
+def _window_from_text(text: str, now=None
+                      ) -> tuple[str | None, str | None, int]:
     """Best-effort time window from the utterance.
 
-    Returns ``(start_time_iso, window_seconds)`` — the ISO start (with tz
-    offset, as search_history requires) or None for an open start, plus the
+    Returns ``(start_iso, end_iso, window_seconds)`` — ISO times (with tz
+    offset, as search_history requires) or None for an open bound, plus the
     equivalent relative seconds for recent_events. All computed from the
     LOCAL clock (the container's TZ), matching the clock line in the system
     prompt."""
@@ -6018,23 +6154,49 @@ def _window_from_text(text: str, now=None) -> tuple[str | None, int]:
 
     t = text or ""
     now = now or datetime.now().astimezone()
+
+    def _hhmm(h, mnt, ampm):
+        h = int(h) % 24
+        if ampm:
+            h = h % 12 + (12 if ampm.lower() == "pm" else 0)
+        return now.replace(hour=h, minute=int(mnt or 0), second=0,
+                           microsecond=0)
+
+    # "from 2pm to 3pm" — an absolute range TODAY. The field bug this
+    # closes: these were the exact phrasings background tasks are given
+    # ("check the red truck on all cameras from 2pm to 3pm"), and the
+    # forced-grounding fallback used to drop the window entirely.
+    m = _CLOCK_RANGE_RE.search(t)
+    if m:
+        h1, m1, ap1, h2, m2, ap2 = m.groups()
+        start = _hhmm(h1, m1, ap1 or ap2)   # "between 1 and 2pm" → both pm
+        end = _hhmm(h2, m2, ap2)
+        if end <= start:                     # "11pm to 1am" → wraps midnight
+            end += timedelta(days=1)
+        return (start.isoformat(timespec="seconds"),
+                end.isoformat(timespec="seconds"),
+                max(60, int((now - start).total_seconds())))
     m = _WINDOW_RE.search(t)
     if m:
         qty = int(m.group(1) or m.group(3))
         unit = (m.group(2) or m.group(4) or "").lower()
         secs = qty * (3600 if unit.startswith(("hour", "hr")) else 60)
-        return (now - timedelta(seconds=secs)).isoformat(timespec="seconds"), secs
+        return ((now - timedelta(seconds=secs)).isoformat(timespec="seconds"),
+                None, secs)
     lowered = t.lower()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if "yesterday" in lowered or "last night" in lowered:
         start = midnight - timedelta(days=1)
-        return start.isoformat(timespec="seconds"), int((now - start).total_seconds())
+        return (start.isoformat(timespec="seconds"),
+                midnight.isoformat(timespec="seconds"),
+                int((now - start).total_seconds()))
     if "today" in lowered or "this morning" in lowered or "tonight" in lowered \
             or "this afternoon" in lowered or "this evening" in lowered:
-        return midnight.isoformat(timespec="seconds"), int((now - midnight).total_seconds())
+        return (midnight.isoformat(timespec="seconds"), None,
+                int((now - midnight).total_seconds()))
     # No parseable window: open start for search_history; recent_events gets
     # a generous hour so "did anyone come?" still looks back meaningfully.
-    return None, 3600
+    return None, None, 3600
 
 
 def _pick_forced_call(
@@ -6049,7 +6211,7 @@ def _pick_forced_call(
     ever picked, so forced grounding can't call something the operator's
     enabled_tools hides from the model."""
     if _is_past_question(text):
-        start_iso, window_secs = _window_from_text(text, now=now)
+        start_iso, end_iso, window_secs = _window_from_text(text, now=now)
         if "search_history" in advertised:
             args: dict[str, Any] = {"camera_id": cam}
             m = _DETECTION_RE.search(text or "")
@@ -6057,6 +6219,8 @@ def _pick_forced_call(
             args["label"] = _HISTORY_LABELS.get(noun, "person")
             if start_iso:
                 args["start_time"] = start_iso
+            if end_iso:
+                args["end_time"] = end_iso
             return "search_history", args
         if "recent_events" in advertised:
             return "recent_events", {

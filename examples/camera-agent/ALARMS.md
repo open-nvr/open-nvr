@@ -39,6 +39,14 @@ person, Person, Car, Truck, Dog — arm in one click; the safety presets (Fire,
 Smoke, Gas leak) are greyed out on a stock stack because COCO has no such
 classes, and clicking one explains what to register to enable it.
 
+The add-alarm form (the demo's Automations card, + → 🔔 Alarm) makes the
+same honesty interactive: its target input is backed by a pick-list of the
+install's real detectable vocabulary (`GET /alarm-targets` — common
+security labels first), and the camera is an **explicit picker** (all
+cameras, or one) — no form arms a camera set by side effect. The same
+form, minus the picker, sits on each camera's own screen fixed to that
+camera, and presets follow the picker's choice too.
+
 ## How it works
 
 `AlarmManager` runs one background loop per alarm. Every few seconds, when the
