@@ -304,6 +304,35 @@
     .ghost.primary:hover{filter:brightness(1.06);}
     .notifyrow{display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem;}
     .notifyrow .empty-note{flex:1;} .notifyrow .ghost{font-size:0.72rem; padding:0.3rem 0.55rem;}
+    /* ── header health dot ───────────────────────────────────────────── */
+    .hdot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-left:0.45rem;
+      vertical-align:middle; background:var(--faint); cursor:default;}
+    .hdot.ok{background:#34d399; box-shadow:0 0 6px rgba(52,211,153,0.55);}
+    .hdot.warn{background:var(--amber); box-shadow:0 0 6px rgba(246,196,83,0.55);}
+    .hdot.down{background:#f2555a; box-shadow:0 0 6px rgba(242,85,90,0.6); animation:hpulse 1.4s ease infinite;}
+    @keyframes hpulse{50%{opacity:0.35;}}
+    /* ── ask-me suggestion chips ─────────────────────────────────────── */
+    .suggestrow{display:flex; gap:0.4rem; flex-wrap:nowrap; overflow-x:auto; padding:0.15rem 0 0.35rem;
+      scrollbar-width:none;} .suggestrow::-webkit-scrollbar{display:none;}
+    .suggest{flex:0 0 auto; background:rgba(94,179,246,0.10); color:var(--accent); border:1px solid rgba(94,179,246,0.25);
+      border-radius:999px; padding:0.28rem 0.7rem; font-size:0.72rem; cursor:pointer; white-space:nowrap;}
+    .suggest:hover{background:rgba(94,179,246,0.18);}
+    /* ── history card (remembered visits + kept photos) ──────────────── */
+    .histfilters{display:flex; gap:0.35rem; margin-bottom:0.5rem;}
+    .histfilters select{flex:1; min-width:0; background:rgba(0,0,0,0.28); color:var(--text);
+      border:1px solid var(--stroke); border-radius:8px; padding:0.3rem 0.35rem; font-size:0.72rem;}
+    .visit{display:flex; align-items:center; gap:0.55rem; padding:0.4rem 0.45rem; background:var(--glass2);
+      border:1px solid var(--stroke); border-radius:10px; margin-bottom:0.4rem;}
+    .visit .vthumb{width:52px; height:40px; flex:0 0 auto; border-radius:7px; object-fit:cover;
+      background:rgba(0,0,0,0.35); cursor:pointer; border:1px solid var(--stroke);}
+    .visit .vthumb.noimg{display:grid; place-items:center; color:var(--faint); font-size:0.9rem; cursor:default;}
+    .visit .vbody{flex:1; min-width:0;}
+    .visit .vwhat{font-size:0.78rem;} .visit .vwhat b{text-transform:capitalize;}
+    .visit .vwhere{font-size:0.66rem; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .visit .vask{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.9rem; flex:0 0 auto;}
+    .visit .vask:hover{color:var(--accent);}
+    .vplate{display:inline-block; background:rgba(246,196,83,0.14); color:var(--amber);
+      border:1px solid rgba(246,196,83,0.3); border-radius:5px; padding:0 0.3rem; font-size:0.64rem; margin-left:0.3rem;}
 
     /* hardware */
     .hwrow{padding:0.44rem 0.55rem; background:var(--glass2); border:1px solid var(--stroke);
@@ -488,7 +517,7 @@
               <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
-              <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</h1></div>
+              <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent<span class="hdot" id="healthDot" title="Checking agent health…"></span></h1></div>
               <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
               <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
                 <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
@@ -586,6 +615,7 @@
             <span class="chip">📌 Asking about a <span id="pinCam"></span> frame</span>
             <button id="pinClear" class="ghost" type="button" title="Unpin — ask about live frames again">✕</button>
           </div>
+          <div class="suggestrow" id="suggestRow" hidden></div>
           <div class="row askrow">
             <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
             <button id="askBtn" class="ghost" type="button">Send</button>
@@ -606,6 +636,28 @@
         <div class="card" id="eventsCard">
           <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle events">▾</button></div>
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
+        </div>
+        <div class="card" id="historyCard" hidden>
+          <div class="cardhead"><h2>History</h2><button class="addbtn" id="histRefresh" type="button" title="Refresh remembered visits" aria-label="Refresh history">↻</button></div>
+          <div class="skillhint">Visits the NVR remembers, with the photo it kept. Tap 💬 to ask about one.</div>
+          <div class="histfilters">
+            <select id="histLabel" aria-label="What to look for">
+              <option value="">anything</option>
+              <option value="person" selected>person</option>
+              <option value="car">car</option>
+              <option value="truck">truck</option>
+              <option value="dog">dog</option>
+              <option value="cat">cat</option>
+            </select>
+            <select id="histCam" aria-label="Which camera"><option value="all">all cameras</option></select>
+            <select id="histHours" aria-label="How far back">
+              <option value="6">last 6 h</option>
+              <option value="24" selected>last 24 h</option>
+              <option value="168">last 7 days</option>
+              <option value="720">last 30 days</option>
+            </select>
+          </div>
+          <div id="histList"></div>
         </div>
         <div class="card" id="skillsCard">
           <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
@@ -1125,7 +1177,75 @@
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
       buildCamStrip(cams);
+      // History card's camera filter shares the same roster.
+      const hc=$("histCam");
+      if(hc) for(const cam of cams){ const o=document.createElement("option");
+        o.value=cam.camera_id; o.textContent=cam.camera_id; hc.appendChild(o); }
     }catch{} }
+
+    // ── header health dot: reachability + last vision failure ───────
+    // /health is an open path, so the dot works even behind the login.
+    async function pollHealth(){ const d=$("healthDot"); if(!d) return;
+      try{ const h=await (await fetch("/health")).json();
+        if(h.vision_error){ d.className="hdot warn";
+          d.title="Vision degraded: "+h.vision_error; }
+        else { d.className="hdot ok"; d.title="Agent healthy"; }
+      }catch{ d.className="hdot down"; d.title="Agent unreachable"; } }
+
+    // ── History card: remembered visits + their kept photos ─────────
+    // Thumbnails are fetched with fetch() (which carries the bearer token)
+    // into object URLs — a bare <img src> would arrive without auth.
+    let _histUrls=[];
+    async function loadHistory(){ if(!authReady()) return;
+      const card=$("historyCard"), list=$("histList"); if(!card||!list) return;
+      let d; try{ d=await (await fetch("/history?label="+encodeURIComponent(($("histLabel")||{}).value||"")
+        +"&camera_id="+encodeURIComponent(($("histCam")||{}).value||"all")
+        +"&hours="+encodeURIComponent(($("histHours")||{}).value||"24"))).json(); }
+      catch{ return; }
+      if(!d || d.available===false){ card.hidden=true; return; }
+      card.hidden=false;
+      for(const u of _histUrls) URL.revokeObjectURL(u); _histUrls=[];
+      list.innerHTML="";
+      if(d.ok===false){ list.innerHTML='<div class="empty-note">Couldn’t reach the history store just now.</div>'; return; }
+      const rows=d.events||[];
+      if(!rows.length){ list.innerHTML='<div class="empty-note">No remembered visits in this window.</div>'; return; }
+      const t=iso=>{ if(!iso) return ""; const dt=new Date(iso);
+        return isNaN(dt)?"":dt.toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); };
+      for(const v of rows.slice(0,30)){
+        const row=document.createElement("div"); row.className="visit";
+        const span=(t(v.started_at)+(v.ended_at&&v.ended_at!==v.started_at?" – "+new Date(v.ended_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):""));
+        if(v.has_evidence){
+          const im=document.createElement("img"); im.className="vthumb"; im.alt=v.label||"visit";
+          im.title="Tap to enlarge";
+          fetch("/history/"+encodeURIComponent(v.id)+"/evidence").then(r=>r.ok?r.blob():null)
+            .then(b=>{ if(!b) return; const u=URL.createObjectURL(b); _histUrls.push(u); im.src=u;
+              im.addEventListener("click",()=>openLightbox(u,(v.label||"visit")+" · "+span)); }).catch(()=>{});
+          row.appendChild(im);
+        } else {
+          const ph=document.createElement("div"); ph.className="vthumb noimg"; ph.textContent="—";
+          ph.title="No photo kept for this visit"; row.appendChild(ph);
+        }
+        const body=document.createElement("div"); body.className="vbody";
+        const what=document.createElement("div"); what.className="vwhat";
+        const b=document.createElement("b"); b.textContent=v.label||"visit"; what.appendChild(b);
+        what.appendChild(document.createTextNode(" · "+span));
+        if(v.plate_text){ const p=document.createElement("span"); p.className="vplate";
+          p.textContent=v.plate_text; what.appendChild(p); }
+        const where=document.createElement("div"); where.className="vwhere";
+        where.textContent=v.role||v.camera_id;
+        body.appendChild(what); body.appendChild(where); row.appendChild(body);
+        const ask=document.createElement("button"); ask.className="vask"; ask.type="button";
+        ask.textContent="💬"; ask.title="Ask the agent what happened in this visit";
+        ask.addEventListener("click",()=>{ const inp=$("askInput");
+          if(inp){ inp.value="What was the "+(v.label||"visitor")+" doing in event #"+v.id+"?"; }
+          ask.disabled=true; setTimeout(()=>{ask.disabled=false;},1500);
+          if(typeof window.ask==="function") window.ask(); else $("askBtn").click(); });
+        row.appendChild(ask);
+        list.appendChild(row); }
+    }
+    (function(){ for(const id of ["histLabel","histCam","histHours"]){ const el=$(id);
+        if(el) el.addEventListener("change",loadHistory); }
+      const rb=$("histRefresh"); if(rb) rb.addEventListener("click",loadHistory); })();
 
     // ── camera strip: live thumbnails ──────────────────────────────
     // tap = PEEK (the agent drops the camera's current frame into the
@@ -1954,7 +2074,20 @@
           if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
           toggleSkill(s.id,"disable"); });
         el.appendChild(d); }
-      renderBrowse(); }
+      renderBrowse(); renderSuggestions(); }
+    // ── "try asking…" chips: each enabled skill's example question, made
+    // tappable. The examples already live in the skills payload — this just
+    // surfaces them where a new user is actually looking (above the input).
+    function renderSuggestions(){ const row=$("suggestRow"); if(!row) return;
+      const ex=_skills.filter(s=>s.enabled&&s.example).map(s=>s.example);
+      row.innerHTML="";
+      if(!ex.length){ row.hidden=true; return; }
+      for(const q of ex.slice(0,4)){ const c=document.createElement("button");
+        c.className="suggest"; c.type="button"; c.textContent=q;
+        c.addEventListener("click",()=>{ const inp=$("askInput");
+          if(inp){ inp.value=q; } if(typeof window.ask==="function") window.ask(); });
+        row.appendChild(c); }
+      row.hidden=false; }
     // Pretty display names for the reference adapters named in tasks.yml's
     // suggested_adapters. Falls back to the raw id for anything unlisted.
     const ADAPTER_LABELS={yolov8:"YOLOv8",moondream:"Moondream",blip:"BLIP",
@@ -2195,7 +2328,8 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(openDeepLinkedCamera); loadNotify(); loadAlarmPresets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    pollHealth(); setInterval(pollHealth, 15000);
     setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarmsHttp, 2500);   // alarms ring even before Talk

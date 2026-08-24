@@ -4826,6 +4826,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # not every registered handler (test-report #4).
             "tools": [t["function"]["name"] for t in runtime.tool_definitions],
             "llm_model": runtime.cfg.llm_model,
+            # For the demo header's health dot: the last describe attempt's
+            # failure reason (None = last look succeeded or none ran yet) and
+            # whether the events store (History) is wired.
+            "vision_error": getattr(runtime.tools, "last_vision_error", None),
+            "history": getattr(runtime, "events_client", None) is not None,
         }
 
     @app.get("/demo", response_class=HTMLResponse)
@@ -4949,6 +4954,68 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         """The merged what-happened feed (alarms + watches + app alerts).
         Viewer tier: events are LOOK; acting on them stays operator+."""
         return {"events": runtime.events_feed()}
+
+    @app.get("/history")
+    async def _history(label: str = "", camera_id: str = "",
+                       hours: float = 24.0) -> dict[str, Any]:
+        """Remembered visits (the events store) for the demo's History card —
+        the browsable face of what search_history answers by voice. Viewer
+        tier (read-only look; the auth middleware gates GETs at viewer).
+
+        Response shapes are deliberately distinct (same honesty rule as the
+        tool): ``available: false`` = history isn't wired on this deployment;
+        ``ok: false`` = wired but the store couldn't be reached — which must
+        never read as "no visits"."""
+        client = getattr(runtime, "events_client", None)
+        if client is None:
+            return {"available": False, "ok": False, "events": []}
+        from datetime import datetime, timedelta
+        hours = max(0.25, min(float(hours or 24.0), 24.0 * 62))
+        start = (datetime.now().astimezone()
+                 - timedelta(hours=hours)).isoformat(timespec="seconds")
+        cam_num: int | None = None
+        if camera_id and camera_id not in ("all", "__any__"):
+            spec = runtime.context.get_camera(camera_id)
+            if spec is None:
+                return JSONResponse({"error": f"unknown camera {camera_id!r}"},
+                                    status_code=404)
+            if spec.opennvr_camera_id is None:
+                # A local/config camera the NVR doesn't record — an empty
+                # window is the truthful answer, not an error.
+                return {"available": True, "ok": True, "events": []}
+            cam_num = int(spec.opennvr_camera_id)
+        events = await client.search(label=(label or None), camera_id=cam_num,
+                                     start=start, limit=60)
+        if events is None:
+            return {"available": True, "ok": False, "events": []}
+        # Map server-side camera ids back to this agent's ids/roles so the
+        # card can say "the front door", not "camera 7".
+        by_srv = {int(c.opennvr_camera_id): c for c in runtime.cfg.cameras
+                  if c.opennvr_camera_id is not None}
+        rows = []
+        for e in events:
+            spec = by_srv.get(int(e.camera_id))
+            rows.append({
+                "id": e.id, "label": e.label,
+                "camera_id": spec.camera_id if spec else str(e.camera_id),
+                "role": (spec.role if spec else f"camera {e.camera_id}"),
+                "started_at": e.started_at, "ended_at": e.ended_at,
+                "plate_text": getattr(e, "plate_text", None),
+                "has_evidence": bool(e.has_evidence),
+            })
+        return {"available": True, "ok": True, "events": rows}
+
+    @app.get("/history/{event_id}/evidence")
+    async def _history_evidence(event_id: int) -> Response:
+        """A remembered visit's best-frame JPEG — the photo behind the
+        History card's thumbnail and the tool's '(photo kept)'."""
+        client = getattr(runtime, "events_client", None)
+        jpeg = await client.evidence(int(event_id)) if client else None
+        if not jpeg:
+            return JSONResponse({"error": "no evidence for that visit"},
+                                status_code=404)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=3600"})
 
     @app.get("/recordings/{camera_id}")
     async def _recordings_list(camera_id: str, request: Request) -> Any:
