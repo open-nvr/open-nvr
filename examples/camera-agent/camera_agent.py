@@ -4766,7 +4766,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     # Streaming /ws is intentionally excluded: it's a long-lived session,
     # not a turn, so pausing background work for its whole lifetime would
     # be wrong.
-    _INTERACTIVE_PATHS = {"/converse", "/ask", "/say"}
+    _INTERACTIVE_PATHS = {"/converse", "/ask", "/say", "/transcribe"}
 
     @app.middleware("http")
     async def _interactive_priority(request: Request, call_next):
@@ -5136,6 +5136,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 else runtime.agent_name)
         return {"name": runtime.agent_name, "voice_gender": runtime.cfg.voice_gender,
                 "text_mode": runtime.cfg.text_mode,
+                # Dictation (the input bar's mic → /transcribe): available on
+                # voice installs, where the Whisper adapter is deployed. Text
+                # installs ship no STT, so the mic button must not appear.
+                "stt_available": not runtime.cfg.text_mode,
                 "wake_phrase": f"Hey {wake.title()}",
                 "wake_required": runtime.cfg.wake_word_required,
                 "avatar_video": runtime.cfg.avatar_video,
@@ -5549,6 +5553,35 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "trace": list(runtime.last_turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
         })
+
+    @app.post("/transcribe")
+    async def _transcribe(request: Request) -> JSONResponse:
+        """Dictation: one audio blob in → {text} out. STT ONLY — no LLM turn,
+        no TTS. Powers the input bar's mic button (chat mode): the user
+        speaks, the words land in the text box for them to edit and send —
+        the Claude/ChatGPT mic pattern. Same transcode + noise filter as
+        /converse, so the two paths can't drift."""
+        blob = await request.body()
+        if not blob:
+            return JSONResponse({"error": "empty audio"}, status_code=400)
+        try:
+            wav = await asyncio.to_thread(_transcode_to_wav16k, blob)
+        except Exception as exc:
+            logger.warning("transcribe: transcode failed: %s", exc)
+            return JSONResponse({"error": "could not decode audio"},
+                                status_code=400)
+        try:
+            text = (await runtime.whisper.transcribe(wav)).strip()
+        except Exception:
+            logger.exception("transcribe: STT failed")
+            return JSONResponse(
+                {"error": "transcription failed (is the Whisper adapter running?)"},
+                status_code=502)
+        if not text or (runtime.cfg.stt_noise_filter and looks_like_noise(text)):
+            # Same honesty as /converse: silence/noise hallucinations
+            # ("Thank you.") must not land in the user's input box.
+            return JSONResponse({"text": "", "note": "nothing intelligible"})
+        return JSONResponse({"text": text})
 
     @app.post("/converse")
     async def _converse(request: Request) -> JSONResponse:
