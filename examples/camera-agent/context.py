@@ -167,6 +167,24 @@ class CameraContext:
     def known_camera(self, camera_id: str) -> bool:
         return camera_id in self._cameras
 
+    def remove_camera(self, camera_id: str) -> bool:
+        """Forget a camera: its spec, frame source, and cached/pinned frames.
+
+        Its event and app-alert rings are deliberately KEPT (they're bounded):
+        a deleted camera's past is still history — "did anyone come by the old
+        gate cam yesterday?" should keep working from memory even though the
+        camera is gone. Returns False when the id wasn't known."""
+        if camera_id not in self._cameras:
+            return False
+        self._cameras.pop(camera_id, None)
+        self._frame_sources.pop(camera_id, None)
+        self._frame_cache.pop(camera_id, None)
+        self._pinned.pop(camera_id, None)
+        self._review.pop(camera_id, None)
+        self._review_bytes.pop(camera_id, None)
+        self._cache_locks.pop(camera_id, None)
+        return True
+
     def get_camera(self, camera_id: str) -> CameraSpec | None:
         return self._cameras.get(camera_id)
 
