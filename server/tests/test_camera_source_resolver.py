@@ -50,6 +50,7 @@ from services.camera_source_resolver import (  # noqa: E402
     fetch_identity,
     inject_credentials,
     resolve_source,
+    rtsp_port_from_url,
     sync_camera_time,
 )
 
@@ -274,3 +275,38 @@ async def test_resolve_onvif_substream_skips_duplicate_uri(monkeypatch):
     monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
     r = await resolve_source("c", "u", "p", 554)
     assert r["substream_url"] is None
+
+
+# --- rtsp_port_from_url ----------------------------------------------------
+# `cameras.port` is the RTSP port but was never derived from `rtsp_url`, so a
+# camera on 8554 showed as ":554" in the list — an address nothing answers on.
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        # Explicit port wins, standard or not.
+        ("rtsp://10.0.0.5:8554/stream", 8554),
+        ("rtsp://10.0.0.5:554/stream", 554),
+        ("rtsp://admin:p%40ss@192.168.29.226:8554/", 8554),
+        # Credentials, paths and queries must not confuse the parse.
+        ("rtsp://u:p@host:2020/cam/realmonitor?channel=1&subtype=0", 2020),
+        # Omitted port falls back to the scheme default.
+        ("rtsp://10.0.0.5/stream", 554),
+        ("rtsps://10.0.0.5/stream", 322),
+        ("rtsps://10.0.0.5:8555/stream", 8555),
+        # IPv6 literals keep their brackets out of the port.
+        ("rtsp://[fe80::1]:8554/s", 8554),
+        ("rtsp://[fe80::1]/s", 554),
+        # Nothing to derive — callers must leave the stored value alone rather
+        # than overwrite it with a guess.
+        (None, None),
+        ("", None),
+        ("http://10.0.0.5:8554/stream", None),
+        ("10.0.0.5:8554", None),
+        ("rtsp://10.0.0.5:abc/stream", None),
+        ("rtsp://10.0.0.5:0/stream", None),
+    ],
+)
+def test_rtsp_port_from_url(url, expected):
+    assert rtsp_port_from_url(url) == expected

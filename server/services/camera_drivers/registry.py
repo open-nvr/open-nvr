@@ -160,7 +160,6 @@ def select_driver_class(manufacturer: str | None) -> type[CameraDriver]:
 async def resolve_endpoint(
     camera_id: int,
     ip: str,
-    camera_port: int | None,
     onvif_port: int | None = None,
     control_scheme: str | None = None,
 ) -> tuple[str, int]:
@@ -171,16 +170,17 @@ async def resolve_endpoint(
       1. a persisted ``(control_scheme, onvif_port)`` is verified once, then trusted;
       2. otherwise the shared candidate ports are scanned, http then https;
       3. default ``("http", 80)``.
+
+    ``cameras.port`` is deliberately NOT consulted. It used to serve as a hint
+    whenever it wasn't 554, on the assumption it held something other than the
+    RTSP port — but it is the RTSP port, now kept in step with ``rtsp_url``, so
+    a camera streaming on 8554 would have handed ONVIF an 8554 hint and paid two
+    dead probes for it. The candidate scan already covers the real control ports.
     """
     if camera_id in _ENDPOINT_CACHE:
         return _ENDPOINT_CACHE[camera_id]
 
-    # Prefer the persisted ONVIF port as the hint; else the camera's own
-    # configured port when it isn't the RTSP port.
-    hint = onvif_port or (
-        camera_port if camera_port and camera_port not in (554, 0) else None
-    )
-    scheme, port = await ods.resolve_control_endpoint(ip, hint, control_scheme)
+    scheme, port = await ods.resolve_control_endpoint(ip, onvif_port, control_scheme)
     _ENDPOINT_CACHE[camera_id] = (scheme, port)
     return scheme, port
 
@@ -263,7 +263,6 @@ async def get_driver_for_camera(
     scheme, port = await resolve_endpoint(
         camera_id,
         camera.ip_address,
-        camera.port,
         getattr(camera, "onvif_port", None),
         getattr(camera, "control_scheme", None),
     )

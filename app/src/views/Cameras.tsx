@@ -744,8 +744,22 @@ export function Cameras() {
               <Field label="IP address">
                 <input className={EDIT_INPUT} value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} required />
               </Field>
+              {/* The RTSP URL is what MediaMTX pulls, so when one is set its
+                  port is the camera's port — the server derives the column
+                  from it on save. Showing an editable field here would offer a
+                  value that is silently discarded, which is how the two came
+                  to disagree in the first place. */}
               <Field label="Port">
-                <input type="number" className={EDIT_INPUT} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} min={1} max={65535} />
+                <input
+                  type="number"
+                  className={`${EDIT_INPUT} disabled:opacity-60`}
+                  value={rtspPortFromUrl(form.rtsp_url) ?? form.port}
+                  onChange={(e) => setForm({ ...form, port: Number(e.target.value) })}
+                  min={1}
+                  max={65535}
+                  disabled={rtspPortFromUrl(form.rtsp_url) !== null}
+                  title={rtspPortFromUrl(form.rtsp_url) !== null ? 'Taken from the RTSP URL below' : undefined}
+                />
               </Field>
               <Field label="Username">
                 <input className={EDIT_INPUT} value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
@@ -901,6 +915,27 @@ const EDIT_INPUT =
 // column.
 const ICON_BTN =
   'inline-flex items-center justify-center rounded border border-[var(--border)] bg-[var(--panel-2)] p-1.5 text-[var(--text-dim)] transition-colors hover:bg-[var(--panel)] hover:text-[var(--text)]'
+
+// The port a camera actually streams on, read off its RTSP URL — the same rule
+// the server applies on save (rtsp defaults to 554, rtsps to 322 when the URL
+// omits it). null when there is nothing to read, so callers fall back to the
+// stored value rather than showing a guess.
+const RTSP_DEFAULT_PORTS: Record<string, number> = { 'rtsp:': 554, 'rtsps:': 322 }
+
+function rtspPortFromUrl(url: string | null | undefined): number | null {
+  if (!url) return null
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  const fallback = RTSP_DEFAULT_PORTS[parsed.protocol]
+  if (fallback === undefined) return null
+  if (!parsed.port) return fallback
+  const port = Number(parsed.port)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

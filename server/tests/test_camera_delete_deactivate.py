@@ -328,3 +328,80 @@ def test_force_bypasses_duplicate_conflict(env):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["ip_address"] == "10.0.0.9"
+
+
+# ---- `port` mirrors the RTSP URL ----
+# `cameras.port` is the RTSP port, but nothing kept it in step with `rtsp_url`.
+# A camera added with an explicit URL on 8554 kept the 554 default, so the
+# cameras list rendered "host:554" — an address nothing answers on, and the
+# first thing an operator checks when the stream drops.
+
+
+def test_create_takes_port_from_the_rtsp_url(env):
+    resp = env.client.post(
+        "/api/v1/cameras/",
+        json=_payload(ip_address="10.0.0.5", rtsp_url="rtsp://10.0.0.5:8554/"),
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 8554
+    stored = env.db.query(Camera).filter(Camera.id == resp.json()["id"]).first()
+    assert stored.port == 8554
+
+
+def test_create_falls_back_to_the_scheme_default_port(env):
+    """A URL with no port streams on 554 — say 554, not whatever was typed."""
+    resp = env.client.post(
+        "/api/v1/cameras/",
+        json=_payload(ip_address="10.0.0.5", port=8000, rtsp_url="rtsp://10.0.0.5/ch1"),
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 554
+
+
+def test_create_without_an_rtsp_url_keeps_the_given_port(env):
+    """Nothing to derive from — the operator's value stands rather than being
+    overwritten with a guess."""
+    resp = env.client.post(
+        "/api/v1/cameras/",
+        json=_payload(ip_address="10.0.0.5", port=8000),
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 8000
+
+
+def test_update_repoints_port_when_the_rtsp_url_moves(env):
+    cam = env.make_camera(ip_address="10.0.0.5", port=554,
+                          rtsp_url="rtsp://10.0.0.5:554/ch1")
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json={"rtsp_url": "rtsp://10.0.0.5:8554/ch1"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 8554
+
+
+def test_update_url_wins_over_a_port_sent_in_the_same_request(env):
+    """MediaMTX pulls the URL, so the URL's port is the only one worth showing —
+    the alternative is leaving the two fields contradicting each other."""
+    cam = env.make_camera(ip_address="10.0.0.5", rtsp_url="rtsp://10.0.0.5:554/ch1")
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json={"rtsp_url": "rtsp://10.0.0.5:8554/ch1", "port": 554},
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 8554
+
+
+def test_update_leaves_port_alone_when_the_url_is_untouched(env):
+    cam = env.make_camera(ip_address="10.0.0.5", port=8000,
+                          rtsp_url="rtsp://10.0.0.5:8554/ch1")
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}", json={"name": "Renamed"}, headers=_auth()
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["port"] == 8000

@@ -166,7 +166,7 @@ def _isolate(monkeypatch):
     """Neutralize network + per-process caches for selection tests."""
     registry._DRIVER_CACHE.clear()
 
-    async def _endpoint(cid, ip, p, onvif_port=None, control_scheme=None):
+    async def _endpoint(cid, ip, onvif_port=None, control_scheme=None):
         return ("http", 80)
 
     monkeypatch.setattr(registry, "resolve_endpoint", _endpoint)
