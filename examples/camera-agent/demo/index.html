@@ -782,11 +782,21 @@
               <option value="count">Keep a live count</option>
             </select>
             <input id="watchTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="watchCam" aria-label="Which camera to watch">
+                <option value="all">All cameras</option>
+              </select>
+            </label>
             <button class="ghost primary" id="watchStart" type="button">Start watching</button>
             <div class="empty-note">For line-crossing counts, ask in chat — the agent will ask you where to place the line.</div>
           </div>
           <div class="addform" id="taskForm" hidden>
             <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="taskCam" aria-label="Scope the search to one camera">
+                <option value="">Any camera</option>
+              </select>
+            </label>
             <button class="ghost primary" id="taskRun" type="button">Run in background</button>
           </div>
           <div class="addform" id="reportForm" hidden>
@@ -1235,9 +1245,8 @@
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
       buildCamStrip(cams);
-      // History card's camera filter and the alarm form's camera picker
-      // share the same roster.
-      for(const sel of [$("histCam"), $("alarmCam")]){
+      // History filter + the alarm/watch/task camera pickers share the roster.
+      for(const sel of [$("histCam"), $("alarmCam"), $("watchCam"), $("taskCam")]){
         if(!sel) continue;
         for(const cam of cams){ const o=document.createElement("option");
           o.value=cam.camera_id;
@@ -2107,7 +2116,10 @@
           b.title=p.available?("Arm: watch for "+p.target+(p.after?(" after "+p.after):"")):(p.requires||"Not available yet");
           b.addEventListener("click",()=>{
             if(!p.available){ showPresetHint(p); return; }
-            const body={name:p.name,target:p.target,camera_id:cameraParam()};
+            // Presets follow the form's explicit Camera picker too (default
+            // "all") — never the main screen's checkbox state by side effect.
+            const pc=$("alarmCam");
+            const body={name:p.name,target:p.target,camera_id:(pc&&pc.value)||"all"};
             if(p.after) body.after=p.after;
             if(p.ring) body.ring=p.ring;
             addAlarm(body);
@@ -2433,7 +2445,10 @@
     (function(){ const add=$("watchAdd"), f=$("watchForm"), go=$("watchStart"), ti=$("watchTarget");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) ti.focus(); });
       async function start(){ const target=(ti.value||"").trim(); if(!target){ ti.focus(); return; }
-        const body={kind:$("watchKind").value,target,camera_id:cameraParam()};
+        // Explicit camera choice, same as the alarm form — never the main
+        // screen's checkbox state by side effect.
+        const wc=$("watchCam");
+        const body={kind:$("watchKind").value,target,camera_id:(wc&&wc.value)||"all"};
         try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
           if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
@@ -2467,7 +2482,13 @@
     // Background tasks: + reveals a query input (POST /tasks).
     (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
-      async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+      async function go(){ let q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+        // A task is a free-text job the background turn interprets with the
+        // full toolset, so camera scoping rides IN the text — the same way
+        // the voice path scopes it ("…on cam1"). The picker just appends it
+        // when the query doesn't already name that camera.
+        const tc=$("taskCam");
+        if(tc&&tc.value&&!q.toLowerCase().includes(tc.value.toLowerCase())) q+=" on "+tc.value;
         try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
           if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
             pollTasks(); if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS); }

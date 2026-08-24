@@ -106,6 +106,21 @@ def test_automations_share_one_empty_state():
         assert old not in _HTML, old
 
 
+def test_watch_and_task_forms_ask_which_camera():
+    # Watches: explicit picker (the old form silently used the main
+    # screen's checkbox state — same bug the alarm form had). Tasks: a
+    # free-text job the background turn interprets, so the picker scopes
+    # by appending "on <cam>" to the query — the voice path's mechanism.
+    assert 'id="watchCam"' in _HTML
+    assert 'camera_id:(wc&&wc.value)||"all"' in _HTML
+    # No AUTOMATION form submits a camera by side effect any more. (Chat's
+    # own `camera:cameraParam()` is different and correct — the checkbox
+    # row IS the conversation's scope.)
+    assert "camera_id:cameraParam()" not in _HTML
+    assert 'id="taskCam"' in _HTML
+    assert 'q+=" on "+tc.value' in _HTML
+
+
 def test_events_card_reads_activity():
     assert "<h2>Activity</h2>" in _HTML
     assert "<h2>Events</h2>" not in _HTML
