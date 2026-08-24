@@ -30,6 +30,8 @@ import type { BadgeVariant } from '../components/ui'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
 import { parseCameraQr } from '../lib/cameraQr'
+import { parseRtspUrl, rtspPortFromUrl, syncCameraIdentity } from '../lib/cameraIdentity'
+import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
 import { Modal } from '../components/Modal'
 
@@ -326,6 +328,20 @@ export function Cameras() {
   const refreshCameras = () =>
     queryClient.invalidateQueries({ queryKey: ['cameras'] })
 
+  // A camera's address, port and credentials live twice over: in these fields
+  // and again inside the RTSP URL. Re-sync when the operator leaves a control
+  // rather than on every keystroke — mid-type, "192.168.1." is not a host and a
+  // half-pasted URL is unparseable, so syncing per character would fight them.
+  const syncIdentity = (changed: IdentityField) =>
+    setForm((prev) => syncCameraIdentity(prev, changed))
+
+  // The URL's host when it contradicts the IP field, else null. Drives the
+  // warning under the URL input.
+  const urlHostMismatch = useMemo(() => {
+    const host = parseRtspUrl(form.rtsp_url)?.hostname
+    return host && form.ip_address && host !== form.ip_address ? host : null
+  }, [form.rtsp_url, form.ip_address])
+
   const onUpdate = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!editing) return
@@ -449,7 +465,10 @@ export function Cameras() {
       name: c.name,
       description: c.description || '',
       ip_address: c.ip_address,
-      port: c.port,
+      // Seed from the URL when it has a port: the server derives the column
+      // from the URL on save regardless, so this is what will be stored — the
+      // box may as well show it rather than a value about to be overwritten.
+      port: rtspPortFromUrl(c.rtsp_url) ?? c.port,
       username: c.username || '',
       password: '',
       rtsp_url: c.rtsp_url || '',
@@ -753,30 +772,29 @@ export function Cameras() {
                 <input className={EDIT_INPUT} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
               </Field>
               <Field label="IP address">
-                <input className={EDIT_INPUT} value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} required />
+                <input className={EDIT_INPUT} value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} onBlur={() => syncIdentity('ip_address')} required />
               </Field>
-              {/* The RTSP URL is what MediaMTX pulls, so when one is set its
-                  port is the camera's port — the server derives the column
-                  from it on save. Showing an editable field here would offer a
-                  value that is silently discarded, which is how the two came
-                  to disagree in the first place. */}
+              {/* Editable again: a port typed here is no longer discarded — it
+                  is written into the RTSP URL on blur, which is what MediaMTX
+                  actually pulls. The URL still wins on save, so the two cannot
+                  drift apart the way they used to. */}
               <Field label="Port">
                 <input
                   type="number"
-                  className={`${EDIT_INPUT} disabled:opacity-60`}
-                  value={rtspPortFromUrl(form.rtsp_url) ?? form.port}
+                  className={EDIT_INPUT}
+                  value={form.port}
                   onChange={(e) => setForm({ ...form, port: Number(e.target.value) })}
+                  onBlur={() => syncIdentity('port')}
                   min={1}
                   max={65535}
-                  disabled={rtspPortFromUrl(form.rtsp_url) !== null}
-                  title={rtspPortFromUrl(form.rtsp_url) !== null ? 'Taken from the RTSP URL below' : undefined}
+                  title="Kept in step with the port in the RTSP URL below"
                 />
               </Field>
               <Field label="Username">
-                <input className={EDIT_INPUT} value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+                <input className={EDIT_INPUT} value={form.username || ''} onChange={(e) => setForm({ ...form, username: e.target.value })} onBlur={() => syncIdentity('username')} />
               </Field>
               <Field label="Password">
-                <input type="password" className={EDIT_INPUT} value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Leave blank to keep existing" />
+                <input type="password" className={EDIT_INPUT} value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} onBlur={() => syncIdentity('password')} placeholder="Leave blank to keep existing" />
               </Field>
               <Field label="Location">
                 <input className={EDIT_INPUT} value={form.location || ''} onChange={(e) => setForm({ ...form, location: e.target.value })} />
@@ -791,10 +809,21 @@ export function Cameras() {
 
             <Field label="RTSP URL">
               <div className="flex gap-2">
-                <input className={`flex-1 ${EDIT_INPUT}`} value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} />
+                <input className={`flex-1 ${EDIT_INPUT}`} value={form.rtsp_url || ''} onChange={(e) => setForm({ ...form, rtsp_url: e.target.value })} onBlur={() => syncIdentity('rtsp_url')} />
                 <button type="button" className="px-3 py-2 border border-[var(--border)] bg-[var(--panel-2)] rounded text-xs whitespace-nowrap" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">Scan QR</button>
               </div>
             </Field>
+            {/* A camera saved before the fields were kept in step can open with
+                the two already disagreeing. Say so rather than picking a winner:
+                which one is stale is not knowable from here — a camera can be
+                streaming perfectly from the URL's host while the IP column holds
+                the wrong address, and silently "fixing" that would kill it. */}
+            {urlHostMismatch && (
+              <p className="text-xs text-amber-400/90 -mt-2">
+                The IP address ({form.ip_address}) and the RTSP URL host ({urlHostMismatch}) disagree.
+                Editing either field updates the other — change the one that is wrong.
+              </p>
+            )}
             <Field label="Substream URL">
               <input className={EDIT_INPUT} value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
             </Field>
@@ -926,27 +955,6 @@ const EDIT_INPUT =
 // column.
 const ICON_BTN =
   'inline-flex items-center justify-center rounded border border-[var(--border)] bg-[var(--panel-2)] p-1.5 text-[var(--text-dim)] transition-colors hover:bg-[var(--panel)] hover:text-[var(--text)]'
-
-// The port a camera actually streams on, read off its RTSP URL — the same rule
-// the server applies on save (rtsp defaults to 554, rtsps to 322 when the URL
-// omits it). null when there is nothing to read, so callers fall back to the
-// stored value rather than showing a guess.
-const RTSP_DEFAULT_PORTS: Record<string, number> = { 'rtsp:': 554, 'rtsps:': 322 }
-
-function rtspPortFromUrl(url: string | null | undefined): number | null {
-  if (!url) return null
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return null
-  }
-  const fallback = RTSP_DEFAULT_PORTS[parsed.protocol]
-  if (fallback === undefined) return null
-  if (!parsed.port) return fallback
-  const port = Number(parsed.port)
-  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
-}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
