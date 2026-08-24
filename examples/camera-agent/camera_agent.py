@@ -2886,6 +2886,11 @@ class CameraAgentRuntime:
                 or _os.environ.get("INTERNAL_API_KEY", ""),
             )
             logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+        # Kept on the runtime too: the events SKILL is served by two
+        # independent backends (NATS ring → recent_events; events store →
+        # search_history/describe_event/describe_window), and the skills
+        # panel must gate + caption on what is ACTUALLY wired.
+        self.events_client = events_client
 
         self.tools = CameraTools(
             context=self.context,
@@ -3154,7 +3159,14 @@ class CameraAgentRuntime:
         if req == "faces":
             return self.faces is not None
         if req == "events":
-            return bool(self.cfg.nats_inference_url)
+            # Either backend makes the skill usable: NATS feeds the live
+            # recent_events ring; the events store (opennvr_api_url) feeds
+            # search_history / describe_event / describe_window. Gating on
+            # NATS alone wrongly greyed the whole skill out on deployments
+            # that have durable history but no event bus.
+            return bool(self.cfg.nats_inference_url) or (
+                getattr(self, "events_client", None) is not None
+            )
         if req == "footage":
             # Configuration presence is the gate (same principle as the app
             # door): the reader re-tries opening on every call, so an index
@@ -3184,17 +3196,27 @@ class CameraAgentRuntime:
         live_tasks = self.kaic_capabilities.tasks_advertised   # None = unknown
         advertised = {t["function"]["name"] for t in self.tool_definitions}
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
+        # The events skill's caption names what is ACTUALLY wired — it has
+        # two independent backends, and "uses inference event bus (NATS)" was
+        # half-true on a stock install where search_history reads the durable
+        # events store, not the bus.
+        events_backends = []
+        if self.cfg.nats_inference_url:
+            events_backends.append("inference event bus (NATS)")
+        if getattr(self, "events_client", None) is not None:
+            events_backends.append("events store (visit history)")
         uses = {
             "see": f"{self.cfg.caption_adapter} caption + {self.cfg.llm_model}",
             "count": f"{self.cfg.detection_adapter} detection",
             "faces": f"{self.cfg.recognition_adapter} recognition",
-            "events": "inference event bus (NATS)",
+            "events": " + ".join(events_backends) or "inference event bus (NATS)",
             "footage": "footage-search index",
             "apps": "OpenNVR app registry + alert relay (read-only)",
         }
         hints = {
             "faces": "Set faces_url to the recognition adapter to enable.",
-            "events": "Set nats_inference_url to stream inference events.",
+            "events": ("Set nats_inference_url (live events) or "
+                       "opennvr_api_url (visit history) to enable."),
             "footage": "Set footage_index_path (built by the footage-search example).",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
@@ -3215,12 +3237,27 @@ class CameraAgentRuntime:
                 live_tasks is None or not backing
                 or bool(set(backing) & live_tasks)
             )
+            # Tool-level honesty: a skill card bundles several tools, and the
+            # old panel only reflected the PRIMARY one — "Look back at recent
+            # events" showed on while search_history (the tool the user's
+            # question needed) was hidden by enabled_tools. Every entry now
+            # lists each of its tools with whether the LLM can actually call
+            # it, and ``partial`` flags an on-skill with hidden tools so the
+            # UI can grey them out instead of implying they all work.
+            tool_states = [
+                {"name": n, "advertised": n in advertised}
+                for n in SKILL_TOOLS[sid]
+            ]
             entry = {
                 "id": sid, "icon": icon, "name": name, "example": example,
                 "uses": uses.get(sid, f"agent app + {self.cfg.llm_model}"),
                 "enabled": enabled, "available": available,
                 "hint": "" if available else (hints.get(req, "Not enabled in config.")),
                 "backing_tasks": backing, "tasks_available": tasks_available,
+                "tools": tool_states,
+                "partial": enabled and any(
+                    not t["advertised"] for t in tool_states
+                ),
             }
             # When a skill is greyed out for want of a backing adapter, GUIDE
             # the operator: name the suggested adapter(s) and, if we know the
