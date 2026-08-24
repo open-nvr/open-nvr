@@ -197,6 +197,12 @@ class AppConfig:
     # Optional OpenNVR camera discovery. Docker uses this so camera-agent can
     # reuse cameras configured in OpenNVR instead of duplicating RTSP URLs.
     opennvr_cameras_url: str | None = None
+    # Where the boot-time camera list came from: "config" (operator-listed in
+    # the YAML, or local auto-discovery) or "opennvr" (fetched from
+    # opennvr_cameras_url). Provenance matters for reconcile: only cameras the
+    # NVR manages may be REMOVED when the NVR stops listing them — a
+    # config-file camera is the operator's explicit word and is never touched.
+    cameras_source: str = "config"
     opennvr_api_key: str | None = None
 
     # Optional OpenNVR server BASE URL (e.g. "http://127.0.0.1:8000") for the
@@ -2526,11 +2532,13 @@ def load_config(path: str | Path) -> AppConfig:
             "auto-discovered %d local camera(s): %s",
             len(cameras), ", ".join(f"{c.camera_id}({c.frame_url})" for c in cameras),
         )
+    cameras_source = "config"
     if not cameras and raw.get("opennvr_cameras_url"):
         cameras = _load_opennvr_cameras(
             url=str(raw["opennvr_cameras_url"]),
             api_key=str(raw.get("opennvr_api_key") or raw.get("kaic_api_key") or ""),
         )
+        cameras_source = "opennvr"
     # An empty camera list is allowed. The agent still serves the /demo
     # page and runs the full voice loop; vision tools simply report that
     # no cameras are configured until the operator adds some (the Docker
@@ -2627,6 +2635,7 @@ def load_config(path: str | Path) -> AppConfig:
             if str(s).strip()
         ],
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
+        cameras_source=cameras_source,
         opennvr_api_key=raw.get("opennvr_api_key"),
         opennvr_api_url=_opennvr_api_url,
         opennvr_ui_url=_opennvr_ui_url,
@@ -2891,6 +2900,15 @@ class CameraAgentRuntime:
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
         self._camera_ids = [cam.camera_id for cam in cfg.cameras]
+        # Cameras the NVR manages — the only ones reconcile may ever REMOVE
+        # when a successful fetch stops listing them (deleted/deactivated in
+        # OpenNVR). Seeded with the boot roster when that roster itself came
+        # from the NVR; cameras added by later reconcile fetches join as they
+        # appear. Config-file / local cameras never enter this set, so they
+        # can never be reconciled away.
+        self._opennvr_managed: set[str] = (
+            set(self._camera_ids) if cfg.cameras_source == "opennvr" else set()
+        )
         self.disabled_skills: set[str] = set()
         # UI-edited target→annunciation overrides (admin action) — the
         # LAST layer over config + built-ins in ring_defaults(); durable
@@ -3916,14 +3934,16 @@ class CameraAgentRuntime:
 
     def _register_opennvr_cameras(self, specs: list[CameraSpec]) -> list[CameraSpec]:
         """Register OpenNVR-sourced camera specs that aren't known yet, wiring
-        each one's frame source. ADD-ONLY for camera *identity*: a transient
-        empty or failed fetch must never tear down cameras that are already
-        working. But a known camera's ``frame_url`` IS refreshed when OpenNVR
-        serves a new one — the URL embeds a short-lived MediaMTX JWT
-        (~60 min), so keeping the boot-time URL means every frame fetch
-        starts 401ing within the hour and the camera tile shows "no frame"
-        forever (describe still works — KAI-C mints its own token — which
-        made this bug look like a UI problem instead of an expired URL)."""
+        each one's frame source. This method itself never removes anything —
+        deletions are handled by ``_remove_opennvr_cameras``, and ONLY from a
+        successful fetch (a transient failed fetch must never tear down
+        cameras that are already working). A known camera's ``frame_url`` IS
+        refreshed when OpenNVR serves a new one — the URL embeds a
+        short-lived MediaMTX JWT (~60 min), so keeping the boot-time URL
+        means every frame fetch starts 401ing within the hour and the camera
+        tile shows "no frame" forever (describe still works — KAI-C mints its
+        own token — which made this bug look like a UI problem instead of an
+        expired URL)."""
         added: list[CameraSpec] = []
         for spec in specs:
             if self.context.known_camera(spec.camera_id):
@@ -3937,6 +3957,37 @@ class CameraAgentRuntime:
             self.cfg.cameras.append(spec)
             added.append(spec)
         return added
+
+    def _remove_opennvr_cameras(self, camera_ids: set[str]) -> list[str]:
+        """Forget cameras that a SUCCESSFUL OpenNVR fetch no longer lists —
+        i.e. deleted or deactivated in the NVR (the internal endpoint only
+        serves ``is_active`` cameras).
+
+        Two hard safety rails: only ids in ``_opennvr_managed`` (seen in a
+        successful fetch, or boot-loaded from the NVR) are ever candidates —
+        a config-file or local camera passed here is ignored; and the caller
+        only reaches this from a fetch that SUCCEEDED, so a transient network
+        failure can never empty the roster."""
+        removed: list[str] = []
+        for cid in sorted(set(camera_ids) & self._opennvr_managed):
+            self._opennvr_managed.discard(cid)
+            if not self.context.remove_camera(cid):
+                continue
+            self.cfg.cameras[:] = [
+                c for c in self.cfg.cameras if c.camera_id != cid
+            ]
+            removed.append(cid)
+        return removed
+
+    def _sync_camera_roster(self) -> None:
+        """Re-bake everything that embeds the camera list after a roster
+        change: the camera-id enums inside the advertised tool schemas (ids
+        are baked in so the model can't invent camera names — which also
+        means a stale list makes the LLM keep offering deleted cameras and
+        never see added ones) and the id list the system-prompt roster and
+        viewer toolset are built from."""
+        self._camera_ids = [cam.camera_id for cam in self.cfg.cameras]
+        self._configure_tools()
 
     def _refresh_frame_url(self, spec: CameraSpec) -> None:
         """Swap a known camera's frame source when its URL changed.
@@ -4108,14 +4159,18 @@ class CameraAgentRuntime:
         The startup fetch is one-shot, so if the agent comes up before the
         OpenNVR core has its cameras ready (the usual boot-order race when the
         stack starts together), it would otherwise stay 'disconnected' until
-        someone restarted it. This loop retries through that race and also
-        picks up cameras registered in OpenNVR later."""
+        someone restarted it. This loop retries through that race, picks up
+        cameras registered in OpenNVR later, and — from a SUCCESSFUL fetch
+        only — forgets NVR-managed cameras the NVR no longer lists (deleted
+        or deactivated there; the endpoint serves is_active cameras only).
+        A FAILED fetch says nothing about deletions and changes nothing."""
         url = self.cfg.opennvr_cameras_url
         if not url:
             return
         api_key = self.cfg.opennvr_api_key or self.cfg.kaic_api_key or ""
         announced_waiting = False
         while not self._stop_event.is_set():
+            specs: list[CameraSpec] | None
             try:
                 # The fetch is a blocking httpx call — off-thread it so we
                 # never stall the event loop.
@@ -4126,9 +4181,27 @@ class CameraAgentRuntime:
                 logger.warning(
                     "camera-agent: OpenNVR camera reconcile failed: %s", exc
                 )
-                specs = []
-            added = self._register_opennvr_cameras(specs)
+                specs = None    # failure ≠ empty: never reconcile against it
+            added: list[CameraSpec] = []
+            removed: list[str] = []
+            if specs is not None:
+                added = self._register_opennvr_cameras(specs)
+                fetched_ids = {s.camera_id for s in specs}
+                removed = self._remove_opennvr_cameras(
+                    self._opennvr_managed - fetched_ids
+                )
+                # Adopt AFTER computing removals: everything this successful
+                # fetch listed is NVR-managed from now on.
+                self._opennvr_managed |= fetched_ids
+                if added or removed:
+                    self._sync_camera_roster()
             have_cameras = bool(self.cfg.cameras)
+            if removed:
+                logger.info(
+                    "camera-agent: forgot %d camera(s) no longer in OpenNVR "
+                    "(deleted/deactivated there): %s",
+                    len(removed), ", ".join(removed),
+                )
             if added:
                 logger.info(
                     "camera-agent: picked up %d OpenNVR camera(s) without a "
