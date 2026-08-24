@@ -522,6 +522,10 @@
     body:not(.ui-talk) #wakeOpt{display:none !important;}
     body.mode-voice .log:empty::after{content:"Ask your cameras anything — type, tap the mic to dictate, or tap Talk.";}
     body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
+    /* Automations kind chooser (🔔 Alarm · 👁 Watch · ⚙ Task · 🕐 Report) */
+    .autokinds{display:flex; gap:0.35rem; margin-bottom:0.55rem;}
+    .autokinds .ghost{flex:1; font-size:0.74rem; padding:0.42rem 0.2rem; text-align:center; white-space:nowrap;}
+    .autokinds .ghost.open{color:var(--accent); border-color:rgba(94,179,246,0.4);}
     /* round dictate mic in the input bar */
     .micbtn{flex:0 0 auto; width:40px; height:40px; border-radius:50%; border:none; cursor:pointer;
       background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
@@ -679,7 +683,7 @@
 
       <div class="side">
         <div class="card" id="eventsCard">
-          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle events">▾</button></div>
+          <div class="cardhead"><h2>Activity</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle activity">▾</button></div>
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
         </div>
         <div class="card" id="historyCard" hidden>
@@ -714,8 +718,19 @@
             <button class="ghost" id="skillBrowseClose" type="button">Done</button>
           </div>
         </div>
-        <div class="card" id="alarmCard">
-          <div class="cardhead"><h2>Alarms</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></span></div>
+        <!-- One AUTOMATIONS surface for every standing behavior the agent
+             runs — alarms, watches, background tasks, scheduled reports.
+             + reveals the kind chooser; each kind opens its own form (the
+             same forms the four separate cards used to carry). -->
+        <div class="card" id="autoCard">
+          <div class="cardhead"><h2>Automations</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="autoAdd" type="button" title="Add an automation" aria-label="Add an automation">+</button></span></div>
+          <div class="skillhint">Alarms, watches, background tasks and reports — one list.</div>
+          <div class="autokinds" id="autoKinds" hidden>
+            <button class="ghost" id="alarmAdd" type="button" title="Ring when something is seen">🔔 Alarm</button>
+            <button class="ghost" id="watchAdd" type="button" title="Notify or keep a live count over time">👁 Watch</button>
+            <button class="ghost" id="taskAdd" type="button" title="Run a longer search in the background">⚙ Task</button>
+            <button class="ghost" id="reportAdd" type="button" title="A recurring summary, daily or every N minutes">🕐 Report</button>
+          </div>
           <div class="addform" id="ringCfgForm" hidden>
             <div class="rec-lbl">Default alert level by target</div>
             <div class="empty-note" id="ringInherited"></div>
@@ -761,31 +776,19 @@
             <span id="notifyStatus" class="empty-note"></span>
             <button class="ghost" id="notifyTest" type="button">Test</button>
           </div>
-          <div id="alarmList"></div>
-        </div>
-        <div class="card" id="watchCard">
-          <div class="cardhead"><h2>Watching</h2><button class="addbtn" id="watchAdd" type="button" title="Add a watch" aria-label="Add a watch">+</button></div>
           <div class="addform" id="watchForm" hidden>
             <select id="watchKind" aria-label="Watch kind">
               <option value="notify">Notify when seen</option>
               <option value="count">Keep a live count</option>
             </select>
-            <input id="watchTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <input id="watchTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
             <button class="ghost primary" id="watchStart" type="button">Start watching</button>
             <div class="empty-note">For line-crossing counts, ask in chat — the agent will ask you where to place the line.</div>
           </div>
-          <div id="monitorList"></div>
-        </div>
-        <div class="card" id="taskCard">
-          <div class="cardhead"><h2>Background tasks</h2><button class="addbtn" id="taskAdd" type="button" title="Add a background task" aria-label="Add a background task">+</button></div>
           <div class="addform" id="taskForm" hidden>
             <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
             <button class="ghost primary" id="taskRun" type="button">Run in background</button>
           </div>
-          <div id="taskList"></div>
-        </div>
-        <div class="card" id="reportCard">
-          <div class="cardhead"><h2>Scheduled reports</h2><button class="addbtn" id="reportAdd" type="button" title="Schedule a report" aria-label="Schedule a report">+</button></div>
           <div class="addform" id="reportForm" hidden>
             <input id="reportName" type="text" placeholder="Name, e.g. Morning summary" autocomplete="off">
             <input id="reportQuery" type="text" placeholder="e.g. summarise overnight activity on all cameras" autocomplete="off">
@@ -793,7 +796,11 @@
             <label class="addform-lbl">or every <input id="reportEvery" type="number" min="5" step="5" placeholder="—"> minutes</label>
             <button class="ghost primary" id="reportCreate" type="button">Schedule report</button>
           </div>
+          <div id="alarmList"></div>
+          <div id="monitorList"></div>
+          <div id="taskList"></div>
           <div id="reportList"></div>
+          <div class="empty-note" id="autoEmpty">Nothing automated yet — tap + to add an alarm, watch, background task, or report.</div>
         </div>
         <div class="card" id="hwCard">
           <div class="cardhead"><h2>Hardware</h2><button class="addbtn" id="hwToggle" type="button" title="Show the per-skill breakdown" aria-label="Toggle hardware detail">▸</button></div>
@@ -1947,11 +1954,11 @@
       renderTasks(tasks); }
     function renderTasks(tasks){ const active=tasks.filter(t=>t.status==="queued"||t.status==="running");
       const done=tasks.filter(t=>t.status==="done"||t.status==="error").slice(-3); const show=[...active,...done];
-      if(!show.length){ taskListEl.innerHTML='<div class="empty-note">No background tasks.</div>'; return; }
+      if(!show.length){ taskListEl.innerHTML=""; updateAutoEmpty(); return; }
       taskListEl.innerHTML="";
       for(const t of show){ const running=t.status==="queued"||t.status==="running"; const d=document.createElement("div");
         d.className="item "+(running?"running":"done"); d.innerHTML=`<span class="badge">${running?"⏳":(t.status==="error"?"⚠️":"✓")}</span>`;
-        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } }
+        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } updateAutoEmpty(); }
 
     async function announce(text){ if(!text||busy||speaking)return;
       try{ const d=await (await fetch("/say",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})})).json();
@@ -1962,7 +1969,7 @@
       for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
-      if(!active.length){ monitorListEl.innerHTML='<div class="empty-note">No active watches.</div>'; return; }
+      if(!active.length){ monitorListEl.innerHTML=""; updateAutoEmpty(); return; }
       monitorListEl.innerHTML="";
       for(const m of active){ const d=document.createElement("div"); d.className="item";
         d.innerHTML=`<span class="badge">${m.kind==="count"?"🔢":"👁"}</span>`; const q=document.createElement("span"); q.className="q";
@@ -1971,7 +1978,7 @@
           q.innerHTML=`${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`; }
         else { q.textContent=`${cams} for ${m.target}`; }
         d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
-        s.addEventListener("click",()=>stopMonitor(m.id,d)); d.appendChild(s); monitorListEl.appendChild(d); } }
+        s.addEventListener("click",()=>stopMonitor(m.id,d)); d.appendChild(s); monitorListEl.appendChild(d); } updateAutoEmpty(); }
     async function stopMonitor(id, rowEl){
       if(rowEl) rowEl.remove();               // optimistic, like alarms
       try{
@@ -1986,13 +1993,13 @@
         addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
       renderReports(data.schedules||[]); }
     function renderReports(schedules){ const active=schedules.filter(s=>s.active);
-      if(!active.length){ reportListEl.innerHTML='<div class="empty-note">No scheduled reports.</div>'; return; }
+      if(!active.length){ reportListEl.innerHTML=""; updateAutoEmpty(); return; }
       reportListEl.innerHTML="";
       for(const s of active){ const d=document.createElement("div"); d.className="item";
         d.innerHTML='<span class="badge">📋</span>'; const q=document.createElement("span"); q.className="q";
         q.textContent=`${s.name} · ${s.schedule}`; d.appendChild(q);
         const x=document.createElement("button"); x.className="stop"; x.title="Cancel"; x.textContent="✕";
-        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } }
+        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } updateAutoEmpty(); }
     async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
 
     // ── alarms ──
@@ -2018,7 +2025,7 @@
         if(!alarmbarEl.classList.contains("chime")) alarmbarEl.hidden=true; }
       renderAlarms(data.alarms||[]); }
     function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
-      if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
+      if(!active.length){ alarmListEl.innerHTML=""; updateAutoEmpty(); return; }
       alarmListEl.innerHTML="";
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
         d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
@@ -2026,7 +2033,7 @@
         const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":(a.ring==="pulse"?" · ⚠️":""));
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
-        s.addEventListener("click",()=>disarmAlarm(a.id,d)); d.appendChild(s); alarmListEl.appendChild(d); } }
+        s.addEventListener("click",()=>disarmAlarm(a.id,d)); d.appendChild(s); alarmListEl.appendChild(d); } updateAutoEmpty(); }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
       alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
     async function disarmAlarm(id, rowEl){
@@ -2367,6 +2374,22 @@
     wireWindowSelect("alarm"); wireWindowSelect("pa");
 
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
+    // ── Automations card: one + reveals the kind chooser; picking a kind
+    // opens that kind's form (the existing per-kind listeners toggle their
+    // own form — this delegation just closes the OTHER three, so the card
+    // never shows two half-filled forms at once).
+    function updateAutoEmpty(){ const e=$("autoEmpty"); if(!e) return;
+      e.hidden=!["alarmList","monitorList","taskList","reportList"].every(
+        id=>{ const el=$(id); return !el||!el.children.length; }); }
+    (function(){ const plus=$("autoAdd"), row=$("autoKinds");
+      const FORMS={alarmAdd:"alarmForm",watchAdd:"watchForm",taskAdd:"taskForm",reportAdd:"reportForm"};
+      if(plus&&row) plus.addEventListener("click",()=>{ row.hidden=!row.hidden;
+        plus.classList.toggle("open",!row.hidden);
+        if(row.hidden) for(const fid of Object.values(FORMS)){ const f=$(fid); if(f) f.hidden=true; } });
+      if(row) row.addEventListener("click",(e)=>{ const k=e.target.closest("button"); if(!k||!FORMS[k.id]) return;
+        for(const [bid,fid] of Object.entries(FORMS)){ if(bid!==k.id){ const f=$(fid); if(f) f.hidden=true;
+          const b=$(bid); if(b) b.classList.remove("open"); } } });
+    })();
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();

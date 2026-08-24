@@ -74,7 +74,41 @@ def test_rail_form_asks_which_camera():
 def test_every_target_input_shares_the_picklist():
     assert 'id="targetOpts"' in _HTML
     assert "loadAlarmTargets" in _HTML
-    assert _HTML.count('list="targetOpts"') == 3   # alarm rail + alarm pop + watch pop
+    # alarm form + alarm popover + watch popover + watch form
+    assert _HTML.count('list="targetOpts"') == 4
+
+
+# ── the unified Automations card ────────────────────────────────────────
+
+def test_automations_card_replaces_the_four_cards():
+    assert 'id="autoCard"' in _HTML and "<h2>Automations</h2>" in _HTML
+    for gone in ('id="watchCard"', 'id="taskCard"', 'id="reportCard"',
+                 'id="alarmCard"'):
+        assert gone not in _HTML, gone
+    # All four kinds' forms and lists live inside the one card, and the
+    # kind chooser reuses the original add-button ids so every existing
+    # form-toggle listener keeps working untouched.
+    auto = _HTML[_HTML.index('id="autoCard"'):_HTML.index('id="hwCard"')]
+    for needle in ('id="alarmForm"', 'id="watchForm"', 'id="taskForm"',
+                   'id="reportForm"', 'id="alarmList"', 'id="monitorList"',
+                   'id="taskList"', 'id="reportList"', 'id="autoKinds"',
+                   'id="alarmAdd"', 'id="watchAdd"', 'id="taskAdd"',
+                   'id="reportAdd"', 'id="autoEmpty"'):
+        assert needle in auto, needle
+
+
+def test_automations_share_one_empty_state():
+    # Four stacked "No active X." notes are gone: renderers clear their list
+    # and defer to the single shared empty note.
+    assert "updateAutoEmpty" in _HTML
+    for old in ("No active watches.", "No background tasks.",
+                "No scheduled reports.", "No alarms armed."):
+        assert old not in _HTML, old
+
+
+def test_events_card_reads_activity():
+    assert "<h2>Activity</h2>" in _HTML
+    assert "<h2>Events</h2>" not in _HTML
 
 
 def test_popover_matches_rail_form():
