@@ -86,6 +86,41 @@ def derive_substream_url(main_url: str | None) -> str | None:
     return None
 
 
+# Scheme defaults for an rtsp(s) URL that omits the port (RFC 7826).
+_RTSP_DEFAULT_PORTS = {"rtsp": 554, "rtsps": 322}
+
+
+def rtsp_port_from_url(url: str | None) -> int | None:
+    """Return the TCP port an rtsp(s) URL actually streams on.
+
+    ``cameras.port`` is the camera's RTSP port, but nothing used to keep it in
+    step with ``cameras.rtsp_url`` — a camera added with an explicit URL on a
+    non-standard port kept the 554 default and the UI then showed an address
+    the stream was never on. Callers use this to derive the column from the URL,
+    which is what MediaMTX actually pulls.
+
+    Returns None for a missing/unparseable URL or a non-rtsp scheme, so callers
+    can leave the stored value alone rather than overwrite it with a guess.
+    """
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in _RTSP_DEFAULT_PORTS:
+        return None
+    try:
+        # Raises ValueError on a malformed authority (e.g. "host:abc").
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        return _RTSP_DEFAULT_PORTS[scheme]
+    return port if 1 <= port <= 65535 else None
+
+
 def inject_credentials(url: str | None, username: str | None, password: str | None) -> str | None:
     """Embed ``user:pass@`` into an rtsp(s) URL's authority (no-op if the URL
     already has userinfo, isn't rtsp, or no username is given)."""

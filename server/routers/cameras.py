@@ -402,6 +402,24 @@ async def create_camera(
             control_scheme,
         )
 
+    # Keep the stored RTSP port in step with the URL that will actually be
+    # pulled. `port` defaults to 554, so a camera added with an explicit URL on
+    # another port (rtsp://host:8554/...) used to keep the default and the
+    # cameras list then rendered "host:554" — an address nothing answers on,
+    # which is the first thing an operator checks when the stream drops.
+    # Derived here, after both branches above have settled `rtsp_url`.
+    from services.camera_source_resolver import rtsp_port_from_url
+
+    _stream_port = rtsp_port_from_url(camera_create.rtsp_url)
+    if _stream_port is not None and _stream_port != camera_create.port:
+        camera_logger.info(
+            "camera %s: port %s -> %s, taken from the RTSP URL",
+            camera_create.name,
+            camera_create.port,
+            _stream_port,
+        )
+        camera_create = camera_create.model_copy(update={"port": _stream_port})
+
     # Duplicate guard — compared after RTSP derivation/credential injection so
     # the final URL is what's matched. 409 carries the matches so the client
     # can show "already added — add anyway?" and retry with ?force=true.
@@ -1006,8 +1024,26 @@ async def update_camera(
         # Refactoring: Since we have the camera, we can use it.
         # But we need to update it.
         was_active = bool(camera.is_active)
-        for field, value in camera_update.model_dump(exclude_unset=True).items():
+        update_fields = camera_update.model_dump(exclude_unset=True)
+        for field, value in update_fields.items():
             setattr(camera, field, value)
+
+        # Re-point `port` whenever the stream URL moves, for the same reason the
+        # create path derives it: MediaMTX pulls `rtsp_url`, so that URL's port
+        # is the only one worth showing. A `port` sent in the same request loses
+        # to the URL rather than leaving the two contradicting each other.
+        if "rtsp_url" in update_fields:
+            from services.camera_source_resolver import rtsp_port_from_url
+
+            stream_port = rtsp_port_from_url(camera.rtsp_url)
+            if stream_port is not None and stream_port != camera.port:
+                camera_logger.info(
+                    "camera %s: port %s -> %s, taken from the updated RTSP URL",
+                    camera.id,
+                    camera.port,
+                    stream_port,
+                )
+                camera.port = stream_port
 
         db.commit()
         db.refresh(camera)
