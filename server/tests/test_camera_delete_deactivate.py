@@ -76,6 +76,7 @@ def env(monkeypatch):
     # Never touch MediaMTX or the recordings disk from these tests.
     unprovision_calls: list[tuple[int, str]] = []
     provision_calls: list[int] = []
+    upsert_calls: list[tuple] = []
 
     async def _fake_unprovision(camera_id, camera_ip):
         unprovision_calls.append((camera_id, camera_ip))
@@ -85,8 +86,19 @@ def env(monkeypatch):
         provision_calls.append(camera_id)
         return {"status": "success"}
 
+    # A URL edit now re-provisions the path, and does so transactionally — an
+    # unstubbed call would reach for a real MediaMTX and the edit would be
+    # rejected with 502. See test_camera_edit_reprovision.py for the tests that
+    # exercise that contract; here it just has to succeed.
+    async def _fake_upsert(camera_id, camera_ip, config, *, transport_security=None):
+        upsert_calls.append((camera_id, camera_ip, dict(config)))
+        return {"status": "ok"}
+
     monkeypatch.setattr(
         MediaMtxAdminService, "unprovision_path", staticmethod(_fake_unprovision)
+    )
+    monkeypatch.setattr(
+        MediaMtxAdminService, "upsert_path", staticmethod(_fake_upsert)
     )
     monkeypatch.setattr(
         MediaMtxStartupService,
@@ -158,6 +170,7 @@ def env(monkeypatch):
             make_camera=make_camera,
             unprovision_calls=unprovision_calls,
             provision_calls=provision_calls,
+            upsert_calls=upsert_calls,
         )
     finally:
         db.close()

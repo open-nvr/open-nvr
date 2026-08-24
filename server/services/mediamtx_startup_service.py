@@ -248,7 +248,7 @@ class MediaMtxStartupService:
 
             try:
                 # Build configuration for provisioning (pass db for effective path lookup)
-                provision_config = MediaMtxStartupService._build_provision_config(
+                provision_config = MediaMtxStartupService.build_provision_config(
                     camera, config, db
                 )
 
@@ -273,8 +273,13 @@ class MediaMtxStartupService:
                     config.transport_security if config is not None else None
                 )
 
-                # Attempt provisioning
-                result = await MediaMtxAdminService.provision_path(
+                # Attempt provisioning. upsert, not add: an existing path must
+                # be REPLACED with the current config, not left alone. Plain
+                # `add` answers "path already exists" for every camera that is
+                # already streaming, which used to be counted as success below
+                # — so this loop (and the MediaMTX runOnInit hook that drives
+                # it) could never correct a camera whose URL had changed.
+                result = await MediaMtxAdminService.upsert_path(
                     camera.id,
                     camera.ip_address,
                     provision_config,
@@ -310,56 +315,57 @@ class MediaMtxStartupService:
                     break
 
                 else:
-                    # Check if it's already exists error - that's actually success for us
-                    error_msg = result.get("details", {}).get("error", "").lower()
-                    if (
-                        "already exists" in error_msg
-                        or "path already exists" in error_msg
-                    ):
-                        camera_result["status"] = "success"
-                        camera_result["note"] = "Path already existed"
-                        camera.status = "provisioned"
-                        db.commit()
-
-                        mediamtx_logger.info(
-                            f"Camera {camera.id} ({camera.name}) already provisioned",
+                    # NB: "path already exists" is NOT handled here any more.
+                    # upsert_path resolves that conflict by replacing the path
+                    # in place, so it can only reach this branch as a genuine
+                    # failure (the replace itself failed). Treating it as
+                    # success — which this code used to do — is exactly what
+                    # made an edited RTSP URL never reach MediaMTX: the path
+                    # existed, so the new config was reported as applied and
+                    # silently dropped. Retry it like any other error.
+                    error_msg = str(
+                        result.get("details", {}).get("error", "")
+                    ).lower()
+                    if "already exists" in error_msg:
+                        mediamtx_logger.warning(
+                            f"Camera {camera.id} ({camera.name}) still reports "
+                            "'already exists' after an upsert — the replace "
+                            "leg failed or MediaMTX reworded its error",
                             extra={
-                                "action": "mediamtx.startup.camera_already_exists",
+                                "action": "mediamtx.startup.upsert_conflict_unresolved",
                                 "camera_id": camera.id,
                                 "camera_name": camera.name,
                             },
                         )
-                        break
-                    else:
-                        camera_result["error"] = result.get("details", {}).get(
-                            "error", "Unknown error"
+                    camera_result["error"] = result.get("details", {}).get(
+                        "error", "Unknown error"
+                    )
+
+                    if attempt < max_retries - 1:
+                        mediamtx_logger.warning(
+                            f"Camera {camera.id} provisioning failed, retrying (attempt {attempt + 1}/{max_retries})",
+                            extra={
+                                "action": "mediamtx.startup.camera_retry",
+                                "camera_id": camera.id,
+                                "attempt": attempt + 1,
+                                "error": camera_result["error"],
+                            },
                         )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        camera_result["status"] = "failed"
+                        camera.status = "provision_failed"
+                        db.commit()
 
-                        if attempt < max_retries - 1:
-                            mediamtx_logger.warning(
-                                f"Camera {camera.id} provisioning failed, retrying (attempt {attempt + 1}/{max_retries})",
-                                extra={
-                                    "action": "mediamtx.startup.camera_retry",
-                                    "camera_id": camera.id,
-                                    "attempt": attempt + 1,
-                                    "error": camera_result["error"],
-                                },
-                            )
-                            await asyncio.sleep(retry_delay)
-                        else:
-                            camera_result["status"] = "failed"
-                            camera.status = "provision_failed"
-                            db.commit()
-
-                            mediamtx_logger.error(
-                                f"Camera {camera.id} provisioning failed after {max_retries} attempts",
-                                extra={
-                                    "action": "mediamtx.startup.camera_failed",
-                                    "camera_id": camera.id,
-                                    "camera_name": camera.name,
-                                    "error": camera_result["error"],
-                                },
-                            )
+                        mediamtx_logger.error(
+                            f"Camera {camera.id} provisioning failed after {max_retries} attempts",
+                            extra={
+                                "action": "mediamtx.startup.camera_failed",
+                                "camera_id": camera.id,
+                                "camera_name": camera.name,
+                                "error": camera_result["error"],
+                            },
+                        )
 
             except TransportPolicyViolation as e:
                 # A policy violation is deterministic — retrying won't help.
@@ -418,10 +424,17 @@ class MediaMtxStartupService:
         return camera_result
 
     @staticmethod
-    def _build_provision_config(
+    def build_provision_config(
         camera: Camera, config: CameraConfig | None, db: Session = None
     ) -> dict[str, Any]:
-        """Build provisioning configuration for a camera."""
+        """Build provisioning configuration for a camera.
+
+        Public because the camera-edit route builds the same payload against an
+        uncommitted, in-request session (it must provision BEFORE it commits, so
+        a MediaMTX refusal can roll the edit back) and therefore cannot go
+        through ``provision_camera_by_id``, which opens a session of its own.
+        Reads live off the Camera row, so it always carries the freshest URLs.
+        """
         provision_config = {
             "source_url": camera.rtsp_url,
             "substream_url": camera.substream_url,

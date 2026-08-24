@@ -699,6 +699,59 @@ class MediaMtxAdminService:
     # === RTSP STREAM PUSHING ===
 
     @staticmethod
+    async def upsert_path(
+        camera_id: int,
+        camera_ip: str,
+        config: dict[str, Any],
+        *,
+        transport_security: str | None = None,
+    ) -> dict[str, Any]:
+        """Add the camera's path, or replace it in place if it already exists.
+
+        The idempotent entry point every provisioner should use. ``add`` alone
+        is not enough: for a camera that is already streaming, MediaMTX answers
+        "path already exists" and the new configuration is silently dropped —
+        which is why editing a camera used to leave the media server on the old
+        source URL forever.
+
+        The conflict is resolved with ``POST /config/paths/replace``, a single
+        config transaction, NOT unprovision + re-provision: the latter is two
+        reloads with a window where the path doesn't exist at all, and a re-add
+        that loses the race with MediaMTX's listener reload leaves the camera
+        with no path (issue #218). ``replace_path`` also short-circuits to a
+        true no-op when the running config already matches, so a re-provision
+        with unchanged settings costs one GET and causes no stream blip.
+
+        ``TransportPolicyViolation`` is raised by the gate inside
+        ``provision_path``/``replace_path`` before any HTTP, and deliberately
+        propagates: callers decide whether that refuses the whole operation.
+        """
+        result = await MediaMtxAdminService.provision_path(
+            camera_id, camera_ip, config, transport_security=transport_security
+        )
+
+        # Substring match, lowercased — same leniency as the startup service's
+        # check, so a MediaMTX rewording of the error only has to be tracked in
+        # one place.
+        error_text = str(result.get("details", {}).get("error", "")).lower()
+        if result.get("status") == "error" and "already exists" in error_text:
+            result = await MediaMtxAdminService.replace_path(
+                camera_id,
+                camera_ip,
+                config,
+                transport_security=transport_security,
+            )
+            if result.get("status") == "ok":
+                result["action"] = (
+                    "rtsp_stream_unchanged" if result.get("unchanged")
+                    else "rtsp_stream_replaced"
+                )
+            else:
+                result["action"] = "replace_failed"
+
+        return result
+
+    @staticmethod
     async def push_rtsp_stream(
         camera_id: int,
         camera_ip: str,
@@ -748,32 +801,9 @@ class MediaMtxAdminService:
         else:
             config["recording"] = {"enabled": False}
 
-        result = await MediaMtxAdminService.provision_path(
+        result = await MediaMtxAdminService.upsert_path(
             camera_id, camera_ip, config, transport_security=transport_security
         )
-
-        # If path already exists, atomically replace its configuration.
-        # NOTE: this used to be unprovision + re-provision, i.e. two config
-        # reloads with a window where the path didn't exist at all — a re-add
-        # that lost the race with MediaMTX's listener reload left the camera
-        # with NO path (no live view, no recording) until manual repair.
-        if (
-            result.get("status") == "error"
-            and result.get("details", {}).get("error") == "path already exists"
-        ):
-            result = await MediaMtxAdminService.replace_path(
-                camera_id,
-                camera_ip,
-                config,
-                transport_security=transport_security,
-            )
-            if result.get("status") == "ok":
-                result["action"] = (
-                    "rtsp_stream_unchanged" if result.get("unchanged")
-                    else "rtsp_stream_replaced"
-                )
-            else:
-                result["action"] = "replace_failed"
 
         if result.get("status") == "ok":
             if "action" not in result:
@@ -863,6 +893,20 @@ class MediaMtxAdminService:
                         "http_status": result.get("http_status"),
                         "result": result,
                     },
+                )
+            elif "already exists" in str(
+                result.get("details", {}).get("error", "")
+            ).lower():
+                # Not a failure: `add` is the first leg of upsert_path, and for
+                # any camera that is already streaming the path is expected to
+                # exist — the caller resolves it with a replace. Logging this at
+                # ERROR put one line per camera in the log on every boot, which
+                # is how real provisioning errors get tuned out.
+                mediamtx_logger.log_action(
+                    "mediamtx.provision_path_exists",
+                    camera_id=camera_id,
+                    message=f"MediaMTX path already exists, replacing in place: {name}",
+                    extra_data={"path": name, "http_status": result.get("http_status")},
                 )
             else:
                 mediamtx_logger.error(
@@ -1197,19 +1241,22 @@ class MediaMtxAdminService:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.delete(url, headers=MediaMtxAdminService._headers())
             # Tear down the agent substream path too (best-effort; harmless if
-            # it was never provisioned). Keyed off the setting so deployments
-            # not using substreams don't pay an extra call per camera delete.
-            if settings.agent_live_use_substream:
-                from services.stream_service import substream_name
+            # it was never provisioned). UNCONDITIONAL: provision_path and
+            # replace_path create the sub whenever a sub source exists,
+            # regardless of agent_live_use_substream (that setting is the
+            # AGENT's choice of which path to WATCH, not a gate on the path
+            # existing). Gating only the teardown on it left an orphaned -sub
+            # pulling from the camera forever after every delete or re-path.
+            from services.stream_service import substream_name
 
-                try:
-                    await client.delete(
-                        MediaMtxAdminService._base()
-                        + f"/config/paths/delete/{substream_name(name)}",
-                        headers=MediaMtxAdminService._headers(),
-                    )
-                except Exception:  # pragma: no cover - best effort
-                    pass
+            try:
+                await client.delete(
+                    MediaMtxAdminService._base()
+                    + f"/config/paths/delete/{substream_name(name)}",
+                    headers=MediaMtxAdminService._headers(),
+                )
+            except Exception:  # pragma: no cover - best effort
+                pass
         return MediaMtxAdminService._to_result(name, resp)
 
     @staticmethod

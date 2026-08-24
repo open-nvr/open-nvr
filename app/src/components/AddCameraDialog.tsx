@@ -21,6 +21,8 @@ import { apiService } from '../lib/apiService'
 import { duplicateCameraNames, isDuplicateCameraError } from '../services/cameraService'
 import { QrScanner } from './QrScanner'
 import { parseCameraQr } from '../lib/cameraQr'
+import { syncCameraIdentity } from '../lib/cameraIdentity'
+import type { IdentityField } from '../lib/cameraIdentity'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
 import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, X } from 'lucide-react'
@@ -141,6 +143,13 @@ export function AddCameraDialog({
     password: '',
     rtsp_url: '',
   })
+
+  // The address, port and credentials are captured here and again inside the
+  // RTSP URL. Re-sync on blur so a camera cannot be *created* already
+  // self-contradicting. A blank URL stays blank — the server derives it over
+  // ONVIF, and fabricating one here would pre-empt a better answer.
+  const syncIdentity = (changed: IdentityField) =>
+    setForm(f => syncCameraIdentity(f, changed))
 
   // Duplicate-camera 409: hold the payload so "Add Anyway" can retry with force.
   const [duplicatePrompt, setDuplicatePrompt] = useState<{ payload: any; names: string[] } | null>(null)
@@ -1242,6 +1251,7 @@ export function AddCameraDialog({
                   placeholder="192.168.1.100"
                   value={form.ip_address}
                   onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
+                  onBlur={() => syncIdentity('ip_address')}
                 />
               </label>
             </div>
@@ -1254,6 +1264,7 @@ export function AddCameraDialog({
                   className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
                   value={form.port}
                   onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
+                  onBlur={() => syncIdentity('port')}
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1264,6 +1275,7 @@ export function AddCameraDialog({
                   placeholder="admin"
                   value={form.username}
                   onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
+                  onBlur={() => syncIdentity('username')}
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1273,6 +1285,7 @@ export function AddCameraDialog({
                   className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
                   value={form.password}
                   onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
+                  onBlur={() => syncIdentity('password')}
                 />
               </label>
             </div>
@@ -1286,6 +1299,7 @@ export function AddCameraDialog({
                   placeholder="rtsp://192.168.1.100:554/stream1"
                   value={form.rtsp_url}
                   onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                  onBlur={() => syncIdentity('rtsp_url')}
                 />
                 <button
                   type="button"

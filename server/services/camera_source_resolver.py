@@ -136,6 +136,39 @@ def inject_credentials(url: str | None, username: str | None, password: str | No
     return urlunparse(parsed._replace(netloc=userinfo + parsed.netloc))
 
 
+def replace_credentials(
+    url: str | None, username: str | None, password: str | None
+) -> str | None:
+    """Rewrite an rtsp(s) URL's ``user:pass@`` userinfo, overwriting whatever
+    was there. Clears the userinfo entirely when ``username`` is falsy.
+
+    The counterpart to :func:`inject_credentials`, which deliberately no-ops on
+    a URL that already carries userinfo. That is right at create time and wrong
+    on edit: MediaMTX authenticates to the camera from the credentials embedded
+    in the source URL, ``Camera.username``/``password`` never reach it, and the
+    edit form re-submits the URL it was prefilled with — so without this a
+    password rotation would be stored on the camera row and never take effect
+    on the stream.
+
+    Pure and offline: no ONVIF, no DESCRIBE. ``resolve_source`` must never be
+    called from the edit path — it is a multi-second network probe.
+    """
+    if not url:
+        return url
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if parsed.scheme.lower() not in ("rtsp", "rtsps"):
+        return url
+    # Strip any existing userinfo; keep host[:port] exactly as-is.
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    if not username:
+        return urlunparse(parsed._replace(netloc=host))
+    userinfo = f"{quote(username, safe='')}:{quote(password or '', safe='')}@"
+    return urlunparse(parsed._replace(netloc=userinfo + host))
+
+
 # --- RTSP DESCRIBE probe (auth-aware) --------------------------------------
 
 
