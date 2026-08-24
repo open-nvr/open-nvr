@@ -64,35 +64,83 @@ def test_present_questions_not_past(q):
 # ── _window_from_text ───────────────────────────────────────────────────
 
 def test_window_last_30_minutes():
-    start, secs = ca._window_from_text("in the last 30 minutes", now=NOW)
-    assert secs == 1800
+    start, end, secs = ca._window_from_text("in the last 30 minutes", now=NOW)
+    assert secs == 1800 and end is None
     assert start == (NOW - timedelta(minutes=30)).isoformat(timespec="seconds")
     assert "+05:30" in start          # tz offset present, as search_history needs
 
 
 def test_window_last_2_hours():
-    start, secs = ca._window_from_text("over the past 2 hours", now=NOW)
-    assert secs == 7200
+    start, end, secs = ca._window_from_text("over the past 2 hours", now=NOW)
+    assert secs == 7200 and end is None
     assert start == (NOW - timedelta(hours=2)).isoformat(timespec="seconds")
 
 
 def test_window_today_starts_at_midnight():
-    start, secs = ca._window_from_text("did you see a person today", now=NOW)
+    start, end, secs = ca._window_from_text("did you see a person today", now=NOW)
     assert start == NOW.replace(hour=0, minute=0, second=0,
                                 microsecond=0).isoformat(timespec="seconds")
+    assert end is None
     assert secs == int(9.5 * 3600)
 
 
-def test_window_yesterday_starts_previous_midnight():
-    start, _ = ca._window_from_text("was a dog here yesterday", now=NOW)
-    assert start == (NOW.replace(hour=0, minute=0, second=0, microsecond=0)
-                     - timedelta(days=1)).isoformat(timespec="seconds")
+def test_window_yesterday_is_midnight_to_midnight():
+    start, end, _ = ca._window_from_text("was a dog here yesterday", now=NOW)
+    midnight = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+    assert start == (midnight - timedelta(days=1)).isoformat(timespec="seconds")
+    assert end == midnight.isoformat(timespec="seconds")
 
 
 def test_window_unparseable_is_open_with_hour_fallback():
-    start, secs = ca._window_from_text("did anyone come by", now=NOW)
-    assert start is None
+    start, end, secs = ca._window_from_text("did anyone come by", now=NOW)
+    assert start is None and end is None
     assert secs == 3600
+
+
+# ── absolute clock ranges — the background-task phrasings ───────────────
+
+def test_window_from_2pm_to_3pm():
+    start, end, _ = ca._window_from_text(
+        "check the red truck on all cameras from 2pm to 3pm", now=NOW)
+    assert start == NOW.replace(hour=14, minute=0, second=0,
+                                microsecond=0).isoformat(timespec="seconds")
+    assert end == NOW.replace(hour=15, minute=0, second=0,
+                              microsecond=0).isoformat(timespec="seconds")
+
+
+def test_window_between_1_and_2pm_inherits_meridiem():
+    start, end, _ = ca._window_from_text(
+        "what all trucks entered between 1 and 2pm", now=NOW)
+    assert start.endswith("T13:00:00+05:30")
+    assert end.endswith("T14:00:00+05:30")
+
+
+def test_window_24h_range_and_minutes():
+    start, end, _ = ca._window_from_text("during 13:15 to 14:45 pm", now=NOW)
+    assert start.endswith("T13:15:00+05:30")
+    assert end.endswith("T14:45:00+05:30")
+
+
+def test_window_range_wrapping_midnight():
+    start, end, _ = ca._window_from_text("from 11pm to 1am", now=NOW)
+    assert start.endswith("T23:00:00+05:30")
+    # end lands on the NEXT day
+    assert end > start
+
+
+def test_clock_range_counts_as_past_question():
+    assert ca._is_past_question("check the red truck on all cameras from 2pm to 3pm")
+    assert ca._is_past_question("what all trucks entered during 1pm to 2pm")
+
+
+def test_forced_call_carries_absolute_window_and_label():
+    name, args = ca._pick_forced_call(
+        "check the red truck on all cameras from 2pm to 3pm", "cam1", ALL,
+        now=NOW)
+    assert name == "search_history"
+    assert args["label"] == "truck"
+    assert args["start_time"].endswith("T14:00:00+05:30")
+    assert args["end_time"].endswith("T15:00:00+05:30")
 
 
 # ── _pick_forced_call ───────────────────────────────────────────────────

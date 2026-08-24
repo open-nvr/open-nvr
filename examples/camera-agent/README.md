@@ -35,7 +35,7 @@ or the local-first brain.
 From the repo root:
 
 ```bash
-examples/camera-agent/quickstart.sh          # voice  (open https://localhost:9100/demo, tap Talk, speak)
+examples/camera-agent/quickstart.sh          # voice  (open https://localhost:9100/demo — type, dictate, or tap Talk)
 examples/camera-agent/quickstart.sh --chat   # chat   (type your question instead)
 examples/camera-agent/quickstart.sh --down   # stop
 ```
@@ -224,7 +224,7 @@ cp config.example.yml config.yml
 # 5. Run
 python camera_agent.py --config config.yml
 
-# 6. Open https://localhost:9100/demo, click Start, and speak.
+# 6. Open https://localhost:9100/demo — type, tap the mic to dictate, or tap Talk.
 ```
 
 ## Try these

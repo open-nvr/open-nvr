@@ -75,7 +75,13 @@
     .app{flex:1 1 auto; min-height:0; display:grid;
       grid-template-columns:minmax(0,1fr) 22rem; gap:1.1rem; align-items:stretch;}
     @media (max-width:900px){ .wrap{height:auto; min-height:100vh; overflow:auto;}
-      body{overflow:auto;} .app{grid-template-columns:1fr;} }
+      body{overflow:auto;} .app{grid-template-columns:1fr;}
+      /* Grid items default to min-width:auto, so any wide child (the wake-word
+         label, the camera row) forced the single column past the viewport and
+         the whole page side-scrolled on phones. min-width:0 lets the column
+         actually shrink; the wake label wraps instead of pushing. */
+      .main-col,.side,.main-col>.card{min-width:0;}
+      .wakeopt{white-space:normal;} }
     .main-col{min-height:0; display:flex;}
     .side{min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:0.9rem; padding-right:2px;}
 
@@ -169,18 +175,30 @@
     .camtile .ct-x{background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.8rem; padding:0;}
     .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
 
-    /* ── talk button ─────────────────────────────────────────────────── */
-    .talk{width:100%; border:none; cursor:pointer; flex:0 0 auto;
+    /* ── talk button (compact, lives in the bottom input bar) ─────────── */
+    /* One small pill next to Send: tap → hands-free session (label flips to
+       ● Stop, red, mic level ring hugs it); Stop or the idle timeout ends
+       it. The bar's dictation mic handles "speak into the text box". */
+    .talk{flex:0 0 auto; border:none; cursor:pointer;
       background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
-      padding:1.05rem 1.25rem; border-radius:14px; font-weight:750; font-size:1.05rem;
-      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none;
-      -webkit-user-select:none; user-select:none; box-shadow:0 10px 30px -12px rgba(94,179,246,0.7);
+      padding:0.55rem 1.05rem; border-radius:999px; font-weight:700; font-size:0.85rem;
+      display:flex; align-items:center; justify-content:center; gap:0.4rem; touch-action:none;
+      -webkit-user-select:none; user-select:none; box-shadow:0 6px 16px -8px rgba(94,179,246,0.6);
       transition:transform 0.05s, filter 0.15s;}
-    .talk:hover:not(:disabled){filter:brightness(1.06);} .talk:active:not(:disabled){transform:scale(0.99);}
+    .talk:hover:not(:disabled){filter:brightness(1.06);}
+    .talk:active:not(:disabled){transform:scale(0.98);}
     .talk:disabled{opacity:0.5; cursor:progress;}
-    .talk.listening{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff;}
+    .talk.listening{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff;
+      box-shadow:0 6px 16px -8px rgba(242,85,90,0.7);}
     .talk.listening::before{content:"● "; animation:blink 1s steps(2,start) infinite;}
     @keyframes blink{to{visibility:hidden;}}
+    /* primary Send, matching the reference bar */
+    .askrow .send{flex:0 0 auto; border:none; cursor:pointer; font-weight:700; font-size:0.85rem;
+      background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      padding:0.55rem 1.15rem; border-radius:10px;}
+    .askrow .send:hover:not(:disabled){filter:brightness(1.07);}
+    .askrow .send:disabled{opacity:0.5; cursor:progress;}
+    .statusrow .status{font-size:0.76rem; padding:0.4rem 0.6rem;}
 
     /* ── rows, status, chips, ghost buttons ──────────────────────────── */
     .row{display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; flex:0 0 auto;}
@@ -198,9 +216,41 @@
       border-radius:12px; padding:0.68rem 0.8rem; font-size:0.95rem; transition:border-color 0.15s;}
     .askrow input::placeholder{color:var(--faint);}
     .askrow input:focus{outline:none; border-color:var(--accent);}
-    .askrow .ghost{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
-      border:none; font-weight:700; padding-left:1.1rem; padding-right:1.1rem;}
-    .askrow .ghost:hover{filter:brightness(1.06);}
+    /* (Send used to be a .ghost styled blue here; it now has its own .send
+       class above, so ghosts in the bar — Reset — stay quiet like ghosts
+       should.) */
+    /* ── phone-only bottom tab bar (desktop never renders it) ────────── */
+    .mtabs{display:none;}
+    @media (max-width:900px){
+      .wrap{padding-bottom:66px;}   /* content never hides behind the bar */
+      .mtabs{position:fixed; bottom:0; left:0; right:0; z-index:60; display:flex;
+        background:rgba(11,17,28,0.96); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+        border-top:1px solid var(--stroke);
+        padding:0.3rem 0.35rem calc(0.3rem + env(safe-area-inset-bottom,0px));}
+      .mtabs button{flex:1; background:none; border:none; color:var(--faint); font-size:0.6rem;
+        display:flex; flex-direction:column; align-items:center; gap:2px; padding:0.2rem 0; cursor:pointer;}
+      .mtabs button .mi{font-size:1.05rem; line-height:1;}
+      .mtabs button.on{color:var(--accent);}
+      /* Tab-driven visibility: body[data-mtab] is set by JS at boot, so a
+         JS failure degrades to the old full stacked page, never to a blank
+         screen. Skills and Hardware share the Skills tab. */
+      body[data-mtab]:not([data-mtab="chat"]) .main-col{display:none;}
+      body[data-mtab]:not([data-mtab="activity"]) #eventsCard{display:none;}
+      body[data-mtab]:not([data-mtab="history"]) #historyCard{display:none;}
+      body[data-mtab]:not([data-mtab="auto"]) #autoCard{display:none;}
+      body[data-mtab]:not([data-mtab="skills"]) #skillsCard,
+      body[data-mtab]:not([data-mtab="skills"]) #hwCard{display:none;}
+    }
+    /* Phones: the bar's five elements (mic · input · Send · Talk · Reset)
+       cannot fit one line — Talk and Reset ended up pushed clean
+       off-canvas, unreachable. Wrap: input takes the full first line, the
+       buttons share the second. AFTER the base .askrow rules so the phone
+       flex wins the same-specificity fight. */
+    @media (max-width:900px){
+      .askrow{flex-wrap:wrap;}
+      .askrow input{flex:1 1 100%; order:-1; min-width:0;}
+      .askrow .send,.askrow .talk{flex:1;}
+    }
 
     /* ── conversation log + bubbles ──────────────────────────────────── */
     .log{margin-top:0.85rem; flex:1 1 auto; min-height:0; overflow-y:auto;
@@ -304,6 +354,35 @@
     .ghost.primary:hover{filter:brightness(1.06);}
     .notifyrow{display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem;}
     .notifyrow .empty-note{flex:1;} .notifyrow .ghost{font-size:0.72rem; padding:0.3rem 0.55rem;}
+    /* ── header health dot ───────────────────────────────────────────── */
+    .hdot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-left:0.45rem;
+      vertical-align:middle; background:var(--faint); cursor:default;}
+    .hdot.ok{background:#34d399; box-shadow:0 0 6px rgba(52,211,153,0.55);}
+    .hdot.warn{background:var(--amber); box-shadow:0 0 6px rgba(246,196,83,0.55);}
+    .hdot.down{background:#f2555a; box-shadow:0 0 6px rgba(242,85,90,0.6); animation:hpulse 1.4s ease infinite;}
+    @keyframes hpulse{50%{opacity:0.35;}}
+    /* ── ask-me suggestion chips ─────────────────────────────────────── */
+    .suggestrow{display:flex; gap:0.4rem; flex-wrap:nowrap; overflow-x:auto; padding:0.15rem 0 0.35rem;
+      scrollbar-width:none;} .suggestrow::-webkit-scrollbar{display:none;}
+    .suggest{flex:0 0 auto; background:rgba(94,179,246,0.10); color:var(--accent); border:1px solid rgba(94,179,246,0.25);
+      border-radius:999px; padding:0.28rem 0.7rem; font-size:0.72rem; cursor:pointer; white-space:nowrap;}
+    .suggest:hover{background:rgba(94,179,246,0.18);}
+    /* ── history card (remembered visits + kept photos) ──────────────── */
+    .histfilters{display:flex; gap:0.35rem; margin-bottom:0.5rem;}
+    .histfilters select{flex:1; min-width:0; background:rgba(0,0,0,0.28); color:var(--text);
+      border:1px solid var(--stroke); border-radius:8px; padding:0.3rem 0.35rem; font-size:0.72rem;}
+    .visit{display:flex; align-items:center; gap:0.55rem; padding:0.4rem 0.45rem; background:var(--glass2);
+      border:1px solid var(--stroke); border-radius:10px; margin-bottom:0.4rem;}
+    .visit .vthumb{width:52px; height:40px; flex:0 0 auto; border-radius:7px; object-fit:cover;
+      background:rgba(0,0,0,0.35); cursor:pointer; border:1px solid var(--stroke);}
+    .visit .vthumb.noimg{display:grid; place-items:center; color:var(--faint); font-size:0.9rem; cursor:default;}
+    .visit .vbody{flex:1; min-width:0;}
+    .visit .vwhat{font-size:0.78rem;} .visit .vwhat b{text-transform:capitalize;}
+    .visit .vwhere{font-size:0.66rem; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .visit .vask{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.9rem; flex:0 0 auto;}
+    .visit .vask:hover{color:var(--accent);}
+    .vplate{display:inline-block; background:rgba(246,196,83,0.14); color:var(--amber);
+      border:1px solid rgba(246,196,83,0.3); border-radius:5px; padding:0 0.3rem; font-size:0.64rem; margin-left:0.3rem;}
 
     /* hardware */
     .hwrow{padding:0.44rem 0.55rem; background:var(--glass2); border:1px solid var(--stroke);
@@ -456,19 +535,55 @@
     #loginGo:disabled{opacity:0.6; cursor:default;}
     .login-foot{margin-top:0.7rem; font-size:0.66rem; color:var(--faint); text-align:center;}
 
-    /* ── install-time interaction mode (from /agent text_mode) ─────────
-       voice → the text box never shows; text → the voice controls never
-       show. The body class is set once in loadAgent(). */
-    body.mode-voice .askrow, body.mode-voice #camAsk{display:none !important;}
+    /* ── interaction modes ──────────────────────────────────────────────
+       Install-time (from /agent text_mode): a TEXT install ships no
+       Whisper/Piper, so every voice control (Talk, dictate mic, the
+       Chat|Talk toggle) is hidden outright. A VOICE install now gets the
+       UNIFIED bar: chat with a dictate mic is the DEFAULT, and hands-free
+       Talk is a runtime choice (the Chat|Talk toggle → body.ui-talk).
+       Talk auto-returns to chat when the session idles out. */
     body.mode-text #talk, body.mode-text .voicebar, body.mode-text #micdot,
-    body.mode-text #wakeOpt, body.mode-text #camTalk{display:none !important;}
-    body.mode-voice .log:empty::after{content:"Ask your cameras anything — tap Talk and speak.";}
+    body.mode-text #wakeOpt, body.mode-text #camTalk,
+    body.mode-text #dictate{display:none !important;}
+    /* Chat is always on; the wake-word option only matters while a
+       hands-free session is live (body.ui-talk, set by start/stopSession).
+       The voicebar is NOT gated here — it is state-driven (it rises via
+       body:has(#ram.listening/thinking/speaking) below), so the animated
+       Listening/Thinking/Speaking pill shows for TYPED asks too, exactly
+       as it always did. */
+    body:not(.ui-talk) #wakeOpt{display:none !important;}
+    body.mode-voice .log:empty::after{content:"Ask your cameras anything — type, tap the mic to dictate, or tap Talk.";}
     body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
+    /* Automations kind chooser (🔔 Alarm · 👁 Watch · ⚙ Task · 🕐 Report) */
+    .autokinds{display:flex; gap:0.35rem; margin-bottom:0.55rem;}
+    .autokinds .ghost{flex:1; font-size:0.74rem; padding:0.42rem 0.2rem; text-align:center; white-space:nowrap;}
+    .autokinds .ghost.open{color:var(--accent); border-color:rgba(94,179,246,0.4);}
+    /* round dictate mic in the input bar */
+    .micbtn{flex:0 0 auto; width:40px; height:40px; border-radius:50%; border:none; cursor:pointer;
+      background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      display:flex; align-items:center; justify-content:center;
+      box-shadow:0 6px 16px -8px rgba(94,179,246,0.6);}
+    .micbtn:hover:not(:disabled){filter:brightness(1.07);}
+    .micbtn:disabled{opacity:0.5; cursor:progress;}
+    .micbtn.rec{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff; animation:hpulse 1.2s ease infinite;}
   </style>
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span></div>
   <div class="ambient-speak" aria-hidden="true"></div>
+  <!-- Shared pick-list behind every alarm/watch target input — filled from
+       /alarm-targets (the detector's real vocabulary on this install). -->
+  <datalist id="targetOpts"></datalist>
+  <!-- Phone-only bottom tab bar: one long stacked page is desktop UX, not
+       mobile. Each tab shows ONE section; desktop never sees this (the CSS
+       lives entirely inside the max-width media query). -->
+  <nav class="mtabs" id="mtabs" aria-label="Sections">
+    <button type="button" data-tab="chat" class="on"><span class="mi">💬</span>Chat</button>
+    <button type="button" data-tab="activity"><span class="mi">🔔</span>Activity</button>
+    <button type="button" data-tab="history" id="mtabHistory"><span class="mi">🕘</span>History</button>
+    <button type="button" data-tab="auto"><span class="mi">⚡</span>Automations</button>
+    <button type="button" data-tab="skills"><span class="mi">✨</span>Skills</button>
+  </nav>
   <div class="wrap">
     <div class="alarmbar" id="alarmbar" hidden>
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="ab-text" id="alarmText">Alarm</span>
@@ -488,8 +603,8 @@
               <video class="avatar-video" id="avatarVideo" muted loop playsinline preload="auto" aria-hidden="true"></video>
             </div>
             <div>
-              <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent</h1></div>
-              <p class="lede" id="lede">Tap <strong>Talk</strong> and speak — it listens and answers aloud, tap Stop when done.</p>
+              <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent<span class="hdot" id="healthDot" title="Checking agent health…"></span></h1></div>
+              <p class="lede" id="lede">Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.</p>
               <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
                 <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
               <div class="micdot" id="micdot" hidden>mic live</div>
@@ -544,18 +659,18 @@
             </div>
             <div class="acts">
               <button class="apill talk2" id="camTalk" type="button">🎙 Talk</button>
-              <button class="apill" id="camAsk" type="button">💬 Ask</button>
               <button class="apill" id="camWatch" type="button">👁 Watch</button>
               <button class="apill" id="camAlarm" type="button">🔔 Alarm</button>
               <div class="pop" id="popWatch">
                 <h4>Watch this camera</h4>
                 <select id="pwKind" aria-label="Watch kind"><option value="notify">Notify when seen</option><option value="count">Keep a live count</option></select>
-                <input id="pwTarget" type="text" placeholder="Watch for, e.g. car / person" autocomplete="off">
+                <input id="pwTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
                 <button class="go" id="pwGo" type="button">Start watch</button>
               </div>
               <div class="pop" id="popAlarm">
                 <h4>Alarm on this camera</h4>
-                <input id="paTarget" type="text" placeholder="Alert on, e.g. person / fire" autocomplete="off">
+                <input id="paName" type="text" placeholder="Name (optional), e.g. Porch person" autocomplete="off">
+                <input id="paTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
                 <select id="paRing" aria-label="Alert level">
                   <option value="chime">🔔 Notice — single chime</option>
                   <option value="pulse">⚠️ Urgent — loud 1 min, stands down</option>
@@ -580,32 +695,60 @@
             <div class="empty-note" id="camScoped"></div>
           </div>
 
+          <!-- Chat-first layout: the conversation fills the card and the
+               input bar is DOCKED AT THE BOTTOM (the shape every chat app
+               trained people on). Talk is one compact button in the bar —
+               tap → hands-free session (it becomes ● Stop); Stop or the
+               idle timeout ends it. -->
+          <div class="log" id="log"></div>
           <div class="voicebar" aria-hidden="true"><div class="pill"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="lbl"></span></div></div>
-          <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <div class="row" id="pinChip" hidden>
             <span class="chip">📌 Asking about a <span id="pinCam"></span> frame</span>
             <button id="pinClear" class="ghost" type="button" title="Unpin — ask about live frames again">✕</button>
           </div>
-          <div class="row askrow">
-            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
-            <button id="askBtn" class="ghost" type="button">Send</button>
-          </div>
-          <div class="row">
+          <div class="suggestrow" id="suggestRow" hidden></div>
+          <div class="row statusrow">
             <div class="status" id="status">Ready.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="sysCheck" class="ghost" type="button" title="Exercise every capability path — frame, detector, VLM, LLM, voice, alarms, events — and report what actually works">System check</button>
+          </div>
+          <div class="row askrow">
+            <button id="dictate" class="micbtn" type="button" title="Dictate — speak, and your words land in the box" aria-label="Dictate into the text box"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
+            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
+            <button id="askBtn" class="send" type="button">Send</button>
+            <button id="talk" class="talk" type="button" title="Hands-free: it listens and answers aloud, and stops itself after a quiet spell"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
             <button id="reset" class="ghost" type="button">Reset</button>
           </div>
-
-          <div class="log" id="log"></div>
         </div>
       </div>
 
       <div class="side">
         <div class="card" id="eventsCard">
-          <div class="cardhead"><h2>Events</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle events">▾</button></div>
+          <div class="cardhead"><h2>Activity</h2><span class="ev-scope" id="evScope" hidden></span><button class="addbtn" id="evToggle" type="button" title="Collapse / expand" aria-label="Toggle activity">▾</button></div>
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
+        </div>
+        <div class="card" id="historyCard" hidden>
+          <div class="cardhead"><h2>History</h2><button class="addbtn" id="histRefresh" type="button" title="Refresh remembered visits" aria-label="Refresh history">↻</button></div>
+          <div class="skillhint">Visits the NVR remembers, with the photo it kept. Tap 💬 to ask about one.</div>
+          <div class="histfilters">
+            <select id="histLabel" aria-label="What to look for">
+              <option value="">anything</option>
+              <option value="person" selected>person</option>
+              <option value="car">car</option>
+              <option value="truck">truck</option>
+              <option value="dog">dog</option>
+              <option value="cat">cat</option>
+            </select>
+            <select id="histCam" aria-label="Which camera"><option value="all">all cameras</option></select>
+            <select id="histHours" aria-label="How far back">
+              <option value="6">last 6 h</option>
+              <option value="24" selected>last 24 h</option>
+              <option value="168">last 7 days</option>
+              <option value="720">last 30 days</option>
+            </select>
+          </div>
+          <div id="histList"></div>
         </div>
         <div class="card" id="skillsCard">
           <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
@@ -617,8 +760,19 @@
             <button class="ghost" id="skillBrowseClose" type="button">Done</button>
           </div>
         </div>
-        <div class="card" id="alarmCard">
-          <div class="cardhead"><h2>Alarms</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="alarmAdd" type="button" title="Add an alarm" aria-label="Add an alarm">+</button></span></div>
+        <!-- One AUTOMATIONS surface for every standing behavior the agent
+             runs — alarms, watches, background tasks, scheduled reports.
+             + reveals the kind chooser; each kind opens its own form (the
+             same forms the four separate cards used to carry). -->
+        <div class="card" id="autoCard">
+          <div class="cardhead"><h2>Automations</h2><span class="headbtns"><button class="addbtn" id="ringCfg" type="button" title="Alert-level defaults for this site" aria-label="Alert-level defaults">⚙</button><button class="addbtn" id="autoAdd" type="button" title="Add an automation" aria-label="Add an automation">+</button></span></div>
+          <div class="skillhint">Alarms, watches, background tasks and reports — one list.</div>
+          <div class="autokinds" id="autoKinds" hidden>
+            <button class="ghost" id="alarmAdd" type="button" title="Ring when something is seen">🔔 Alarm</button>
+            <button class="ghost" id="watchAdd" type="button" title="Notify or keep a live count over time">👁 Watch</button>
+            <button class="ghost" id="taskAdd" type="button" title="Run a longer search in the background">⚙ Task</button>
+            <button class="ghost" id="reportAdd" type="button" title="A recurring summary, daily or every N minutes">🕐 Report</button>
+          </div>
           <div class="addform" id="ringCfgForm" hidden>
             <div class="rec-lbl">Default alert level by target</div>
             <div class="empty-note" id="ringInherited"></div>
@@ -634,7 +788,12 @@
           <div class="preset-hint" id="presetHint" hidden></div>
           <div class="addform" id="alarmForm" hidden>
             <input id="alarmName" type="text" placeholder="Name, e.g. Porch person" autocomplete="off">
-            <input id="alarmTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <input id="alarmTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="alarmCam" aria-label="Which camera to arm">
+                <option value="all">All cameras</option>
+              </select>
+            </label>
             <select id="alarmRing" aria-label="Alert level">
               <option value="chime">🔔 Notice — a single chime (visitors, deliveries)</option>
               <option value="pulse">⚠️ Urgent — loud for a minute, then stands down</option>
@@ -659,31 +818,29 @@
             <span id="notifyStatus" class="empty-note"></span>
             <button class="ghost" id="notifyTest" type="button">Test</button>
           </div>
-          <div id="alarmList"></div>
-        </div>
-        <div class="card" id="watchCard">
-          <div class="cardhead"><h2>Watching</h2><button class="addbtn" id="watchAdd" type="button" title="Add a watch" aria-label="Add a watch">+</button></div>
           <div class="addform" id="watchForm" hidden>
             <select id="watchKind" aria-label="Watch kind">
               <option value="notify">Notify when seen</option>
               <option value="count">Keep a live count</option>
             </select>
-            <input id="watchTarget" type="text" placeholder="Watch for, e.g. person / car / package" autocomplete="off">
+            <input id="watchTarget" type="text" list="targetOpts" placeholder="Watch for — type or pick: person, car, dog…" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="watchCam" aria-label="Which camera to watch">
+                <option value="all">All cameras</option>
+              </select>
+            </label>
             <button class="ghost primary" id="watchStart" type="button">Start watching</button>
             <div class="empty-note">For line-crossing counts, ask in chat — the agent will ask you where to place the line.</div>
           </div>
-          <div id="monitorList"></div>
-        </div>
-        <div class="card" id="taskCard">
-          <div class="cardhead"><h2>Background tasks</h2><button class="addbtn" id="taskAdd" type="button" title="Add a background task" aria-label="Add a background task">+</button></div>
           <div class="addform" id="taskForm" hidden>
             <input id="taskQuery" type="text" placeholder="e.g. find the red truck earlier today" autocomplete="off">
+            <label class="addform-lbl">Camera
+              <select id="taskCam" aria-label="Scope the search to one camera">
+                <option value="">Any camera</option>
+              </select>
+            </label>
             <button class="ghost primary" id="taskRun" type="button">Run in background</button>
           </div>
-          <div id="taskList"></div>
-        </div>
-        <div class="card" id="reportCard">
-          <div class="cardhead"><h2>Scheduled reports</h2><button class="addbtn" id="reportAdd" type="button" title="Schedule a report" aria-label="Schedule a report">+</button></div>
           <div class="addform" id="reportForm" hidden>
             <input id="reportName" type="text" placeholder="Name, e.g. Morning summary" autocomplete="off">
             <input id="reportQuery" type="text" placeholder="e.g. summarise overnight activity on all cameras" autocomplete="off">
@@ -691,7 +848,11 @@
             <label class="addform-lbl">or every <input id="reportEvery" type="number" min="5" step="5" placeholder="—"> minutes</label>
             <button class="ghost primary" id="reportCreate" type="button">Schedule report</button>
           </div>
+          <div id="alarmList"></div>
+          <div id="monitorList"></div>
+          <div id="taskList"></div>
           <div id="reportList"></div>
+          <div class="empty-note" id="autoEmpty">Nothing automated yet — tap + to add an alarm, watch, background task, or report.</div>
         </div>
         <div class="card" id="hwCard">
           <div class="cardhead"><h2>Hardware</h2><button class="addbtn" id="hwToggle" type="button" title="Show the per-skill breakdown" aria-label="Toggle hardware detail">▸</button></div>
@@ -1079,18 +1240,19 @@
       window._opennvrUi=a.opennvr_ui_url||"";            // deep-link base for recordings
       if(a.avatar_video===false) disableAvatarVideo();   // operator turned the video avatar off
       // Interaction mode is chosen at install time (text_mode in the
-      // config): the body class hides the OTHER mode's controls entirely —
-      // voice installs never show the text box, text installs never show
-      // the Talk button / voice pill (CSS: body.mode-voice / body.mode-text).
+      // config): text installs ship no STT/TTS, so every voice control is
+      // hidden (CSS: body.mode-text). Voice installs get the UNIFIED bar —
+      // chat + dictate mic by default, hands-free Talk one toggle away.
       if(a.text_mode){
         document.body.classList.add("mode-text");
         ledeEl.innerHTML=`Type a question — e.g. <em>"how many people on cam1?"</em>`;
         setStatus("Ready. Type a question.");
       } else {
         document.body.classList.add("mode-voice");
-        ledeEl.innerHTML=`Tap <strong>Talk</strong> and speak — it listens and answers aloud.`;
-        setStatus("Ready. Tap Talk and speak.");
+        ledeEl.innerHTML=`Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.`;
+        setStatus("Ready. Type, dictate, or tap Talk.");
       }
+      if(a.stt_available===false){ const b=$("dictate"); if(b) b.hidden=true; }
     }catch{} }
 
     // ── lite text turn ──
@@ -1125,7 +1287,90 @@
       camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
         if(!cbs().some(c=>c.checked)) all.checked=true; });
       buildCamStrip(cams);
+      // History filter + the alarm/watch/task camera pickers share the roster.
+      for(const sel of [$("histCam"), $("alarmCam"), $("watchCam"), $("taskCam")]){
+        if(!sel) continue;
+        for(const cam of cams){ const o=document.createElement("option");
+          o.value=cam.camera_id;
+          o.textContent=cam.camera_id+(cam.role?(" · "+String(cam.role).slice(0,22)):"");
+          sel.appendChild(o); } }
     }catch{} }
+
+    // ── what can set off an alarm/watch: the detector's real vocabulary ─
+    // Fills the shared <datalist> behind every target input, so operators
+    // pick from what THIS install can actually see instead of guessing.
+    // (fire/smoke are deliberately absent here — they need a dedicated
+    // detector/app; the greyed presets carry that story.)
+    async function loadAlarmTargets(){ const dl=$("targetOpts"); if(!dl) return;
+      try{ const d=await (await fetch("/alarm-targets")).json();
+        dl.innerHTML="";
+        for(const t of (d.targets||[])){ const o=document.createElement("option");
+          o.value=t; dl.appendChild(o); } }catch{} }
+
+    // ── header health dot: reachability + last vision failure ───────
+    // /health is an open path, so the dot works even behind the login.
+    async function pollHealth(){ const d=$("healthDot"); if(!d) return;
+      try{ const h=await (await fetch("/health")).json();
+        if(h.vision_error){ d.className="hdot warn";
+          d.title="Vision degraded: "+h.vision_error; }
+        else { d.className="hdot ok"; d.title="Agent healthy"; }
+      }catch{ d.className="hdot down"; d.title="Agent unreachable"; } }
+
+    // ── History card: remembered visits + their kept photos ─────────
+    // Thumbnails are fetched with fetch() (which carries the bearer token)
+    // into object URLs — a bare <img src> would arrive without auth.
+    let _histUrls=[];
+    async function loadHistory(){ if(!authReady()) return;
+      const card=$("historyCard"), list=$("histList"); if(!card||!list) return;
+      let d; try{ d=await (await fetch("/history?label="+encodeURIComponent(($("histLabel")||{}).value||"")
+        +"&camera_id="+encodeURIComponent(($("histCam")||{}).value||"all")
+        +"&hours="+encodeURIComponent(($("histHours")||{}).value||"24"))).json(); }
+      catch{ return; }
+      const htab=$("mtabHistory");
+      if(!d || d.available===false){ card.hidden=true; if(htab) htab.hidden=true; return; }
+      card.hidden=false; if(htab) htab.hidden=false;
+      for(const u of _histUrls) URL.revokeObjectURL(u); _histUrls=[];
+      list.innerHTML="";
+      if(d.ok===false){ list.innerHTML='<div class="empty-note">Couldn’t reach the history store just now.</div>'; return; }
+      const rows=d.events||[];
+      if(!rows.length){ list.innerHTML='<div class="empty-note">No remembered visits in this window.</div>'; return; }
+      const t=iso=>{ if(!iso) return ""; const dt=new Date(iso);
+        return isNaN(dt)?"":dt.toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); };
+      for(const v of rows.slice(0,30)){
+        const row=document.createElement("div"); row.className="visit";
+        const span=(t(v.started_at)+(v.ended_at&&v.ended_at!==v.started_at?" – "+new Date(v.ended_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):""));
+        if(v.has_evidence){
+          const im=document.createElement("img"); im.className="vthumb"; im.alt=v.label||"visit";
+          im.title="Tap to enlarge";
+          fetch("/history/"+encodeURIComponent(v.id)+"/evidence").then(r=>r.ok?r.blob():null)
+            .then(b=>{ if(!b) return; const u=URL.createObjectURL(b); _histUrls.push(u); im.src=u;
+              im.addEventListener("click",()=>openLightbox(u,(v.label||"visit")+" · "+span)); }).catch(()=>{});
+          row.appendChild(im);
+        } else {
+          const ph=document.createElement("div"); ph.className="vthumb noimg"; ph.textContent="—";
+          ph.title="No photo kept for this visit"; row.appendChild(ph);
+        }
+        const body=document.createElement("div"); body.className="vbody";
+        const what=document.createElement("div"); what.className="vwhat";
+        const b=document.createElement("b"); b.textContent=v.label||"visit"; what.appendChild(b);
+        what.appendChild(document.createTextNode(" · "+span));
+        if(v.plate_text){ const p=document.createElement("span"); p.className="vplate";
+          p.textContent=v.plate_text; what.appendChild(p); }
+        const where=document.createElement("div"); where.className="vwhere";
+        where.textContent=v.role||v.camera_id;
+        body.appendChild(what); body.appendChild(where); row.appendChild(body);
+        const ask=document.createElement("button"); ask.className="vask"; ask.type="button";
+        ask.textContent="💬"; ask.title="Ask the agent what happened in this visit";
+        ask.addEventListener("click",()=>{ const inp=$("askInput");
+          if(inp){ inp.value="What was the "+(v.label||"visitor")+" doing in event #"+v.id+"?"; }
+          ask.disabled=true; setTimeout(()=>{ask.disabled=false;},1500);
+          if(typeof window.ask==="function") window.ask(); else $("askBtn").click(); });
+        row.appendChild(ask);
+        list.appendChild(row); }
+    }
+    (function(){ for(const id of ["histLabel","histCam","histHours"]){ const el=$(id);
+        if(el) el.addEventListener("change",loadHistory); }
+      const rb=$("histRefresh"); if(rb) rb.addEventListener("click",loadHistory); })();
 
     // ── camera strip: live thumbnails ──────────────────────────────
     // tap = PEEK (the agent drops the camera's current frame into the
@@ -1213,10 +1458,16 @@
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
       if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
       goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); _evAllCams=false; renderEventsCard();
-      addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
+      // The docked chat bar below stays the one input; scope it visibly.
+      const inp=$("askInput");
+      if(inp) inp.placeholder="Ask about "+cam+" — e.g. what do you see right now?";
+      // The generic try-asking chips would crowd the shrunken log here.
+      const sr=$("suggestRow"); if(sr) sr.hidden=true;
+      addMsg("Focused on "+cam+" — talk or type below, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
+      renderSuggestions();   // chips return on the all-cameras screen
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       stopPlayback(); stopWebrtc();
@@ -1245,7 +1496,12 @@
 
     function fmtClock(ts){ const d=new Date(ts*1000);
       return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2); }
+    let _liveInflight=false;   // 1 fps polling must never pile up behind a slow grab
     async function refreshPlayerLive(){ const cam=window._camScreenCam; if(!cam||_pc||_playback) return;
+      if(_liveInflight) return;   // an RTSP still can take >1s (keyframe wait)
+      _liveInflight=true;
+      try{ await _refreshPlayerLiveInner(cam); } finally{ _liveInflight=false; } }
+    async function _refreshPlayerLiveInner(cam){
       const gen=_viewGen, img=$("camImg"), off=$("camNoFrame");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(gen!==_viewGen||cam!==window._camScreenCam) return;   // view moved on
@@ -1315,13 +1571,16 @@
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       const s=$("camScrub"); if(_tl&&_tl.frames&&_tl.frames.length){ s.value=s.max; }
       refreshPlayerLive();   // instant first picture while WHEP negotiates
-      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },2000);
+      // 1 fps still refresh (was 2 s): the in-flight guard above means a
+      // slow RTSP grab degrades to "as fast as the source delivers", never
+      // a request pile-up. WebRTC (when it connects) replaces this anyway.
+      if(!_liveTimer) _liveTimer=setInterval(()=>{ if(window._camScreenCam&&!_revTs&&!_playback&&!_pc&&_playing) refreshPlayerLive(); },1000);
       const cam=window._camScreenCam;
       if(cam) tryWebrtcLive(cam).then((ok)=>{
         if(window._camScreenCam!==cam||_revTs||_playback) return;
         $("camTnote").textContent = ok
           ? "Live · real-time stream · marks = detections · drag to review"
-          : "Live preview — stills every 2 s"+(window._whepHadUrl
+          : "Live preview — up to 1 frame/s"+(window._whepHadUrl
              ? " (camera stream unreachable right now)"
              : (_authMode==="opennvr"
                 ? " (link this camera to OpenNVR for full-motion video)"
@@ -1519,15 +1778,9 @@
       el.textContent=bits.join("  ·  "); }
     (function(){
       const t=$("camTalk"); if(t) t.addEventListener("click",()=>{ closePops(); const tb=$("talk"); if(tb) tb.click(); });
-      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops();
-        // Ask has no dialog of its own — it hands you to the type box.
-        // Make that VISIBLE (scoped placeholder + a brief pulse) so the
-        // pill never reads as a dead button.
-        const inp=$("askInput"), row=inp.closest(".askrow");
-        inp.placeholder="Ask about "+(window._camScreenCam||"this camera")+" — e.g. what do you see right now?";
-        inp.scrollIntoView({block:"center",behavior:"smooth"}); inp.focus();
-        if(row){ row.classList.remove("pulse"); void row.offsetWidth; row.classList.add("pulse");
-          setTimeout(()=>row.classList.remove("pulse"),1400); } });
+      // (No "Ask" pill here any more: the chat bar is always docked right
+      // below this screen, and cameraParam() already scopes typed questions
+      // to the open camera. One less button saying what the layout shows.)
       const w=$("camWatch"); if(w) w.addEventListener("click",()=>togglePop("#popWatch"));
       const al=$("camAlarm"); if(al) al.addEventListener("click",()=>togglePop("#popAlarm"));
       const wg=$("pwGo"); if(wg) wg.addEventListener("click",async()=>{
@@ -1542,13 +1795,14 @@
       const ag=$("paGo"); if(ag) ag.addEventListener("click",async()=>{
         const cam=window._camScreenCam, target=($("paTarget").value||"").trim();
         if(!cam||!target){ $("paTarget").focus(); return; }
-        const body={name:"Alarm: "+target+" on "+cam,target,camera_ids:[cam],
+        const paName=($("paName")&&$("paName").value.trim())||("Alarm: "+target+" on "+cam);
+        const body={name:paName,target,camera_ids:[cam],
                     ring:$("paRing").value, ...alarmWindow("pa")};
         // Close the popup IMMEDIATELY — the form lingering while the POST
         // ran read as "did it take?" and invited another click (the
         // server dedups, but the UI shouldn't tempt it). The verdict lands as
         // a chat line either way.
-        $("paTarget").value=""; closePops();
+        $("paTarget").value=""; const pn=$("paName"); if(pn) pn.value=""; closePops();
         try{ const r=await fetch("/alarms",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
@@ -1658,6 +1912,7 @@
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      syncSegTalk();   // voice pill + wake option surface for the session
       // Voice turns answer from LIVE frames — an armed pin would be a lie
       // (only typed asks carry it), so unpin loudly instead of silently.
       if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
@@ -1690,10 +1945,58 @@
       // server also guards this, but don't rely on the race going our way).
       if(busy){ fetch("/converse/cancel",{method:"POST"}).catch(()=>{}); busy=false; }
       if(inflightCtl){ try{ inflightCtl.abort(); }catch{} inflightCtl=null; } }
-    function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk"; setStatus("Stopped. Tap Talk to start again."); }
+    function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
+      setStatus("Stopped. Type below, or tap Talk again."); syncSegChat(); }
     function pauseForIdle(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
-      setStatus("Stopped listening after a quiet spell. Tap Talk to resume.");
-      addMsg("The agent stopped listening after a quiet spell. Tap Talk to chat again.","sys"); }
+      setStatus("Stopped listening after a quiet spell — back to chat.");
+      addMsg("The agent stopped listening after a quiet spell. Tap Talk to speak again.","sys");
+      syncSegChat(); }
+
+    // ── hands-free surface follows the SESSION, not a mode toggle ──
+    // body.ui-talk shows the voice pill + wake option only while a talk
+    // session is live. Every session ending — Stop, or the idle timeout —
+    // clears it, so the mic is never secretly live while the bar reads
+    // "Talk". (Chat/dictate stay available at all times.)
+    function syncSegChat(){ document.body.classList.remove("ui-talk"); }
+    function syncSegTalk(){ document.body.classList.add("ui-talk"); }
+
+    // ── dictation: mic → /transcribe → words land in the text box ───
+    // One utterance per tap (tap again to finish, 30 s cap). STT only —
+    // the user reads, edits, and sends; nothing is spoken back.
+    let dictRec=null, dictStream=null, dictChunks=[], dictTimer=null;
+    async function toggleDictate(){
+      const btn=$("dictate"); if(!btn) return;
+      if(dictRec){ try{ dictRec.stop(); }catch{} return; }
+      if(sessionActive){ setStatus("Talk mode is live — switch to Chat to dictate.","error"); return; }
+      try{ dictStream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+      catch{ setStatus("Microphone permission is needed to dictate.","error"); return; }
+      const m=pickMimeType(); dictChunks=[];
+      dictRec=new MediaRecorder(dictStream, m?{mimeType:m}:undefined);
+      dictRec.ondataavailable=e=>{ if(e.data&&e.data.size) dictChunks.push(e.data); };
+      dictRec.onstop=async ()=>{
+        if(dictTimer){ clearTimeout(dictTimer); dictTimer=null; }
+        const blob=new Blob(dictChunks,{type:(dictRec&&dictRec.mimeType)||"audio/webm"});
+        dictRec=null; dictChunks=[];
+        if(dictStream){ dictStream.getTracks().forEach(tr=>tr.stop()); dictStream=null; }
+        btn.classList.remove("rec"); btn.title="Dictate — speak, and your words land in the box";
+        if(blob.size<200){ setStatus("Didn't catch anything — try again."); return; }
+        btn.disabled=true; setStatus("Transcribing…","active");
+        try{
+          const r=await fetch("/transcribe",{method:"POST",
+            headers:{"Content-Type":"application/octet-stream"}, body:blob});
+          const d=await r.json().catch(()=>({}));
+          if(r.ok && d.text){ const inp=$("askInput");
+            inp.value=(inp.value?inp.value.replace(/\s+$/,"")+" ":"")+d.text;
+            inp.focus(); setStatus("Ready — edit if you like, then Send."); }
+          else setStatus(d.error||"Didn't catch that — try again.", r.ok?"":"error");
+        }catch{ setStatus("Transcription failed — agent unreachable?","error"); }
+        btn.disabled=false; };
+      dictRec.start();
+      btn.classList.add("rec"); btn.title="Stop dictating";
+      setStatus("Listening… tap the mic again when done.","active");
+      dictTimer=setTimeout(()=>{ try{ dictRec&&dictRec.stop(); }catch{} },30000);
+    }
+    (function(){ const b=$("dictate"); if(b) b.addEventListener("click",toggleDictate); })();
 
     // ── tasks ──
     async function pollTasks(data){ if(!authReady())return; let tasks; if(data){ tasks=data.tasks||[]; } else try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
@@ -1703,11 +2006,11 @@
       renderTasks(tasks); }
     function renderTasks(tasks){ const active=tasks.filter(t=>t.status==="queued"||t.status==="running");
       const done=tasks.filter(t=>t.status==="done"||t.status==="error").slice(-3); const show=[...active,...done];
-      if(!show.length){ taskListEl.innerHTML='<div class="empty-note">No background tasks.</div>'; return; }
+      if(!show.length){ taskListEl.innerHTML=""; updateAutoEmpty(); return; }
       taskListEl.innerHTML="";
       for(const t of show){ const running=t.status==="queued"||t.status==="running"; const d=document.createElement("div");
         d.className="item "+(running?"running":"done"); d.innerHTML=`<span class="badge">${running?"⏳":(t.status==="error"?"⚠️":"✓")}</span>`;
-        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } }
+        const q=document.createElement("span"); q.className="q"; q.textContent=t.query+(running?" — working…":""); d.appendChild(q); taskListEl.appendChild(d); } updateAutoEmpty(); }
 
     async function announce(text){ if(!text||busy||speaking)return;
       try{ const d=await (await fetch("/say",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})})).json();
@@ -1718,7 +2021,7 @@
       for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
-      if(!active.length){ monitorListEl.innerHTML='<div class="empty-note">No active watches.</div>'; return; }
+      if(!active.length){ monitorListEl.innerHTML=""; updateAutoEmpty(); return; }
       monitorListEl.innerHTML="";
       for(const m of active){ const d=document.createElement("div"); d.className="item";
         d.innerHTML=`<span class="badge">${m.kind==="count"?"🔢":"👁"}</span>`; const q=document.createElement("span"); q.className="q";
@@ -1727,7 +2030,7 @@
           q.innerHTML=`${m.target} on ${cams} — <span class="count">now ${cur}, peak ${peak}</span>`; }
         else { q.textContent=`${cams} for ${m.target}`; }
         d.appendChild(q); const s=document.createElement("button"); s.className="stop"; s.title="Stop"; s.textContent="✕";
-        s.addEventListener("click",()=>stopMonitor(m.id,d)); d.appendChild(s); monitorListEl.appendChild(d); } }
+        s.addEventListener("click",()=>stopMonitor(m.id,d)); d.appendChild(s); monitorListEl.appendChild(d); } updateAutoEmpty(); }
     async function stopMonitor(id, rowEl){
       if(rowEl) rowEl.remove();               // optimistic, like alarms
       try{
@@ -1742,13 +2045,13 @@
         addMsg(`📋 ${rep.name}: ${rep.text}`,"agent"); playChime("done"); await announce(`${rep.name}. ${rep.text}`); } }
       renderReports(data.schedules||[]); }
     function renderReports(schedules){ const active=schedules.filter(s=>s.active);
-      if(!active.length){ reportListEl.innerHTML='<div class="empty-note">No scheduled reports.</div>'; return; }
+      if(!active.length){ reportListEl.innerHTML=""; updateAutoEmpty(); return; }
       reportListEl.innerHTML="";
       for(const s of active){ const d=document.createElement("div"); d.className="item";
         d.innerHTML='<span class="badge">📋</span>'; const q=document.createElement("span"); q.className="q";
         q.textContent=`${s.name} · ${s.schedule}`; d.appendChild(q);
         const x=document.createElement("button"); x.className="stop"; x.title="Cancel"; x.textContent="✕";
-        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } }
+        x.addEventListener("click",()=>stopReport(s.id)); d.appendChild(x); reportListEl.appendChild(d); } updateAutoEmpty(); }
     async function stopReport(id){ try{ await fetch("/reports/"+id,{method:"DELETE"}); }catch{} pollReports(); }
 
     // ── alarms ──
@@ -1774,7 +2077,7 @@
         if(!alarmbarEl.classList.contains("chime")) alarmbarEl.hidden=true; }
       renderAlarms(data.alarms||[]); }
     function renderAlarms(alarms){ const active=alarms.filter(a=>a.active);
-      if(!active.length){ alarmListEl.innerHTML='<div class="empty-note">No alarms armed.</div>'; return; }
+      if(!active.length){ alarmListEl.innerHTML=""; updateAutoEmpty(); return; }
       alarmListEl.innerHTML="";
       for(const a of active){ const d=document.createElement("div"); d.className="item"+(a.triggered?" ringing":"");
         d.innerHTML=`<span class="badge">${IC.bell}</span>`; const q=document.createElement("span"); q.className="q";
@@ -1782,7 +2085,7 @@
         const ring=a.ring==="chime"?" · 🔔":(a.ring==="silent"?" · 🤫":(a.ring==="pulse"?" · ⚠️":""));
         q.textContent=`${a.name}: ${a.target} on ${a.camera_ids.join(", ")}${when}${contact}${ring}`; d.appendChild(q);
         const s=document.createElement("button"); s.className="stop"; s.title="Disarm"; s.textContent="✕";
-        s.addEventListener("click",()=>disarmAlarm(a.id,d)); d.appendChild(s); alarmListEl.appendChild(d); } }
+        s.addEventListener("click",()=>disarmAlarm(a.id,d)); d.appendChild(s); alarmListEl.appendChild(d); } updateAutoEmpty(); }
     async function ackAlarms(){ ensureOutputAudio(); try{ await fetch("/alarms/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch{}
       alarmRinging=false; alarmbarEl.hidden=true; stopSiren(); pollAlarms(); }
     async function disarmAlarm(id, rowEl){
@@ -1856,7 +2159,10 @@
           b.title=p.available?("Arm: watch for "+p.target+(p.after?(" after "+p.after):"")):(p.requires||"Not available yet");
           b.addEventListener("click",()=>{
             if(!p.available){ showPresetHint(p); return; }
-            const body={name:p.name,target:p.target,camera_id:cameraParam()};
+            // Presets follow the form's explicit Camera picker too (default
+            // "all") — never the main screen's checkbox state by side effect.
+            const pc=$("alarmCam");
+            const body={name:p.name,target:p.target,camera_id:(pc&&pc.value)||"all"};
             if(p.after) body.after=p.after;
             if(p.ring) body.ring=p.ring;
             addAlarm(body);
@@ -1954,7 +2260,20 @@
           if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
           toggleSkill(s.id,"disable"); });
         el.appendChild(d); }
-      renderBrowse(); }
+      renderBrowse(); renderSuggestions(); }
+    // ── "try asking…" chips: each enabled skill's example question, made
+    // tappable. The examples already live in the skills payload — this just
+    // surfaces them where a new user is actually looking (above the input).
+    function renderSuggestions(){ const row=$("suggestRow"); if(!row) return;
+      const ex=_skills.filter(s=>s.enabled&&s.example).map(s=>s.example);
+      row.innerHTML="";
+      if(!ex.length){ row.hidden=true; return; }
+      for(const q of ex.slice(0,4)){ const c=document.createElement("button");
+        c.className="suggest"; c.type="button"; c.textContent=q;
+        c.addEventListener("click",()=>{ const inp=$("askInput");
+          if(inp){ inp.value=q; } if(typeof window.ask==="function") window.ask(); });
+        row.appendChild(c); }
+      row.hidden=false; }
     // Pretty display names for the reference adapters named in tasks.yml's
     // suggested_adapters. Falls back to the raw id for anything unlisted.
     const ADAPTER_LABELS={yolov8:"YOLOv8",moondream:"Moondream",blip:"BLIP",
@@ -2110,11 +2429,32 @@
     wireWindowSelect("alarm"); wireWindowSelect("pa");
 
     // Alarms: + reveals a small custom-alarm form (POST /alarms via addAlarm).
+    // ── Automations card: one + reveals the kind chooser; picking a kind
+    // opens that kind's form (the existing per-kind listeners toggle their
+    // own form — this delegation just closes the OTHER three, so the card
+    // never shows two half-filled forms at once).
+    function updateAutoEmpty(){ const e=$("autoEmpty"); if(!e) return;
+      e.hidden=!["alarmList","monitorList","taskList","reportList"].every(
+        id=>{ const el=$(id); return !el||!el.children.length; }); }
+    (function(){ const plus=$("autoAdd"), row=$("autoKinds");
+      const FORMS={alarmAdd:"alarmForm",watchAdd:"watchForm",taskAdd:"taskForm",reportAdd:"reportForm"};
+      if(plus&&row) plus.addEventListener("click",()=>{ row.hidden=!row.hidden;
+        plus.classList.toggle("open",!row.hidden);
+        if(row.hidden) for(const fid of Object.values(FORMS)){ const f=$(fid); if(f) f.hidden=true; } });
+      if(row) row.addEventListener("click",(e)=>{ const k=e.target.closest("button"); if(!k||!FORMS[k.id]) return;
+        for(const [bid,fid] of Object.entries(FORMS)){ if(bid!==k.id){ const f=$(fid); if(f) f.hidden=true;
+          const b=$(bid); if(b) b.classList.remove("open"); } } });
+    })();
     (function(){ const add=$("alarmAdd"), f=$("alarmForm"), arm=$("alarmArm");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) $("alarmName").focus(); });
       if(arm) arm.addEventListener("click",()=>{ const target=$("alarmTarget").value.trim();
         if(!target){ $("alarmTarget").focus(); return; }
-        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,camera_id:cameraParam(),
+        // The camera is an EXPLICIT choice now — the old form silently used
+        // whatever the main screen's checkboxes happened to say, so an
+        // alarm meant for the porch could quietly arm fleet-wide.
+        const camSel=$("alarmCam");
+        const body={name:$("alarmName").value.trim()||("Alarm: "+target),target,
+                    camera_id:(camSel&&camSel.value)||"all",
                     ring:$("alarmRing").value, ...alarmWindow("alarm")};
         addAlarm(body);
         $("alarmName").value=""; $("alarmTarget").value=""; f.hidden=true; add.classList.remove("open"); }); })();
@@ -2148,7 +2488,10 @@
     (function(){ const add=$("watchAdd"), f=$("watchForm"), go=$("watchStart"), ti=$("watchTarget");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) ti.focus(); });
       async function start(){ const target=(ti.value||"").trim(); if(!target){ ti.focus(); return; }
-        const body={kind:$("watchKind").value,target,camera_id:cameraParam()};
+        // Explicit camera choice, same as the alarm form — never the main
+        // screen's checkbox state by side effect.
+        const wc=$("watchCam");
+        const body={kind:$("watchKind").value,target,camera_id:(wc&&wc.value)||"all"};
         try{ const r=await fetch("/monitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
           const d=await r.json().catch(()=>({}));
           if(!r.ok){ addMsg("Couldn't start the watch: "+(d.error||("HTTP "+r.status)),"sys"); return; }
@@ -2182,7 +2525,13 @@
     // Background tasks: + reveals a query input (POST /tasks).
     (function(){ const add=$("taskAdd"), f=$("taskForm"), run=$("taskRun"), qi=$("taskQuery");
       if(add&&f) add.addEventListener("click",()=>{ f.hidden=!f.hidden; add.classList.toggle("open",!f.hidden); if(!f.hidden) qi.focus(); });
-      async function go(){ const q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+      async function go(){ let q=(qi.value||"").trim(); if(!q){ qi.focus(); return; }
+        // A task is a free-text job the background turn interprets with the
+        // full toolset, so camera scoping rides IN the text — the same way
+        // the voice path scopes it ("…on cam1"). The picker just appends it
+        // when the query doesn't already name that camera.
+        const tc=$("taskCam");
+        if(tc&&tc.value&&!q.toLowerCase().includes(tc.value.toLowerCase())) q+=" on "+tc.value;
         try{ const r=await fetch("/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:q})});
           if(r.ok){ addMsg("Background task queued: "+q,"sys"); qi.value=""; f.hidden=true; add.classList.remove("open");
             pollTasks(); if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS); }
@@ -2195,7 +2544,15 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(openDeepLinkedCamera); loadNotify(); loadAlarmPresets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    pollHealth(); setInterval(pollHealth, 15000);
+    // Phone tab bar: pure show/hide via body[data-mtab]; boot on Chat.
+    (function(){ const bar=$("mtabs"); if(!bar) return;
+      document.body.dataset.mtab="chat";
+      bar.addEventListener("click",(e)=>{ const b=e.target.closest("button[data-tab]"); if(!b) return;
+        document.body.dataset.mtab=b.dataset.tab;
+        bar.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));
+        window.scrollTo(0,0); }); })();
     setAvatar("idle");
     renderTasks([]); renderMonitors([]); renderAlarms([]); renderReports([]);
     alarmTimer = setInterval(pollAlarmsHttp, 2500);   // alarms ring even before Talk

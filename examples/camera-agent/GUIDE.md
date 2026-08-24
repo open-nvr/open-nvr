@@ -6,10 +6,17 @@ use it. This is the operator-facing companion to
 links. If a term appears in the demo UI, it is explained here.
 
 The agent runs in two flavours from the same code — **voice**
-(`--profile camera-agent`: speak, hear the answer) and **chat**
-(`--profile camera-agent-chat`: type, read). Both expose the demo at
-`https://localhost:9100/demo`. Everything below applies to both unless
-stated otherwise.
+(`--profile camera-agent`) and **chat** (`--profile camera-agent-chat`).
+Both expose the demo at `https://localhost:9100/demo`, laid out
+chat-first: the conversation fills the page and the input bar is docked
+at the bottom. On a voice install that bar carries a **dictation mic**
+(speak, and the words land in the text box to edit and send) and a
+compact **Talk** button for hands-free sessions (it listens and answers
+aloud until you tap Stop or it idles out); a chat install ships no
+STT/TTS, so it shows the text box alone. On phones a bottom tab bar
+shows one section at a time — Chat · Activity · History · Automations ·
+Skills. Everything below applies to both flavours unless stated
+otherwise.
 
 ---
 
@@ -123,7 +130,7 @@ until a human acknowledges them**. Full mechanics: [ALARMS.md](ALARMS.md).
   person is detected after 6pm", "Alert me loudly if a car enters
   between 10pm and 6am on all cameras". Overnight windows
   (`22:00`–`06:00`) wrap correctly.
-* **One-click presets** on the Alarms card. Presets are
+* **One-click presets** on the Automations card. Presets are
   **capability-aware**: the server checks each preset's target against
   what the detection path can actually see. Presets the stock stack
   can serve — *After-hours person, Person, Car, Truck, Dog* — are
@@ -134,8 +141,12 @@ until a human acknowledges them**. Full mechanics: [ALARMS.md](ALARMS.md).
   for it, then list its label under `detector_extra_labels` in the
   agent config, which lights the preset up). A Fire button that armed
   an alarm which could never ring would be worse than none.
-* **The + form** on the Alarms card: free-form name, target, alert
-  level, time window.
+* **The + form** on the Automations card (+ → 🔔 Alarm): name, target
+  — with a pick-list of what the detector can actually see, fed by
+  `GET /alarm-targets` — an **explicit camera picker** (all cameras or
+  one; nothing arms fleet-wide by accident), alert level, time window.
+  The same form, minus the camera picker, sits on each camera's own
+  screen, fixed to that camera.
 
 **Alert levels** (per alarm, preselected by target):
 
@@ -147,7 +158,7 @@ until a human acknowledges them**. Full mechanics: [ALARMS.md](ALARMS.md).
 | **silent** | notifications only |
 
 Fire-grade targets (fire, smoke, flame, gas) default to **siren**;
-everything else to **chime**. The ⚙ button on the Alarms card edits
+everything else to **chime**. The ⚙ button on the Automations card edits
 this **site policy** (admin tier) — a farm can make "snake" critical, a
 bank "person". Nothing is pre-armed out of the box: arming is always a
 one-click or one-utterance human decision, and only **operator-tier**
@@ -164,8 +175,9 @@ output: "watch the driveway and tell me if more than 3 cars show up"
 creates a monitor that counts over time and posts a notification when
 the condition is met, without ringing anything. Use an alarm when a
 human must react *now*; a watch when you want to *know*. Watches live
-in the right-rail "Watches" card; stop one by voice ("stop watching the
-driveway") or with its ✕.
+in the **Automations card** (+ → 👁 Watch: notify or live count, target
+pick-list, explicit camera picker); stop one by voice ("stop watching
+the driveway") or with its ✕.
 
 ## Background tasks
 
@@ -176,28 +188,41 @@ each, and reports back when done — while you keep talking.
 
 * **How it works**: the agent queues the job and answers immediately;
   a background worker runs a full tool-calling turn for the query and
-  stores the result. The Tasks card polls progress, and the completion
-  is surfaced back into the chat. Guardrail: a background task runs
-  with the agent-control tools removed — a task can't spawn more
-  tasks, arm alarms, or create watches.
-* **How to enable**: off in both docker demos (it's the most
-  token-hungry skill on CPU). Add `create_background_task` to
-  `enabled_tools` and restart, or run a bare-metal config with
-  `enabled_tools` unset.
+  stores the result. The Automations card polls progress, and the
+  completion is surfaced back into the chat. Guardrail: a background
+  task runs with the agent-control tools removed — a task can't spawn
+  more tasks, arm alarms, or create watches.
+* **How to add one**: the Automations card's + → ⚙ Task form always
+  works (it posts to `/tasks` directly; an optional camera picker
+  scopes the search by appending "on cam1" to the query — the same way
+  the voice path scopes it). Creating tasks *by voice* is off in both
+  docker demos (the tool is token-hungry on CPU): add
+  `create_background_task` to `enabled_tools` and restart, or run a
+  bare-metal config with `enabled_tools` unset.
 * **Task vs watch**: a task runs once and finishes; a watch runs
   forever until stopped.
 
 ## Events
 
-The agent remembers what the detection stream saw. With the **events**
-skill on (default), ask about the recent past — "did anyone come to the
-door in the last 30 minutes?" — and the agent answers from the NATS
-event ring (`recent_events`). This is short-term memory (the in-process
-ring, `event_ring_size`); for days-back questions use **footage**
-search, which reads the persistent index. The skill's deeper tools —
-`search_history`, `describe_event`, `describe_window` — are not in the
-docker allowlists (prompt size); add them to `enabled_tools` to let the
-agent narrate a specific event or time window.
+The agent remembers what the detection stream saw, at two depths — and
+all of the events tools are on by default in the docker configs.
+
+* **Minutes back**: "did anyone come to the door in the last 30
+  minutes?" answers from the NATS event ring (`recent_events`) —
+  short-term, in-process memory (`event_ring_size`).
+* **Days back**: "did you see a person today?", "which cars entered
+  between 1 and 2pm?" answer from the platform's durable **events
+  store** (`search_history`) — one row per visit, with the best photo
+  kept. Follow up on a specific visit with `describe_event` ("what was
+  the person doing in event #12?") or review a whole span with
+  `describe_window`. Absolute clock windows ("from 2pm to 3pm") are
+  parsed and honoured.
+
+The **History card** in the rail is the browsable face of the store:
+filter by label / camera / window, see each visit's kept photo, and tap
+💬 to ask the agent about it. **Footage** search (`search_footage`)
+stays the tool for attribute questions ("did a *red* truck come by?") —
+it reads the footage-search app's caption index.
 
 ## Events, alerts, and alarms — the attention ladder
 
@@ -235,7 +260,7 @@ Three streams end up in front of you:
   lands in the feed proactively, throttled per app+camera so a
   misbehaving app can't spam. Ask "any occupancy alerts this morning?"
   (`recent_app_alerts`) for the full, unthrottled history.
-* **The events card**: the same items, in the right rail.
+* **The Activity card**: the same items, in the right rail.
 * **External delivery**: webhooks / Apprise push (ntfy, Telegram,
   email, …) via `notify_webhooks` / `notify_apprise` — see
   [NOTIFICATIONS.md](NOTIFICATIONS.md). Off until configured; the
@@ -274,7 +299,7 @@ and forget people. Details: [FACES.md](FACES.md).
 The scheduled task shape: "every morning at 7, summarise overnight
 activity", or "every day at 8 AM, tell me how many trucks entered" — a
 standing query the agent re-runs on its clock, with each answer landing
-in the Reports card and the notification feed (and any configured
+in the Automations card and the notification feed (and any configured
 external channel). Create by voice/chat, stop the same way ("stop the
 morning report"). Off in both docker demos; enable by adding
 `create_report` / `stop_report` to `enabled_tools`.
