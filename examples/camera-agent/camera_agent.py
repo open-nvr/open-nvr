@@ -6120,15 +6120,33 @@ _HISTORY_LABELS: dict[str, str] = {
 
 
 def _is_past_question(text: str) -> bool:
-    """True when the utterance asks about history, not the current scene."""
-    return bool(_PAST_RE.search(text or ""))
+    """True when the utterance asks about history, not the current scene.
+
+    An absolute clock range ("from 2pm to 3pm") counts as history even
+    without past-tense wording — background-task queries are phrased that
+    way ("check the red truck on all cameras from 2pm to 3pm")."""
+    t = text or ""
+    return bool(_PAST_RE.search(t) or _CLOCK_RANGE_RE.search(t))
 
 
-def _window_from_text(text: str, now=None) -> tuple[str | None, int]:
+# Absolute clock ranges: "from 2pm to 3pm", "between 1 and 2pm",
+# "13:00-14:00", "2 pm till 3 pm". The first time may omit its am/pm and
+# inherit it from the second ("between 1 and 2pm" → 13:00-14:00).
+_CLOCK_RANGE_RE = re.compile(
+    r"\b(?:from|between)?\s*"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*"
+    r"(?:to|till|until|and|[-–])\s*"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+    re.IGNORECASE,
+)
+
+
+def _window_from_text(text: str, now=None
+                      ) -> tuple[str | None, str | None, int]:
     """Best-effort time window from the utterance.
 
-    Returns ``(start_time_iso, window_seconds)`` — the ISO start (with tz
-    offset, as search_history requires) or None for an open start, plus the
+    Returns ``(start_iso, end_iso, window_seconds)`` — ISO times (with tz
+    offset, as search_history requires) or None for an open bound, plus the
     equivalent relative seconds for recent_events. All computed from the
     LOCAL clock (the container's TZ), matching the clock line in the system
     prompt."""
@@ -6136,23 +6154,49 @@ def _window_from_text(text: str, now=None) -> tuple[str | None, int]:
 
     t = text or ""
     now = now or datetime.now().astimezone()
+
+    def _hhmm(h, mnt, ampm):
+        h = int(h) % 24
+        if ampm:
+            h = h % 12 + (12 if ampm.lower() == "pm" else 0)
+        return now.replace(hour=h, minute=int(mnt or 0), second=0,
+                           microsecond=0)
+
+    # "from 2pm to 3pm" — an absolute range TODAY. The field bug this
+    # closes: these were the exact phrasings background tasks are given
+    # ("check the red truck on all cameras from 2pm to 3pm"), and the
+    # forced-grounding fallback used to drop the window entirely.
+    m = _CLOCK_RANGE_RE.search(t)
+    if m:
+        h1, m1, ap1, h2, m2, ap2 = m.groups()
+        start = _hhmm(h1, m1, ap1 or ap2)   # "between 1 and 2pm" → both pm
+        end = _hhmm(h2, m2, ap2)
+        if end <= start:                     # "11pm to 1am" → wraps midnight
+            end += timedelta(days=1)
+        return (start.isoformat(timespec="seconds"),
+                end.isoformat(timespec="seconds"),
+                max(60, int((now - start).total_seconds())))
     m = _WINDOW_RE.search(t)
     if m:
         qty = int(m.group(1) or m.group(3))
         unit = (m.group(2) or m.group(4) or "").lower()
         secs = qty * (3600 if unit.startswith(("hour", "hr")) else 60)
-        return (now - timedelta(seconds=secs)).isoformat(timespec="seconds"), secs
+        return ((now - timedelta(seconds=secs)).isoformat(timespec="seconds"),
+                None, secs)
     lowered = t.lower()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if "yesterday" in lowered or "last night" in lowered:
         start = midnight - timedelta(days=1)
-        return start.isoformat(timespec="seconds"), int((now - start).total_seconds())
+        return (start.isoformat(timespec="seconds"),
+                midnight.isoformat(timespec="seconds"),
+                int((now - start).total_seconds()))
     if "today" in lowered or "this morning" in lowered or "tonight" in lowered \
             or "this afternoon" in lowered or "this evening" in lowered:
-        return midnight.isoformat(timespec="seconds"), int((now - midnight).total_seconds())
+        return (midnight.isoformat(timespec="seconds"), None,
+                int((now - midnight).total_seconds()))
     # No parseable window: open start for search_history; recent_events gets
     # a generous hour so "did anyone come?" still looks back meaningfully.
-    return None, 3600
+    return None, None, 3600
 
 
 def _pick_forced_call(
@@ -6167,7 +6211,7 @@ def _pick_forced_call(
     ever picked, so forced grounding can't call something the operator's
     enabled_tools hides from the model."""
     if _is_past_question(text):
-        start_iso, window_secs = _window_from_text(text, now=now)
+        start_iso, end_iso, window_secs = _window_from_text(text, now=now)
         if "search_history" in advertised:
             args: dict[str, Any] = {"camera_id": cam}
             m = _DETECTION_RE.search(text or "")
@@ -6175,6 +6219,8 @@ def _pick_forced_call(
             args["label"] = _HISTORY_LABELS.get(noun, "person")
             if start_iso:
                 args["start_time"] = start_iso
+            if end_iso:
+                args["end_time"] = end_iso
             return "search_history", args
         if "recent_events" in advertised:
             return "recent_events", {
