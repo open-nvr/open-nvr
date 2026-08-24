@@ -75,7 +75,13 @@
     .app{flex:1 1 auto; min-height:0; display:grid;
       grid-template-columns:minmax(0,1fr) 22rem; gap:1.1rem; align-items:stretch;}
     @media (max-width:900px){ .wrap{height:auto; min-height:100vh; overflow:auto;}
-      body{overflow:auto;} .app{grid-template-columns:1fr;} }
+      body{overflow:auto;} .app{grid-template-columns:1fr;}
+      /* Grid items default to min-width:auto, so any wide child (the wake-word
+         label, the camera row) forced the single column past the viewport and
+         the whole page side-scrolled on phones. min-width:0 lets the column
+         actually shrink; the wake label wraps instead of pushing. */
+      .main-col,.side,.main-col>.card{min-width:0;}
+      .wakeopt{white-space:normal;} }
     .main-col{min-height:0; display:flex;}
     .side{min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:0.9rem; padding-right:2px;}
 
