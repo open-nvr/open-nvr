@@ -400,31 +400,37 @@ detect_llm_hardware() {
 #     tools noticeably, so tiny tiers are only suggested where latency
 #     would otherwise make it unusable.
 #   * CEILING — the tested envelope: suggestions never exceed the
-#     largest model this agent has been exercised with (qwen2.5:3b).
-#     "This hardware CAN run a bigger model" is detectable; "bigger
-#     will be BETTER for this agent's tool-calling and voice latency"
-#     is not — 7b doubles latency for untested gain, so machines with
-#     headroom get it as a note to try, never as the default.
-# Staying inside one family (qwen2.5) keeps the chat template and
-# tool-call format identical across tiers.
+#     largest model this agent has been exercised with. That envelope
+#     now includes qwen3:1.7b, field-tested against qwen2.5 with this
+#     agent and giving BETTER answers at similar speed (~3 GB), so it
+#     is the suggestion wherever RAM allows. "This hardware CAN run a
+#     bigger model" is detectable; "bigger will be BETTER for this
+#     agent's tool-calling and voice latency" is not — 7b doubles
+#     latency for untested gain, so machines with headroom get it as a
+#     note to try, never as the default.
+# qwen3 is a "thinking" family; the shipped configs set llm_think:false
+# so it answers snappily — the chat template difference vs qwen2.5 is
+# handled by Ollama's per-model templates, not by us.
 suggest_llm_model() {
     if [[ "$HW_ACCEL" != "cpu" ]]; then
-        if (( HW_RAM_GB >= 16 )); then echo "qwen2.5:3b"
+        if (( HW_RAM_GB >= 8 )); then echo "qwen3:1.7b"
         else echo "qwen2.5:1.5b"; fi
     else
-        if   (( HW_RAM_GB >= 16 && HW_CORES >= 8 )); then echo "qwen2.5:1.5b"
+        if   (( HW_RAM_GB >= 16 && HW_CORES >= 8 )); then echo "qwen3:1.7b"
         else echo "qwen2.5:0.5b"; fi
     fi
 }
 
 # suggest_vlm_model → caption/VQA model for CAPTION_ADAPTER=ollamavlm.
-# ALWAYS moondream: it is the project's tested VQA default, and the
-# ollamavlm adapter is itself new — defaulting an untested model
-# through a new adapter based on a RAM check would stack unknowns.
-# Capable machines are told (in the prompt note) that qwen2.5vl:3b is
-# worth trying; that stays an operator decision.
+# gemma3:4b was field-tested with this agent through ollamavlm and gives
+# clearly better scene answers than moondream, so it is the suggestion
+# wherever RAM allows (~4 GB working set + headroom). moondream stays the
+# low-RAM default: still tested, still cheap. Capable machines are told
+# (in the prompt note) that qwen2.5vl:3b is the better text READER;
+# trying it stays an operator decision.
 suggest_vlm_model() {
-    echo "moondream"
+    if (( HW_RAM_GB >= 8 )); then echo "gemma3:4b"
+    else echo "moondream"; fi
 }
 
 # ── Catalog-driven model menu ───────────────────────────────────────
@@ -626,7 +632,7 @@ choose_example() {
             "moondream | blip | ollamavlm — all local."
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
-            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. moondream is the tested default." \
+            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested — clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick." \
                 "yes" "$vlm_suggest"
             pick_model_from_catalog vlm "$vlm_suggest" "Vision model (Ollama)"
             env_set OLLAMA_VLM_MODEL "$PICKED_MODEL"

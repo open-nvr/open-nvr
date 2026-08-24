@@ -197,6 +197,12 @@ class AppConfig:
     # Optional OpenNVR camera discovery. Docker uses this so camera-agent can
     # reuse cameras configured in OpenNVR instead of duplicating RTSP URLs.
     opennvr_cameras_url: str | None = None
+    # Where the boot-time camera list came from: "config" (operator-listed in
+    # the YAML, or local auto-discovery) or "opennvr" (fetched from
+    # opennvr_cameras_url). Provenance matters for reconcile: only cameras the
+    # NVR manages may be REMOVED when the NVR stops listing them — a
+    # config-file camera is the operator's explicit word and is never touched.
+    cameras_source: str = "config"
     opennvr_api_key: str | None = None
 
     # Optional OpenNVR server BASE URL (e.g. "http://127.0.0.1:8000") for the
@@ -2526,11 +2532,13 @@ def load_config(path: str | Path) -> AppConfig:
             "auto-discovered %d local camera(s): %s",
             len(cameras), ", ".join(f"{c.camera_id}({c.frame_url})" for c in cameras),
         )
+    cameras_source = "config"
     if not cameras and raw.get("opennvr_cameras_url"):
         cameras = _load_opennvr_cameras(
             url=str(raw["opennvr_cameras_url"]),
             api_key=str(raw.get("opennvr_api_key") or raw.get("kaic_api_key") or ""),
         )
+        cameras_source = "opennvr"
     # An empty camera list is allowed. The agent still serves the /demo
     # page and runs the full voice loop; vision tools simply report that
     # no cameras are configured until the operator adds some (the Docker
@@ -2627,6 +2635,7 @@ def load_config(path: str | Path) -> AppConfig:
             if str(s).strip()
         ],
         opennvr_cameras_url=raw.get("opennvr_cameras_url"),
+        cameras_source=cameras_source,
         opennvr_api_key=raw.get("opennvr_api_key"),
         opennvr_api_url=_opennvr_api_url,
         opennvr_ui_url=_opennvr_ui_url,
@@ -2877,6 +2886,11 @@ class CameraAgentRuntime:
                 or _os.environ.get("INTERNAL_API_KEY", ""),
             )
             logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+        # Kept on the runtime too: the events SKILL is served by two
+        # independent backends (NATS ring → recent_events; events store →
+        # search_history/describe_event/describe_window), and the skills
+        # panel must gate + caption on what is ACTUALLY wired.
+        self.events_client = events_client
 
         self.tools = CameraTools(
             context=self.context,
@@ -2891,6 +2905,15 @@ class CameraAgentRuntime:
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
         self._camera_ids = [cam.camera_id for cam in cfg.cameras]
+        # Cameras the NVR manages — the only ones reconcile may ever REMOVE
+        # when a successful fetch stops listing them (deleted/deactivated in
+        # OpenNVR). Seeded with the boot roster when that roster itself came
+        # from the NVR; cameras added by later reconcile fetches join as they
+        # appear. Config-file / local cameras never enter this set, so they
+        # can never be reconciled away.
+        self._opennvr_managed: set[str] = (
+            set(self._camera_ids) if cfg.cameras_source == "opennvr" else set()
+        )
         self.disabled_skills: set[str] = set()
         # UI-edited target→annunciation overrides (admin action) — the
         # LAST layer over config + built-ins in ring_defaults(); durable
@@ -3136,7 +3159,14 @@ class CameraAgentRuntime:
         if req == "faces":
             return self.faces is not None
         if req == "events":
-            return bool(self.cfg.nats_inference_url)
+            # Either backend makes the skill usable: NATS feeds the live
+            # recent_events ring; the events store (opennvr_api_url) feeds
+            # search_history / describe_event / describe_window. Gating on
+            # NATS alone wrongly greyed the whole skill out on deployments
+            # that have durable history but no event bus.
+            return bool(self.cfg.nats_inference_url) or (
+                getattr(self, "events_client", None) is not None
+            )
         if req == "footage":
             # Configuration presence is the gate (same principle as the app
             # door): the reader re-tries opening on every call, so an index
@@ -3166,17 +3196,27 @@ class CameraAgentRuntime:
         live_tasks = self.kaic_capabilities.tasks_advertised   # None = unknown
         advertised = {t["function"]["name"] for t in self.tool_definitions}
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
+        # The events skill's caption names what is ACTUALLY wired — it has
+        # two independent backends, and "uses inference event bus (NATS)" was
+        # half-true on a stock install where search_history reads the durable
+        # events store, not the bus.
+        events_backends = []
+        if self.cfg.nats_inference_url:
+            events_backends.append("inference event bus (NATS)")
+        if getattr(self, "events_client", None) is not None:
+            events_backends.append("events store (visit history)")
         uses = {
             "see": f"{self.cfg.caption_adapter} caption + {self.cfg.llm_model}",
             "count": f"{self.cfg.detection_adapter} detection",
             "faces": f"{self.cfg.recognition_adapter} recognition",
-            "events": "inference event bus (NATS)",
+            "events": " + ".join(events_backends) or "inference event bus (NATS)",
             "footage": "footage-search index",
             "apps": "OpenNVR app registry + alert relay (read-only)",
         }
         hints = {
             "faces": "Set faces_url to the recognition adapter to enable.",
-            "events": "Set nats_inference_url to stream inference events.",
+            "events": ("Set nats_inference_url (live events) or "
+                       "opennvr_api_url (visit history) to enable."),
             "footage": "Set footage_index_path (built by the footage-search example).",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
@@ -3197,12 +3237,27 @@ class CameraAgentRuntime:
                 live_tasks is None or not backing
                 or bool(set(backing) & live_tasks)
             )
+            # Tool-level honesty: a skill card bundles several tools, and the
+            # old panel only reflected the PRIMARY one — "Look back at recent
+            # events" showed on while search_history (the tool the user's
+            # question needed) was hidden by enabled_tools. Every entry now
+            # lists each of its tools with whether the LLM can actually call
+            # it, and ``partial`` flags an on-skill with hidden tools so the
+            # UI can grey them out instead of implying they all work.
+            tool_states = [
+                {"name": n, "advertised": n in advertised}
+                for n in SKILL_TOOLS[sid]
+            ]
             entry = {
                 "id": sid, "icon": icon, "name": name, "example": example,
                 "uses": uses.get(sid, f"agent app + {self.cfg.llm_model}"),
                 "enabled": enabled, "available": available,
                 "hint": "" if available else (hints.get(req, "Not enabled in config.")),
                 "backing_tasks": backing, "tasks_available": tasks_available,
+                "tools": tool_states,
+                "partial": enabled and any(
+                    not t["advertised"] for t in tool_states
+                ),
             }
             # When a skill is greyed out for want of a backing adapter, GUIDE
             # the operator: name the suggested adapter(s) and, if we know the
@@ -3916,14 +3971,16 @@ class CameraAgentRuntime:
 
     def _register_opennvr_cameras(self, specs: list[CameraSpec]) -> list[CameraSpec]:
         """Register OpenNVR-sourced camera specs that aren't known yet, wiring
-        each one's frame source. ADD-ONLY for camera *identity*: a transient
-        empty or failed fetch must never tear down cameras that are already
-        working. But a known camera's ``frame_url`` IS refreshed when OpenNVR
-        serves a new one — the URL embeds a short-lived MediaMTX JWT
-        (~60 min), so keeping the boot-time URL means every frame fetch
-        starts 401ing within the hour and the camera tile shows "no frame"
-        forever (describe still works — KAI-C mints its own token — which
-        made this bug look like a UI problem instead of an expired URL)."""
+        each one's frame source. This method itself never removes anything —
+        deletions are handled by ``_remove_opennvr_cameras``, and ONLY from a
+        successful fetch (a transient failed fetch must never tear down
+        cameras that are already working). A known camera's ``frame_url`` IS
+        refreshed when OpenNVR serves a new one — the URL embeds a
+        short-lived MediaMTX JWT (~60 min), so keeping the boot-time URL
+        means every frame fetch starts 401ing within the hour and the camera
+        tile shows "no frame" forever (describe still works — KAI-C mints its
+        own token — which made this bug look like a UI problem instead of an
+        expired URL)."""
         added: list[CameraSpec] = []
         for spec in specs:
             if self.context.known_camera(spec.camera_id):
@@ -3937,6 +3994,37 @@ class CameraAgentRuntime:
             self.cfg.cameras.append(spec)
             added.append(spec)
         return added
+
+    def _remove_opennvr_cameras(self, camera_ids: set[str]) -> list[str]:
+        """Forget cameras that a SUCCESSFUL OpenNVR fetch no longer lists —
+        i.e. deleted or deactivated in the NVR (the internal endpoint only
+        serves ``is_active`` cameras).
+
+        Two hard safety rails: only ids in ``_opennvr_managed`` (seen in a
+        successful fetch, or boot-loaded from the NVR) are ever candidates —
+        a config-file or local camera passed here is ignored; and the caller
+        only reaches this from a fetch that SUCCEEDED, so a transient network
+        failure can never empty the roster."""
+        removed: list[str] = []
+        for cid in sorted(set(camera_ids) & self._opennvr_managed):
+            self._opennvr_managed.discard(cid)
+            if not self.context.remove_camera(cid):
+                continue
+            self.cfg.cameras[:] = [
+                c for c in self.cfg.cameras if c.camera_id != cid
+            ]
+            removed.append(cid)
+        return removed
+
+    def _sync_camera_roster(self) -> None:
+        """Re-bake everything that embeds the camera list after a roster
+        change: the camera-id enums inside the advertised tool schemas (ids
+        are baked in so the model can't invent camera names — which also
+        means a stale list makes the LLM keep offering deleted cameras and
+        never see added ones) and the id list the system-prompt roster and
+        viewer toolset are built from."""
+        self._camera_ids = [cam.camera_id for cam in self.cfg.cameras]
+        self._configure_tools()
 
     def _refresh_frame_url(self, spec: CameraSpec) -> None:
         """Swap a known camera's frame source when its URL changed.
@@ -4108,14 +4196,18 @@ class CameraAgentRuntime:
         The startup fetch is one-shot, so if the agent comes up before the
         OpenNVR core has its cameras ready (the usual boot-order race when the
         stack starts together), it would otherwise stay 'disconnected' until
-        someone restarted it. This loop retries through that race and also
-        picks up cameras registered in OpenNVR later."""
+        someone restarted it. This loop retries through that race, picks up
+        cameras registered in OpenNVR later, and — from a SUCCESSFUL fetch
+        only — forgets NVR-managed cameras the NVR no longer lists (deleted
+        or deactivated there; the endpoint serves is_active cameras only).
+        A FAILED fetch says nothing about deletions and changes nothing."""
         url = self.cfg.opennvr_cameras_url
         if not url:
             return
         api_key = self.cfg.opennvr_api_key or self.cfg.kaic_api_key or ""
         announced_waiting = False
         while not self._stop_event.is_set():
+            specs: list[CameraSpec] | None
             try:
                 # The fetch is a blocking httpx call — off-thread it so we
                 # never stall the event loop.
@@ -4126,9 +4218,27 @@ class CameraAgentRuntime:
                 logger.warning(
                     "camera-agent: OpenNVR camera reconcile failed: %s", exc
                 )
-                specs = []
-            added = self._register_opennvr_cameras(specs)
+                specs = None    # failure ≠ empty: never reconcile against it
+            added: list[CameraSpec] = []
+            removed: list[str] = []
+            if specs is not None:
+                added = self._register_opennvr_cameras(specs)
+                fetched_ids = {s.camera_id for s in specs}
+                removed = self._remove_opennvr_cameras(
+                    self._opennvr_managed - fetched_ids
+                )
+                # Adopt AFTER computing removals: everything this successful
+                # fetch listed is NVR-managed from now on.
+                self._opennvr_managed |= fetched_ids
+                if added or removed:
+                    self._sync_camera_roster()
             have_cameras = bool(self.cfg.cameras)
+            if removed:
+                logger.info(
+                    "camera-agent: forgot %d camera(s) no longer in OpenNVR "
+                    "(deleted/deactivated there): %s",
+                    len(removed), ", ".join(removed),
+                )
             if added:
                 logger.info(
                     "camera-agent: picked up %d OpenNVR camera(s) without a "
@@ -4396,11 +4506,31 @@ class CameraAgentRuntime:
         roster = "\n".join(
             f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
         )
+        # Per-turn wall clock, in the container's local timezone (TZ is passed
+        # through by the compose files). Without this the model cannot turn
+        # "today" or "the last 30 minutes" into the ISO 8601 window that
+        # search_history / describe_window take — it would have to guess the
+        # date, and small models guess their training cutoff.
+        from datetime import datetime as _dt
+        _now = _dt.now().astimezone()
+        clock_line = (
+            f"The current date and time is "
+            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. When a tool takes "
+            f"an ISO 8601 time window, compute it from THIS clock and include "
+            f"the timezone offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
+        )
+        # Which tools the LLM can actually call this turn — guidance below
+        # must never route to a tool that isn't advertised (a small model
+        # will either stall or 'improvise' with a live-scene tool instead).
+        advertised = {
+            t["function"]["name"] for t in (self.tool_definitions or ())
+        }
         prompt = (
             f"You are the OpenNVR Agent, this system's camera agent. Speak in "
             f"the FIRST person — say 'I see…', 'I'm watching…', not in the "
             f"third person. If asked your name, say you're the OpenNVR Agent.\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
+            f"{clock_line}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
@@ -4413,29 +4543,57 @@ class CameraAgentRuntime:
             f"the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
-            f"every camera or more than one.\n\n"
-            f"For STANDING requests — 'notify me when you see…', 'let me know "
-            f"if…', 'keep counting…', 'count people entering…', 'watch cam X "
-            f"for…' — call create_monitor (kind 'notify', 'count', or "
-            f"'crossing' for line entry counts) instead of a one-off detection, "
-            f"and confirm what you'll watch. Use stop_monitor to cancel one.\n\n"
-            f"For URGENT, ringing requests — 'sound an alarm if…', 'fire alarm', "
-            f"'alert me loudly if…', 'alarm if a person is seen after 6pm' — call "
-            f"create_alarm (not create_monitor). Extract any time window into "
-            f"'after'/'before' as 24h 'HH:MM' (e.g. 6pm → after '18:00'). An "
-            f"alarm rings until acknowledged; use stop_alarm to silence or "
-            f"disarm it.\n\n"
-            f"For RECURRING summaries — 'every morning summarize overnight "
-            f"activity', 'daily 7am rundown', 'every hour tell me the count' — "
-            f"call create_report (set 'at' HH:MM for a daily time, or "
-            f"'every_minutes'). Use stop_report to cancel one.\n\n"
-            f"For questions about the RECORDED PAST (e.g. 'earlier today', "
-            f"'two days ago at 3am', 'last week') searching footage can take "
-            f"a while. For those, call create_background_task with a short "
-            f"description instead of answering immediately, tell the user you'll "
-            f"look into it and get back to them, and keep the conversation going. "
-            f"You'll deliver the result when the task finishes."
+            f"every camera or more than one."
         )
+        # Tool-specific guidance is emitted ONLY for tools the model can
+        # actually call this turn. Teaching a small model a route to a tool
+        # that enabled_tools hides makes it stall ("I'll look into it") or
+        # substitute a live-scene tool — the field bug behind past-tense
+        # questions being answered with the current frame.
+        if "create_monitor" in advertised:
+            prompt += (
+                "\n\nFor STANDING requests — 'notify me when you see…', 'let "
+                "me know if…', 'keep counting…', 'count people entering…', "
+                "'watch cam X for…' — call create_monitor (kind 'notify', "
+                "'count', or 'crossing' for line entry counts) instead of a "
+                "one-off detection, and confirm what you'll watch. Use "
+                "stop_monitor to cancel one."
+            )
+        if "create_alarm" in advertised:
+            prompt += (
+                "\n\nFor URGENT, ringing requests — 'sound an alarm if…', "
+                "'fire alarm', 'alert me loudly if…', 'alarm if a person is "
+                "seen after 6pm' — call create_alarm (not create_monitor). "
+                "Extract any time window into 'after'/'before' as 24h 'HH:MM' "
+                "(e.g. 6pm → after '18:00'). An alarm rings until "
+                "acknowledged; use stop_alarm to silence or disarm it."
+            )
+        if "create_report" in advertised:
+            prompt += (
+                "\n\nFor RECURRING summaries — 'every morning summarize "
+                "overnight activity', 'daily 7am rundown', 'every hour tell "
+                "me the count' — call create_report (set 'at' HH:MM for a "
+                "daily time, or 'every_minutes'). Use stop_report to cancel "
+                "one."
+            )
+        # Long footage reviews as background work — ONLY when the tool is
+        # actually callable. Advertising this route unconditionally taught
+        # small models to promise "I'll look into it" (or fall back to a live
+        # detect_objects look) on every past-tense question in demos where
+        # create_background_task isn't exposed — the field bug behind
+        # "asked about a person today, got told about a potted plant".
+        # search_history stays the FIRST answer for the past; the background
+        # task is for spans it can't cover quickly.
+        if "create_background_task" in advertised:
+            prompt += (
+                "\n\nFor a DEEP review of the recorded past that a quick "
+                "search_history / search_footage call can't answer (e.g. "
+                "'check every camera for anyone in a red shirt last week') — "
+                "call create_background_task with a short description, tell "
+                "the user you'll look into it and get back to them, and keep "
+                "the conversation going. You'll deliver the result when the "
+                "task finishes."
+            )
         # Proactive honesty about capabilities that aren't wired this turn:
         # a compact, dynamic list so the model can say "I can't do X — install
         # the adapter/app" instead of hallucinating a result. Empty (and thus a
@@ -5809,6 +5967,110 @@ def _pick_forced_tool(text: str) -> str:
     return "describe_camera"
 
 
+# Past-tense / history phrasing. These questions are about what HAPPENED, not
+# what the current frame shows — so forced grounding must route them to the
+# HISTORY tools, never the live detector. The field bug this fixes: "did you
+# see a person today?" contains "person", _pick_forced_tool sent it to
+# detect_objects, and the user was told about a potted plant currently in view.
+_PAST_RE = re.compile(
+    r"\b(did|didn't|was|were|has|have|had)\b.{0,60}?"
+    r"\b(come|came|been|seen|see|visit|visited|enter|entered|arrive|arrived|"
+    r"pass|passed|show(?:ed)?\s+up|stop(?:ped)?\s+by|there)\b"
+    r"|\b(earlier|yesterday|last\s+night|this\s+morning|this\s+afternoon|"
+    r"this\s+evening|today|tonight|ago|so\s+far)\b"
+    r"|\b(last|past)\s+\d+\s*(minutes?|mins?|hours?|hrs?)\b"
+    r"|\b(in|over|during)\s+the\s+(last|past)\b"
+    r"|\b(recording|recordings|footage|history)\b",
+    re.IGNORECASE,
+)
+
+# "last/past 30 minutes", "last 2 hours" → a relative look-back in seconds.
+_WINDOW_RE = re.compile(
+    r"\b(?:last|past)\s+(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\b"
+    r"|\b(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\s+ago\b",
+    re.IGNORECASE,
+)
+
+# Detection noun → the events-store label search_history stores visits under.
+# Person-ish nouns collapse to "person"; unknown nouns fall back to "person"
+# (the store's own default) rather than guessing a label it never indexes.
+_HISTORY_LABELS: dict[str, str] = {
+    "car": "car", "cars": "car", "vehicle": "car", "truck": "truck",
+    "bike": "bicycle", "bicycle": "bicycle", "motorcycle": "motorcycle",
+    "dog": "dog", "cat": "cat",
+}
+
+
+def _is_past_question(text: str) -> bool:
+    """True when the utterance asks about history, not the current scene."""
+    return bool(_PAST_RE.search(text or ""))
+
+
+def _window_from_text(text: str, now=None) -> tuple[str | None, int]:
+    """Best-effort time window from the utterance.
+
+    Returns ``(start_time_iso, window_seconds)`` — the ISO start (with tz
+    offset, as search_history requires) or None for an open start, plus the
+    equivalent relative seconds for recent_events. All computed from the
+    LOCAL clock (the container's TZ), matching the clock line in the system
+    prompt."""
+    from datetime import datetime, timedelta
+
+    t = text or ""
+    now = now or datetime.now().astimezone()
+    m = _WINDOW_RE.search(t)
+    if m:
+        qty = int(m.group(1) or m.group(3))
+        unit = (m.group(2) or m.group(4) or "").lower()
+        secs = qty * (3600 if unit.startswith(("hour", "hr")) else 60)
+        return (now - timedelta(seconds=secs)).isoformat(timespec="seconds"), secs
+    lowered = t.lower()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if "yesterday" in lowered or "last night" in lowered:
+        start = midnight - timedelta(days=1)
+        return start.isoformat(timespec="seconds"), int((now - start).total_seconds())
+    if "today" in lowered or "this morning" in lowered or "tonight" in lowered \
+            or "this afternoon" in lowered or "this evening" in lowered:
+        return midnight.isoformat(timespec="seconds"), int((now - midnight).total_seconds())
+    # No parseable window: open start for search_history; recent_events gets
+    # a generous hour so "did anyone come?" still looks back meaningfully.
+    return None, 3600
+
+
+def _pick_forced_call(
+    text: str, cam: str, advertised: set[str], now=None
+) -> tuple[str, dict[str, Any]]:
+    """Choose the forced-grounding (tool, arguments) — history-aware.
+
+    Past-tense questions go to search_history (durable events store) when it
+    is advertised, else recent_events (in-memory ring) — never to a live
+    detector, which can only describe the CURRENT frame. Present-tense
+    questions keep the _pick_forced_tool routing. Only advertised tools are
+    ever picked, so forced grounding can't call something the operator's
+    enabled_tools hides from the model."""
+    if _is_past_question(text):
+        start_iso, window_secs = _window_from_text(text, now=now)
+        if "search_history" in advertised:
+            args: dict[str, Any] = {"camera_id": cam}
+            m = _DETECTION_RE.search(text or "")
+            noun = (m.group(0).lower() if m else "")
+            args["label"] = _HISTORY_LABELS.get(noun, "person")
+            if start_iso:
+                args["start_time"] = start_iso
+            return "search_history", args
+        if "recent_events" in advertised:
+            return "recent_events", {
+                "camera_id": cam, "window_seconds": window_secs,
+            }
+        # No history tool advertised: fall through to the live routing —
+        # a wrong-tense answer beats no grounding at all, and the reply
+        # honestly describes what the tool actually looked at.
+    name = _pick_forced_tool(text)
+    if name not in advertised and "describe_camera" in advertised:
+        name = "describe_camera"
+    return name, {"camera_id": cam}
+
+
 # Questions about the camera ROSTER / system config ("how many cameras are
 # configured?", "which cameras do you have?", "list the cameras") are about
 # the SYSTEM, not what's visible — the model answers them correctly from its
@@ -5966,18 +6228,22 @@ async def _run_conversation_turn(
             forced = True
             grounded = True
             cam = _pick_camera(user_text, cameras, preferred_camera)
-            # Route to the detector for presence/count questions and to the
-            # BLIP caption for open "what's there?" questions. Small models
-            # often refuse or fabricate instead of calling a tool, so this
-            # forced path is what most camera questions actually hit —
-            # picking the RIGHT tool here is what makes "is there a person?"
-            # get a detector answer ("no people") instead of an off-topic
-            # scene caption.
-            tool_name = _pick_forced_tool(user_text)
+            # Route to the detector for presence/count questions, to the
+            # BLIP caption for open "what's there?" questions, and — for
+            # PAST-TENSE questions — to the history tools (search_history /
+            # recent_events), never a live look. Small models often refuse
+            # or fabricate instead of calling a tool, so this forced path is
+            # what most camera questions actually hit — picking the RIGHT
+            # tool here is what makes "is there a person?" get a detector
+            # answer and "did you see a person today?" get the NVR's memory
+            # instead of whatever happens to be in the current frame.
+            tool_name, tool_args = _pick_forced_call(
+                user_text, cam,
+                {t["function"]["name"] for t in (tools or ())},
+            )
             call = {
                 "id": "forced-0", "type": "function",
-                "function": {"name": tool_name,
-                             "arguments": {"camera_id": cam}},
+                "function": {"name": tool_name, "arguments": tool_args},
             }
             name, result = await _invoke_tool(runtime, call)
             logger.info("converse: FORCED grounding (%s) on %s -> %s",

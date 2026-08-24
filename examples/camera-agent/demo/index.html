@@ -270,6 +270,13 @@
     .skill .sk-body{flex:1; min-width:0;}
     .skill .sk-nm{display:block;}
     .skill .sk-uses{display:block; font-size:0.66rem; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    /* per-tool honesty chips: every tool the skill bundles, greyed +
+       struck-through when the LLM can't actually call it (hidden by
+       enabled_tools or a missing backend) */
+    .skill .sk-tools{display:flex; flex-wrap:wrap; gap:0.25rem; margin-top:0.2rem;}
+    .skill .sk-tool{font-size:0.6rem; color:var(--faint); background:rgba(0,0,0,0.25);
+      border:1px solid var(--stroke); border-radius:999px; padding:0 0.4rem;}
+    .skill .sk-tool.off{opacity:0.45; text-decoration:line-through;}
     .skill .sk-x{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem; flex:0 0 auto; padding:0 0.1rem;}
     .skill .sk-x:hover{color:var(--danger);}
     #skillBrowse{margin-top:0.5rem; border-top:1px solid var(--stroke); padding-top:0.5rem;}
@@ -1930,6 +1937,19 @@
         d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
         d.querySelector(".sk-nm").textContent=s.name;
         d.querySelector(".sk-uses").textContent="uses "+s.uses;
+        // Tool-level honesty: list every tool this skill bundles; grey out
+        // (and strike through) any the model can't actually call, so an
+        // "on" card can't imply hidden tools work. App-door entries carry
+        // no tools array — nothing is rendered for them.
+        if(Array.isArray(s.tools)&&s.tools.length){
+          const tl=document.createElement("span"); tl.className="sk-tools";
+          for(const t of s.tools){ const c=document.createElement("span");
+            c.className="sk-tool"+(t.advertised?"":" off");
+            c.textContent=t.name;
+            if(!t.advertised) c.title="Hidden from the model — not in enabled_tools (or its backend isn't wired). The agent can't call this tool.";
+            tl.appendChild(c); }
+          d.querySelector(".sk-body").appendChild(tl);
+        }
         d.querySelector(".sk-x").addEventListener("click",()=>{
           if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
           toggleSkill(s.id,"disable"); });
