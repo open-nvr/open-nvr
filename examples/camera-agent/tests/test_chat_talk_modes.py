@@ -147,3 +147,35 @@ def test_demo_talk_end_always_returns_to_chat():
 def test_demo_text_installs_hide_all_voice_controls():
     assert "body.mode-text #dictate" in _HTML
     assert "body.mode-text #talk" in _HTML
+
+
+def test_demo_talk_is_off_by_default():
+    # The hands-free session starts ONLY from the Talk button: exactly two
+    # occurrences of "startSession()" — its definition and the one call in
+    # the talk click handler. Any boot-time auto-start would add a third.
+    assert _HTML.count("startSession()") == 2
+    # And the page never ships with the hands-free surface pre-raised.
+    assert 'class="ui-talk"' not in _HTML
+
+
+def test_demo_state_animations_survive_the_redesign():
+    # The avatar's four states, the ambient speaking glow, the blinking
+    # Stop dot, and the state-driven voice pill — all still wired.
+    for needle in (".ram.idle", ".ram.listening", ".ram.thinking",
+                   ".ram.speaking", ".ambient-speak",
+                   ".talk.listening::before",
+                   "body:has(#ram.thinking) .voicebar",
+                   "body:has(#ram.speaking) .ambient-speak"):
+        assert needle in _HTML, needle
+    # The voice pill must stay STATE-driven, never mode-gated: gating it on
+    # ui-talk silently killed the Thinking… animation for typed asks.
+    assert "body:not(.ui-talk) .voicebar" not in _HTML
+
+
+def test_demo_chat_dock_present_on_camera_screen_too():
+    # The log + docked bar live OUTSIDE #mainScreen/#camScreen, after both —
+    # so opening a single camera keeps the same chat dock below it.
+    cam_screen = _HTML.index('id="camScreen"')
+    log = _HTML.index('<div class="log" id="log">')
+    bar = _HTML.index('<div class="row askrow">')
+    assert cam_screen < log < bar

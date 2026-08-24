@@ -513,9 +513,13 @@
     body.mode-text #talk, body.mode-text .voicebar, body.mode-text #micdot,
     body.mode-text #wakeOpt, body.mode-text #camTalk,
     body.mode-text #dictate{display:none !important;}
-    /* Chat is always on; the voice pill and wake option surface only while
-       a hands-free session is live (body.ui-talk, set by start/stopSession). */
-    body:not(.ui-talk) .voicebar, body:not(.ui-talk) #wakeOpt{display:none !important;}
+    /* Chat is always on; the wake-word option only matters while a
+       hands-free session is live (body.ui-talk, set by start/stopSession).
+       The voicebar is NOT gated here — it is state-driven (it rises via
+       body:has(#ram.listening/thinking/speaking) below), so the animated
+       Listening/Thinking/Speaking pill shows for TYPED asks too, exactly
+       as it always did. */
+    body:not(.ui-talk) #wakeOpt{display:none !important;}
     body.mode-voice .log:empty::after{content:"Ask your cameras anything — type, tap the mic to dictate, or tap Talk.";}
     body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
     /* round dictate mic in the input bar */
@@ -1374,10 +1378,13 @@
       // The docked chat bar below stays the one input; scope it visibly.
       const inp=$("askInput");
       if(inp) inp.placeholder="Ask about "+cam+" — e.g. what do you see right now?";
+      // The generic try-asking chips would crowd the shrunken log here.
+      const sr=$("suggestRow"); if(sr) sr.hidden=true;
       addMsg("Focused on "+cam+" — talk or type below, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
+      renderSuggestions();   // chips return on the all-cameras screen
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
       if(_stepTimer){clearInterval(_stepTimer);_stepTimer=null;}
       stopPlayback(); stopWebrtc();
