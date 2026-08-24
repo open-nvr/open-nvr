@@ -347,8 +347,14 @@ services:
   # ──────────────────────────────────────────────────────────────
   # Ollama model pull — one-shot (VOICE + CHAT). Runs AUTOMATICALLY on ``up``
   # because the agent depends_on it (service_completed_successfully), so the
-  # model is present before the agent starts. Model = OLLAMA_MODEL in .env
-  # (default qwen2.5:1.5b).
+  # model is present before the agent starts. Pulls OLLAMA_MODEL (the LLM
+  # brain) and, when CAPTION_ADAPTER=ollamavlm, OLLAMA_VLM_MODEL (the eyes)
+  # — previously only the LLM was pre-pulled, so the FIRST describe question
+  # cold-pulled the VLM through the adapter: fine-ish for moondream (1.7GB),
+  # but a picked gemma3:4b / qwen2.5vl meant minutes of 503s that read as
+  # "the vision model doesn't work". The VLM pull is best-effort: a typo'd
+  # model name must not take down the whole agent profile — the adapter's
+  # auto-pull remains the fallback and the failure is named in the log.
   # ──────────────────────────────────────────────────────────────
   ollama-model-pull:
     profiles: [camera-agent, camera-agent-chat]
@@ -367,9 +373,21 @@ services:
         MODEL="$${OLLAMA_MODEL:-qwen2.5:1.5b}"
         echo "Pulling Ollama model: $$MODEL"
         OLLAMA_HOST=http://ollama:11434 ollama pull "$$MODEL"
-        echo "Model ready."
+        echo "LLM model ready."
+        if [ "$${CAPTION_ADAPTER}" = "ollamavlm" ] && [ -n "$${OLLAMA_VLM_MODEL}" ]; then
+          echo "Pulling vision model: $${OLLAMA_VLM_MODEL}"
+          if OLLAMA_HOST=http://ollama:11434 ollama pull "$${OLLAMA_VLM_MODEL}"; then
+            echo "Vision model ready."
+          else
+            echo "WARN: could not pull vision model '$${OLLAMA_VLM_MODEL}' —" >&2
+            echo "describe answers stay degraded until the adapter's auto-pull succeeds" >&2
+            echo "or you pull it manually (ollama pull $${OLLAMA_VLM_MODEL})." >&2
+          fi
+        fi
     environment:
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_VLM_MODEL=${OLLAMA_VLM_MODEL:-moondream}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
       - opennvr_ollama_models:/root/.ollama
     networks:

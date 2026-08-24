@@ -600,6 +600,9 @@ choose_example() {
                 fi
             else
                 warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
+                if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
+                    warn "And the vision model:                        ollama pull $(env_get OLLAMA_VLM_MODEL)"
+                fi
             fi
         fi
         if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
