@@ -702,7 +702,15 @@ pull_and_build() {
     check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
-        COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE" --profile "$EXAMPLE_PROFILE")
+        COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE")
+        # External-LLM overlay, same condition as compose_args in start.sh.
+        # Without it the bundled ollama/ollama-model-pull services are still
+        # in an ACTIVE profile here, so `pull` downloads the 3.7 GB
+        # ollama/ollama image for containers the launcher then never starts.
+        if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml ]]; then
+            COMPOSE_ARGS+=(-f docker-compose.camera-agent.external-llm.yml)
+        fi
+        COMPOSE_ARGS+=(--profile "$EXAMPLE_PROFILE")
         info "Pulling images for $EXAMPLE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
     fi
