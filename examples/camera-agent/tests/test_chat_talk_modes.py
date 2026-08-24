@@ -106,10 +106,22 @@ def test_agent_hides_stt_on_text_installs():
 _HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
 
 
-def test_demo_has_mode_toggle_and_dictate_mic():
-    for needle in ('id="modeSeg"', 'id="modeChat"', 'id="modeTalk"',
-                   'id="dictate"', 'fetch("/transcribe"'):
+def test_demo_has_docked_bar_with_dictate_and_single_talk():
+    # ChatGPT-shape bar: mic (dictate) + input + Send + one compact Talk.
+    for needle in ('id="dictate"', 'fetch("/transcribe"', 'id="talk"',
+                   'class="send"'):
         assert needle in _HTML, needle
+    # The Chat|Talk segmented toggle is gone — Talk is a single button.
+    assert 'id="modeSeg"' not in _HTML
+    assert 'id="modeChat"' not in _HTML
+
+
+def test_demo_chat_log_sits_above_the_input_bar():
+    # The conversation fills the card; the input bar is docked BELOW it —
+    # on the camera screen too (one global bar; the camAsk pill is gone).
+    assert _HTML.index('<div class="log" id="log">') \
+        < _HTML.index('<div class="row askrow">')
+    assert 'id="camAsk"' not in _HTML
 
 
 def test_demo_voice_installs_keep_the_text_box():
@@ -119,8 +131,9 @@ def test_demo_voice_installs_keep_the_text_box():
 
 
 def test_demo_talk_end_always_returns_to_chat():
-    # Both session endings — explicit Stop and the idle timeout — must land
-    # the UI back on Chat (ui-talk off), so the mic is never secretly live.
+    # Both session endings — explicit Stop and the idle timeout — must clear
+    # the hands-free surface (ui-talk), so the mic is never secretly live;
+    # startSession is what raises it.
     import re
     stop = re.search(r"function stopSession\(\)\{.*?\}", _HTML, re.S).group(0)
     idle = re.search(r"function pauseForIdle\(\)\{.*?syncSegChat\(\);\s*\}",
@@ -128,7 +141,9 @@ def test_demo_talk_end_always_returns_to_chat():
     assert "syncSegChat()" in stop
     assert idle is not None
     assert 'classList.remove("ui-talk")' in _HTML
+    assert "syncSegTalk()" in _HTML
 
 
 def test_demo_text_installs_hide_all_voice_controls():
-    assert "body.mode-text #modeSeg, body.mode-text #dictate" in _HTML
+    assert "body.mode-text #dictate" in _HTML
+    assert "body.mode-text #talk" in _HTML

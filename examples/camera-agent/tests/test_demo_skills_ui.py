@@ -161,7 +161,9 @@ def test_camera_strip_peek_and_camera_screen_wired(script: str, html: str) -> No
     # review player. The pin stays one-shot on the next /ask.
     for eid in ("camstrip", "pinChip", "pinClear", "mainScreen", "camScreen",
                 "camPlayer", "camImg", "camScrub", "camMarks", "camLive",
-                "camPlay", "camTalk", "camAsk", "camWatch", "camAlarm",
+                # camAsk was retired: the chat bar is docked below the camera
+                # screen and cameraParam() scopes typed questions already.
+                "camPlay", "camTalk", "camWatch", "camAlarm",
                 "popWatch", "popAlarm", "camRecordings", "camBack"):
         assert f'id="{eid}"' in html, f"camera UI element missing: {eid!r}"
     for fn in ("function buildCamStrip", "async function peekCam",

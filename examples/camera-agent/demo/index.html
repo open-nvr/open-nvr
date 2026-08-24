@@ -175,25 +175,30 @@
     .camtile .ct-x{background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.8rem; padding:0;}
     .camtile .ct-x:hover,.camtile:hover .ct-nm{color:var(--text);}
 
-    /* ── talk button ─────────────────────────────────────────────────── */
-    /* A centered pill, not a full-width slab: sized to its label, thumb-
-       friendly (≥44px tall), with the mic level ring (JS-driven box-shadow)
-       hugging the rounded shape. width:max-content + margin:auto keeps the
-       flex display from stretching it across the card. */
-    .talk{width:max-content; min-width:10.5rem; margin:0.2rem auto; border:none; cursor:pointer;
+    /* ── talk button (compact, lives in the bottom input bar) ─────────── */
+    /* One small pill next to Send: tap → hands-free session (label flips to
+       ● Stop, red, mic level ring hugs it); Stop or the idle timeout ends
+       it. The bar's dictation mic handles "speak into the text box". */
+    .talk{flex:0 0 auto; border:none; cursor:pointer;
       background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
-      padding:0.72rem 1.9rem; border-radius:999px; font-weight:750; font-size:0.95rem;
-      display:flex; align-items:center; justify-content:center; gap:0.5rem; touch-action:none;
-      -webkit-user-select:none; user-select:none; box-shadow:0 8px 22px -10px rgba(94,179,246,0.65);
+      padding:0.55rem 1.05rem; border-radius:999px; font-weight:700; font-size:0.85rem;
+      display:flex; align-items:center; justify-content:center; gap:0.4rem; touch-action:none;
+      -webkit-user-select:none; user-select:none; box-shadow:0 6px 16px -8px rgba(94,179,246,0.6);
       transition:transform 0.05s, filter 0.15s;}
-    .talk:hover:not(:disabled){filter:brightness(1.06); transform:translateY(-1px);}
+    .talk:hover:not(:disabled){filter:brightness(1.06);}
     .talk:active:not(:disabled){transform:scale(0.98);}
     .talk:disabled{opacity:0.5; cursor:progress;}
     .talk.listening{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff;
-      box-shadow:0 8px 22px -10px rgba(242,85,90,0.7);}
+      box-shadow:0 6px 16px -8px rgba(242,85,90,0.7);}
     .talk.listening::before{content:"● "; animation:blink 1s steps(2,start) infinite;}
     @keyframes blink{to{visibility:hidden;}}
-    @media (max-width:900px){ .talk{width:100%; min-width:0;} }  /* phones: full-width stays the easier tap target */
+    /* primary Send, matching the reference bar */
+    .askrow .send{flex:0 0 auto; border:none; cursor:pointer; font-weight:700; font-size:0.85rem;
+      background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
+      padding:0.55rem 1.15rem; border-radius:10px;}
+    .askrow .send:hover:not(:disabled){filter:brightness(1.07);}
+    .askrow .send:disabled{opacity:0.5; cursor:progress;}
+    .statusrow .status{font-size:0.76rem; padding:0.4rem 0.6rem;}
 
     /* ── rows, status, chips, ghost buttons ──────────────────────────── */
     .row{display:flex; gap:0.5rem; align-items:center; margin:0.6rem 0 0; flex:0 0 auto;}
@@ -211,9 +216,9 @@
       border-radius:12px; padding:0.68rem 0.8rem; font-size:0.95rem; transition:border-color 0.15s;}
     .askrow input::placeholder{color:var(--faint);}
     .askrow input:focus{outline:none; border-color:var(--accent);}
-    .askrow .ghost{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
-      border:none; font-weight:700; padding-left:1.1rem; padding-right:1.1rem;}
-    .askrow .ghost:hover{filter:brightness(1.06);}
+    /* (Send used to be a .ghost styled blue here; it now has its own .send
+       class above, so ghosts in the bar — Reset — stay quiet like ghosts
+       should.) */
 
     /* ── conversation log + bubbles ──────────────────────────────────── */
     .log{margin-top:0.85rem; flex:1 1 auto; min-height:0; overflow-y:auto;
@@ -507,18 +512,12 @@
        Talk auto-returns to chat when the session idles out. */
     body.mode-text #talk, body.mode-text .voicebar, body.mode-text #micdot,
     body.mode-text #wakeOpt, body.mode-text #camTalk,
-    body.mode-text #modeSeg, body.mode-text #dictate{display:none !important;}
-    body:not(.ui-talk) #talk, body:not(.ui-talk) .voicebar,
-    body:not(.ui-talk) #wakeOpt{display:none !important;}
-    body.mode-voice .log:empty::after{content:"Ask your cameras anything — type, tap the mic to dictate, or switch to Talk.";}
+    body.mode-text #dictate{display:none !important;}
+    /* Chat is always on; the voice pill and wake option surface only while
+       a hands-free session is live (body.ui-talk, set by start/stopSession). */
+    body:not(.ui-talk) .voicebar, body:not(.ui-talk) #wakeOpt{display:none !important;}
+    body.mode-voice .log:empty::after{content:"Ask your cameras anything — type, tap the mic to dictate, or tap Talk.";}
     body.mode-text .log:empty::after{content:"Ask your cameras anything — type your question below.";}
-    /* Chat|Talk segmented toggle */
-    .modeseg{display:flex; gap:0.25rem; width:max-content; margin:0.25rem auto 0;
-      background:rgba(0,0,0,0.28); border:1px solid var(--stroke); border-radius:999px; padding:0.18rem;}
-    .modeseg .seg{border:none; background:transparent; color:var(--muted); font-size:0.8rem;
-      padding:0.34rem 1.05rem; border-radius:999px; cursor:pointer; display:flex; align-items:center; gap:0.35rem;}
-    .modeseg .seg:hover{color:var(--text);}
-    .modeseg .seg.on{background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f; font-weight:700;}
     /* round dictate mic in the input bar */
     .micbtn{flex:0 0 auto; width:40px; height:40px; border-radius:50%; border:none; cursor:pointer;
       background:linear-gradient(180deg,var(--accent),var(--accent-strong)); color:#04121f;
@@ -552,7 +551,7 @@
             </div>
             <div>
               <div class="titlerow"><h1 id="title"><span class="wm-open">Open</span><span class="wm-nvr">NVR</span> Agent<span class="hdot" id="healthDot" title="Checking agent health…"></span></h1></div>
-              <p class="lede" id="lede">Type a question, tap the mic to dictate — or switch to <strong>Talk</strong> for hands-free voice.</p>
+              <p class="lede" id="lede">Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.</p>
               <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
                 <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
               <div class="micdot" id="micdot" hidden>mic live</div>
@@ -607,7 +606,6 @@
             </div>
             <div class="acts">
               <button class="apill talk2" id="camTalk" type="button">🎙 Talk</button>
-              <button class="apill" id="camAsk" type="button">💬 Ask</button>
               <button class="apill" id="camWatch" type="button">👁 Watch</button>
               <button class="apill" id="camAlarm" type="button">🔔 Alarm</button>
               <div class="pop" id="popWatch">
@@ -643,31 +641,31 @@
             <div class="empty-note" id="camScoped"></div>
           </div>
 
-          <div class="modeseg" id="modeSeg" role="tablist" aria-label="Interaction mode">
-            <button id="modeChat" class="seg on" type="button" role="tab" aria-selected="true" title="Type your questions — tap the mic to dictate">💬 Chat</button>
-            <button id="modeTalk" class="seg" type="button" role="tab" aria-selected="false" title="Hands-free: it listens and answers aloud, and stops itself after a quiet spell">🎙 Talk</button>
-          </div>
+          <!-- Chat-first layout: the conversation fills the card and the
+               input bar is DOCKED AT THE BOTTOM (the shape every chat app
+               trained people on). Talk is one compact button in the bar —
+               tap → hands-free session (it becomes ● Stop); Stop or the
+               idle timeout ends it. -->
+          <div class="log" id="log"></div>
           <div class="voicebar" aria-hidden="true"><div class="pill"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="lbl"></span></div></div>
-          <button id="talk" class="talk" type="button"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
           <div class="row" id="pinChip" hidden>
             <span class="chip">📌 Asking about a <span id="pinCam"></span> frame</span>
             <button id="pinClear" class="ghost" type="button" title="Unpin — ask about live frames again">✕</button>
           </div>
           <div class="suggestrow" id="suggestRow" hidden></div>
-          <div class="row askrow">
-            <button id="dictate" class="micbtn" type="button" title="Dictate — speak, and your words land in the box" aria-label="Dictate into the text box"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
-            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
-            <button id="askBtn" class="ghost" type="button">Send</button>
-          </div>
-          <div class="row">
+          <div class="row statusrow">
             <div class="status" id="status">Ready.</div>
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="sysCheck" class="ghost" type="button" title="Exercise every capability path — frame, detector, VLM, LLM, voice, alarms, events — and report what actually works">System check</button>
+          </div>
+          <div class="row askrow">
+            <button id="dictate" class="micbtn" type="button" title="Dictate — speak, and your words land in the box" aria-label="Dictate into the text box"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
+            <input id="askInput" type="text" placeholder="Type a question, e.g. how many people on cam1?" autocomplete="off">
+            <button id="askBtn" class="send" type="button">Send</button>
+            <button id="talk" class="talk" type="button" title="Hands-free: it listens and answers aloud, and stops itself after a quiet spell"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Talk</button>
             <button id="reset" class="ghost" type="button">Reset</button>
           </div>
-
-          <div class="log" id="log"></div>
         </div>
       </div>
 
@@ -1179,8 +1177,8 @@
         setStatus("Ready. Type a question.");
       } else {
         document.body.classList.add("mode-voice");
-        ledeEl.innerHTML=`Type a question, tap the mic to dictate — or switch to <strong>Talk</strong> for hands-free voice.`;
-        setStatus("Ready. Type, dictate, or switch to Talk.");
+        ledeEl.innerHTML=`Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.`;
+        setStatus("Ready. Type, dictate, or tap Talk.");
       }
       if(a.stt_available===false){ const b=$("dictate"); if(b) b.hidden=true; }
     }catch{} }
@@ -1373,7 +1371,10 @@
       $("camTitle").textContent=cam; $("camSub").textContent=_camRoles[cam]||"";
       if(push) history.pushState({cam:cam},"","/demo/camera/"+encodeURIComponent(cam));
       goLive(); loadTimeline(cam); loadCamScoped(cam); loadRecordings(cam); _evAllCams=false; renderEventsCard();
-      addMsg("Focused on "+cam+" — talk or type, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
+      // The docked chat bar below stays the one input; scope it visibly.
+      const inp=$("askInput");
+      if(inp) inp.placeholder="Ask about "+cam+" — e.g. what do you see right now?";
+      addMsg("Focused on "+cam+" — talk or type below, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
       window._camScreenCam=null;
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
@@ -1679,15 +1680,9 @@
       el.textContent=bits.join("  ·  "); }
     (function(){
       const t=$("camTalk"); if(t) t.addEventListener("click",()=>{ closePops(); const tb=$("talk"); if(tb) tb.click(); });
-      const a=$("camAsk"); if(a) a.addEventListener("click",()=>{ closePops();
-        // Ask has no dialog of its own — it hands you to the type box.
-        // Make that VISIBLE (scoped placeholder + a brief pulse) so the
-        // pill never reads as a dead button.
-        const inp=$("askInput"), row=inp.closest(".askrow");
-        inp.placeholder="Ask about "+(window._camScreenCam||"this camera")+" — e.g. what do you see right now?";
-        inp.scrollIntoView({block:"center",behavior:"smooth"}); inp.focus();
-        if(row){ row.classList.remove("pulse"); void row.offsetWidth; row.classList.add("pulse");
-          setTimeout(()=>row.classList.remove("pulse"),1400); } });
+      // (No "Ask" pill here any more: the chat bar is always docked right
+      // below this screen, and cameraParam() already scopes typed questions
+      // to the open camera. One less button saying what the layout shows.)
       const w=$("camWatch"); if(w) w.addEventListener("click",()=>togglePop("#popWatch"));
       const al=$("camAlarm"); if(al) al.addEventListener("click",()=>togglePop("#popAlarm"));
       const wg=$("pwGo"); if(wg) wg.addEventListener("click",async()=>{
@@ -1818,6 +1813,7 @@
     async function startSession(){ ensureOutputAudio();
       try{ await ensureMic(); }catch(err){ setStatus("Microphone access denied.","error"); addMsg("Microphone access denied: "+err,"sys"); return; }
       sessionActive=true; lastActivity=performance.now(); loudFrames=0;
+      syncSegTalk();   // voice pill + wake option surface for the session
       // Voice turns answer from LIVE frames — an armed pin would be a lie
       // (only typed asks carry it), so unpin loudly instead of silently.
       if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
@@ -1851,28 +1847,19 @@
       if(busy){ fetch("/converse/cancel",{method:"POST"}).catch(()=>{}); busy=false; }
       if(inflightCtl){ try{ inflightCtl.abort(); }catch{} inflightCtl=null; } }
     function stopSession(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
-      setStatus("Stopped. Type below, or switch to Talk again."); syncSegChat(); }
+      setStatus("Stopped. Type below, or tap Talk again."); syncSegChat(); }
     function pauseForIdle(){ endSession(); talkBtn.innerHTML=IC.mic+" Talk";
       setStatus("Stopped listening after a quiet spell — back to chat.");
-      addMsg("The agent stopped listening after a quiet spell. Switch to Talk to speak again.","sys");
+      addMsg("The agent stopped listening after a quiet spell. Tap Talk to speak again.","sys");
       syncSegChat(); }
 
-    // ── runtime interaction mode: chat (default) ⇄ hands-free talk ──
-    // Selecting Talk STARTS the session immediately; the session ending —
-    // by Stop, or by the idle timeout above — always lands back on Chat,
-    // so the mic is never secretly live while the UI claims chat mode.
-    function syncSegChat(){ document.body.classList.remove("ui-talk");
-      const c=$("modeChat"), t=$("modeTalk");
-      if(c){ c.classList.add("on"); c.setAttribute("aria-selected","true"); }
-      if(t){ t.classList.remove("on"); t.setAttribute("aria-selected","false"); } }
-    function syncSegTalk(){ document.body.classList.add("ui-talk");
-      const c=$("modeChat"), t=$("modeTalk");
-      if(c){ c.classList.remove("on"); c.setAttribute("aria-selected","false"); }
-      if(t){ t.classList.add("on"); t.setAttribute("aria-selected","true"); } }
-    (function(){ const c=$("modeChat"), t=$("modeTalk");
-      if(c) c.addEventListener("click",()=>{ if(sessionActive) stopSession(); else syncSegChat(); });
-      if(t) t.addEventListener("click",()=>{ syncSegTalk();
-        if(!sessionActive){ ensureOutputAudio(); startSession(); } }); })();
+    // ── hands-free surface follows the SESSION, not a mode toggle ──
+    // body.ui-talk shows the voice pill + wake option only while a talk
+    // session is live. Every session ending — Stop, or the idle timeout —
+    // clears it, so the mic is never secretly live while the bar reads
+    // "Talk". (Chat/dictate stay available at all times.)
+    function syncSegChat(){ document.body.classList.remove("ui-talk"); }
+    function syncSegTalk(){ document.body.classList.add("ui-talk"); }
 
     // ── dictation: mic → /transcribe → words land in the text box ───
     // One utterance per tap (tap again to finish, 30 s cap). STT only —
