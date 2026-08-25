@@ -82,3 +82,68 @@ def test_count_cap_evicts_oldest():
     assert len(s) == 2                        # oldest (track 0) evicted
     assert s.get_jpeg("cam1", 0) is None
     assert s.get_jpeg("cam1", 2) is not None
+
+
+# ── fleet fairness: one busy camera must not starve the quiet ones ──
+
+def test_a_busy_camera_cannot_evict_a_quiet_cameras_best_frame():
+    """The regression: the count cap was GLOBAL and recency was driven by put
+    rate, so a busy/high-fps camera continuously evicted quiet cameras and
+    "best frame for cam-quiet" came back empty on a real fleet."""
+    s, clk, _calls = _store(max_entries=8, max_per_camera=4)
+
+    clk.t = 1.0
+    s.put("cam-quiet", "t1", ["quiet-best"])          # one frame, then silence
+
+    for i in range(200):                              # a busy neighbour floods
+        clk.t = 2.0 + i * 0.01
+        s.put("cam-busy", f"t{i}", [f"busy{i}"])
+
+    assert s.get_jpeg("cam-quiet", "t1") is not None, \
+        "quiet camera's best frame was evicted by a busy neighbour"
+    # ...and the busy camera is held to its own quota rather than the store.
+    assert len(s) <= 8
+
+
+def test_per_camera_quota_is_enforced_independently():
+    s, clk, _calls = _store(max_entries=100, max_per_camera=3)
+    for cam in ("a", "b"):
+        for i in range(10):
+            clk.t = 1.0 + i
+            s.put(cam, f"t{i}", [f"{cam}{i}"])
+    assert len(s) == 6                                # 3 per camera, both kept
+    for cam in ("a", "b"):                            # newest survive, oldest go
+        assert s.get_jpeg(cam, "t9") is not None
+        assert s.get_jpeg(cam, "t0") is None
+
+
+def test_global_backstop_takes_from_the_largest_bucket():
+    s, clk, _calls = _store(max_entries=4, max_per_camera=10)
+    clk.t = 1.0
+    s.put("small", "only", ["keep-me"])
+    for i in range(9):
+        clk.t = 2.0 + i
+        s.put("big", f"t{i}", [f"b{i}"])
+    # The single-entry camera survives; the hog is trimmed.
+    assert s.get_jpeg("small", "only") is not None
+    assert len(s) <= 4
+
+
+def test_latest_jpeg_is_scoped_to_its_own_camera():
+    s, clk, _calls = _store()
+    clk.t = 1.0
+    s.put("cam1", "a", ["one"])
+    clk.t = 5.0
+    s.put("cam2", "b", ["two"])                       # newer, different camera
+    assert s.latest_jpeg("cam1") == s.get_jpeg("cam1", "a")
+    assert s.latest_jpeg("cam2") == s.get_jpeg("cam2", "b")
+
+
+def test_latest_jpeg_skips_expired_entries():
+    s, clk, _calls = _store(max_age_s=10.0)
+    clk.t = 0.0
+    s.put("cam1", "old", ["stale"])
+    clk.t = 5.0
+    s.put("cam1", "new", ["fresh"])
+    clk.t = 12.0                                       # "old" is now expired
+    assert s.latest_jpeg("cam1") == s.get_jpeg("cam1", "new")
