@@ -447,14 +447,14 @@ Honest limit that remains: `True` means the client accepted the payload,
 not that the broker acknowledged it — awaiting that would block the frame
 loop.
 
-### 13b. NATS disconnects permanently after 10 failed reconnects
+### 13b. NATS disconnects permanently after 10 failed reconnects — ✅ FIXED
 
 `max_reconnect_attempts: 10`, and nothing rebuilds the publisher
 afterwards — every camera's live events stop until the container is
 restarted. `/health` does surface it (`connected()` feeds the probe),
 which is the only reason this is not worse.
 
-### 13c. VisitPoster: unfair, serial, and drops the wrong end
+### 13c. VisitPoster: unfair, serial, and drops the wrong end — ✅ MOSTLY FIXED
 
 One instance and one drain thread serve the whole fleet, doing a blocking
 POST at a time. Specifically:
@@ -471,7 +471,14 @@ POST at a time. Specifically:
   inner `try` kills the thread silently and **all** visit persistence
   stops with no liveness signal.
 
-### 13d. Tier-1 dispatch has no per-camera fairness and no env knob
+**Fixed:** drop-oldest now matches the docstring, the counter is locked, the
+drain loop is guarded per iteration, and the thread's liveness is reported in
+`/health`. **Still open:** it remains ONE serial drain thread with no
+per-camera fairness in the queue, so a slow core still caps fleet-wide visit
+throughput at 1/latency and a high-churn camera can still take more than its
+share of the 256 slots.
+
+### 13d. Tier-1 dispatch has no per-camera fairness and no env knob — ✅ FIXED
 
 `max_inflight=4` is hardcoded — not reachable from any environment
 variable — and permits are a pure race between workers. A camera with
@@ -479,7 +486,7 @@ several escalating tracks takes all four in one frame. It drops rather
 than blocks and the drops are labelled per camera, so this degrades
 visibly; it is a fairness gap, not a stall.
 
-### 13e. `DETECT_CV_THREADS` does not cap the ORT backend
+### 13e. `DETECT_CV_THREADS` does not cap the ORT backend — ✅ FIXED
 
 `cv2.setNumThreads` bounds OpenCV only. An `onnxruntime` session with no
 `SessionOptions` defaults `intra_op_num_threads` to the core count, so

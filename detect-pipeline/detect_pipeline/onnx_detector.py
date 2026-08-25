@@ -181,6 +181,32 @@ def resolve_providers(requested, available) -> list[str]:
     return provs
 
 
+def _ort_session_options(ort):
+    """Bound an ORT session's own thread pools to DETECT_CV_THREADS.
+
+    ``cv2.setNumThreads`` caps OpenCV ONLY. An InferenceSession built with no
+    options defaults ``intra_op_num_threads`` to the machine's core count and
+    allocates its own pool, so the ``ort`` and ``rfdetr`` paths escaped the
+    service's only CPU governor entirely — several sessions on one box then
+    each believed they owned every core. The detector pool caps how many
+    sessions exist; this caps how wide each one is.
+
+    0/unset means "let ORT decide", matching what DETECT_CV_THREADS=0 means
+    for OpenCV.
+    """
+    import os as _os
+
+    opts = ort.SessionOptions()
+    try:
+        threads = int((_os.environ.get("DETECT_CV_THREADS") or "2").strip() or 0)
+    except ValueError:
+        threads = 2
+    if threads > 0:
+        opts.intra_op_num_threads = threads
+        opts.inter_op_num_threads = 1     # one session, one request at a time
+    return opts
+
+
 class OrtBackend:
     """Run the ONNX model through ONNX Runtime with selectable execution providers.
 
@@ -208,7 +234,9 @@ class OrtBackend:
 
             provs = resolve_providers(providers, ort.get_available_providers())
             log.info("ONNX Runtime backend using providers: %s", provs)
-            self._sess = ort.InferenceSession(model_path, providers=provs)
+            self._sess = ort.InferenceSession(
+                model_path, sess_options=_ort_session_options(ort), providers=provs
+            )
         self._input = self._sess.get_inputs()[0].name
 
     def infer(self, blob: np.ndarray) -> np.ndarray:

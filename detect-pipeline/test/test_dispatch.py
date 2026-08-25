@@ -141,3 +141,56 @@ def test_kaic_dispatcher_posts_governed_infer():
     assert posted["body"]["task"] == "caption" and "frame_b64" in posted["body"]
     assert posted["body"]["camera_id"] == "cam_3" and posted["body"]["track_id"] == 7
     assert posted["key"] == "tok"
+
+
+# ── fairness: one busy camera must not take every permit ────────────
+
+def _blank():
+    return np.zeros((4, 4, 3), np.uint8)
+
+
+def test_one_camera_cannot_consume_every_dispatch_permit():
+    """dispatch_escalations fires once per escalated track in a tight loop,
+    so a single camera with several escalating tracks took all permits in one
+    frame and locked out the whole fleet until they returned."""
+    from detect_pipeline.dispatch import KaicDispatcher
+
+    started, release = [], threading.Event()
+
+    def slow_post(url, body, key, timeout):
+        started.append(1)
+        release.wait(timeout=10)
+
+    d = KaicDispatcher("http://kaic", max_inflight=4, http_post=slow_post)
+    try:
+        for i in range(8):                       # one greedy camera
+            d.dispatch("cam-busy", "caption", _blank(), _track(i))
+        for _ in range(200):
+            if len(started) >= 2:
+                break
+            time.sleep(0.01)
+
+        assert len(started) <= 2, f"cam-busy took {len(started)} of 4 permits"
+        d.dispatch("cam-quiet", "caption", _blank(), _track(99))
+        for _ in range(200):
+            if len(started) >= 3:
+                break
+            time.sleep(0.01)
+        assert len(started) >= 3, "quiet camera was starved by the busy one"
+    finally:
+        release.set()
+        d.close()
+
+
+def test_camera_slots_are_returned_after_completion():
+    from detect_pipeline.dispatch import KaicDispatcher
+
+    d = KaicDispatcher("http://kaic", max_inflight=4, http_post=lambda *a, **k: None)
+    try:
+        for i in range(10):
+            d.dispatch("cam1", "caption", _blank(), _track(i))
+            time.sleep(0.02)
+        time.sleep(0.2)
+        assert d._cam_inflight.get("cam1", 0) == 0, d._cam_inflight
+    finally:
+        d.close()

@@ -172,3 +172,45 @@ def test_resolve_providers_all_filtered_falls_back_to_cpu():
     # every requested EP unavailable -> only the CPU fallback remains
     assert resolve_providers(["HailoExecutionProvider"], available=["CPUExecutionProvider"]) == \
         ["CPUExecutionProvider"]
+
+
+# ── ORT thread capping (DETECT_CV_THREADS governs cv2 only) ─────────
+
+class _FakeSessionOptions:
+    def __init__(self):
+        self.intra_op_num_threads = 0
+        self.inter_op_num_threads = 0
+
+
+class _FakeOrt:
+    SessionOptions = _FakeSessionOptions
+
+
+def test_ort_session_options_honour_detect_cv_threads(monkeypatch):
+    """cv2.setNumThreads caps OpenCV ONLY. An ORT session built with no
+    options defaults intra_op to the core count and allocates its own pool,
+    so the ort/rfdetr paths escaped the service's only CPU governor — and
+    several sessions each believed they owned every core."""
+    from detect_pipeline.onnx_detector import _ort_session_options
+
+    monkeypatch.setenv("DETECT_CV_THREADS", "3")
+    opts = _ort_session_options(_FakeOrt)
+    assert opts.intra_op_num_threads == 3
+    assert opts.inter_op_num_threads == 1
+
+
+def test_ort_session_options_let_ort_decide_when_uncapped(monkeypatch):
+    """0 means "uncapped" for OpenCV; it must mean the same for ORT rather
+    than pinning it to a single thread."""
+    from detect_pipeline.onnx_detector import _ort_session_options
+
+    monkeypatch.setenv("DETECT_CV_THREADS", "0")
+    opts = _ort_session_options(_FakeOrt)
+    assert opts.intra_op_num_threads == 0
+
+
+def test_ort_session_options_survive_a_garbage_value(monkeypatch):
+    from detect_pipeline.onnx_detector import _ort_session_options
+
+    monkeypatch.setenv("DETECT_CV_THREADS", "banana")
+    assert _ort_session_options(_FakeOrt).intra_op_num_threads == 2   # the default

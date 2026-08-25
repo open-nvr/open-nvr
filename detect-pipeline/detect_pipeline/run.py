@@ -110,6 +110,7 @@ class ServiceConfig:
     bestframe_per_camera: int = 16
     detector_pool: int = 0
     start_spread_s: float = 10.0
+    dispatch_max_inflight: int = 4
     visits_enabled: bool = True
 
 
@@ -198,6 +199,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         bestframe_per_camera=_env_int(env, "DETECT_BESTFRAME_PER_CAMERA", 16),
         detector_pool=_detector_pool_from_env(env),
         start_spread_s=_env_float(env, "DETECT_START_SPREAD_S", 10.0),
+        dispatch_max_inflight=_env_int(env, "DETECT_DISPATCH_MAX_INFLIGHT", 4),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -429,7 +431,10 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     dispatcher = router = None
     if cfg.dispatch_kaic_url and (cfg.gate_mode or "").lower() == "enforce":
         from .dispatch import DispatchRouter, KaicDispatcher
-        dispatcher = KaicDispatcher(cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task)
+        dispatcher = KaicDispatcher(
+            cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+            max_inflight=cfg.dispatch_max_inflight,
+        )
         router = DispatchRouter()
         log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
     elif cfg.dispatch_kaic_url:
@@ -697,7 +702,8 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             from .dispatch import DispatchRouter, KaicDispatcher
 
             dispatcher = KaicDispatcher(
-                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task
+                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+                max_inflight=cfg.dispatch_max_inflight,
             )
             router = DispatchRouter()
             log.info("tier1 dispatch enabled -> %s (task=%s)",
