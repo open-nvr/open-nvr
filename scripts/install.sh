@@ -394,43 +394,102 @@ detect_llm_hardware() {
     fi
 }
 
-# suggest_llm_model → echoes the suggested Ollama model for the detected
-# hardware. Two constraints shape the tiers, deliberately:
-#   * FLOOR — tool-calling quality: below ~1.5b the agent misroutes
-#     tools noticeably, so tiny tiers are only suggested where latency
-#     would otherwise make it unusable.
-#   * CEILING — the tested envelope: suggestions never exceed the
-#     largest model this agent has been exercised with. That envelope
-#     now includes qwen3:1.7b, field-tested against qwen2.5 with this
-#     agent and giving BETTER answers at similar speed (~3 GB), so it
-#     is the suggestion wherever RAM allows. "This hardware CAN run a
-#     bigger model" is detectable; "bigger will be BETTER for this
-#     agent's tool-calling and voice latency" is not — 7b doubles
-#     latency for untested gain, so machines with headroom get it as a
-#     note to try, never as the default.
-# qwen3 is a "thinking" family; the shipped configs set llm_think:false
-# so it answers snappily — the chat template difference vs qwen2.5 is
-# handled by Ollama's per-model templates, not by us.
-suggest_llm_model() {
-    if [[ "$HW_ACCEL" != "cpu" ]]; then
-        if (( HW_RAM_GB >= 8 )); then echo "qwen3:1.7b"
-        else echo "qwen2.5:1.5b"; fi
+# ── Sizing the models to the machine ───────────────────────────────
+# Both Ollama models are RESIDENT AT ONCE (the shipped compose sets
+# OLLAMA_KEEP_ALIVE=-1 so answers stay snappy), and they share the box with
+# the OpenNVR stack itself. So what has to fit is the SUM, not either model
+# on its own — sizing them independently is what put a 4 GB vision model on
+# 8 GB machines and left them thrashing.
+#
+# Measured on a running install: the 13 stack containers hold ~2 GB RSS, and
+# Docker Desktop adds its VM overhead on top of that. Leave the operator's
+# own machine some room too — a desktop with zero free RAM is a broken one.
+OPENNVR_STACK_GB=3
+OPENNVR_OS_HEADROOM_GB=2
+
+# compute_model_budget → sets HW_MODEL_BUDGET_GB, the RAM left for models.
+compute_model_budget() {
+    HW_MODEL_BUDGET_GB=$(( HW_RAM_GB - OPENNVR_STACK_GB - OPENNVR_OS_HEADROOM_GB ))
+    (( HW_MODEL_BUDGET_GB < 0 )) && HW_MODEL_BUDGET_GB=0
+    return 0
+}
+
+# catalog_pick <kind> <max_ram_gb> → largest TESTED model of that kind whose
+# working set fits, or empty. Reads the catalog so the tiers can never drift
+# from the menu the operator is shown.
+catalog_pick() {
+    local kind="$1" cap="$2" catalog="examples/camera-agent/model_catalog.txt"
+    local k model min_ram tested rest best="" best_ram=-1
+    [[ -f "$catalog" ]] || return 0
+    while IFS='|' read -r k model min_ram tested rest; do
+        [[ "$k" == "$kind" && "$tested" == "yes" ]] || continue
+        (( min_ram <= cap )) || continue
+        (( min_ram > best_ram )) && { best="$model"; best_ram="$min_ram"; }
+    done < <(grep -v '^#' "$catalog")
+    printf '%s|%s' "$best" "$best_ram"
+}
+
+# suggest_models → sets SUGGEST_LLM, SUGGEST_VLM, SUGGEST_CAPTION_ADAPTER.
+#
+# Two ceilings, deliberately:
+#   * SPEED — a model that fits in RAM can still be unusable. CPU-only boxes
+#     get a tier matched to their cores, because "it fits" and "it answers
+#     before the operator gives up" are different questions.
+#   * TESTED — never suggest past the envelope this agent has actually been
+#     exercised with. "This machine CAN run a bigger model" is detectable;
+#     "bigger will be BETTER at tool-calling and voice latency" is not, so
+#     untested headroom stays a note in the menu, never a default.
+#
+# The tool-routing floor still applies: below ~1.5b the agent misroutes tools
+# noticeably, so the tiny tier is only chosen where nothing else fits.
+suggest_models() {
+    compute_model_budget
+    local cap_llm
+    if [[ "$HW_ACCEL" != "cpu" ]]; then cap_llm=4        # GPU: up to qwen2.5:3b
+    elif (( HW_CORES >= 8 )); then      cap_llm=3        # strong CPU: qwen3:1.7b
+    elif (( HW_CORES >= 4 )); then      cap_llm=2        # modest CPU: qwen2.5:1.5b
+    else                                cap_llm=1        # weak CPU: the tiny tier
+    fi
+    (( cap_llm > HW_MODEL_BUDGET_GB )) && cap_llm=$HW_MODEL_BUDGET_GB
+
+    local picked llm_ram
+    picked=$(catalog_pick llm "$cap_llm")
+    SUGGEST_LLM="${picked%%|*}"; llm_ram="${picked##*|}"
+    if [[ -z "$SUGGEST_LLM" ]]; then
+        # Nothing fits the budget. Suggest the smallest tested model anyway —
+        # the operator may know something we do not (swap, a spare box, an
+        # external Ollama) — and let the menu's own fit warning speak.
+        SUGGEST_LLM="qwen2.5:0.5b"; llm_ram=1
+    fi
+
+    # Whatever the LLM did not take. A vision model this machine cannot hold
+    # is worse than a smaller one: it evicts the LLM on every question.
+    local remaining=$(( HW_MODEL_BUDGET_GB - llm_ram ))
+    (( remaining < 0 )) && remaining=0
+    # On a weak CPU, serving vision through Ollama is slow enough to be a
+    # worse experience than the small in-container model, whatever fits.
+    if [[ "$HW_ACCEL" == "cpu" ]] && (( HW_CORES < 4 )); then remaining=0; fi
+    picked=$(catalog_pick vlm "$remaining")
+    SUGGEST_VLM="${picked%%|*}"
+    if [[ -n "$SUGGEST_VLM" ]]; then
+        SUGGEST_CAPTION_ADAPTER="ollamavlm"
     else
-        if   (( HW_RAM_GB >= 16 && HW_CORES >= 8 )); then echo "qwen3:1.7b"
-        else echo "qwen2.5:0.5b"; fi
+        # No room to serve vision from Ollama: fall back to the moondream
+        # ADAPTER, a ~0.5b-int8 build in its own container — far smaller than
+        # anything in the Ollama catalog, and still a real VQA answer.
+        SUGGEST_CAPTION_ADAPTER="moondream"
+        SUGGEST_VLM=""
     fi
 }
 
-# suggest_vlm_model → caption/VQA model for CAPTION_ADAPTER=ollamavlm.
-# gemma3:4b was field-tested with this agent through ollamavlm and gives
-# clearly better scene answers than moondream, so it is the suggestion
-# wherever RAM allows (~4 GB working set + headroom). moondream stays the
-# low-RAM default: still tested, still cheap. Capable machines are told
-# (in the prompt note) that qwen2.5vl:3b is the better text READER;
-# trying it stays an operator decision.
-suggest_vlm_model() {
-    if (( HW_RAM_GB >= 8 )); then echo "gemma3:4b"
-    else echo "moondream"; fi
+# suggest_whisper_model → speech-to-text sized to the CPU that will run it.
+# Transcription is on the voice critical path: a model that takes four
+# seconds to transcribe "is anyone at the door" makes the agent feel broken,
+# so weak machines get the fast tier and strong ones the accurate one.
+suggest_whisper_model() {
+    if   (( HW_CORES >= 8 && HW_RAM_GB >= 16 )); then echo "small.en"
+    elif (( HW_CORES >= 4 )); then                    echo "base.en"
+    else                                              echo "tiny.en"; fi
 }
 
 # ── Catalog-driven model menu ───────────────────────────────────────
@@ -456,8 +515,10 @@ pick_model_from_catalog() {
         idx=$((idx + 1))
         names[$idx]="$model"
         local fit="" mark=""
-        if (( HW_RAM_GB > 0 && min_ram > HW_RAM_GB )); then
-            fit="  [needs ~${min_ram} GB — this machine detected ${HW_RAM_GB} GB]"
+        if (( HW_RAM_GB > 0 && min_ram > HW_MODEL_BUDGET_GB )); then
+            # Against the BUDGET, not total RAM: a 4 GB model on an 8 GB box
+            # "fits" only if you ignore the stack and the other model.
+            fit="  [needs ~${min_ram} GB — only ~${HW_MODEL_BUDGET_GB} GB free for models]"
         fi
         [[ "$model" == "$suggest" ]] && { mark="  ← suggested"; default_idx="$idx"; }
         printf '   %d. %-16s ~%sGB  %-8s %-8s %s%s%s\n' \
@@ -572,9 +633,10 @@ choose_example() {
         # Size the defaults for the machine that will actually run the
         # model. Suggestions only — type any Ollama model to override.
         detect_llm_hardware "$llm_where"
+        suggest_models
         local llm_suggest vlm_suggest hw_desc
-        llm_suggest=$(suggest_llm_model)
-        vlm_suggest=$(suggest_vlm_model)
+        llm_suggest="$SUGGEST_LLM"
+        vlm_suggest="$SUGGEST_VLM"
         hw_desc="${HW_RAM_GB} GB RAM, ${HW_CORES} cores"
         case "$HW_ACCEL" in
             metal) hw_desc="Apple Silicon GPU (Metal), $hw_desc" ;;
@@ -584,7 +646,12 @@ choose_example() {
         if [[ "$llm_where" == "container" && "$PLATFORM" == "macOS" ]]; then
             hw_desc="$hw_desc (Docker VM allowance)"
         fi
-        ok "Detected: $hw_desc → suggesting $llm_suggest"
+        ok "Detected: $hw_desc → ~${HW_MODEL_BUDGET_GB} GB for models after the stack"
+        if [[ -n "$vlm_suggest" ]]; then
+            ok "Suggesting ${llm_suggest} + ${vlm_suggest} (both stay resident)"
+        else
+            ok "Suggesting ${llm_suggest}; too little left for an Ollama vision model, so scene description falls back to the small in-container moondream"
+        fi
 
         printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
         explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hw_desc), capped at the largest model this agent is tested with — 'untested' entries are known-good models nobody has validated with THIS agent yet." \
@@ -612,9 +679,10 @@ choose_example() {
             fi
         fi
         if [[ "$EXAMPLE_PROFILE" == "camera-agent" ]]; then
-            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" "base.en" \
-                "Transcribes your spoken questions (voice mode only)." "yes" \
-                "tiny.en (fastest) | base.en (default) | small.en (most accurate)."
+            configure_value WHISPER_MODEL_SIZE "Whisper speech-to-text model" \
+                "$(suggest_whisper_model)" \
+                "Transcribes your spoken questions (voice mode only). Sized for this machine — transcription is on the voice critical path, so weak boxes get the fast tier." "yes" \
+                "tiny.en (fastest) | base.en (balanced) | small.en (most accurate)."
         fi
         # When the LLM already runs on the host Ollama, the VLM belongs there
         # too: the ollamavlm adapter proxies scene questions to the same
@@ -623,8 +691,11 @@ choose_example() {
         # audited KAI-C path — only where the weights execute changes. On
         # the bundled-container path the in-VM moondream stays the default
         # (there may be no host Ollama at all on a Linux server).
+        # ...but only if there is RAM for it. Both Ollama models stay
+        # resident, so proxying vision to Ollama on a machine that cannot
+        # hold both means every scene question evicts the chat model.
         local caption_default="moondream"
-        if [[ "$llm_where" == "host" ]]; then
+        if [[ "$llm_where" == "host" && "$SUGGEST_CAPTION_ADAPTER" == "ollamavlm" ]]; then
             caption_default="ollamavlm"
         fi
         configure_value CAPTION_ADAPTER "Scene-description model" "$caption_default" \

@@ -416,7 +416,9 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
         $mark = ''
         if ($f[1] -eq $Suggest) { $mark = '  <- suggested'; $defaultIdx = [string]($i + 1) }
         $fit = ''
-        if ($RamGb -gt 0 -and [int]$f[2] -gt $RamGb) { $fit = "  [needs ~$($f[2]) GB - detected $RamGb GB]" }
+        # Against the BUDGET, not total RAM: a 4 GB model on an 8 GB box
+        # "fits" only if you ignore the stack and the other model.
+        if ($RamGb -gt 0 -and [int]$f[2] -gt $RamGb) { $fit = "  [needs ~$($f[2]) GB - only ~$RamGb GB free for models]" }
         $tested = if ($f[3] -eq 'yes') { 'tested' } else { 'untested' }
         Write-Host ('   {0}. {1,-16} ~{2}GB  {3,-8} {4,-8} {5}{6}{7}' -f ($i + 1), $f[1], $f[2], $f[4], $tested, $f[5], $fit, $mark)
     }
@@ -512,27 +514,64 @@ function Choose-Example {
                 try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
             }
         }
-        # Ceiling = the tested envelope. qwen3:1.7b is field-tested with
-        # this agent and answers BETTER than the qwen2.5 set at similar
-        # speed (~3 GB; the shipped configs disable its thinking mode), so
-        # it is the suggestion wherever RAM allows. Likewise gemma3:4b was
-        # field-tested through ollamavlm and clearly beats moondream, so
-        # it is the VLM suggestion on >= 8 GB; moondream stays the tested
-        # low-RAM pick. Bigger-is-runnable is detectable, bigger-is-better
-        # is not — untested headroom stays a prompt note, never a default.
-        $llmSuggest = if ($accel -ne 'cpu') {
-            if ($ramGb -ge 8) { 'qwen3:1.7b' } else { 'qwen2.5:1.5b' }
-        } else {
-            if ($ramGb -ge 16 -and $cores -ge 8) { 'qwen3:1.7b' } else { 'qwen2.5:0.5b' }
+        # Both Ollama models are RESIDENT AT ONCE (the shipped compose sets
+        # OLLAMA_KEEP_ALIVE=-1), and they share the box with the OpenNVR
+        # stack. What has to fit is the SUM, not either model alone - sizing
+        # them independently is what put a 4 GB vision model on 8 GB machines.
+        # Measured on a running install: the 13 stack containers hold ~2 GB,
+        # and Docker Desktop adds its VM overhead on top. Keep-in-sync with
+        # compute_model_budget / suggest_models in install.sh.
+        $stackGb = 3; $osHeadroomGb = 2
+        $budgetGb = [math]::Max(0, $ramGb - $stackGb - $osHeadroomGb)
+
+        # Ceiling = the tested envelope; never suggest past what this agent
+        # has been exercised with. Speed ceiling too: a model that fits can
+        # still be unusable, so CPU-only boxes are tiered by cores.
+        $capLlm = if ($accel -ne 'cpu') { 4 } elseif ($cores -ge 8) { 3 } elseif ($cores -ge 4) { 2 } else { 1 }
+        if ($capLlm -gt $budgetGb) { $capLlm = $budgetGb }
+
+        function Pick-FromCatalog([string]$Kind, [int]$Cap) {
+            $catalog = 'examples/camera-agent/model_catalog.txt'
+            if (-not (Test-Path $catalog)) { return $null }
+            $best = $null; $bestRam = -1
+            foreach ($line in (Get-Content $catalog | Where-Object { $_ -and -not $_.StartsWith('#') })) {
+                $f = $line -split '\|'
+                if ($f[0] -ne $Kind -or $f[3] -ne 'yes') { continue }
+                $r = [int]$f[2]
+                if ($r -le $Cap -and $r -gt $bestRam) { $best = $f[1]; $bestRam = $r }
+            }
+            # ,@(...): PowerShell unrolls a returned array into the output
+            # stream; the comma operator keeps it as ONE object so [0]/[1] hold.
+            if ($best) { return ,@($best, $bestRam) } else { return $null }
         }
-        $vlmSuggest = if ($ramGb -ge 8) { 'gemma3:4b' } else { 'moondream' }
-        $hwDesc = "$(if ($accel -eq 'cuda') { 'NVIDIA GPU (CUDA), ' } else { 'CPU only, ' })$ramGb GB RAM, $cores cores"
-        Ok "Detected: $hwDesc -> suggesting $llmSuggest"
+
+        $pick = Pick-FromCatalog 'llm' $capLlm
+        if ($pick) { $llmSuggest = $pick[0]; $llmRam = $pick[1] }
+        else { $llmSuggest = 'qwen2.5:0.5b'; $llmRam = 1 }
+
+        # Whatever the LLM did not take. A vision model the machine cannot
+        # hold is worse than a smaller one: it evicts the LLM every question.
+        $remaining = [math]::Max(0, $budgetGb - $llmRam)
+        if ($accel -eq 'cpu' -and $cores -lt 4) { $remaining = 0 }
+        $pick = Pick-FromCatalog 'vlm' $remaining
+        if ($pick) { $vlmSuggest = $pick[0]; $captionSuggest = 'ollamavlm' }
+        else { $vlmSuggest = ''; $captionSuggest = 'moondream' }
+
+        # Transcription is on the voice critical path, so weak machines get
+        # the fast tier and strong ones the accurate one.
+        $whisperSuggest = if ($cores -ge 8 -and $ramGb -ge 16) { 'small.en' } elseif ($cores -ge 4) { 'base.en' } else { 'tiny.en' }
+
+        Ok "Detected: $hwDesc -> ~$budgetGb GB for models after the stack"
+        if ($vlmSuggest) {
+            Ok "Suggesting $llmSuggest + $vlmSuggest (both stay resident)"
+        } else {
+            Ok "Suggesting $llmSuggest; too little left for an Ollama vision model, so scene description falls back to the small in-container moondream"
+        }
 
         Write-Host ''
         Write-Host '  -- Camera Agent models (all local, no API keys) -------'
         Explain "The local chat model that answers your questions; must support tool calling. The suggestion is sized for this machine ($hwDesc), capped at the largest model this agent is tested with - 'untested' entries are known-good models nobody has validated with THIS agent yet." 'yes' $llmSuggest
-        Set-EnvValue OLLAMA_MODEL (Pick-ModelFromCatalog 'llm' $llmSuggest 'Local LLM model (Ollama)' $ramGb)
+        Set-EnvValue OLLAMA_MODEL (Pick-ModelFromCatalog 'llm' $llmSuggest 'Local LLM model (Ollama)' $budgetGb)
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if ($llmWhere -eq 'host') {
             $extModel = Get-EnvValue OLLAMA_MODEL; if (-not $extModel) { $extModel = $llmSuggest }
@@ -551,9 +590,9 @@ function Choose-Example {
             }
         }
         if ($prof -eq 'camera-agent') {
-            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' 'base.en' `
-                'Transcribes your spoken questions (voice mode only).' 'yes' `
-                'tiny.en (fastest) | base.en (default) | small.en (most accurate).'
+            Configure-Value WHISPER_MODEL_SIZE 'Whisper speech-to-text model' $whisperSuggest `
+                'Transcribes your spoken questions (voice mode only). Sized for this machine - transcription is on the voice critical path, so weak boxes get the fast tier.' 'yes' `
+                'tiny.en (fastest) | base.en (balanced) | small.en (most accurate).'
         }
         # When the LLM already runs on the host Ollama, the VLM belongs there
         # too: the ollamavlm adapter proxies scene questions to the same
@@ -561,14 +600,17 @@ function Choose-Example {
         # the in-container weights). Same adapter contract, same audited
         # KAI-C path - only where the weights execute changes. On the
         # bundled-container path the in-VM moondream stays the default.
+        # ...but only if there is RAM for it. Both Ollama models stay
+        # resident, so proxying vision to Ollama on a machine that cannot
+        # hold both means every scene question evicts the chat model.
         $captionDefault = 'moondream'
-        if ($llmWhere -eq 'host') { $captionDefault = 'ollamavlm' }
+        if ($llmWhere -eq 'host' -and $captionSuggest -eq 'ollamavlm') { $captionDefault = 'ollamavlm' }
         Configure-Value CAPTION_ADAPTER 'Scene-description model' $captionDefault `
             'Describes what a camera sees. ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - the default in that case; needs an adapter tag newer than 0.1.3); moondream/blip run inside Docker (moondream answers questions, blip writes plain captions).' 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
             Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested - clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick.' 'yes' $vlmSuggest
-            Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $ramGb)
+            Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $budgetGb)
         }
     } else {
         Prompt-OverlayDefaults $manifest
