@@ -58,6 +58,16 @@ def calculate_region(
     # don't go any smaller than the model size
     if size < model_size:
         size = model_size
+    # ...but a region can never be larger than the frame it is cut from.
+    # Only the OFFSET used to be clamped, so on a substream smaller than
+    # model_size (320) — QVGA 320x240 and CIF 352x288 are stock profiles on
+    # budget cameras — the region claimed to be 320x320 while numpy silently
+    # returned a 240-row crop. crop_and_resize then stretched that to a
+    # square and detections_to_frame mapped back using the CLAIMED height,
+    # inflating every y coordinate by 320/240 and pushing boxes below the
+    # frame. Silent, permanent, and only on those cameras: it corrupts track
+    # matching, stationary IoU, gate zones and the published box alike.
+    size = min(size, frame_shape[0], frame_shape[1])
 
     # x_offset = midpoint of box minus half the size, clamped into the frame
     x_offset = int((xmax - xmin) / 2.0 + xmin - size / 2.0)

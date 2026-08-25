@@ -505,3 +505,32 @@ def test_identical_sources_do_not_retry_in_lockstep():
     times = [first_retry(rng.random) for _ in range(30)]
     assert len(set(round(t, 3) for t in times)) > 20, "retries are still synchronised"
     assert all(2.0 <= t <= 4.0 for t in times), times
+
+
+def test_decode_flip_does_not_block_the_frame_loop():
+    """set_decode_skip runs on the worker's frame loop. _terminate() waits up
+    to 3s reaping the child, so every adaptive-decode flip — on by default —
+    stalled that camera for as long as ffmpeg took to die. close() was written
+    not to block for this reason; this path had been missed."""
+    import subprocess
+    import sys
+
+    from detect_pipeline.frame_source import FrameSource
+
+    child = ("import signal,time;"
+             "signal.signal(signal.SIGTERM, lambda *a: None);"   # ignores SIGTERM
+             "time.sleep(30)")
+    proc = subprocess.Popen([sys.executable, "-c", child],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    src = FrameSource("rtsp://cam/x", width=4, height=4, fps=5,
+                      spawn=lambda cmd: proc)
+    src._current_proc = proc
+    try:
+        t0 = time.monotonic()
+        src.set_decode_skip("nokey")
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0, f"flip blocked the frame loop for {elapsed:.1f}s"
+        assert src.decode_skip == "nokey"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)

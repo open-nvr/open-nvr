@@ -447,14 +447,14 @@ Honest limit that remains: `True` means the client accepted the payload,
 not that the broker acknowledged it — awaiting that would block the frame
 loop.
 
-### 13b. NATS disconnects permanently after 10 failed reconnects
+### 13b. NATS disconnects permanently after 10 failed reconnects — ✅ FIXED
 
 `max_reconnect_attempts: 10`, and nothing rebuilds the publisher
 afterwards — every camera's live events stop until the container is
 restarted. `/health` does surface it (`connected()` feeds the probe),
 which is the only reason this is not worse.
 
-### 13c. VisitPoster: unfair, serial, and drops the wrong end
+### 13c. VisitPoster: unfair, serial, and drops the wrong end — ✅ MOSTLY FIXED
 
 One instance and one drain thread serve the whole fleet, doing a blocking
 POST at a time. Specifically:
@@ -471,7 +471,14 @@ POST at a time. Specifically:
   inner `try` kills the thread silently and **all** visit persistence
   stops with no liveness signal.
 
-### 13d. Tier-1 dispatch has no per-camera fairness and no env knob
+**Fixed:** drop-oldest now matches the docstring, the counter is locked, the
+drain loop is guarded per iteration, and the thread's liveness is reported in
+`/health`. **Still open:** it remains ONE serial drain thread with no
+per-camera fairness in the queue, so a slow core still caps fleet-wide visit
+throughput at 1/latency and a high-churn camera can still take more than its
+share of the 256 slots.
+
+### 13d. Tier-1 dispatch has no per-camera fairness and no env knob — ✅ FIXED
 
 `max_inflight=4` is hardcoded — not reachable from any environment
 variable — and permits are a pure race between workers. A camera with
@@ -479,7 +486,7 @@ several escalating tracks takes all four in one frame. It drops rather
 than blocks and the drops are labelled per camera, so this degrades
 visibly; it is a fairness gap, not a stall.
 
-### 13e. `DETECT_CV_THREADS` does not cap the ORT backend
+### 13e. `DETECT_CV_THREADS` does not cap the ORT backend — ✅ FIXED
 
 `cv2.setNumThreads` bounds OpenCV only. An `onnxruntime` session with no
 `SessionOptions` defaults `intra_op_num_threads` to the core count, so
@@ -487,7 +494,7 @@ the `DETECT_ONNX_BACKEND=ort` and `rfdetr` paths escape the service's
 only CPU governor. The 0.1.4 detector pool caps how many *sessions* are
 resident, which bounds the blast radius but does not set their width.
 
-### 13f. Overload converts to a reconnect storm rather than degrading
+### 13f. Overload converts to a reconnect storm rather than degrading — STILL OPEN
 
 There is no frame-freshness check and no drop-oldest path. When the box
 saturates, ffmpeg blocks on a full stdout pipe, MediaMTX drops the
@@ -496,14 +503,14 @@ CPU than steady state. `Frame.ts` is `time.monotonic()` at *read*
 completion, not capture time, so staleness is structurally unmeasurable
 today; measuring it is a prerequisite for any load-shedding.
 
-### 13g. Tentative tracks consume the cap while invisible
+### 13g. Tentative tracks consume the cap while invisible — STILL OPEN
 
 `max_tracks` counts all internal tracks; `tier0_tracks_active` reports
 only confirmed ones. A camera can refuse new tracks
 (`tier0_track_spawns_dropped` rising) while the gauge that is supposed to
 explain why looks healthy.
 
-### 13h. Docs that overstate the code
+### 13h. Docs that overstate the code — STILL OPEN
 
 - `README` calls adaptive-decode promotion "sub-second, no backoff"; the
   real path is up to a GOP plus process teardown and a keyframe wait.
@@ -514,3 +521,45 @@ explain why looks healthy.
 - `events_poster`'s module docstring says the worker loop never blocks on
   the events store; the best-frame JPEG encode runs in `_finish`, on the
   worker thread. Only the HTTP POST is off-thread.
+
+
+---
+
+## 14. Second-pass review findings (post-0.1.4 hardening)
+
+A fresh two-angle review of the whole component after the 13x work. Fixed in
+the same pass unless marked otherwise.
+
+**Fixed:** a `NameError` in `main()` that made the service unbootable (a
+local of `build_manager` referenced from `main`; `main` is `# pragma: no
+cover` so nothing caught it — now guarded by a bytecode scan asserting every
+global resolves); one malformed camera row taking down the whole fleet an
+hour later via stalled URL refresh and JWT expiry; region size never clamped
+to the frame, inflating every y coordinate by 1.33x on QVGA/CIF substreams;
+NATS never retrying its FIRST connect (the compose start race disabled
+publishing for the process lifetime); seven settings bypassing the safe env
+helpers so a blank `${VAR}` crash-looped the container; the detector pool
+recirculating degraded `StubDetector` instances across every camera; heavy
+motion starving track re-verification entirely; adaptive-decode flips being
+counted as feed restarts; a stop signalled during source setup being lost;
+the Tier-1 dispatcher leaking a thread pool per gate-mode toggle; decode
+flips blocking the frame loop up to 3s; and the rfdetr crop-size mismatch.
+
+**Still open, lower severity:**
+
+* `Metrics` has no per-series removal, so a deleted camera's
+  `tier0_worker_up{camera=X}` stays at 0 forever and alerts on a camera that
+  no longer exists. `forget_camera` only clears the `/health` input.
+* The new drop-oldest path in `VisitPoster.submit` makes `submit` a queue
+  CONSUMER. Two workers hitting a full queue concurrently can lose two visits
+  while counting one. Rare; it undercounts the metric it exists to make honest.
+* `max_backoff_seconds` is unreachable dead config — `stream()` gives up at
+  `max_fruitless_restarts` before the delay ever escalates that far.
+* `gate.py` labels a critical-class track suppressed in cooldown as
+  `"stationary"` rather than `"cooldown"`, over-counting that reason.
+* The `"unconfirmed"` visit-drop reason cannot fire: `VisitLifecycle` is fed
+  `Tracker.tracks`, which is confirmed-only.
+* `_StderrTail.text()` iterates a deque another thread appends to, and
+  `running_ids()` iterates `_workers` from the health thread. Both are safe
+  under CPython's GIL (single C-level calls) but would race on a
+  free-threaded build.

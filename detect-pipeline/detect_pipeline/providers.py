@@ -52,6 +52,8 @@ class HttpCameraProvider:
         # (post resolve_hwaccel), never the configured one — reporting an
         # intent we cannot honour is the whole bug this closes.
         self.hwaccel = hwaccel
+        # Rows already reported as unusable — warn once, not every tick.
+        self._warned_bad_rows: set = set()
 
     def list_cameras(self) -> list[CameraSpec] | None:
         req = urllib.request.Request(f"{self.base_url}{self.path}")
@@ -62,10 +64,30 @@ class HttpCameraProvider:
         try:
             with self._opener(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            return [_to_spec(c) for c in data.get("cameras", [])]
         except Exception:
             log.warning("camera discovery failed at %s%s", self.base_url, self.path, exc_info=True)
             return None
+        # Parse per ROW. A single malformed camera — frame_url absent because
+        # MediaMTX has not published that path yet, a null fps, a row caught
+        # mid-provisioning — used to raise inside the comprehension and make
+        # the whole call return None. reconcile reads None as "discovery
+        # failed, keep the current workers and come back later", so it also
+        # stopped refreshing _latest_url: every tap JWT then aged out and, an
+        # hour later, the ENTIRE fleet was dark with nothing in the log but a
+        # repeating warning. One bad row must cost one camera, not all of them.
+        specs: list[CameraSpec] = []
+        for c in data.get("cameras", []) or []:
+            try:
+                specs.append(_to_spec(c))
+            except Exception:
+                cid = c.get("camera_id") if isinstance(c, dict) else None
+                if cid not in self._warned_bad_rows:
+                    self._warned_bad_rows.add(cid)
+                    log.warning(
+                        "skipping unusable camera row %r from discovery; the rest "
+                        "of the fleet is unaffected", cid, exc_info=True,
+                    )
+        return specs
 
 
 def _default_fps() -> int:

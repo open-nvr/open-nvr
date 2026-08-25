@@ -339,6 +339,11 @@ services:
       # Spread a batch of worker starts so a cold start / fleet recovery does
       # not hit MediaMTX with N simultaneous RTSP session setups.
       - DETECT_START_SPREAD_S=${DETECT_START_SPREAD_S:-10}
+      # Fleet-wide cap on concurrent Tier-1 dispatches (per-camera share is
+      # half of it, so one busy camera cannot take every permit).
+      - DETECT_DISPATCH_MAX_INFLIGHT=${DETECT_DISPATCH_MAX_INFLIGHT:-4}
+      # 0 = per-camera quota is the only bound on the best-frame store.
+      - DETECT_BESTFRAME_MAX_ENTRIES=${DETECT_BESTFRAME_MAX_ENTRIES:-0}
       # Best-frame crops retained per camera (see .env.example).
       - DETECT_BESTFRAME_PER_CAMERA=${DETECT_BESTFRAME_PER_CAMERA:-16}
       # RTSP socket-I/O timeout (seconds; 0 disables). Bounds a HALF-OPEN

@@ -111,15 +111,40 @@ def select_regions(
     it as ``tier0_regions_capped_total``).
     """
     kept: list[Box] = []
-    capped = False
-    for b in list(motion_boxes) + list(track_boxes):
-        if max_regions is not None and len(kept) >= max_regions:
-            capped = True
-            break
-        r = calculate_region(frame_shape, b[0], b[1], b[2], b[3], min_region, multiplier)
-        if all(intersection_over_union(r, k) < dedup_iou for k in kept):
-            kept.append(r)
-    return kept, capped
+    # Candidates we actually EVALUATED. A box that was evaluated and then
+    # deduped away is not "capped" — only one the budget never let us look
+    # at is, which is what tier0_regions_capped_total is meant to report.
+    attempted: set[tuple[int, int]] = set()
+
+    def _take(boxes, budget: int, group: int) -> None:
+        added = 0
+        for i, b in enumerate(boxes):
+            if added >= budget or (max_regions is not None and len(kept) >= max_regions):
+                continue
+            attempted.add((group, i))
+            r = calculate_region(
+                frame_shape, b[0], b[1], b[2], b[3], min_region, multiplier
+            )
+            if all(intersection_over_union(r, k) < dedup_iou for k in kept):
+                kept.append(r)
+                added += 1
+
+    motion, tracks = list(motion_boxes), list(track_boxes)
+    if max_regions is None:
+        _take(motion, len(motion), 0)
+        _take(tracks, len(tracks), 1)
+    else:
+        # Reserve part of the budget for track re-verification. Motion boxes
+        # used to be taken first and the loop simply broke at the cap, so a
+        # scene generating max_regions motion boxes every frame — rain, wind
+        # in foliage, a busy road — meant NO confirmed track was ever
+        # re-verified. They all coasted to DETECT_TRACK_TTL (300s default),
+        # which is exactly when the pipeline most needs to know what is real.
+        reserve = min(len(tracks), max(1, max_regions // 2)) if tracks else 0
+        _take(motion, max_regions - reserve, 0)   # motion first, minus the reserve
+        _take(tracks, max_regions, 1)             # tracks claim the reserve
+        _take(motion, max_regions, 0)             # any slack goes back to motion
+    return kept, len(attempted) < (len(motion) + len(tracks))
 
 
 class DetectPipeline:

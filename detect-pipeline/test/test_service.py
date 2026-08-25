@@ -614,3 +614,105 @@ def test_non_superseded_worker_stopped_mid_stagger_reports_down():
     _time.sleep(0.05)
     assert m.metrics.value("tier0_worker_up", {"camera": "cam2"}) == 0.0
     m.metrics.reset()
+
+
+def test_decode_mode_flips_are_not_counted_as_feed_restarts():
+    """Adaptive decode is ON by default and respawns ffmpeg on every
+    idle<->active flip, resetting seq to 0. Counting that as a feed restart
+    made healthy cameras look like flapping ones on the metric operators are
+    told to alert on."""
+    from detect_pipeline import metrics as m
+    from detect_pipeline.frame_source import Frame
+    from detect_pipeline.service import CameraWorker
+
+    size = frame_size_bytes(W, H)
+
+    class _FlipSource:
+        width, height = W, H
+
+        def stream(self):
+            yield Frame(bytes(size), W, H, 0, 0.0)
+            yield Frame(bytes(size), W, H, 1, 1.0)
+            # a deliberate decode flip: seq restarts, but it is not a failure
+            yield Frame(bytes(size), W, H, 0, 2.0, True)
+            yield Frame(bytes(size), W, H, 1, 3.0)
+            # a real feed drop: seq restarts with no marker
+            yield Frame(bytes(size), W, H, 0, 4.0)
+
+    m.metrics.reset()
+    w = CameraWorker(_spec("cam-flip"), _FakeSink(), frame_source=_FlipSource())
+    w.start()
+    for _ in range(200):
+        if not w.is_alive():
+            break
+        time.sleep(0.01)
+    w.stop(timeout=5)
+
+    cam = {"camera": "cam-flip"}
+    assert m.metrics.value("tier0_worker_restarts_total", cam) == 1.0
+    assert m.metrics.value("tier0_decode_mode_changes_total", cam) == 1.0
+    m.metrics.reset()
+
+
+def test_stop_during_source_setup_is_not_lost():
+    """request_stop() closes the source via self._src, which is still None
+    while _make_source() runs. A stop arriving in that window closed nothing,
+    so the worker went on to dial RTSP and — on a dead camera — kept
+    respawning ffmpeg for a minute or more after being told to stop, while
+    its replacement was already running."""
+    import threading as _t
+
+    from detect_pipeline.service import CameraWorker
+
+    in_setup, may_finish = _t.Event(), _t.Event()
+
+    class _SlowSource:
+        width, height = W, H
+
+        def __init__(self):
+            self.closed = False
+
+        def stream(self):
+            raise AssertionError("stopped worker must never open the stream")
+
+        def close(self):
+            self.closed = True
+
+    src = _SlowSource()
+    w = CameraWorker(_spec("cam-slow"), _FakeSink(), frame_source=src)
+
+    original = w._make_source
+
+    def slow_make_source(decode_skip=None):
+        in_setup.set()
+        may_finish.wait(timeout=5)          # stop lands during this window
+        return original(decode_skip)
+
+    w._make_source = slow_make_source
+    w.start()
+    assert in_setup.wait(timeout=5)
+    w.request_stop()                        # _src is still None right now
+    may_finish.set()
+
+    assert w.join(5.0), "worker did not exit"
+    assert src.closed, "the source was never closed — stop was lost"
+
+
+def test_gate_change_closes_the_outgoing_dispatcher():
+    """_poll_gate_override builds a fresh KaicDispatcher on each transition
+    into enforce and passes None on the way out; close() was never called
+    anywhere, so every shadow<->enforce round trip from the promotion panel
+    leaked a thread pool."""
+    class _Disp:
+        def __init__(self): self.closed = False
+        def close(self): self.closed = True
+
+    old, new = _Disp(), _Disp()
+    mgr = WorkerManager(_FakeProvider([]), _FakeSink(), dispatcher=old)
+    mgr.apply_gate_change(lambda: None, dispatcher=new)
+    assert old.closed and not new.closed
+
+    # ...and leaving enforce (dispatcher=None) must retire it too.
+    mgr.apply_gate_change(lambda: None, dispatcher=None)
+    assert new.closed
+    assert mgr._dispatcher is None

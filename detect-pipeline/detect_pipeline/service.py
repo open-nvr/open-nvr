@@ -440,6 +440,22 @@ class CameraWorker:
         try:
             src, w, h = self._make_source()
             self._src = src
+            # request_stop() reads self._src to close the source. Between the
+            # stagger returning and this assignment it is still None, so a stop
+            # arriving in that window closed NOTHING and left _closing False:
+            # the worker went on to dial RTSP and, on a dead camera, kept
+            # respawning ffmpeg for a minute or more AFTER being told to stop —
+            # while the manager had already timed out and started its
+            # replacement. Re-check now that the source is reachable; the flag
+            # is set before _src is read, so one of the two orderings always
+            # catches it.
+            if self._stop.is_set():
+                src.close()
+                if not self._superseded:
+                    record_worker_state(
+                        self.spec.camera_id, False, target_fps=self.spec.fps
+                    )
+                return
         except Exception:
             # Emit the DOWN gauge before bailing. Returning here used to skip
             # record_worker_state entirely, so a camera that never opens had
@@ -512,7 +528,18 @@ class CameraWorker:
                 # restart signal without reaching into the source's internals.
                 seq = getattr(frame, "seq", None)
                 if seq == 0 and prev_seq is not None:
-                    record_worker_restart(self.spec.camera_id)
+                    # Adaptive decode (on by default) respawns ffmpeg on every
+                    # idle<->active flip, which also resets seq. Counting those
+                    # as feed restarts made a healthy camera with intermittent
+                    # activity look like a flapping one — on the very metric
+                    # the docs tell operators to alert on.
+                    if getattr(frame, "deliberate_restart", False):
+                        _metrics.inc(
+                            "tier0_decode_mode_changes_total",
+                            {"camera": self.spec.camera_id},
+                        )
+                    else:
+                        record_worker_restart(self.spec.camera_id)
                 prev_seq = seq
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
@@ -761,11 +788,29 @@ class WorkerManager:
         serially made this cost STOP_TIMEOUT_S per camera — minutes of total
         blackout on a large install, from one click in the UI."""
         self._gate_factory = gate_factory
-        if dispatcher is not None:
+        # Retire the outgoing dispatcher. _poll_gate_override builds a FRESH
+        # KaicDispatcher on every transition into enforce and passes None on
+        # the way out, and close() was never called anywhere — so an admin
+        # A/B-ing shadow vs enforce from the promotion panel leaked a 4-thread
+        # pool per round trip, and on the way out the old one stayed wired up
+        # (disarmed only accidentally, by the gate returning nothing to
+        # dispatch in shadow).
+        if dispatcher is not self._dispatcher:
+            self._close_dispatcher(self._dispatcher)
             self._dispatcher = dispatcher
         if router is not None:
             self._router = router
         self._stop_all()
+
+    @staticmethod
+    def _close_dispatcher(dispatcher) -> None:
+        close = getattr(dispatcher, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception:  # pragma: no cover - defensive
+            log.debug("error closing the outgoing dispatcher", exc_info=True)
 
     @staticmethod
     def _baked(spec: CameraSpec) -> CameraSpec:
@@ -831,7 +876,8 @@ class WorkerManager:
         # any of them is what keeps the wind-down bounded by one timeout
         # instead of one-per-camera; the old serial loop turned a spec change
         # across a fleet into minutes of blocked reconcile.
-        self._retire(doomed)
+        # Cameras still in `desired` are being REPLACED this tick, not removed.
+        self._retire(doomed, replaced={c for c in doomed if c in desired})
 
         starting = [c for c in desired if c not in self._workers]
         # Spread this batch's opening dials. One tick starting N cameras means
@@ -847,7 +893,7 @@ class WorkerManager:
                 self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
 
-    def _retire(self, workers: dict[str, Worker]) -> None:
+    def _retire(self, workers: dict[str, Worker], replaced: set[str] | None = None) -> None:
         """Wind down a set of workers: signal all, then wait once.
 
         A straggler is reported rather than silently orphaned. Its source has
@@ -857,6 +903,18 @@ class WorkerManager:
         """
         if not workers:
             return
+        # Mark the ones a replacement is already queued for BEFORE signalling.
+        # Doing it only for post-timeout stragglers left a race: a worker that
+        # exits microseconds after the deadline runs its teardown concurrently
+        # with the manager's loop, reads _superseded as False, and writes
+        # tier0_worker_up=0. If that lands after the replacement's UP — likely,
+        # since the replacement must clear a stagger, an ffprobe and an ffmpeg
+        # spawn while the straggler only has to flush — the gauge stays 0
+        # forever, because UP is written exactly once per worker at start.
+        for cid in (replaced or set()):
+            supersede = getattr(workers.get(cid), "mark_superseded", None)
+            if supersede is not None:
+                supersede()
         for worker in workers.values():
             _signal_stop(worker)
         stragglers = _join_workers(workers, STOP_TIMEOUT_S)
@@ -880,3 +938,4 @@ class WorkerManager:
 
     def stop(self) -> None:
         self._stop_all()
+        self._close_dispatcher(self._dispatcher)

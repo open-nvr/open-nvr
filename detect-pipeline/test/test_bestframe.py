@@ -147,3 +147,27 @@ def test_latest_jpeg_skips_expired_entries():
     s.put("cam1", "new", ["fresh"])
     clk.t = 12.0                                       # "old" is now expired
     assert s.latest_jpeg("cam1") == s.get_jpeg("cam1", "new")
+
+
+def test_per_camera_quota_is_reachable_on_a_real_fleet():
+    """A hard-coded global 256 silently overruled the configured per-camera
+    quota: 20 cameras x 16 = 320 > 256, so from camera 17 onward every put
+    evicted somebody and DETECT_BESTFRAME_PER_CAMERA became a fiction."""
+    s, clk, _calls = _store(max_per_camera=16)          # no global cap
+    clk.t = 100.0                                      # inside max_age for all
+    for cam in range(20):
+        for t in range(16):
+            s.put(f"cam{cam}", f"t{t}", [f"{cam}-{t}"])
+    assert len(s) == 20 * 16, len(s)
+    # ...and every camera really kept its full share.
+    for cam in (0, 9, 19):
+        assert s.get_jpeg(f"cam{cam}", "t15") is not None
+
+
+def test_explicit_global_cap_is_still_honoured():
+    s, clk, _calls = _store(max_entries=10, max_per_camera=16)
+    for cam in range(5):
+        for t in range(8):
+            clk.t += 1
+            s.put(f"cam{cam}", f"t{t}", [f"{cam}-{t}"])
+    assert len(s) <= 10

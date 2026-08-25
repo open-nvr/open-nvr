@@ -109,8 +109,25 @@ class KaicDispatcher:
         self.timeout = timeout
         self.jpeg_quality = jpeg_quality
         self._post = http_post or _http_post_json
-        self._sem = threading.Semaphore(max_inflight)
-        self._pool = ThreadPoolExecutor(max_workers=max_inflight, thread_name_prefix="tier1-dispatch")
+        self.max_inflight = max(1, int(max_inflight))
+        # Global admission, plus a per-camera share of it. Permits used to be
+        # a pure race: dispatch_escalations fires once per escalated track in
+        # a tight loop, so ONE camera with several escalating tracks took
+        # every permit in a single frame and locked out the whole fleet until
+        # they returned. A camera may now hold at most `per_camera`, so a busy
+        # scene degrades itself rather than everyone else.
+        self._sem = threading.Semaphore(self.max_inflight)
+        # Reserve one permit rather than capping each camera at half. A fixed
+        # half starved the installs with no contention at all (a two-camera
+        # NVR could never use more than 2 of its 4), while leaving the whole
+        # pool open lets one camera lock everyone out — which is the bug.
+        # Holding back a single slot does both jobs: a busy camera runs nearly
+        # flat out, and a newcomer always finds a permit waiting.
+        self._per_camera = max(1, self.max_inflight - 1)
+        self._cam_inflight: dict[str, int] = {}
+        self._pool = ThreadPoolExecutor(
+            max_workers=self.max_inflight, thread_name_prefix="tier1-dispatch"
+        )
         self._ilock = threading.Lock()
         self._inflight = 0
 
@@ -119,8 +136,29 @@ class KaicDispatcher:
             self._inflight += delta
             metrics.gauge("tier1_dispatch_inflight", float(self._inflight))
 
+    def _claim_camera_slot(self, camera_id: str) -> bool:
+        with self._ilock:
+            if self._cam_inflight.get(camera_id, 0) >= self._per_camera:
+                return False
+            self._cam_inflight[camera_id] = self._cam_inflight.get(camera_id, 0) + 1
+            return True
+
+    def _release_camera_slot(self, camera_id: str) -> None:
+        with self._ilock:
+            left = self._cam_inflight.get(camera_id, 0) - 1
+            if left > 0:
+                self._cam_inflight[camera_id] = left
+            else:
+                self._cam_inflight.pop(camera_id, None)
+
     def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
+        if not self._claim_camera_slot(camera_id):
+            metrics.inc("tier1_dispatch_dropped_total",
+                        {"camera": camera_id, "adapter": adapter})
+            log.debug("tier1 dispatch: %s already at its share; dropping", camera_id)
+            return
         if not self._sem.acquire(blocking=False):
+            self._release_camera_slot(camera_id)
             metrics.inc("tier1_dispatch_dropped_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch backpressure; dropping %s/%s", camera_id, adapter)
             return
@@ -128,6 +166,7 @@ class KaicDispatcher:
             self._pool.submit(self._run, camera_id, adapter, crop_bgr, track)
         except Exception:                          # pool shutting down, etc.
             self._sem.release()
+            self._release_camera_slot(camera_id)
 
     def _run(self, camera_id, adapter, crop_bgr, track) -> None:
         self._bump_inflight(1)
@@ -146,6 +185,7 @@ class KaicDispatcher:
         finally:
             self._bump_inflight(-1)
             self._sem.release()
+            self._release_camera_slot(camera_id)
 
     def close(self) -> None:  # pragma: no cover
         self._pool.shutdown(wait=False)

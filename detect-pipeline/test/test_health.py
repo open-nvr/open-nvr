@@ -106,3 +106,29 @@ def test_health_survives_a_failing_stale_probe():
     )
     ok, detail = evaluate(st, now=10_000.0)      # must not raise
     assert detail["stale_cameras"] == []
+
+
+def test_health_reports_a_dead_visit_persistence_thread():
+    """One drain thread serves every camera; if it dies, detection carries on
+    looking perfectly healthy while no history is recorded for anyone."""
+    from detect_pipeline.health import HealthState, evaluate
+
+    st = HealthState(
+        enabled=True, workers_running=lambda: 3,
+        newest_frame_age_s=lambda: 1.0, started_at=0.0,
+        visits_running=lambda: False,
+    )
+    ok, detail = evaluate(st, now=10_000.0)
+    assert ok is False
+    assert detail["visits"] == "stopped"
+    assert any("no history" in p for p in detail["problems"])
+
+
+def test_health_is_quiet_about_visits_when_the_poster_is_off():
+    from detect_pipeline.health import HealthState, evaluate
+
+    st = HealthState(enabled=True, workers_running=lambda: 1,
+                     newest_frame_age_s=lambda: 1.0, started_at=0.0)
+    ok, detail = evaluate(st, now=10_000.0)
+    assert ok is True
+    assert detail["visits"] == "unconfigured"

@@ -122,3 +122,46 @@ def test_pool_grows_lazily_so_small_installs_are_unaffected():
 class _Rec:
     def detect(self, crop):
         return []
+
+
+def test_pool_does_not_recirculate_a_degraded_detector():
+    """The factory degrades to StubDetector when a model fails to load. Under
+    one-per-worker that blinded ONE camera; in a shared pool the stub would
+    circulate forever, so a rotating share of every camera's frames would
+    silently detect nothing — and /health samples a separate probe instance,
+    so it would keep reporting the real model."""
+    from detect_pipeline.detector import DetectorPool, StubDetector
+
+    calls = {"n": 0}
+
+    def flaky_factory():
+        calls["n"] += 1
+        return StubDetector() if calls["n"] == 1 else _Rec()   # first load fails
+
+    pool = DetectorPool(flaky_factory, 4)
+    assert pool.detect(None) == []          # got the stub this time
+    for _ in range(10):
+        pool.detect(None)
+    # The stub was discarded rather than parked in the free list.
+    assert all(not isinstance(d, StubDetector) for d in pool._free), pool._free
+    assert pool._degraded >= 1
+
+
+def test_pool_created_counts_only_what_was_built():
+    """`_created += 1` used to commit before the factory ran, so a failed load
+    inflated it forever and real capacity shrank below max_size unnoticed."""
+    from detect_pipeline.detector import DetectorPool
+
+    boom = {"n": 0}
+
+    def failing_factory():
+        boom["n"] += 1
+        raise RuntimeError("model load failed")
+
+    pool = DetectorPool(failing_factory, 4)
+    for _ in range(5):
+        try:
+            pool.detect(None)
+        except RuntimeError:
+            pass
+    assert pool.created == 0, pool.created

@@ -147,13 +147,18 @@ def test_build_manager_honours_disabled():
 
 # ── NATS connect options (token auth against the compose broker) ────
 
-def test_nats_options_include_token_and_bounded_reconnects():
+def test_nats_options_include_token_and_never_give_up_reconnecting():
+    """Reconnects must be UNBOUNDED. They used to stop after 10 attempts and
+    nothing rebuilt the client, so a broker restart that outlasted ten tries
+    left every camera's live events dead until the container was restarted.
+    The retry WAIT is what keeps a misconfigured broker from looping hot."""
     from detect_pipeline.run import _nats_connect_options
 
     opts = _nats_connect_options("nats://nats:4222", "sekret")
     assert opts["servers"] == ["nats://nats:4222"]
     assert opts["token"] == "sekret"
-    assert opts["max_reconnect_attempts"] == 10
+    assert opts["max_reconnect_attempts"] == -1
+    assert opts["reconnect_time_wait"] > 0
 
 
 def test_nats_options_omit_token_when_absent():
@@ -287,3 +292,36 @@ def test_resolve_onnx_backend_auto_and_explicit():
     assert _resolve_onnx_backend("", "ort") == "ort"
     assert _resolve_onnx_backend("cvdnn", "ort") == "cvdnn"   # explicit wins
     assert _resolve_onnx_backend("tensorflow", "cvdnn") == "cvdnn"
+
+
+# ── every global a function loads must actually resolve ─────────────
+
+def test_run_module_functions_reference_no_undefined_globals():
+    """`main()` is `# pragma: no cover` and starts the whole service, so a
+    name that does not resolve there is invisible to the suite and crashes
+    the container on startup.
+
+    This actually happened: /health wiring referenced `visit_poster`, which
+    is a LOCAL of build_manager(), so main() raised NameError immediately
+    after build_manager returned — before metrics or /health came up. A
+    bytecode scan catches the whole class without running the service.
+    """
+    import builtins
+    import dis
+    import types
+
+    from detect_pipeline import run
+
+    unresolved: list[str] = []
+    for name, obj in vars(run).items():
+        if not isinstance(obj, types.FunctionType) or obj.__module__ != run.__name__:
+            continue
+        for instr in dis.get_instructions(obj):
+            if instr.opname != "LOAD_GLOBAL":
+                continue
+            g = instr.argval
+            if hasattr(run, g) or hasattr(builtins, g):
+                continue
+            unresolved.append(f"{name}() -> {g}")
+
+    assert not unresolved, "undefined global(s) in detect_pipeline.run: " + ", ".join(unresolved)
