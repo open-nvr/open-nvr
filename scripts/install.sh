@@ -724,7 +724,11 @@ choose_example() {
                                         ok "Ollama is answering on :11434."
                                         ollama_ready="yes"
                                     elif command -v ollama >/dev/null 2>&1; then
-                                        warn "Ollama found but not answering yet — start it: sudo systemctl start ollama (or: ollama serve)."
+                                        if [[ "$PLATFORM" == "macOS" ]]; then
+                                            warn "Ollama found but not answering yet — open the Ollama app (or: brew services start ollama)."
+                                        else
+                                            warn "Ollama found but not answering yet — start it: sudo systemctl start ollama (or: ollama serve)."
+                                        fi
                                         ollama_ready="yes"
                                     else
                                         warn "Ollama is still not installed."

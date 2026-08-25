@@ -37,6 +37,7 @@ if [[ -z "$GATE" ]]; then
 fi
 
 # run_gate <ext_url> <have_ollama:yes|no> <answers csv> [appears_after]
+#          [platform] [have_brew:yes|no] [brew_ok:yes|no]
 #   Drives the gate with everything stubbed; answers feed BOTH yes/no
 #   questions and the re-check loop prompt, in call order. When the answers
 #   run out, prompts report EOF (a dried-up stdin). ``appears_after`` makes
@@ -45,9 +46,11 @@ fi
 #   "where=<llm_where> url=<OLLAMA_EXTERNAL_URL> asked=<questions>|..."
 run_gate() {
     local ext_url="$1" have_ollama="$2" answers="$3" appears="${4:-}"
+    local platform="${5:-Linux}" have_brew="${6:-no}" brew_ok="${7:-no}"
     bash -u -c '
-        PLATFORM="Linux"; host_ollama=""; llm_where="host"
+        PLATFORM="'"$platform"'"; host_ollama=""; llm_where="host"
         EXT_URL="'"$ext_url"'"; HAVE_OLLAMA="'"$have_ollama"'"
+        HAVE_BREW="'"$have_brew"'"; BREW_OK="'"$brew_ok"'"
         APPEARS_AFTER="'"$appears"'"; OLLAMA_CHECKS=0
         IFS="," read -r -a ANSWERS <<< "'"$answers"'"
         A_I=0; ASKED=""
@@ -81,7 +84,13 @@ run_gate() {
                 return 1
             fi
             [[ "$1" == "-v" && "$2" == "curl" ]] && return 0
+            if [[ "$1" == "-v" && "$2" == "brew" ]]; then
+                [[ "$HAVE_BREW" == "yes" ]]; return
+            fi
             builtin command "$@"
+        }
+        brew() {             # brew install / brew services start
+            [[ "$BREW_OK" == "yes" ]]
         }
         curl() { return 1; }     # nothing answers anywhere in tests
         sleep() { :; }           # no real waiting in tests
@@ -185,6 +194,46 @@ out=$(run_gate "$LOCAL_URL" no "y,y")
     || fail "failed install then accepted fallback should switch, got: $out"
 
 # ── 6. the two installers must not drift apart ──
+# ── 7. macOS: the same gate, the right words ──
+start_test "macOS + Homebrew: accepted brew install keeps the host runtime"
+out=$(run_gate "$LOCAL_URL" no "y" "" macOS yes yes)
+if [[ "$out" == *"where=host"* && "$out" == *"Install it now with Homebrew?"* \
+      && "$out" != *"press Enter to re-check"* ]]; then
+    pass
+else
+    fail "expected a clean brew install, got: $out"
+fi
+
+start_test "macOS + Homebrew: failed brew install still cannot proceed broken"
+out=$(run_gate "$LOCAL_URL" no "y,y" "" macOS yes no)
+[[ "$out" == *"where=container"* ]] && pass \
+    || fail "failed brew install then container should switch, got: $out"
+
+start_test "macOS without Homebrew: no scripted-installer offer, loop still guards"
+# Ollama's install.sh is Linux-only, so a brewless Mac gets no auto-install
+# offer — just the container question and then the loop.
+out=$(run_gate "$LOCAL_URL" no "n,ENTER,container" "" macOS no no)
+if [[ "$out" == *"where=container"* && "$out" != *"official installer"* \
+      && "$out" != *"Homebrew"* && "$out" == *"press Enter to re-check"* ]]; then
+    pass
+else
+    fail "brewless Mac should skip install offers but keep the loop, got: $out"
+fi
+
+start_test "macOS re-check hint names the app, not systemctl"
+out=$(run_gate "$LOCAL_URL" no "n,ENTER" 1 macOS no no)
+if [[ "$out" == *"where=host"* && "$out" == *"Ollama app"* \
+      && "$out" != *"systemctl"* ]]; then
+    pass
+else
+    fail "expected a macOS start hint, got: $out"
+fi
+
+start_test "Linux re-check hint still says systemctl"
+out=$(run_gate "$LOCAL_URL" no "n,n,ENTER" 1)
+[[ "$out" == *"where=host"* && "$out" == *"systemctl"* ]] && pass \
+    || fail "expected the Linux start hint, got: $out"
+
 start_test "install.ps1 carries the container fallback"
 grep -q "Use the bundled ollama container instead" scripts/install.ps1 && pass \
     || fail "install.ps1 lost the container-fallback question"
