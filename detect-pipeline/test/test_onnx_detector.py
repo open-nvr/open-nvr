@@ -218,36 +218,57 @@ def test_ort_session_options_survive_a_garbage_value(monkeypatch):
 
 # ── fixed-shape exports must not take the camera down ───────────────
 
-class _FixedShapeNet:
-    """A net exported at ONE input size, like the shipped yolov8n.onnx."""
+class _FixedShapeDetector:
+    """Stands in for ANY family whose ONNX export is fixed-shape.
 
-    def __init__(self, accepts: int):
+    Deliberately not a cv2 net: the probe must work for RF-DETR (384/432/560)
+    and whatever comes next, not just YOLO — so it goes through the
+    detector's own detect().
+    """
+
+    def __init__(self, accepts: int, requested: int):
         self.accepts = accepts
-        self._blob = None
+        self.input_size = requested
+        self.calls: list[int] = []
 
-    def setInput(self, blob):          # noqa: N802 - cv2 API shape
-        self._blob = blob
-
-    def forward(self):
-        if self._blob.shape[-1] != self.accepts:
-            raise cv2.error("outTotal == inpTotal in function 'getOutShape'")
-        return np.zeros((1, 84, 8400), np.float32)
+    def detect(self, crop):
+        self.calls.append(self.input_size)
+        if self.input_size != self.accepts:
+            raise RuntimeError("outTotal == inpTotal in function 'getOutShape'")
+        return []
 
 
 def test_probe_adopts_the_size_the_model_actually_accepts():
     """The shipped yolov8n.onnx is exported at a FIXED 640. Feeding 320 raised
-    deep in the graph — once per region, per frame — and nothing wrapped it, so
-    it reached the worker loop and the camera went dark in a restart loop. A
+    deep in the graph — once per region, per frame. Nothing wrapped it, so it
+    reached the worker loop and the camera went dark in a restart loop: a
     documented env knob could take detection down entirely."""
-    from detect_pipeline.onnx_detector import probe_input_size
+    from detect_pipeline.detector import resolve_input_size
 
-    assert probe_input_size(_FixedShapeNet(640), 320) == 640
-    assert probe_input_size(_FixedShapeNet(640), 640) == 640
-    assert probe_input_size(_FixedShapeNet(416), 640) == 416
+    d = _FixedShapeDetector(accepts=640, requested=320)
+    assert resolve_input_size(d, 320) == 640
+    assert d.input_size == 320, "probing must not leave the size mutated"
+
+
+def test_probe_covers_the_detr_family_too():
+    """RF-DETR ships at 384/432/560 and fails identically — the probe is
+    family-agnostic on purpose."""
+    from detect_pipeline.detector import resolve_input_size
+
+    assert resolve_input_size(_FixedShapeDetector(432, 640), 640) == 432
+    assert resolve_input_size(_FixedShapeDetector(560, 384), 384) == 560
+
+
+def test_probe_keeps_a_size_that_already_works():
+    from detect_pipeline.detector import resolve_input_size
+
+    d = _FixedShapeDetector(accepts=640, requested=640)
+    assert resolve_input_size(d, 640) == 640
+    assert d.calls == [640], "a working size must not trigger extra probing"
 
 
 def test_probe_returns_the_request_when_nothing_fits():
-    """Never loop forever or invent a size: report and let the error surface."""
-    from detect_pipeline.onnx_detector import probe_input_size
+    """Never loop forever or invent a size: report and let it surface."""
+    from detect_pipeline.detector import resolve_input_size
 
-    assert probe_input_size(_FixedShapeNet(99), 640) == 640
+    assert resolve_input_size(_FixedShapeDetector(99, 640), 640) == 640

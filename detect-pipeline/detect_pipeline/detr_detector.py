@@ -190,6 +190,11 @@ class OnnxDetrDetector:
         else:
             raise ValueError("OnnxDetrDetector needs a model_path or backend_impl")
         self.backend_name = getattr(self._backend, "name", "custom")
+        # RF-DETR variants ship at 384/432/560; a mismatch used to fail on
+        # every region forever. Settle it against the real graph once.
+        if model_path:
+            from .detector import resolve_input_size
+            self.input_size = resolve_input_size(self, self.input_size)
 
     def detect(self, crop: np.ndarray) -> list[RawDetection]:
         blob = preprocess_detr(crop, self.input_size)

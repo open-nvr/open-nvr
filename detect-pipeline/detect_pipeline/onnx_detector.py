@@ -131,55 +131,6 @@ def postprocess_yolo(
 # tiny and the two are interchangeable.
 
 
-# Input sizes a YOLO export is commonly fixed at, tried in descending order
-# when the configured one does not fit the graph.
-_STANDARD_INPUTS = (640, 576, 512, 448, 416, 384, 320)
-
-
-def probe_input_size(net, requested: int) -> int:
-    """The input size this net will actually accept.
-
-    Many YOLO exports — including the yolov8n.onnx this project ships — are
-    exported with a FIXED input shape rather than dynamic axes. Feeding any
-    other size raises deep inside the graph ("outTotal == inpTotal"), once per
-    region, per frame. Nothing wrapped that, so it reached the worker loop and
-    killed the camera: setting the documented DETECT_ONNX_INPUT to anything
-    the model was not exported at took detection down entirely, in a restart
-    loop, with only a reshape assertion to explain it.
-
-    So establish the working size ONCE here, and adapt instead of dying.
-    """
-    import numpy as np
-
-    def _fits(size: int) -> bool:
-        try:
-            blob = cv2.dnn.blobFromImage(
-                np.zeros((size, size, 3), np.uint8), 1 / 255.0, (size, size),
-                swapRB=True, crop=False,
-            )
-            net.setInput(blob)
-            net.forward()
-            return True
-        except Exception:
-            return False
-
-    if _fits(requested):
-        return requested
-    for size in _STANDARD_INPUTS:
-        if size != requested and _fits(size):
-            log.warning(
-                "ONNX model does not accept a %dpx input (it is exported at a "
-                "FIXED shape); using %dpx instead. Re-export with dynamic axes "
-                "to make DETECT_ONNX_INPUT tunable.", requested, size,
-            )
-            return size
-    log.error(
-        "ONNX model rejected every standard input size including the "
-        "configured %dpx — detection will not run", requested,
-    )
-    return requested
-
-
 class CvDnnBackend:
     """Run the ONNX model through ``cv2.dnn`` (default; zero extra dependency, CPU)."""
 
@@ -344,9 +295,9 @@ class OnnxYoloDetector:
         # Settle the input size against the real graph ONCE, rather than
         # raising per region per frame (which killed the worker). Only the
         # cv2.dnn path can be probed cheaply; ORT reports its own shapes.
-        _net = getattr(self._backend, "_net", None)
-        if _net is not None and model_path:
-            self.input_size = probe_input_size(_net, self.input_size)
+        if model_path:
+            from .detector import resolve_input_size
+            self.input_size = resolve_input_size(self, self.input_size)
 
     def detect(self, crop: np.ndarray) -> list[RawDetection]:
         blob = cv2.dnn.blobFromImage(
