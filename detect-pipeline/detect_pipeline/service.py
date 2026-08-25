@@ -22,6 +22,7 @@ skipped, so per-camera opt-out works without touching the rest.
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -289,6 +290,7 @@ class CameraWorker:
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
         rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
         url_provider=None,                       # freshest tap URL (its JWT rotates)
+        start_delay: float = 0.0,                # stagger the first RTSP dial
         decode_idle: str = "",                   # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,         # quiet seconds before idling
         frame_source=None,                       # injectable for tests
@@ -311,6 +313,7 @@ class CameraWorker:
         self.fast_decode = fast_decode
         self.rtsp_timeout_s = rtsp_timeout_s
         self.url_provider = url_provider
+        self.start_delay = max(0.0, start_delay)
         self.decode_idle = decode_idle
         self.decode_idle_after = decode_idle_after
         self._frame_source = frame_source
@@ -417,6 +420,14 @@ class CameraWorker:
         return src, w, h
 
     def _run(self) -> None:
+        # Stagger the opening dial. A reconcile tick starts every new worker
+        # at once, and each one ffprobes then spawns ffmpeg — so a fleet
+        # coming up (or recovering together after a MediaMTX restart) hits it
+        # with N simultaneous RTSP session setups. Interruptible: a stop
+        # during the stagger returns immediately rather than waiting it out.
+        if self.start_delay > 0 and self._stop.wait(self.start_delay):
+            record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
+            return
         try:
             src, w, h = self._make_source()
             self._src = src
@@ -606,6 +617,7 @@ class WorkerManager:
         worker_factory: WorkerFactory | None = None,
         detector_factory: Callable[[], DetectorAdapter] | None = None,
         detector_pool: int = 0,                           # 0 = one detector per worker
+        start_spread_s: float = 10.0,                     # spread simultaneous dials
 
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
@@ -638,6 +650,10 @@ class WorkerManager:
         # detector_pool=0/None keeps the old behaviour (one per worker) so a
         # caller can opt out; the pool grows lazily, so below the cap nothing
         # changes anyway.
+        # NOT `self._factory is self._default_factory`: attribute access
+        # builds a NEW bound method each time, so that identity check is
+        # always False and the stagger would never apply.
+        self._own_factory = worker_factory is None
         factory = detector_factory or (lambda: StubDetector())
         self._detector_factory = factory
         self._shared_detector = (
@@ -648,6 +664,9 @@ class WorkerManager:
         self._best_frames = best_frames
         self._device = device
         self._hwaccel = hwaccel
+        # Max window over which a batch of new workers opens its streams.
+        self._start_spread_s = max(0.0, start_spread_s)
+        self._rand = random.random
         self._decode_skip = decode_skip
         self._decode_threads = decode_threads
         self._fast_decode = fast_decode
@@ -682,7 +701,20 @@ class WorkerManager:
         """The freshest known stream URL for a camera (see _latest_url)."""
         return self._latest_url.get(camera_id)
 
-    def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
+    def _make_worker(self, spec: CameraSpec, spread: float) -> Worker:
+        """Build a worker, giving it a random slot inside the start window.
+
+        Only the built-in factory is offered a stagger: an injected factory
+        (tests, fakes) has the two-argument shape and opens no stream, so
+        there is nothing to spread.
+        """
+        if not self._own_factory:
+            return self._factory(spec, self.sink)
+        delay = self._rand() * spread if spread > 0 else 0.0
+        return self._default_factory(spec, self.sink, delay)
+
+    def _default_factory(self, spec: CameraSpec, sink: ResultSink,
+                         start_delay: float = 0.0) -> Worker:
         return CameraWorker(
             spec, sink,
             detector=self._shared_detector or self._detector_factory(),
@@ -694,6 +726,7 @@ class WorkerManager:
             fast_decode=self._fast_decode,
             rtsp_timeout_s=self._rtsp_timeout_s,
             url_provider=lambda cid=spec.camera_id: self.current_url(cid),
+            start_delay=start_delay,
             decode_idle=self._decode_idle,
             decode_idle_after=self._decode_idle_after,
             gate=self._gate_factory() if self._gate_factory else None,
@@ -791,9 +824,15 @@ class WorkerManager:
         # across a fleet into minutes of blocked reconcile.
         self._retire(doomed)
 
+        starting = [c for c in desired if c not in self._workers]
+        # Spread this batch's opening dials. One tick starting N cameras means
+        # N ffprobes and N RTSP session setups in the same instant — the shape
+        # of a cold start AND of a fleet-wide recovery. Proportional so a
+        # couple of cameras still come up immediately.
+        spread = min(self._start_spread_s, 0.25 * max(0, len(starting) - 1))
         for cid, spec in desired.items():
             if cid not in self._workers:
-                worker = self._factory(spec, self.sink)
+                worker = self._make_worker(spec, spread)
                 worker.start()
                 self._workers[cid] = worker
                 self._specs[cid] = spec

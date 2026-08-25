@@ -502,3 +502,45 @@ def test_detector_pool_zero_restores_one_per_worker():
     workers = [mgr._default_factory(_spec(f"c{i}"), _FakeSink()) for i in range(5)]
     assert len({id(w.detector) for w in workers}) == 5
     assert len(made) == 5
+
+
+# ── start stagger: N cameras must not dial RTSP in the same instant ──
+
+def test_new_workers_get_spread_start_delays():
+    """One tick starts every new camera at once, and each ffprobes then
+    spawns ffmpeg — so a cold start (or a fleet-wide recovery) would hit
+    MediaMTX with N simultaneous session setups. Exercises the real
+    _make_worker path, no stubbing."""
+    mgr = WorkerManager(_FakeProvider([]), _FakeSink(), start_spread_s=10.0)
+    workers = [mgr._make_worker(_spec(f"c{i}"), 7.25) for i in range(30)]
+    try:
+        delays = [w.start_delay for w in workers]
+        assert all(0.0 <= d <= 7.25 for d in delays), delays
+        assert len(set(round(d, 3) for d in delays)) > 20, "delays are not spread"
+    finally:
+        for w in workers:
+            w.request_stop()
+
+
+def test_small_batches_are_not_delayed():
+    """Two cameras must still come up immediately — the spread is
+    proportional to how many are starting."""
+    prov = _FakeProvider([_spec("a"), _spec("b")])
+    mgr = WorkerManager(prov, _FakeSink(), start_spread_s=10.0)
+    spread = min(mgr._start_spread_s, 0.25 * max(0, 2 - 1))
+    assert spread <= 0.25
+
+
+def test_start_stagger_is_interrupted_by_stop():
+    """A worker waiting out its stagger must stop at once, not sit through it."""
+    import time as _time
+
+    from detect_pipeline.service import CameraWorker
+
+    w = CameraWorker(_spec("slow"), _FakeSink(), frame_source=_FramesSource(1),
+                     start_delay=30.0)
+    w.start()
+    _time.sleep(0.05)
+    t0 = _time.monotonic()
+    assert w.stop(timeout=5.0), "worker did not exit during its stagger"
+    assert _time.monotonic() - t0 < 2.0

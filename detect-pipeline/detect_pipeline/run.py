@@ -27,6 +27,8 @@ Env:
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)
+  DETECT_START_SPREAD_S     window over which a batch of workers opens its
+                            streams (default 10; 0 = all at once)
   DETECT_DETECTOR_POOL      max resident detector instances (default: auto
                             from CPU count). One per camera was the memory
                             wall; 0 restores that.
@@ -45,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import signal
 import threading
 from dataclasses import dataclass
@@ -105,6 +108,7 @@ class ServiceConfig:
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
     detector_pool: int = 0
+    start_spread_s: float = 10.0
     visits_enabled: bool = True
 
 
@@ -192,6 +196,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         rtsp_timeout_s=_env_float(env, "DETECT_RTSP_TIMEOUT_S", DEFAULT_RTSP_TIMEOUT_S),
         bestframe_per_camera=_env_int(env, "DETECT_BESTFRAME_PER_CAMERA", 16),
         detector_pool=_detector_pool_from_env(env),
+        start_spread_s=_env_float(env, "DETECT_START_SPREAD_S", 10.0),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -460,6 +465,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
         detector_pool=cfg.detector_pool,
+        start_spread_s=cfg.start_spread_s,
         decode_threads=cfg.decode_threads,
         rtsp_timeout_s=cfg.rtsp_timeout_s,
         fast_decode=cfg.fast_decode,
@@ -663,7 +669,10 @@ def main() -> int:  # pragma: no cover - integration entrypoint
                 manager.reconcile()
             except Exception:
                 log.exception("reconcile failed; will retry")
-            stop.wait(cfg.refresh_seconds)
+            # Jitter the tick so this process does not poll core in lockstep
+            # with anything else that restarted alongside it, and so a fleet
+            # that gave up together does not all re-queue on the same instant.
+            stop.wait(cfg.refresh_seconds * random.uniform(0.85, 1.15))
     finally:
         manager.stop()
         close()

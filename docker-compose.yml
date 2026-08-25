@@ -336,6 +336,9 @@ services:
       # CAMERA made memory a function of the fleet rather than the hardware,
       # which is the wall a large install hits first. 0 restores per-camera.
       - DETECT_DETECTOR_POOL=${DETECT_DETECTOR_POOL:-}
+      # Spread a batch of worker starts so a cold start / fleet recovery does
+      # not hit MediaMTX with N simultaneous RTSP session setups.
+      - DETECT_START_SPREAD_S=${DETECT_START_SPREAD_S:-10}
       # Best-frame crops retained per camera (see .env.example).
       - DETECT_BESTFRAME_PER_CAMERA=${DETECT_BESTFRAME_PER_CAMERA:-16}
       # RTSP socket-I/O timeout (seconds; 0 disables). Bounds a HALF-OPEN
