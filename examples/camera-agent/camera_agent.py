@@ -1529,6 +1529,9 @@ class Alarm:
     # one's timestamps, and the quiet camera — the driveway nobody walks up —
     # would silently never use Tier-0 at all.
     last_tier0_at: dict[str, float] = field(default_factory=dict)
+    # When this alarm last ran its own fallback inference, per camera — the
+    # throttle clock for the backstop while Tier-0 is verifiably alive.
+    last_fallback_at: dict[str, float] = field(default_factory=dict)
 
     def window_label(self) -> str:
         def fmt(m):
@@ -1634,12 +1637,21 @@ class AlarmManager:
     def __init__(self, runtime: "CameraAgentRuntime", *, interval: float = 5.0,
                  rearm_cooldown: float = 20.0, max_alarms: int = 20,
                  pulse_seconds: float = 60.0,
-                 tier0_max_age: float = 30.0) -> None:
+                 tier0_max_age: float = 30.0,
+                 tier0_fallback_every: float = 15.0) -> None:
         self._pulse = pulse_seconds
         # Absolute cap on how old a Tier-0 detection may be and still count as
         # "present now" — a backstop for the per-cycle watermark below, so a
         # loop that stalls for minutes cannot wake up and ring on ancient news.
         self._tier0_max_age = tier0_max_age
+        # While Tier-0 is verifiably alive for a camera, run the backstop
+        # inference at most this often instead of every cycle. The backstop's
+        # own full-frame inference burns seconds of the SAME CPU detect-pipeline
+        # needs — measured live: the moment a person appeared, Tier-0's frame
+        # latency blew its budget (1.32s vs 0.50s), the load shedder cut its
+        # detector regions 8 -> 2, and the pipeline went half-blind exactly when
+        # it mattered, publishing nothing. Part of that load was us, polling.
+        self._fallback_every = tier0_fallback_every
         self._runtime = runtime
         self._alarms: dict[int, Alarm] = {}
         self._order: list[int] = []
@@ -1780,13 +1792,20 @@ class AlarmManager:
             return mins >= a
         return mins < b
 
-    # How many consecutive poll cycles an alarm may yield to interactive
-    # turns before polling anyway. The yield keeps voice-turn latency
-    # snappy on CPU, but UNBOUNDED it silently pauses a safety feature:
-    # on a busy box each turn runs tens of seconds, so chained
-    # conversation kept alarms unpolled for minutes — the field report
-    # was 'armed a siren, walked in, nothing... it fired much later'.
+    # How many consecutive poll cycles an alarm may yield its own INFERENCE
+    # to interactive turns before running it anyway. The yield keeps
+    # voice-turn latency snappy on CPU, but UNBOUNDED it silently pauses a
+    # safety feature: on a busy box each turn runs tens of seconds, so
+    # chained conversation kept alarms unpolled for minutes — the field
+    # report was 'armed a siren, walked in, nothing... it fired much later'.
     # 4 skips at the 5s interval bounds worst-case added delay to ~20s.
+    #
+    # Only the inference yields. The Tier-0 check is a ring-buffer read —
+    # microseconds, no model touched — so deferring it bought the user's
+    # turn nothing and cost the alarm up to those same 20s. Second field
+    # report, verified in the logs: the operator armed an alarm, tested it
+    # by TALKING TO THE AGENT, and the ring came >30s after the person did
+    # ('yielded 4 cycles' immediately followed by the trigger).
     _MAX_BUSY_SKIPS = 4
 
     async def _loop(self, alarm: Alarm) -> None:
@@ -1794,21 +1813,22 @@ class AlarmManager:
         try:
             while alarm.active and not self._runtime._stop_event.is_set():
                 if self._in_window(alarm):
-                    if (self._runtime.interactive_busy()
-                            and busy_skips < self._MAX_BUSY_SKIPS):
+                    busy = (self._runtime.interactive_busy()
+                            and busy_skips < self._MAX_BUSY_SKIPS)
+                    if busy:
                         busy_skips += 1
                     else:
                         if busy_skips >= self._MAX_BUSY_SKIPS:
-                            log_fn = logger.info
-                            log_fn("alarm #%d: polling despite an active turn "
-                                   "(yielded %d cycles — a safety check must "
-                                   "not wait out a conversation)",
-                                   alarm.id, busy_skips)
+                            logger.info(
+                                "alarm #%d: polling despite an active turn "
+                                "(yielded %d cycles — a safety check must "
+                                "not wait out a conversation)",
+                                alarm.id, busy_skips)
                         busy_skips = 0
-                        for cam in alarm.camera_ids:
-                            if not alarm.active:
-                                break
-                            await self._poll(alarm, cam)
+                    for cam in alarm.camera_ids:
+                        if not alarm.active:
+                            break
+                        await self._poll(alarm, cam, allow_infer=not busy)
                 self._maybe_stand_down(alarm)
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:  # pragma: no cover
@@ -1884,7 +1904,29 @@ class AlarmManager:
                 return True
         return False
 
-    async def _poll(self, alarm: Alarm, cam: str) -> None:
+    def _tier0_alive(self, cam: str, now: float) -> bool:
+        """Has Tier-0 published ANYTHING for this camera recently?
+
+        Liveness, not presence: gate audit records with no tracks count — an
+        audit of a non-event is still proof the pipeline is up and watching
+        this camera. (A genuinely quiet scene publishes nothing at all, so
+        silence stays ambiguous and the backstop stays un-throttled there.)
+        """
+        ctx = getattr(self._runtime, "context", None)
+        recent = getattr(ctx, "recent_events", None)
+        if recent is None:
+            return False
+        try:
+            events = recent(camera_id=cam, window_seconds=self._tier0_max_age)
+        except Exception:
+            return False
+        return any(getattr(e, "adapter", None) == "tier0" for e in events or ())
+
+    def _fallback_due(self, alarm: Alarm, cam: str, now: float) -> bool:
+        return (now - alarm.last_fallback_at.get(cam, 0.0)) >= self._fallback_every
+
+    async def _poll(self, alarm: Alarm, cam: str, *,
+                    allow_infer: bool = True) -> None:
         import time
 
         now = time.time()
@@ -1897,6 +1939,21 @@ class AlarmManager:
             # replaced: a safety feature must not go quiet just because one
             # source did, and Tier-0 publishes nothing at all on a quiet
             # scene, which is indistinguishable from Tier-0 having stopped.
+            #
+            # But the backstop is not free: its full-frame inference costs
+            # seconds of the same CPU detect-pipeline needs. So it yields to
+            # an interactive turn (the Tier-0 read above already ran — that
+            # part must never wait out a conversation), and while Tier-0 is
+            # demonstrably alive for this camera it runs on a throttle
+            # instead of every cycle. Measured live: our own polling was part
+            # of the load that blew Tier-0's frame budget the moment a person
+            # appeared, shedding its detector to near-blindness exactly when
+            # it mattered.
+            if not allow_infer:
+                return
+            if self._tier0_alive(cam, now) and not self._fallback_due(alarm, cam, now):
+                return
+            alarm.last_fallback_at[cam] = now
             try:
                 frame = await self._runtime.context.get_frame(cam, allow_pinned=False)
                 resp = await self._runtime.detection_client.infer(
@@ -1926,12 +1983,20 @@ class AlarmManager:
                 return
         alarm.last_triggered = now
         alarm.trigger_count += 1
+        # The event carries WHEN THE PERSON WAS SEEN, not when the loop got
+        # around to ringing. A Tier-0 ring can lag its evidence by a few
+        # seconds (track confirmation + the poll interval), and the activity
+        # click seeks the recording to this timestamp — anchored at ring time
+        # it landed on a frame the person had already left, which read as
+        # "the alarm fired on nothing". Cooldown/re-arm mechanics above stay
+        # on ``now``: those govern the RINGING, not the sighting.
+        seen_ts = alarm.last_tier0_at.get(cam, now) if source == "tier0" else now
         text = f"{alarm.name}: {alarm.target} detected on {cam}"
         if alarm.emergency_contact:
             text += f" (would alert {alarm.emergency_contact})"
         self._events.append({
             "id": self._next_event_id, "alarm_id": alarm.id, "name": alarm.name,
-            "text": text, "camera": cam, "ts": now, "ring": alarm.ring,
+            "text": text, "camera": cam, "ts": seen_ts, "ring": alarm.ring,
             "emergency_contact": alarm.emergency_contact,
         })
         self._next_event_id += 1
@@ -1939,9 +2004,8 @@ class AlarmManager:
                        alarm.id, alarm.ring, source, text)
         self._runtime.notifier.fire({
             "type": "alarm", "title": alarm.name, "text": text,
-            "camera": cam,
+            "camera": cam, "ts": seen_ts,
             "severity": "critical" if alarm.ring == "siren" else "medium",
-            "ts": now,
         })
 
 
