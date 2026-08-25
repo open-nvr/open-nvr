@@ -209,3 +209,47 @@ def test_provider_leaves_hwaccel_undeclared_when_core_omits_it():
     declared = _to_spec({"camera_id": "cam1", "frame_url": "rtsp://m/cam-1",
                          "hwaccel": "vaapi"})
     assert declared.hwaccel == "vaapi"
+
+
+# ── capability handshake: tell core what we can ACTUALLY decode ─────
+
+def test_provider_reports_its_resolved_capability():
+    """Core hands out the full-resolution main stream only to a reader that
+    can really hardware-decode, so the header must carry the RESOLVED value."""
+    seen = {}
+
+    def opener(req, timeout=None):
+        seen["hw"] = req.get_header("X-detect-hwaccel")
+        return _FakeResp(json.dumps({"cameras": []}).encode())
+
+    prov = HttpCameraProvider("http://core:8000", opener=opener, hwaccel="vaapi")
+    prov.list_cameras()
+    assert seen["hw"] == "vaapi"
+
+
+def test_provider_omits_the_header_when_it_has_nothing_to_report():
+    """No claim is better than a false one: core then falls back to its own
+    setting rather than being told something untrue."""
+    seen = {}
+
+    def opener(req, timeout=None):
+        seen["hw"] = req.get_header("X-detect-hwaccel")
+        return _FakeResp(json.dumps({"cameras": []}).encode())
+
+    HttpCameraProvider("http://core:8000", opener=opener).list_cameras()
+    assert seen["hw"] is None
+
+
+def test_build_manager_reports_cpu_when_the_render_node_is_missing():
+    """End of the trap: DETECT_HWACCEL=vaapi with no /dev/dri must report cpu,
+    so core keeps this reader on the cheap substream instead of handing it
+    full-res video it can only decode in software."""
+    from detect_pipeline.run import build_manager, config_from_env
+
+    class _Sink:
+        def publish(self, *a): return True
+
+    cfg = config_from_env({"DETECT_HWACCEL": "vaapi",
+                           "DETECT_HWACCEL_DEVICE": "/definitely/not/here"})
+    mgr = build_manager(cfg, _Sink())
+    assert mgr.provider.hwaccel == "cpu"

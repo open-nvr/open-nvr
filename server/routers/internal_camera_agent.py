@@ -256,8 +256,23 @@ def _mint_mediamtx_jwt() -> str | None:
 
 
 @router.get("/cameras", dependencies=[Depends(_require_internal_key)])
-def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object]:
+def list_camera_agent_sources(
+    db: Session = Depends(get_db),
+    x_detect_hwaccel: str | None = Header(default=None, alias="X-Detect-Hwaccel"),
+) -> dict[str, object]:
     """Return active cameras as frame sources for camera-agent.
+
+    ``X-Detect-Hwaccel`` is the caller's **resolved** decode backend — what it
+    can actually do, not what it was configured to want. When present it wins
+    over ``settings.detect_hwaccel`` for the auto tap decision below.
+
+    Why: handing out the full-resolution main stream is a bet that the reader
+    has a GPU to absorb it. That bet used to be placed on a setting BOTH sides
+    read independently, so a deployment with ``DETECT_HWACCEL=vaapi`` but no
+    ``/dev/dri`` passed through got the main stream *and* software decode —
+    several times the intended cost, silently. The reader is the only party
+    that knows whether the render node is really there, so it now says so and
+    we believe it. A caller that sends no header keeps the old behaviour.
 
     Prefer the MediaMTX internal RTSP tap so OpenNVR remains the owner of the
     camera connection. If the deployment disables that tap, fall back to the
@@ -320,7 +335,14 @@ def list_camera_agent_sources(db: Session = Depends(get_db)) -> dict[str, object
             elif mode == "sub":
                 use_sub = has_sub
             else:  # auto (and any unknown value degrades to auto)
-                hw = (settings.detect_hwaccel or "cpu").strip().lower()
+                # The caller's REPORTED capability wins; the setting is only a
+                # declaration of intent. No header = pre-handshake caller, so
+                # keep reading the setting for it.
+                hw = (
+                    x_detect_hwaccel
+                    if x_detect_hwaccel is not None
+                    else (settings.detect_hwaccel or "cpu")
+                ).strip().lower()
                 use_sub = has_sub and hw in ("", "cpu")
             tap_name = substream_name(stream_name) if use_sub else stream_name
             frame_url = f"{base}/{tap_name}"
