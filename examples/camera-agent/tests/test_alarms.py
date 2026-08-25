@@ -650,8 +650,7 @@ def _tier0_runtime(tracks, *, age=0.0, poll_detections=None):
 
     rt.detection_client.infer = counting_infer
     ev = _Ev(time.time() - age, tracks)
-    rt.context.latest_inference = lambda cam, adapter="tier0": (
-        ev if adapter == "tier0" else None)
+    rt.context.recent_events = lambda *, camera_id, window_seconds: [ev]
     return rt, polls
 
 
@@ -737,7 +736,7 @@ def test_tier0_without_the_target_still_falls_back_to_polling():
 def test_no_tier0_stream_behaves_exactly_as_before():
     """Cameras with no Tier-0 coverage keep the original behaviour."""
     rt = _runtime(detections=[{"label": "person"}])
-    rt.context.latest_inference = lambda cam, adapter="tier0": None
+    rt.context.recent_events = lambda *, camera_id, window_seconds: []
 
     async def go():
         alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
@@ -757,10 +756,10 @@ def test_a_broken_tier0_ring_cannot_take_the_alarm_loop_down():
     stop ringing because a context accessor raised."""
     rt = _runtime(detections=[{"label": "person"}])
 
-    def boom(cam, adapter="tier0"):
+    def boom(*, camera_id, window_seconds):
         raise RuntimeError("ring exploded")
 
-    rt.context.latest_inference = boom
+    rt.context.recent_events = boom
 
     async def go():
         alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
@@ -865,7 +864,9 @@ def test_a_busy_camera_does_not_starve_a_quiet_one_on_the_same_alarm():
     # cam1 is busy and its newest event is NEWER than cam2's.
     evs = {"cam1": _Ev(now, [{"label": "person"}]),
            "cam2": _Ev(now - 3.0, [{"label": "person"}])}
-    rt.context.latest_inference = lambda cam, adapter="tier0": evs.get(cam)
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds:
+            [evs[camera_id]] if camera_id in evs else [])
 
     async def go():
         alarm = rt.alarms.create(name="Both", target="person",
@@ -878,5 +879,61 @@ def test_a_busy_camera_does_not_starve_a_quiet_one_on_the_same_alarm():
         assert alarm.last_tier0_at.get("cam2"), (
             "cam2's own Tier-0 evidence was discarded because cam1's was newer")
         assert not polls, "cam2 should not have needed the fallback poll"
+
+    asyncio.run(go())
+
+
+def test_a_gate_audit_record_does_not_mask_a_real_detection():
+    """Caught in production, not in review. Tier-0 publishes its GATE
+    decisions — the audit of *non*-events — on the same adapter and into the
+    same ring as detections, and they carry no tracks. They are also more
+    frequent, so reading only the newest Tier-0 record meant almost always
+    reading an empty one: every single alarm fired 'via poll' while the
+    pipeline was detecting people a second earlier.
+
+    An empty record is not evidence of absence. Skip past it to the last
+    record that actually looked.
+    """
+    import time
+    rt, polls = _tier0_runtime([{"label": "person"}])
+    now = time.time()
+    # Exactly the production shape: a detection, then a newer gate audit.
+    detection = _Ev(now - 1.0, [{"label": "person", "score": 0.61}])
+    gate = _Ev(now, [])
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [gate, detection])   # newest first
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, (
+            "a gate audit with no tracks masked the detection behind it")
+        assert not polls, "should have rung from Tier-0, not fallen back to the poll"
+
+    asyncio.run(go())
+
+
+def test_an_empty_ring_still_falls_back_to_the_poll():
+    """All gate audits and no detections is genuinely 'Tier-0 has nothing to
+    say' — the backstop must still run."""
+    rt, polls = _tier0_runtime([{"label": "cat"}], poll_detections=[{"label": "person"}])
+    import time
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [_Ev(time.time(), [])])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True and polls, "the backstop must still run"
 
     asyncio.run(go())

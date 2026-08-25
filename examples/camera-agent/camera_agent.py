@@ -1834,27 +1834,38 @@ class AlarmManager:
         published frame can ring the alarm exactly once, and never later.
         """
         ctx = getattr(self._runtime, "context", None)
-        latest = getattr(ctx, "latest_inference", None)
-        if latest is None:
+        recent = getattr(ctx, "recent_events", None)
+        if recent is None:
             return False
         try:
-            ev = latest(cam, adapter="tier0")
+            events = recent(camera_id=cam, window_seconds=self._tier0_max_age)
         except Exception:            # a read of a ring buffer must never
             return False             # take the alarm loop down with it
-        if ev is None:
-            return False             # no Tier-0 for this camera — poll instead
-        seen = float(getattr(ev, "received_at", 0.0) or 0.0)
-        watermark = alarm.last_tier0_at.get(cam, 0.0)
-        if seen <= max(watermark, now - self._tier0_max_age):
-            return False
-        tracks = (getattr(ev, "raw", None) or {}).get("tracks") or []
-        hit = any(
-            str(t.get("label") or "").strip().lower() == alarm.target
-            for t in tracks if isinstance(t, dict)
-        )
-        if hit:
-            alarm.last_tier0_at[cam] = seen
-        return hit
+        # Judged-already, or too old to mean "now". Checked here and not left
+        # to the ring's own windowing: whether evidence is current is the
+        # safety property of this function, not a collaborator's to guarantee.
+        floor_ = max(alarm.last_tier0_at.get(cam, 0.0), now - self._tier0_max_age)
+        for ev in events or ():                      # newest first
+            if getattr(ev, "adapter", None) != "tier0":
+                continue
+            seen = float(getattr(ev, "received_at", 0.0) or 0.0)
+            if seen <= floor_:
+                break        # this and everything older is stale or judged
+            tracks = (getattr(ev, "raw", None) or {}).get("tracks") or []
+            if not tracks:
+                # Tier-0 publishes its GATE decisions — the audit of
+                # non-events — on the same adapter and into the same ring as
+                # detections, and they carry no tracks. They are also more
+                # frequent, so reading only the newest Tier-0 record meant
+                # almost always reading an empty one and concluding nobody was
+                # there. An empty record is not evidence of absence; skip past
+                # it to the last record that actually looked.
+                continue
+            if any(str(t.get("label") or "").strip().lower() == alarm.target
+                   for t in tracks if isinstance(t, dict)):
+                alarm.last_tier0_at[cam] = seen
+                return True
+        return False
 
     async def _poll(self, alarm: Alarm, cam: str) -> None:
         import time
