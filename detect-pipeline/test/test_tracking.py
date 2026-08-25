@@ -107,3 +107,48 @@ def test_best_frame_tracked_per_object():
     tracks = tk.update([Detection("person", (100, 100, 160, 300), 0.80)])  # +0.20 score
     assert tracks[0].best is not None
     assert tracks[0].best.score == 0.80     # best updated to the higher-scoring frame
+
+
+# ── evidence crops carry context ───────────────────────────────────────
+
+
+def test_best_crop_includes_context_around_the_box():
+    """The crop becomes the visit's stored evidence — the photo the operator
+    sees for "who came today?". The bare detection box is the least legible
+    framing of it: field case, a person leaned over a desk camera and the
+    evidence was a 163x187 crop of their knuckles with zero surroundings."""
+    import numpy as np
+    from detect_pipeline.tracking import _crop_bgr
+
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    crop = _crop_bgr(frame, (800, 400, 1000, 700))       # 200x300 box mid-frame
+    h, w = crop.shape[:2]
+    assert w > 200 and h > 300, f"no context added: got {w}x{h}"
+    assert w == 200 + 2 * 50 and h == 300 + 2 * 75, (
+        f"expected a quarter-box margin per side, got {w}x{h}")
+
+
+def test_best_crop_margin_clamps_at_the_frame_edge():
+    """A box in a corner cannot borrow context that does not exist — the crop
+    clamps to the frame instead of failing or wrapping."""
+    import numpy as np
+    from detect_pipeline.tracking import _crop_bgr
+
+    frame = np.zeros((480, 640, 3), np.uint8)
+    crop = _crop_bgr(frame, (0, 0, 100, 100))
+    h, w = crop.shape[:2]
+    assert (w, h) == (125, 125), f"corner crop should clamp to 125x125, got {w}x{h}"
+
+    crop = _crop_bgr(frame, (540, 380, 640, 480))        # bottom-right corner
+    h, w = crop.shape[:2]
+    assert (w, h) == (125, 125), f"corner crop should clamp, got {w}x{h}"
+
+
+def test_best_crop_of_a_full_frame_box_is_the_frame():
+    """margin cannot push past the frame however large the box."""
+    import numpy as np
+    from detect_pipeline.tracking import _crop_bgr
+
+    frame = np.zeros((480, 640, 3), np.uint8)
+    crop = _crop_bgr(frame, (0, 0, 640, 480))
+    assert crop.shape[:2] == (480, 640)
