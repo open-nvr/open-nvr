@@ -777,16 +777,21 @@ def test_a_broken_tier0_ring_cannot_take_the_alarm_loop_down():
 # ── the backstop poll's framing ────────────────────────────────────────
 
 
-def _jpeg(w, h):
-    import cv2, numpy as np
-    img = np.full((h, w, 3), 90, np.uint8)
-    return cv2.imencode(".jpg", img)[1].tobytes()
+def _jpeg(w, h, colour=(90, 90, 90)):
+    """Pillow, not OpenCV: cv2 is an optional extra for this package, so a
+    test written against it fails wherever the extra is absent — which is
+    exactly where the code under test must still work."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), colour).save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def _dims(jpeg):
-    import cv2, numpy as np
-    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-    return img.shape[1], img.shape[0]
+    import io
+    from PIL import Image
+    return Image.open(io.BytesIO(jpeg)).size
 
 
 def test_letterbox_squares_a_widescreen_frame():
@@ -804,20 +809,26 @@ def test_letterbox_squares_a_widescreen_frame():
 def test_letterbox_keeps_the_whole_frame():
     """Nothing may be cut: the edges of a driveway or gate view are exactly
     where the thing you armed the alarm for walks in."""
-    import cv2, numpy as np
+    import io
+    from PIL import Image
     from camera_agent import _letterbox_jpeg
-    src = np.full((1080, 1920, 3), 30, np.uint8)
-    src[:, :192] = 255                     # the leftmost tenth of the frame
-    src[:, -192:] = 255                    # ...and the rightmost tenth
-    out = cv2.imdecode(
-        np.frombuffer(_letterbox_jpeg(cv2.imencode(".jpg", src)[1].tobytes()),
-                      np.uint8), cv2.IMREAD_COLOR)
+
+    src = Image.new("RGB", (1920, 1080), (30, 30, 30))
+    white = Image.new("RGB", (192, 1080), (255, 255, 255))
+    src.paste(white, (0, 0))               # the leftmost tenth of the frame
+    src.paste(white, (1920 - 192, 0))      # ...and the rightmost tenth
+    buf = io.BytesIO(); src.save(buf, format="JPEG")
+
+    out = Image.open(io.BytesIO(_letterbox_jpeg(buf.getvalue()))).convert("RGB")
     # Padding goes top/bottom for a landscape frame, so the middle row is all
     # content and the marked tenths must still be at its two ends.
-    band = out[out.shape[0] // 2]
-    tenth = max(1, band.shape[0] // 10)
-    assert band[:tenth].mean() > 200, "left edge of the frame was lost"
-    assert band[-tenth:].mean() > 200, "right edge of the frame was lost"
+    w, h = out.size
+    y = h // 2
+    tenth = max(1, w // 10)
+    left = [out.getpixel((x, y))[0] for x in range(tenth)]
+    right = [out.getpixel((x, y))[0] for x in range(w - tenth, w)]
+    assert sum(left) / len(left) > 200, "left edge of the frame was lost"
+    assert sum(right) / len(right) > 200, "right edge of the frame was lost"
 
 
 def test_letterbox_leaves_a_square_frame_alone():

@@ -1568,7 +1568,7 @@ def _letterbox_jpeg(jpeg: bytes, max_side: int = 960) -> bytes:
 
         position     squashed   centre-crop   letterboxed
         left edge      0.28        0.00           0.84
-        centre         0.00        0.54           0.77
+        centre         0.00        0.54           0.76
         right edge     0.48        0.00           0.82
 
     Note the middle column: cropping to a centre square is BLIND at both
@@ -1577,42 +1577,51 @@ def _letterbox_jpeg(jpeg: bytes, max_side: int = 960) -> bytes:
 
     ``max_side`` shrinks before padding, because the detector resizes to its
     own input regardless — sending 1920x1920 buys nothing and costs real work.
-    Downscaling here is also BETTER than letting the adapter do it, since
-    INTER_AREA resamples properly. Same person, same three positions:
+    Downscaling here is also BETTER than letting the adapter do it, because a
+    proper resampling filter beats whatever the far side does. Same person,
+    same three positions:
 
         letterbox side   1920   1280    960    640
         left edge        0.77   0.83   0.85   0.85
         centre           0.63   0.74   0.78   0.75
         right edge       0.80   0.83   0.81   0.75
-        cost              114ms   82ms   44ms   33ms
         payload            83KB   36KB   25KB   13KB
 
-    960 keeps headroom above a 640 model input while costing a third of full
-    size and a third of the bytes.
+    960 keeps headroom above a 640 model input at a third of the bytes.
+
+    Pillow, deliberately, not OpenCV: cv2 is an OPTIONAL extra here (the
+    ``device`` group, for local capture cameras) while Pillow is a core
+    dependency. Written against cv2 this degraded to "return the frame
+    unchanged" on any install without that extra — silently handing the
+    detector the squashed 16:9 frame again, which is the exact blindness this
+    function exists to remove. A safety path must not depend on an optional
+    package to work.
     """
     try:
-        import cv2
-        import numpy as np
+        import io
 
-        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg))
+        img.load()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        w, h = img.size
+        if w == 0 or h == 0:
             return jpeg
-        h, w = img.shape[:2]
-        if h == 0 or w == 0:
-            return jpeg
-        if max_side and max(h, w) > max_side:
-            scale = max_side / max(h, w)
-            img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
-                             interpolation=cv2.INTER_AREA)
-            h, w = img.shape[:2]
-        elif h == w:
+        if max_side and max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                             Image.Resampling.LANCZOS)
+            w, h = img.size
+        elif w == h:
             return jpeg          # already square and already small enough
-        side = max(h, w)
-        canvas = np.zeros((side, side, 3), np.uint8)
-        y, x = (side - h) // 2, (side - w) // 2
-        canvas[y:y + h, x:x + w] = img
-        ok, enc = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        return enc.tobytes() if ok else jpeg
+        side = max(w, h)
+        canvas = Image.new("RGB", (side, side), (0, 0, 0))
+        canvas.paste(img, ((side - w) // 2, (side - h) // 2))
+        buf = io.BytesIO()
+        canvas.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
     except Exception:
         return jpeg
 
