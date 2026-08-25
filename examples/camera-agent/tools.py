@@ -970,7 +970,8 @@ class CameraTools:
                     "or the time range wasn't understood) — please try again.")
         if not events:
             window = self._window_phrase(start, end)
-            return f"No {label} visits remembered{window}."
+            return (f"No {label} visits remembered{window}."
+                    + self._in_progress_note(label, camera_arg))
 
         clauses = []
         for e in events[:10]:
@@ -982,6 +983,7 @@ class CameraTools:
                 f"[#{e.id}] {span} on camera {e.camera_id}{plate_bit}"
                 + (" (photo kept)" if e.has_evidence else "")
             )
+        live_note = self._in_progress_note(label, camera_arg)
         summary = (f"I remember {len(events)} {label} visit(s)"
                    f"{self._window_phrase(start, end)}: " + "; ".join(clauses) + ".")
 
@@ -991,6 +993,7 @@ class CameraTools:
         # extra read and turns "I saw someone at 16:25" into something the
         # operator can actually check.
         await self._attach_evidence_frames(events)
+        summary += live_note
 
         # Face-match the evidence for person questions (best-effort, capped).
         if label == "person" and bool(args.get("identify_faces", True)):
@@ -998,6 +1001,36 @@ class CameraTools:
             if names:
                 summary += " Recognised: " + ", ".join(sorted(names)) + "."
         return summary
+
+    def _in_progress_note(self, label: str, camera_arg) -> str:
+        """A visit enters the store only when it ENDS, so history alone answers
+        'did anyone come today?' with a straight no while the person is
+        literally standing on camera. Seen in the field: the operator walked in
+        to test, asked, and was denied — the visit was still being written.
+        Cross-check the live Tier-0 ring and say so.
+        """
+        try:
+            cam_filter = None
+            if camera_arg not in (None, "", "all", "__any__"):
+                cam_filter = str(camera_arg)
+            events = self._ctx.recent_events(
+                camera_id=cam_filter, window_seconds=45.0)
+        except Exception:
+            return ""            # the note is a bonus; history stays the answer
+        cams: list[str] = []
+        for ev in events or ():
+            if getattr(ev, "adapter", None) != "tier0":
+                continue
+            tracks = (getattr(ev, "raw", None) or {}).get("tracks") or []
+            if any(str(t.get("label") or "").strip().lower() == label
+                   for t in tracks if isinstance(t, dict)):
+                cam = str(getattr(ev, "camera_id", "") or "")
+                if cam and cam not in cams:
+                    cams.append(cam)
+        if not cams:
+            return ""
+        return (f" And right now a {label} IS on {', '.join(sorted(cams))} — "
+                f"that visit is still in progress and enters history when it ends.")
 
     async def _attach_evidence_frames(self, events, cap: int = 3) -> None:
         """Publish up to ``cap`` remembered best-frames onto this turn.

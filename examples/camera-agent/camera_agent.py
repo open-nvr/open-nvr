@@ -1983,12 +1983,20 @@ class AlarmManager:
                 return
         alarm.last_triggered = now
         alarm.trigger_count += 1
+        # The event carries WHEN THE PERSON WAS SEEN, not when the loop got
+        # around to ringing. A Tier-0 ring can lag its evidence by a few
+        # seconds (track confirmation + the poll interval), and the activity
+        # click seeks the recording to this timestamp — anchored at ring time
+        # it landed on a frame the person had already left, which read as
+        # "the alarm fired on nothing". Cooldown/re-arm mechanics above stay
+        # on ``now``: those govern the RINGING, not the sighting.
+        seen_ts = alarm.last_tier0_at.get(cam, now) if source == "tier0" else now
         text = f"{alarm.name}: {alarm.target} detected on {cam}"
         if alarm.emergency_contact:
             text += f" (would alert {alarm.emergency_contact})"
         self._events.append({
             "id": self._next_event_id, "alarm_id": alarm.id, "name": alarm.name,
-            "text": text, "camera": cam, "ts": now, "ring": alarm.ring,
+            "text": text, "camera": cam, "ts": seen_ts, "ring": alarm.ring,
             "emergency_contact": alarm.emergency_contact,
         })
         self._next_event_id += 1
@@ -1996,9 +2004,8 @@ class AlarmManager:
                        alarm.id, alarm.ring, source, text)
         self._runtime.notifier.fire({
             "type": "alarm", "title": alarm.name, "text": text,
-            "camera": cam,
+            "camera": cam, "ts": seen_ts,
             "severity": "critical" if alarm.ring == "siren" else "medium",
-            "ts": now,
         })
 
 

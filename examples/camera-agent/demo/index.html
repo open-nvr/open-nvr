@@ -1698,7 +1698,10 @@
       try{ await loadRecordings(cam); }catch{}
       const seg=_recs.find(x=>{ const s0=Date.parse(x.start)/1000;
         return ts>=s0-2&&ts<=s0+(x.duration||0)+2; });
-      if(seg) playRecording(cam,seg,null);
+      // Seek INSIDE the segment: the alarm at 20:00 lives in a segment that
+      // began at 19:53, and opening it from 0:00 showed an empty room seven
+      // minutes before the person — which read as "the alarm fired on nothing".
+      if(seg) playRecording(cam,seg,null,ts);
       // else: live view (openCamScreen already did that)
     }
 
@@ -1741,7 +1744,7 @@
         b.querySelector("small").textContent=mins+" min";
         b.addEventListener("click",()=>playRecording(cam,seg,b));
         segs.appendChild(b); } }
-    async function playRecording(cam,seg,btn){
+    async function playRecording(cam,seg,btn,atTs){
       try{ const r=await fetch("/recordings/"+encodeURIComponent(cam)+"/play?start="+
           encodeURIComponent(seg.start)+"&duration="+encodeURIComponent(seg.duration||60));
         const d=await r.json().catch(()=>({}));
@@ -1754,6 +1757,11 @@
         // Autoplay: the click gesture is gone after the fetch, so an
         // unmuted play() may be blocked — fall back to muted (controls
         // let the user unmute), never to a frozen first frame.
+        if(atTs){ const offSec=Math.max(0,atTs-Date.parse(seg.start)/1000);
+          if(offSec>0&&offSec<(seg.duration||1e9)){
+            const seekTo=()=>{ try{ v.currentTime=offSec; }catch{} };
+            if(v.readyState>=1) seekTo();
+            else v.addEventListener("loadedmetadata",seekTo,{once:true}); } }
         v.muted=false;
         v.play().catch(()=>{ v.muted=true; v.play().catch(()=>{}); });
         setMode("playback");

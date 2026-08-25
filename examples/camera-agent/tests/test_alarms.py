@@ -1072,3 +1072,30 @@ def test_gate_audit_records_prove_liveness_for_the_throttle():
             f"gate records prove liveness; expected 1 inference, got {len(polls)}")
 
     asyncio.run(go())
+
+
+def test_alarm_event_carries_the_sighting_time_not_the_ring_time():
+    """The activity click seeks the recording to the event's ts. A Tier-0 ring
+    can lag its evidence by track-confirmation plus a poll interval; anchored
+    at ring time the click landed on a frame the person had already left,
+    which read as 'the alarm fired on nothing'."""
+    import time
+    rt, _polls = _tier0_runtime([])
+    seen_at = time.time() - 8.0                    # seen 8s before the ring
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [_Ev(seen_at, [{"label": "person"}])])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person",
+                                 camera_ids=["cam1"], ring="chime")
+        rt.alarms.stop(alarm.id)
+        alarm.active = True
+        await rt.alarms._poll(alarm, "cam1")
+        ev = rt.alarms.events()[-1]
+        assert abs(ev["ts"] - seen_at) < 0.5, (
+            f"event ts must be the sighting ({seen_at}), got {ev['ts']}")
+        # ...while the ring mechanics stay anchored at ring time, or the
+        # re-arm window would be silently shortened by the evidence lag.
+        assert alarm.last_triggered > seen_at + 5
+
+    asyncio.run(go())
