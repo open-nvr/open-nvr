@@ -652,3 +652,67 @@ def test_decode_mode_flips_are_not_counted_as_feed_restarts():
     assert m.metrics.value("tier0_worker_restarts_total", cam) == 1.0
     assert m.metrics.value("tier0_decode_mode_changes_total", cam) == 1.0
     m.metrics.reset()
+
+
+def test_stop_during_source_setup_is_not_lost():
+    """request_stop() closes the source via self._src, which is still None
+    while _make_source() runs. A stop arriving in that window closed nothing,
+    so the worker went on to dial RTSP and — on a dead camera — kept
+    respawning ffmpeg for a minute or more after being told to stop, while
+    its replacement was already running."""
+    import threading as _t
+
+    from detect_pipeline.service import CameraWorker
+
+    in_setup, may_finish = _t.Event(), _t.Event()
+
+    class _SlowSource:
+        width, height = W, H
+
+        def __init__(self):
+            self.closed = False
+
+        def stream(self):
+            raise AssertionError("stopped worker must never open the stream")
+
+        def close(self):
+            self.closed = True
+
+    src = _SlowSource()
+    w = CameraWorker(_spec("cam-slow"), _FakeSink(), frame_source=src)
+
+    original = w._make_source
+
+    def slow_make_source(decode_skip=None):
+        in_setup.set()
+        may_finish.wait(timeout=5)          # stop lands during this window
+        return original(decode_skip)
+
+    w._make_source = slow_make_source
+    w.start()
+    assert in_setup.wait(timeout=5)
+    w.request_stop()                        # _src is still None right now
+    may_finish.set()
+
+    assert w.join(5.0), "worker did not exit"
+    assert src.closed, "the source was never closed — stop was lost"
+
+
+def test_gate_change_closes_the_outgoing_dispatcher():
+    """_poll_gate_override builds a fresh KaicDispatcher on each transition
+    into enforce and passes None on the way out; close() was never called
+    anywhere, so every shadow<->enforce round trip from the promotion panel
+    leaked a thread pool."""
+    class _Disp:
+        def __init__(self): self.closed = False
+        def close(self): self.closed = True
+
+    old, new = _Disp(), _Disp()
+    mgr = WorkerManager(_FakeProvider([]), _FakeSink(), dispatcher=old)
+    mgr.apply_gate_change(lambda: None, dispatcher=new)
+    assert old.closed and not new.closed
+
+    # ...and leaving enforce (dispatcher=None) must retire it too.
+    mgr.apply_gate_change(lambda: None, dispatcher=None)
+    assert new.closed
+    assert mgr._dispatcher is None

@@ -427,7 +427,14 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         cfg.core_url, api_key=cfg.api_key, hwaccel=effective_hwaccel.value,
     )
     # Region crops match the detector input so the model sees full-detail crops.
-    model_size = cfg.onnx_input if cfg.detector == "onnx" else cfg.model_size
+    # Crop to the detector's real input. The rfdetr branch was missing, so
+    # DETR variants cropped to DETECT_MODEL_SIZE (320) and then upsampled to
+    # their 384-560 input — paying DETR-sized inference on 320px of actual
+    # detail, throwing away the small-object recall the region sizing exists
+    # to protect.
+    model_size = (
+        cfg.onnx_input if cfg.detector in ("onnx", "rfdetr") else cfg.model_size
+    )
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
     # default). It still only fires on enforce escalations (shadow/off = nothing).
     dispatcher = router = None

@@ -440,6 +440,22 @@ class CameraWorker:
         try:
             src, w, h = self._make_source()
             self._src = src
+            # request_stop() reads self._src to close the source. Between the
+            # stagger returning and this assignment it is still None, so a stop
+            # arriving in that window closed NOTHING and left _closing False:
+            # the worker went on to dial RTSP and, on a dead camera, kept
+            # respawning ffmpeg for a minute or more AFTER being told to stop —
+            # while the manager had already timed out and started its
+            # replacement. Re-check now that the source is reachable; the flag
+            # is set before _src is read, so one of the two orderings always
+            # catches it.
+            if self._stop.is_set():
+                src.close()
+                if not self._superseded:
+                    record_worker_state(
+                        self.spec.camera_id, False, target_fps=self.spec.fps
+                    )
+                return
         except Exception:
             # Emit the DOWN gauge before bailing. Returning here used to skip
             # record_worker_state entirely, so a camera that never opens had
@@ -772,11 +788,29 @@ class WorkerManager:
         serially made this cost STOP_TIMEOUT_S per camera — minutes of total
         blackout on a large install, from one click in the UI."""
         self._gate_factory = gate_factory
-        if dispatcher is not None:
+        # Retire the outgoing dispatcher. _poll_gate_override builds a FRESH
+        # KaicDispatcher on every transition into enforce and passes None on
+        # the way out, and close() was never called anywhere — so an admin
+        # A/B-ing shadow vs enforce from the promotion panel leaked a 4-thread
+        # pool per round trip, and on the way out the old one stayed wired up
+        # (disarmed only accidentally, by the gate returning nothing to
+        # dispatch in shadow).
+        if dispatcher is not self._dispatcher:
+            self._close_dispatcher(self._dispatcher)
             self._dispatcher = dispatcher
         if router is not None:
             self._router = router
         self._stop_all()
+
+    @staticmethod
+    def _close_dispatcher(dispatcher) -> None:
+        close = getattr(dispatcher, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception:  # pragma: no cover - defensive
+            log.debug("error closing the outgoing dispatcher", exc_info=True)
 
     @staticmethod
     def _baked(spec: CameraSpec) -> CameraSpec:
@@ -904,3 +938,4 @@ class WorkerManager:
 
     def stop(self) -> None:
         self._stop_all()
+        self._close_dispatcher(self._dispatcher)

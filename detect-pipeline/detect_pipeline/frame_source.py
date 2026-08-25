@@ -268,8 +268,20 @@ class FrameSource:
         thread that consumes ``stream()``, between frames."""
         self.decode_skip = mode
         self._skip_backoff_once = True
-        if self._current_proc is not None:
-            _terminate(self._current_proc)
+        proc = self._current_proc
+        if proc is not None:
+            # Signal only — _terminate() waits up to 3s reaping the child, and
+            # this runs on the WORKER'S FRAME LOOP. Adaptive decode is on by
+            # default, so every idle<->active flip stalled that camera for
+            # however long ffmpeg took to die. close() was deliberately written
+            # not to block for exactly this reason; this path was missed.
+            # The reader unblocks when the pipe closes and the loop's own
+            # finally does the full reap.
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("frame source: error signalling a decode flip", exc_info=True)
 
     def close(self) -> None:
         """Stop the restart loop and unblock the reader NOW.
