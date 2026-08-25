@@ -353,3 +353,114 @@ def test_worker_degrades_to_cpu_when_the_device_is_absent():
     worker = mgr._default_factory(_spec("a"), _FakeSink())
     # Degrades rather than failing every camera at ffmpeg spawn.
     assert worker._effective_hwaccel() is HwAccel.CPU
+
+
+# ── fleet shutdown: bounded, interruptible, and non-orphaning ───────
+
+class _BlockingSource:
+    """A source parked in a blocking read until close() releases it.
+
+    Models the real failure: the worker only checks the stop flag BETWEEN
+    frames, so a source that isn't producing frames leaves it unreachable.
+    """
+
+    width, height = W, H
+
+    def __init__(self):
+        import threading as _t
+        self.released = _t.Event()
+        self.closed = False
+
+    def stream(self):
+        self.released.wait(timeout=30)      # unblocked only by close()
+        return
+        yield                                # pragma: no cover - generator marker
+
+    def close(self):
+        self.closed = True
+        self.released.set()
+
+
+def test_stop_unblocks_a_worker_parked_in_a_blocking_read():
+    """Before: join(5) always timed out here and the thread was orphaned."""
+    import time as _time
+
+    from detect_pipeline.service import CameraWorker
+
+    src = _BlockingSource()
+    worker = CameraWorker(_spec("cam-stuck"), _FakeSink(), frame_source=src)
+    worker.start()
+    for _ in range(200):                     # let it reach the blocking read
+        if worker.is_alive():
+            break
+        _time.sleep(0.01)
+
+    t0 = _time.monotonic()
+    exited = worker.stop(timeout=5.0)
+    elapsed = _time.monotonic() - t0
+
+    assert exited, "worker did not exit — join timed out"
+    assert src.closed, "stop() must close the source to unblock the reader"
+    assert elapsed < 2.0, f"took {elapsed:.1f}s; the source was not interrupted"
+
+
+def test_fleet_stop_costs_one_timeout_not_one_per_camera(monkeypatch):
+    """The regression: reconcile stopped workers serially with a 5s join
+    each, so a spec change across a fleet blocked the loop for minutes and
+    an admin gate toggle took N x 5s with every camera dark."""
+    import time as _time
+
+    from detect_pipeline import service as svc
+
+    monkeypatch.setattr(svc, "STOP_TIMEOUT_S", 0.4)
+
+    class _Deaf:
+        """Never exits — worst case for the join."""
+        def __init__(self, *a):
+            self.signalled = False
+            self.superseded = False
+
+        def start(self): pass
+        def is_alive(self): return True
+        def request_stop(self): self.signalled = True
+        def join(self, timeout):
+            _time.sleep(timeout)             # burn the whole budget
+            return False
+        def mark_superseded(self): self.superseded = True
+        def stop(self, timeout=5.0): self.request_stop(); return self.join(timeout)
+
+    made = []
+    prov = _FakeProvider([_spec(c) for c in "abcdefgh"])   # 8 cameras
+    mgr = WorkerManager(prov, _FakeSink(),
+                        worker_factory=lambda s, k: (made.append(_Deaf()), made[-1])[1])
+    mgr.reconcile()
+    assert len(made) == 8
+
+    prov.specs = []                                        # all removed
+    t0 = _time.monotonic()
+    mgr.reconcile()
+    elapsed = _time.monotonic() - t0
+
+    assert all(w.signalled for w in made), "every worker must be signalled first"
+    # One shared budget, not 8 x 0.4s.
+    assert elapsed < 8 * 0.4 * 0.6, f"{elapsed:.2f}s looks serial"
+    # Stragglers are superseded so they cannot clobber a replacement's gauge.
+    assert all(w.superseded for w in made)
+
+
+def test_straggler_cannot_zero_the_replacement_gauge():
+    from detect_pipeline import metrics as m
+    from detect_pipeline.service import CameraWorker
+
+    m.metrics.reset()
+    src = _BlockingSource()
+    old = CameraWorker(_spec("cam1"), _FakeSink(), frame_source=src)
+    old.start()
+    old.mark_superseded()                    # manager replaced it
+    old.request_stop()
+    old.join(5.0)
+
+    # The replacement's UP gauge must survive the old worker's teardown.
+    m.record_worker_state("cam1", True, target_fps=2)
+    assert m.metrics.value("tier0_worker_up", {"camera": "cam1"}) == 1.0
+    m.metrics.reset()

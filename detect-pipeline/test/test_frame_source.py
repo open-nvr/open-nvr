@@ -369,3 +369,106 @@ def test_stream_urls_are_redacted_in_logs(caplog):
         list(src.stream())
     assert caplog.text, "expected restart/give-up logging"
     assert "SECRETPAYLOAD" not in caplog.text, "JWT leaked into logs"
+
+
+# ── close(): make a parked source stoppable ────────────────────────
+
+def test_close_unblocks_a_real_blocking_read():
+    """A REAL child that never writes: without close() terminating it, the
+    reader sits in stdout.read() until the RTSP timeout and the owning
+    worker cannot be joined."""
+    import subprocess
+    import sys
+    import threading
+
+    from detect_pipeline.frame_source import FrameSource
+
+    def spawn(argv):
+        # Sleeps without ever writing a frame — a stalled feed.
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    src = FrameSource("rtsp://cam/stalled", width=4, height=4, fps=5,
+                      spawn=spawn, backoff_seconds=0)
+    done = threading.Event()
+
+    def drain():
+        list(src.stream())
+        done.set()
+
+    threading.Thread(target=drain, daemon=True).start()
+    time.sleep(0.4)                      # let it reach the blocking read
+    t0 = time.monotonic()
+    src.close()
+    assert done.wait(timeout=10), "close() did not unblock the reader"
+    assert time.monotonic() - t0 < 8.0
+
+
+def test_close_interrupts_the_restart_backoff():
+    """A source waiting out its backoff must stop immediately, not after the
+    full (escalating, up to max_backoff_seconds) delay."""
+    import threading
+
+    from detect_pipeline.frame_source import FrameSource
+
+    src = FrameSource(
+        "rtsp://cam/dead", width=4, height=4, fps=5,
+        spawn=lambda cmd: _EmptyProc(),
+        max_fruitless_restarts=50,        # would loop a long time
+        backoff_seconds=5.0, max_backoff_seconds=30.0,
+    )
+    done = threading.Event()
+    threading.Thread(target=lambda: (list(src.stream()), done.set()), daemon=True).start()
+    time.sleep(0.3)                      # now parked in the backoff sleep
+    t0 = time.monotonic()
+    src.close()
+    assert done.wait(timeout=5), "close() did not interrupt the backoff"
+    assert time.monotonic() - t0 < 3.0
+
+
+def test_close_stops_the_loop_from_respawning():
+    spawns = []
+    from detect_pipeline.frame_source import FrameSource
+
+    src = FrameSource("rtsp://cam/x", width=4, height=4, fps=5,
+                      spawn=lambda cmd: (spawns.append(1), _EmptyProc())[1],
+                      max_fruitless_restarts=10, backoff_seconds=0,
+                      _sleep=lambda s: src.close())   # close during backoff
+    list(src.stream())
+    assert len(spawns) == 1, "closed source must not respawn ffmpeg"
+
+
+def test_close_does_not_block_on_the_child():
+    """close() must SIGNAL, never reap.
+
+    _terminate() waits up to 3s for the child. Calling it here made close()
+    blocking, so a manager stopping N sources paid that serially — measured
+    at 15s for 6 real cameras before this was fixed. The child below ignores
+    SIGTERM, so a reaping close() would stall for the full wait.
+    """
+    import signal
+    import subprocess
+    import sys
+
+    from detect_pipeline.frame_source import FrameSource
+
+    child = (
+        "import signal,time;"
+        "signal.signal(signal.SIGTERM, lambda *a: None);"   # ignore SIGTERM
+        "time.sleep(30)"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", child],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    src = FrameSource("rtsp://cam/x", width=4, height=4, fps=5,
+                      spawn=lambda cmd: proc)
+    src._current_proc = proc
+    try:
+        t0 = time.monotonic()
+        src.close()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0, f"close() blocked for {elapsed:.1f}s — it must not reap"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
