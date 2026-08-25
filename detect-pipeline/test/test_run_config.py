@@ -325,3 +325,35 @@ def test_run_module_functions_reference_no_undefined_globals():
             unresolved.append(f"{name}() -> {g}")
 
     assert not unresolved, "undefined global(s) in detect_pipeline.run: " + ", ".join(unresolved)
+
+
+# ── .env inline-comment leakage ─────────────────────────────────────
+
+def test_leaked_inline_comments_are_not_treated_as_values():
+    """`VAR=` followed by a trailing `# comment` in a .env file parses as the
+    COMMENT — only the EMPTY case; non-empty values strip theirs correctly.
+    Found live on this project's own .env.example: the container really had
+    DETECT_DISPATCH_KAIC_URL set to "# set (e.g. http://kai-c:8100) ...",
+    which is truthy, so the service reported Tier-1 dispatch as configured
+    against a URL that could never resolve."""
+    bogus_url = "# set (e.g. http://kai-c:8100) to run the gated model; empty = off"
+    cfg = config_from_env({
+        "DETECT_DISPATCH_KAIC_URL": bogus_url,
+        "DETECT_ONNX_PROVIDERS": "# ort EPs, e.g. OpenVINOExecutionProvider",
+    })
+    assert cfg.dispatch_kaic_url == ""
+    assert cfg.onnx_providers == ""
+
+
+def test_a_non_url_dispatch_target_is_refused():
+    cfg = config_from_env({"DETECT_DISPATCH_KAIC_URL": "kai-c:8100"})   # no scheme
+    assert cfg.dispatch_kaic_url == ""
+
+
+def test_real_values_are_untouched():
+    cfg = config_from_env({
+        "DETECT_DISPATCH_KAIC_URL": "http://kai-c:8100",
+        "DETECT_ONNX_PROVIDERS": "OpenVINOExecutionProvider,CPUExecutionProvider",
+    })
+    assert cfg.dispatch_kaic_url == "http://kai-c:8100"
+    assert cfg.onnx_providers == "OpenVINOExecutionProvider,CPUExecutionProvider"

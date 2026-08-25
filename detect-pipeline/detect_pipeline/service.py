@@ -22,6 +22,7 @@ skipped, so per-camera opt-out works without touching the rest.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -48,7 +49,7 @@ from .metrics import (
     forget_camera,
 )
 from .motion import MotionConfig, MotionDetector
-from .pipeline import DetectPipeline, FrameResult
+from .pipeline import DetectPipeline, FrameResult, RegionBudgetController
 from .tracking import TrackConfig, Tracker
 
 log = logging.getLogger("detect_pipeline.service")
@@ -456,14 +457,25 @@ class CameraWorker:
                         self.spec.camera_id, False, target_fps=self.spec.fps
                     )
                 return
-        except Exception:
+        except Exception as exc:
             # Emit the DOWN gauge before bailing. Returning here used to skip
             # record_worker_state entirely, so a camera that never opens had
             # no tier0_worker_up series at all — not even 0 — and reconcile
             # silently re-attempted it every tick with nothing but a log line
             # to show for it. An absent series can't alert; a 0 can.
             record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
-            log.exception("tier0 %s: could not open source", self.spec.camera_id)
+            # A camera that is simply unreachable — powered off, unplugged,
+            # rebooting — is normal operation, not a code fault. ffprobe has
+            # already logged WHY at warning level, so a full traceback every
+            # reconcile tick just buries that reason and reads like a crash.
+            # Anything unexpected still gets its stack.
+            if isinstance(exc, RuntimeError) and "could not probe" in str(exc):
+                log.warning(
+                    "tier0 %s: source unavailable (%s) — retrying next tick",
+                    self.spec.camera_id, exc,
+                )
+            else:
+                log.exception("tier0 %s: could not open source", self.spec.camera_id)
             return
         # Substream guard: Tier-0 is designed to decode a LOW-RES substream.
         # Decoding a high-res main stream (no substream configured for this
@@ -517,6 +529,11 @@ class CameraWorker:
                 self.spec.camera_id, self.decode_idle, self.decode_idle_after,
             )
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
+        budget = RegionBudgetController(pipe.max_regions, self.spec.fps)
+        _metrics.gauge(
+            "tier0_regions_budget", float(budget.current),
+            {"camera": self.spec.camera_id},
+        )
         prev_seq: int | None = None
         win_t0 = time.monotonic()
         win_n = 0
@@ -543,9 +560,28 @@ class CameraWorker:
                 prev_seq = seq
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
+                frame_latency = time.monotonic() - t0
+                # Spend fewer detector crops when we cannot finish a frame in
+                # its budget. Falling behind does not just delay detections —
+                # the worker stops draining ffmpeg's stdout, ffmpeg blocks on
+                # the full pipe, and MediaMTX drops the session, which surfaces
+                # as a "flaky camera" that is really us.
+                if budget.observe(frame_latency):
+                    pipe.max_regions = budget.current
+                    _metrics.gauge(
+                        "tier0_regions_budget", float(budget.current),
+                        {"camera": self.spec.camera_id},
+                    )
+                    log.warning(
+                        "tier0 %s: frame latency %.2fs against a %.2fs budget — "
+                        "detector regions %s to %d (of %d configured)",
+                        self.spec.camera_id, frame_latency, budget.budget_s,
+                        "cut" if budget.shedding else "restored to",
+                        budget.current, budget.configured,
+                    )
                 record_frame(
                     self.spec.camera_id, result,
-                    latency_s=time.monotonic() - t0,
+                    latency_s=frame_latency,
                     detector_latency_s=getattr(result, "detect_latency_s", None),
                     stage_latency_s=getattr(result, "stage_latency_s", None),
                     model=self.model_id,
@@ -654,6 +690,7 @@ class WorkerManager:
         detector_factory: Callable[[], DetectorAdapter] | None = None,
         detector_pool: int = 0,                           # 0 = one detector per worker
         start_spread_s: float = 10.0,                     # spread simultaneous dials
+        cv_threads_pinned: bool = False,                  # operator set DETECT_CV_THREADS
 
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
@@ -732,6 +769,10 @@ class WorkerManager:
         # re-minted JWT must not bounce a healthy worker) precisely because
         # this is the cheaper way to deliver it.
         self._latest_url: dict[str, str] = {}
+        # Inference width, retuned as the fleet changes size. Pinned means
+        # the operator set DETECT_CV_THREADS and we leave it alone.
+        self._cv_threads = 0
+        self._cv_threads_pinned = cv_threads_pinned
 
     def current_url(self, camera_id: str) -> str | None:
         """The freshest known stream URL for a camera (see _latest_url)."""
@@ -892,6 +933,46 @@ class WorkerManager:
                 self._workers[cid] = worker
                 self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
+        self._tune_inference_threads()
+
+    def _tune_inference_threads(self) -> None:
+        """Give each concurrent inference the cores it can actually use.
+
+        A FIXED per-inference thread cap is right for a fleet and wrong for a
+        small one. Measured on an 8-core box, one camera, yolov8n at 640:
+
+            1 thread   874 ms      4 threads  241 ms
+            2 threads  449 ms      8 threads  176 ms
+
+        Near-linear — so the shipped cap of 2 left six cores idle and made
+        every frame 2.5x more expensive than the hardware required. That is
+        what pushed this deployment six times over its frame budget.
+
+        At most min(pool, cameras) inferences run at once, so that is what the
+        cores divide between. Process-global (cv2's cap is), recomputed only
+        when the camera count changes, and never overridden when the operator
+        pinned DETECT_CV_THREADS themselves.
+        """
+        if self._cv_threads_pinned or not self._workers:
+            return
+        concurrent = len(self._workers)
+        if self._shared_detector is not None:
+            concurrent = min(concurrent, self._shared_detector.max_size)
+        cores = os.cpu_count() or 2
+        want = max(1, cores // max(1, concurrent))
+        if want == self._cv_threads:
+            return
+        try:
+            import cv2
+
+            cv2.setNumThreads(want)
+        except Exception:  # pragma: no cover - cv2 optional (stub/hog)
+            return
+        log.info(
+            "tier0: %d camera(s) on %d cores — %d inference thread(s) each "
+            "(was %d)", len(self._workers), cores, want, self._cv_threads,
+        )
+        self._cv_threads = want
 
     def _retire(self, workers: dict[str, Worker], replaced: set[str] | None = None) -> None:
         """Wind down a set of workers: signal all, then wait once.

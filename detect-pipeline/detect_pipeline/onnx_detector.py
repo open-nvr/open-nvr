@@ -292,6 +292,12 @@ class OnnxYoloDetector:
                 "OnnxYoloDetector needs a model_path, or an injected net/session/backend_impl"
             )
         self.backend_name = getattr(self._backend, "name", "custom")
+        # Settle the input size against the real graph ONCE, rather than
+        # raising per region per frame (which killed the worker). Only the
+        # cv2.dnn path can be probed cheaply; ORT reports its own shapes.
+        if model_path:
+            from .detector import resolve_input_size
+            self.input_size = resolve_input_size(self, self.input_size)
 
     def detect(self, crop: np.ndarray) -> list[RawDetection]:
         blob = cv2.dnn.blobFromImage(

@@ -172,3 +172,57 @@ def test_label_allowlist_drops_phantom_classes_before_tracking():
     result = pipe.process_frame(_frame(1))
     assert {d.label for d in result.detections} == {"person"}
     assert {t.label for t in tracker.tracks} == {"person"}
+
+
+# ── load shedding: never fall so far behind that we lose the stream ──
+
+def test_budget_sheds_under_sustained_overrun_and_recovers():
+    """Measured on a live 1080p camera with the shipped defaults: 3.07s of
+    inference against a 500ms budget, sustained, with the RTSP session
+    dropping every few minutes. Falling behind is not just late detections —
+    the worker stops draining ffmpeg's stdout, ffmpeg blocks on the full pipe,
+    and MediaMTX drops the reader. The camera then looks flaky when it is us."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)          # 500ms budget
+    assert c.current == 8 and not c.shedding
+
+    for _ in range(40):
+        c.observe(3.07)
+    assert c.current < 8 and c.shedding
+    assert c.current >= 1, "must keep detecting something"
+
+    for _ in range(120):
+        c.observe(0.05)                            # hardware caught up
+    assert c.current == 8 and not c.shedding
+
+
+def test_budget_ignores_isolated_slow_frames():
+    """A GOP boundary, a burst of motion, the OS scheduling elsewhere — one
+    slow frame must not cut the budget."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    for _ in range(20):
+        c.observe(0.05)
+    c.observe(4.0)                                 # single spike
+    c.observe(0.05)
+    assert c.current == 8
+
+
+def test_budget_is_inert_when_regions_are_unbounded():
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(0, fps=2)           # 0 = no cap configured
+    for _ in range(40):
+        assert c.observe(9.0) is False
+    assert c.current == 0
+
+
+def test_budget_never_sheds_below_its_floor():
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2, floor=2)
+    for _ in range(200):
+        c.observe(30.0)                            # hopelessly over budget
+    assert c.current == 2

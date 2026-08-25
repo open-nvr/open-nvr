@@ -92,6 +92,55 @@ def detections_to_frame(raws: list[RawDetection], region: Box) -> list[Detection
     return out
 
 
+# Input squares ONNX detectors are commonly exported at, widest first. Covers
+# both families this service ships: YOLO (640/320) and RF-DETR (384/432/560).
+STANDARD_INPUTS = (640, 576, 560, 512, 448, 432, 416, 384, 320)
+
+
+def resolve_input_size(detector, requested: int, *, candidates=STANDARD_INPUTS) -> int:
+    """The input square this model will actually accept.
+
+    Many ONNX exports are fixed-shape rather than dynamic. Feeding any other
+    size raises deep inside the graph — once per region, per frame — which the
+    pipeline now survives per region, but which would leave the camera
+    detecting NOTHING while looking correctly configured.
+
+    Deliberately detector-AGNOSTIC: it probes through the detector's own
+    ``detect``, so it exercises that family's real preprocessing and decode.
+    YOLO is not the only option here — RF-DETR variants ship at 384/432/560
+    and fail in exactly the same way, and whatever family comes next will too.
+    """
+    import numpy as np
+
+    def fits(size: int) -> bool:
+        prev = detector.input_size
+        try:
+            detector.input_size = size
+            detector.detect(np.zeros((size, size, 3), np.uint8))
+            return True
+        except Exception:
+            return False
+        finally:
+            detector.input_size = prev
+
+    if fits(requested):
+        return requested
+    for size in candidates:
+        if size != requested and fits(size):
+            log.warning(
+                "%s does not accept a %dpx input (the model is exported at a "
+                "FIXED shape); using %dpx instead. Re-export with dynamic axes "
+                "to make the input size tunable.",
+                type(detector).__name__, requested, size,
+            )
+            return size
+    log.error(
+        "%s rejected every standard input size including the configured %dpx "
+        "— detection will not run", type(detector).__name__, requested,
+    )
+    return requested
+
+
 class StubDetector:
     """A no-op detector (reference impl / test double). Returns nothing."""
 

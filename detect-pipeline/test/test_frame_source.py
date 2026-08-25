@@ -534,3 +534,66 @@ def test_decode_flip_does_not_block_the_frame_loop():
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def test_probe_failures_never_log_the_jwt():
+    """The tap URL's ?jwt= is a live wildcard-read credential. The restart
+    logs were redacted; the probe-failure logs added later were not — and a
+    powered-off camera hits exactly those, every reconcile tick."""
+    import logging
+    import subprocess
+
+    from detect_pipeline.frame_source import probe_stream
+
+    secret = "rtsp://mtx:8554/cam-1?jwt=eyJhbGciOiJSUzI1NiJ9.SECRETPAYLOAD.SIG"
+    logger = logging.getLogger("detect_pipeline.frame_source")
+
+    class _Capture(logging.Handler):
+        def __init__(self): super().__init__(); self.text = ""
+        def emit(self, record): self.text += record.getMessage()
+
+    cap = _Capture()
+    logger.addHandler(cap)
+    try:
+        # non-zero rc path
+        probe_stream(secret, timeout=0.1)
+        # timeout path
+        original = subprocess.run
+
+        def boom(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=0.1)
+
+        subprocess.run = boom
+        try:
+            probe_stream(secret, timeout=0.1)
+        finally:
+            subprocess.run = original
+    finally:
+        logger.removeHandler(cap)
+
+    assert cap.text, "expected the failure to be logged at all"
+    assert "SECRETPAYLOAD" not in cap.text, "the probe logs leaked the JWT"
+    assert "<redacted>" in cap.text
+
+
+def test_child_process_output_is_scrubbed_of_credentials():
+    """Redacting the URL we FORMAT is not enough — ffmpeg and ffprobe print
+    the URL they were given in their own diagnostics, and this service
+    surfaces that output on purpose because it is what makes a failure
+    diagnosable. The credential comes back through the child's stderr."""
+    from detect_pipeline.frame_source import _StderrTail, scrub_secrets
+
+    line = ("[rtsp @ 0x1] Could not open "
+            "rtsp://mtx:8554/cam-1?jwt=eyJhbGciOi.SECRETPAYLOAD.SIG: 401")
+    assert "SECRETPAYLOAD" not in scrub_secrets(line)
+    assert "jwt=<redacted>" in scrub_secrets(line)
+    assert scrub_secrets("no url here") == "no url here"
+    assert scrub_secrets("") == ""
+
+    # ...and the tail the restart log prints goes through it too
+    tail = _StderrTail(io.BytesIO(line.encode() + b"\n"))
+    for _ in range(200):
+        if tail.text():
+            break
+        time.sleep(0.01)
+    assert "SECRETPAYLOAD" not in tail.text()

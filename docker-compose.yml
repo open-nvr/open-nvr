@@ -292,10 +292,12 @@ services:
   # ──────────────────────────────────────────────────────────────
   detect-pipeline:
     # Pulled from GHCR (built + published by publish-detect-pipeline.yml), like
-    # opennvr-core and yolov8-adapter — no local build. To build from source
-    # instead: `docker compose build` with a build: override, or run the
-    # component directly (see detect-pipeline/README.md).
-    image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
+    # opennvr-core and yolov8-adapter — no local build. To run a locally built
+    # image (e.g. to test a change against a live stack), set
+    # DETECT_PIPELINE_IMAGE=opennvr/detect-pipeline:mytag — no compose edit and
+    # nothing to remember to undo. Otherwise build from source per
+    # detect-pipeline/README.md.
+    image: ${DETECT_PIPELINE_IMAGE:-ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}}
     container_name: opennvr_detect_pipeline
     logging: *svc-logs
     restart: unless-stopped
@@ -318,6 +320,9 @@ services:
       # model is missing — the container never crash-loops).
       - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
       - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
+      # Only tunable with a dynamic-axes export; the shipped model is fixed
+      # at 640 and the service adapts (with a warning) if this disagrees.
+      - DETECT_ONNX_INPUT=${DETECT_ONNX_INPUT:-640}
       # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
       # For an accelerator, set backend=ort + providers (and install the matching
       # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
@@ -367,7 +372,8 @@ services:
       - DETECT_METRICS_PORT=${DETECT_METRICS_PORT:-9109}
       # Thread cap for the detector (cv2 intra-op + BLAS). Prevents Tier-0
       # from starving CPU-bound co-tenants; raise it on big machines.
-      - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
+      # Empty = sized to the fleet (cores / concurrent inferences).
+      - DETECT_CV_THREADS=${DETECT_CV_THREADS:-}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
       - DETECT_FPS=${DETECT_FPS:-2}

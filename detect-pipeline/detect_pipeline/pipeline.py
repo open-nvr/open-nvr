@@ -180,6 +180,7 @@ class DetectPipeline:
         # of region crops YOLO ever runs on one frame, no matter how many
         # tracks accumulate. 0 disables (unbounded, the pre-guard behavior).
         self.max_regions = max(0, int(max_regions))
+        self.detector_errors = 0
         # Labels worth TRACKING. An NVR watching a cluttered desk has no
         # business confirming tracks for "kite"/"banana" wire false
         # positives — every phantom is a standing re-verify cost. None = all.
@@ -243,7 +244,17 @@ class DetectPipeline:
             _t = time.monotonic()
             for region in regions:
                 crop = crop_and_resize(bgr, region, self.model_size[0], self.model_size[1])
-                raws = self.detector.detect(crop)
+                try:
+                    raws = self.detector.detect(crop)
+                except Exception:
+                    # One bad inference must cost one region, not the camera.
+                    # This was unwrapped, so a model that rejected the crop
+                    # shape raised straight through process_frame into the
+                    # worker loop's "crashed" handler and the feed went dark
+                    # until the next reconcile — every frame, in a loop.
+                    self.detector_errors += 1
+                    log.debug("detector failed on one region", exc_info=True)
+                    continue
                 dets.extend(detections_to_frame(raws, region))
             if self.allowed_labels is not None:
                 dets = [d for d in dets if d.label in self.allowed_labels]
@@ -269,3 +280,89 @@ class DetectPipeline:
             result = self.process_frame(frame)
             if on_tracks is not None:
                 on_tracks(frame, result.tracks, result.calibrating)
+
+
+class RegionBudgetController:
+    """Shrink the per-frame detector budget when a camera can't keep up.
+
+    Tier-0's cost is dominated by inference, and the region budget is what
+    multiplies it: ``max_regions`` crops per frame. On hardware where a single
+    inference is slower than the whole frame budget, the worker simply falls
+    further behind every frame — and it has no way to notice. The consequence
+    is not just late detections: the worker stops draining ffmpeg's stdout,
+    ffmpeg blocks on the full pipe, MediaMTX drops the reader, and the session
+    dies. The camera then looks flaky ("Failed reading RTSP data: End of file")
+    when the real cause is us.
+
+    Measured on a live 1080p camera with the shipped defaults (8 regions,
+    640px input, 2 fps): 3.07s of inference against a 500ms budget — six times
+    over, sustained, with the stream dropping every few minutes.
+
+    So: watch actual frame latency against the budget and spend fewer regions
+    when we are over it, recovering when there is room again. Detecting less
+    per frame is a real cost, but it is strictly better than decoding a stream
+    we cannot finish and losing the session with it.
+
+    Pure and clock-injected — no I/O, no threads.
+    """
+
+    def __init__(
+        self,
+        configured: int,
+        fps: int,
+        *,
+        floor: int = 1,
+        over_budget: float = 1.2,
+        recover_at: float = 0.6,
+        settle_frames: int = 5,
+        smoothing: float = 0.3,
+    ) -> None:
+        self.configured = max(0, int(configured))
+        self.budget_s = 1.0 / max(1, int(fps))
+        self.floor = max(1, int(floor))
+        self.over_budget = over_budget
+        self.recover_at = recover_at
+        self.settle_frames = max(1, int(settle_frames))
+        self.smoothing = smoothing
+        self.current = self.configured
+        self._ema: float | None = None
+        self._streak = 0
+
+    @property
+    def shedding(self) -> bool:
+        return self.configured > 0 and self.current < self.configured
+
+    def observe(self, latency_s: float) -> bool:
+        """Feed one frame's processing time. True if the budget changed.
+
+        A single slow frame means nothing — a GOP boundary, a burst of motion,
+        the OS scheduling elsewhere. Only a sustained trend moves the budget,
+        so this smooths and requires a streak in one direction.
+        """
+        if self.configured <= 0:
+            return False
+        self._ema = (
+            latency_s if self._ema is None
+            else (self.smoothing * latency_s + (1 - self.smoothing) * self._ema)
+        )
+        over = self._ema > self.budget_s * self.over_budget
+        under = self._ema < self.budget_s * self.recover_at
+
+        if over and self.current > self.floor:
+            self._streak = self._streak + 1 if self._streak >= 0 else 1
+        elif under and self.current < self.configured:
+            self._streak = self._streak - 1 if self._streak <= 0 else -1
+        else:
+            self._streak = 0
+            return False
+
+        if abs(self._streak) < self.settle_frames:
+            return False
+        self._streak = 0
+        # Halve on the way down (the overrun is usually large), step back up
+        # one at a time so recovery cannot immediately re-saturate.
+        self.current = (
+            max(self.floor, self.current // 2) if over
+            else min(self.configured, self.current + 1)
+        )
+        return True
