@@ -254,3 +254,40 @@ def test_forget_camera_drops_a_deleted_cameras_entry():
     m.forget_camera("cam-gone")          # idempotent
     m._last_frame_wall.clear()
     m.metrics.reset()
+
+
+def test_forget_camera_drops_its_metric_series_too():
+    """Prometheus has no "this series is over": a deleted camera kept
+    reporting tier0_worker_up=0 and alerting forever, and only a container
+    restart cleared it. forget_camera cleaned the /health input but not the
+    metric an operator actually alerts on."""
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+    m._last_frame_wall.clear()
+    m.record_worker_state("cam-gone", True, target_fps=2)
+    m.metrics.inc("tier0_frames_total", {"camera": "cam-gone"})
+    m.metrics.observe("tier0_frame_latency_seconds", 0.1, {"camera": "cam-gone"})
+    m.metrics.inc("tier0_frames_total", {"camera": "cam-stays"})
+
+    m.forget_camera("cam-gone")
+    out = m.metrics.render()
+    assert "cam-gone" not in out
+    assert "cam-stays" in out, "removing one camera must not touch the others"
+    m.metrics.reset()
+
+
+def test_track_population_gauge_shows_what_the_cap_counts():
+    """DETECT_MAX_TRACKS counts ALL internal tracks; tier0_tracks_active
+    reports confirmed ones only, so a camera could sit at the cap refusing
+    spawns while the gauge meant to explain it looked healthy."""
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+    r = _Result(tracks=[1, 2])
+    r.track_population = 7                      # 5 of them still tentative
+    m.record_frame("cam1", r)
+    cam = {"camera": "cam1"}
+    assert m.metrics.value("tier0_tracks_active", cam) == 2.0
+    assert m.metrics.value("tier0_tracks_population", cam) == 7.0
+    m.metrics.reset()

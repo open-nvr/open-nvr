@@ -27,10 +27,13 @@ baseline / gated escalations.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from collections import defaultdict
+
+log = logging.getLogger("detect_pipeline.metrics")
 
 _BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 
@@ -92,6 +95,25 @@ class Metrics:
             if k in self._counters:
                 return self._counters[k]
             return self._gauges.get(k, 0.0)
+
+    def drop_label(self, label: str, value: str) -> int:
+        """Remove every series carrying ``label=value``. Returns how many.
+
+        Prometheus has no notion of "this series is over", so a camera deleted
+        from core kept reporting: tier0_worker_up{camera=X} stayed at 0 and
+        alerted forever, tier0_frame_age_seconds froze at its last scrape, and
+        only a container restart cleared them. forget_camera() cleaned the
+        /health input but nothing removed the metric an operator actually
+        alerts on.
+        """
+        pair = (label, value)
+        removed = 0
+        with self._lock:
+            for store in (self._counters, self._gauges, self._hist):
+                for key in [k for k in store if pair in k[1]]:
+                    store.pop(key, None)
+                    removed += 1
+        return removed
 
     def reset(self) -> None:
         with self._lock:
@@ -170,6 +192,13 @@ def record_frame(
     else:
         metrics.inc("tier0_detector_skipped_total", {"camera": camera_id, "reason": "no_motion"})
     metrics.gauge("tier0_tracks_active", float(len(result.tracks)), cam)
+    # ALL internal tracks, tentative included — this is the population
+    # DETECT_MAX_TRACKS caps. tracks_active counts confirmed ones only, so a
+    # camera could sit at the cap refusing new spawns while the gauge meant
+    # to explain that looked perfectly healthy.
+    population = getattr(result, "track_population", None)
+    if population is not None:
+        metrics.gauge("tier0_tracks_population", float(population), cam)
     # Bounded-load guards (#track-explosion) — never cap silently:
     if getattr(result, "regions_capped", False):
         metrics.inc("tier0_regions_capped_total", cam)
@@ -211,6 +240,11 @@ def forget_camera(camera_id: str) -> None:
     """
     with _frame_wall_lock:
         _last_frame_wall.pop(camera_id, None)
+    # ...and drop its metric series, or the camera keeps alerting after it is
+    # gone: tier0_worker_up stays 0 and tier0_frame_age_seconds freezes.
+    dropped = metrics.drop_label("camera", camera_id)
+    if dropped:
+        log.info("dropped %d metric series for removed camera %s", dropped, camera_id)
 
 
 def newest_frame_age_s(now: float | None = None) -> float | None:

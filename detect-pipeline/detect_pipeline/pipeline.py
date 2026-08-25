@@ -68,6 +68,7 @@ class FrameResult:
     # Stationary tracks whose region was NOT scanned this frame (the PR B
     # saving, made visible for metrics/tests).
     skipped_stationary: int = 0
+    track_population: int = 0
     # True when the per-frame region budget dropped at least one candidate
     # this frame (exported as tier0_regions_capped_total — no silent caps).
     regions_capped: bool = False
@@ -259,6 +260,7 @@ class DetectPipeline:
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
             skipped_stationary=skipped, regions_capped=regions_capped,
+            track_population=self.tracker.population,
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:

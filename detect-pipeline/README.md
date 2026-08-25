@@ -134,6 +134,15 @@ larger candidate pool for best-frame selection; dropping to 1 buys a
 last bit of CPU back. An explicit per-camera `fps` from the discovery
 endpoint still wins.
 
+One counter-intuitive trade to know before raising it: track confirmation
+needs `fps // 2` **consecutive** matched frames, so a higher rate also
+raises the bar an object must clear to exist at all. At the default 2 that
+is a single frame; at 10 it is five in a row, and one dropped frame from an
+occlusion resets it. Brief visits therefore get *harder* to record as you
+give the box more CPU — watch `tier0_visits_dropped_total{reason="too_short"}`
+after a change.
+
+
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
 provides). If a camera has no substream configured, Tier-0 falls back to
@@ -189,8 +198,9 @@ The pattern Blue Iris ships as "limit decoding unless required", ON by
 default: a camera whose scene is quiet decodes ONLY keyframes (~one frame
 per GOP) — near-zero cost — while motion is still watched at that rate.
 The first motion box or live track flips the camera back to full decode by
-respawning its ffmpeg against the local MediaMTX republish (sub-second, no
-backoff); after `DETECT_DECODE_IDLE_AFTER` quiet seconds (default 60) it
+respawning its ffmpeg against the local MediaMTX republish (no backoff,
+but budget 2-6s end to end: a GOP to notice, process teardown, a fresh RTSP
+handshake, then a wait for the next keyframe); after `DETECT_DECODE_IDLE_AFTER` quiet seconds (default 60) it
 idles again. `tier0_decode_idle{camera=...}` on `/metrics` shows who is
 idling. Recording is unaffected — the full main stream is always recorded;
 this shapes only what the detector looks at. The trade the default accepts:

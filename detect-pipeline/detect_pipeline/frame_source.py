@@ -196,7 +196,7 @@ class FrameSource:
         max_restarts: int | None = None,
         max_fruitless_restarts: int = 5,
         backoff_seconds: float = 1.0,
-        max_backoff_seconds: float = 15.0,
+        max_backoff_seconds: float = 8.0,
         min_healthy_seconds: float = 5.0,
         _sleep: Callable[[float], None] | None = None,
         _rand: Callable[[], float] | None = None,
@@ -229,6 +229,9 @@ class FrameSource:
         # resurrects it with a FRESH tap URL from the provider.
         self.max_fruitless_restarts = max_fruitless_restarts
         self.backoff_seconds = backoff_seconds
+        # Reachable by construction: with the default schedule the last
+        # delay before give-up is backoff * 2**(max_fruitless-2) = 8s, so a
+        # 15s cap could never bind and read as dead config.
         self.max_backoff_seconds = max_backoff_seconds
         # How long a session must last to count as "the stream works". Below
         # this, a restart is treated as fruitless (see stream()).
