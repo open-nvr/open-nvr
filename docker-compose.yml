@@ -332,6 +332,12 @@ services:
       # count; ffmpeg's auto default spawns up to 16/camera) and the opt-in
       # loop-filter skip (small extra CPU cut, tiny pixel drift; CPU decode only).
       - DETECT_DECODE_THREADS=${DETECT_DECODE_THREADS:-2}
+      # Resident detector instances (blank = auto from CPU count). One per
+      # CAMERA made memory a function of the fleet rather than the hardware,
+      # which is the wall a large install hits first. 0 restores per-camera.
+      - DETECT_DETECTOR_POOL=${DETECT_DETECTOR_POOL:-}
+      # Best-frame crops retained per camera (see .env.example).
+      - DETECT_BESTFRAME_PER_CAMERA=${DETECT_BESTFRAME_PER_CAMERA:-16}
       # RTSP socket-I/O timeout (seconds; 0 disables). Bounds a HALF-OPEN
       # stream — a camera powered off mid-session, or a NAT/firewall dropping
       # the flow — which otherwise blocks the decode forever with no restart.

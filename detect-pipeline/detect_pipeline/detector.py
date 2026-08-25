@@ -92,3 +92,64 @@ class StubDetector:
 
     def detect(self, crop: np.ndarray) -> list[RawDetection]:
         return []
+
+
+class DetectorPool:
+    """A detector shared by many camera workers, backed by a bounded pool.
+
+    One detector instance PER CAMERA is the memory wall of this service: each
+    holds its own copy of the model weights plus its own activation arenas,
+    so a fleet pays N x that before it runs out of anything else. But the
+    instances cannot simply be shared — ``cv2.dnn.Net.forward`` is not safe to
+    call concurrently on one Net, which is why the manager built one per
+    worker in the first place.
+
+    A pool keeps both properties: a detector is still used by exactly one
+    thread at a time (borrowed for the duration of a single ``detect`` call),
+    while the number of instances is capped independently of the camera count.
+
+    Grown lazily, so a small install never allocates more than it uses: with
+    fewer cameras than ``max_size`` this behaves exactly as before, one
+    detector each. Throughput is unaffected at sane sizes — inference is
+    CPU-bound and releases the GIL, so more concurrent detectors than cores
+    buys nothing but memory.
+    """
+
+    def __init__(self, factory, max_size: int) -> None:
+        import threading
+
+        self._factory = factory
+        self.max_size = max(1, int(max_size))
+        self._free: list = []
+        self._created = 0
+        self._lock = threading.Lock()
+        # Admission control: never more concurrent detects than instances.
+        self._slots = threading.Semaphore(self.max_size)
+
+    def _take(self):
+        with self._lock:
+            if self._free:
+                return self._free.pop()
+            self._created += 1
+        return self._factory()          # built outside the lock: model load is slow
+
+    def _give(self, det) -> None:
+        with self._lock:
+            self._free.append(det)
+
+    def detect(self, crop):
+        self._slots.acquire()
+        try:
+            det = self._take()
+            try:
+                return det.detect(crop)
+            finally:
+                self._give(det)
+        finally:
+            self._slots.release()
+
+    @property
+    def created(self) -> int:
+        """Detector instances actually built (<= max_size)."""
+        with self._lock:
+            return self._created

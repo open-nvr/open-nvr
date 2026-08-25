@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
-from .detector import DetectorAdapter, StubDetector
+from .detector import DetectorAdapter, DetectorPool, StubDetector
 from .frame_source import FrameSource, probe_stream
 from .dispatch import dispatch_escalations
 from .gate import Gate
@@ -605,6 +605,8 @@ class WorkerManager:
         enabled: bool = True,
         worker_factory: WorkerFactory | None = None,
         detector_factory: Callable[[], DetectorAdapter] | None = None,
+        detector_pool: int = 0,                           # 0 = one detector per worker
+
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
@@ -625,9 +627,22 @@ class WorkerManager:
         self.provider = provider
         self.sink = sink
         self.enabled = enabled
-        # A factory (not a shared instance) so each worker thread gets its own
-        # detector — cv2 detectors aren't guaranteed thread-safe to share.
-        self._detector_factory = detector_factory or (lambda: StubDetector())
+        # cv2 detectors are not safe to call concurrently on one instance, so
+        # a worker can never SHARE a detector — but it does not need a private
+        # one either. A pool borrows an instance for the duration of a single
+        # detect() call, which keeps the exclusivity while capping how many
+        # models are resident: one per camera was this service's memory wall
+        # (each holds its own weights + activation arenas), and it grew with
+        # the fleet rather than with the hardware.
+        #
+        # detector_pool=0/None keeps the old behaviour (one per worker) so a
+        # caller can opt out; the pool grows lazily, so below the cap nothing
+        # changes anyway.
+        factory = detector_factory or (lambda: StubDetector())
+        self._detector_factory = factory
+        self._shared_detector = (
+            DetectorPool(factory, detector_pool) if detector_pool else None
+        )
         self._model_size = model_size
         self._model_id = model_id
         self._best_frames = best_frames
@@ -669,7 +684,8 @@ class WorkerManager:
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
-            spec, sink, detector=self._detector_factory(),
+            spec, sink,
+            detector=self._shared_detector or self._detector_factory(),
             model_size=self._model_size, model_id=self._model_id,
             best_frames=self._best_frames, device=self._device,
             hwaccel=self._hwaccel,
