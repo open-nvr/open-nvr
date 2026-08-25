@@ -140,13 +140,34 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool]:
     return labels, analyze
 
 
+# Cameras already warned about a missing/garbled open_nvr_camera_id — the
+# provider re-fetches every reconcile tick, so warn once per handle, not
+# once per 30 seconds.
+_warned_no_nvr_id: set[str] = set()
+
+
 def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
     # is honoured if the endpoint ever adds per-camera opt-out.
     labels, assignment_analyze = _assignment_view(c)
+    # Core's numeric Camera.id, sent alongside the "cam{id}" handle — the
+    # events store keys on the number (see CameraSpec.nvr_camera_id).
+    try:
+        nvr_id = int(c["open_nvr_camera_id"])
+    except (KeyError, TypeError, ValueError):
+        nvr_id = None
+        handle = str(c.get("camera_id"))
+        if handle not in _warned_no_nvr_id:
+            _warned_no_nvr_id.add(handle)
+            log.warning(
+                "camera %s: no usable open_nvr_camera_id (%r) — visit posts "
+                "will fall back to parsing the handle",
+                handle, c.get("open_nvr_camera_id"),
+            )
     return CameraSpec(
         camera_id=str(c["camera_id"]),
+        nvr_camera_id=nvr_id,
         name=c.get("name", str(c["camera_id"])),
         substream_url=c["frame_url"],
         analyze=bool(c.get("analyze", True)) and assignment_analyze,

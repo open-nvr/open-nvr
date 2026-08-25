@@ -23,6 +23,7 @@ import base64
 import json
 import logging
 import queue
+import re
 import threading
 import urllib.request
 from dataclasses import dataclass
@@ -45,6 +46,33 @@ class Visit:
     ended_at: datetime
     stationary: bool | None
     jpeg: bytes | None
+    # Core's numeric Camera.id — what the events endpoint keys on. The
+    # pipeline-facing camera_id is the provider's string handle ("cam1"),
+    # which is NOT the DB id; core sends the real one separately as
+    # ``open_nvr_camera_id``. None → derived from camera_id at post time.
+    nvr_camera_id: int | None = None
+
+
+def _core_camera_id(v: Visit) -> int:
+    """The numeric camera id core's events endpoint expects.
+
+    Prefers the explicit ``nvr_camera_id`` threaded from the provider;
+    falls back to parsing the string handle ("cam1"/"cam-1"/"1" → 1) so
+    visits from older specs still land instead of failing on int('cam1').
+    The fallback is a guess about a format core owns, so it WARNs — a
+    handle whose digits are not the DB id would file history under the
+    wrong camera.
+    """
+    if v.nvr_camera_id is not None:
+        return v.nvr_camera_id
+    m = re.fullmatch(r"(?:cam[-_]?)?(\d+)", str(v.camera_id).strip())
+    if m is None:
+        raise ValueError(f"no numeric core camera id for {v.camera_id!r}")
+    log.warning(
+        "visit for %s posted with handle-parsed camera id %s — spec carried "
+        "no open_nvr_camera_id", v.camera_id, m.group(1),
+    )
+    return int(m.group(1))
 
 
 class VisitPoster:
@@ -102,7 +130,7 @@ class VisitPoster:
 
     def _post(self, v: Visit) -> None:
         body = {
-            "camera_id": int(v.camera_id),
+            "camera_id": _core_camera_id(v),
             "label": v.label,
             "score": v.score,
             "track_id": str(v.track_id),
@@ -134,8 +162,15 @@ class VisitLifecycle:
     ``min_duration_s`` — flickers never become history rows.
     """
 
-    def __init__(self, camera_id: str, *, min_duration_s: float = 1.0) -> None:
+    def __init__(
+        self,
+        camera_id: str,
+        *,
+        nvr_camera_id: int | None = None,
+        min_duration_s: float = 1.0,
+    ) -> None:
         self.camera_id = camera_id
+        self.nvr_camera_id = nvr_camera_id
         self.min_duration_s = min_duration_s
         self._live: dict = {}
 
@@ -188,6 +223,7 @@ class VisitLifecycle:
                 jpeg = None  # a visit without a photo still beats no history
         return Visit(
             camera_id=self.camera_id,
+            nvr_camera_id=self.nvr_camera_id,
             label=str(v["label"]),
             score=v["score"],
             track_id=str(tid),

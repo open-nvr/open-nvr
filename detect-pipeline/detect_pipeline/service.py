@@ -110,6 +110,11 @@ class CameraSpec:
     # ``assignments`` field; a change restarts the worker on the next
     # reconcile tick (see WorkerManager.reconcile).
     labels: frozenset[str] | None = None
+    # Core's numeric Camera.id (from the endpoint's ``open_nvr_camera_id``).
+    # camera_id above is the string handle ("cam1") used in topics/metrics —
+    # core's events store keys on this numeric id instead. Appended LAST so
+    # existing positional constructions keep their meaning.
+    nvr_camera_id: int | None = None
 
 
 def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
@@ -309,7 +314,9 @@ class CameraWorker:
                 self.spec.camera_id, w, h,
             )
         from .events_poster import VisitLifecycle
-        lifecycle = VisitLifecycle(self.spec.camera_id)
+        lifecycle = VisitLifecycle(
+            self.spec.camera_id, nvr_camera_id=self.spec.nvr_camera_id
+        )
         motion = MotionDetector((h, w), MotionConfig())
         tracker = Tracker((h, w), TrackConfig(
             fps=self.spec.fps,
@@ -500,10 +507,11 @@ class WorkerManager:
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
         # The spec each running worker was built with — reconcile compares
-        # ONLY the fields a worker bakes in at start (today: labels) so a
-        # settings-page change takes effect within one tick. Deliberately
-        # not whole-spec equality: frame_url carries a freshly minted JWT
-        # on every fetch and would restart every worker every tick.
+        # ONLY the fields a worker bakes in at start (today: labels and
+        # nvr_camera_id) so a settings-page change takes effect within one
+        # tick. Deliberately not whole-spec equality: frame_url carries a
+        # freshly minted JWT on every fetch and would restart every worker
+        # every tick.
         self._specs: dict[str, CameraSpec] = {}
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
@@ -549,21 +557,26 @@ class WorkerManager:
 
         for cid in list(self._workers):
             worker = self._workers[cid]
-            labels_changed = (
+            spec_changed = (
                 cid in desired
                 and self._specs.get(cid) is not None
-                and desired[cid].labels != self._specs[cid].labels
+                and (
+                    desired[cid].labels != self._specs[cid].labels
+                    or desired[cid].nvr_camera_id != self._specs[cid].nvr_camera_id
+                )
             )
-            if cid not in desired or not worker.is_alive() or labels_changed:
+            if cid not in desired or not worker.is_alive() or spec_changed:
                 worker.stop()
                 del self._workers[cid]
                 self._specs.pop(cid, None)
-                if labels_changed:
+                if spec_changed:
                     log.info(
-                        "tier0: restarting %s — per-camera labels changed to %s",
+                        "tier0: restarting %s — baked-in spec changed "
+                        "(labels=%s, nvr_camera_id=%s)",
                         cid,
                         sorted(desired[cid].labels) if desired[cid].labels is not None
                         else "(global default)",
+                        desired[cid].nvr_camera_id,
                     )
 
         for cid, spec in desired.items():

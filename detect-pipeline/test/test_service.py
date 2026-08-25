@@ -253,3 +253,28 @@ def test_reconcile_restarts_worker_when_labels_change():
     prov.specs = [_spec("a"), _spec("b")]
     mgr.reconcile()
     assert len(made) == 4 and made[3].spec.labels is None
+
+
+def test_reconcile_restarts_worker_when_nvr_camera_id_changes():
+    # The worker bakes nvr_camera_id into its VisitLifecycle at start, so a
+    # late-arriving id (core upgraded mid-flight) must rebuild the worker.
+    made = []
+
+    def factory(spec, sink):
+        w = _FakeWorker(spec, sink)
+        made.append(w)
+        return w
+
+    prov = _FakeProvider([CameraSpec("a", "a", "rtsp://h/a")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=factory)
+    mgr.reconcile()
+    assert len(made) == 1
+
+    prov.specs = [CameraSpec("a", "a", "rtsp://h/a", nvr_camera_id=5)]
+    mgr.reconcile()
+    assert len(made) == 2 and made[1].spec.nvr_camera_id == 5
+    assert made[0].stopped
+
+    prov.specs = [CameraSpec("a", "a", "rtsp://h/a", nvr_camera_id=5)]
+    mgr.reconcile()
+    assert len(made) == 2                        # unchanged id → no bounce
