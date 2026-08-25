@@ -26,6 +26,10 @@ Env:
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
+  DETECT_RTSP_TIMEOUT_S     RTSP socket-I/O timeout in seconds (default 10;
+                            0 disables). Without it a half-open TCP session
+                            blocks the decode FOREVER and the camera goes
+                            silently dead with no restart.
   DETECT_DECODE_FAST        true = skip h264 loop filter (CPU decode only; opt-in)
   DETECT_DECODE_IDLE        adaptive decode while quiet (default nokey; none = off)
   DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
@@ -42,6 +46,7 @@ import threading
 from dataclasses import dataclass
 
 from .bus import EventSink, GateEventSink
+from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S
 from .providers import HttpCameraProvider
 from .service import WorkerManager
 
@@ -93,6 +98,7 @@ class ServiceConfig:
     # kites/bananas endlessly; each becomes a standing track. 0.4 keeps real
     # people/vehicles (typically >0.6) while starving the phantom supply.
     detect_conf: float = 0.4
+    rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     visits_enabled: bool = True
 
 
@@ -153,6 +159,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         decode_skip=_decode_skip_from_env(env),
         decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
+        rtsp_timeout_s=_env_float(env, "DETECT_RTSP_TIMEOUT_S", DEFAULT_RTSP_TIMEOUT_S),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -403,6 +410,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         device=cfg.device,
         decode_skip=cfg.decode_skip,
         decode_threads=cfg.decode_threads,
+        rtsp_timeout_s=cfg.rtsp_timeout_s,
         fast_decode=cfg.fast_decode,
         decode_idle=cfg.decode_idle,
         decode_idle_after=cfg.decode_idle_after,

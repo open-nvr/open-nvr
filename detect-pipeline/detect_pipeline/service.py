@@ -32,7 +32,7 @@ from .detector import DetectorAdapter, StubDetector
 from .frame_source import FrameSource, probe_stream
 from .dispatch import dispatch_escalations
 from .gate import Gate
-from .ffmpeg_presets import HwAccel
+from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel
 from .metrics import (
     metrics as _metrics,
     record_frame,
@@ -231,6 +231,7 @@ class CameraWorker:
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
+        rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
         decode_idle: str = "",                   # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,         # quiet seconds before idling
         frame_source=None,                       # injectable for tests
@@ -250,6 +251,7 @@ class CameraWorker:
         self.decode_skip = decode_skip
         self.decode_threads = decode_threads
         self.fast_decode = fast_decode
+        self.rtsp_timeout_s = rtsp_timeout_s
         self.decode_idle = decode_idle
         self.decode_idle_after = decode_idle_after
         self._frame_source = frame_source
@@ -290,6 +292,7 @@ class CameraWorker:
             decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
+            rtsp_timeout_s=self.rtsp_timeout_s,
         )
         return src, w, h
 
@@ -297,6 +300,12 @@ class CameraWorker:
         try:
             src, w, h = self._make_source()
         except Exception:
+            # Emit the DOWN gauge before bailing. Returning here used to skip
+            # record_worker_state entirely, so a camera that never opens had
+            # no tier0_worker_up series at all — not even 0 — and reconcile
+            # silently re-attempted it every tick with nothing but a log line
+            # to show for it. An absent series can't alert; a 0 can.
+            record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
             log.exception("tier0 %s: could not open source", self.spec.camera_id)
             return
         # Substream guard: Tier-0 is designed to decode a LOW-RES substream.
@@ -475,6 +484,7 @@ class WorkerManager:
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                          # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,                        # skip h264 loop filter (opt-in)
+        rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
         decode_idle: str = "",                            # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,                  # quiet seconds before idling
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
@@ -496,6 +506,7 @@ class WorkerManager:
         self._decode_skip = decode_skip
         self._decode_threads = decode_threads
         self._fast_decode = fast_decode
+        self._rtsp_timeout_s = rtsp_timeout_s
         self._decode_idle = decode_idle
         self._decode_idle_after = decode_idle_after
         # The gate is stateful per camera, so each worker gets its own instance.
@@ -523,6 +534,7 @@ class WorkerManager:
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,
             fast_decode=self._fast_decode,
+            rtsp_timeout_s=self._rtsp_timeout_s,
             decode_idle=self._decode_idle,
             decode_idle_after=self._decode_idle_after,
             gate=self._gate_factory() if self._gate_factory else None,
