@@ -262,6 +262,15 @@ def record_published(camera_id: str) -> None:
     metrics.inc("tier0_events_published_total", {"camera": camera_id})
 
 
+def record_worker_straggler(camera_id: str) -> None:
+    """A worker did not exit within the fleet stop budget.
+
+    Previously invisible: the manager moved on regardless, so a thread that
+    outlived its join kept its ffmpeg alive and its replacement quietly
+    duplicated it."""
+    metrics.inc("tier0_worker_stop_timeouts_total", {"camera": camera_id})
+
+
 def record_sink_error(camera_id: str) -> None:
     """A publish to the event bus raised. Without a counter, a bus outage
     is indistinguishable from a quiet scene: both just stop incrementing

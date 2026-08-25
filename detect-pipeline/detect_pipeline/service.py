@@ -43,6 +43,7 @@ from .metrics import (
     record_sink_error,
     record_worker_restart,
     record_worker_state,
+    record_worker_straggler,
     forget_camera,
 )
 from .motion import MotionConfig, MotionDetector
@@ -158,11 +159,48 @@ class ResultSink(Protocol):
 
 
 class Worker(Protocol):
-    """A per-camera worker handle (thread-backed in production, fake in tests)."""
+    """A per-camera worker handle (thread-backed in production, fake in tests).
+
+    ``request_stop``/``join`` are optional: when a worker provides them the
+    manager stops the fleet in two phases (signal everyone, then wait once).
+    A worker with only the blocking ``stop`` still works — it is just stopped
+    serially, which is fine for fakes and single cameras.
+    """
 
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def is_alive(self) -> bool: ...
+
+
+# How long the manager waits for the whole fleet to wind down. This is a
+# budget for ALL workers together, not per worker: paying it serially is what
+# turned a gate-mode toggle on 50 cameras into minutes of downtime.
+STOP_TIMEOUT_S = 5.0
+
+
+def _signal_stop(worker) -> None:
+    """Phase 1 — tell a worker to stop without waiting for it."""
+    request = getattr(worker, "request_stop", None)
+    if request is not None:
+        request()
+    else:                       # legacy/fake worker: blocking stop is all it has
+        worker.stop()
+
+
+def _join_workers(workers: dict[str, Worker], timeout: float) -> list[str]:
+    """Phase 2 — wait for signalled workers against ONE shared deadline.
+
+    Returns the ids that did not exit in time.
+    """
+    deadline = time.monotonic() + timeout
+    stragglers: list[str] = []
+    for cid, worker in workers.items():
+        join = getattr(worker, "join", None)
+        if join is None:        # already stopped synchronously in phase 1
+            continue
+        if not join(max(0.0, deadline - time.monotonic())):
+            stragglers.append(cid)
+    return stragglers
 
 
 # ── adaptive decode (Blue Iris-style "limit decoding unless required") ──
@@ -283,6 +321,9 @@ class CameraWorker:
         self.visit_poster = visit_poster
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # The live source, so request_stop() can unblock the reader.
+        self._src = None
+        self._superseded = False
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -290,10 +331,44 @@ class CameraWorker:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        """Signal the worker to stop and unblock it — never waits.
+
+        Split from the join so a manager stopping N cameras can signal them
+        all first and then wait ONCE, instead of paying the timeout serially
+        per camera. Closing the source is what makes the wait short: the
+        thread is otherwise parked in a blocking read or the restart backoff
+        and only notices the flag between frames.
+        """
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        src = self._src
+        if src is not None:
+            close = getattr(src, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:  # pragma: no cover - defensive
+                    log.debug("tier0 %s: error closing source",
+                              self.spec.camera_id, exc_info=True)
+
+    def join(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` for the thread to exit; True if it did."""
+        if self._thread is None:
+            return True
+        self._thread.join(timeout=max(0.0, timeout))
+        return not self._thread.is_alive()
+
+    def mark_superseded(self) -> None:
+        """A replacement worker for this camera now owns the metrics.
+
+        Without this, a worker that outlived its join would later write
+        tier0_worker_up=0 and zero the gauge of the healthy replacement.
+        """
+        self._superseded = True
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        self.request_stop()
+        return self.join(timeout)
 
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -344,6 +419,7 @@ class CameraWorker:
     def _run(self) -> None:
         try:
             src, w, h = self._make_source()
+            self._src = src
         except Exception:
             # Emit the DOWN gauge before bailing. Returning here used to skip
             # record_worker_state entirely, so a camera that never opens had
@@ -490,7 +566,8 @@ class CameraWorker:
             if self.visit_poster is not None:
                 for visit in lifecycle.flush():
                     self.visit_poster.submit(visit)
-            record_worker_state(self.spec.camera_id, False)
+            if not self._superseded:
+                record_worker_state(self.spec.camera_id, False)
             log.info("tier0 %s: stopped", self.spec.camera_id)
 
     def _run_gate(self, result, frame) -> None:
@@ -619,7 +696,12 @@ class WorkerManager:
         and the pipeline applies it live. Gates are stateful per camera, so
         the only correct swap is stop-everything — the next reconcile tick
         rebuilds every worker with the new factory. A few seconds of gap on
-        an explicit admin action is fine; a redeploy is not."""
+        an explicit admin action is fine; a redeploy is not.
+
+        "A few seconds" is now true at fleet scale: the wind-down signals
+        every worker first and then waits ONCE (see _retire). Stopping them
+        serially made this cost STOP_TIMEOUT_S per camera — minutes of total
+        blackout on a large install, from one click in the UI."""
         self._gate_factory = gate_factory
         if dispatcher is not None:
             self._dispatcher = dispatcher
@@ -653,6 +735,7 @@ class WorkerManager:
             if c.substream_url:
                 self._latest_url[c.camera_id] = c.substream_url
 
+        doomed: dict[str, Worker] = {}
         for cid in list(self._workers):
             worker = self._workers[cid]
             spec_changed = (
@@ -668,7 +751,7 @@ class WorkerManager:
                 )
             )
             if cid not in desired or not worker.is_alive() or spec_changed:
-                worker.stop()
+                doomed[cid] = worker
                 del self._workers[cid]
                 self._specs.pop(cid, None)
                 if cid not in desired:
@@ -686,6 +769,12 @@ class WorkerManager:
                         desired[cid].nvr_camera_id,
                     )
 
+        # Stop them together. Signalling every doomed worker BEFORE waiting on
+        # any of them is what keeps the wind-down bounded by one timeout
+        # instead of one-per-camera; the old serial loop turned a spec change
+        # across a fleet into minutes of blocked reconcile.
+        self._retire(doomed)
+
         for cid, spec in desired.items():
             if cid not in self._workers:
                 worker = self._factory(spec, self.sink)
@@ -694,9 +783,34 @@ class WorkerManager:
                 self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
 
+    def _retire(self, workers: dict[str, Worker]) -> None:
+        """Wind down a set of workers: signal all, then wait once.
+
+        A straggler is reported rather than silently orphaned. Its source has
+        already been closed by the signal, so it is no longer decoding or
+        publishing — but it is marked superseded so that when it finally
+        exits it cannot zero the health gauge of its replacement.
+        """
+        if not workers:
+            return
+        for worker in workers.values():
+            _signal_stop(worker)
+        stragglers = _join_workers(workers, STOP_TIMEOUT_S)
+        for cid in stragglers:
+            supersede = getattr(workers[cid], "mark_superseded", None)
+            if supersede is not None:
+                supersede()
+            record_worker_straggler(cid)
+        if stragglers:
+            log.warning(
+                "tier0: %d worker(s) did not exit within %.0fs: %s — their "
+                "sources are closed; they are superseded and will not report "
+                "state for the cameras that replace them",
+                len(stragglers), STOP_TIMEOUT_S, ", ".join(sorted(stragglers)),
+            )
+
     def _stop_all(self) -> None:
-        for worker in self._workers.values():
-            worker.stop()
+        self._retire(dict(self._workers))
         self._workers.clear()
         self._specs.clear()
 

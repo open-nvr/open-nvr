@@ -176,7 +176,7 @@ class FrameSource:
         backoff_seconds: float = 1.0,
         max_backoff_seconds: float = 15.0,
         min_healthy_seconds: float = 5.0,
-        _sleep: Callable[[float], None] = time.sleep,
+        _sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.rtsp_url = rtsp_url
         self.width = width
@@ -210,7 +210,12 @@ class FrameSource:
         # How long a session must last to count as "the stream works". Below
         # this, a restart is treated as fruitless (see stream()).
         self.min_healthy_seconds = min_healthy_seconds
-        self._sleep = _sleep
+        # Set by close(): ends the restart loop and interrupts the backoff
+        # sleep, so a worker parked in backoff stops in milliseconds instead
+        # of holding its caller's join() open for the full delay.
+        self._closing = False
+        self._wake = threading.Event()
+        self._sleep = _sleep or (lambda secs: self._wake.wait(secs))
         self._current_proc = None
         self._skip_backoff_once = False
 
@@ -240,6 +245,36 @@ class FrameSource:
         self._skip_backoff_once = True
         if self._current_proc is not None:
             _terminate(self._current_proc)
+
+    def close(self) -> None:
+        """Stop the restart loop and unblock the reader NOW.
+
+        Without this a stopping worker is unreachable: it is parked in a
+        blocking ``proc.stdout.read()`` (up to the RTSP timeout) or in the
+        restart backoff (up to max_backoff_seconds), and only notices the
+        stop flag between frames. Terminating the process makes the read
+        return at once, and waking the sleep drops the backoff — so join()
+        succeeds in milliseconds instead of timing out and leaving an
+        orphaned thread and ffmpeg behind.
+
+        Safe to call from another thread, and more than once.
+
+        Signals only — it must NOT wait for the process. ``_terminate``
+        blocks up to 3s reaping the child, which would make a caller
+        stopping N sources pay that serially (measured: 15s for 6 real
+        cameras). SIGTERM is enough: the child exits, its stdout closes, the
+        blocked read returns, and the stream loop's own ``finally`` does the
+        full terminate-and-reap.
+        """
+        self._closing = True
+        self._wake.set()
+        proc = self._current_proc
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("frame source: error signalling ffmpeg", exc_info=True)
 
     def _refresh_url(self) -> None:
         """Adopt the freshest known URL for this camera, if one is offered.
@@ -276,6 +311,8 @@ class FrameSource:
         restarts = 0
         fruitless = 0
         while True:
+            if self._closing:
+                return
             self._refresh_url()
             proc = self._spawn(self.command())
             self._current_proc = proc
@@ -289,6 +326,8 @@ class FrameSource:
             finally:
                 self._current_proc = None
                 _terminate(proc)
+            if self._closing:      # closed mid-session: do not respawn
+                return
             reason = stderr_tail.text()
             # A decode-mode flip terminates ffmpeg ON PURPOSE (adaptive
             # decode). It is not a stream failure, so it must not touch the
