@@ -26,7 +26,7 @@ class _FakeProvider:
         self.specs = specs
 
     def list_cameras(self):
-        return list(self.specs)
+        return None if self.specs is None else list(self.specs)
 
 
 class _FakeSink:
@@ -53,8 +53,8 @@ class _FakeWorker:
         return self.started and not self.stopped
 
 
-def _spec(cid, analyze=True):
-    return CameraSpec(cid, cid, f"rtsp://h/{cid}", analyze=analyze)
+def _spec(cid, analyze=True, **kw):
+    return CameraSpec(cid, cid, f"rtsp://h/{cid}", analyze=analyze, **kw)
 
 
 # ── manager reconcile ───────────────────────────────────────────────
@@ -253,3 +253,61 @@ def test_reconcile_restarts_worker_when_labels_change():
     prov.specs = [_spec("a"), _spec("b")]
     mgr.reconcile()
     assert len(made) == 4 and made[3].spec.labels is None
+
+
+def test_reconcile_restarts_worker_when_nvr_camera_id_changes():
+    # The worker bakes nvr_camera_id into its VisitLifecycle at start, so a
+    # late-arriving id (core upgraded mid-flight) must rebuild the worker.
+    made = []
+
+    def factory(spec, sink):
+        w = _FakeWorker(spec, sink)
+        made.append(w)
+        return w
+
+    prov = _FakeProvider([_spec("a")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=factory)
+    mgr.reconcile()
+    assert len(made) == 1
+
+    prov.specs = [_spec("a", nvr_camera_id=5)]
+    mgr.reconcile()
+    assert len(made) == 2 and made[1].spec.nvr_camera_id == 5
+    assert made[0].stopped
+
+    prov.specs = [_spec("a", nvr_camera_id=5)]
+    mgr.reconcile()
+    assert len(made) == 2                        # unchanged id → no bounce
+
+    # A fetch that DEGRADES the id (mixed-version core replicas during a
+    # rolling upgrade) must not flap the worker: None carries no new
+    # information, and the running worker's baked-in id still works.
+    prov.specs = [_spec("a")]
+    mgr.reconcile()
+    prov.specs = [_spec("a", nvr_camera_id=5)]
+    mgr.reconcile()
+    assert len(made) == 2                        # N → None → N: zero bounces
+
+
+def test_reconcile_keeps_workers_when_discovery_fails():
+    # provider.list_cameras() → None means "discovery failed", not "no
+    # cameras" — a one-tick core outage must not tear down detection.
+    made = []
+
+    def factory(spec, sink):
+        w = _FakeWorker(spec, sink)
+        made.append(w)
+        return w
+
+    prov = _FakeProvider([_spec("a"), _spec("b")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=factory)
+    mgr.reconcile()
+    assert len(made) == 2
+
+    prov.specs = None                            # core briefly down
+    mgr.reconcile()
+    assert len(made) == 2 and not any(w.stopped for w in made)
+
+    prov.specs = []                              # genuinely no cameras
+    mgr.reconcile()
+    assert all(w.stopped for w in made)

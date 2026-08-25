@@ -203,3 +203,62 @@ def test_real_ffmpeg_accepts_every_emitted_skip_token():
         assert proc.returncode == 0, (mode, token, proc.stderr)
         assert "Undefined constant" not in proc.stderr, (mode, token, proc.stderr)
         assert "Invalid" not in proc.stderr, (mode, token, proc.stderr)
+
+
+# ── RTSP socket timeout (the "stalled stream hangs forever" fix) ────
+
+def test_decode_command_carries_rtsp_timeout_before_input():
+    from detect_pipeline.ffmpeg_presets import build_decode_command
+
+    cmd = build_decode_command("rtsp://h:8554/cam", width=320, height=240, fps=5)
+    assert "-timeout" in cmd
+    # microseconds, and it must precede -i to bind to the INPUT
+    assert cmd[cmd.index("-timeout") + 1] == str(int(10.0 * 1_000_000))
+    assert cmd.index("-timeout") < cmd.index("-i")
+
+
+def test_decode_command_does_not_use_rw_timeout():
+    """-rw_timeout is accepted by ffmpeg for RTSP but SILENTLY does nothing.
+
+    Verified against the shipped image (ffmpeg 7.1.5): `-timeout 3000000`
+    reaches the transport as `tcp://...?timeout=3000000`, while
+    `-rw_timeout 3000000` arrives as `timeout=0`. Neither errors, so only a
+    test can stop someone "simplifying" one into the other.
+    """
+    from detect_pipeline.ffmpeg_presets import build_decode_command
+
+    cmd = build_decode_command("rtsp://h:8554/cam", width=320, height=240, fps=5)
+    assert "-rw_timeout" not in cmd
+
+
+def test_rtsp_timeout_can_be_disabled():
+    from detect_pipeline.ffmpeg_presets import build_decode_command, rtsp_timeout_args
+
+    assert rtsp_timeout_args(0) == []
+    cmd = build_decode_command(
+        "rtsp://h:8554/cam", width=320, height=240, fps=5, rtsp_timeout_s=0
+    )
+    assert "-timeout" not in cmd
+
+
+@pytest.mark.skipif(_shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_rtsp_timeout_flag_is_accepted_by_real_ffmpeg():
+    """The flag must PARSE on a real ffmpeg against a real RTSP input.
+
+    ``-timeout`` belongs to the RTSP demuxer specifically — on a non-RTSP
+    input ffmpeg rejects it with "Option timeout not found", which is why
+    this points at an rtsp:// URL (a closed port: we want the option parsed,
+    then a connection error, NOT an option error). A wrong option name here
+    would make every camera fail instantly on deploy.
+    """
+    from detect_pipeline.ffmpeg_presets import build_decode_command
+
+    cmd = build_decode_command(
+        "rtsp://127.0.0.1:9/closed", width=64, height=64, fps=5, rtsp_timeout_s=1.0
+    )
+    proc = _subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert "Unrecognized option" not in proc.stderr, proc.stderr
+    assert "Option not found" not in proc.stderr, proc.stderr
+    # It should fail to CONNECT (port 9 is discard/closed), proving the
+    # option parsed and ffmpeg got as far as dialling.
+    assert proc.returncode != 0

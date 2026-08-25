@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import time
 
 from detect_pipeline.ffmpeg_presets import HwAccel, frame_size_bytes
 from detect_pipeline.frame_source import Frame, FrameSource, read_frames
@@ -151,7 +152,220 @@ def test_fruitless_counter_resets_after_a_good_cycle():
     src = FrameSource(
         "rtsp://cam/flaky", width=4, height=4, fps=5,
         spawn=lambda cmd: next(it),
-        max_fruitless_restarts=3, _sleep=lambda s: None,
+        # min_healthy_seconds=0 → any frame counts as a healthy session, the
+        # rule this test was written for. The duration rule has its own test.
+        max_fruitless_restarts=3, min_healthy_seconds=0, _sleep=lambda s: None,
     )
     frames = list(src.stream())
     assert len(frames) == 2
+
+
+# ── stream robustness: stalls, flapping, and ffmpeg's own reason ────
+
+def test_short_sessions_do_not_reset_the_giveup_counter():
+    """A stream that connects, emits one frame and dies is NOT healthy.
+
+    Counting any single frame as success let a flapping camera restart
+    forever without ever reaching the give-up path — so it never got a
+    fresh tap URL, which is the only thing that can fix an expired ticket.
+    """
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    class _BlipProc:
+        def __init__(self):
+            import io
+            self.stdout = io.BytesIO(b"\x00" * frame_size_bytes(4, 4))
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+        def terminate(self): pass
+        def kill(self): pass
+
+    spawns = []
+    src = FrameSource(
+        "rtsp://cam/flapping", width=4, height=4, fps=5,
+        spawn=lambda cmd: (spawns.append(1), _BlipProc())[1],
+        max_fruitless_restarts=3,
+        min_healthy_seconds=5.0,      # instant blips are below this
+        _sleep=lambda s: None,
+    )
+    frames = list(src.stream())
+    # Each blip yields its one frame, but none resets the counter, so the
+    # source gives up after exactly max_fruitless_restarts attempts.
+    assert len(spawns) == 3
+    assert len(frames) == 3
+
+
+def test_restart_backoff_escalates_and_is_capped():
+    slept: list[float] = []
+    src = FrameSource(
+        "rtsp://cam/dead", width=4, height=4, fps=5,
+        spawn=lambda cmd: _EmptyProc(),
+        max_fruitless_restarts=6, backoff_seconds=1.0, max_backoff_seconds=4.0,
+        _sleep=slept.append,
+    )
+    list(src.stream())
+    # 1, 2, 4, then capped at 4 — never a flat re-dial rate.
+    assert slept[:3] == [1.0, 2.0, 4.0]
+    assert all(s <= 4.0 for s in slept)
+
+
+def test_stderr_flood_does_not_deadlock_the_reader():
+    """ffmpeg writing more than the pipe buffer must not stall the decode.
+
+    With stderr=PIPE and nobody draining it, the ~64KB kernel buffer fills,
+    the child BLOCKS writing to stderr, and stdout stops — a permanent hang
+    that looks exactly like a dead camera. Uses a REAL subprocess, because
+    the deadlock is a kernel pipe behaviour a fake cannot reproduce.
+    """
+    import subprocess
+    import sys
+
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    size = frame_size_bytes(4, 4)
+    # Write 512KB of stderr (8x the typical buffer) interleaved with frames.
+    child = (
+        "import sys;"
+        f"n={size};"
+        "sys.stderr.buffer.write(b'x'*262144);sys.stderr.buffer.flush();"
+        "sys.stdout.buffer.write(b'\\0'*n);sys.stdout.buffer.flush();"
+        "sys.stderr.buffer.write(b'y'*262144);sys.stderr.buffer.flush();"
+        "sys.stdout.buffer.write(b'\\1'*n);sys.stdout.buffer.flush();"
+    )
+
+    def spawn(argv):
+        return subprocess.Popen(
+            [sys.executable, "-c", child],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    src = FrameSource(
+        "rtsp://cam/chatty", width=4, height=4, fps=5,
+        spawn=spawn, max_restarts=0, backoff_seconds=0, _sleep=lambda s: None,
+    )
+    frames = list(src.stream())
+    assert len(frames) == 2, "stderr flood stalled the frame reader"
+
+
+def test_stderr_tail_keeps_ffmpegs_reason():
+    from detect_pipeline.frame_source import _StderrTail
+
+    tail = _StderrTail(io.BytesIO(b"Connection refused\nbad ticket 401\n"), keep=6)
+    # The drain runs on a daemon thread; give it a moment to consume.
+    for _ in range(200):
+        if tail.text():
+            break
+        time.sleep(0.01)
+    assert "401" in tail.text()
+
+
+def test_stderr_tail_tolerates_a_proc_without_stderr():
+    from detect_pipeline.frame_source import _StderrTail
+
+    assert _StderrTail(None).text() == ""       # injected fakes have no stderr
+
+
+def test_decode_flips_never_count_toward_giveup():
+    """Adaptive decode terminates ffmpeg on purpose — that is not a failure.
+
+    Flips are short-lived by nature (a scene waking the camera), so if they
+    counted toward the fruitless budget a healthy camera with intermittent
+    motion would be torn down as though its feed were dead.
+    """
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    size = frame_size_bytes(4, 4)
+    spawns = []
+
+    def spawn(cmd):
+        spawns.append(1)
+        p = _FakeProc(b"\x00" * size)
+        return p
+
+    src = FrameSource(
+        "rtsp://cam/adaptive", width=4, height=4, fps=5,
+        spawn=spawn, max_fruitless_restarts=3,
+        min_healthy_seconds=5.0,        # every fake session is instant
+        max_restarts=6, backoff_seconds=0, _sleep=lambda s: None,
+    )
+    stream = src.stream()
+    # Consume a frame, then flip, repeatedly — more flips than the fruitless
+    # budget would allow if flips were penalised.
+    for _ in range(6):
+        next(stream)
+        src.set_decode_skip("nokey")
+    # Still alive after 6 deliberate flips (budget was 3).
+    assert len(spawns) >= 6
+
+
+# ── rotating tap JWT (60-min lifetime, baked in at worker start) ────
+
+def test_expired_url_heals_on_respawn_without_killing_the_worker():
+    """The tap URL's JWT expires after 60 minutes.
+
+    Before, a long-running source kept re-dialling the dead token until it
+    burned the give-up budget and the worker died; only a reconcile tick
+    could hand it a fresh URL. Now it adopts the freshest URL itself.
+    """
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    size = frame_size_bytes(4, 4)
+    seen: list[str] = []
+    current = {"url": "rtsp://mtx/cam-1?jwt=EXPIRED"}
+
+    def spawn(cmd):
+        seen.append(next(a for a in cmd if a.startswith("rtsp://")))
+        return _FakeProc(b"\x00" * size)
+
+    src = FrameSource(
+        "rtsp://mtx/cam-1?jwt=EXPIRED", width=4, height=4, fps=5,
+        spawn=spawn, url_provider=lambda: current["url"],
+        max_restarts=2, backoff_seconds=0, min_healthy_seconds=0,
+        _sleep=lambda s: None,
+    )
+    stream = src.stream()
+    next(stream)                                  # first spawn: expired token
+    current["url"] = "rtsp://mtx/cam-1?jwt=FRESH"  # reconcile re-minted it
+    for _ in stream:                              # drain remaining respawns
+        pass
+
+    assert seen[0].endswith("EXPIRED")
+    assert seen[-1].endswith("FRESH"), "source never adopted the refreshed URL"
+
+
+def test_url_provider_failure_is_survivable():
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    def boom():
+        raise RuntimeError("core unreachable")
+
+    src = FrameSource(
+        "rtsp://mtx/cam-1?jwt=OLD", width=4, height=4, fps=5,
+        spawn=lambda cmd: _FakeProc(b"\x00" * frame_size_bytes(4, 4)),
+        url_provider=boom, max_restarts=0, backoff_seconds=0,
+        _sleep=lambda s: None,
+    )
+    assert len(list(src.stream())) == 1           # keeps the URL it has
+    assert src.rtsp_url.endswith("OLD")
+
+
+def test_stream_urls_are_redacted_in_logs(caplog):
+    """The tap URL's ?jwt= is a live wildcard-read credential."""
+    import logging
+
+    from detect_pipeline.frame_source import FrameSource, redact_url
+
+    secret = "rtsp://mtx:8554/cam-1?jwt=eyJhbGciOiJSUzI1NiJ9.SECRETPAYLOAD.SIG"
+    assert redact_url(secret) == "rtsp://mtx:8554/cam-1?<redacted>"
+    assert "SECRET" not in redact_url(secret)
+    assert redact_url("rtsp://cam/no-query") == "rtsp://cam/no-query"
+
+    with caplog.at_level(logging.INFO):
+        src = FrameSource(
+            secret, width=4, height=4, fps=5,
+            spawn=lambda cmd: _EmptyProc(), max_fruitless_restarts=2,
+            backoff_seconds=0, _sleep=lambda s: None,
+        )
+        list(src.stream())
+    assert caplog.text, "expected restart/give-up logging"
+    assert "SECRETPAYLOAD" not in caplog.text, "JWT leaked into logs"

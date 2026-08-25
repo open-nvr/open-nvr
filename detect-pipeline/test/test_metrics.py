@@ -3,6 +3,7 @@
 """Unit tests for the Tier-0 metrics registry + service-layer recorders."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from detect_pipeline.gate import GateDecision, GateResult
@@ -159,3 +160,97 @@ def test_sample_process_metrics_sets_rss_on_linux():
     assert m.value("tier0_process_resident_memory_bytes") > 0
     sample_process_metrics(m)          # second sample: CPU% gauge now present
     assert "tier0_process_cpu_percent" in m.render()
+
+
+# ── per-camera staleness (a dead feed must not hide behind a live one) ──
+
+def test_stale_cameras_names_the_dead_feed_a_fleet_max_would_hide():
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    now = 1_000_000.0
+    m._last_frame_wall["cam1"] = now - 1       # healthy
+    m._last_frame_wall["cam2"] = now - 600     # dead for 10 minutes
+
+    # The fleet-wide signal is dominated by the healthy camera...
+    assert m.newest_frame_age_s(now) < 5
+    # ...while the per-camera view names the casualty.
+    assert m.stale_cameras(60.0, now) == ["cam2"]
+    ages = m.frame_ages_s(now)
+    assert round(ages["cam2"]) == 600
+    m._last_frame_wall.clear()
+
+
+def test_frame_age_gauge_moves_when_a_feed_stalls():
+    """The gauge must be sampled at SCRAPE time, not in the frame loop —
+    a loop-written gauge freezes at its last good value when frames stop."""
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+    now = 2_000_000.0
+    m._last_frame_wall["cam9"] = now - 300
+    m.sample_frame_age_metrics(now)
+    out = m.metrics.render()
+    assert "tier0_frame_age_seconds" in out
+    assert 'camera="cam9"' in out
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+
+
+def test_frame_wall_reads_are_safe_against_concurrent_workers():
+    """N worker threads insert camera keys while the scrape thread iterates.
+
+    An unguarded insert during iteration raises "dictionary changed size
+    during iteration" — which would take out /metrics and /health together,
+    and fires precisely during worker churn.
+    """
+    import threading
+
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            m.record_frame(f"cam{i}", _Result())
+            i += 1
+
+    def reader():
+        while not stop.is_set():
+            try:
+                m.frame_ages_s()
+                m.newest_frame_age_s()
+                m.stale_cameras(60.0)
+            except RuntimeError as e:      # the bug this pins
+                errors.append(str(e))
+                return
+
+    threads = [threading.Thread(target=writer, daemon=True) for _ in range(3)]
+    threads.append(threading.Thread(target=reader, daemon=True))
+    for t in threads:
+        t.start()
+    time.sleep(0.4)
+    stop.set()
+    for t in threads:
+        t.join(timeout=2)
+
+    assert not errors, errors[:1]
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+
+
+def test_forget_camera_drops_a_deleted_cameras_entry():
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    m.record_frame("cam-gone", _Result())
+    assert "cam-gone" in m.frame_ages_s()
+    m.forget_camera("cam-gone")
+    assert "cam-gone" not in m.frame_ages_s()
+    m.forget_camera("cam-gone")          # idempotent
+    m._last_frame_wall.clear()
+    m.metrics.reset()

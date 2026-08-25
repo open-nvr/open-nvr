@@ -148,6 +148,26 @@ DECODE_SKIP_MODES = ("none", "bidir", "nonref", "nokey")
 _FFMPEG_SKIP_TOKEN = {"nonref": "noref"}
 
 
+# Socket-I/O timeout for RTSP reads. Without it, a half-open TCP session — a
+# camera powered off mid-stream, a NAT/firewall dropping the flow — leaves the
+# read blocked FOREVER: ffmpeg never exits, so the restart loop never runs and
+# the camera is silently dead until the process is restarted.
+#
+# The flag is ``-timeout`` (microseconds) on the rtsp demuxer, NOT
+# ``-rw_timeout``: verified against the shipped image (ffmpeg 7.1.5), where
+# ``-timeout 3000000`` reaches the transport as ``tcp://...?timeout=3000000``
+# while ``-rw_timeout`` arrives as ``timeout=0`` — accepted, and silently
+# doing nothing. Neither errors, so this is only catchable by inspection.
+DEFAULT_RTSP_TIMEOUT_S = 10.0
+
+
+def rtsp_timeout_args(timeout_s: float = DEFAULT_RTSP_TIMEOUT_S) -> list[str]:
+    """``-timeout`` in microseconds, or nothing when disabled (<= 0)."""
+    if timeout_s <= 0:
+        return []
+    return ["-timeout", str(int(timeout_s * 1_000_000))]
+
+
 def build_decode_command(
     rtsp_url: str,
     *,
@@ -158,6 +178,7 @@ def build_decode_command(
     device: str = "/dev/dri/renderD128",
     codec: str = "h264",
     rtsp_transport: str = "tcp",
+    rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,
     decode_skip: str = "none",
     decode_threads: int = 2,
     fast_decode: bool = False,
@@ -201,6 +222,7 @@ def build_decode_command(
         "-hide_banner",
         "-loglevel", "warning",
         "-rtsp_transport", rtsp_transport,
+        *rtsp_timeout_args(rtsp_timeout_s),
         *thread_args,
         *skip_args,
         *fast_args,

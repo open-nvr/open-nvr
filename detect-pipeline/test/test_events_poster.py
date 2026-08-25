@@ -4,7 +4,9 @@
 
 import io
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+
+import pytest
 
 from detect_pipeline.events_poster import Visit, VisitLifecycle, VisitPoster
 
@@ -96,3 +98,93 @@ def test_full_queue_drops_not_blocks():
     assert p.submit(_visit()) is True
     assert p.submit(_visit()) is False                          # dropped, no block
     assert p._dropped == 1
+
+
+# ── numeric camera id (core keys events on Camera.id, not "cam1") ───
+
+def _post_body(visit):
+    seen = {}
+    def opener(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return _Resp()
+    VisitPoster("http://core:8000", None, opener=opener)._post(visit)
+    return seen["body"]
+
+
+def test_post_prefers_explicit_nvr_camera_id():
+    body = _post_body(replace(_visit(), camera_id="cam9", nvr_camera_id=3))
+    assert body["camera_id"] == 3
+
+
+@pytest.mark.parametrize("handle", ["cam7", "cam-7", "cam_7", "7"])
+def test_post_parses_cam_handle_when_no_numeric_id(handle):
+    body = _post_body(replace(_visit(), camera_id=handle))     # older specs
+    assert body["camera_id"] == 7
+
+
+def test_post_rejects_unparseable_camera_id():
+    with pytest.raises(ValueError):
+        _post_body(replace(_visit(), camera_id="front-door"))
+
+
+def test_lifecycle_threads_nvr_camera_id_into_visits():
+    lc = VisitLifecycle("cam3", nvr_camera_id=3)
+    lc.observe([_Tr(1)], T0)
+    lc.observe([_Tr(1)], T0 + 5)
+    done = lc.observe([], T0 + 6)
+    assert (done[0].camera_id, done[0].nvr_camera_id) == ("cam3", 3)
+
+
+# ── history loss is now countable (the docstring's promised metric) ──
+
+def test_dropped_visits_are_counted_by_reason():
+    from dataclasses import replace as _replace
+
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+
+    # 1. queue full
+    p = VisitPoster("http://core:8000", None, maxsize=1)
+    p.submit(_visit())
+    p.submit(_visit())
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "3", "reason": "queue_full"}
+    ) == 1
+
+    # 2. a post that can never succeed (unresolvable camera id)
+    def opener(req, timeout=None):
+        raise AssertionError("must not reach the network")
+
+    bad = VisitPoster("http://core:8000", None, opener=opener)
+    bad._q.put_nowait(_replace(_visit(), camera_id="front-door"))
+    try:
+        bad._post(bad._q.get())
+    except ValueError:
+        m.record_visit_dropped("front-door", "unresolved_camera")
+    assert m.metrics.value(
+        "tier0_visits_dropped_total",
+        {"camera": "front-door", "reason": "unresolved_camera"},
+    ) == 1
+    m.metrics.reset()
+
+
+def test_junk_suppression_is_counted_not_silent():
+    """Flickers are dropped by design — but silently dropping them made a
+    misconfigured floor indistinguishable from an empty scene."""
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+    lc = VisitLifecycle("7", nvr_camera_id=7, min_duration_s=1.0)
+    lc.observe([_Tr(1, confirmed=False)], T0)
+    assert lc.observe([], T0 + 10) == []                 # never confirmed
+    lc.observe([_Tr(2)], T0)
+    assert lc.observe([], T0 + 0.3) == []                # under the floor
+
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "7", "reason": "unconfirmed"}
+    ) == 1
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "7", "reason": "too_short"}
+    ) == 1
+    m.metrics.reset()

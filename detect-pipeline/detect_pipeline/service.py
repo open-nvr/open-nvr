@@ -25,14 +25,14 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .detector import DetectorAdapter, StubDetector
 from .frame_source import FrameSource, probe_stream
 from .dispatch import dispatch_escalations
 from .gate import Gate
-from .ffmpeg_presets import HwAccel
+from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel
 from .metrics import (
     metrics as _metrics,
     record_frame,
@@ -40,8 +40,10 @@ from .metrics import (
     record_processing_fps,
     record_mainstream_fallback,
     record_published,
+    record_sink_error,
     record_worker_restart,
     record_worker_state,
+    forget_camera,
 )
 from .motion import MotionConfig, MotionDetector
 from .pipeline import DetectPipeline, FrameResult
@@ -110,6 +112,11 @@ class CameraSpec:
     # ``assignments`` field; a change restarts the worker on the next
     # reconcile tick (see WorkerManager.reconcile).
     labels: frozenset[str] | None = None
+    # Core's numeric Camera.id (from the endpoint's ``open_nvr_camera_id``).
+    # camera_id above is the string handle ("cam1") used in topics/metrics —
+    # core's events store keys on this numeric id instead. Appended LAST so
+    # existing positional constructions keep their meaning.
+    nvr_camera_id: int | None = None
 
 
 def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
@@ -124,7 +131,8 @@ def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
 
 
 class CameraProvider(Protocol):
-    def list_cameras(self) -> list[CameraSpec]:
+    def list_cameras(self) -> list[CameraSpec] | None:
+        """The desired camera set; None = discovery failed (keep current)."""
         ...
 
 
@@ -225,6 +233,8 @@ class CameraWorker:
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
+        rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
+        url_provider=None,                       # freshest tap URL (its JWT rotates)
         decode_idle: str = "",                   # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,         # quiet seconds before idling
         frame_source=None,                       # injectable for tests
@@ -244,6 +254,8 @@ class CameraWorker:
         self.decode_skip = decode_skip
         self.decode_threads = decode_threads
         self.fast_decode = fast_decode
+        self.rtsp_timeout_s = rtsp_timeout_s
+        self.url_provider = url_provider
         self.decode_idle = decode_idle
         self.decode_idle_after = decode_idle_after
         self._frame_source = frame_source
@@ -284,6 +296,8 @@ class CameraWorker:
             decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
+            rtsp_timeout_s=self.rtsp_timeout_s,
+            url_provider=self.url_provider,
         )
         return src, w, h
 
@@ -291,6 +305,12 @@ class CameraWorker:
         try:
             src, w, h = self._make_source()
         except Exception:
+            # Emit the DOWN gauge before bailing. Returning here used to skip
+            # record_worker_state entirely, so a camera that never opens had
+            # no tier0_worker_up series at all — not even 0 — and reconcile
+            # silently re-attempted it every tick with nothing but a log line
+            # to show for it. An absent series can't alert; a 0 can.
+            record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
             log.exception("tier0 %s: could not open source", self.spec.camera_id)
             return
         # Substream guard: Tier-0 is designed to decode a LOW-RES substream.
@@ -309,7 +329,9 @@ class CameraWorker:
                 self.spec.camera_id, w, h,
             )
         from .events_poster import VisitLifecycle
-        lifecycle = VisitLifecycle(self.spec.camera_id)
+        lifecycle = VisitLifecycle(
+            self.spec.camera_id, nvr_camera_id=self.spec.nvr_camera_id
+        )
         motion = MotionDetector((h, w), MotionConfig())
         tracker = Tracker((h, w), TrackConfig(
             fps=self.spec.fps,
@@ -397,6 +419,12 @@ class CameraWorker:
                     if self.sink.publish(self.spec.camera_id, result, frame):
                         record_published(self.spec.camera_id)   # count real publishes only
                 except Exception:
+                    # Counted, not just debug-logged: at the default INFO level
+                    # a sink raising on EVERY frame produced no output at all,
+                    # so a bus outage looked identical to a quiet scene —
+                    # tier0_events_published_total simply stopped climbing with
+                    # nothing to say why.
+                    record_sink_error(self.spec.camera_id)
                     log.debug("tier0 %s: sink error", self.spec.camera_id, exc_info=True)
                 if self.gate is not None:
                     self._run_gate(result, frame)
@@ -467,6 +495,7 @@ class WorkerManager:
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                          # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,                        # skip h264 loop filter (opt-in)
+        rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
         decode_idle: str = "",                            # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,                  # quiet seconds before idling
         gate_factory: Callable[[], Gate] | None = None,   # fresh gate per camera (stateful)
@@ -488,6 +517,7 @@ class WorkerManager:
         self._decode_skip = decode_skip
         self._decode_threads = decode_threads
         self._fast_decode = fast_decode
+        self._rtsp_timeout_s = rtsp_timeout_s
         self._decode_idle = decode_idle
         self._decode_idle_after = decode_idle_after
         # The gate is stateful per camera, so each worker gets its own instance.
@@ -499,12 +529,24 @@ class WorkerManager:
         self._visit_poster = visit_poster
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
-        # The spec each running worker was built with — reconcile compares
-        # ONLY the fields a worker bakes in at start (today: labels) so a
-        # settings-page change takes effect within one tick. Deliberately
-        # not whole-spec equality: frame_url carries a freshly minted JWT
-        # on every fetch and would restart every worker every tick.
+        # The spec each running worker was built with — reconcile restarts
+        # on any change to the fields a worker bakes in at start (see
+        # _baked: everything except the volatile substream_url, whose JWT
+        # is re-minted on every fetch, and nvr_camera_id, compared
+        # asymmetrically) so a settings-page change takes effect within
+        # one tick.
         self._specs: dict[str, CameraSpec] = {}
+        # Freshest tap URL seen per camera, refreshed every reconcile. The URL
+        # embeds a 60-minute JWT; a long-running worker's baked-in copy WILL
+        # expire, so the frame source consults this before each respawn
+        # instead of 401-ing until the worker dies. Kept out of _baked (a
+        # re-minted JWT must not bounce a healthy worker) precisely because
+        # this is the cheaper way to deliver it.
+        self._latest_url: dict[str, str] = {}
+
+    def current_url(self, camera_id: str) -> str | None:
+        """The freshest known stream URL for a camera (see _latest_url)."""
+        return self._latest_url.get(camera_id)
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
@@ -514,6 +556,8 @@ class WorkerManager:
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,
             fast_decode=self._fast_decode,
+            rtsp_timeout_s=self._rtsp_timeout_s,
+            url_provider=lambda cid=spec.camera_id: self.current_url(cid),
             decode_idle=self._decode_idle,
             decode_idle_after=self._decode_idle_after,
             gate=self._gate_factory() if self._gate_factory else None,
@@ -540,30 +584,63 @@ class WorkerManager:
             self._router = router
         self._stop_all()
 
+    @staticmethod
+    def _baked(spec: CameraSpec) -> CameraSpec:
+        """The spec with volatile fields masked — what a restart-worthy
+        change means. substream_url carries a freshly minted JWT on every
+        fetch; nvr_camera_id is compared separately (asymmetric: a fetch
+        that degrades it to None must not bounce the worker)."""
+        return replace(spec, substream_url="", nvr_camera_id=None)
+
     def reconcile(self) -> None:
         """Start workers for new analyze-enabled cameras, stop the rest."""
         if not self.enabled:
             self._stop_all()
             return
-        desired = {c.camera_id: c for c in self.provider.list_cameras() if c.analyze}
+        cams = self.provider.list_cameras()
+        if cams is None:
+            # Discovery failed (core briefly down / timeout) — an empty
+            # answer would read as "no cameras" and tear down every worker.
+            # Keep what's running; the next tick retries.
+            return
+        desired = {c.camera_id: c for c in cams if c.analyze}
+        # Every camera we just heard about, analyzed or not — a running
+        # worker's source reads this to pick up a re-minted JWT.
+        for c in cams:
+            if c.substream_url:
+                self._latest_url[c.camera_id] = c.substream_url
 
         for cid in list(self._workers):
             worker = self._workers[cid]
-            labels_changed = (
+            spec_changed = (
                 cid in desired
                 and self._specs.get(cid) is not None
-                and desired[cid].labels != self._specs[cid].labels
+                and (
+                    self._baked(desired[cid]) != self._baked(self._specs[cid])
+                    or (
+                        desired[cid].nvr_camera_id is not None
+                        and desired[cid].nvr_camera_id
+                        != self._specs[cid].nvr_camera_id
+                    )
+                )
             )
-            if cid not in desired or not worker.is_alive() or labels_changed:
+            if cid not in desired or not worker.is_alive() or spec_changed:
                 worker.stop()
                 del self._workers[cid]
                 self._specs.pop(cid, None)
-                if labels_changed:
+                if cid not in desired:
+                    # Gone from core entirely — drop its frame-age entry so
+                    # it stops being reported stale forever.
+                    self._latest_url.pop(cid, None)
+                    forget_camera(cid)
+                if spec_changed:
                     log.info(
-                        "tier0: restarting %s — per-camera labels changed to %s",
+                        "tier0: restarting %s — baked-in spec changed "
+                        "(labels=%s, nvr_camera_id=%s)",
                         cid,
                         sorted(desired[cid].labels) if desired[cid].labels is not None
                         else "(global default)",
+                        desired[cid].nvr_camera_id,
                     )
 
         for cid, spec in desired.items():

@@ -86,8 +86,8 @@ class _FakeResp(io.BytesIO):
 def test_provider_maps_camera_agent_endpoint_to_specs():
     # shape of the existing GET /api/v1/internal/camera-agent/cameras endpoint
     body = json.dumps({"cameras": [
-        {"camera_id": "cam1", "name": "Front", "frame_url": "rtsp://mediamtx:8554/cam-1?jwt=x", "source": "mediamtx"},
-        {"camera_id": "cam2", "name": "Gate", "frame_url": "rtsp://u:p@10.0.0.9:554/sub", "source": "camera"},
+        {"camera_id": "cam1", "open_nvr_camera_id": "1", "name": "Front", "frame_url": "rtsp://mediamtx:8554/cam-1?jwt=x", "source": "mediamtx"},
+        {"camera_id": "cam2", "open_nvr_camera_id": "2", "name": "Gate", "frame_url": "rtsp://u:p@10.0.0.9:554/sub", "source": "camera"},
     ]}).encode()
 
     captured = {}
@@ -102,6 +102,7 @@ def test_provider_maps_camera_agent_endpoint_to_specs():
     assert captured["url"] == "http://opennvr-core:8000/api/v1/internal/camera-agent/cameras"
     assert captured["key"] == "secret"
     assert [s.camera_id for s in specs] == ["cam1", "cam2"]
+    assert [s.nvr_camera_id for s in specs] == [1, 2]                    # core's numeric id
     assert specs[0].name == "Front"
     assert specs[0].substream_url == "rtsp://mediamtx:8554/cam-1?jwt=x"   # MediaMTX tap
     assert all(s.analyze for s in specs)                                 # on by default
@@ -133,12 +134,14 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
     assert _to_spec(cam).fps == 2
 
 
-def test_provider_returns_empty_on_failure():
+def test_provider_returns_none_on_failure():
     def boom(req, timeout=None):
         raise OSError("connection refused")
 
     prov = HttpCameraProvider("http://core:8000", opener=boom)
-    assert prov.list_cameras() == []                    # never raises; retries next tick
+    # None (not []) — the manager must be able to tell "discovery failed,
+    # keep current workers" apart from "genuinely no cameras, stop all".
+    assert prov.list_cameras() is None
 
 
 # ── Assignments → per-camera labels + opt-in skip (slice 3) ─────────
