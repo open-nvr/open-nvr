@@ -36,14 +36,19 @@ if [[ -z "$GATE" ]]; then
     exit 1
 fi
 
-# run_gate <ext_url> <have_ollama:yes|no> <answers csv, consumed in order>
-#   Drives the gate with everything stubbed. Emits a result line:
-#   "where=<llm_where> url=<OLLAMA_EXTERNAL_URL> asked=<questions asked>|..."
+# run_gate <ext_url> <have_ollama:yes|no> <answers csv> [appears_after]
+#   Drives the gate with everything stubbed; answers feed BOTH yes/no
+#   questions and the re-check loop prompt, in call order. When the answers
+#   run out, prompts report EOF (a dried-up stdin). ``appears_after`` makes
+#   `command -v ollama` start succeeding after that many checks — an install
+#   completing in another terminal mid-loop. Emits a result line:
+#   "where=<llm_where> url=<OLLAMA_EXTERNAL_URL> asked=<questions>|..."
 run_gate() {
-    local ext_url="$1" have_ollama="$2" answers="$3"
+    local ext_url="$1" have_ollama="$2" answers="$3" appears="${4:-}"
     bash -u -c '
         PLATFORM="Linux"; host_ollama=""; llm_where="host"
         EXT_URL="'"$ext_url"'"; HAVE_OLLAMA="'"$have_ollama"'"
+        APPEARS_AFTER="'"$appears"'"; OLLAMA_CHECKS=0
         IFS="," read -r -a ANSWERS <<< "'"$answers"'"
         A_I=0; ASKED=""
         env_get() { printf "%s" "$EXT_URL"; }
@@ -53,11 +58,27 @@ run_gate() {
             _a="${ANSWERS[$A_I]:-n}"; A_I=$((A_I+1))
             [[ "$_a" == "y" ]]
         }
+        read() {             # the re-check loop prompts with the builtin
+            _var=""
+            while [[ $# -gt 0 && "$1" == -* ]]; do
+                case "$1" in -p) ASKED="${ASKED}|$2"; shift 2 ;; *) shift ;; esac
+            done
+            _var="${1:-REPLY}"
+            _a="${ANSWERS[$A_I]:-__EOF__}"; A_I=$((A_I+1))
+            [[ "$_a" == "__EOF__" ]] && return 1     # stdin ran dry
+            [[ "$_a" == "ENTER" ]] && _a=""          # bare Enter (bash drops
+                                                     # empty CSV fields)
+            eval "$_var=\"\$_a\""
+            return 0
+        }
         warn() { WARNED="${WARNED:-}|$1"; }
         ok() { :; }; info() { :; }
         command() {          # intercept `command -v ollama` / `command -v curl`
             if [[ "$1" == "-v" && "$2" == "ollama" ]]; then
-                [[ "$HAVE_OLLAMA" == "yes" ]]; return
+                OLLAMA_CHECKS=$((OLLAMA_CHECKS+1))
+                [[ "$HAVE_OLLAMA" == "yes" ]] && return 0
+                [[ -n "$APPEARS_AFTER" ]] && (( OLLAMA_CHECKS > APPEARS_AFTER )) && return 0
+                return 1
             fi
             [[ "$1" == "-v" && "$2" == "curl" ]] && return 0
             builtin command "$@"
@@ -98,13 +119,38 @@ out=$(run_gate "$LOCAL_URL" no "n,y")
 [[ "$out" == *"url= asked="* || "$out" =~ url=\ +asked= ]] && pass \
     || fail "OLLAMA_EXTERNAL_URL not cleared: $out"
 
-# ── 2. refusing both is allowed, but never silent ──
-start_test "declining install AND fallback proceeds only with a loud warning"
-out=$(run_gate "$LOCAL_URL" no "n,n")
-if [[ "$out" == *"where=host"* && "$out" == *"WITHOUT an LLM runtime"* ]]; then
+# ── 2. there is NO proceed-broken exit any more ──
+start_test "refusing install and container does not proceed — it loops"
+# decline install, decline container, press Enter once (still nothing),
+# then give in and take the container. The gate must never exit "host"
+# without a runtime, and the old warn-and-continue text must be gone.
+out=$(run_gate "$LOCAL_URL" no "n,n,ENTER,container")
+if [[ "$out" == *"where=container"* && "$out" != *"WITHOUT an LLM runtime"* \
+      && "$out" == *"press Enter to re-check"* ]]; then
     pass
 else
-    fail "expected an explicit WITHOUT-runtime warning, got: $out"
+    fail "expected the re-check loop then container, got: $out"
+fi
+
+start_test "the loop notices an Ollama installed mid-loop in another terminal"
+# decline install, decline container, press Enter — by then `command -v
+# ollama` starts succeeding (appears_after=1: the operator installed it).
+out=$(run_gate "$LOCAL_URL" no "n,n,ENTER" 1)
+if [[ "$out" == *"where=host"* && "$out" == *"start it"* ]]; then
+    pass
+else
+    fail "expected the re-check to find the new install, got: $out"
+fi
+
+start_test "a dried-up stdin takes the container, never a hang, never broken"
+# Answers exhaust after the two declines: the loop prompt hits EOF. An
+# unattended run must end with a WORKING runtime, not an infinite loop
+# and not a dead endpoint.
+out=$(run_gate "$LOCAL_URL" no "n,n")
+if [[ "$out" == *"where=container"* && "$out" == *"No interactive input"* ]]; then
+    pass
+else
+    fail "expected the container on EOF, got: $out"
 fi
 
 # ── 3. a LAN endpoint must not demand a local install ──
@@ -146,6 +192,14 @@ grep -q "Use the bundled ollama container instead" scripts/install.ps1 && pass \
 start_test "install.ps1 skips the nag for remote endpoints"
 grep -q 'targetsHere' scripts/install.ps1 && pass \
     || fail "install.ps1 lost the remote-endpoint guard"
+
+start_test "install.ps1 carries the no-proceed re-check loop"
+if grep -q "press Enter to re-check" scripts/install.ps1 \
+   && ! grep -q "Continuing WITHOUT an LLM runtime" scripts/install.ps1; then
+    pass
+else
+    fail "install.ps1 lost the re-check loop or kept the proceed-broken exit"
+fi
 
 echo ""
 if (( TESTS_FAILED > 0 )); then

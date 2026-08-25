@@ -520,8 +520,41 @@ function Choose-Example {
                             $llmWhere = 'container'
                             Set-EnvValue OLLAMA_EXTERNAL_URL ''
                             Ok 'Switched to the bundled ollama container.'
+                        }
+                    }
+                    # The installer does NOT proceed without a working LLM
+                    # runtime. The only ways past this point are a verified
+                    # Ollama here or an explicit switch to the bundled
+                    # container. Keep in sync with install.sh.
+                    while ($llmWhere -eq 'host' -and -not $ollamaReady) {
+                        $resp = ''
+                        try {
+                            $resp = Read-Host "  Install Ollama (https://ollama.com/download) in another window, then press Enter to re-check - or type 'container' to use the bundled runtime"
+                        } catch {
+                            # Stdin ran dry (unattended run): hanging forever
+                            # helps no one - take the runtime that works.
+                            Warn 'No interactive input - using the bundled ollama container.'
+                            $resp = 'container'
+                        }
+                        if ($resp -in @('container', 'c', 'C')) {
+                            $llmWhere = 'container'
+                            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+                            Ok 'Switched to the bundled ollama container.'
                         } else {
-                            Warn 'Continuing WITHOUT an LLM runtime - the agent cannot answer until Ollama is installed: https://ollama.com/download'
+                            $answering = $false
+                            try {
+                                $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+                                $answering = $true
+                            } catch {}
+                            if ($answering) {
+                                Ok 'Ollama is answering on :11434.'
+                                $ollamaReady = $true
+                            } elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
+                                Warn 'Ollama found but not answering yet - launch the Ollama app.'
+                                $ollamaReady = $true
+                            } else {
+                                Warn 'Ollama is still not installed.'
+                            }
                         }
                     }
                 }

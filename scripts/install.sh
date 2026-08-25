@@ -695,11 +695,43 @@ choose_example() {
                                 llm_where="container"
                                 env_set OLLAMA_EXTERNAL_URL ""
                                 ok "Switched to the bundled ollama container."
-                            else
-                                warn "Continuing WITHOUT an LLM runtime — the agent cannot answer"
-                                warn "until Ollama is installed: https://ollama.com/download"
                             fi
                         fi
+                        # The installer does NOT proceed without a working LLM
+                        # runtime (operator decision, from the field). The only
+                        # ways past this point are a verified Ollama here or an
+                        # explicit switch to the bundled container — the first
+                        # version of this gate kept a warn-and-continue exit,
+                        # which was the original bug wearing a louder warning.
+                        while [[ "$llm_where" == "host" && -z "$ollama_ready" ]]; do
+                            local _resp=""
+                            if ! read -r -p "  Install Ollama (https://ollama.com/download) in another terminal, then press Enter to re-check — or type 'container' to use the bundled runtime: " _resp; then
+                                # Stdin ran dry (unattended run): hanging
+                                # forever helps no one, and proceeding broken
+                                # is the bug this gate exists to prevent.
+                                # Take the runtime that works.
+                                warn "No interactive input — using the bundled ollama container."
+                                _resp="container"
+                            fi
+                            case "$_resp" in
+                                container|c|C)
+                                    llm_where="container"
+                                    env_set OLLAMA_EXTERNAL_URL ""
+                                    ok "Switched to the bundled ollama container."
+                                    ;;
+                                *)
+                                    if curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+                                        ok "Ollama is answering on :11434."
+                                        ollama_ready="yes"
+                                    elif command -v ollama >/dev/null 2>&1; then
+                                        warn "Ollama found but not answering yet — start it: sudo systemctl start ollama (or: ollama serve)."
+                                        ollama_ready="yes"
+                                    else
+                                        warn "Ollama is still not installed."
+                                    fi
+                                    ;;
+                            esac
+                        done
                         ;;
                     *)
                         # A remote endpoint (another box on the LAN). A local
