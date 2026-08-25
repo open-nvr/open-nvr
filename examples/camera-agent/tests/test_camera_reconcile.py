@@ -178,3 +178,50 @@ def test_reconcile_successful_fetch_adds_and_removes(monkeypatch):
     assert rt.context.known_camera("cam9")
     assert _enum_ids(rt) == {"cam2", "cam9"}
     assert rt._opennvr_managed == {"cam2", "cam9"}
+
+
+# ── the camera-id map must not freeze at boot either ────────────────
+#
+# Same class as the tool-enum staleness above, one layer down. The agent
+# resolved "cam1" -> the OpenNVR camera id through a dict comprehension
+# captured in a closure at startup. The reconcile loop exists BECAUSE the
+# agent usually boots before the core has cameras ready — so on a normal cold
+# start that snapshot was empty and stayed empty for the life of the process,
+# even while reconcile logged "loaded 1 camera(s)" every 30s.
+#
+# Field symptom: every past-tense question returned "The camera appears to be
+# offline." search_history got ERROR: camera 'cam1' has no server-side id, and
+# the LLM turned that into an offline claim about a camera that was online the
+# whole time. camera_snapshot and describe_camera's best-frame fetch resolve
+# through the same function and broke identically.
+
+
+def _nvr_spec(cid: str, oid: int) -> CameraSpec:
+    return CameraSpec(camera_id=cid, frame_url=f"http://x/{cid}.jpg", role=cid,
+                      opennvr_camera_id=oid)
+
+
+def test_camera_added_after_boot_resolves_to_its_server_side_id():
+    rt = _runtime()                              # boots with NO cameras
+    assert rt.tools._resolve_camera("cam1") == "cam1"   # nothing to resolve yet
+
+    rt._register_opennvr_cameras([_nvr_spec("cam1", 1)])
+    rt._sync_camera_roster()
+
+    assert rt.tools._resolve_camera("cam1") == "1", (
+        "resolver froze the boot-time roster; history/snapshot stay broken "
+        "for the life of the process"
+    )
+
+
+def test_resolver_follows_a_removed_camera_too():
+    rt = _runtime()
+    rt._register_opennvr_cameras([_nvr_spec("cam1", 1), _nvr_spec("cam2", 2)])
+    rt._opennvr_managed |= {"cam1", "cam2"}      # what the reconcile loop adopts
+    rt._sync_camera_roster()
+    assert rt.tools._resolve_camera("cam2") == "2"
+
+    rt._remove_opennvr_cameras({"cam2"})
+    rt._sync_camera_roster()
+    assert rt.tools._resolve_camera("cam2") == "cam2"   # unknown again
+    assert rt.tools._resolve_camera("cam1") == "1"      # survivor unaffected

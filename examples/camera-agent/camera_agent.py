@@ -2853,14 +2853,28 @@ class CameraAgentRuntime:
                     cfg.footage_index_path,
                 )
 
-        # Agent camera id → pipeline camera id (the OpenNVR camera id on the Tier-0
-        # bus subject / best-frame endpoint). Used by BOTH camera_snapshot (ring
-        # lookup) and describe_camera (best-frame fetch) so they agree on the camera.
-        _cam_map = {
-            cam.camera_id: str(cam.opennvr_camera_id)
-            for cam in cfg.cameras if cam.opennvr_camera_id is not None
-        }
-        _resolve_camera = lambda cid: _cam_map.get(cid, cid)  # noqa: E731
+        # Agent camera id → OpenNVR camera id (used on the Tier-0 bus subject,
+        # the best-frame endpoint, and the events store). Resolved AT CALL TIME
+        # against the live roster.
+        #
+        # This used to be a dict comprehension captured in a closure, which
+        # froze the roster as it looked during startup assembly. The background
+        # reconcile exists precisely because the agent usually boots before the
+        # core has its cameras ready — so on a normal cold start the snapshot
+        # was EMPTY, and it stayed empty for the life of the process even as
+        # reconcile logged "loaded 1 camera(s)" every 30s. Every history query
+        # then failed with "camera 'camN' has no server-side id", which the LLM
+        # relayed to users as "The camera appears to be offline" — a camera
+        # that was online the whole time. camera_snapshot and describe_camera's
+        # best-frame path resolve through here too, so they broke the same way.
+        def _resolve_camera(cid: str) -> str:
+            # self.context is the LIVE roster — both _register_opennvr_cameras
+            # and _remove_opennvr_cameras act on it, while cfg.cameras is only
+            # the boot-time config list.
+            for cam in self.context.cameras:
+                if cam.camera_id == cid and cam.opennvr_camera_id is not None:
+                    return str(cam.opennvr_camera_id)
+            return cid
 
         # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
         # frame when the detect-pipeline origin is configured.
