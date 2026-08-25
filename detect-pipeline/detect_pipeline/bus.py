@@ -19,7 +19,11 @@ from collections.abc import Callable
 from .pipeline import FrameResult
 
 # publish(subject: str, data: bytes) -> None  (best-effort; never raises upward)
-PublishFn = Callable[[str, bytes], None]
+# Returns True/False when the transport can tell (the NATS publisher does);
+# None means "delivered as far as this transport knows" and is treated as
+# published, which keeps simple fakes and no-op sinks working. Only an
+# explicit False counts as "did not reach the bus".
+PublishFn = Callable[[str, bytes], "bool | None"]
 
 ADAPTER = "tier0"
 SCHEMA = "opennvr.tier0.v1"
@@ -82,8 +86,12 @@ class EventSink:
         if not result.tracks and not self.publish_empty:
             return False
         payload = build_payload(camera_id, result, frame)
-        self._publish(subject_for(camera_id), json.dumps(payload).encode("utf-8"))
-        return True
+        # Propagate the transport's verdict. Returning an unconditional True
+        # is what let tier0_events_published_total count events that never
+        # left the process: a NATS client that had given up reconnecting
+        # raised nothing, so "no exception" read as "published".
+        sent = self._publish(subject_for(camera_id), json.dumps(payload).encode("utf-8"))
+        return sent is not False
 
 
 # ─────────────────────── gate decisions (PR B) ───────────────────────

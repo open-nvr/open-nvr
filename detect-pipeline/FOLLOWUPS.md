@@ -423,7 +423,7 @@ These were found in the same review and deliberately **not** fixed — they
 are recorded here so they are not rediscovered from scratch. Rough
 priority order; each is issue-ready.
 
-### 13a. The bus publish path reports success it cannot verify
+### 13a. The bus publish path reports success it cannot verify — ✅ FIXED
 
 `EventSink.publish` returns `True` unconditionally once it has handed the
 payload to the publisher, and `run.py`'s publish coroutine swallows every
@@ -435,8 +435,17 @@ exception with `pass` and returns `None`. So:
   mistaken for a quiet scene — can essentially never fire on the NATS
   path.
 
-Fix is to make the publish fn return a bool and propagate it. Note this
-undercuts a 0.1.4 change, so it is the highest-value item here.
+**Fixed.** The publish fn returns a bool and `EventSink` propagates it
+(`None` still means "delivered as far as this transport knows", so simple
+fakes keep working — only an explicit `False` counts as not-published). A
+publish attempted with no connected client is counted rather than merely
+absent, since "published_total stopped climbing" alone cannot be told apart
+from every camera going quiet. Failures that happen AFTER hand-off are
+caught by a done-callback on the future, which was previously discarded.
+
+Honest limit that remains: `True` means the client accepted the payload,
+not that the broker acknowledged it — awaiting that would block the frame
+loop.
 
 ### 13b. NATS disconnects permanently after 10 failed reconnects
 

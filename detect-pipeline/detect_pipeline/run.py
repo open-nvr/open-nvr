@@ -53,6 +53,7 @@ import threading
 from dataclasses import dataclass
 
 from .bus import EventSink, GateEventSink
+from .metrics import record_sink_error
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, resolve_hwaccel
 from .providers import HttpCameraProvider
 from .service import WorkerManager
@@ -507,7 +508,9 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
     Best-effort: NATS down never breaks a worker — but ``connected_fn`` feeds
     /health so "down" is VISIBLE instead of silently dropping events."""
     if not nats_url:
-        return (lambda subject, data: None), (lambda: None), (lambda: False)
+        # No bus configured: nothing is published, and saying so keeps
+        # tier0_events_published_total honest rather than counting no-ops.
+        return (lambda subject, data: False), (lambda: None), (lambda: False)
     import asyncio
 
     import nats
@@ -528,14 +531,43 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
 
     threading.Thread(target=_serve, name="tier0-nats", daemon=True).start()
 
-    def publish(subject: str, data: bytes) -> None:
+    def _note_async_failure(fut) -> None:
+        """Count a publish that failed AFTER we handed it to the loop.
+
+        The future is otherwise discarded, so a broker rejecting writes
+        looked identical to success from the worker's side.
+        """
+        try:
+            if fut.exception() is not None:
+                record_sink_error("bus")
+        except Exception:  # pragma: no cover - cancelled/loop torn down
+            pass
+
+    def publish(subject: str, data: bytes) -> bool:
+        """True iff the payload reached a connected client.
+
+        Returning None here (the old signature) is what let
+        ``tier0_events_published_total`` count events that never left the
+        process: the sink took "no exception" as "published", and a NATS
+        client that had given up reconnecting raised nothing at all.
+
+        Honest limit: True means accepted by the client, not acknowledged
+        by the broker — awaiting that would block the frame loop. Failures
+        after hand-off are counted asynchronously above instead.
+        """
         nc = box.get("nc")
         if nc is None:
-            return
+            # Counted, not merely absent: "published_total stopped climbing"
+            # alone is indistinguishable from every camera going quiet.
+            record_sink_error("bus")
+            return False                     # never connected, or gave up
         try:
-            asyncio.run_coroutine_threadsafe(nc.publish(subject, data), loop)
+            fut = asyncio.run_coroutine_threadsafe(nc.publish(subject, data), loop)
         except Exception:
-            pass
+            log.debug("bus publish could not be scheduled", exc_info=True)
+            return False
+        fut.add_done_callback(_note_async_failure)
+        return True
 
     def close() -> None:
         loop.call_soon_threadsafe(loop.stop)
