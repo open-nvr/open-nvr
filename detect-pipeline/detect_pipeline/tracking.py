@@ -143,13 +143,25 @@ def _coverage(inner: Box, outer: Box) -> float:
     return inter / area
 
 
-def _crop_bgr(bgr, box: Box):
-    """Clamp ``box`` to the frame and return a copied BGR crop, or None if empty."""
+def _crop_bgr(bgr, box: Box, margin: float = 0.25):
+    """Crop ``box`` plus a context margin, clamped to the frame; None if empty.
+
+    The margin is the point. This crop becomes the visit's stored EVIDENCE —
+    the photo the operator is shown when they ask "who came today?" — and the
+    bare detection box is the least legible framing of it. Field case: a
+    person leaned over a desk camera, the highest-scoring box of the visit
+    was their hands, and the evidence photo was a 163x187 crop of knuckles
+    with zero surroundings. A quarter of the box's size on every side keeps
+    the subject dominant while showing enough scene to tell WHERE they were
+    and what they were near — which is what evidence is for.
+    """
     h, w = bgr.shape[:2]
-    x1 = max(0, min(int(box[0]), w - 1))
-    y1 = max(0, min(int(box[1]), h - 1))
-    x2 = max(x1 + 1, min(int(box[2]), w))
-    y2 = max(y1 + 1, min(int(box[3]), h))
+    mx = int((int(box[2]) - int(box[0])) * margin)
+    my = int((int(box[3]) - int(box[1])) * margin)
+    x1 = max(0, min(int(box[0]) - mx, w - 1))
+    y1 = max(0, min(int(box[1]) - my, h - 1))
+    x2 = max(x1 + 1, min(int(box[2]) + mx, w))
+    y2 = max(y1 + 1, min(int(box[3]) + my, h))
     crop = bgr[y1:y2, x1:x2]
     return crop.copy() if crop.size else None
 
