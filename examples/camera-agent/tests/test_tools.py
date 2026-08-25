@@ -512,3 +512,65 @@ def test_search_history_speaks_plates(anyio_backend=None):
     out = asyncio.run(tools.search_history({"label": "car", "plate": "KA01"}))
     assert "plate KA01AB1234" in out
     assert ec.searches[0]["plate"] == "KA01"
+
+
+# ── remembered photos reach the chat ────────────────────────────────
+
+
+def test_search_history_publishes_the_remembered_photos(anyio_backend=None):
+    """The answer already said "(photo kept)" and the crop was already being
+    fetched to face-match — then thrown away, so an answer about 16:25 arrived
+    as bare text. Put the photo on the turn so the UI can show it."""
+    import asyncio, base64
+    ec = _FakeEventsClient(
+        [_FakeEvent(7), _FakeEvent(8), _FakeEvent(9, has_evidence=False)],
+        crops={7: b"crop-7", 8: b"crop-8"},
+    )
+    tools = _history_tools(ec)
+    asyncio.run(tools.search_history({"label": "person"}))
+
+    frames = tools.last_evidence_frames
+    assert len(frames) == 2, "both visits with a kept photo should be published"
+    assert [base64.b64decode(f["jpeg_b64"]) for f in frames] == [b"crop-7", b"crop-8"]
+    # A visit with no evidence contributes nothing rather than a broken image.
+    assert all(f["jpeg_b64"] for f in frames)
+
+
+def test_published_photos_are_captioned_with_their_time(anyio_backend=None):
+    """Every frame the chat has ever rendered was the LIVE view. An
+    uncaptioned crop from this afternoon sitting in an answer would read as
+    "here is your camera now" — the wrong thing to get wrong in a security
+    product. Each historical frame carries its own identity and time."""
+    import asyncio
+    ec = _FakeEventsClient([_FakeEvent(42)], crops={42: b"crop"})
+    tools = _history_tools(ec)
+    asyncio.run(tools.search_history({"label": "person"}))
+    cap = tools.last_evidence_frames[0]["caption"]
+    assert "#42" in cap, f"caption must identify the visit, got {cap!r}"
+    assert any(ch.isdigit() for ch in cap.split("·")[-1]), (
+        f"caption must carry a time, got {cap!r}")
+
+
+def test_publishing_photos_is_capped(anyio_backend=None):
+    """A busy afternoon must not dump twenty images into the chat."""
+    import asyncio
+    events = [_FakeEvent(i) for i in range(1, 11)]
+    ec = _FakeEventsClient(events, crops={i: b"c%d" % i for i in range(1, 11)})
+    tools = _history_tools(ec)
+    asyncio.run(tools.search_history({"label": "person"}))
+    assert len(tools.last_evidence_frames) == 3
+
+
+def test_a_failed_evidence_fetch_does_not_break_the_answer(anyio_backend=None):
+    """The text answer is the thing that must survive; the photo is a bonus."""
+    import asyncio
+
+    class _Broken(_FakeEventsClient):
+        async def evidence(self, event_id):
+            raise RuntimeError("store went away")
+
+    ec = _Broken([_FakeEvent(1)], crops={})
+    tools = _history_tools(ec)
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "1 person visit(s)" in out
+    assert tools.last_evidence_frames == []

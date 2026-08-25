@@ -188,12 +188,15 @@ def test_budget_sheds_under_sustained_overrun_and_recovers():
     assert c.current == 8 and not c.shedding
 
     for _ in range(40):
-        c.observe(3.07)
+        c.observe(3.07, regions_run=c.current)
     assert c.current < 8 and c.shedding
     assert c.current >= 1, "must keep detecting something"
 
-    for _ in range(120):
-        c.observe(0.05)                            # hardware caught up
+    # Recovery is deliberately cautious now — the budget will not sprint back
+    # into a level it has seen fail, and it will not take a quiet frame's word
+    # for it either — so full recovery takes real frames doing real work.
+    for _ in range(400):
+        c.observe(0.05, regions_run=c.current)     # hardware caught up
     assert c.current == 8 and not c.shedding
 
 
@@ -267,3 +270,141 @@ def test_budget_change_reports_its_direction():
 
     ups = [c.observe(0.05, c.current) for _ in range(200)]
     assert any(d > 0 for d in ups), "recovery must report a positive delta"
+
+
+def _drive(controller, frames, *, per_region=0.115, busy_every=4, period=50):
+    """Drive the controller with a production-shaped load and count budget moves.
+
+    Cost scales with the regions actually RUN, and activity comes and goes: a
+    quiet frame runs a couple of regions and is cheap at any budget, a busy one
+    runs the full budget and is not. That asymmetry is the whole problem — it
+    is why headroom measured while quiet is not evidence about a busy frame.
+    """
+    moves, dwell = 0, {}
+    for i in range(frames):
+        demand = 8 if (i // period) % busy_every == busy_every - 1 else 2
+        ran = min(controller.current, demand)
+        if controller.observe(per_region * ran, ran) != 0:
+            moves += 1
+        dwell[controller.current] = dwell.get(controller.current, 0) + 1
+    return moves, dwell
+
+
+def test_budget_stops_climbing_back_into_a_level_it_knows_fails():
+    """The production sawtooth. In one 35-minute run the budget was cut
+    sixteen times and every single cut was from 8: it halved away, climbed
+    1 -> 8 in about twenty seconds off cheap quiet frames, blew the budget at 8
+    again, and repeated every three minutes. Nothing broke; it just spent its
+    life re-learning one fact.
+
+    At 0.115s per region against a 500ms budget, 5 is the largest level a busy
+    frame can afford. The controller has to find that and stay there.
+    """
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    memoryless = RegionBudgetController(
+        8, fps=2, probe_factor=1, max_probe_backoff=1, probation_frames=1
+    )
+    remembering = RegionBudgetController(8, fps=2)
+
+    old_moves, old_dwell = _drive(memoryless, 20000)
+    new_moves, new_dwell = _drive(remembering, 20000)
+
+    assert remembering.current == 5, (
+        f"should settle on the largest level a busy frame affords, "
+        f"got {remembering.current}"
+    )
+    # The memoryless controller spends most of its life at the level that
+    # fails; this one must not go there at all once it has converged.
+    assert old_dwell.get(8, 0) > 20000 // 2
+    assert new_dwell.get(8, 0) < 20000 // 10
+    assert new_moves < old_moves // 4, (
+        f"churn should collapse, not merely improve: {new_moves} vs {old_moves}"
+    )
+
+
+def test_budget_churn_stops_once_converged():
+    """Converged means converged — no moves at all in the final stretch. A
+    controller that still steps every few minutes is still writing WARNING
+    lines and still re-paying the cost of being wrong."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    _drive(c, 30000)                                  # converge
+    tail_moves, _ = _drive(c, 10000)                  # then watch
+    assert tail_moves == 0, f"still churning after convergence: {tail_moves} moves"
+
+
+def test_a_ceiling_is_never_permanent():
+    """One bad minute must not cost detections forever. When the box genuinely
+    frees up — a neighbouring camera stopped, the scene changed — the budget
+    has to come back."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    _drive(c, 20000)
+    assert c.current < 8 and c._ceiling is not None
+
+    for _ in range(2000):                             # everything cheap now
+        c.observe(0.02 * min(c.current, 8), min(c.current, 8))
+        if c.current == 8:
+            break
+    assert c.current == 8, "a stale ceiling must not pin the budget down"
+    assert c._ceiling is None
+
+
+def test_the_ceiling_only_lifts_on_evidence_from_frames_that_tested_it():
+    """Arriving at a level is not proof it works. A quiet frame is cheap at any
+    budget because barely any regions run, so quiet frames must not be able to
+    retire the mark — that is exactly the loop being closed here."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    while c.current == 8:
+        c.observe(0.9, regions_run=8)                 # 8 is too expensive
+    assert c._ceiling == 8
+
+    # Thousands of cheap frames that never run more than 2 regions. They may
+    # walk the budget up, but they can never certify the ceiling.
+    for _ in range(3000):
+        c.observe(0.03, regions_run=2)
+    assert c._ceiling == 8, "quiet frames must not retire the ceiling"
+
+
+def test_the_ceiling_tracks_downwards_when_a_lower_level_also_fails():
+    """Cost is monotone in region count, so a failure at 4 also condemns 5-8.
+    The mark has to follow the evidence down; when it did not, every shed
+    landed somewhere new, the repeat-failure count kept resetting to 1, and the
+    probe never got expensive enough to stop the hunting."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    while c.current == 8:
+        c.observe(0.9, regions_run=8)
+    assert c._ceiling == 8
+    at = c.current
+
+    while c.current == at:                            # `at` is too slow as well
+        c.observe(2.0, regions_run=at)
+    assert c._ceiling <= at, f"ceiling must follow failure down, got {c._ceiling}"
+
+
+def test_repeated_failure_at_a_level_makes_the_next_probe_dearer():
+    """Bounded backoff: a level that keeps failing stops being retried every
+    few minutes, but never stops being retried altogether."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    _drive(c, 20000)
+    assert c._ceiling_hits > 1, "repeat failures must accumulate"
+
+    # Standing just below the ceiling with a recovery streak running: the cost
+    # of the next probe grows with the failures, and stops growing at the cap.
+    c._streak = -1
+    c.current = c._ceiling - 1
+    ordinary = c.settle_frames
+    cost = c._evidence_needed()
+    assert cost > ordinary, "a probe must cost more than an ordinary step"
+    assert cost <= ordinary * c.probe_factor * c.max_probe_backoff, (
+        "probe cost must stay bounded so the level is still retried eventually"
+    )

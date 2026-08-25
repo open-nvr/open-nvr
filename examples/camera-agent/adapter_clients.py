@@ -143,6 +143,21 @@ class KaicAdapterClient(_ReusableClientMixin):
                         response=resp_obj,
                     ) if isinstance(exc, httpx.HTTPStatusError) else exc
                 last_exc = exc
+                # A retry exists to bridge a warming-up adapter. Some failures
+                # can never become success by waiting: 404 means the adapter
+                # route does not exist (not deployed, or a typo'd
+                # recognition_adapter), 400 means our payload is wrong. Retrying
+                # those burns two extra round trips and two WARNINGs per call —
+                # seen in the field as insightface 404s repeating on every
+                # person visit, on a stack with no face adapter installed.
+                status = getattr(resp_obj, "status_code", None)
+                if status in (400, 404):
+                    logger.warning(
+                        "KAI-C adapter unavailable (HTTP %s at %s) — not "
+                        "retrying; this cannot succeed by waiting",
+                        status, self._url,
+                    )
+                    break
                 if attempt < self._retries:
                     backoff = self._backoff_for(resp_obj)
                     logger.warning(

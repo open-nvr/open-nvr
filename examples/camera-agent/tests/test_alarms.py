@@ -614,3 +614,337 @@ def test_busy_yield_is_bounded():
     assert alarm.triggered, (
         "the capped yield must let the poll through and fire the alarm"
     )
+
+
+# ── Tier-0 as the trigger source ───────────────────────────────────────
+# The agent is already subscribed to detect-pipeline's detections and they
+# are far better evidence than this loop's own full-frame poll: Tier-0 runs
+# the detector on a SQUARE crop around motion at the stream's frame rate,
+# the poll squashes a whole 1920x1080 frame to 640x640 once every several
+# seconds. On a live deployment that was the difference between finding a
+# person and returning nothing — four people recorded by Tier-0 at 0.53-0.66
+# confidence, of which the full-frame path found two at ~0.28 and missed two
+# outright, while visits lasting 5-19s were sampled once per 8-12s.
+
+
+class _Ev:
+    """Minimal stand-in for context.EventRecord."""
+
+    def __init__(self, received_at, tracks, adapter="tier0"):
+        self.received_at = received_at
+        self.adapter = adapter
+        self.raw = {"tracks": tracks}
+
+
+def _tier0_runtime(tracks, *, age=0.0, poll_detections=None):
+    """A runtime whose Tier-0 ring holds one event, and whose own poll finds
+    ``poll_detections`` (nothing, by default — so a trigger can only have
+    come from Tier-0)."""
+    import time
+    rt = _runtime(detections=poll_detections if poll_detections is not None else [])
+    polls = []
+
+    async def counting_infer(*, frame_jpeg, **kw):
+        polls.append(1)
+        return {"result": {"detections": poll_detections or []}}
+
+    rt.detection_client.infer = counting_infer
+    ev = _Ev(time.time() - age, tracks)
+    rt.context.recent_events = lambda *, camera_id, window_seconds: [ev]
+    return rt, polls
+
+
+def test_alarm_triggers_off_tier0_without_polling():
+    """The live failure: Tier-0 saw the person, the alarm's own full-frame
+    poll did not, and nothing rang."""
+    rt, polls = _tier0_runtime([{"label": "person", "score": 0.61}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, "Tier-0 evidence must ring the alarm"
+        assert not polls, "no need to run our own inference when Tier-0 already saw it"
+
+    asyncio.run(go())
+
+
+def test_stale_tier0_evidence_does_not_ring():
+    """'A person was here five minutes ago' is not 'a person is here'."""
+    rt, _polls = _tier0_runtime([{"label": "person"}], age=600.0)
+    rt.alarms._interval = 0.01        # many passes, all of them stale
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        await asyncio.sleep(0.25)
+        triggered = rt.alarms.list()[0]["triggered"]
+        rt.alarms.stop(alarm.id)
+        assert triggered is False
+
+    asyncio.run(go())
+
+
+def test_one_tier0_frame_rings_once():
+    """Tier-0 republishes the same scene many times a second. Acknowledging
+    an alarm must not be undone by the frame that raised it still being the
+    newest thing on the ring."""
+    rt, _polls = _tier0_runtime([{"label": "person"}])
+    rt.alarms._rearm = 0.0            # cooldown cannot be what holds it back
+    rt.alarms._interval = 0.01        # ...and the loop must actually come round
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        assert rt.alarms.acknowledge(alarm.id) == 1
+        await asyncio.sleep(0.3)      # ~30 further loop passes
+        again = rt.alarms.list()[0]["triggered"]
+        rt.alarms.stop(alarm.id)
+        assert again is False, "the same published frame must not re-ring"
+
+    asyncio.run(go())
+
+
+def test_tier0_without_the_target_still_falls_back_to_polling():
+    """Tier-0 publishes only frames that produced tracks, so silence from it
+    means 'quiet scene' and 'pipeline down' alike. The alarm's own look has
+    to stay as a backstop — a safety feature must not go quiet because one
+    source did."""
+    rt, polls = _tier0_runtime([{"label": "cat"}],
+                               poll_detections=[{"label": "person"}])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, "the backstop poll must still ring"
+        assert polls, "Tier-0 seeing a cat is not evidence about a person"
+
+    asyncio.run(go())
+
+
+def test_no_tier0_stream_behaves_exactly_as_before():
+    """Cameras with no Tier-0 coverage keep the original behaviour."""
+    rt = _runtime(detections=[{"label": "person"}])
+    rt.context.recent_events = lambda *, camera_id, window_seconds: []
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True
+
+    asyncio.run(go())
+
+
+def test_a_broken_tier0_ring_cannot_take_the_alarm_loop_down():
+    """The ring read is defensive: alarms are a safety feature and must not
+    stop ringing because a context accessor raised."""
+    rt = _runtime(detections=[{"label": "person"}])
+
+    def boom(*, camera_id, window_seconds):
+        raise RuntimeError("ring exploded")
+
+    rt.context.recent_events = boom
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, "must fall back, not die"
+
+    asyncio.run(go())
+
+
+# ── the backstop poll's framing ────────────────────────────────────────
+
+
+def _jpeg(w, h, colour=(90, 90, 90)):
+    """Pillow, not OpenCV: cv2 is an optional extra for this package, so a
+    test written against it fails wherever the extra is absent — which is
+    exactly where the code under test must still work."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), colour).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _dims(jpeg):
+    import io
+    from PIL import Image
+    return Image.open(io.BytesIO(jpeg)).size
+
+
+def test_letterbox_squares_a_widescreen_frame():
+    """A detector resizes whatever it gets to a square input, so a 16:9 frame
+    arrives crushed 1.78x and people come out too narrow to recognise. Pad
+    first; never crop — a centre crop measured 0.00 at both frame edges."""
+    from camera_agent import _letterbox_jpeg
+    w, h = _dims(_letterbox_jpeg(_jpeg(1920, 1080)))
+    assert w == h, f"output must be square, got {w}x{h}"
+    # ...and shrunk on the way, since the detector resizes to its own input
+    # regardless: sending 1920x1920 costs real work and buys nothing.
+    assert w <= 960, f"expected a downscaled square, got {w}"
+
+
+def test_letterbox_keeps_the_whole_frame():
+    """Nothing may be cut: the edges of a driveway or gate view are exactly
+    where the thing you armed the alarm for walks in."""
+    import io
+    from PIL import Image
+    from camera_agent import _letterbox_jpeg
+
+    src = Image.new("RGB", (1920, 1080), (30, 30, 30))
+    white = Image.new("RGB", (192, 1080), (255, 255, 255))
+    src.paste(white, (0, 0))               # the leftmost tenth of the frame
+    src.paste(white, (1920 - 192, 0))      # ...and the rightmost tenth
+    buf = io.BytesIO(); src.save(buf, format="JPEG")
+
+    out = Image.open(io.BytesIO(_letterbox_jpeg(buf.getvalue()))).convert("RGB")
+    # Padding goes top/bottom for a landscape frame, so the middle row is all
+    # content and the marked tenths must still be at its two ends.
+    w, h = out.size
+    y = h // 2
+    tenth = max(1, w // 10)
+    left = [out.getpixel((x, y))[0] for x in range(tenth)]
+    right = [out.getpixel((x, y))[0] for x in range(w - tenth, w)]
+    assert sum(left) / len(left) > 200, "left edge of the frame was lost"
+    assert sum(right) / len(right) > 200, "right edge of the frame was lost"
+
+
+def test_letterbox_leaves_a_square_frame_alone():
+    from camera_agent import _letterbox_jpeg
+    square = _jpeg(640, 640)
+    assert _letterbox_jpeg(square) is square
+
+
+def test_letterbox_never_breaks_the_poll():
+    """Alarms are a safety feature: garbage in must mean 'unchanged', not an
+    exception that stops the loop looking."""
+    from camera_agent import _letterbox_jpeg
+    assert _letterbox_jpeg(b"not a jpeg") == b"not a jpeg"
+    assert _letterbox_jpeg(b"") == b""
+
+
+def test_a_busy_camera_does_not_starve_a_quiet_one_on_the_same_alarm():
+    """One alarm can watch several cameras. A single shared watermark lets the
+    busiest camera hold it permanently ahead of the quiet camera's timestamps,
+    so the quiet one — the side gate nobody walks up — would silently never use
+    Tier-0 at all and fall back to the weak full-frame poll forever."""
+    import time
+    from context import CameraSpec
+
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front"),
+                 CameraSpec(camera_id="cam2", frame_url="http://x/2.jpg", role="gate")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    polls = []
+
+    async def fake_get_frame(cam, **_kw):
+        return b"\xff\xd8\xff"
+
+    async def counting_infer(*, frame_jpeg, **kw):
+        polls.append(1)
+        return {"result": {"detections": []}}   # the poll finds nothing
+
+    rt.context.get_frame = fake_get_frame
+    rt.detection_client.infer = counting_infer
+
+    now = time.time()
+    # cam1 is busy and its newest event is NEWER than cam2's.
+    evs = {"cam1": _Ev(now, [{"label": "person"}]),
+           "cam2": _Ev(now - 3.0, [{"label": "person"}])}
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds:
+            [evs[camera_id]] if camera_id in evs else [])
+
+    async def go():
+        alarm = rt.alarms.create(name="Both", target="person",
+                                 camera_ids=["cam1", "cam2"])
+        await rt.alarms._poll(alarm, "cam1")
+        alarm.triggered = False                 # unlatch so cam2 gets its turn
+        alarm.last_ack = 0.0
+        await rt.alarms._poll(alarm, "cam2")
+        rt.alarms.stop(alarm.id)
+        assert alarm.last_tier0_at.get("cam2"), (
+            "cam2's own Tier-0 evidence was discarded because cam1's was newer")
+        assert not polls, "cam2 should not have needed the fallback poll"
+
+    asyncio.run(go())
+
+
+def test_a_gate_audit_record_does_not_mask_a_real_detection():
+    """Caught in production, not in review. Tier-0 publishes its GATE
+    decisions — the audit of *non*-events — on the same adapter and into the
+    same ring as detections, and they carry no tracks. They are also more
+    frequent, so reading only the newest Tier-0 record meant almost always
+    reading an empty one: every single alarm fired 'via poll' while the
+    pipeline was detecting people a second earlier.
+
+    An empty record is not evidence of absence. Skip past it to the last
+    record that actually looked.
+    """
+    import time
+    rt, polls = _tier0_runtime([{"label": "person"}])
+    now = time.time()
+    # Exactly the production shape: a detection, then a newer gate audit.
+    detection = _Ev(now - 1.0, [{"label": "person", "score": 0.61}])
+    gate = _Ev(now, [])
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [gate, detection])   # newest first
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, (
+            "a gate audit with no tracks masked the detection behind it")
+        assert not polls, "should have rung from Tier-0, not fallen back to the poll"
+
+    asyncio.run(go())
+
+
+def test_an_empty_ring_still_falls_back_to_the_poll():
+    """All gate audits and no detections is genuinely 'Tier-0 has nothing to
+    say' — the backstop must still run."""
+    rt, polls = _tier0_runtime([{"label": "cat"}], poll_detections=[{"label": "person"}])
+    import time
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [_Ev(time.time(), [])])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(60):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.02)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True and polls, "the backstop must still run"
+
+    asyncio.run(go())

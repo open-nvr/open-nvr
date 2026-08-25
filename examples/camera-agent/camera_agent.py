@@ -907,6 +907,14 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
         })
         if len(out) >= max_frames:
             break
+    # Remembered best-frames from the events store, for answers about the
+    # PAST. Appended after the live ones and never deduped against them: they
+    # are different moments, and several visits on one camera are several
+    # photos, not one. Each carries its own timestamp caption.
+    for ev in (getattr(runtime.tools, "last_evidence_frames", None) or []):
+        if len(out) >= max_frames:
+            break
+        out.append(dict(ev))
     return out
 
 
@@ -1513,6 +1521,14 @@ class Alarm:
     last_triggered: float | None = None
     trigger_count: int = 0
     last_ack: float = 0.0
+    # Watermark into the always-on Tier-0 stream, PER CAMERA. A detection at
+    # or before this has already been judged, so one published frame rings the
+    # alarm at most once — Tier-0 republishes the same scene several times a
+    # second. Per camera because one alarm can watch several: a single shared
+    # watermark lets the busiest camera hold it permanently ahead of a quiet
+    # one's timestamps, and the quiet camera — the driveway nobody walks up —
+    # would silently never use Tier-0 at all.
+    last_tier0_at: dict[str, float] = field(default_factory=dict)
 
     def window_label(self) -> str:
         def fmt(m):
@@ -1537,6 +1553,79 @@ class Alarm:
         }
 
 
+def _letterbox_jpeg(jpeg: bytes, max_side: int = 960) -> bytes:
+    """Pad a frame to a square, preserving aspect. Returns the input unchanged
+    if anything at all goes wrong.
+
+    Detectors resize whatever they are handed to a square input, so a 16:9
+    frame arrives crushed 1.78x horizontally — people come out too narrow for
+    a model trained on people. Padding to square first costs a few pixels of
+    scale and keeps the shapes honest.
+
+    Measured on this deployment, same detector, same person, moved across the
+    frame (best person-confidence, 0.00 = not found at all) — the last column
+    is this function end to end:
+
+        position     squashed   centre-crop   letterboxed
+        left edge      0.28        0.00           0.84
+        centre         0.00        0.54           0.76
+        right edge     0.48        0.00           0.82
+
+    Note the middle column: cropping to a centre square is BLIND at both
+    edges, which is exactly the part of the frame a driveway or gate camera
+    cares about. Padding is the only one of the three that works everywhere.
+
+    ``max_side`` shrinks before padding, because the detector resizes to its
+    own input regardless — sending 1920x1920 buys nothing and costs real work.
+    Downscaling here is also BETTER than letting the adapter do it, because a
+    proper resampling filter beats whatever the far side does. Same person,
+    same three positions:
+
+        letterbox side   1920   1280    960    640
+        left edge        0.77   0.83   0.85   0.85
+        centre           0.63   0.74   0.78   0.75
+        right edge       0.80   0.83   0.81   0.75
+        payload            83KB   36KB   25KB   13KB
+
+    960 keeps headroom above a 640 model input at a third of the bytes.
+
+    Pillow, deliberately, not OpenCV: cv2 is an OPTIONAL extra here (the
+    ``device`` group, for local capture cameras) while Pillow is a core
+    dependency. Written against cv2 this degraded to "return the frame
+    unchanged" on any install without that extra — silently handing the
+    detector the squashed 16:9 frame again, which is the exact blindness this
+    function exists to remove. A safety path must not depend on an optional
+    package to work.
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg))
+        img.load()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        w, h = img.size
+        if w == 0 or h == 0:
+            return jpeg
+        if max_side and max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                             Image.Resampling.LANCZOS)
+            w, h = img.size
+        elif w == h:
+            return jpeg          # already square and already small enough
+        side = max(w, h)
+        canvas = Image.new("RGB", (side, side), (0, 0, 0))
+        canvas.paste(img, ((side - w) // 2, (side - h) // 2))
+        buf = io.BytesIO()
+        canvas.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception:
+        return jpeg
+
+
 class AlarmManager:
     """Polls watched cameras and rings when an alarm's condition is met.
     Mirrors MonitorManager but raises sticky, acknowledgeable alarm events
@@ -1544,8 +1633,13 @@ class AlarmManager:
 
     def __init__(self, runtime: "CameraAgentRuntime", *, interval: float = 5.0,
                  rearm_cooldown: float = 20.0, max_alarms: int = 20,
-                 pulse_seconds: float = 60.0) -> None:
+                 pulse_seconds: float = 60.0,
+                 tier0_max_age: float = 30.0) -> None:
         self._pulse = pulse_seconds
+        # Absolute cap on how old a Tier-0 detection may be and still count as
+        # "present now" — a backstop for the per-cycle watermark below, so a
+        # loop that stalls for minutes cannot wake up and ring on ancient news.
+        self._tier0_max_age = tier0_max_age
         self._runtime = runtime
         self._alarms: dict[int, Alarm] = {}
         self._order: list[int] = []
@@ -1737,18 +1831,84 @@ class AlarmManager:
             alarm.last_ack = now
             logger.info("alarm #%d (pulse) stood down", alarm.id)
 
+    def _tier0_says_present(self, alarm: Alarm, cam: str, now: float) -> bool:
+        """Is the target on camera per the always-on Tier-0 stream?
+
+        The agent is already subscribed to detect-pipeline's detections, and
+        they are strictly better evidence than anything this loop can gather
+        for itself: Tier-0 watches every frame at the stream's rate and runs
+        the detector on a SQUARE crop around motion, so the object fills the
+        model's input. This loop grabs one whole 1920x1080 frame every several
+        seconds and lets the adapter squash it to 640x640 — 16:9 crushed 1.78x
+        and everything in it shrunk. Measured on this deployment, that is the
+        difference between finding a person and returning nothing at all: of
+        four people Tier-0 recorded at 0.53-0.66 confidence, the full-frame
+        path found two at ~0.28 and missed the other two entirely. Add a
+        sampling gap of one look per 8-12s against visits lasting 5-19s and
+        people walked through unannounced.
+
+        Only evidence gathered since the last look counts, so a single
+        published frame can ring the alarm exactly once, and never later.
+        """
+        ctx = getattr(self._runtime, "context", None)
+        recent = getattr(ctx, "recent_events", None)
+        if recent is None:
+            return False
+        try:
+            events = recent(camera_id=cam, window_seconds=self._tier0_max_age)
+        except Exception:            # a read of a ring buffer must never
+            return False             # take the alarm loop down with it
+        # Judged-already, or too old to mean "now". Checked here and not left
+        # to the ring's own windowing: whether evidence is current is the
+        # safety property of this function, not a collaborator's to guarantee.
+        floor_ = max(alarm.last_tier0_at.get(cam, 0.0), now - self._tier0_max_age)
+        for ev in events or ():                      # newest first
+            if getattr(ev, "adapter", None) != "tier0":
+                continue
+            seen = float(getattr(ev, "received_at", 0.0) or 0.0)
+            if seen <= floor_:
+                break        # this and everything older is stale or judged
+            tracks = (getattr(ev, "raw", None) or {}).get("tracks") or []
+            if not tracks:
+                # Tier-0 publishes its GATE decisions — the audit of
+                # non-events — on the same adapter and into the same ring as
+                # detections, and they carry no tracks. They are also more
+                # frequent, so reading only the newest Tier-0 record meant
+                # almost always reading an empty one and concluding nobody was
+                # there. An empty record is not evidence of absence; skip past
+                # it to the last record that actually looked.
+                continue
+            if any(str(t.get("label") or "").strip().lower() == alarm.target
+                   for t in tracks if isinstance(t, dict)):
+                alarm.last_tier0_at[cam] = seen
+                return True
+        return False
+
     async def _poll(self, alarm: Alarm, cam: str) -> None:
         import time
 
-        try:
-            frame = await self._runtime.context.get_frame(cam, allow_pinned=False)
-            resp = await self._runtime.detection_client.infer(frame_jpeg=frame)
-        except Exception as exc:
-            logger.info("alarm #%d: poll of %s failed (%s)", alarm.id, cam, exc)
-            return
-        detections = (resp.get("result") or {}).get("detections") or []
-        present = self._runtime.monitors._count_target(detections, alarm.target) > 0
         now = time.time()
+        source = "tier0"
+        present = self._tier0_says_present(alarm, cam, now)
+        if not present:
+            # Tier-0 has nothing to say — no coverage for this camera, the
+            # pipeline is down, or it genuinely sees nothing. Fall back to
+            # looking ourselves. Kept deliberately as a backstop rather than
+            # replaced: a safety feature must not go quiet just because one
+            # source did, and Tier-0 publishes nothing at all on a quiet
+            # scene, which is indistinguishable from Tier-0 having stopped.
+            try:
+                frame = await self._runtime.context.get_frame(cam, allow_pinned=False)
+                resp = await self._runtime.detection_client.infer(
+                    frame_jpeg=_letterbox_jpeg(frame))
+            except Exception as exc:
+                logger.info("alarm #%d: poll of %s failed (%s)", alarm.id, cam, exc)
+                return
+            detections = (resp.get("result") or {}).get("detections") or []
+            present = self._runtime.monitors._count_target(
+                detections, alarm.target) > 0
+            source = "poll"
+            now = time.time()        # the inference above is not instant
         if not present:
             return
         if alarm.ring in ("siren", "pulse"):
@@ -1775,7 +1935,8 @@ class AlarmManager:
             "emergency_contact": alarm.emergency_contact,
         })
         self._next_event_id += 1
-        logger.warning("ALARM #%d TRIGGERED (%s): %s", alarm.id, alarm.ring, text)
+        logger.warning("ALARM #%d TRIGGERED (%s, via %s): %s",
+                       alarm.id, alarm.ring, source, text)
         self._runtime.notifier.fire({
             "type": "alarm", "title": alarm.name, "text": text,
             "camera": cam,
@@ -5549,6 +5710,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         import time as _t
         t0 = _t.perf_counter()
         runtime.tools.last_cameras_used = []
+        runtime.tools.last_evidence_frames = []
         # Fresh frame per question (see /converse): each turn sees the current
         # moment, not a frame cached from a question seconds ago.
         runtime.context.invalidate_frame_cache()
@@ -5712,6 +5874,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         #    agent, Hey-Siri style: she acknowledges, and the UI then treats the
         #    NEXT utterance as the question without needing the wake word again.
         runtime.tools.last_cameras_used = []
+        runtime.tools.last_evidence_frames = []
         armed = bool(require_wake and not question)
         if armed:
             reply = "Yes?"
