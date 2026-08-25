@@ -11,7 +11,8 @@ or the stored RTSP URL as a fallback). So the Tier-0 service needs **no new
 server endpoint**: it consumes the exact frame source OpenNVR already exposes.
 
 Stdlib-only (urllib); the opener is injectable for tests. Discovery failure
-returns ``[]`` so the manager keeps its current workers and retries next tick.
+returns ``None`` — distinct from ``[]`` (genuinely no cameras) — so the
+manager keeps its current workers and retries next tick.
 """
 from __future__ import annotations
 
@@ -45,17 +46,17 @@ class HttpCameraProvider:
         self._opener = opener or urllib.request.urlopen
         self.timeout = timeout
 
-    def list_cameras(self) -> list[CameraSpec]:
+    def list_cameras(self) -> list[CameraSpec] | None:
         req = urllib.request.Request(f"{self.base_url}{self.path}")
         if self.api_key:
             req.add_header("X-Internal-Api-Key", self.api_key)
         try:
             with self._opener(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            return [_to_spec(c) for c in data.get("cameras", [])]
         except Exception:
             log.warning("camera discovery failed at %s%s", self.base_url, self.path, exc_info=True)
-            return []
-        return [_to_spec(c) for c in data.get("cameras", [])]
+            return None
 
 
 def _default_fps() -> int:
@@ -152,12 +153,15 @@ def _to_spec(c: dict) -> CameraSpec:
     # is honoured if the endpoint ever adds per-camera opt-out.
     labels, assignment_analyze = _assignment_view(c)
     # Core's numeric Camera.id, sent alongside the "cam{id}" handle — the
-    # events store keys on the number (see CameraSpec.nvr_camera_id).
+    # events store keys on the number (see CameraSpec.nvr_camera_id). The
+    # str() round-trip rejects bools/floats (int(True) == 1 would file
+    # events under camera 1) instead of silently accepting them.
+    handle = str(c.get("camera_id"))
     try:
-        nvr_id = int(c["open_nvr_camera_id"])
+        nvr_id = int(str(c["open_nvr_camera_id"]))
+        _warned_no_nvr_id.discard(handle)   # healed — re-warn if it breaks again
     except (KeyError, TypeError, ValueError):
         nvr_id = None
-        handle = str(c.get("camera_id"))
         if handle not in _warned_no_nvr_id:
             _warned_no_nvr_id.add(handle)
             log.warning(

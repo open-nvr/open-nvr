@@ -134,12 +134,14 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
     assert _to_spec(cam).fps == 2
 
 
-def test_provider_returns_empty_on_failure():
+def test_provider_returns_none_on_failure():
     def boom(req, timeout=None):
         raise OSError("connection refused")
 
     prov = HttpCameraProvider("http://core:8000", opener=boom)
-    assert prov.list_cameras() == []                    # never raises; retries next tick
+    # None (not []) — the manager must be able to tell "discovery failed,
+    # keep current workers" apart from "genuinely no cameras, stop all".
+    assert prov.list_cameras() is None
 
 
 # ── Assignments → per-camera labels + opt-in skip (slice 3) ─────────

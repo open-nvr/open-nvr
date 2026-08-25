@@ -59,16 +59,17 @@ def _core_camera_id(v: Visit) -> int:
     Prefers the explicit ``nvr_camera_id`` threaded from the provider;
     falls back to parsing the string handle ("cam1"/"cam-1"/"1" → 1) so
     visits from older specs still land instead of failing on int('cam1').
-    The fallback is a guess about a format core owns, so it WARNs — a
-    handle whose digits are not the DB id would file history under the
-    wrong camera.
+    The fallback is a guess about a format core owns — a handle whose
+    digits are not the DB id would file history under the wrong camera —
+    but the provider already WARNed once per camera when the spec lost its
+    id, so per-visit noise stays at debug.
     """
     if v.nvr_camera_id is not None:
         return v.nvr_camera_id
     m = re.fullmatch(r"(?:cam[-_]?)?(\d+)", str(v.camera_id).strip())
     if m is None:
         raise ValueError(f"no numeric core camera id for {v.camera_id!r}")
-    log.warning(
+    log.debug(
         "visit for %s posted with handle-parsed camera id %s — spec carried "
         "no open_nvr_camera_id", v.camera_id, m.group(1),
     )

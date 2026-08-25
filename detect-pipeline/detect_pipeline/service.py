@@ -25,7 +25,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .detector import DetectorAdapter, StubDetector
@@ -129,7 +129,8 @@ def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
 
 
 class CameraProvider(Protocol):
-    def list_cameras(self) -> list[CameraSpec]:
+    def list_cameras(self) -> list[CameraSpec] | None:
+        """The desired camera set; None = discovery failed (keep current)."""
         ...
 
 
@@ -506,12 +507,12 @@ class WorkerManager:
         self._visit_poster = visit_poster
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
-        # The spec each running worker was built with — reconcile compares
-        # ONLY the fields a worker bakes in at start (today: labels and
-        # nvr_camera_id) so a settings-page change takes effect within one
-        # tick. Deliberately not whole-spec equality: frame_url carries a
-        # freshly minted JWT on every fetch and would restart every worker
-        # every tick.
+        # The spec each running worker was built with — reconcile restarts
+        # on any change to the fields a worker bakes in at start (see
+        # _baked: everything except the volatile substream_url, whose JWT
+        # is re-minted on every fetch, and nvr_camera_id, compared
+        # asymmetrically) so a settings-page change takes effect within
+        # one tick.
         self._specs: dict[str, CameraSpec] = {}
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
@@ -548,12 +549,26 @@ class WorkerManager:
             self._router = router
         self._stop_all()
 
+    @staticmethod
+    def _baked(spec: CameraSpec) -> CameraSpec:
+        """The spec with volatile fields masked — what a restart-worthy
+        change means. substream_url carries a freshly minted JWT on every
+        fetch; nvr_camera_id is compared separately (asymmetric: a fetch
+        that degrades it to None must not bounce the worker)."""
+        return replace(spec, substream_url="", nvr_camera_id=None)
+
     def reconcile(self) -> None:
         """Start workers for new analyze-enabled cameras, stop the rest."""
         if not self.enabled:
             self._stop_all()
             return
-        desired = {c.camera_id: c for c in self.provider.list_cameras() if c.analyze}
+        cams = self.provider.list_cameras()
+        if cams is None:
+            # Discovery failed (core briefly down / timeout) — an empty
+            # answer would read as "no cameras" and tear down every worker.
+            # Keep what's running; the next tick retries.
+            return
+        desired = {c.camera_id: c for c in cams if c.analyze}
 
         for cid in list(self._workers):
             worker = self._workers[cid]
@@ -561,8 +576,12 @@ class WorkerManager:
                 cid in desired
                 and self._specs.get(cid) is not None
                 and (
-                    desired[cid].labels != self._specs[cid].labels
-                    or desired[cid].nvr_camera_id != self._specs[cid].nvr_camera_id
+                    self._baked(desired[cid]) != self._baked(self._specs[cid])
+                    or (
+                        desired[cid].nvr_camera_id is not None
+                        and desired[cid].nvr_camera_id
+                        != self._specs[cid].nvr_camera_id
+                    )
                 )
             )
             if cid not in desired or not worker.is_alive() or spec_changed:
