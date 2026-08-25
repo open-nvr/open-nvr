@@ -171,18 +171,52 @@ including one on another LAN machine. The installer offers this as the
 ## What the installer suggests (hardware-aware defaults)
 
 The installer detects the machine that will RUN the LLM (host vs the
-Docker VM) and sizes the default model accordingly. Suggestions only —
-type any Ollama model at the prompt. Keep this table in sync with
-`suggest_llm_model` / `suggest_vlm_model` in `scripts/install.sh` and
+Docker VM) and sizes the defaults to it. Suggestions only — type any
+Ollama model at the prompt. Keep this table in sync with
+`suggest_models` / `suggest_whisper_model` in `scripts/install.sh` and
 the equivalent logic in `scripts/install.ps1`.
 
-| Where the LLM runs | Hardware | LLM default | VLM default (ollamavlm) |
-|---|---|---|---|
-| Host, Apple Silicon / NVIDIA | ≥ 8 GB RAM | `qwen3:1.7b` | `gemma3:4b` |
-| Host, GPU, < 8 GB | | `qwen2.5:1.5b` | `moondream` |
-| Any CPU-only | ≥ 16 GB + ≥ 8 cores | `qwen3:1.7b` | `gemma3:4b` (≥ 8 GB) |
-| Any CPU-only | smaller | `qwen2.5:0.5b` | `moondream` |
-| macOS, bundled container | sized to the Docker VM's RAM, always CPU tier | | |
+Both Ollama models are **resident at once** — the shipped compose sets
+`OLLAMA_KEEP_ALIVE=-1` so answers stay snappy — and they share the box
+with the OpenNVR stack. So the installer budgets them **together**:
+
+```
+model budget = RAM − 3 GB (the stack: 13 containers hold ~2 GB RSS,
+                           plus Docker Desktop's VM overhead)
+                   − 2 GB (the operator's own machine)
+```
+
+The LLM is chosen first, from the largest *tested* catalog entry that
+fits both the budget and a speed ceiling; the vision model gets what is
+left. When nothing is left, scene description falls back to the
+`moondream` **adapter** — a ~0.5b-int8 build in its own container, far
+smaller than anything in the Ollama catalog and still a real VQA answer.
+
+Sizing them independently is what put a 4 GB vision model on 8 GB
+machines: `gemma3:4b` was gated on `RAM ≥ 8` alone, so an 8 GB box got
+5 GB of models on top of a 3 GB stack and thrashed.
+
+| Machine | LLM | Vision | Adapter | Whisper |
+|---|---|---|---|---|
+| 4 GB / 2 cores, CPU | `qwen2.5:0.5b` | — | `moondream` | `tiny.en` |
+| 8 GB / 4 cores, CPU | `qwen2.5:1.5b` | — | `moondream` | `base.en` |
+| 8 GB / 8 threads, CPU | `qwen3:1.7b` | — | `moondream` | `base.en` |
+| 16 GB / 8 threads, CPU | `qwen3:1.7b` | `gemma3:4b` | `ollamavlm` | `small.en` |
+| 16 GB / 4 cores, CPU | `qwen2.5:1.5b` | `gemma3:4b` | `ollamavlm` | `base.en` |
+| 32 GB / 16 cores, CPU | `qwen3:1.7b` | `gemma3:4b` | `ollamavlm` | `small.en` |
+| 8 GB, GPU | `qwen3:1.7b` | — | `moondream` | `base.en` |
+| 16 GB, GPU | `qwen2.5:3b` | `gemma3:4b` | `ollamavlm` | `small.en` |
+| 32 GB, Apple Silicon | `qwen2.5:3b` | `gemma3:4b` | `ollamavlm` | `small.en` |
+| detection failed | `qwen2.5:0.5b` | — | `moondream` | `tiny.en` |
+
+Detection failing sizes DOWN, never up: an unknown machine is treated as
+a small one, because the cost of guessing high is an install that does
+not run.
+
+CPU-only machines are tiered by cores as well as RAM, because "it fits"
+and "it answers before the operator gives up" are different questions —
+and a machine with fewer than 4 cores skips the Ollama vision path
+entirely, whatever the RAM arithmetic says.
 
 Two constraints shape the tiers. The **floor** is tool-calling quality:
 below ~1.5b the agent misroutes tools noticeably, so the tiny tier is
