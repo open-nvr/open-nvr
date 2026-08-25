@@ -171,3 +171,59 @@ def test_forced_sub_uses_it_even_with_hardware_decode(client, monkeypatch):
     # never turns a derivation guess into the detector's source either.
     assert cams["cam2"]["source"] == "mediamtx"
     assert cams["cam3"]["source"] == "mediamtx"
+
+
+# ── Capability handshake: the reader's ACTUAL decode ability wins ───
+#
+# Handing out the main stream is a bet that the reader has a GPU. That bet
+# used to be placed on a setting BOTH services read independently, so a
+# deployment with DETECT_HWACCEL=vaapi but no /dev/dri passed through got the
+# main stream AND software decode — several times the intended cost, silently.
+# The reader now reports what it RESOLVED and we believe it over the setting.
+
+
+def _cams_hw(client, hwaccel: str | None) -> dict[str, dict]:
+    headers = {} if hwaccel is None else {"X-Detect-Hwaccel": hwaccel}
+    body = client.get("/internal/camera-agent/cameras", headers=headers).json()
+    return {c["camera_id"]: c for c in body["cameras"]}
+
+
+def test_reported_cpu_keeps_the_substream_despite_the_setting(client, monkeypatch):
+    """THE trap this closes: configured for vaapi, but the container cannot
+    see the render node, so the pipeline reports cpu — it must not be handed
+    full-resolution video it can only decode in software."""
+    monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")
+    cams = _cams_hw(client, "cpu")
+    assert cams["cam1"]["source"] == "mediamtx-sub"
+    assert cams["cam1"]["frame_url"].endswith("-sub")
+
+
+def test_reported_hwaccel_earns_the_main_stream(client, monkeypatch):
+    """The converse: the reader really can hardware-decode, so full-res is
+    affordable even though the server-side setting was never updated."""
+    monkeypatch.setattr(settings, "detect_hwaccel", "cpu")
+    cams = _cams_hw(client, "vaapi")
+    assert cams["cam1"]["source"] == "mediamtx"
+    assert not cams["cam1"]["frame_url"].endswith("-sub")
+
+
+def test_absent_header_preserves_the_pre_handshake_behaviour(client, monkeypatch):
+    """The endpoint is shared with the camera-agent, which does not report a
+    capability — those callers must keep reading the setting."""
+    monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")
+    assert _cams_hw(client, None)["cam1"]["source"] == "mediamtx"
+    monkeypatch.setattr(settings, "detect_hwaccel", "cpu")
+    assert _cams_hw(client, None)["cam1"]["source"] == "mediamtx-sub"
+
+
+def test_forced_tap_modes_still_override_the_report(client, monkeypatch):
+    """An explicit operator choice outranks the negotiation entirely."""
+    monkeypatch.setattr(settings, "inference_tap_stream", "sub")
+    assert _cams_hw(client, "vaapi")["cam1"]["source"] == "mediamtx-sub"
+    monkeypatch.setattr(settings, "inference_tap_stream", "main")
+    assert _cams_hw(client, "cpu")["cam1"]["source"] == "mediamtx"
+
+
+def test_reported_capability_is_case_and_space_tolerant(client, monkeypatch):
+    monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")
+    assert _cams_hw(client, " CPU ")["cam1"]["source"] == "mediamtx-sub"

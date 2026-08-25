@@ -39,17 +39,26 @@ class HttpCameraProvider:
         path: str = DEFAULT_PATH,
         opener=None,
         timeout: float = 10.0,
+        hwaccel: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.path = path
         self._opener = opener or urllib.request.urlopen
         self.timeout = timeout
+        # Our RESOLVED decode backend, sent with every discovery request. Core
+        # picks the tap stream from it: full-resolution main only when the
+        # reader can genuinely hardware-decode. Must be the effective value
+        # (post resolve_hwaccel), never the configured one — reporting an
+        # intent we cannot honour is the whole bug this closes.
+        self.hwaccel = hwaccel
 
     def list_cameras(self) -> list[CameraSpec] | None:
         req = urllib.request.Request(f"{self.base_url}{self.path}")
         if self.api_key:
             req.add_header("X-Internal-Api-Key", self.api_key)
+        if self.hwaccel:
+            req.add_header("X-Detect-Hwaccel", self.hwaccel)
         try:
             with self._opener(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))

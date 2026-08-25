@@ -47,7 +47,7 @@ import threading
 from dataclasses import dataclass
 
 from .bus import EventSink, GateEventSink
-from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S
+from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, resolve_hwaccel
 from .providers import HttpCameraProvider
 from .service import WorkerManager
 
@@ -373,7 +373,20 @@ def _detector_factory(cfg: ServiceConfig):
 
 
 def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
-    provider = HttpCameraProvider(cfg.core_url, api_key=cfg.api_key)
+    # Resolve the decode backend ONCE here and tell core what we can actually
+    # do. Core hands out the full-resolution main stream only when the reader
+    # really can hardware-decode, so this must be the post-resolution value:
+    # claiming vaapi without the render node is what used to buy us the main
+    # stream AND software decode.
+    effective_hwaccel, hw_downgrade = resolve_hwaccel(cfg.hwaccel, device=cfg.device)
+    if hw_downgrade:
+        log.warning(
+            "hwaccel %r unusable — reporting 'cpu' to core so it keeps us on "
+            "the substream: %s", cfg.hwaccel, hw_downgrade,
+        )
+    provider = HttpCameraProvider(
+        cfg.core_url, api_key=cfg.api_key, hwaccel=effective_hwaccel.value,
+    )
     # Region crops match the detector input so the model sees full-detail crops.
     model_size = cfg.onnx_input if cfg.detector == "onnx" else cfg.model_size
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
