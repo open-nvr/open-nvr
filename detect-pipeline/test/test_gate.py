@@ -193,3 +193,20 @@ def test_gate_event_sink_skips_empty_by_default():
     GateEventSink(lambda s, d: sent.append(s)).publish(
         "cam_1", Gate().evaluate([], now=0.0), _Frame())
     assert sent == []
+
+
+def test_critical_class_in_cooldown_is_labelled_cooldown_not_stationary():
+    """Critical classes bypass stationary suppression and are rate-limited by
+    cooldown only. A stationary critical object in cooldown fell through to
+    the stationary check, so the audit said "we suppress these" — the opposite
+    of the contract — and inflated suppressions{reason="stationary"}."""
+    g = Gate(GateConfig(shadow=False, escalate_cooldown_s=30,
+                        critical_classes=frozenset({"person"})))
+
+    first = g.evaluate([mk(label="person")], now=0.0).decisions[0]
+    assert first.escalate and first.reason == "critical_class"
+
+    # motionless past stationary_threshold -> the track reads as stationary
+    d = g.evaluate([mk(label="person", motionless=60)], now=5.0).decisions[0]
+    assert d.escalate is False
+    assert d.reason == "cooldown", d.reason

@@ -503,14 +503,14 @@ CPU than steady state. `Frame.ts` is `time.monotonic()` at *read*
 completion, not capture time, so staleness is structurally unmeasurable
 today; measuring it is a prerequisite for any load-shedding.
 
-### 13g. Tentative tracks consume the cap while invisible — STILL OPEN
+### 13g. Tentative tracks consume the cap while invisible — ✅ FIXED
 
 `max_tracks` counts all internal tracks; `tier0_tracks_active` reports
 only confirmed ones. A camera can refuse new tracks
 (`tier0_track_spawns_dropped` rising) while the gauge that is supposed to
 explain why looks healthy.
 
-### 13h. Docs that overstate the code — STILL OPEN
+### 13h. Docs that overstate the code — ✅ FIXED
 
 - `README` calls adaptive-decode promotion "sub-second, no backoff"; the
   real path is up to a GOP plus process teardown and a keyframe wait.
@@ -545,21 +545,20 @@ counted as feed restarts; a stop signalled during source setup being lost;
 the Tier-1 dispatcher leaking a thread pool per gate-mode toggle; decode
 flips blocking the frame loop up to 3s; and the rfdetr crop-size mismatch.
 
-**Still open, lower severity:**
+**Also fixed in a follow-up pass:** per-series metric removal (a deleted
+camera no longer alerts forever), the drop-oldest double-drop race, the
+unreachable `max_backoff_seconds`, the `"stationary"`-vs-`"cooldown"`
+suppression label, and the `"unconfirmed"` reason (documented as a
+belt-and-braces path for callers that feed unfiltered tracks, not a
+production rail).
 
-* `Metrics` has no per-series removal, so a deleted camera's
-  `tier0_worker_up{camera=X}` stays at 0 forever and alerts on a camera that
-  no longer exists. `forget_camera` only clears the `/health` input.
-* The new drop-oldest path in `VisitPoster.submit` makes `submit` a queue
-  CONSUMER. Two workers hitting a full queue concurrently can lose two visits
-  while counting one. Rare; it undercounts the metric it exists to make honest.
-* `max_backoff_seconds` is unreachable dead config — `stream()` gives up at
-  `max_fruitless_restarts` before the delay ever escalates that far.
-* `gate.py` labels a critical-class track suppressed in cooldown as
-  `"stationary"` rather than `"cooldown"`, over-counting that reason.
-* The `"unconfirmed"` visit-drop reason cannot fire: `VisitLifecycle` is fed
-  `Tracker.tracks`, which is confirmed-only.
+**Still open — deliberately deferred:**
+
+* **13f overload behaviour.** Needs real capture timestamps to measure
+  staleness at all: `Frame.ts` is `time.monotonic()` at READ completion, so
+  "how far behind are we" is currently unanswerable, and any load-shedding
+  has to be built on top of that. This is design work, not a patch.
 * `_StderrTail.text()` iterates a deque another thread appends to, and
   `running_ids()` iterates `_workers` from the health thread. Both are safe
-  under CPython's GIL (single C-level calls) but would race on a
-  free-threaded build.
+  under CPython's GIL (single uninterruptible C-level calls) and would only
+  race on a free-threaded build, which this service does not target.

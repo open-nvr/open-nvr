@@ -8,9 +8,11 @@ when the visit becomes history: one POST to core's canonical event store
 (RFC-0001 C1) with the lifecycle summary and the crop as JPEG.
 
 Design constraints honoured here:
-* the worker loop must never block on core → posts go through a small
+* the worker loop must never block ON CORE → the POST goes through a small
   bounded queue drained by one daemon thread; when the queue is full the
-  oldest visit is dropped (and counted) rather than stalling detection;
+  oldest visit is dropped (and counted) rather than stalling detection.
+  Note the best-frame JPEG encode is NOT off-thread: _finish() encodes on
+  the worker's frame loop, so a track ending costs one imencode there;
 * per-track grain, not per-frame — a busy camera posts a handful of visits
   per hour, so stdlib urllib + one thread is deliberately boring;
 * best-effort: core being down loses history, never detection. Failures
@@ -97,6 +99,7 @@ class VisitPoster:
         self._q: queue.Queue[Visit] = queue.Queue(maxsize=maxsize)
         self._dropped = 0
         self._drop_lock = threading.Lock()
+        self._evict_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     # -- worker-side (never blocks) ---------------------------------
@@ -112,16 +115,29 @@ class VisitPoster:
         # always promised. put_nowait alone dropped the NEWEST, so a backlog
         # meant keeping a queue full of stale visits and throwing away
         # everything currently happening — the opposite of useful history.
+        #
+        # Serialised: submit is called from every worker thread and this path
+        # makes it a queue CONSUMER as well as a producer. Two workers
+        # overflowing at once could each pull one off and only one win the put
+        # back, silently losing the other thread's evicted visit while counting
+        # a single drop.
         evicted: Visit | None = None
-        try:
-            evicted = self._q.get_nowait()
-        except queue.Empty:                  # drained between the two calls
-            pass
-        try:
-            self._q.put_nowait(visit)
-            queued = True
-        except queue.Full:                   # refilled underneath us; give up
-            queued = False
+        with self._evict_lock:
+            try:
+                evicted = self._q.get_nowait()
+            except queue.Empty:              # drained between the two calls
+                pass
+            try:
+                self._q.put_nowait(visit)
+                queued = True
+            except queue.Full:               # refilled underneath us; give up
+                queued = False
+                if evicted is not None:      # put the old one back, not the new
+                    try:
+                        self._q.put_nowait(evicted)
+                        evicted = None
+                    except queue.Full:       # pragma: no cover - drained again
+                        pass
 
         lost = evicted if queued else visit
         with self._drop_lock:                # plain += raced across N workers
@@ -257,6 +273,10 @@ class VisitLifecycle:
     def _finish(self, tid, v) -> Visit | None:
         end = v.get("end", v["start"])
         if not v["confirmed"]:
+            # Belt-and-braces only: observe() is fed Tracker.tracks, which is
+            # confirmed-only, so this cannot fire through the production path.
+            # Kept for callers that feed unfiltered tracks (bench, replay);
+            # it is NOT the junk-suppression rail — min_duration_s below is.
             record_visit_dropped(self.camera_id, "unconfirmed")
             return None
         if (end - v["start"]) < self.min_duration_s:

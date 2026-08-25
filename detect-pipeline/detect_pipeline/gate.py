@@ -170,6 +170,13 @@ class Gate:
                 return out(True, "critical_class")
             if in_zone:
                 return out(True, "in_zone")
+        elif is_critical or in_zone:
+            # It WOULD have been forced through; the only thing holding it back
+            # is the rate limit. Falling into the normal path below labelled a
+            # stationary critical object "stationary", which reads as "we
+            # suppress these" — the opposite of the documented contract, and it
+            # inflated gate_suppressions_total{reason="stationary"}.
+            return out(False, "cooldown")
 
         # ── normal path ──
         if not interesting:
