@@ -91,6 +91,39 @@ def frame_size_bytes(width: int, height: int) -> int:
     return width * height * 3 // 2
 
 
+# Backends that decode through a device NODE the container must have been
+# given. docker-compose ships the `devices:` mapping COMMENTED OUT, so
+# "DETECT_HWACCEL=vaapi" without also uncommenting it is the single most
+# likely misconfiguration — and it would fail every camera at once.
+_NEEDS_DEVICE_NODE = frozenset({HwAccel.VAAPI, HwAccel.QSV, HwAccel.RPI, HwAccel.RKMPP})
+
+
+def resolve_hwaccel(
+    requested: str | None, *, device: str = "/dev/dri/renderD128", _exists=None
+) -> tuple[HwAccel, str | None]:
+    """The hwaccel we can ACTUALLY use, plus a reason if it was downgraded.
+
+    Degrading to CPU costs frames-per-core; failing to degrade costs the
+    entire fleet, because ffmpeg exits immediately on a missing render node
+    and every worker just restart-loops. Same "degrade loudly, never
+    crash-loop" rule the decode-skip parser follows.
+    """
+    import os as _os
+
+    exists = _exists or _os.path.exists
+    name = (requested or "cpu").strip().lower() or "cpu"
+    try:
+        accel = HwAccel(name)
+    except ValueError:
+        return HwAccel.CPU, f"unknown hwaccel {requested!r}"
+    if accel in _NEEDS_DEVICE_NODE and not exists(device):
+        return HwAccel.CPU, (
+            f"{accel.value} needs {device}, which this container cannot see "
+            f"(pass it through with `devices: - /dev/dri:/dev/dri`)"
+        )
+    return accel, None
+
+
 def decode_args(hwaccel: HwAccel, *, device: str = "/dev/dri/renderD128",
                 codec: str = "h264", width: int = 0, height: int = 0) -> list[str]:
     """Args to place before ``-i`` for the given backend."""

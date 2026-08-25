@@ -399,6 +399,12 @@ services:
     # DETECT_HWACCEL=vaapi in .env (uncomment):
     # devices:
     #   - /dev/dri:/dev/dri
+    # Setting DETECT_HWACCEL without this mapping is the expensive mistake:
+    # core reads the same setting as "this box has a GPU" and switches these
+    # cameras to the full-resolution MAIN stream, while the pipeline — unable
+    # to see the render node — falls back to software decode. It warns per
+    # camera rather than failing, but that combination costs several times
+    # what plain cpu decode on the substream does.
     networks:
       - opennvr_internal
 

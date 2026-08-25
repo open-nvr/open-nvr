@@ -262,3 +262,51 @@ def test_rtsp_timeout_flag_is_accepted_by_real_ffmpeg():
     # It should fail to CONNECT (port 9 is discard/closed), proving the
     # option parsed and ffmpeg got as far as dialling.
     assert proc.returncode != 0
+
+
+# ── hwaccel resolution (degrade loudly, never fail every camera) ────
+
+def test_resolve_hwaccel_keeps_a_usable_backend():
+    from detect_pipeline.ffmpeg_presets import HwAccel, resolve_hwaccel
+
+    accel, why = resolve_hwaccel("vaapi", _exists=lambda p: True)
+    assert (accel, why) == (HwAccel.VAAPI, None)
+    assert resolve_hwaccel("cpu", _exists=lambda p: False)[0] is HwAccel.CPU
+
+
+def test_resolve_hwaccel_degrades_when_the_render_node_is_missing():
+    """docker-compose ships `devices:` COMMENTED OUT, so DETECT_HWACCEL=vaapi
+    without uncommenting it is the likeliest misconfiguration — and ffmpeg
+    would exit instantly on every camera, not just one."""
+    from detect_pipeline.ffmpeg_presets import HwAccel, resolve_hwaccel
+
+    accel, why = resolve_hwaccel("vaapi", _exists=lambda p: False)
+    assert accel is HwAccel.CPU
+    assert why and "/dev/dri" in why
+
+
+def test_resolve_hwaccel_degrades_on_an_unknown_name():
+    from detect_pipeline.ffmpeg_presets import HwAccel, resolve_hwaccel
+
+    accel, why = resolve_hwaccel("vaapii", _exists=lambda p: True)
+    assert accel is HwAccel.CPU and why
+    # empty/None mean "unset", not "broken"
+    assert resolve_hwaccel(None)[0] is HwAccel.CPU
+    assert resolve_hwaccel("")[1] is None
+
+
+def test_nvidia_needs_no_device_node():
+    from detect_pipeline.ffmpeg_presets import HwAccel, resolve_hwaccel
+
+    accel, why = resolve_hwaccel("nvidia", _exists=lambda p: False)
+    assert (accel, why) == (HwAccel.NVIDIA, None)
+
+
+def test_decode_command_carries_hwaccel_args_when_resolved():
+    from detect_pipeline.ffmpeg_presets import HwAccel, build_decode_command
+
+    cmd = build_decode_command("rtsp://h/cam", width=704, height=576, fps=2,
+                               hwaccel=HwAccel.VAAPI, device="/dev/dri/renderD128")
+    assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
+    assert "/dev/dri/renderD128" in cmd
+    assert "scale_vaapi" in cmd[cmd.index("-vf") + 1]

@@ -178,7 +178,7 @@ def _to_spec(c: dict) -> CameraSpec:
         width=c.get("width"),
         height=c.get("height"),
         fps=int(c.get("fps", _default_fps())),
-        hwaccel=c.get("hwaccel", "cpu"),
+        hwaccel=(c.get("hwaccel") or None),   # None = not declared → global applies
         labels=labels,
     )
 

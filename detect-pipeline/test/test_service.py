@@ -311,3 +311,45 @@ def test_reconcile_keeps_workers_when_discovery_fails():
     prov.specs = []                              # genuinely no cameras
     mgr.reconcile()
     assert all(w.stopped for w in made)
+
+
+# ── DETECT_HWACCEL actually reaching the workers ────────────────────
+
+def test_service_wide_hwaccel_reaches_the_worker():
+    """The regression this pins: DETECT_HWACCEL was parsed and LOGGED but
+    never passed to WorkerManager, so every camera decoded on CPU no matter
+    what was configured — while core, keying off the same setting, handed
+    the pipeline the full-resolution MAIN stream."""
+    from detect_pipeline.service import CameraWorker
+
+    mgr = WorkerManager(
+        _FakeProvider([_spec("a")]), _FakeSink(),
+        hwaccel="vaapi", device="/dev/dri/renderD128",
+    )
+    worker = mgr._default_factory(_spec("a"), _FakeSink())
+    assert isinstance(worker, CameraWorker)
+    assert worker.hwaccel == "vaapi"
+    assert worker.device == "/dev/dri/renderD128"
+
+
+def test_hwaccel_precedence_camera_declaration_then_global():
+    from detect_pipeline.service import hwaccel_for
+
+    # Nothing declared per camera → the service-wide value applies. This is
+    # the normal case: core does not send `hwaccel` per camera.
+    assert hwaccel_for(_spec("a"), "vaapi") == "vaapi"
+    # A per-camera declaration wins, mirroring allowed_labels_for.
+    assert hwaccel_for(_spec("a", hwaccel="qsv"), "vaapi") == "qsv"
+    assert hwaccel_for(_spec("a"), "cpu") == "cpu"
+
+
+def test_worker_degrades_to_cpu_when_the_device_is_absent():
+    from detect_pipeline.ffmpeg_presets import HwAccel
+
+    mgr = WorkerManager(
+        _FakeProvider([_spec("a")]), _FakeSink(),
+        hwaccel="vaapi", device="/definitely/not/here",
+    )
+    worker = mgr._default_factory(_spec("a"), _FakeSink())
+    # Degrades rather than failing every camera at ffmpeg spawn.
+    assert worker._effective_hwaccel() is HwAccel.CPU
