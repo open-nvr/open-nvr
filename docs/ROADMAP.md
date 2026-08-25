@@ -160,7 +160,57 @@ The headline themes are *new AI capabilities* and *operator polish*.
   awkward.
 - **Multi-host deployment story.** v0.1 scales fine to ~50 cameras on
   one host; v0.2 documents the multi-host pattern with KAI-C federation
-  for installs that span sites.
+  for installs that span sites. See **Horizontal sharding for Tier-0**
+  below for the piece that has to land first.
+
+### Horizontal sharding for Tier-0
+
+**The gap.** `detect-pipeline` starts a worker for *every* camera the
+discovery endpoint returns. There is no shard key, camera allowlist, or
+replica index anywhere in the service, so a second instance is not a way
+to split the fleet — both instances would analyse **every** camera. That
+is duplicated decode and inference, duplicated NATS events on the same
+subjects, and duplicated rows in the events store (track ids are assigned
+per process, so the `uq_events_visit` constraint does not dedupe them).
+Scaling past one host today means a bigger host, not another one.
+
+**The shape of the fix.** Give each instance a stable slice of the fleet
+and let discovery filter to it:
+
+```
+DETECT_SHARD=<index>/<total>     # e.g. 0/3, 1/3, 2/3
+```
+
+with the assignment made in `providers._to_spec`/`list_cameras`, keyed by
+a *stable* camera identifier (`open_nvr_camera_id`, not list position, so
+adding a camera does not reshuffle every other one). `<total>` of 1 —
+the default — must be byte-identical to today's behaviour.
+
+**What makes it more than a modulo.** The naive version is a few lines;
+the parts that need design are:
+
+- **Coverage proof.** A camera silently owned by *no* shard is worse than
+  one owned by two — it is simply never analysed, and nothing currently
+  reports "this camera has no worker anywhere". Core sees every request,
+  so it is the natural place to notice a camera no shard claimed.
+- **Rebalancing.** Changing `<total>` moves cameras between hosts. Their
+  in-flight tracks end, best frames are lost, and both hosts briefly
+  analyse the moved cameras. Acceptable on an explicit operator action;
+  it should not happen because one host restarted.
+- **Failure of a shard.** Nothing takes over that host's cameras. Either
+  accept it and alert (simplest, and honest), or move to leases — at
+  which point this stops being sharding and becomes cluster membership,
+  which is a much larger commitment.
+- **Interaction with the tap handshake.** Core picks main-vs-substream
+  from the reader's reported decode capability. Shards may have different
+  hardware, so that decision is already per-caller — worth confirming it
+  stays coherent when several readers share a camera list.
+
+**Why it is not in v0.1.** Single-host is a deliberate scope choice, and
+the honest ceiling is set by memory (one model per detector instance,
+pooled since v0.1) rather than by the absence of sharding. An operator at
+~50 cameras is served by a larger host; sharding matters at the point
+where multi-site federation does, which is exactly v0.2's remit.
 - **Adapter route enrichment.** KAI-C's `ADAPTER_REGISTRY` is currently
   a single-URL default; v0.2 supports per-task-class routing so
   operators with mixed adapter fleets get cleaner deployments.

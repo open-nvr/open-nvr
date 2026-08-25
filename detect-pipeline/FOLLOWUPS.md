@@ -413,3 +413,104 @@ family, FP32 vs INT8) needs the *same* aspects measured the *same* way, per mode
 one comparison table (per model: mAP, latency/fps, CPU/RAM, cameras/box). That table
 is Paper 01's evaluation section — build once, use twice. The live metrics half is
 done; the accuracy half waits on hardware, same as the shadow→enforce validation.
+
+---
+
+## 13. Known-open findings from the pre-0.1.4 hardening review
+
+The 0.1.4 sweep fixed the failures that lose footage or stall a camera.
+These were found in the same review and deliberately **not** fixed — they
+are recorded here so they are not rediscovered from scratch. Rough
+priority order; each is issue-ready.
+
+### 13a. The bus publish path reports success it cannot verify — ✅ FIXED
+
+`EventSink.publish` returns `True` unconditionally once it has handed the
+payload to the publisher, and `run.py`'s publish coroutine swallows every
+exception with `pass` and returns `None`. So:
+
+- `tier0_events_published_total` counts events that never left the
+  process, and
+- `record_sink_error` — added in 0.1.4 precisely so a bus outage is not
+  mistaken for a quiet scene — can essentially never fire on the NATS
+  path.
+
+**Fixed.** The publish fn returns a bool and `EventSink` propagates it
+(`None` still means "delivered as far as this transport knows", so simple
+fakes keep working — only an explicit `False` counts as not-published). A
+publish attempted with no connected client is counted rather than merely
+absent, since "published_total stopped climbing" alone cannot be told apart
+from every camera going quiet. Failures that happen AFTER hand-off are
+caught by a done-callback on the future, which was previously discarded.
+
+Honest limit that remains: `True` means the client accepted the payload,
+not that the broker acknowledged it — awaiting that would block the frame
+loop.
+
+### 13b. NATS disconnects permanently after 10 failed reconnects
+
+`max_reconnect_attempts: 10`, and nothing rebuilds the publisher
+afterwards — every camera's live events stop until the container is
+restarted. `/health` does surface it (`connected()` feeds the probe),
+which is the only reason this is not worse.
+
+### 13c. VisitPoster: unfair, serial, and drops the wrong end
+
+One instance and one drain thread serve the whole fleet, doing a blocking
+POST at a time. Specifically:
+
+- the docstring promises the **oldest** visit is dropped when the queue
+  fills; `put_nowait` drops the **newest**, so under sustained overload it
+  keeps 256 stale visits and discards everything current;
+- no per-camera fairness — one high-churn camera can occupy all 256 slots
+  and starve the rest;
+- `self._dropped += 1` is an unsynchronised read-modify-write across
+  worker threads (the Prometheus counter is correctly locked; only the
+  WARN's running total under-reports);
+- the drain loop has no outer guard, so an exception raised outside its
+  inner `try` kills the thread silently and **all** visit persistence
+  stops with no liveness signal.
+
+### 13d. Tier-1 dispatch has no per-camera fairness and no env knob
+
+`max_inflight=4` is hardcoded — not reachable from any environment
+variable — and permits are a pure race between workers. A camera with
+several escalating tracks takes all four in one frame. It drops rather
+than blocks and the drops are labelled per camera, so this degrades
+visibly; it is a fairness gap, not a stall.
+
+### 13e. `DETECT_CV_THREADS` does not cap the ORT backend
+
+`cv2.setNumThreads` bounds OpenCV only. An `onnxruntime` session with no
+`SessionOptions` defaults `intra_op_num_threads` to the core count, so
+the `DETECT_ONNX_BACKEND=ort` and `rfdetr` paths escape the service's
+only CPU governor. The 0.1.4 detector pool caps how many *sessions* are
+resident, which bounds the blast radius but does not set their width.
+
+### 13f. Overload converts to a reconnect storm rather than degrading
+
+There is no frame-freshness check and no drop-oldest path. When the box
+saturates, ffmpeg blocks on a full stdout pipe, MediaMTX drops the
+reader, ffmpeg exits and the source respawns — and a respawn costs more
+CPU than steady state. `Frame.ts` is `time.monotonic()` at *read*
+completion, not capture time, so staleness is structurally unmeasurable
+today; measuring it is a prerequisite for any load-shedding.
+
+### 13g. Tentative tracks consume the cap while invisible
+
+`max_tracks` counts all internal tracks; `tier0_tracks_active` reports
+only confirmed ones. A camera can refuse new tracks
+(`tier0_track_spawns_dropped` rising) while the gauge that is supposed to
+explain why looks healthy.
+
+### 13h. Docs that overstate the code
+
+- `README` calls adaptive-decode promotion "sub-second, no backoff"; the
+  real path is up to a GOP plus process teardown and a keyframe wait.
+- `README` recommends raising `DETECT_FPS` for finer granularity without
+  noting that it raises the track-confirmation bar (`fps // 2`
+  consecutive frames), so short visits get *harder* to record as you give
+  the box more CPU.
+- `events_poster`'s module docstring says the worker loop never blocks on
+  the events store; the best-frame JPEG encode runs in `_finish`, on the
+  worker thread. Only the HTTP POST is off-thread.

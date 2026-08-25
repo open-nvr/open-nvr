@@ -253,3 +253,29 @@ def test_build_manager_reports_cpu_when_the_render_node_is_missing():
                            "DETECT_HWACCEL_DEVICE": "/definitely/not/here"})
     mgr = build_manager(cfg, _Sink())
     assert mgr.provider.hwaccel == "cpu"
+
+
+# ── publish accounting: never count what did not reach the bus ──────
+
+def test_sink_reports_failure_when_the_transport_says_so():
+    """tier0_events_published_total counted events that never left the
+    process: the sink returned True once the payload was handed over, and a
+    NATS client that had given up reconnecting raised nothing at all — so
+    "no exception" read as "published" and a bus outage looked like a quiet
+    scene."""
+    from detect_pipeline.bus import EventSink
+
+    result = FrameResult(tracks=[_track()], calibrating=False)
+    assert EventSink(lambda s, d: False).publish("c", result, _frame()) is False
+    assert EventSink(lambda s, d: True).publish("c", result, _frame()) is True
+
+
+def test_sink_treats_a_none_returning_transport_as_delivered():
+    """Back-compat: simple fakes and no-op sinks return None, which must not
+    be read as failure. Only an explicit False counts as not-published."""
+    from detect_pipeline.bus import EventSink
+
+    sent = []
+    sink = EventSink(lambda s, d: sent.append(1))      # append() -> None
+    assert sink.publish("c", FrameResult(tracks=[_track()], calibrating=False), _frame()) is True
+    assert len(sent) == 1

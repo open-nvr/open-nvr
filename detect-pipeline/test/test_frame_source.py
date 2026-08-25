@@ -202,6 +202,7 @@ def test_restart_backoff_escalates_and_is_capped():
         spawn=lambda cmd: _EmptyProc(),
         max_fruitless_restarts=6, backoff_seconds=1.0, max_backoff_seconds=4.0,
         _sleep=slept.append,
+        _rand=lambda: 1.0,          # top of the jitter band → the raw schedule
     )
     list(src.stream())
     # 1, 2, 4, then capped at 4 — never a flat re-dial rate.
@@ -472,3 +473,35 @@ def test_close_does_not_block_on_the_child():
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+# ── jitter: a fleet that fails together must not retry together ─────
+
+def test_jittered_spreads_over_the_lower_half():
+    from detect_pipeline.frame_source import _jittered
+
+    assert _jittered(4.0, lambda: 0.0) == 2.0      # floor
+    assert _jittered(4.0, lambda: 1.0) == 4.0      # ceiling
+    assert _jittered(0, lambda: 0.5) == 0.0        # disabled backoff stays off
+
+
+def test_identical_sources_do_not_retry_in_lockstep():
+    """MediaMTX restarts and every camera drops in the same second. With a
+    fixed backoff they all re-dial in the same instant, so the herd never
+    thins and the storm sustains itself."""
+    import random
+
+    from detect_pipeline.frame_source import FrameSource
+
+    def first_retry(rand):
+        slept: list[float] = []
+        src = FrameSource("rtsp://c/x", width=4, height=4, fps=5,
+                          spawn=lambda cmd: _EmptyProc(), max_fruitless_restarts=2,
+                          backoff_seconds=4.0, _sleep=slept.append, _rand=rand)
+        list(src.stream())
+        return slept[0]
+
+    rng = random.Random(1234)
+    times = [first_retry(rng.random) for _ in range(30)]
+    assert len(set(round(t, 3) for t in times)) > 20, "retries are still synchronised"
+    assert all(2.0 <= t <= 4.0 for t in times), times

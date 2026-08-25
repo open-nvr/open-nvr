@@ -15,6 +15,7 @@ stream, so it is unit-tested with an in-memory buffer; the process lifecycle
 from __future__ import annotations
 
 import logging
+import random
 import subprocess
 import threading
 import time
@@ -88,6 +89,20 @@ def read_frames(stream, width: int, height: int, *, _clock=time.monotonic) -> It
 
 def _default_spawn(argv: list[str]) -> "subprocess.Popen[bytes]":
     return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _jittered(delay: float, rand: Callable[[], float]) -> float:
+    """Spread a retry delay over [delay/2, delay] ("equal jitter").
+
+    Cameras fail TOGETHER — MediaMTX restarts, core restarts, the switch
+    blips — and identical backoff makes them retry together too, so the
+    fleet re-dials in lockstep and the herd never thins. Jitter is what
+    turns a synchronised storm into a spread of reconnects; halving the
+    floor also means the fleet is not uniformly slower to come back.
+    """
+    if delay <= 0:
+        return 0.0
+    return delay * 0.5 + delay * 0.5 * rand()
 
 
 def redact_url(url: str) -> str:
@@ -177,6 +192,7 @@ class FrameSource:
         max_backoff_seconds: float = 15.0,
         min_healthy_seconds: float = 5.0,
         _sleep: Callable[[float], None] | None = None,
+        _rand: Callable[[], float] | None = None,
     ) -> None:
         self.rtsp_url = rtsp_url
         self.width = width
@@ -214,6 +230,8 @@ class FrameSource:
         # sleep, so a worker parked in backoff stops in milliseconds instead
         # of holding its caller's join() open for the full delay.
         self._closing = False
+        # Injectable so retry timing is deterministic in tests.
+        self._rand = _rand or random.random
         self._wake = threading.Event()
         self._sleep = _sleep or (lambda secs: self._wake.wait(secs))
         self._current_proc = None
@@ -366,9 +384,12 @@ class FrameSource:
             # Escalating backoff, capped. A flat delay meant a stream failing
             # instantly was re-dialled at a fixed rate forever, each cycle a
             # full ffmpeg spawn + RTSP handshake; healthy sessions reset it.
-            delay = min(
-                self.backoff_seconds * (2 ** max(0, fruitless - 1)),
-                self.max_backoff_seconds,
+            delay = _jittered(
+                min(
+                    self.backoff_seconds * (2 ** max(0, fruitless - 1)),
+                    self.max_backoff_seconds,
+                ),
+                self._rand,
             )
             log.warning(
                 "frame source for %s ended; restart #%d (retry in %.1fs)%s",

@@ -27,6 +27,8 @@ Env:
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)
+  DETECT_START_SPREAD_S     window over which a batch of workers opens its
+                            streams (default 10; 0 = all at once)
   DETECT_DETECTOR_POOL      max resident detector instances (default: auto
                             from CPU count). One per camera was the memory
                             wall; 0 restores that.
@@ -45,11 +47,13 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import signal
 import threading
 from dataclasses import dataclass
 
 from .bus import EventSink, GateEventSink
+from .metrics import record_sink_error
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, resolve_hwaccel
 from .providers import HttpCameraProvider
 from .service import WorkerManager
@@ -105,6 +109,7 @@ class ServiceConfig:
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
     detector_pool: int = 0
+    start_spread_s: float = 10.0
     visits_enabled: bool = True
 
 
@@ -192,6 +197,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         rtsp_timeout_s=_env_float(env, "DETECT_RTSP_TIMEOUT_S", DEFAULT_RTSP_TIMEOUT_S),
         bestframe_per_camera=_env_int(env, "DETECT_BESTFRAME_PER_CAMERA", 16),
         detector_pool=_detector_pool_from_env(env),
+        start_spread_s=_env_float(env, "DETECT_START_SPREAD_S", 10.0),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -460,6 +466,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
         detector_pool=cfg.detector_pool,
+        start_spread_s=cfg.start_spread_s,
         decode_threads=cfg.decode_threads,
         rtsp_timeout_s=cfg.rtsp_timeout_s,
         fast_decode=cfg.fast_decode,
@@ -501,7 +508,9 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
     Best-effort: NATS down never breaks a worker — but ``connected_fn`` feeds
     /health so "down" is VISIBLE instead of silently dropping events."""
     if not nats_url:
-        return (lambda subject, data: None), (lambda: None), (lambda: False)
+        # No bus configured: nothing is published, and saying so keeps
+        # tier0_events_published_total honest rather than counting no-ops.
+        return (lambda subject, data: False), (lambda: None), (lambda: False)
     import asyncio
 
     import nats
@@ -522,14 +531,43 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
 
     threading.Thread(target=_serve, name="tier0-nats", daemon=True).start()
 
-    def publish(subject: str, data: bytes) -> None:
+    def _note_async_failure(fut) -> None:
+        """Count a publish that failed AFTER we handed it to the loop.
+
+        The future is otherwise discarded, so a broker rejecting writes
+        looked identical to success from the worker's side.
+        """
+        try:
+            if fut.exception() is not None:
+                record_sink_error("bus")
+        except Exception:  # pragma: no cover - cancelled/loop torn down
+            pass
+
+    def publish(subject: str, data: bytes) -> bool:
+        """True iff the payload reached a connected client.
+
+        Returning None here (the old signature) is what let
+        ``tier0_events_published_total`` count events that never left the
+        process: the sink took "no exception" as "published", and a NATS
+        client that had given up reconnecting raised nothing at all.
+
+        Honest limit: True means accepted by the client, not acknowledged
+        by the broker — awaiting that would block the frame loop. Failures
+        after hand-off are counted asynchronously above instead.
+        """
         nc = box.get("nc")
         if nc is None:
-            return
+            # Counted, not merely absent: "published_total stopped climbing"
+            # alone is indistinguishable from every camera going quiet.
+            record_sink_error("bus")
+            return False                     # never connected, or gave up
         try:
-            asyncio.run_coroutine_threadsafe(nc.publish(subject, data), loop)
+            fut = asyncio.run_coroutine_threadsafe(nc.publish(subject, data), loop)
         except Exception:
-            pass
+            log.debug("bus publish could not be scheduled", exc_info=True)
+            return False
+        fut.add_done_callback(_note_async_failure)
+        return True
 
     def close() -> None:
         loop.call_soon_threadsafe(loop.stop)
@@ -663,7 +701,10 @@ def main() -> int:  # pragma: no cover - integration entrypoint
                 manager.reconcile()
             except Exception:
                 log.exception("reconcile failed; will retry")
-            stop.wait(cfg.refresh_seconds)
+            # Jitter the tick so this process does not poll core in lockstep
+            # with anything else that restarted alongside it, and so a fleet
+            # that gave up together does not all re-queue on the same instant.
+            stop.wait(cfg.refresh_seconds * random.uniform(0.85, 1.15))
     finally:
         manager.stop()
         close()
