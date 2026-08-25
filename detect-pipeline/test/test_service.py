@@ -614,3 +614,41 @@ def test_non_superseded_worker_stopped_mid_stagger_reports_down():
     _time.sleep(0.05)
     assert m.metrics.value("tier0_worker_up", {"camera": "cam2"}) == 0.0
     m.metrics.reset()
+
+
+def test_decode_mode_flips_are_not_counted_as_feed_restarts():
+    """Adaptive decode is ON by default and respawns ffmpeg on every
+    idle<->active flip, resetting seq to 0. Counting that as a feed restart
+    made healthy cameras look like flapping ones on the metric operators are
+    told to alert on."""
+    from detect_pipeline import metrics as m
+    from detect_pipeline.frame_source import Frame
+    from detect_pipeline.service import CameraWorker
+
+    size = frame_size_bytes(W, H)
+
+    class _FlipSource:
+        width, height = W, H
+
+        def stream(self):
+            yield Frame(bytes(size), W, H, 0, 0.0)
+            yield Frame(bytes(size), W, H, 1, 1.0)
+            # a deliberate decode flip: seq restarts, but it is not a failure
+            yield Frame(bytes(size), W, H, 0, 2.0, True)
+            yield Frame(bytes(size), W, H, 1, 3.0)
+            # a real feed drop: seq restarts with no marker
+            yield Frame(bytes(size), W, H, 0, 4.0)
+
+    m.metrics.reset()
+    w = CameraWorker(_spec("cam-flip"), _FakeSink(), frame_source=_FlipSource())
+    w.start()
+    for _ in range(200):
+        if not w.is_alive():
+            break
+        time.sleep(0.01)
+    w.stop(timeout=5)
+
+    cam = {"camera": "cam-flip"}
+    assert m.metrics.value("tier0_worker_restarts_total", cam) == 1.0
+    assert m.metrics.value("tier0_decode_mode_changes_total", cam) == 1.0
+    m.metrics.reset()

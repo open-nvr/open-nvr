@@ -47,6 +47,12 @@ class Frame:
     height: int
     seq: int             # monotonic counter since the stream (re)started
     ts: float            # time.monotonic() when the frame was fully read
+    # True on the first frame after a DELIBERATE decode-mode flip. seq also
+    # resets to 0 there, and the worker counted that as a feed restart — so
+    # adaptive decode (on by default) made every healthy camera with
+    # intermittent activity look like a flapping feed on the very metric
+    # operators alert on.
+    deliberate_restart: bool = False
 
     @property
     def y_plane(self) -> bytes:
@@ -71,7 +77,8 @@ def _read_exact(stream, n: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def read_frames(stream, width: int, height: int, *, _clock=time.monotonic) -> Iterator[Frame]:
+def read_frames(stream, width: int, height: int, *, _clock=time.monotonic,
+                deliberate: bool = False) -> Iterator[Frame]:
     """Yield full I420 frames from a binary readable ``stream`` until EOF.
 
     A trailing partial frame (torn read at stream end) is discarded, never
@@ -83,7 +90,7 @@ def read_frames(stream, width: int, height: int, *, _clock=time.monotonic) -> It
         buf = _read_exact(stream, size)
         if buf is None:
             return
-        yield Frame(buf, width, height, seq, _clock())
+        yield Frame(buf, width, height, seq, _clock(), seq == 0 and deliberate)
         seq += 1
 
 
@@ -332,13 +339,17 @@ class FrameSource:
             if self._closing:
                 return
             self._refresh_url()
+            was_deliberate = self._skip_backoff_once
             proc = self._spawn(self.command())
             self._current_proc = proc
             stderr_tail = _StderrTail(getattr(proc, "stderr", None))
             got_frame = False
             started = time.monotonic()
             try:
-                for frame in read_frames(proc.stdout, self.width, self.height):
+                for frame in read_frames(
+                    proc.stdout, self.width, self.height,
+                    deliberate=was_deliberate,
+                ):
                     got_frame = True
                     yield frame
             finally:

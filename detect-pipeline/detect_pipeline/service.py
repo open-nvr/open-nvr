@@ -512,7 +512,18 @@ class CameraWorker:
                 # restart signal without reaching into the source's internals.
                 seq = getattr(frame, "seq", None)
                 if seq == 0 and prev_seq is not None:
-                    record_worker_restart(self.spec.camera_id)
+                    # Adaptive decode (on by default) respawns ffmpeg on every
+                    # idle<->active flip, which also resets seq. Counting those
+                    # as feed restarts made a healthy camera with intermittent
+                    # activity look like a flapping one — on the very metric
+                    # the docs tell operators to alert on.
+                    if getattr(frame, "deliberate_restart", False):
+                        _metrics.inc(
+                            "tier0_decode_mode_changes_total",
+                            {"camera": self.spec.camera_id},
+                        )
+                    else:
+                        record_worker_restart(self.spec.camera_id)
                 prev_seq = seq
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)

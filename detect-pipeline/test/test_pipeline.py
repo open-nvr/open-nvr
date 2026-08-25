@@ -272,3 +272,39 @@ def test_adjacent_motion_does_not_erode_a_gated_track():
         pipe.process_frame(frame2(700 + i))
     assert [t.id for t in tracker.tracks] == [tid], (
         "gated track eroded by adjacent-motion partial scans")
+
+
+BIG = (720, 1280)          # this module's H/W are QVGA; these need room
+
+
+def test_heavy_motion_cannot_starve_track_reverification():
+    """Rain, wind in foliage, a busy road — any scene producing max_regions
+    motion boxes every frame used to consume the whole budget, so NO confirmed
+    track was ever re-verified and they all coasted to DETECT_TRACK_TTL (300s).
+    That is precisely when the pipeline most needs to know what is real."""
+    from detect_pipeline.regions import calculate_region
+
+    motion = [(i * 140, 0, i * 140 + 40, 40) for i in range(10)]
+    tracks = [(500, 400, 560, 480), (900, 300, 960, 380)]
+    regions, capped = select_regions(motion, tracks, BIG, 320, max_regions=8)
+
+    assert len(regions) == 8 and capped is True
+    for t in tracks:
+        r = calculate_region(BIG, t[0], t[1], t[2], t[3], 320)
+        assert r in regions, "a live track went un-scanned under heavy motion"
+
+
+def test_tracks_do_not_hog_the_budget_when_motion_is_light():
+    """The reserve must not invert the problem — slack goes back to motion."""
+    motion = [(0, 0, 40, 40), (200, 0, 240, 40)]
+    tracks = [(500, 400, 560, 480)]
+    regions, capped = select_regions(motion, tracks, BIG, 320, max_regions=8)
+    assert len(regions) == 3 and capped is False
+
+
+def test_dedup_alone_is_not_reported_as_capped():
+    """capped means the BUDGET hid a candidate, not that dedup merged one —
+    it is what tier0_regions_capped_total alerts on."""
+    boxes = [(100, 100, 160, 200), (105, 100, 165, 205)]
+    regions, capped = select_regions(boxes, [], BIG, min_region=320, max_regions=8)
+    assert len(regions) == 1 and capped is False
