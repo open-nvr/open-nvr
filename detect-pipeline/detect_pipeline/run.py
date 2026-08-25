@@ -26,6 +26,7 @@ Env:
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
+  DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)
   DETECT_RTSP_TIMEOUT_S     RTSP socket-I/O timeout in seconds (default 10;
                             0 disables). Without it a half-open TCP session
                             blocks the decode FOREVER and the camera goes
@@ -99,6 +100,7 @@ class ServiceConfig:
     # people/vehicles (typically >0.6) while starving the phantom supply.
     detect_conf: float = 0.4
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
+    bestframe_per_camera: int = 16
     visits_enabled: bool = True
 
 
@@ -160,6 +162,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         decode_skip=_decode_skip_from_env(env),
         decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
         rtsp_timeout_s=_env_float(env, "DETECT_RTSP_TIMEOUT_S", DEFAULT_RTSP_TIMEOUT_S),
+        bestframe_per_camera=_env_int(env, "DETECT_BESTFRAME_PER_CAMERA", 16),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -392,7 +395,11 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     best_frames = None
     if cfg.metrics_port:
         from .bestframe import BestFrameStore
-        best_frames = BestFrameStore()
+        # Per-camera quota keeps one busy camera from evicting the rest;
+        # the global cap stays as the memory backstop.
+        best_frames = BestFrameStore(
+            max_per_camera=cfg.bestframe_per_camera,
+        )
     # Events store (RFC-0001 C1): post finished visits + best-frame evidence
     # to core. Best-effort by design — core down loses history, not detection.
     visit_poster = None

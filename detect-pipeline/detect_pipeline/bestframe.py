@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 
 
 def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
@@ -41,15 +42,25 @@ class BestFrameStore:
     """Thread-safe, bounded cache of each track's best-frame crop (encoded lazily)."""
 
     def __init__(self, *, max_entries: int = 256, max_age_s: float = 120.0,
-                 jpeg_quality: int = 85, _clock=time.monotonic, _encode=_encode_jpeg) -> None:
+                 max_per_camera: int = 16, jpeg_quality: int = 85,
+                 _clock=time.monotonic, _encode=_encode_jpeg) -> None:
         self._max_entries = max_entries
+        # Per-camera quota. Without one, the count cap was global and a busy
+        # camera simply evicted the quiet ones: at DETECT_MAX_TRACKS=50 the
+        # 256-entry cap saturates at ~6 busy cameras, and because recency is
+        # driven by PUT RATE the high-fps camera always won the sort — so
+        # "best frame for the quiet camera" returned nothing on a fleet.
+        self._max_per_camera = max(1, max_per_camera)
         self._max_age_s = max_age_s
         self._quality = jpeg_quality
         self._clock = _clock
         self._encode = _encode
         self._lock = threading.Lock()
-        # key -> {crop, ts, jpeg(None until encoded)}
-        self._d: dict[tuple[str, str], dict] = {}
+        # camera_id -> OrderedDict[track_id, {crop, ts, jpeg}], ordered
+        # oldest-touch first. An OrderedDict makes both the LRU eviction and
+        # "newest track for this camera" O(1); the previous flat dict re-sorted
+        # EVERY entry on EVERY put, under this lock, on the frame hot path.
+        self._cams: dict[str, "OrderedDict[str, dict]"] = {}
 
     def put(self, camera_id: str, track_id, crop_bgr, ts: float | None = None) -> None:
         """Record a track's current best crop. Cheap: stores a reference, no encode.
@@ -62,63 +73,103 @@ class BestFrameStore:
         """
         if crop_bgr is None:
             return
-        key = (camera_id, str(track_id))
+        tid = str(track_id)
         now = self._clock()
         with self._lock:
-            e = self._d.get(key)
+            bucket = self._cams.get(camera_id)
+            if bucket is None:
+                bucket = self._cams[camera_id] = OrderedDict()
+            e = bucket.get(tid)
             if e is not None and e["crop"] is crop_bgr:
                 e["ts"] = now                     # unchanged best → just touch recency
             else:
-                self._d[key] = {"crop": crop_bgr, "ts": now, "jpeg": None}
-            self._evict_locked()
+                bucket[tid] = {"crop": crop_bgr, "ts": now, "jpeg": None}
+            bucket.move_to_end(tid)               # newest last
+            self._evict_locked(camera_id, bucket)
 
-    def _encode_cached(self, key) -> bytes | None:
-        """Return the cached JPEG for ``key``, encoding it if needed. Encoding runs
-        OUTSIDE the lock (cv2 can be slow) so it never blocks worker ``put``s."""
+    def _encode_cached(self, camera_id: str, tid: str) -> bytes | None:
+        """Return the cached JPEG for a track, encoding it if needed. Encoding
+        runs OUTSIDE the lock (cv2 can be slow) so it never blocks ``put``s."""
         with self._lock:
-            e = self._d.get(key)
+            bucket = self._cams.get(camera_id)
+            e = bucket.get(tid) if bucket is not None else None
             if e is None or self._expired_locked(e):
-                self._d.pop(key, None)
+                if bucket is not None:
+                    bucket.pop(tid, None)
+                    if not bucket:
+                        self._cams.pop(camera_id, None)
                 return None
             if e["jpeg"] is not None:
                 e["ts"] = self._clock()
+                bucket.move_to_end(tid)
                 return e["jpeg"]
             crop = e["crop"]                      # snapshot the ref; encode unlocked
         jpeg = self._encode(crop, self._quality)
         with self._lock:
-            e = self._d.get(key)
+            bucket = self._cams.get(camera_id)
+            e = bucket.get(tid) if bucket is not None else None
             if e is not None and e["crop"] is crop:
                 e["jpeg"] = jpeg
                 e["ts"] = self._clock()
+                bucket.move_to_end(tid)
         return jpeg
 
     def get_jpeg(self, camera_id: str, track_id) -> bytes | None:
         """Best frame for one track as JPEG bytes, or None. Encodes once, caches."""
-        return self._encode_cached((camera_id, str(track_id)))
+        return self._encode_cached(camera_id, str(track_id))
 
     def latest_jpeg(self, camera_id: str) -> bytes | None:
-        """Best frame for the camera's most-recently-updated track (no track id)."""
+        """Best frame for the camera's most-recently-updated track (no track id).
+
+        O(1) in the bucket: the newest live track is simply its last key. This
+        used to scan EVERY entry of EVERY camera under the lock.
+        """
         with self._lock:
-            best_key = None
-            best_ts = -1.0
-            for key, e in self._d.items():
-                if key[0] == camera_id and not self._expired_locked(e) and e["ts"] > best_ts:
-                    best_key, best_ts = key, e["ts"]
-        return self._encode_cached(best_key) if best_key is not None else None
+            bucket = self._cams.get(camera_id)
+            if not bucket:
+                return None
+            newest = None
+            for tid in reversed(bucket):          # newest first; stop at the first live one
+                if not self._expired_locked(bucket[tid]):
+                    newest = tid
+                    break
+        return self._encode_cached(camera_id, newest) if newest is not None else None
 
     def _expired_locked(self, e: dict) -> bool:
         return (self._clock() - e["ts"]) > self._max_age_s
 
-    def _evict_locked(self) -> None:
-        # drop expired first, then oldest-touch while over the count cap
-        for key in [k for k, e in self._d.items() if self._expired_locked(e)]:
-            self._d.pop(key, None)
-        if len(self._d) > self._max_entries:
-            for key, _ in sorted(self._d.items(), key=lambda kv: kv[1]["ts"])[
-                : len(self._d) - self._max_entries
-            ]:
-                self._d.pop(key, None)
+    def _evict_locked(self, camera_id: str, bucket) -> None:
+        """Bound this camera's bucket, then the store as a whole.
+
+        Amortised O(1): the bucket is ordered oldest-touch first, so expired
+        entries are a prefix — pop until the first live one and stop. The old
+        implementation re-scanned every entry in the store (calling the clock
+        per entry) and re-sorted them on every single put.
+        """
+        while bucket:
+            tid = next(iter(bucket))
+            if not self._expired_locked(bucket[tid]):
+                break
+            bucket.pop(tid, None)
+        while len(bucket) > self._max_per_camera:
+            bucket.popitem(last=False)            # drop this camera's oldest
+        if not bucket:
+            self._cams.pop(camera_id, None)
+            return
+        # Global backstop for memory. Take from the LARGEST bucket rather than
+        # the globally-oldest entry, so a busy camera cannot evict a quiet
+        # camera's only best frame.
+        while self._count_locked() > self._max_entries:
+            biggest = max(self._cams.values(), key=len, default=None)
+            if not biggest:
+                break
+            biggest.popitem(last=False)
+            for cam in [c for c, b in self._cams.items() if not b]:
+                self._cams.pop(cam, None)
+
+    def _count_locked(self) -> int:
+        return sum(len(b) for b in self._cams.values())
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._d)
+            return self._count_locked()
