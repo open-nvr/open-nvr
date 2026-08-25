@@ -775,3 +775,36 @@ def test_pinned_cv_threads_are_never_retuned():
     finally:
         svc.os.cpu_count = original
         sys.modules.pop("cv2", None)
+
+
+def test_worker_exports_the_region_ceiling_beside_the_budget(monkeypatch):
+    """The budget gauge alone is unreadable on a dashboard — "3" means nothing
+    without the ceiling it is being held under. The worker must export both,
+    per camera, so the UI can render "3 / 8" and flag a shed camera."""
+    import detect_pipeline.motion as motion_mod
+    from detect_pipeline.metrics import metrics as _m
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+
+    worker = CameraWorker(
+        _spec("cam-gauges"), _FakeSink(),
+        detector=_MotionAllDetector(), frame_source=_FramesSource(2),
+    )
+    worker.start()
+    for _ in range(50):
+        text = _m.render()
+        if 'tier0_regions_configured{camera="cam-gauges"}' in text:
+            break
+        time.sleep(0.02)
+    worker.stop()
+
+    text = _m.render()
+    assert 'tier0_regions_budget{camera="cam-gauges"}' in text
+    assert 'tier0_regions_configured{camera="cam-gauges"}' in text

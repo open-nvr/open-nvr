@@ -271,3 +271,84 @@ def test_promotion_handles_no_data_gracefully():
                            shadow_since_iso=None)
     assert p == {"override": None, "shadow_since": None, "shadow_days": None,
                  "would_save_ratio": None, "ready": False}
+
+
+# ── per-camera detail + events flow ──────────────────────────────────
+# Every series here earned its place in a live debugging session: the region
+# budget pinned below its ceiling is the load-shedding signature, and zero
+# bus events while detections climb is the "detected but nobody was told"
+# failure. The fleet aggregate hides exactly the camera that is struggling.
+
+PER_CAMERA_TEXT = """
+tier0_worker_up{camera="cam1"} 1
+tier0_worker_up{camera="cam2"} 1
+tier0_processing_fps{camera="cam1"} 1.96
+tier0_processing_fps{camera="cam2"} 5.0
+tier0_target_fps{camera="cam1"} 2
+tier0_target_fps{camera="cam2"} 5
+tier0_frame_age_seconds{camera="cam1"} 0.15
+tier0_frame_age_seconds{camera="cam2"} 0.4
+tier0_regions_budget{camera="cam1"} 3
+tier0_regions_configured{camera="cam1"} 8
+tier0_regions_budget{camera="cam2"} 8
+tier0_regions_configured{camera="cam2"} 8
+tier0_regions_capped_total{camera="cam1"} 415
+tier0_tracks_active{camera="cam1"} 2
+tier0_mainstream_fallback{camera="cam1"} 1
+tier0_visits_posted_total{camera="cam1"} 7
+tier0_visits_dropped_total{camera="cam1"} 1
+tier0_events_published_total{camera="cam1"} 292
+tier0_sink_errors_total{camera="cam1"} 3
+tier0_stationary_skipped_total{camera="cam1"} 44
+tier0_frames_total{camera="cam1"} 1000
+"""
+
+
+def test_per_camera_rows_surface_the_struggling_camera():
+    r = reduce_metrics(parse_prometheus_text(PER_CAMERA_TEXT))
+    cams = {c["camera"]: c for c in r["cameras"]}
+    assert set(cams) == {"cam1", "cam2"}
+
+    c1 = cams["cam1"]
+    assert c1["up"] is True
+    assert c1["fps"] == 1.96 and c1["target_fps"] == 2
+    assert c1["frame_age_s"] == 0.15
+    # The load-shedding signature: budget held below its ceiling.
+    assert c1["regions_budget"] == 3 and c1["regions_configured"] == 8
+    assert c1["shedding"] is True
+    assert c1["regions_capped_total"] == 415
+    assert c1["tracks_active"] == 2
+    assert c1["visits_posted"] == 7 and c1["visits_dropped"] == 1
+    assert c1["mainstream_fallback"] is True
+
+    c2 = cams["cam2"]
+    assert c2["shedding"] is False
+    assert c2["mainstream_fallback"] is False
+
+
+def test_shedding_needs_both_numbers_absence_is_not_evidence():
+    """A pipeline predating the configured gauge must not be labelled as
+    shedding (or as healthy) off a missing number."""
+    text = 'tier0_worker_up{camera="cam1"} 1\ntier0_regions_budget{camera="cam1"} 3\n'
+    r = reduce_metrics(parse_prometheus_text(text))
+    row = r["cameras"][0]
+    assert row["regions_budget"] == 3
+    assert row["regions_configured"] is None
+    assert row["shedding"] is False
+
+
+def test_events_flow_rollup():
+    r = reduce_metrics(parse_prometheus_text(PER_CAMERA_TEXT))
+    assert r["events_flow"] == {
+        "bus_events_published": 292,
+        "visits_posted": 7,
+        "visits_dropped": 1,
+        "sink_errors": 3,
+    }
+    assert r["frames"]["skipped_stationary"] == 44
+
+
+def test_no_cameras_yields_empty_list_not_a_crash():
+    r = reduce_metrics(parse_prometheus_text("tier0_frames_total 5\n"))
+    assert r["cameras"] == []
+    assert r["events_flow"]["bus_events_published"] == 0

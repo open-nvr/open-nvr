@@ -534,6 +534,13 @@ class CameraWorker:
             "tier0_regions_budget", float(budget.current),
             {"camera": self.spec.camera_id},
         )
+        # The budget gauge alone is unreadable on a dashboard — "3" is only
+        # meaningful against what was configured. Export the ceiling once so
+        # the UI can render "3 / 8" and flag a shed camera at a glance.
+        _metrics.gauge(
+            "tier0_regions_configured", float(budget.configured),
+            {"camera": self.spec.camera_id},
+        )
         prev_seq: int | None = None
         win_t0 = time.monotonic()
         win_n = 0

@@ -101,6 +101,15 @@ def _sums_grouped_by(samples: list[Sample], name: str, label: str) -> dict[str, 
     return out
 
 
+def _by_camera(samples: list[Sample], name: str) -> dict[str, float]:
+    """Latest value of a per-camera family, keyed by camera label."""
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels:
+            out[s.labels["camera"]] = s.value
+    return out
+
+
 def _dominant_label(samples: list[Sample], name: str, label: str) -> str | None:
     """The label value carrying the most weight (e.g. the active detector model)."""
     grouped = _sums_grouped_by(samples, name, label)
@@ -149,6 +158,7 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     runs = _sum(samples, "tier0_detector_runs_total")
     skipped_motion = _sum_by_label(samples, "tier0_detector_skipped_total", "reason", "no_motion")
     skipped_calib = _sum_by_label(samples, "tier0_detector_skipped_total", "reason", "calibrating")
+    skipped_stationary = _sum(samples, "tier0_stationary_skipped_total")
     denom = runs + skipped_motion  # calibrating frames aren't a gate decision
     motion_gate_ratio = (skipped_motion / denom) if denom > 0 else None
 
@@ -192,6 +202,45 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
            if s.name == "tier0_target_fps" and "camera" in s.labels}
     ratios = {c: proc[c] / tgt[c] for c in proc if tgt.get(c, 0) > 0}
     worst_cam = min(ratios, key=ratios.get) if ratios else None
+    # Per-camera detail — the fleet aggregate hides exactly the signals that
+    # matter when ONE camera is struggling. Every one of these earned its
+    # place in a live debugging session: the region budget pinned below its
+    # ceiling is the load-shedding signature (the pipeline is protecting the
+    # stream by detecting less); frame age says whether frames are fresh;
+    # visits dropped and a main-stream fallback are misconfigurations the
+    # operator can actually fix.
+    frame_age = _by_camera(samples, "tier0_frame_age_seconds")
+    budget_now = _by_camera(samples, "tier0_regions_budget")
+    budget_cfg = _by_camera(samples, "tier0_regions_configured")
+    tracks_act = _by_camera(samples, "tier0_tracks_active")
+    mainstream = _by_camera(samples, "tier0_mainstream_fallback")
+    visits_ok = _by_camera(samples, "tier0_visits_posted_total")
+    visits_drop = _by_camera(samples, "tier0_visits_dropped_total")
+    capped = _by_camera(samples, "tier0_regions_capped_total")
+    up_by_cam = _by_camera(samples, "tier0_worker_up")
+    all_cams = sorted(set(proc) | set(tgt) | set(up_by_cam) | set(frame_age))
+    cameras = []
+    for cam in all_cams:
+        b = budget_now.get(cam)
+        c = budget_cfg.get(cam)
+        cameras.append({
+            "camera": cam,
+            "up": bool(up_by_cam.get(cam, 0) >= 1.0),
+            "fps": round(proc[cam], 2) if cam in proc else None,
+            "target_fps": round(tgt[cam], 2) if cam in tgt else None,
+            "frame_age_s": round(frame_age[cam], 2) if cam in frame_age else None,
+            "regions_budget": None if b is None else int(b),
+            "regions_configured": None if c is None else int(c),
+            # Shedding = the budget is currently held below its ceiling.
+            # Only claimable when BOTH numbers exist; absence is not evidence.
+            "shedding": (b is not None and c is not None and b < c),
+            "regions_capped_total": int(capped.get(cam, 0)),
+            "tracks_active": int(tracks_act.get(cam, 0)),
+            "visits_posted": int(visits_ok.get(cam, 0)),
+            "visits_dropped": int(visits_drop.get(cam, 0)),
+            "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+        })
+
     health = {
         "workers_up": workers_up,
         "workers_total": len([c for c in worker_cams if c is not None]),
@@ -236,7 +285,20 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "detector_runs": int(runs),
             "skipped_no_motion": int(skipped_motion),
             "skipped_calibrating": int(skipped_calib),
+            "skipped_stationary": int(skipped_stationary),
             "motion_gate_ratio": motion_gate_ratio,
+        },
+        "cameras": cameras,
+        # The pipeline's outputs actually LEAVING it: detections become NATS
+        # events (what alarms and apps consume) and finished visits become
+        # events-store rows (what history answers from). Zero here while
+        # detections climb is the "detected but nobody was told" failure —
+        # observed live, and invisible until these were surfaced.
+        "events_flow": {
+            "bus_events_published": int(_sum(samples, "tier0_events_published_total")),
+            "visits_posted": int(_sum(samples, "tier0_visits_posted_total")),
+            "visits_dropped": int(_sum(samples, "tier0_visits_dropped_total")),
+            "sink_errors": int(_sum(samples, "tier0_sink_errors_total")),
         },
         "gate": {
             "escalations": int(escalations),
