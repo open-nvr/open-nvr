@@ -574,3 +574,59 @@ def test_a_failed_evidence_fetch_does_not_break_the_answer(anyio_backend=None):
     out = asyncio.run(tools.search_history({"label": "person"}))
     assert "1 person visit(s)" in out
     assert tools.last_evidence_frames == []
+
+
+# ── history + the visit still being written ─────────────────────────
+
+
+class _RingEv:
+    def __init__(self, tracks, camera_id="cam1", age=2.0):
+        import time
+        self.received_at = time.time() - age
+        self.adapter = "tier0"
+        self.camera_id = camera_id
+        self.raw = {"tracks": tracks}
+
+
+def test_history_admits_a_visit_still_in_progress(anyio_backend=None):
+    """A visit enters the store only when it ENDS. Field report: the operator
+    walked in to test, asked 'did any person come today', and was denied while
+    standing on camera — the visit was still being written. The live Tier-0
+    ring knows; the answer must say so."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "person"}])])
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "No person visits remembered" in out
+    assert "right now" in out and "still in progress" in out, out
+
+
+def test_no_in_progress_note_when_the_ring_is_quiet(anyio_backend=None):
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = lambda *, camera_id, window_seconds: []
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "right now" not in out
+
+
+def test_in_progress_note_matches_the_asked_label(anyio_backend=None):
+    """A cat on camera is not evidence about a person question."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "cat"}])])
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "right now" not in out
+
+
+def test_a_broken_ring_never_breaks_the_history_answer(anyio_backend=None):
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([_FakeEvent(1)], crops={1: b"c"}))
+
+    def boom(*, camera_id, window_seconds):
+        raise RuntimeError("ring exploded")
+
+    tools._ctx.recent_events = boom
+    out = asyncio.run(tools.search_history({"label": "person"}))
+    assert "1 person visit(s)" in out
