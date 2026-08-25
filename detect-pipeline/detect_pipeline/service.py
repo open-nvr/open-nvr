@@ -426,7 +426,16 @@ class CameraWorker:
         # with N simultaneous RTSP session setups. Interruptible: a stop
         # during the stagger returns immediately rather than waiting it out.
         if self.start_delay > 0 and self._stop.wait(self.start_delay):
-            record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
+            # Same guard the teardown path uses: a worker stopped during its
+            # stagger may already have been replaced (the fleet stop shares
+            # ONE deadline, so a late waker is marked superseded), and writing
+            # DOWN here would zero the gauge its replacement just set — the
+            # camera would then read down for good, since UP is only written
+            # once at start.
+            if not self._superseded:
+                record_worker_state(
+                    self.spec.camera_id, False, target_fps=self.spec.fps
+                )
             return
         try:
             src, w, h = self._make_source()

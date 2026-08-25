@@ -524,11 +524,34 @@ def test_new_workers_get_spread_start_delays():
 
 def test_small_batches_are_not_delayed():
     """Two cameras must still come up immediately — the spread is
-    proportional to how many are starting."""
+    proportional to the batch, so a small install pays nothing. Drives the
+    real reconcile() rather than recomputing its arithmetic, so deleting the
+    scaling actually fails this."""
     prov = _FakeProvider([_spec("a"), _spec("b")])
     mgr = WorkerManager(prov, _FakeSink(), start_spread_s=10.0)
-    spread = min(mgr._start_spread_s, 0.25 * max(0, 2 - 1))
-    assert spread <= 0.25
+    mgr.reconcile()
+    try:
+        delays = [mgr._workers[c].start_delay for c in mgr.running_ids()]
+        assert len(delays) == 2
+        assert all(d <= 0.25 for d in delays), delays
+    finally:
+        mgr.stop()
+
+
+def test_large_batches_are_spread_through_reconcile():
+    """The same path with a real fleet: 40 new cameras must not all dial at
+    once. Pins reconcile's scaling, not a formula copied into the test."""
+    prov = _FakeProvider([_spec(f"c{i}") for i in range(40)])
+    mgr = WorkerManager(prov, _FakeSink(), start_spread_s=10.0)
+    mgr.reconcile()
+    try:
+        delays = [mgr._workers[c].start_delay for c in mgr.running_ids()]
+        assert len(delays) == 40
+        assert max(delays) > 1.0, "batch was not spread at all"
+        assert all(0.0 <= d <= 10.0 for d in delays), delays
+        assert len(set(round(d, 3) for d in delays)) > 30
+    finally:
+        mgr.stop()
 
 
 def test_start_stagger_is_interrupted_by_stop():
@@ -544,3 +567,50 @@ def test_start_stagger_is_interrupted_by_stop():
     t0 = _time.monotonic()
     assert w.stop(timeout=5.0), "worker did not exit during its stagger"
     assert _time.monotonic() - t0 < 2.0
+
+
+def test_superseded_worker_stopped_mid_stagger_keeps_the_gauge_up():
+    """A fleet stop shares ONE deadline, so a worker still sitting in its
+    start stagger can be marked superseded and only wake AFTERWARDS. The
+    race that matters is that ordering: the replacement writes UP first, and
+    the straggler must not then write DOWN over it — UP is emitted once at
+    start, so the healthy camera would read down for good.
+    """
+    import time as _time
+
+    from detect_pipeline import metrics as m
+    from detect_pipeline.service import CameraWorker
+
+    m.metrics.reset()
+    old = CameraWorker(_spec("cam1"), _FakeSink(), frame_source=_FramesSource(1),
+                       start_delay=30.0)
+    old.start()
+    _time.sleep(0.05)                       # parked in the stagger
+    old.mark_superseded()                   # manager replaced it...
+    m.record_worker_state("cam1", True, target_fps=2)   # ...replacement is UP
+
+    old.request_stop()                      # only NOW does the straggler wake
+    assert old.join(5.0)
+    _time.sleep(0.05)
+
+    assert m.metrics.value("tier0_worker_up", {"camera": "cam1"}) == 1.0, \
+        "straggler zeroed its replacement's gauge"
+    m.metrics.reset()
+
+
+def test_non_superseded_worker_stopped_mid_stagger_reports_down():
+    """The converse: a genuine stop must still be visible as DOWN."""
+    import time as _time
+
+    from detect_pipeline import metrics as m
+    from detect_pipeline.service import CameraWorker
+
+    m.metrics.reset()
+    w = CameraWorker(_spec("cam2"), _FakeSink(), frame_source=_FramesSource(1),
+                     start_delay=30.0)
+    w.start()
+    _time.sleep(0.05)
+    assert w.stop(timeout=5.0)
+    _time.sleep(0.05)
+    assert m.metrics.value("tier0_worker_up", {"camera": "cam2"}) == 0.0
+    m.metrics.reset()
