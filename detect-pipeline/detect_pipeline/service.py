@@ -48,7 +48,7 @@ from .metrics import (
     forget_camera,
 )
 from .motion import MotionConfig, MotionDetector
-from .pipeline import DetectPipeline, FrameResult
+from .pipeline import DetectPipeline, FrameResult, RegionBudgetController
 from .tracking import TrackConfig, Tracker
 
 log = logging.getLogger("detect_pipeline.service")
@@ -517,6 +517,11 @@ class CameraWorker:
                 self.spec.camera_id, self.decode_idle, self.decode_idle_after,
             )
         record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
+        budget = RegionBudgetController(pipe.max_regions, self.spec.fps)
+        _metrics.gauge(
+            "tier0_regions_budget", float(budget.current),
+            {"camera": self.spec.camera_id},
+        )
         prev_seq: int | None = None
         win_t0 = time.monotonic()
         win_n = 0
@@ -543,9 +548,28 @@ class CameraWorker:
                 prev_seq = seq
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
+                frame_latency = time.monotonic() - t0
+                # Spend fewer detector crops when we cannot finish a frame in
+                # its budget. Falling behind does not just delay detections —
+                # the worker stops draining ffmpeg's stdout, ffmpeg blocks on
+                # the full pipe, and MediaMTX drops the session, which surfaces
+                # as a "flaky camera" that is really us.
+                if budget.observe(frame_latency):
+                    pipe.max_regions = budget.current
+                    _metrics.gauge(
+                        "tier0_regions_budget", float(budget.current),
+                        {"camera": self.spec.camera_id},
+                    )
+                    log.warning(
+                        "tier0 %s: frame latency %.2fs against a %.2fs budget — "
+                        "detector regions %s to %d (of %d configured)",
+                        self.spec.camera_id, frame_latency, budget.budget_s,
+                        "cut" if budget.shedding else "restored to",
+                        budget.current, budget.configured,
+                    )
                 record_frame(
                     self.spec.camera_id, result,
-                    latency_s=time.monotonic() - t0,
+                    latency_s=frame_latency,
                     detector_latency_s=getattr(result, "detect_latency_s", None),
                     stage_latency_s=getattr(result, "stage_latency_s", None),
                     model=self.model_id,

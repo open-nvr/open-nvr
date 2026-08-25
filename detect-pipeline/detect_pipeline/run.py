@@ -115,6 +115,29 @@ class ServiceConfig:
     visits_enabled: bool = True
 
 
+def _clean_env(value: str | None) -> str:
+    """Strip a value that is really a leaked inline comment.
+
+    `VAR=` followed by a trailing `# comment` in a .env file parses as the
+    COMMENT, not as empty — only the empty case, values carry their comment
+    off correctly. Seen in the wild on this project's own .env.example:
+    DETECT_DISPATCH_KAIC_URL arrived literally set to "# set (e.g. ...",
+    which is truthy, so the service reported Tier-1 dispatch as configured
+    against a URL that could never resolve.
+    """
+    v = (value or "").strip()
+    return "" if v.startswith("#") else v
+
+
+def _env_url(env: dict, name: str) -> str:
+    """A URL setting, or empty. Anything that is not http(s) is not a URL."""
+    v = _clean_env(env.get(name))
+    if v and not v.startswith(("http://", "https://")):
+        log.warning("%s=%r is not an http(s) URL; treating it as unset", name, v)
+        return ""
+    return v
+
+
 def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
@@ -191,7 +214,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
         onnx_input=_env_int(env, "DETECT_ONNX_INPUT", 640),
         onnx_backend=env.get("DETECT_ONNX_BACKEND", "auto"),
-        onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
+        onnx_providers=_clean_env(env.get("DETECT_ONNX_PROVIDERS")),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
         device=env.get("DETECT_HWACCEL_DEVICE", "/dev/dri/renderD128"),
         decode_skip=_decode_skip_from_env(env),
@@ -214,7 +237,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
         metrics_port=_env_int(env, "DETECT_METRICS_PORT", 9109),
-        dispatch_kaic_url=env.get("DETECT_DISPATCH_KAIC_URL", ""),
+        dispatch_kaic_url=_env_url(env, "DETECT_DISPATCH_KAIC_URL"),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
