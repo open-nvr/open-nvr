@@ -292,10 +292,12 @@ services:
   # ──────────────────────────────────────────────────────────────
   detect-pipeline:
     # Pulled from GHCR (built + published by publish-detect-pipeline.yml), like
-    # opennvr-core and yolov8-adapter — no local build. To build from source
-    # instead: `docker compose build` with a build: override, or run the
-    # component directly (see detect-pipeline/README.md).
-    image: ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}
+    # opennvr-core and yolov8-adapter — no local build. To run a locally built
+    # image (e.g. to test a change against a live stack), set
+    # DETECT_PIPELINE_IMAGE=opennvr/detect-pipeline:mytag — no compose edit and
+    # nothing to remember to undo. Otherwise build from source per
+    # detect-pipeline/README.md.
+    image: ${DETECT_PIPELINE_IMAGE:-ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}}
     container_name: opennvr_detect_pipeline
     logging: *svc-logs
     restart: unless-stopped
