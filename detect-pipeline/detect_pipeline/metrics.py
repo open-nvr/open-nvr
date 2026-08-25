@@ -148,7 +148,6 @@ def record_frame(
     stage_latency_s: dict[str, float] | None = None,
     model: str | None = None,
 ) -> None:
-    _last_frame_wall[camera_id] = time.time()
     """Emit Tier-0 per-frame metrics from a FrameResult (service layer).
 
     ``model`` (the active detector's identity, e.g. ``yolov8n``) labels the
@@ -158,6 +157,8 @@ def record_frame(
     decode/motion/track). ``tier0_detections_total{label}`` is per-class output
     volume — another axis for a model-vs-model comparison.
     """
+    with _frame_wall_lock:
+        _last_frame_wall[camera_id] = time.time()
     cam = {"camera": camera_id}
     # model-attributable label set (falls back to camera-only when unknown)
     mcam = {"camera": camera_id, "model": model} if model else cam
@@ -187,15 +188,38 @@ def record_frame(
 
 # Wall-clock time of the most recent processed frame per camera — the "are
 # frames actually flowing" signal /health uses. Module-level like ``metrics``.
+#
+# Guarded: N worker threads INSERT into this (a camera's first frame adds a
+# key) while the scrape thread iterates it. An unguarded insert during
+# iteration raises "dictionary changed size during iteration", which would
+# take out /metrics and /health together — and it fires precisely during
+# worker churn, when those endpoints are what you are looking at.
 _last_frame_wall: dict[str, float] = {}
+_frame_wall_lock = threading.Lock()
+
+
+def _frame_wall_snapshot() -> dict[str, float]:
+    with _frame_wall_lock:
+        return dict(_last_frame_wall)
+
+
+def forget_camera(camera_id: str) -> None:
+    """Drop a camera's frame-age entry (it left the desired set).
+
+    Without this the key lives forever and the camera is reported stale
+    indefinitely after it is deleted from core.
+    """
+    with _frame_wall_lock:
+        _last_frame_wall.pop(camera_id, None)
 
 
 def newest_frame_age_s(now: float | None = None) -> float | None:
     """Age in seconds of the newest frame across all cameras (None = none yet)."""
-    if not _last_frame_wall:
+    snap = _frame_wall_snapshot()
+    if not snap:
         return None
     now = time.time() if now is None else now
-    return max(0.0, now - max(_last_frame_wall.values()))
+    return max(0.0, now - max(snap.values()))
 
 
 def frame_ages_s(now: float | None = None) -> dict[str, float]:
@@ -206,7 +230,7 @@ def frame_ages_s(now: float | None = None) -> dict[str, float]:
     it cannot answer "is camera 2 still being analyzed?". This can.
     """
     now = time.time() if now is None else now
-    return {cam: max(0.0, now - t) for cam, t in _last_frame_wall.items()}
+    return {cam: max(0.0, now - t) for cam, t in _frame_wall_snapshot().items()}
 
 
 def stale_cameras(threshold_s: float, now: float | None = None) -> list[str]:

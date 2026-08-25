@@ -43,6 +43,7 @@ from .metrics import (
     record_sink_error,
     record_worker_restart,
     record_worker_state,
+    forget_camera,
 )
 from .motion import MotionConfig, MotionDetector
 from .pipeline import DetectPipeline, FrameResult
@@ -627,6 +628,11 @@ class WorkerManager:
                 worker.stop()
                 del self._workers[cid]
                 self._specs.pop(cid, None)
+                if cid not in desired:
+                    # Gone from core entirely — drop its frame-age entry so
+                    # it stops being reported stale forever.
+                    self._latest_url.pop(cid, None)
+                    forget_camera(cid)
                 if spec_changed:
                     log.info(
                         "tier0: restarting %s — baked-in spec changed "

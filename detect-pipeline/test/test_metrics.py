@@ -3,6 +3,7 @@
 """Unit tests for the Tier-0 metrics registry + service-layer recorders."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from detect_pipeline.gate import GateDecision, GateResult
@@ -193,5 +194,63 @@ def test_frame_age_gauge_moves_when_a_feed_stalls():
     out = m.metrics.render()
     assert "tier0_frame_age_seconds" in out
     assert 'camera="cam9"' in out
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+
+
+def test_frame_wall_reads_are_safe_against_concurrent_workers():
+    """N worker threads insert camera keys while the scrape thread iterates.
+
+    An unguarded insert during iteration raises "dictionary changed size
+    during iteration" — which would take out /metrics and /health together,
+    and fires precisely during worker churn.
+    """
+    import threading
+
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            m.record_frame(f"cam{i}", _Result())
+            i += 1
+
+    def reader():
+        while not stop.is_set():
+            try:
+                m.frame_ages_s()
+                m.newest_frame_age_s()
+                m.stale_cameras(60.0)
+            except RuntimeError as e:      # the bug this pins
+                errors.append(str(e))
+                return
+
+    threads = [threading.Thread(target=writer, daemon=True) for _ in range(3)]
+    threads.append(threading.Thread(target=reader, daemon=True))
+    for t in threads:
+        t.start()
+    time.sleep(0.4)
+    stop.set()
+    for t in threads:
+        t.join(timeout=2)
+
+    assert not errors, errors[:1]
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+
+
+def test_forget_camera_drops_a_deleted_cameras_entry():
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    m.record_frame("cam-gone", _Result())
+    assert "cam-gone" in m.frame_ages_s()
+    m.forget_camera("cam-gone")
+    assert "cam-gone" not in m.frame_ages_s()
+    m.forget_camera("cam-gone")          # idempotent
     m._last_frame_wall.clear()
     m.metrics.reset()
