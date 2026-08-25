@@ -530,7 +530,16 @@ function Choose-Example {
         $capLlm = if ($accel -ne 'cpu') { 4 } elseif ($cores -ge 8) { 3 } elseif ($cores -ge 4) { 2 } else { 1 }
         if ($capLlm -gt $budgetGb) { $capLlm = $budgetGb }
 
-        function Pick-FromCatalog([string]$Kind, [int]$Cap) {
+        # The catalog's speed column is editorial prose; this is the only
+        # place that turns it into an ordering. Keep in sync with speed_rank
+        # in install.sh.
+        function Get-SpeedRank([string]$Speed) {
+            switch ($Speed) {
+                'fastest' { 0 } 'fast' { 1 } 'medium' { 2 }
+                'slower'  { 3 } 'slowest' { 4 } default { 2 }
+            }
+        }
+        function Pick-FromCatalog([string]$Kind, [int]$Cap, [int]$SpeedCap = 9) {
             $catalog = 'examples/camera-agent/model_catalog.txt'
             if (-not (Test-Path $catalog)) { return $null }
             $best = $null; $bestRam = -1
@@ -538,7 +547,9 @@ function Choose-Example {
                 $f = $line -split '\|'
                 if ($f[0] -ne $Kind -or $f[3] -ne 'yes') { continue }
                 $r = [int]$f[2]
-                if ($r -le $Cap -and $r -gt $bestRam) { $best = $f[1]; $bestRam = $r }
+                if ($r -gt $Cap) { continue }
+                if ((Get-SpeedRank $f[4]) -gt $SpeedCap) { continue }
+                if ($r -gt $bestRam) { $best = $f[1]; $bestRam = $r }
             }
             # ,@(...): PowerShell unrolls a returned array into the output
             # stream; the comma operator keeps it as ONE object so [0]/[1] hold.
@@ -553,7 +564,12 @@ function Choose-Example {
         # hold is worse than a smaller one: it evicts the LLM every question.
         $remaining = [math]::Max(0, $budgetGb - $llmRam)
         if ($accel -eq 'cpu' -and $cores -lt 4) { $remaining = 0 }
-        $pick = Pick-FromCatalog 'vlm' $remaining
+        # Vision gets a SPEED ceiling too, not just a RAM one - the same rule
+        # the LLM got. Without it every machine with room landed on the same
+        # 4B model: it fits, so it wins, even CPU-only where a caption costs
+        # ~25 s against ~1-2 s on a GPU.
+        $vlmSpeedCap = if ($accel -eq 'cpu') { 1 } else { 9 }
+        $pick = Pick-FromCatalog 'vlm' $remaining $vlmSpeedCap
         if ($pick) { $vlmSuggest = $pick[0]; $captionSuggest = 'ollamavlm' }
         else { $vlmSuggest = ''; $captionSuggest = 'moondream' }
 

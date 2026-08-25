@@ -201,9 +201,9 @@ machines: `gemma3:4b` was gated on `RAM ≥ 8` alone, so an 8 GB box got
 | 4 GB / 2 cores, CPU | `qwen2.5:0.5b` | — | `moondream` | `tiny.en` |
 | 8 GB / 4 cores, CPU | `qwen2.5:1.5b` | — | `moondream` | `base.en` |
 | 8 GB / 8 threads, CPU | `qwen3:1.7b` | — | `moondream` | `base.en` |
-| 16 GB / 8 threads, CPU | `qwen3:1.7b` | `gemma3:4b` | `ollamavlm` | `small.en` |
-| 16 GB / 4 cores, CPU | `qwen2.5:1.5b` | `gemma3:4b` | `ollamavlm` | `base.en` |
-| 32 GB / 16 cores, CPU | `qwen3:1.7b` | `gemma3:4b` | `ollamavlm` | `small.en` |
+| 16 GB / 8 threads, CPU | `qwen3:1.7b` | `moondream` | `ollamavlm` | `small.en` |
+| 16 GB / 4 cores, CPU | `qwen2.5:1.5b` | `moondream` | `ollamavlm` | `base.en` |
+| 32 GB / 16 cores, CPU | `qwen3:1.7b` | `moondream` | `ollamavlm` | `small.en` |
 | 8 GB, GPU | `qwen3:1.7b` | — | `moondream` | `base.en` |
 | 16 GB, GPU | `qwen2.5:3b` | `gemma3:4b` | `ollamavlm` | `small.en` |
 | 32 GB, Apple Silicon | `qwen2.5:3b` | `gemma3:4b` | `ollamavlm` | `small.en` |
@@ -217,6 +217,13 @@ CPU-only machines are tiered by cores as well as RAM, because "it fits"
 and "it answers before the operator gives up" are different questions —
 and a machine with fewer than 4 cores skips the Ollama vision path
 entirely, whatever the RAM arithmetic says.
+
+The vision model carries that same speed ceiling, not just a RAM one. A
+4B vision model costs ~25 s per caption on CPU against ~1-2 s on a GPU,
+so CPU-only machines are capped at the catalog's *fast* tier however
+much RAM is spare. Without that cap every machine with room landed on
+`gemma3:4b` — it fits, so it won — and the suggestion stopped varying
+with the hardware at all.
 
 Two constraints shape the tiers. The **floor** is tool-calling quality:
 below ~1.5b the agent misroutes tools noticeably, so the tiny tier is

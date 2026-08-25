@@ -108,6 +108,39 @@ gpu=$(cut -d'|' -f1 <<<"$(size 16 8 cuda)")
 [[ "$cpu" != "$gpu" ]] && pass \
     || fail "GPU and CPU-only 16 GB boxes both got '${cpu}'"
 
+# ── the second field report: "LLM is machine specific now, but the VLM is
+# still gemma on every machine". It was — the LLM got a speed ceiling and the
+# vision model only got a RAM one, so every box with room landed on the same
+# 4B model. It fits, so it won, even CPU-only where a caption costs ~25 s
+# against ~1-2 s on a GPU.
+start_test "the vision model varies with hardware, not just the LLM"
+seen=$(for spec in "8 4 cpu" "16 8 cpu" "32 16 cpu" "16 8 cuda" "32 12 metal"; do
+           read -r ram cores accel <<<"$spec"
+           cut -d'|' -f2 <<<"$(size "$ram" "$cores" "$accel")"
+       done | sort -u | wc -l | tr -d ' ')
+(( seen > 1 )) && pass \
+    || fail "every machine got the same vision answer across CPU, GPU and Metal"
+
+start_test "a heavyweight vision model is not suggested on a CPU-only box"
+catalog="examples/camera-agent/model_catalog.txt"
+speed_of() { awk -F'|' -v m="$1" '$2 == m { print $5 }' <(grep -v '^#' "$catalog"); }
+slow=""
+for spec in "16 8 cpu" "32 16 cpu" "64 32 cpu"; do
+    read -r ram cores accel <<<"$spec"
+    vlm=$(cut -d'|' -f2 <<<"$(size "$ram" "$cores" "$accel")")
+    [[ -n "$vlm" ]] || continue
+    sp=$(speed_of "$vlm")
+    [[ "$sp" == "fastest" || "$sp" == "fast" ]] \
+        || slow="${slow} [${spec} → ${vlm} (${sp})]"
+done
+[[ -z "$slow" ]] && pass || fail "slow vision model on CPU-only:${slow}"
+
+start_test "a GPU still gets the better vision model"
+gpu_vlm=$(cut -d'|' -f2 <<<"$(size 16 8 cuda)")
+cpu_vlm=$(cut -d'|' -f2 <<<"$(size 16 8 cpu)")
+[[ -n "$gpu_vlm" && "$gpu_vlm" != "$cpu_vlm" ]] && pass \
+    || fail "GPU box got '${gpu_vlm:-nothing}', same as CPU-only — the speed ceiling should only bind on CPU"
+
 # ── 4. failing to detect must size DOWN, never up ──
 start_test "undetectable hardware is treated as a small machine"
 got=$(size 0 0 cpu)

@@ -414,16 +414,27 @@ compute_model_budget() {
     return 0
 }
 
-# catalog_pick <kind> <max_ram_gb> → largest TESTED model of that kind whose
-# working set fits, or empty. Reads the catalog so the tiers can never drift
-# from the menu the operator is shown.
+# speed_rank <speed> → 0 (fastest) .. 4 (slowest). The catalog's speed column
+# is editorial prose; this is the only place that turns it into an ordering.
+speed_rank() {
+    case "$1" in
+        fastest) echo 0 ;; fast) echo 1 ;; medium) echo 2 ;;
+        slower)  echo 3 ;; slowest) echo 4 ;; *) echo 2 ;;
+    esac
+}
+
+# catalog_pick <kind> <max_ram_gb> [max_speed_rank] → largest TESTED model of
+# that kind that fits BOTH ceilings, or empty. Reads the catalog so the tiers
+# can never drift from the menu the operator is shown.
 catalog_pick() {
-    local kind="$1" cap="$2" catalog="examples/camera-agent/model_catalog.txt"
-    local k model min_ram tested rest best="" best_ram=-1
+    local kind="$1" cap="$2" speed_cap="${3:-9}"
+    local catalog="examples/camera-agent/model_catalog.txt"
+    local k model min_ram tested speed rest best="" best_ram=-1
     [[ -f "$catalog" ]] || return 0
-    while IFS='|' read -r k model min_ram tested rest; do
+    while IFS='|' read -r k model min_ram tested speed rest; do
         [[ "$k" == "$kind" && "$tested" == "yes" ]] || continue
         (( min_ram <= cap )) || continue
+        (( $(speed_rank "$speed") <= speed_cap )) || continue
         (( min_ram > best_ram )) && { best="$model"; best_ram="$min_ram"; }
     done < <(grep -v '^#' "$catalog")
     printf '%s|%s' "$best" "$best_ram"
@@ -469,7 +480,14 @@ suggest_models() {
     # On a weak CPU, serving vision through Ollama is slow enough to be a
     # worse experience than the small in-container model, whatever fits.
     if [[ "$HW_ACCEL" == "cpu" ]] && (( HW_CORES < 4 )); then remaining=0; fi
-    picked=$(catalog_pick vlm "$remaining")
+    # Vision gets a SPEED ceiling too, not just a RAM one — the same rule the
+    # LLM already got. Without it every machine with room landed on the same
+    # 4B model: it fits, so it wins, even CPU-only where a caption costs ~25 s
+    # against ~1-2 s on a GPU. Fitting in RAM and answering before the
+    # operator gives up are different questions.
+    local vlm_speed_cap=9
+    [[ "$HW_ACCEL" == "cpu" ]] && vlm_speed_cap=1        # CPU: the fast tier only
+    picked=$(catalog_pick vlm "$remaining" "$vlm_speed_cap")
     SUGGEST_VLM="${picked%%|*}"
     if [[ -n "$SUGGEST_VLM" ]]; then
         SUGGEST_CAPTION_ADAPTER="ollamavlm"
