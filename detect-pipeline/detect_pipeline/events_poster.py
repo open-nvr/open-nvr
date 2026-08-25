@@ -96,22 +96,43 @@ class VisitPoster:
         self._opener = opener or urllib.request.urlopen
         self._q: queue.Queue[Visit] = queue.Queue(maxsize=maxsize)
         self._dropped = 0
+        self._drop_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     # -- worker-side (never blocks) ---------------------------------
 
     def submit(self, visit: Visit) -> bool:
+        """Queue a visit. Never blocks the worker; drops the OLDEST on overflow."""
         try:
             self._q.put_nowait(visit)
             return True
         except queue.Full:
+            pass
+        # Make room by discarding the oldest, which is what the module has
+        # always promised. put_nowait alone dropped the NEWEST, so a backlog
+        # meant keeping a queue full of stale visits and throwing away
+        # everything currently happening — the opposite of useful history.
+        evicted: Visit | None = None
+        try:
+            evicted = self._q.get_nowait()
+        except queue.Empty:                  # drained between the two calls
+            pass
+        try:
+            self._q.put_nowait(visit)
+            queued = True
+        except queue.Full:                   # refilled underneath us; give up
+            queued = False
+
+        lost = evicted if queued else visit
+        with self._drop_lock:                # plain += raced across N workers
             self._dropped += 1
-            record_visit_dropped(visit.camera_id, "queue_full")
-            log.warning(
-                "visit queue full — dropped %s/%s (total dropped: %d)",
-                visit.camera_id, visit.track_id, self._dropped,
-            )
-            return False
+            total = self._dropped
+        record_visit_dropped(lost.camera_id, "queue_full")
+        log.warning(
+            "visit queue full — dropped %s/%s (total dropped: %d)",
+            lost.camera_id, lost.track_id, total,
+        )
+        return queued
 
     # -- drain thread -----------------------------------------------
 
@@ -121,24 +142,37 @@ class VisitPoster:
         )
         self._thread.start()
 
+    def is_alive(self) -> bool:
+        """Whether the drain thread is still running (fed to /health)."""
+        return self._thread is not None and self._thread.is_alive()
+
     def _drain(self) -> None:
+        # Outer guard: ONE drain thread serves every camera, so an exception
+        # escaping the inner handler — including from the handler itself —
+        # used to kill visit persistence fleet-wide, silently and for the
+        # life of the process, while the queue filled behind it.
         while True:
-            visit = self._q.get()
             try:
-                self._post(visit)
-                record_visit_posted(visit.camera_id)
-            except Exception as e:
-                # A post failure is PERMANENT history loss — there is no retry
-                # queue — so it is counted, not just logged. The reason label
-                # separates "core is down" from "this visit can never be
-                # posted" (an unresolvable camera id), which look identical
-                # in the log.
-                reason = "unresolved_camera" if isinstance(e, ValueError) else "post_failed"
-                record_visit_dropped(visit.camera_id, reason)
-                log.warning(
-                    "visit post failed for %s/%s: %s",
-                    visit.camera_id, visit.track_id, e,
-                )
+                self._drain_one()
+            except Exception:  # pragma: no cover - the last line of defence
+                log.exception("visit drain iteration failed; continuing")
+
+    def _drain_one(self) -> None:
+        visit = self._q.get()
+        try:
+            self._post(visit)
+            record_visit_posted(visit.camera_id)
+        except Exception as e:
+            # A post failure is PERMANENT history loss — there is no retry
+            # queue — so it is counted, not just logged. The reason label
+            # separates "core is down" from "this visit can never be posted"
+            # (an unresolvable camera id), which look identical in the log.
+            reason = "unresolved_camera" if isinstance(e, ValueError) else "post_failed"
+            record_visit_dropped(visit.camera_id, reason)
+            log.warning(
+                "visit post failed for %s/%s: %s",
+                visit.camera_id, visit.track_id, e,
+            )
 
     def _post(self, v: Visit) -> None:
         body = {

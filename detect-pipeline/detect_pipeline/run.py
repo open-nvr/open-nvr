@@ -482,6 +482,12 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
     return manager
 
 
+# Delay between reconnect attempts. This — not a retry cap — is what keeps a
+# misconfigured broker from error-looping hot, while still recovering from an
+# ordinary restart whenever it finishes.
+_NATS_RECONNECT_WAIT_S = 2.0
+
+
 def _nats_connect_options(nats_url: str, token: str | None) -> dict:
     """kwargs for ``nats.connect`` against the compose broker.
 
@@ -489,13 +495,20 @@ def _nats_connect_options(nats_url: str, token: str | None) -> dict:
     docker-compose) — connecting without the token is an Authorization
     Violation and the reconnect loop spams the log while every publish is
     silently dropped. Reuse the same INTERNAL_API_KEY the service already
-    holds for opennvr-core. Bounded reconnects keep a genuinely
-    misconfigured broker from error-looping forever.
+    holds for opennvr-core.
+
+    Reconnects are UNBOUNDED. They used to stop after 10 attempts to keep a
+    misconfigured broker from error-looping, but nothing rebuilt the client
+    afterwards: an ordinary broker restart that outlasted ten tries left
+    every camera's live events dead until the container was restarted. That
+    is the wrong trade for a service meant to run for months. The retry WAIT
+    is what stops the hot loop; giving up is not.
     """
     opts: dict = {
         "servers": [nats_url],
         "name": "opennvr-tier0",
-        "max_reconnect_attempts": 10,
+        "max_reconnect_attempts": -1,     # never stop trying
+        "reconnect_time_wait": _NATS_RECONNECT_WAIT_S,
     }
     if token:
         opts["token"] = token
@@ -617,6 +630,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         workers_running=lambda: len(manager.running_ids()),
         newest_frame_age_s=newest_frame_age_s,
         stale_cameras=stale_cameras,
+        visits_running=(visit_poster.is_alive if visit_poster is not None else None),
     )
 
     # Effective config — one truthful block. Half of every support/QA thread

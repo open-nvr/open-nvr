@@ -42,6 +42,10 @@ class HealthState:
     # not by itself flip the service unhealthy — a camera being offline is
     # normal operations, and alerting policy belongs on the metric.
     stale_cameras: Callable[[float], list[str]] = lambda _threshold: []
+    # Whether visit persistence is still running. ONE drain thread serves the
+    # whole fleet, so if it dies every camera silently stops recording
+    # history while detection carries on looking perfectly healthy.
+    visits_running: Callable[[], bool] | None = None
     started_at: float = field(default_factory=time.time)
     frame_stale_s: float = 60.0
     startup_grace_s: float = 90.0
@@ -68,6 +72,13 @@ def evaluate(st: HealthState, now: float | None = None) -> tuple[bool, dict]:
 
     if st.nats_configured and not st.nats_connected() and not in_grace:
         problems.append("event bus configured but not connected — events are dropped")
+
+    visits_alive = None if st.visits_running is None else bool(st.visits_running())
+    if visits_alive is False:
+        problems.append(
+            "visit persistence thread is dead — detection continues but no "
+            "history is being recorded for any camera"
+        )
 
     workers = st.workers_running()
     age = st.newest_frame_age_s()
@@ -96,6 +107,8 @@ def evaluate(st: HealthState, now: float | None = None) -> tuple[bool, dict]:
         "detector": {"requested": st.detector_requested, "actual": st.detector_actual},
         "nats": ("connected" if st.nats_connected() else "disconnected")
         if st.nats_configured else "unconfigured",
+        "visits": ("running" if visits_alive else "stopped")
+        if visits_alive is not None else "unconfigured",
         "in_startup_grace": in_grace,
         "problems": problems,
     }

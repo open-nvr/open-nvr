@@ -147,13 +147,18 @@ def test_build_manager_honours_disabled():
 
 # ── NATS connect options (token auth against the compose broker) ────
 
-def test_nats_options_include_token_and_bounded_reconnects():
+def test_nats_options_include_token_and_never_give_up_reconnecting():
+    """Reconnects must be UNBOUNDED. They used to stop after 10 attempts and
+    nothing rebuilt the client, so a broker restart that outlasted ten tries
+    left every camera's live events dead until the container was restarted.
+    The retry WAIT is what keeps a misconfigured broker from looping hot."""
     from detect_pipeline.run import _nats_connect_options
 
     opts = _nats_connect_options("nats://nats:4222", "sekret")
     assert opts["servers"] == ["nats://nats:4222"]
     assert opts["token"] == "sekret"
-    assert opts["max_reconnect_attempts"] == 10
+    assert opts["max_reconnect_attempts"] == -1
+    assert opts["reconnect_time_wait"] > 0
 
 
 def test_nats_options_omit_token_when_absent():

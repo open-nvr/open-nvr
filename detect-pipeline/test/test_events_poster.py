@@ -93,11 +93,21 @@ def test_post_carries_auth_and_evidence():
     assert "evidence_jpeg_b64" in seen["body"]
 
 
-def test_full_queue_drops_not_blocks():
-    p = VisitPoster("http://core:8000", None, maxsize=1)
-    assert p.submit(_visit()) is True
-    assert p.submit(_visit()) is False                          # dropped, no block
+def test_full_queue_drops_the_oldest_and_never_blocks():
+    """The module has always promised the OLDEST is dropped; put_nowait alone
+    dropped the newest, so a backlog kept a queue of stale visits and threw
+    away everything currently happening."""
+    from dataclasses import replace as _replace
+
+    p = VisitPoster("http://core:8000", None, maxsize=2)
+    old, mid, new = (_replace(_visit(), track_id=t) for t in ("old", "mid", "new"))
+    assert p.submit(old) is True
+    assert p.submit(mid) is True
+    assert p.submit(new) is True                    # full: evicts `old`, keeps `new`
     assert p._dropped == 1
+
+    kept = [p._q.get_nowait().track_id for _ in range(2)]
+    assert kept == ["mid", "new"], kept             # oldest went, newest stayed
 
 
 # ── numeric camera id (core keys events on Camera.id, not "cam1") ───
@@ -188,3 +198,65 @@ def test_junk_suppression_is_counted_not_silent():
         "tier0_visits_dropped_total", {"camera": "7", "reason": "too_short"}
     ) == 1
     m.metrics.reset()
+
+
+def test_drop_counter_is_safe_across_concurrent_workers():
+    """`self._dropped += 1` is a read-modify-write; N worker threads submit
+    into one shared queue, so the plain increment lost updates."""
+    import threading
+
+    p = VisitPoster("http://core:8000", None, maxsize=1)
+    p.submit(_visit())                                  # fill it
+
+    def hammer():
+        for _ in range(200):
+            p.submit(_visit())
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert p._dropped == 8 * 200, p._dropped
+
+
+def test_drain_thread_survives_a_failure_inside_its_own_handler():
+    """ONE drain thread serves every camera. The inner `except` calls the
+    metrics registry and the logger; if either raises, the exception escapes
+    the handler and used to kill visit persistence fleet-wide — silently, for
+    the life of the process, while the queue filled behind it.
+
+    (BaseException is deliberately NOT caught: swallowing KeyboardInterrupt /
+    SystemExit would be worse than the bug.)
+    """
+    import time as _time
+
+    from detect_pipeline import events_poster as ep
+
+    p = VisitPoster("http://core:8000", None)
+    seen = {"posts": 0, "handler_calls": 0}
+
+    def failing_post(_v):
+        seen["posts"] += 1
+        raise RuntimeError("core unreachable")
+
+    def exploding_metric(camera_id, reason):
+        seen["handler_calls"] += 1
+        raise RuntimeError("registry blew up INSIDE the except block")
+
+    p._post = failing_post
+    original = ep.record_visit_dropped
+    ep.record_visit_dropped = exploding_metric
+    try:
+        p.start()
+        for _ in range(3):
+            p.submit(_visit())
+        for _ in range(300):
+            if seen["handler_calls"] >= 3:
+                break
+            _time.sleep(0.01)
+    finally:
+        ep.record_visit_dropped = original
+
+    assert seen["handler_calls"] >= 3, "drain stopped after the first failure"
+    assert p.is_alive(), "drain thread died and took all persistence with it"
