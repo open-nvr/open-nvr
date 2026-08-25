@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import subprocess
 import threading
 import time
@@ -112,6 +113,18 @@ def _jittered(delay: float, rand: Callable[[], float]) -> float:
     return delay * 0.5 + delay * 0.5 * rand()
 
 
+def scrub_secrets(text: str) -> str:
+    """Strip signed query strings out of arbitrary text before logging it.
+
+    Redacting the URL we pass in is not enough: ffmpeg and ffprobe print the
+    URL THEY were given in their own diagnostics, and this service surfaces
+    that output deliberately (it is what makes a failure diagnosable). So the
+    credential comes back through the child's stderr even when every format
+    argument is clean.
+    """
+    return re.sub(r"(\?|&)jwt=[^\s\"'&\]]+", r"\1jwt=<redacted>", text or "")
+
+
 def redact_url(url: str) -> str:
     """Drop the query string from a stream URL before logging it.
 
@@ -157,7 +170,7 @@ class _StderrTail:
             pass
 
     def text(self) -> str:
-        return " | ".join(self._lines)
+        return scrub_secrets(" | ".join(self._lines))
 
 
 def _terminate(proc) -> None:
@@ -515,13 +528,14 @@ def probe_stream(
         if out.returncode != 0 or not out.stdout.strip():
             log.warning(
                 "ffprobe failed for %s (rc=%s): %s",
-                url, out.returncode, (out.stderr or "").strip() or "no output",
+                redact_url(url), out.returncode,
+                scrub_secrets((out.stderr or "").strip()) or "no output",
             )
             return None
         return _parse_ffprobe(out.stdout)
     except subprocess.TimeoutExpired:
-        log.warning("ffprobe timed out after %.0fs for %s", timeout, url)
+        log.warning("ffprobe timed out after %.0fs for %s", timeout, redact_url(url))
         return None
     except Exception as e:
-        log.warning("ffprobe error for %s: %s", url, e)
+        log.warning("ffprobe error for %s: %s", redact_url(url), scrub_secrets(str(e)))
         return None

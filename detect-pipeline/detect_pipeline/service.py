@@ -457,14 +457,25 @@ class CameraWorker:
                         self.spec.camera_id, False, target_fps=self.spec.fps
                     )
                 return
-        except Exception:
+        except Exception as exc:
             # Emit the DOWN gauge before bailing. Returning here used to skip
             # record_worker_state entirely, so a camera that never opens had
             # no tier0_worker_up series at all — not even 0 — and reconcile
             # silently re-attempted it every tick with nothing but a log line
             # to show for it. An absent series can't alert; a 0 can.
             record_worker_state(self.spec.camera_id, False, target_fps=self.spec.fps)
-            log.exception("tier0 %s: could not open source", self.spec.camera_id)
+            # A camera that is simply unreachable — powered off, unplugged,
+            # rebooting — is normal operation, not a code fault. ffprobe has
+            # already logged WHY at warning level, so a full traceback every
+            # reconcile tick just buries that reason and reads like a crash.
+            # Anything unexpected still gets its stack.
+            if isinstance(exc, RuntimeError) and "could not probe" in str(exc):
+                log.warning(
+                    "tier0 %s: source unavailable (%s) — retrying next tick",
+                    self.spec.camera_id, exc,
+                )
+            else:
+                log.exception("tier0 %s: could not open source", self.spec.camera_id)
             return
         # Substream guard: Tier-0 is designed to decode a LOW-RES substream.
         # Decoding a high-res main stream (no substream configured for this
