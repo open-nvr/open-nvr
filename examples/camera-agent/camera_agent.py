@@ -1513,10 +1513,14 @@ class Alarm:
     last_triggered: float | None = None
     trigger_count: int = 0
     last_ack: float = 0.0
-    # Watermark for the always-on Tier-0 stream. A detection older than this
-    # has already been judged, so one published frame rings the alarm at most
-    # once — Tier-0 republishes the same scene several times a second.
-    last_tier0_at: float = 0.0
+    # Watermark into the always-on Tier-0 stream, PER CAMERA. A detection at
+    # or before this has already been judged, so one published frame rings the
+    # alarm at most once — Tier-0 republishes the same scene several times a
+    # second. Per camera because one alarm can watch several: a single shared
+    # watermark lets the busiest camera hold it permanently ahead of a quiet
+    # one's timestamps, and the quiet camera — the driveway nobody walks up —
+    # would silently never use Tier-0 at all.
+    last_tier0_at: dict[str, float] = field(default_factory=dict)
 
     def window_label(self) -> str:
         def fmt(m):
@@ -1541,7 +1545,7 @@ class Alarm:
         }
 
 
-def _letterbox_jpeg(jpeg: bytes) -> bytes:
+def _letterbox_jpeg(jpeg: bytes, max_side: int = 960) -> bytes:
     """Pad a frame to a square, preserving aspect. Returns the input unchanged
     if anything at all goes wrong.
 
@@ -1551,16 +1555,32 @@ def _letterbox_jpeg(jpeg: bytes) -> bytes:
     scale and keeps the shapes honest.
 
     Measured on this deployment, same detector, same person, moved across the
-    frame (best person-confidence, 0.00 = not found at all):
+    frame (best person-confidence, 0.00 = not found at all) — the last column
+    is this function end to end:
 
         position     squashed   centre-crop   letterboxed
-        left edge      0.28        0.00           0.75
-        centre         0.00        0.54           0.68
-        right edge     0.49        0.00           0.82
+        left edge      0.28        0.00           0.84
+        centre         0.00        0.54           0.77
+        right edge     0.48        0.00           0.82
 
     Note the middle column: cropping to a centre square is BLIND at both
     edges, which is exactly the part of the frame a driveway or gate camera
     cares about. Padding is the only one of the three that works everywhere.
+
+    ``max_side`` shrinks before padding, because the detector resizes to its
+    own input regardless — sending 1920x1920 buys nothing and costs real work.
+    Downscaling here is also BETTER than letting the adapter do it, since
+    INTER_AREA resamples properly. Same person, same three positions:
+
+        letterbox side   1920   1280    960    640
+        left edge        0.77   0.83   0.85   0.85
+        centre           0.63   0.74   0.78   0.75
+        right edge       0.80   0.83   0.81   0.75
+        cost              114ms   82ms   44ms   33ms
+        payload            83KB   36KB   25KB   13KB
+
+    960 keeps headroom above a 640 model input while costing a third of full
+    size and a third of the bytes.
     """
     try:
         import cv2
@@ -1570,8 +1590,15 @@ def _letterbox_jpeg(jpeg: bytes) -> bytes:
         if img is None:
             return jpeg
         h, w = img.shape[:2]
-        if h == w or h == 0 or w == 0:
+        if h == 0 or w == 0:
             return jpeg
+        if max_side and max(h, w) > max_side:
+            scale = max_side / max(h, w)
+            img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                             interpolation=cv2.INTER_AREA)
+            h, w = img.shape[:2]
+        elif h == w:
+            return jpeg          # already square and already small enough
         side = max(h, w)
         canvas = np.zeros((side, side, 3), np.uint8)
         y, x = (side - h) // 2, (side - w) // 2
@@ -1817,7 +1844,8 @@ class AlarmManager:
         if ev is None:
             return False             # no Tier-0 for this camera — poll instead
         seen = float(getattr(ev, "received_at", 0.0) or 0.0)
-        if seen <= max(alarm.last_tier0_at, now - self._tier0_max_age):
+        watermark = alarm.last_tier0_at.get(cam, 0.0)
+        if seen <= max(watermark, now - self._tier0_max_age):
             return False
         tracks = (getattr(ev, "raw", None) or {}).get("tracks") or []
         hit = any(
@@ -1825,7 +1853,7 @@ class AlarmManager:
             for t in tracks if isinstance(t, dict)
         )
         if hit:
-            alarm.last_tier0_at = seen
+            alarm.last_tier0_at[cam] = seen
         return hit
 
     async def _poll(self, alarm: Alarm, cam: str) -> None:

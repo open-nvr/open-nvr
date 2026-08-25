@@ -795,7 +795,11 @@ def test_letterbox_squares_a_widescreen_frame():
     arrives crushed 1.78x and people come out too narrow to recognise. Pad
     first; never crop — a centre crop measured 0.00 at both frame edges."""
     from camera_agent import _letterbox_jpeg
-    assert _dims(_letterbox_jpeg(_jpeg(1920, 1080))) == (1920, 1920)
+    w, h = _dims(_letterbox_jpeg(_jpeg(1920, 1080)))
+    assert w == h, f"output must be square, got {w}x{h}"
+    # ...and shrunk on the way, since the detector resizes to its own input
+    # regardless: sending 1920x1920 costs real work and buys nothing.
+    assert w <= 960, f"expected a downscaled square, got {w}"
 
 
 def test_letterbox_keeps_the_whole_frame():
@@ -804,14 +808,17 @@ def test_letterbox_keeps_the_whole_frame():
     import cv2, numpy as np
     from camera_agent import _letterbox_jpeg
     src = np.full((1080, 1920, 3), 30, np.uint8)
-    src[:, :40] = 255                      # a marker at the extreme left
-    src[:, -40:] = 255                     # ...and the extreme right
+    src[:, :192] = 255                     # the leftmost tenth of the frame
+    src[:, -192:] = 255                    # ...and the rightmost tenth
     out = cv2.imdecode(
         np.frombuffer(_letterbox_jpeg(cv2.imencode(".jpg", src)[1].tobytes()),
                       np.uint8), cv2.IMREAD_COLOR)
+    # Padding goes top/bottom for a landscape frame, so the middle row is all
+    # content and the marked tenths must still be at its two ends.
     band = out[out.shape[0] // 2]
-    assert band[:40].mean() > 200, "left edge of the frame was lost"
-    assert band[-40:].mean() > 200, "right edge of the frame was lost"
+    tenth = max(1, band.shape[0] // 10)
+    assert band[:tenth].mean() > 200, "left edge of the frame was lost"
+    assert band[-tenth:].mean() > 200, "right edge of the frame was lost"
 
 
 def test_letterbox_leaves_a_square_frame_alone():
@@ -826,3 +833,50 @@ def test_letterbox_never_breaks_the_poll():
     from camera_agent import _letterbox_jpeg
     assert _letterbox_jpeg(b"not a jpeg") == b"not a jpeg"
     assert _letterbox_jpeg(b"") == b""
+
+
+def test_a_busy_camera_does_not_starve_a_quiet_one_on_the_same_alarm():
+    """One alarm can watch several cameras. A single shared watermark lets the
+    busiest camera hold it permanently ahead of the quiet camera's timestamps,
+    so the quiet one — the side gate nobody walks up — would silently never use
+    Tier-0 at all and fall back to the weak full-frame poll forever."""
+    import time
+    from context import CameraSpec
+
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x/1.jpg", role="front"),
+                 CameraSpec(camera_id="cam2", frame_url="http://x/2.jpg", role="gate")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    polls = []
+
+    async def fake_get_frame(cam, **_kw):
+        return b"\xff\xd8\xff"
+
+    async def counting_infer(*, frame_jpeg, **kw):
+        polls.append(1)
+        return {"result": {"detections": []}}   # the poll finds nothing
+
+    rt.context.get_frame = fake_get_frame
+    rt.detection_client.infer = counting_infer
+
+    now = time.time()
+    # cam1 is busy and its newest event is NEWER than cam2's.
+    evs = {"cam1": _Ev(now, [{"label": "person"}]),
+           "cam2": _Ev(now - 3.0, [{"label": "person"}])}
+    rt.context.latest_inference = lambda cam, adapter="tier0": evs.get(cam)
+
+    async def go():
+        alarm = rt.alarms.create(name="Both", target="person",
+                                 camera_ids=["cam1", "cam2"])
+        await rt.alarms._poll(alarm, "cam1")
+        alarm.triggered = False                 # unlatch so cam2 gets its turn
+        alarm.last_ack = 0.0
+        await rt.alarms._poll(alarm, "cam2")
+        rt.alarms.stop(alarm.id)
+        assert alarm.last_tier0_at.get("cam2"), (
+            "cam2's own Tier-0 evidence was discarded because cam1's was newer")
+        assert not polls, "cam2 should not have needed the fallback poll"
+
+    asyncio.run(go())
