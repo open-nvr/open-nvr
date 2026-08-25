@@ -716,3 +716,62 @@ def test_gate_change_closes_the_outgoing_dispatcher():
     mgr.apply_gate_change(lambda: None, dispatcher=None)
     assert new.closed
     assert mgr._dispatcher is None
+
+
+def test_inference_threads_follow_the_fleet_size():
+    """A fixed per-inference thread cap is right for a fleet and wrong for a
+    small one. Measured on an 8-core box, one camera, yolov8n at 640: 2
+    threads 449ms vs 8 threads 176ms — near-linear, so the shipped cap of 2
+    left six cores idle and made every frame 2.5x more expensive than the
+    hardware required."""
+    import detect_pipeline.service as svc
+
+    seen: list[int] = []
+
+    class _Cv2:
+        @staticmethod
+        def setNumThreads(n): seen.append(n)
+
+    import sys
+    sys.modules["cv2"] = _Cv2                       # intercept the global cap
+
+    prov = _FakeProvider([_spec(f"c{i}") for i in range(2)])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
+    mgr._shared_detector = None
+    original = svc.os.cpu_count
+    svc.os.cpu_count = lambda: 8
+    try:
+        mgr.reconcile()
+        assert seen and seen[-1] == 4, seen        # 8 cores / 2 cameras
+
+        prov.specs = [_spec(f"c{i}") for i in range(8)]
+        mgr.reconcile()
+        assert seen[-1] == 1, seen                 # 8 cores / 8 cameras
+    finally:
+        svc.os.cpu_count = original
+        sys.modules.pop("cv2", None)
+
+
+def test_pinned_cv_threads_are_never_retuned():
+    """An operator who set DETECT_CV_THREADS meant it."""
+    import sys
+
+    import detect_pipeline.service as svc
+
+    seen: list[int] = []
+
+    class _Cv2:
+        @staticmethod
+        def setNumThreads(n): seen.append(n)
+
+    sys.modules["cv2"] = _Cv2
+    original = svc.os.cpu_count
+    svc.os.cpu_count = lambda: 8
+    try:
+        mgr = WorkerManager(_FakeProvider([_spec("a")]), _FakeSink(),
+                            worker_factory=_FakeWorker, cv_threads_pinned=True)
+        mgr.reconcile()
+        assert seen == [], seen
+    finally:
+        svc.os.cpu_count = original
+        sys.modules.pop("cv2", None)

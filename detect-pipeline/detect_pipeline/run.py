@@ -508,6 +508,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         decode_skip=cfg.decode_skip,
         detector_pool=cfg.detector_pool,
         start_spread_s=cfg.start_spread_s,
+        cv_threads_pinned=_env_int(dict(os.environ), "DETECT_CV_THREADS", 0) > 0,
         decode_threads=cfg.decode_threads,
         rtsp_timeout_s=cfg.rtsp_timeout_s,
         fast_decode=cfg.fast_decode,
@@ -673,7 +674,11 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     # Reading it raw here crash-looped the container on an empty or
     # typo'd value — and "declared but empty" is what compose passes for
     # an unset ${VAR}, so env.get's default never applies.
-    threads = _env_int(dict(os.environ), "DETECT_CV_THREADS", 2)
+    # Unset means "let the manager size it to the fleet" (see
+    # WorkerManager._tune_inference_threads): a fixed cap is right for many
+    # cameras and wastes most of the box for one. An explicit value is
+    # honoured and never retuned.
+    threads = _env_int(dict(os.environ), "DETECT_CV_THREADS", 0)
     if threads > 0:
         try:
             import cv2

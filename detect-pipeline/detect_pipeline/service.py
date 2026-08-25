@@ -22,6 +22,7 @@ skipped, so per-camera opt-out works without touching the rest.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -678,6 +679,7 @@ class WorkerManager:
         detector_factory: Callable[[], DetectorAdapter] | None = None,
         detector_pool: int = 0,                           # 0 = one detector per worker
         start_spread_s: float = 10.0,                     # spread simultaneous dials
+        cv_threads_pinned: bool = False,                  # operator set DETECT_CV_THREADS
 
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
@@ -756,6 +758,10 @@ class WorkerManager:
         # re-minted JWT must not bounce a healthy worker) precisely because
         # this is the cheaper way to deliver it.
         self._latest_url: dict[str, str] = {}
+        # Inference width, retuned as the fleet changes size. Pinned means
+        # the operator set DETECT_CV_THREADS and we leave it alone.
+        self._cv_threads = 0
+        self._cv_threads_pinned = cv_threads_pinned
 
     def current_url(self, camera_id: str) -> str | None:
         """The freshest known stream URL for a camera (see _latest_url)."""
@@ -916,6 +922,46 @@ class WorkerManager:
                 self._workers[cid] = worker
                 self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
+        self._tune_inference_threads()
+
+    def _tune_inference_threads(self) -> None:
+        """Give each concurrent inference the cores it can actually use.
+
+        A FIXED per-inference thread cap is right for a fleet and wrong for a
+        small one. Measured on an 8-core box, one camera, yolov8n at 640:
+
+            1 thread   874 ms      4 threads  241 ms
+            2 threads  449 ms      8 threads  176 ms
+
+        Near-linear — so the shipped cap of 2 left six cores idle and made
+        every frame 2.5x more expensive than the hardware required. That is
+        what pushed this deployment six times over its frame budget.
+
+        At most min(pool, cameras) inferences run at once, so that is what the
+        cores divide between. Process-global (cv2's cap is), recomputed only
+        when the camera count changes, and never overridden when the operator
+        pinned DETECT_CV_THREADS themselves.
+        """
+        if self._cv_threads_pinned or not self._workers:
+            return
+        concurrent = len(self._workers)
+        if self._shared_detector is not None:
+            concurrent = min(concurrent, self._shared_detector.max_size)
+        cores = os.cpu_count() or 2
+        want = max(1, cores // max(1, concurrent))
+        if want == self._cv_threads:
+            return
+        try:
+            import cv2
+
+            cv2.setNumThreads(want)
+        except Exception:  # pragma: no cover - cv2 optional (stub/hog)
+            return
+        log.info(
+            "tier0: %d camera(s) on %d cores — %d inference thread(s) each "
+            "(was %d)", len(self._workers), cores, want, self._cv_threads,
+        )
+        self._cv_threads = want
 
     def _retire(self, workers: dict[str, Worker], replaced: set[str] | None = None) -> None:
         """Wind down a set of workers: signal all, then wait once.

@@ -370,7 +370,8 @@ services:
       - DETECT_METRICS_PORT=${DETECT_METRICS_PORT:-9109}
       # Thread cap for the detector (cv2 intra-op + BLAS). Prevents Tier-0
       # from starving CPU-bound co-tenants; raise it on big machines.
-      - DETECT_CV_THREADS=${DETECT_CV_THREADS:-2}
+      # Empty = sized to the fleet (cores / concurrent inferences).
+      - DETECT_CV_THREADS=${DETECT_CV_THREADS:-}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
       - DETECT_FPS=${DETECT_FPS:-2}
