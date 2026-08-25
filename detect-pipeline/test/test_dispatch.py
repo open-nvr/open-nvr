@@ -163,6 +163,7 @@ def test_one_camera_cannot_consume_every_dispatch_permit():
 
     d = KaicDispatcher("http://kaic", max_inflight=4, http_post=slow_post)
     try:
+        # A busy camera may run nearly flat out, but never take the last slot.
         for i in range(8):                       # one greedy camera
             d.dispatch("cam-busy", "caption", _blank(), _track(i))
         for _ in range(200):
@@ -170,7 +171,7 @@ def test_one_camera_cannot_consume_every_dispatch_permit():
                 break
             time.sleep(0.01)
 
-        assert len(started) <= 2, f"cam-busy took {len(started)} of 4 permits"
+        assert len(started) <= 3, f"cam-busy took {len(started)} of 4 permits"
         d.dispatch("cam-quiet", "caption", _blank(), _track(99))
         for _ in range(200):
             if len(started) >= 3:

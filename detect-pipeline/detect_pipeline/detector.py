@@ -19,10 +19,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+import logging
+
 import cv2
 import numpy as np
 
+from .metrics import metrics
 from .regions import Box
+
+log = logging.getLogger("detect_pipeline.detector")
 from .tracking import Detection
 
 
@@ -122,6 +127,8 @@ class DetectorPool:
         self.max_size = max(1, int(max_size))
         self._free: list = []
         self._created = 0
+        self._degraded = 0
+        self._reject_type = StubDetector
         self._lock = threading.Lock()
         # Admission control: never more concurrent detects than instances.
         self._slots = threading.Semaphore(self.max_size)
@@ -130,10 +137,40 @@ class DetectorPool:
         with self._lock:
             if self._free:
                 return self._free.pop()
+        det = self._factory()           # built outside the lock: model load is slow
+        # Count only what was actually BUILT. Incrementing before the factory
+        # ran meant a failed load inflated the count for good, quietly shrinking
+        # real capacity below max_size with no signal.
+        with self._lock:
             self._created += 1
-        return self._factory()          # built outside the lock: model load is slow
+        return det
+
+    def _usable(self, det) -> bool:
+        """Whether an instance is worth returning to the pool.
+
+        The factory degrades to a StubDetector when a model fails to load. Under
+        one-detector-per-worker that blinded exactly one camera; in a SHARED pool
+        the stub would circulate forever, so a rotating subset of frames across
+        every camera would silently detect nothing — and /health could not see
+        it, because it samples a separate probe instance built once at startup.
+        """
+        if self._reject_type is None:
+            return True
+        return not isinstance(det, self._reject_type)
 
     def _give(self, det) -> None:
+        if not self._usable(det):
+            with self._lock:
+                self._created = max(0, self._created - 1)
+                self._degraded += 1
+            log.warning(
+                "detector pool: discarding a degraded (%s) instance instead of "
+                "recirculating it — it would blind a share of every camera's "
+                "frames. Rebuilt on the next borrow.",
+                type(det).__name__,
+            )
+            metrics.inc("tier0_detector_pool_degraded_total")
+            return
         with self._lock:
             self._free.append(det)
 

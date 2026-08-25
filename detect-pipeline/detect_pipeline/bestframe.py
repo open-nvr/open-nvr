@@ -41,10 +41,15 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
 class BestFrameStore:
     """Thread-safe, bounded cache of each track's best-frame crop (encoded lazily)."""
 
-    def __init__(self, *, max_entries: int = 256, max_age_s: float = 120.0,
+    def __init__(self, *, max_entries: int = 0, max_age_s: float = 120.0,
                  max_per_camera: int = 16, jpeg_quality: int = 85,
                  _clock=time.monotonic, _encode=_encode_jpeg) -> None:
-        self._max_entries = max_entries
+        # 0 = derive from the per-camera quota rather than a fixed number.
+        # A hard-coded 256 silently overruled DETECT_BESTFRAME_PER_CAMERA
+        # past ~16 cameras: 20 x 16 = 320 > 256, so from camera 17 onward
+        # every put evicted from someone's bucket and the quota an
+        # operator configured was simply unreachable.
+        self._max_entries = max_entries if max_entries > 0 else 0
         # Per-camera quota. Without one, the count cap was global and a busy
         # camera simply evicted the quiet ones: at DETECT_MAX_TRACKS=50 the
         # 256-entry cap saturates at ~6 busy cameras, and because recency is
@@ -159,6 +164,8 @@ class BestFrameStore:
         # Global backstop for memory. Take from the LARGEST bucket rather than
         # the globally-oldest entry, so a busy camera cannot evict a quiet
         # camera's only best frame.
+        if self._max_entries <= 0:      # per-camera quota is the only bound
+            return
         while self._count_locked() > self._max_entries:
             biggest = max(self._cams.values(), key=len, default=None)
             if not biggest:

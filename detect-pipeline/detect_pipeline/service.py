@@ -831,7 +831,8 @@ class WorkerManager:
         # any of them is what keeps the wind-down bounded by one timeout
         # instead of one-per-camera; the old serial loop turned a spec change
         # across a fleet into minutes of blocked reconcile.
-        self._retire(doomed)
+        # Cameras still in `desired` are being REPLACED this tick, not removed.
+        self._retire(doomed, replaced={c for c in doomed if c in desired})
 
         starting = [c for c in desired if c not in self._workers]
         # Spread this batch's opening dials. One tick starting N cameras means
@@ -847,7 +848,7 @@ class WorkerManager:
                 self._specs[cid] = spec
                 log.info("tier0: started worker for camera %s", cid)
 
-    def _retire(self, workers: dict[str, Worker]) -> None:
+    def _retire(self, workers: dict[str, Worker], replaced: set[str] | None = None) -> None:
         """Wind down a set of workers: signal all, then wait once.
 
         A straggler is reported rather than silently orphaned. Its source has
@@ -857,6 +858,18 @@ class WorkerManager:
         """
         if not workers:
             return
+        # Mark the ones a replacement is already queued for BEFORE signalling.
+        # Doing it only for post-timeout stragglers left a race: a worker that
+        # exits microseconds after the deadline runs its teardown concurrently
+        # with the manager's loop, reads _superseded as False, and writes
+        # tier0_worker_up=0. If that lands after the replacement's UP — likely,
+        # since the replacement must clear a stagger, an ffprobe and an ffmpeg
+        # spawn while the straggler only has to flush — the gauge stays 0
+        # forever, because UP is written exactly once per worker at start.
+        for cid in (replaced or set()):
+            supersede = getattr(workers.get(cid), "mark_superseded", None)
+            if supersede is not None:
+                supersede()
         for worker in workers.values():
             _signal_stop(worker)
         stragglers = _join_workers(workers, STOP_TIMEOUT_S)

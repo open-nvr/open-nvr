@@ -292,3 +292,36 @@ def test_resolve_onnx_backend_auto_and_explicit():
     assert _resolve_onnx_backend("", "ort") == "ort"
     assert _resolve_onnx_backend("cvdnn", "ort") == "cvdnn"   # explicit wins
     assert _resolve_onnx_backend("tensorflow", "cvdnn") == "cvdnn"
+
+
+# ── every global a function loads must actually resolve ─────────────
+
+def test_run_module_functions_reference_no_undefined_globals():
+    """`main()` is `# pragma: no cover` and starts the whole service, so a
+    name that does not resolve there is invisible to the suite and crashes
+    the container on startup.
+
+    This actually happened: /health wiring referenced `visit_poster`, which
+    is a LOCAL of build_manager(), so main() raised NameError immediately
+    after build_manager returned — before metrics or /health came up. A
+    bytecode scan catches the whole class without running the service.
+    """
+    import builtins
+    import dis
+    import types
+
+    from detect_pipeline import run
+
+    unresolved: list[str] = []
+    for name, obj in vars(run).items():
+        if not isinstance(obj, types.FunctionType) or obj.__module__ != run.__name__:
+            continue
+        for instr in dis.get_instructions(obj):
+            if instr.opname != "LOAD_GLOBAL":
+                continue
+            g = instr.argval
+            if hasattr(run, g) or hasattr(builtins, g):
+                continue
+            unresolved.append(f"{name}() -> {g}")
+
+    assert not unresolved, "undefined global(s) in detect_pipeline.run: " + ", ".join(unresolved)

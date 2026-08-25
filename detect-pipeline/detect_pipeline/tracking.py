@@ -172,6 +172,16 @@ class Tracker:
         self.spawns_dropped = 0
 
     @property
+    def population(self) -> int:
+        """ALL internal tracks, tentative included — what ``max_tracks`` caps.
+
+        ``tracks`` returns only confirmed ones, so a camera could sit at the
+        cap refusing new spawns while the gauge meant to explain that looked
+        perfectly healthy.
+        """
+        return len(self._tracks)
+
+    @property
     def tracks(self) -> list[Track]:
         """Confirmed tracks only (past the initialization delay)."""
         return [t for t in self._tracks if t.confirmed]

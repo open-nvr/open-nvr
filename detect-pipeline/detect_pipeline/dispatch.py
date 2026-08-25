@@ -117,7 +117,13 @@ class KaicDispatcher:
         # they returned. A camera may now hold at most `per_camera`, so a busy
         # scene degrades itself rather than everyone else.
         self._sem = threading.Semaphore(self.max_inflight)
-        self._per_camera = max(1, self.max_inflight // 2)
+        # Reserve one permit rather than capping each camera at half. A fixed
+        # half starved the installs with no contention at all (a two-camera
+        # NVR could never use more than 2 of its 4), while leaving the whole
+        # pool open lets one camera lock everyone out — which is the bug.
+        # Holding back a single slot does both jobs: a busy camera runs nearly
+        # flat out, and a newcomer always finds a permit waiting.
+        self._per_camera = max(1, self.max_inflight - 1)
         self._cam_inflight: dict[str, int] = {}
         self._pool = ThreadPoolExecutor(
             max_workers=self.max_inflight, thread_name_prefix="tier1-dispatch"

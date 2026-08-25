@@ -111,6 +111,7 @@ class ServiceConfig:
     detector_pool: int = 0
     start_spread_s: float = 10.0
     dispatch_max_inflight: int = 4
+    bestframe_max_entries: int = 0
     visits_enabled: bool = True
 
 
@@ -188,7 +189,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         nats_url=env.get("NATS_URL") or None,
         detector=env.get("DETECT_DETECTOR", "onnx"),
         onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
-        onnx_input=int(env.get("DETECT_ONNX_INPUT", "640")),
+        onnx_input=_env_int(env, "DETECT_ONNX_INPUT", 640),
         onnx_backend=env.get("DETECT_ONNX_BACKEND", "auto"),
         onnx_providers=env.get("DETECT_ONNX_PROVIDERS", ""),
         hwaccel=env.get("DETECT_HWACCEL", "cpu"),
@@ -200,18 +201,19 @@ def config_from_env(env: dict) -> ServiceConfig:
         detector_pool=_detector_pool_from_env(env),
         start_spread_s=_env_float(env, "DETECT_START_SPREAD_S", 10.0),
         dispatch_max_inflight=_env_int(env, "DETECT_DISPATCH_MAX_INFLIGHT", 4),
+        bestframe_max_entries=_env_int(env, "DETECT_BESTFRAME_MAX_ENTRIES", 0),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
-        model_size=int(env.get("DETECT_MODEL_SIZE", "320")),
+        model_size=_env_int(env, "DETECT_MODEL_SIZE", 320),
         model_id=_derive_model_id(env),
-        refresh_seconds=float(env.get("DETECT_REFRESH_SECONDS", "30")),
+        refresh_seconds=_env_float(env, "DETECT_REFRESH_SECONDS", 30.0),
         gate_mode=env.get("DETECT_GATE_MODE", "shadow").strip().lower(),
         visits_enabled=_truthy(env.get("DETECT_VISITS_ENABLED", "true")),
-        gate_heartbeat_s=float(env.get("DETECT_GATE_HEARTBEAT_S", "0")),
+        gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
-        gate_cooldown_s=float(env.get("DETECT_GATE_COOLDOWN_S", "30")),
-        metrics_port=int(env.get("DETECT_METRICS_PORT", "9109")),
+        gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
+        metrics_port=_env_int(env, "DETECT_METRICS_PORT", 9109),
         dispatch_kaic_url=env.get("DETECT_DISPATCH_KAIC_URL", ""),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
@@ -452,6 +454,10 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         # the global cap stays as the memory backstop.
         best_frames = BestFrameStore(
             max_per_camera=cfg.bestframe_per_camera,
+            # Scale the global backstop with the fleet, or the per-camera
+            # quota is unreachable: 20 cameras x 16 = 320 > the old fixed
+            # 256, so from camera 17 every put evicted someone.
+            max_entries=cfg.bestframe_max_entries,
         )
     # Events store (RFC-0001 C1): post finished visits + best-frame evidence
     # to core. Best-effort by design — core down loses history, not detection.
@@ -484,6 +490,9 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         visit_poster=visit_poster,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
+    # Same reason: main() wires this into /health. It is a LOCAL of this
+    # function, so referring to it from main() is a NameError at startup.
+    manager.visit_poster = visit_poster
     return manager
 
 
@@ -536,15 +545,41 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
     loop = asyncio.new_event_loop()
     box: dict = {}
 
+    def _connect_forever():
+        """Keep trying the FIRST connect; unbounded reconnects only cover a
+        client that connected at least once.
+
+        nats-py's ``max_reconnect_attempts`` governs an ESTABLISHED client.
+        If the very first connect raised — the ordinary compose start race,
+        where tier0 is up before the broker accepts connections — nothing
+        retried, ``box["nc"]`` stayed unset, and publishing was disabled for
+        the life of the process. A five-second startup race cost every live
+        event, permanently.
+        """
+        attempt = 0
+        while not box.get("stopping"):
+            try:
+                box["nc"] = loop.run_until_complete(
+                    nats.connect(**_nats_connect_options(nats_url, token))
+                )
+                log.info("connected to NATS at %s", nats_url)
+                return True
+            except Exception as e:
+                attempt += 1
+                # Loud once, then occasional: a broker that is simply slow to
+                # start must not look the same as one that is misconfigured.
+                if attempt == 1 or attempt % 30 == 0:
+                    log.warning(
+                        "NATS connect to %s failed (attempt %d): %s — retrying "
+                        "every %.0fs; publishing is disabled until it succeeds",
+                        nats_url, attempt, e, _NATS_RECONNECT_WAIT_S,
+                    )
+                loop.run_until_complete(asyncio.sleep(_NATS_RECONNECT_WAIT_S))
+        return False
+
     def _serve():
         asyncio.set_event_loop(loop)
-        try:
-            box["nc"] = loop.run_until_complete(
-                nats.connect(**_nats_connect_options(nats_url, token))
-            )
-            log.info("connected to NATS at %s", nats_url)
-        except Exception:
-            log.warning("NATS connect failed at %s; publishing disabled", nats_url)
+        _connect_forever()
         loop.run_forever()
 
     threading.Thread(target=_serve, name="tier0-nats", daemon=True).start()
@@ -588,6 +623,7 @@ def _make_publisher(nats_url: str | None, token: str | None = None):  # pragma: 
         return True
 
     def close() -> None:
+        box["stopping"] = True          # break the initial-connect retry loop
         loop.call_soon_threadsafe(loop.stop)
 
     def connected() -> bool:
@@ -603,7 +639,11 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     # Cap OpenCV's intra-op threads. cv2.dnn defaults to every core, which
     # starves CPU-bound co-tenants (the camera-agent's adapters) far more
     # than it helps a 320px detector. 0 disables the cap.
-    threads = int(os.environ.get("DETECT_CV_THREADS", "2") or 0)
+    # Same variable _detector_pool_from_env reads through the safe helper.
+    # Reading it raw here crash-looped the container on an empty or
+    # typo'd value — and "declared but empty" is what compose passes for
+    # an unset ${VAR}, so env.get's default never applies.
+    threads = _env_int(dict(os.environ), "DETECT_CV_THREADS", 2)
     if threads > 0:
         try:
             import cv2
@@ -635,7 +675,10 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         workers_running=lambda: len(manager.running_ids()),
         newest_frame_age_s=newest_frame_age_s,
         stale_cameras=stale_cameras,
-        visits_running=(visit_poster.is_alive if visit_poster is not None else None),
+        visits_running=(
+            manager.visit_poster.is_alive
+            if getattr(manager, "visit_poster", None) is not None else None
+        ),
     )
 
     # Effective config — one truthful block. Half of every support/QA thread
