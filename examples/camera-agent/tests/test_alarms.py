@@ -948,3 +948,127 @@ def test_an_empty_ring_still_falls_back_to_the_poll():
         assert data["triggered"] is True and polls, "the backstop must still run"
 
     asyncio.run(go())
+
+
+# ── latency under load ─────────────────────────────────────────────────
+# Second field report, verified in the logs: operator armed an alarm, tested
+# it by TALKING TO THE AGENT, and the ring came >30s after the person did —
+# 'yielded 4 cycles' immediately followed by the trigger. Two causes, each
+# pinned below: the cheap Tier-0 ring-read was being deferred by the
+# interactive yield along with the expensive inference, and the backstop's
+# own full-frame inference was burning the CPU detect-pipeline needed (its
+# frame budget blew 8 -> 2 regions the moment the person appeared).
+
+
+def test_tier0_evidence_rings_even_during_an_interactive_turn():
+    """The yield exists to keep the user's turn snappy by not running MODELS.
+    Reading the Tier-0 ring touches no model and costs microseconds — deferring
+    it bought the turn nothing and cost the alarm up to ~20s."""
+    rt, polls = _tier0_runtime([{"label": "person", "score": 0.61}])
+    rt.interactive_busy = lambda: True          # a conversation, forever
+    rt.alarms._interval = 0.01
+    # Make the bounded-skip escape hatch unreachable within this test, so it
+    # cannot mask the property under test: the ring must come from the Tier-0
+    # check running DURING the yield, not from the yield running out. (At the
+    # real 5s interval those 4 skips are the ~20s the operator waited.)
+    rt.alarms._MAX_BUSY_SKIPS = 10_000
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        for _ in range(100):
+            if rt.alarms.list()[0]["triggered"]:
+                break
+            await asyncio.sleep(0.01)
+        data = rt.alarms.list()[0]
+        rt.alarms.stop(alarm.id)
+        assert data["triggered"] is True, (
+            "Tier-0 evidence must ring immediately, conversation or not")
+        assert not polls, "no inference may run while yielding to the turn"
+
+    asyncio.run(go())
+
+
+def test_backstop_inference_still_yields_to_the_turn_boundedly():
+    """The expensive half keeps the original yield semantics: skip while a
+    turn is active, but never more than _MAX_BUSY_SKIPS cycles — a safety
+    check must not wait out a conversation."""
+    rt, polls = _tier0_runtime([], poll_detections=[{"label": "person"}])
+    rt.context.recent_events = lambda *, camera_id, window_seconds: []
+    rt.interactive_busy = lambda: True
+    rt.alarms._interval = 0.01
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        await asyncio.sleep(0.03)                # a few cycles: still yielding
+        yielded_early = not polls
+        for _ in range(200):
+            if polls:
+                break
+            await asyncio.sleep(0.01)
+        rt.alarms.stop(alarm.id)
+        assert yielded_early, "inference should yield to the turn at first"
+        assert polls, "but a bounded number of skips later it must look anyway"
+
+    asyncio.run(go())
+
+
+def test_backstop_throttles_while_tier0_is_alive():
+    """While Tier-0 is demonstrably watching this camera, the backstop runs on
+    a clock, not every cycle — its full-frame inference was part of the load
+    that shed Tier-0's detector to near-blindness the moment a person arrived."""
+    import time
+    rt, polls = _tier0_runtime([{"label": "cat"}])   # alive, but no person
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        rt.alarms.stop(alarm.id)                 # drive _poll by hand
+        alarm.active = True
+        for _ in range(6):
+            await rt.alarms._poll(alarm, "cam1")
+        assert len(polls) == 1, (
+            f"expected one due inference then throttle, got {len(polls)}")
+        # The clock, not luck: age the stamp past the throttle and it looks again.
+        alarm.last_fallback_at["cam1"] -= rt.alarms._fallback_every + 1
+        await rt.alarms._poll(alarm, "cam1")
+        assert len(polls) == 2
+
+    asyncio.run(go())
+
+
+def test_backstop_unthrottled_when_tier0_is_silent():
+    """Silence is ambiguous — quiet scene and dead pipeline look identical —
+    so with no Tier-0 records at all the backstop keeps its full cadence."""
+    rt, polls = _tier0_runtime([], poll_detections=[])
+    rt.context.recent_events = lambda *, camera_id, window_seconds: []
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        rt.alarms.stop(alarm.id)
+        alarm.active = True
+        for _ in range(4):
+            await rt.alarms._poll(alarm, "cam1")
+        assert len(polls) == 4, (
+            f"no liveness signal -> every cycle must look, got {len(polls)}")
+
+    asyncio.run(go())
+
+
+def test_gate_audit_records_prove_liveness_for_the_throttle():
+    """A gate record has no tracks but is still proof the pipeline is up and
+    watching — an audit of a non-event. It must throttle the backstop even
+    though it can never ring the alarm."""
+    import time
+    rt, polls = _tier0_runtime([])
+    rt.context.recent_events = (
+        lambda *, camera_id, window_seconds: [_Ev(time.time(), [])])
+
+    async def go():
+        alarm = rt.alarms.create(name="Front", target="person", camera_ids=["cam1"])
+        rt.alarms.stop(alarm.id)
+        alarm.active = True
+        for _ in range(6):
+            await rt.alarms._poll(alarm, "cam1")
+        assert len(polls) == 1, (
+            f"gate records prove liveness; expected 1 inference, got {len(polls)}")
+
+    asyncio.run(go())
