@@ -483,6 +483,21 @@ function Choose-Example {
             Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
                 'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
                 'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
+            # Prompt for the re-check loop. $null means the input is GONE —
+            # deterministically (redirected stdin with nothing left to read),
+            # or a host where Read-Host throws. An empty string is a real
+            # Enter. The distinction matters: on redirected-but-exhausted
+            # stdin Read-Host returns "" forever WITHOUT throwing, so a
+            # catch-only guard loops an unattended run to infinity.
+            function Read-GateResponse([string]$Prompt) {
+                try {
+                    if ([Console]::IsInputRedirected -and [Console]::In.Peek() -lt 0) {
+                        return $null
+                    }
+                } catch {}
+                try { return (Read-Host $Prompt) } catch { return $null }
+            }
+            # --- ollama-availability gate (tested: test_installer_ollama_gate_ps1.sh) ---
             # Warning-and-proceeding is not enough: seen in the field, the
             # installer printed the download URL, carried on, and produced a
             # finished install whose agent pointed at :11434 with nothing
@@ -527,10 +542,8 @@ function Choose-Example {
                     # Ollama here or an explicit switch to the bundled
                     # container. Keep in sync with install.sh.
                     while ($llmWhere -eq 'host' -and -not $ollamaReady) {
-                        $resp = ''
-                        try {
-                            $resp = Read-Host "  Install Ollama (https://ollama.com/download) in another window, then press Enter to re-check - or type 'container' to use the bundled runtime"
-                        } catch {
+                        $resp = Read-GateResponse "  Install Ollama (https://ollama.com/download) in another window, then press Enter to re-check - or type 'container' to use the bundled runtime"
+                        if ($null -eq $resp) {
                             # Stdin ran dry (unattended run): hanging forever
                             # helps no one - take the runtime that works.
                             Warn 'No interactive input - using the bundled ollama container.'
@@ -559,6 +572,7 @@ function Choose-Example {
                     }
                 }
             }
+            # --- end ollama-availability gate ---
         }
         if ($llmWhere -eq 'host') {
             Info 'The bundled ollama container will be skipped entirely.'
