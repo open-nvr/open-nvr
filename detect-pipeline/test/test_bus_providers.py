@@ -195,3 +195,17 @@ def test_skip_unassigned_is_opt_in(monkeypatch):
     # ...and NO assignments at all is never skipped (no restriction declared).
     assert _to_spec(_cam()).analyze is True
     assert _to_spec(_cam(assignments=[])).analyze is True
+
+
+def test_provider_leaves_hwaccel_undeclared_when_core_omits_it():
+    """Core does not send `hwaccel` per camera. The old default of "cpu"
+    was indistinguishable from an explicit "cpu" and silently overrode the
+    service-wide DETECT_HWACCEL for every camera."""
+    from detect_pipeline.providers import _to_spec
+
+    spec = _to_spec({"camera_id": "cam1", "frame_url": "rtsp://m/cam-1"})
+    assert spec.hwaccel is None
+    # ...and an explicit declaration is still honoured if it ever appears.
+    declared = _to_spec({"camera_id": "cam1", "frame_url": "rtsp://m/cam-1",
+                         "hwaccel": "vaapi"})
+    assert declared.hwaccel == "vaapi"

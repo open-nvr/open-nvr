@@ -408,6 +408,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         model_id=cfg.model_id,
         best_frames=best_frames,
         device=cfg.device,
+        hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
         decode_threads=cfg.decode_threads,
         rtsp_timeout_s=cfg.rtsp_timeout_s,

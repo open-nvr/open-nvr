@@ -32,7 +32,7 @@ from .detector import DetectorAdapter, StubDetector
 from .frame_source import FrameSource, probe_stream
 from .dispatch import dispatch_escalations
 from .gate import Gate
-from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel
+from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel, resolve_hwaccel
 from .metrics import (
     metrics as _metrics,
     record_frame,
@@ -104,7 +104,11 @@ class CameraSpec:
     width: int | None = None      # if the provider knows it; else we ffprobe
     height: int | None = None
     fps: int = 5
-    hwaccel: str = "cpu"
+    # Per-camera decode backend, if the discovery endpoint ever declares one.
+    # None = not declared → the service-wide DETECT_HWACCEL applies. It
+    # defaulted to "cpu", which was indistinguishable from "core said cpu"
+    # and silently pinned every camera to software decode.
+    hwaccel: str | None = None
     # Per-camera label set from the camera's ``object_detection`` assignment
     # ("camera 4 wants person + truck"). None = no per-camera declaration →
     # the global DETECT_LABELS applies, exactly as before assignments
@@ -117,6 +121,17 @@ class CameraSpec:
     # core's events store keys on this numeric id instead. Appended LAST so
     # existing positional constructions keep their meaning.
     nvr_camera_id: int | None = None
+
+
+def hwaccel_for(spec: "CameraSpec", default: str) -> str:
+    """The decode backend THIS camera should use.
+
+    Same precedence as ``allowed_labels_for``: a per-camera declaration wins
+    when present, otherwise the service-wide setting. Hardware decode is a
+    property of the HOST, so the service-wide value is the one that normally
+    applies — it just never used to reach here.
+    """
+    return spec.hwaccel or default
 
 
 def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
@@ -230,6 +245,7 @@ class CameraWorker:
         model_id: str | None = None,             # detector identity for benchmarking labels
         best_frames=None,                        # shared BestFrameStore (on-demand best frame)
         device: str = "/dev/dri/renderD128",
+        hwaccel: str = "cpu",             # service-wide DETECT_HWACCEL default
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
@@ -251,6 +267,7 @@ class CameraWorker:
         self.model_id = model_id
         self.best_frames = best_frames
         self.device = device
+        self.hwaccel = hwaccel
         self.decode_skip = decode_skip
         self.decode_threads = decode_threads
         self.fast_decode = fast_decode
@@ -281,6 +298,29 @@ class CameraWorker:
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def _effective_hwaccel(self) -> HwAccel:
+        """Resolve this camera's decode backend, degrading loudly if unusable.
+
+        Announced per camera because the consequence is a ~6x CPU difference
+        and it is otherwise invisible: core hands the pipeline the MAIN
+        stream whenever hwaccel is configured (it assumes a GPU will absorb
+        it), so silently falling back to software decode would leave the
+        camera decoding full-resolution video on the CPU.
+        """
+        requested = hwaccel_for(self.spec, self.hwaccel)
+        accel, downgrade = resolve_hwaccel(requested, device=self.device)
+        if downgrade:
+            log.warning(
+                "tier0 %s: hwaccel %r unusable — falling back to CPU decode: %s",
+                self.spec.camera_id, requested, downgrade,
+            )
+        elif accel is not HwAccel.CPU:
+            log.info(
+                "tier0 %s: hardware decode via %s (%s)",
+                self.spec.camera_id, accel.value, self.device,
+            )
+        return accel
+
     def _make_source(self, decode_skip: str | None = None):
         if self._frame_source is not None:
             return self._frame_source, self._frame_source.width, self._frame_source.height
@@ -292,7 +332,7 @@ class CameraWorker:
             w, h, _fps = probed
         src = FrameSource(
             self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
-            hwaccel=HwAccel(self.spec.hwaccel), device=self.device,
+            hwaccel=self._effective_hwaccel(), device=self.device,
             decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
@@ -492,6 +532,7 @@ class WorkerManager:
         model_id: str | None = None,                      # detector identity (benchmark labels)
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
+        hwaccel: str = "cpu",                             # service-wide DETECT_HWACCEL
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
         decode_threads: int = 2,                          # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,                        # skip h264 loop filter (opt-in)
@@ -514,6 +555,7 @@ class WorkerManager:
         self._model_id = model_id
         self._best_frames = best_frames
         self._device = device
+        self._hwaccel = hwaccel
         self._decode_skip = decode_skip
         self._decode_threads = decode_threads
         self._fast_decode = fast_decode
@@ -553,6 +595,7 @@ class WorkerManager:
             spec, sink, detector=self._detector_factory(),
             model_size=self._model_size, model_id=self._model_id,
             best_frames=self._best_frames, device=self._device,
+            hwaccel=self._hwaccel,
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,
             fast_decode=self._fast_decode,
