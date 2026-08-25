@@ -332,15 +332,22 @@ class RegionBudgetController:
     def shedding(self) -> bool:
         return self.configured > 0 and self.current < self.configured
 
-    def observe(self, latency_s: float) -> bool:
-        """Feed one frame's processing time. True if the budget changed.
+    def observe(self, latency_s: float, regions_run: int = 1) -> int:
+        """Feed one frame. Returns the DELTA applied to the budget (0 = none).
 
         A single slow frame means nothing — a GOP boundary, a burst of motion,
         the OS scheduling elsewhere. Only a sustained trend moves the budget,
         so this smooths and requires a streak in one direction.
+
+        ``regions_run`` is what makes the signal honest. A frame on which the
+        detector never ran costs ~0ms, and treating that as "we have headroom"
+        let a quiet scene walk the budget straight back up to the configured
+        maximum on evidence that says nothing about the cost of a BUSY frame —
+        so the next burst of motion immediately blew the budget again and it
+        sawtoothed. Idle frames are simply not evidence either way.
         """
-        if self.configured <= 0:
-            return False
+        if self.configured <= 0 or regions_run <= 0:
+            return 0
         self._ema = (
             latency_s if self._ema is None
             else (self.smoothing * latency_s + (1 - self.smoothing) * self._ema)
@@ -354,15 +361,16 @@ class RegionBudgetController:
             self._streak = self._streak - 1 if self._streak <= 0 else -1
         else:
             self._streak = 0
-            return False
+            return 0
 
         if abs(self._streak) < self.settle_frames:
-            return False
+            return 0
         self._streak = 0
         # Halve on the way down (the overrun is usually large), step back up
         # one at a time so recovery cannot immediately re-saturate.
+        before = self.current
         self.current = (
             max(self.floor, self.current // 2) if over
             else min(self.configured, self.current + 1)
         )
-        return True
+        return self.current - before

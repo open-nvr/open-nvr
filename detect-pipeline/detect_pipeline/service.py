@@ -566,17 +566,24 @@ class CameraWorker:
                 # the worker stops draining ffmpeg's stdout, ffmpeg blocks on
                 # the full pipe, and MediaMTX drops the session, which surfaces
                 # as a "flaky camera" that is really us.
-                if budget.observe(frame_latency):
+                delta = budget.observe(frame_latency, len(result.regions))
+                if delta:
                     pipe.max_regions = budget.current
                     _metrics.gauge(
                         "tier0_regions_budget", float(budget.current),
                         {"camera": self.spec.camera_id},
                     )
-                    log.warning(
+                    # Shedding is a capability loss and deserves a warning;
+                    # getting capacity back is routine. The direction comes
+                    # from the DELTA — "shedding" (below configured) is still
+                    # true while recovering, so keying off it reported a step
+                    # UP as a cut.
+                    log.log(
+                        logging.WARNING if delta < 0 else logging.INFO,
                         "tier0 %s: frame latency %.2fs against a %.2fs budget — "
-                        "detector regions %s to %d (of %d configured)",
+                        "detector regions %s %d (of %d configured)",
                         self.spec.camera_id, frame_latency, budget.budget_s,
-                        "cut" if budget.shedding else "restored to",
+                        "cut to" if delta < 0 else "restored to",
                         budget.current, budget.configured,
                     )
                 record_frame(
