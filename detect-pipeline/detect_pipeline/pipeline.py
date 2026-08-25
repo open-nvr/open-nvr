@@ -303,6 +303,18 @@ class RegionBudgetController:
     per frame is a real cost, but it is strictly better than decoding a stream
     we cannot finish and losing the session with it.
 
+    Recovery remembers. Plain additive-increase/multiplicative-decrease is
+    memoryless, and on a real camera that showed: it halved away from 8
+    regions, climbed back to 8 in about twenty seconds off cheap quiet frames,
+    blew the budget at 8 again, and repeated every three minutes — sixteen cuts
+    in one 35-minute run, every one of them from 8. So the level that failed is
+    remembered (TCP's slow-start threshold), growth below it stays free, and
+    growth back INTO it has to be paid for in sustained evidence, more each
+    time it fails again. The mark only lifts on frames that genuinely ran that
+    many regions — a quiet frame is cheap at any budget and proves nothing —
+    so a busy scene can no longer be talked into a level it cannot afford, and
+    a box that really does free up still gets its full budget back.
+
     Pure and clock-injected — no I/O, no threads.
     """
 
@@ -316,6 +328,9 @@ class RegionBudgetController:
         recover_at: float = 0.6,
         settle_frames: int = 5,
         smoothing: float = 0.3,
+        probe_factor: int = 4,
+        max_probe_backoff: int = 8,
+        probation_frames: int = 20,
     ) -> None:
         self.configured = max(0, int(configured))
         self.budget_s = 1.0 / max(1, int(fps))
@@ -324,9 +339,23 @@ class RegionBudgetController:
         self.recover_at = recover_at
         self.settle_frames = max(1, int(settle_frames))
         self.smoothing = smoothing
+        self.probe_factor = max(1, int(probe_factor))
+        self.max_probe_backoff = max(1, int(max_probe_backoff))
+        self.probation_frames = max(1, int(probation_frames))
         self.current = self.configured
         self._ema: float | None = None
         self._streak = 0
+        # The lowest region count observed to blow the budget on this box, or
+        # None if we have no such evidence. TCP's slow-start threshold: the
+        # point below which growth is free and above which it must be earned.
+        self._ceiling: int | None = None
+        # Consecutive failures at that same level. Each one makes the next
+        # probe cost more evidence, so a level that keeps failing stops being
+        # retried every few minutes — bounded, so it is never retried *never*.
+        self._ceiling_hits = 0
+        # Frames that have genuinely exercised the ceiling since we climbed
+        # back to it. Only these count towards clearing it.
+        self._held = 0
 
     @property
     def shedding(self) -> bool:
@@ -354,6 +383,7 @@ class RegionBudgetController:
         )
         over = self._ema > self.budget_s * self.over_budget
         under = self._ema < self.budget_s * self.recover_at
+        self._serve_probation(regions_run, over)
 
         if over and self.current > self.floor:
             self._streak = self._streak + 1 if self._streak >= 0 else 1
@@ -363,14 +393,76 @@ class RegionBudgetController:
             self._streak = 0
             return 0
 
-        if abs(self._streak) < self.settle_frames:
+        if abs(self._streak) < self._evidence_needed():
             return 0
         self._streak = 0
         # Halve on the way down (the overrun is usually large), step back up
         # one at a time so recovery cannot immediately re-saturate.
         before = self.current
-        self.current = (
-            max(self.floor, self.current // 2) if over
-            else min(self.configured, self.current + 1)
-        )
+        if over:
+            # This level does not work here — remember it, so recovery does
+            # not sprint straight back into it. Cost is monotone in region
+            # count (if `before` regions is too slow, so is anything above it),
+            # so while the mark stands it only ever moves DOWN. Shedding from
+            # at-or-above it means a probe we already paid for has failed
+            # again: charge more for the next one.
+            if self._ceiling is not None and before >= self._ceiling:
+                self._ceiling_hits += 1
+            else:
+                self._ceiling_hits = 1
+            self._ceiling = (
+                before if self._ceiling is None else min(self._ceiling, before)
+            )
+            self._held = 0
+            self.current = max(self.floor, self.current // 2)
+        else:
+            self.current = min(self.configured, self.current + 1)
         return self.current - before
+
+    def _serve_probation(self, regions_run: int, over: bool) -> None:
+        """Clear the remembered ceiling once the level has actually proved out.
+
+        Arriving at the level is not proof. A quiet frame costs almost nothing
+        at *any* budget because barely any regions run, so a quiet stretch will
+        happily carry the budget back to a level that the next burst of motion
+        cannot afford — which is precisely the loop this class exists to break.
+        Only a frame that really ran ``ceiling`` regions and came in on time
+        tests the ceiling.
+
+        Sustain enough of those and the evidence is genuinely stale: the box
+        freed up, the scene changed, whatever. Then the mark comes off and
+        ordinary growth resumes. Nothing is pinned permanently.
+        """
+        if self._ceiling is None or self.current < self._ceiling:
+            self._held = 0
+            return
+        if regions_run < self._ceiling or over:
+            return                              # proves nothing about this level
+        self._held += 1
+        if self._held >= self.probation_frames:
+            self._ceiling = None
+            self._ceiling_hits = 0
+            self._held = 0
+
+    def _evidence_needed(self) -> int:
+        """Frames of agreeing evidence required before the next step.
+
+        Shedding is urgent and stepping up into room we have no reason to
+        distrust is cheap, so both take the ordinary streak. Stepping up to a
+        level that has already blown the budget is a *probe*, and a wrong probe
+        is expensive: the overrun stalls the worker, ffmpeg's pipe fills and
+        MediaMTX drops the reader. So a probe has to be paid for in evidence.
+
+        Without this the controller was memoryless — it halved away from 8,
+        climbed 1 -> 8 in about twenty seconds, blew the budget at 8 again, and
+        repeated every three minutes forever (sixteen such cuts in one 35-minute
+        run, every one of them from 8). Same additive-increase/multiplicative-
+        decrease law, but now it converges on the largest level that actually
+        works instead of orbiting the one that does not.
+        """
+        if self._streak > 0:                                   # shedding
+            return self.settle_frames
+        if self._ceiling is None or self.current + 1 < self._ceiling:
+            return self.settle_frames
+        backoff = min(self._ceiling_hits, self.max_probe_backoff)
+        return self.settle_frames * self.probe_factor * max(1, backoff)
