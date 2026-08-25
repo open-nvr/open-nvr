@@ -23,6 +23,7 @@ metadata + the event ring.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from typing import Any
@@ -366,6 +367,12 @@ class CameraTools:
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
+        # Stored best-frame photos this turn dug out of the events store, so
+        # an answer about the PAST can show what it is talking about. Kept
+        # apart from the live per-turn frame cache on purpose: these are
+        # historical, and each carries its own timestamp caption so the UI
+        # can never present a photo from 16:25 as the current view.
+        self.last_evidence_frames: list[dict] = []
         # Why the last describe fell back from the VLM ("" = it didn't) —
         # surfaced by the system self-check so degradation is visible.
         self.last_vision_error: str | None = None
@@ -978,12 +985,48 @@ class CameraTools:
         summary = (f"I remember {len(events)} {label} visit(s)"
                    f"{self._window_phrase(start, end)}: " + "; ".join(clauses) + ".")
 
+        # Hand the remembered photos to the UI. The answer names times and
+        # says "(photo kept)" — the photo is right there in the store and was
+        # already being fetched to face-match, so showing it costs one small
+        # extra read and turns "I saw someone at 16:25" into something the
+        # operator can actually check.
+        await self._attach_evidence_frames(events)
+
         # Face-match the evidence for person questions (best-effort, capped).
         if label == "person" and bool(args.get("identify_faces", True)):
             names = await self._identify_visit_faces(events)
             if names:
                 summary += " Recognised: " + ", ".join(sorted(names)) + "."
         return summary
+
+    async def _attach_evidence_frames(self, events, cap: int = 3) -> None:
+        """Publish up to ``cap`` remembered best-frames onto this turn.
+
+        Each carries its own timestamp caption. That is not decoration: every
+        frame the UI has ever rendered in a chat bubble was the LIVE view, so
+        an uncaptioned crop from 16:25 sitting in an answer about this
+        afternoon would read as "here is your camera now" — the wrong thing to
+        get wrong in a security product.
+        """
+        if self._events is None:
+            return
+        for e in events:
+            if len(self.last_evidence_frames) >= cap:
+                break
+            if not getattr(e, "has_evidence", False):
+                continue
+            try:
+                crop = await self._events.evidence(e.id)
+            except Exception:
+                logger.warning("search_history: evidence fetch failed for #%s", e.id)
+                continue
+            if not crop or len(crop) > 2_000_000:      # same cap as live frames
+                continue
+            self.last_evidence_frames.append({
+                "camera_id": str(e.camera_id),
+                "caption": f"#{e.id} · {self._clock_phrase(e.started_at)}",
+                "jpeg_b64": base64.b64encode(crop).decode("ascii"),
+            })
 
     async def _identify_visit_faces(self, events, cap: int = 4) -> set:
         names: set = set()
@@ -993,7 +1036,14 @@ class CameraTools:
                 break
             if not e.has_evidence:
                 continue
-            crop = await self._events.evidence(e.id)
+            try:
+                crop = await self._events.evidence(e.id)
+            except Exception:
+                # A photo we cannot fetch costs a NAME, not the answer. This
+                # was unguarded, so one bad read turned "I remember 3 visits
+                # at 15:12, 15:40 and 16:25" into no answer at all.
+                logger.warning("search_history: evidence fetch failed for #%s", e.id)
+                continue
             if not crop:
                 continue
             checked += 1

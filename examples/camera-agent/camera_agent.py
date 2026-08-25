@@ -907,6 +907,14 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
         })
         if len(out) >= max_frames:
             break
+    # Remembered best-frames from the events store, for answers about the
+    # PAST. Appended after the live ones and never deduped against them: they
+    # are different moments, and several visits on one camera are several
+    # photos, not one. Each carries its own timestamp caption.
+    for ev in (getattr(runtime.tools, "last_evidence_frames", None) or []):
+        if len(out) >= max_frames:
+            break
+        out.append(dict(ev))
     return out
 
 
@@ -5693,6 +5701,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         import time as _t
         t0 = _t.perf_counter()
         runtime.tools.last_cameras_used = []
+        runtime.tools.last_evidence_frames = []
         # Fresh frame per question (see /converse): each turn sees the current
         # moment, not a frame cached from a question seconds ago.
         runtime.context.invalidate_frame_cache()
@@ -5856,6 +5865,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         #    agent, Hey-Siri style: she acknowledges, and the UI then treats the
         #    NEXT utterance as the question without needing the wake word again.
         runtime.tools.last_cameras_used = []
+        runtime.tools.last_evidence_frames = []
         armed = bool(require_wake and not question)
         if armed:
             reply = "Yes?"

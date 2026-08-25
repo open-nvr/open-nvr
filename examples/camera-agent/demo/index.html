@@ -1199,9 +1199,13 @@
         if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
           frames.forEach(f=>{ const wrap=document.createElement("div");
             const im=document.createElement("img"); im.className="frame-thumb";
-            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=f.role||f.camera_id;
-            im.addEventListener("click",()=>openLightbox(im.src,f.role||f.camera_id));
-            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=f.role||f.camera_id;
+            // caption wins over role: a remembered best-frame carries its own
+            // timestamp ("#38 · 16:25"), and showing a past photo under a bare
+            // camera name would read as the live view.
+            const lbl=f.caption||f.role||f.camera_id;
+            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=lbl;
+            im.addEventListener("click",()=>openLightbox(im.src,lbl));
+            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
             wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
           d.appendChild(fr); } }
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
