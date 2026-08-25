@@ -214,3 +214,40 @@ def test_ort_session_options_survive_a_garbage_value(monkeypatch):
 
     monkeypatch.setenv("DETECT_CV_THREADS", "banana")
     assert _ort_session_options(_FakeOrt).intra_op_num_threads == 2   # the default
+
+
+# ── fixed-shape exports must not take the camera down ───────────────
+
+class _FixedShapeNet:
+    """A net exported at ONE input size, like the shipped yolov8n.onnx."""
+
+    def __init__(self, accepts: int):
+        self.accepts = accepts
+        self._blob = None
+
+    def setInput(self, blob):          # noqa: N802 - cv2 API shape
+        self._blob = blob
+
+    def forward(self):
+        if self._blob.shape[-1] != self.accepts:
+            raise cv2.error("outTotal == inpTotal in function 'getOutShape'")
+        return np.zeros((1, 84, 8400), np.float32)
+
+
+def test_probe_adopts_the_size_the_model_actually_accepts():
+    """The shipped yolov8n.onnx is exported at a FIXED 640. Feeding 320 raised
+    deep in the graph — once per region, per frame — and nothing wrapped it, so
+    it reached the worker loop and the camera went dark in a restart loop. A
+    documented env knob could take detection down entirely."""
+    from detect_pipeline.onnx_detector import probe_input_size
+
+    assert probe_input_size(_FixedShapeNet(640), 320) == 640
+    assert probe_input_size(_FixedShapeNet(640), 640) == 640
+    assert probe_input_size(_FixedShapeNet(416), 640) == 416
+
+
+def test_probe_returns_the_request_when_nothing_fits():
+    """Never loop forever or invent a size: report and let the error surface."""
+    from detect_pipeline.onnx_detector import probe_input_size
+
+    assert probe_input_size(_FixedShapeNet(99), 640) == 640

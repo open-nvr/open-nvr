@@ -180,6 +180,7 @@ class DetectPipeline:
         # of region crops YOLO ever runs on one frame, no matter how many
         # tracks accumulate. 0 disables (unbounded, the pre-guard behavior).
         self.max_regions = max(0, int(max_regions))
+        self.detector_errors = 0
         # Labels worth TRACKING. An NVR watching a cluttered desk has no
         # business confirming tracks for "kite"/"banana" wire false
         # positives — every phantom is a standing re-verify cost. None = all.
@@ -243,7 +244,17 @@ class DetectPipeline:
             _t = time.monotonic()
             for region in regions:
                 crop = crop_and_resize(bgr, region, self.model_size[0], self.model_size[1])
-                raws = self.detector.detect(crop)
+                try:
+                    raws = self.detector.detect(crop)
+                except Exception:
+                    # One bad inference must cost one region, not the camera.
+                    # This was unwrapped, so a model that rejected the crop
+                    # shape raised straight through process_frame into the
+                    # worker loop's "crashed" handler and the feed went dark
+                    # until the next reconcile — every frame, in a loop.
+                    self.detector_errors += 1
+                    log.debug("detector failed on one region", exc_info=True)
+                    continue
                 dets.extend(detections_to_frame(raws, region))
             if self.allowed_labels is not None:
                 dets = [d for d in dets if d.label in self.allowed_labels]

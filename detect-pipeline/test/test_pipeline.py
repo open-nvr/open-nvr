@@ -308,3 +308,30 @@ def test_dedup_alone_is_not_reported_as_capped():
     boxes = [(100, 100, 160, 200), (105, 100, 165, 205)]
     regions, capped = select_regions(boxes, [], BIG, min_region=320, max_regions=8)
     assert len(regions) == 1 and capped is False
+
+
+def test_one_failing_region_does_not_kill_the_frame():
+    """detector.detect() was unwrapped, so a model rejecting a crop shape
+    raised through process_frame into the worker loop's 'crashed' handler and
+    the feed went dark until the next reconcile — every frame, in a loop.
+    That is reachable from a documented env knob: the shipped yolov8n.onnx is
+    exported at a FIXED 640, so DETECT_ONNX_INPUT=320 made every inference
+    raise."""
+    class _Flaky:
+        def __init__(self): self.n = 0
+        def detect(self, crop):
+            self.n += 1
+            if self.n == 1:
+                raise RuntimeError("model rejected this crop shape")
+            return [RawDetection("person", 0.9, (0.1, 0.1, 0.5, 0.8))]
+
+    det = _Flaky()
+    tracker = Tracker((H, W), TrackConfig(fps=2))
+    p = DetectPipeline(_FakeSource(4), _FakeMotion(calibrating=False), det, tracker)
+
+    results = [p.process_frame(f) for f in _FakeSource(4).stream()]   # must not raise
+    assert any(r.regions for r in results), "no regions — test would prove nothing"
+    assert p.detector_errors == 1
+    assert det.n > 1, "pipeline stopped calling the detector after the failure"
+    assert any(r.tracks or r.detections for r in results), \
+        "later regions must still produce detections"

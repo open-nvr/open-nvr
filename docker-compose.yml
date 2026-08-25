@@ -318,6 +318,9 @@ services:
       # model is missing — the container never crash-loops).
       - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
       - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
+      # Only tunable with a dynamic-axes export; the shipped model is fixed
+      # at 640 and the service adapts (with a warning) if this disagrees.
+      - DETECT_ONNX_INPUT=${DETECT_ONNX_INPUT:-640}
       # Inference backend: cvdnn (zero-dep CPU, default) or ort (ONNX Runtime).
       # For an accelerator, set backend=ort + providers (and install the matching
       # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
