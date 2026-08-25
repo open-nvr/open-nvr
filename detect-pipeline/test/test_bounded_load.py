@@ -215,7 +215,7 @@ def test_budget_is_inert_when_regions_are_unbounded():
 
     c = RegionBudgetController(0, fps=2)           # 0 = no cap configured
     for _ in range(40):
-        assert c.observe(9.0) is False
+        assert c.observe(9.0) == 0
     assert c.current == 0
 
 
@@ -226,3 +226,44 @@ def test_budget_never_sheds_below_its_floor():
     for _ in range(200):
         c.observe(30.0)                            # hopelessly over budget
     assert c.current == 2
+
+
+def test_idle_frames_are_not_evidence_of_headroom():
+    """A frame on which the detector never ran costs ~0ms. Counting that as
+    "we have headroom" let a quiet scene walk the budget straight back to the
+    configured maximum on evidence that says nothing about a BUSY frame — so
+    the next burst of motion blew the budget again and it sawtoothed.
+
+    Observed in production: 'frame latency 0.00s ... regions cut to 6' —
+    stepping the budget UP off zero-cost frames, and mislabelling it too.
+    """
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    for _ in range(40):
+        c.observe(3.07, regions_run=8)          # sustained real overrun
+    shed_to = c.current
+    assert shed_to < 8
+
+    for _ in range(200):
+        c.observe(0.0, regions_run=0)           # quiet scene, no detector work
+    assert c.current == shed_to, "idle frames must not restore the budget"
+
+    for _ in range(200):
+        c.observe(0.05, regions_run=shed_to)    # real frames, real headroom
+    assert c.current == 8
+
+
+def test_budget_change_reports_its_direction():
+    """`shedding` is true while RECOVERING too (still below configured), so
+    keying the log off it reported a step up as a cut — production logged
+    'regions cut to 6' while climbing 5->6, and 'restored to to 8'."""
+    from detect_pipeline.pipeline import RegionBudgetController
+
+    c = RegionBudgetController(8, fps=2)
+    deltas = [c.observe(3.07, 8) for _ in range(40)]
+    assert any(d < 0 for d in deltas), "shedding must report a negative delta"
+    assert all(d <= 0 for d in deltas)
+
+    ups = [c.observe(0.05, c.current) for _ in range(200)]
+    assert any(d > 0 for d in ups), "recovery must report a positive delta"
