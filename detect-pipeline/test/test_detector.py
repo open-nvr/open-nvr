@@ -3,6 +3,8 @@
 """Unit tests for the detector-adapter interface + tensor shaping."""
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
@@ -49,3 +51,74 @@ def test_detections_map_from_crop_to_full_frame():
 
 def test_stub_detector_returns_nothing():
     assert StubDetector().detect(np.zeros((320, 320, 3), np.uint8)) == []
+
+
+# ── DetectorPool: cap resident models without sharing one concurrently ──
+
+def test_pool_never_hands_one_detector_to_two_threads_at_once():
+    """The invariant that forced one detector per worker: cv2.dnn.Net.forward
+    is not safe to call concurrently on the same Net. Pooling is only
+    legitimate if a borrowed detector is exclusively held."""
+    import threading
+
+    from detect_pipeline.detector import DetectorPool
+
+    violations = []
+
+    class _Det:
+        def __init__(self):
+            self.busy = False
+
+        def detect(self, crop):
+            if self.busy:                      # someone else is inside this instance
+                violations.append(1)
+            self.busy = True
+            time.sleep(0.001)
+            self.busy = False
+            return []
+
+    pool = DetectorPool(_Det, 4)
+    threads = [threading.Thread(target=lambda: [pool.detect(None) for _ in range(40)])
+               for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not violations, f"{len(violations)} concurrent uses of one detector"
+
+
+def test_pool_caps_instances_under_concurrency():
+    import threading
+
+    from detect_pipeline.detector import DetectorPool
+
+    class _Det:
+        def detect(self, crop):
+            time.sleep(0.002)
+            return []
+
+    pool = DetectorPool(_Det, 3)
+    threads = [threading.Thread(target=lambda: [pool.detect(None) for _ in range(20)])
+               for _ in range(24)]                # 24 "cameras", cap of 3
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert pool.created <= 3, f"built {pool.created} detectors past the cap"
+
+
+def test_pool_grows_lazily_so_small_installs_are_unaffected():
+    """Below the cap nothing changes — a 2-camera box must not allocate 8
+    models just because the cap allows it."""
+    from detect_pipeline.detector import DetectorPool
+
+    made = []
+    pool = DetectorPool(lambda: made.append(1) or _Rec(), 8)
+    for _ in range(50):
+        pool.detect(None)                      # sequential: one is enough
+    assert pool.created == 1
+
+
+class _Rec:
+    def detect(self, crop):
+        return []

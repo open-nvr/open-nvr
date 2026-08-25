@@ -27,6 +27,9 @@ Env:
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)
+  DETECT_DETECTOR_POOL      max resident detector instances (default: auto
+                            from CPU count). One per camera was the memory
+                            wall; 0 restores that.
   DETECT_RTSP_TIMEOUT_S     RTSP socket-I/O timeout in seconds (default 10;
                             0 disables). Without it a half-open TCP session
                             blocks the decode FOREVER and the camera goes
@@ -101,6 +104,7 @@ class ServiceConfig:
     detect_conf: float = 0.4
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
+    detector_pool: int = 0
     visits_enabled: bool = True
 
 
@@ -146,6 +150,30 @@ def _derive_model_id(env: dict) -> str:
     return detector
 
 
+def _detector_pool_from_env(env: dict) -> int:
+    """Max resident detectors. Auto = one per core-pair, clamped to [2, 8].
+
+    Each detector holds its own model weights and activation arenas, so one
+    per CAMERA made resident memory a function of the fleet instead of the
+    hardware — the first hard wall this service hits. The pool grows lazily,
+    so an install with fewer cameras than this is completely unaffected.
+
+    Sized against cores rather than cameras because inference is CPU-bound
+    and releases the GIL: more concurrent detectors than the box can run
+    buys memory, not throughput. DETECT_CV_THREADS is each one's internal
+    width, so cores/threads is the number that actually fit.
+    """
+    raw = (env.get("DETECT_DETECTOR_POOL") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))          # 0 = opt out, one per worker
+        except ValueError:
+            log.warning("DETECT_DETECTOR_POOL=%r is not an integer; using auto", raw)
+    cores = os.cpu_count() or 2
+    per_detector = max(1, _env_int(env, "DETECT_CV_THREADS", 2))
+    return max(2, min(8, cores // per_detector))
+
+
 def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
@@ -163,6 +191,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         decode_threads=_env_int(env, "DETECT_DECODE_THREADS", 2),
         rtsp_timeout_s=_env_float(env, "DETECT_RTSP_TIMEOUT_S", DEFAULT_RTSP_TIMEOUT_S),
         bestframe_per_camera=_env_int(env, "DETECT_BESTFRAME_PER_CAMERA", 16),
+        detector_pool=_detector_pool_from_env(env),
         fast_decode=_truthy(env.get("DETECT_DECODE_FAST", "false")),
         decode_idle=_decode_idle_from_env(env),
         decode_idle_after=_env_float(env, "DETECT_DECODE_IDLE_AFTER", 60.0),
@@ -430,6 +459,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         device=cfg.device,
         hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
+        detector_pool=cfg.detector_pool,
         decode_threads=cfg.decode_threads,
         rtsp_timeout_s=cfg.rtsp_timeout_s,
         fast_decode=cfg.fast_decode,

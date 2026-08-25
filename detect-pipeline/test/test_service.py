@@ -464,3 +464,41 @@ def test_straggler_cannot_zero_the_replacement_gauge():
     m.record_worker_state("cam1", True, target_fps=2)
     assert m.metrics.value("tier0_worker_up", {"camera": "cam1"}) == 1.0
     m.metrics.reset()
+
+
+def test_manager_shares_one_detector_pool_across_workers():
+    """One detector per camera made resident memory a function of the FLEET
+    rather than the hardware — the first hard wall at scale."""
+    made = []
+
+    class _Det:
+        def __init__(self): made.append(1)
+        def detect(self, crop): return []
+
+    mgr = WorkerManager(
+        _FakeProvider([]), _FakeSink(),
+        detector_factory=_Det, detector_pool=3,
+    )
+    workers = [mgr._default_factory(_spec(f"c{i}"), _FakeSink()) for i in range(20)]
+    # Every worker holds the SAME pooled detector...
+    assert len({id(w.detector) for w in workers}) == 1
+    # ...and nothing is built until inference actually runs.
+    assert made == []
+    workers[0].detector.detect(None)
+    assert len(made) == 1
+
+
+def test_detector_pool_zero_restores_one_per_worker():
+    made = []
+
+    class _Det:
+        def __init__(self): made.append(1)
+        def detect(self, crop): return []
+
+    mgr = WorkerManager(
+        _FakeProvider([]), _FakeSink(),
+        detector_factory=_Det, detector_pool=0,
+    )
+    workers = [mgr._default_factory(_spec(f"c{i}"), _FakeSink()) for i in range(5)]
+    assert len({id(w.detector) for w in workers}) == 5
+    assert len(made) == 5
