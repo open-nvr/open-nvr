@@ -36,6 +36,12 @@ class HealthState:
     nats_connected: Callable[[], bool] = lambda: False
     workers_running: Callable[[], int] = lambda: 0
     newest_frame_age_s: Callable[[], float | None] = lambda: None
+    # Cameras whose own last frame is older than frame_stale_s. Reported by
+    # NAME because newest_frame_age_s is a fleet MAX: one healthy camera
+    # holds it near zero while every other feed is dead. Listing them does
+    # not by itself flip the service unhealthy — a camera being offline is
+    # normal operations, and alerting policy belongs on the metric.
+    stale_cameras: Callable[[float], list[str]] = lambda _threshold: []
     started_at: float = field(default_factory=time.time)
     frame_stale_s: float = 60.0
     startup_grace_s: float = 90.0
@@ -73,10 +79,20 @@ def evaluate(st: HealthState, now: float | None = None) -> tuple[bool, dict]:
                 f"(stale > {st.frame_stale_s:.0f}s)"
             )
 
+    stalled: list[str] = []
+    if workers > 0 and not in_grace:
+        try:
+            stalled = list(st.stale_cameras(st.frame_stale_s))
+        except Exception:  # pragma: no cover - never let a probe raise
+            stalled = []
+
     detail = {
         "status": "ok" if not problems else "unhealthy",
         "workers": workers,
         "newest_frame_age_s": None if age is None else round(age, 1),
+        # Named so a single dead feed in a healthy fleet is actionable
+        # instead of invisible behind the fleet-wide max.
+        "stale_cameras": stalled,
         "detector": {"requested": st.detector_requested, "actual": st.detector_actual},
         "nats": ("connected" if st.nats_connected() else "disconnected")
         if st.nats_configured else "unconfigured",

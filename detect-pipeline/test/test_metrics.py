@@ -159,3 +159,39 @@ def test_sample_process_metrics_sets_rss_on_linux():
     assert m.value("tier0_process_resident_memory_bytes") > 0
     sample_process_metrics(m)          # second sample: CPU% gauge now present
     assert "tier0_process_cpu_percent" in m.render()
+
+
+# ── per-camera staleness (a dead feed must not hide behind a live one) ──
+
+def test_stale_cameras_names_the_dead_feed_a_fleet_max_would_hide():
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    now = 1_000_000.0
+    m._last_frame_wall["cam1"] = now - 1       # healthy
+    m._last_frame_wall["cam2"] = now - 600     # dead for 10 minutes
+
+    # The fleet-wide signal is dominated by the healthy camera...
+    assert m.newest_frame_age_s(now) < 5
+    # ...while the per-camera view names the casualty.
+    assert m.stale_cameras(60.0, now) == ["cam2"]
+    ages = m.frame_ages_s(now)
+    assert round(ages["cam2"]) == 600
+    m._last_frame_wall.clear()
+
+
+def test_frame_age_gauge_moves_when_a_feed_stalls():
+    """The gauge must be sampled at SCRAPE time, not in the frame loop —
+    a loop-written gauge freezes at its last good value when frames stop."""
+    from detect_pipeline import metrics as m
+
+    m._last_frame_wall.clear()
+    m.metrics.reset()
+    now = 2_000_000.0
+    m._last_frame_wall["cam9"] = now - 300
+    m.sample_frame_age_metrics(now)
+    out = m.metrics.render()
+    assert "tier0_frame_age_seconds" in out
+    assert 'camera="cam9"' in out
+    m._last_frame_wall.clear()
+    m.metrics.reset()

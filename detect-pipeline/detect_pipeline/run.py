@@ -518,7 +518,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
     # detecting nothing (the exact zombie QA found).
     detector_actual = type(_detector_factory(cfg)()).__name__
     from .health import HealthState, evaluate as health_evaluate
-    from .metrics import newest_frame_age_s
+    from .metrics import newest_frame_age_s, stale_cameras
     hstate = HealthState(
         enabled=cfg.enabled,
         detector_requested=cfg.detector,
@@ -527,6 +527,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         nats_connected=nats_connected,
         workers_running=lambda: len(manager.running_ids()),
         newest_frame_age_s=newest_frame_age_s,
+        stale_cameras=stale_cameras,
     )
 
     # Effective config — one truthful block. Half of every support/QA thread

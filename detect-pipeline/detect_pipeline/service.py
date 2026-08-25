@@ -40,6 +40,7 @@ from .metrics import (
     record_processing_fps,
     record_mainstream_fallback,
     record_published,
+    record_sink_error,
     record_worker_restart,
     record_worker_state,
 )
@@ -232,6 +233,7 @@ class CameraWorker:
         decode_threads: int = 2,                 # ffmpeg decoder thread cap (0 = auto)
         fast_decode: bool = False,               # skip h264 loop filter (opt-in)
         rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S,   # socket-I/O timeout
+        url_provider=None,                       # freshest tap URL (its JWT rotates)
         decode_idle: str = "",                   # idle skip mode ("" = adaptive off)
         decode_idle_after: float = 60.0,         # quiet seconds before idling
         frame_source=None,                       # injectable for tests
@@ -252,6 +254,7 @@ class CameraWorker:
         self.decode_threads = decode_threads
         self.fast_decode = fast_decode
         self.rtsp_timeout_s = rtsp_timeout_s
+        self.url_provider = url_provider
         self.decode_idle = decode_idle
         self.decode_idle_after = decode_idle_after
         self._frame_source = frame_source
@@ -293,6 +296,7 @@ class CameraWorker:
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
             rtsp_timeout_s=self.rtsp_timeout_s,
+            url_provider=self.url_provider,
         )
         return src, w, h
 
@@ -414,6 +418,12 @@ class CameraWorker:
                     if self.sink.publish(self.spec.camera_id, result, frame):
                         record_published(self.spec.camera_id)   # count real publishes only
                 except Exception:
+                    # Counted, not just debug-logged: at the default INFO level
+                    # a sink raising on EVERY frame produced no output at all,
+                    # so a bus outage looked identical to a quiet scene —
+                    # tier0_events_published_total simply stopped climbing with
+                    # nothing to say why.
+                    record_sink_error(self.spec.camera_id)
                     log.debug("tier0 %s: sink error", self.spec.camera_id, exc_info=True)
                 if self.gate is not None:
                     self._run_gate(result, frame)
@@ -525,6 +535,17 @@ class WorkerManager:
         # asymmetrically) so a settings-page change takes effect within
         # one tick.
         self._specs: dict[str, CameraSpec] = {}
+        # Freshest tap URL seen per camera, refreshed every reconcile. The URL
+        # embeds a 60-minute JWT; a long-running worker's baked-in copy WILL
+        # expire, so the frame source consults this before each respawn
+        # instead of 401-ing until the worker dies. Kept out of _baked (a
+        # re-minted JWT must not bounce a healthy worker) precisely because
+        # this is the cheaper way to deliver it.
+        self._latest_url: dict[str, str] = {}
+
+    def current_url(self, camera_id: str) -> str | None:
+        """The freshest known stream URL for a camera (see _latest_url)."""
+        return self._latest_url.get(camera_id)
 
     def _default_factory(self, spec: CameraSpec, sink: ResultSink) -> Worker:
         return CameraWorker(
@@ -535,6 +556,7 @@ class WorkerManager:
             decode_threads=self._decode_threads,
             fast_decode=self._fast_decode,
             rtsp_timeout_s=self._rtsp_timeout_s,
+            url_provider=lambda cid=spec.camera_id: self.current_url(cid),
             decode_idle=self._decode_idle,
             decode_idle_after=self._decode_idle_after,
             gate=self._gate_factory() if self._gate_factory else None,
@@ -581,6 +603,11 @@ class WorkerManager:
             # Keep what's running; the next tick retries.
             return
         desired = {c.camera_id: c for c in cams if c.analyze}
+        # Every camera we just heard about, analyzed or not — a running
+        # worker's source reads this to pick up a re-minted JWT.
+        for c in cams:
+            if c.substream_url:
+                self._latest_url[c.camera_id] = c.substream_url
 
         for cid in list(self._workers):
             worker = self._workers[cid]

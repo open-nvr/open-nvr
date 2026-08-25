@@ -74,3 +74,35 @@ def test_no_workers_no_frame_requirement():
     ok, _ = evaluate(_state(workers_running=lambda: 0,
                             newest_frame_age_s=lambda: None), now=AFTER_GRACE)
     assert ok
+
+
+def test_health_reports_stalled_cameras_by_name():
+    from detect_pipeline.health import HealthState, evaluate
+
+    st = HealthState(
+        enabled=True,
+        detector_requested="onnx", detector_actual="OnnxDetector",
+        workers_running=lambda: 3,
+        newest_frame_age_s=lambda: 1.0,          # one healthy camera
+        stale_cameras=lambda _t: ["cam2", "cam3"],
+        started_at=0.0,                          # past startup grace
+    )
+    ok, detail = evaluate(st, now=10_000.0)
+    # A camera being offline is normal ops, so the service stays ok...
+    assert ok is True
+    # ...but the dead feeds are named instead of hidden behind the max.
+    assert detail["stale_cameras"] == ["cam2", "cam3"]
+
+
+def test_health_survives_a_failing_stale_probe():
+    from detect_pipeline.health import HealthState, evaluate
+
+    def boom(_t):
+        raise RuntimeError("registry busy")
+
+    st = HealthState(
+        enabled=True, workers_running=lambda: 1,
+        newest_frame_age_s=lambda: 1.0, stale_cameras=boom, started_at=0.0,
+    )
+    ok, detail = evaluate(st, now=10_000.0)      # must not raise
+    assert detail["stale_cameras"] == []

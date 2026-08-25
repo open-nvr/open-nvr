@@ -29,6 +29,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .metrics import record_visit_dropped, record_visit_posted
+
 log = logging.getLogger("detect_pipeline.events")
 
 EVENTS_PATH = "/api/v1/internal/camera-agent/events"
@@ -104,6 +106,7 @@ class VisitPoster:
             return True
         except queue.Full:
             self._dropped += 1
+            record_visit_dropped(visit.camera_id, "queue_full")
             log.warning(
                 "visit queue full — dropped %s/%s (total dropped: %d)",
                 visit.camera_id, visit.track_id, self._dropped,
@@ -123,7 +126,15 @@ class VisitPoster:
             visit = self._q.get()
             try:
                 self._post(visit)
+                record_visit_posted(visit.camera_id)
             except Exception as e:
+                # A post failure is PERMANENT history loss — there is no retry
+                # queue — so it is counted, not just logged. The reason label
+                # separates "core is down" from "this visit can never be
+                # posted" (an unresolvable camera id), which look identical
+                # in the log.
+                reason = "unresolved_camera" if isinstance(e, ValueError) else "post_failed"
+                record_visit_dropped(visit.camera_id, reason)
                 log.warning(
                     "visit post failed for %s/%s: %s",
                     visit.camera_id, visit.track_id, e,
@@ -211,7 +222,15 @@ class VisitLifecycle:
 
     def _finish(self, tid, v) -> Visit | None:
         end = v.get("end", v["start"])
-        if not v["confirmed"] or (end - v["start"]) < self.min_duration_s:
+        if not v["confirmed"]:
+            record_visit_dropped(self.camera_id, "unconfirmed")
+            return None
+        if (end - v["start"]) < self.min_duration_s:
+            # Junk suppression is deliberate, but it was previously invisible:
+            # there was no way to tell "nothing happened" from "the floor is
+            # eating every real visit" — which is what a raised DETECT_FPS
+            # does, since confirmation then needs more consecutive frames.
+            record_visit_dropped(self.camera_id, "too_short")
             return None
         jpeg = None
         crop = v.get("crop")

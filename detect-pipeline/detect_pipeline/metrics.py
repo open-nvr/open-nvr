@@ -198,6 +198,35 @@ def newest_frame_age_s(now: float | None = None) -> float | None:
     return max(0.0, now - max(_last_frame_wall.values()))
 
 
+def frame_ages_s(now: float | None = None) -> dict[str, float]:
+    """Per-camera age of the last processed frame.
+
+    The fleet-wide ``newest_frame_age_s`` takes the MAX across cameras, so a
+    single healthy camera keeps it near zero while every other feed is dead —
+    it cannot answer "is camera 2 still being analyzed?". This can.
+    """
+    now = time.time() if now is None else now
+    return {cam: max(0.0, now - t) for cam, t in _last_frame_wall.items()}
+
+
+def stale_cameras(threshold_s: float, now: float | None = None) -> list[str]:
+    """Cameras whose last frame is older than ``threshold_s``, sorted."""
+    return sorted(
+        cam for cam, age in frame_ages_s(now).items() if age > threshold_s
+    )
+
+
+def sample_frame_age_metrics(now: float | None = None) -> None:
+    """Refresh the per-camera frame-age gauge (call at scrape time).
+
+    Emitted on scrape rather than in the frame loop on purpose: a gauge only
+    written while frames flow FREEZES at its last good value when the feed
+    stalls, which is the exact moment it needs to move.
+    """
+    for cam, age in frame_ages_s(now).items():
+        metrics.gauge("tier0_frame_age_seconds", age, {"camera": cam})
+
+
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:
     """Gauge: 1 while Tier-0 decodes a high-resolution main stream for this
     camera (no usable substream) — the expensive path the README warns about."""
@@ -207,6 +236,28 @@ def record_mainstream_fallback(camera_id: str, active: bool) -> None:
 
 def record_published(camera_id: str) -> None:
     metrics.inc("tier0_events_published_total", {"camera": camera_id})
+
+
+def record_sink_error(camera_id: str) -> None:
+    """A publish to the event bus raised. Without a counter, a bus outage
+    is indistinguishable from a quiet scene: both just stop incrementing
+    tier0_events_published_total."""
+    metrics.inc("tier0_sink_errors_total", {"camera": camera_id})
+
+
+def record_visit_dropped(camera_id: str, reason: str) -> None:
+    """A finished visit never reached the events store.
+
+    The poster module has always promised this counter in its docstring
+    ("failures are visible via tier0_visits_dropped_total") while nothing
+    emitted it — so silent, permanent history loss (a queue that stays
+    full, a post that always fails) showed up nowhere at all."""
+    metrics.inc("tier0_visits_dropped_total",
+                {"camera": camera_id, "reason": reason})
+
+
+def record_visit_posted(camera_id: str) -> None:
+    metrics.inc("tier0_visits_posted_total", {"camera": camera_id})
 
 
 def record_gate(camera_id: str, gate_result) -> None:
@@ -289,6 +340,7 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
             path = parsed.path.rstrip("/")
             if path in ("/metrics", ""):
                 sample_process_metrics(reg)      # refresh CPU%/RSS on each scrape
+                sample_frame_age_metrics()       # ...and per-camera staleness
                 self._send(200, reg.render().encode("utf-8"),
                            "text/plain; version=0.0.4")
                 return

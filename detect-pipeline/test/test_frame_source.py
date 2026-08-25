@@ -296,3 +296,76 @@ def test_decode_flips_never_count_toward_giveup():
         src.set_decode_skip("nokey")
     # Still alive after 6 deliberate flips (budget was 3).
     assert len(spawns) >= 6
+
+
+# ── rotating tap JWT (60-min lifetime, baked in at worker start) ────
+
+def test_expired_url_heals_on_respawn_without_killing_the_worker():
+    """The tap URL's JWT expires after 60 minutes.
+
+    Before, a long-running source kept re-dialling the dead token until it
+    burned the give-up budget and the worker died; only a reconcile tick
+    could hand it a fresh URL. Now it adopts the freshest URL itself.
+    """
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    size = frame_size_bytes(4, 4)
+    seen: list[str] = []
+    current = {"url": "rtsp://mtx/cam-1?jwt=EXPIRED"}
+
+    def spawn(cmd):
+        seen.append(next(a for a in cmd if a.startswith("rtsp://")))
+        return _FakeProc(b"\x00" * size)
+
+    src = FrameSource(
+        "rtsp://mtx/cam-1?jwt=EXPIRED", width=4, height=4, fps=5,
+        spawn=spawn, url_provider=lambda: current["url"],
+        max_restarts=2, backoff_seconds=0, min_healthy_seconds=0,
+        _sleep=lambda s: None,
+    )
+    stream = src.stream()
+    next(stream)                                  # first spawn: expired token
+    current["url"] = "rtsp://mtx/cam-1?jwt=FRESH"  # reconcile re-minted it
+    for _ in stream:                              # drain remaining respawns
+        pass
+
+    assert seen[0].endswith("EXPIRED")
+    assert seen[-1].endswith("FRESH"), "source never adopted the refreshed URL"
+
+
+def test_url_provider_failure_is_survivable():
+    from detect_pipeline.frame_source import FrameSource, frame_size_bytes
+
+    def boom():
+        raise RuntimeError("core unreachable")
+
+    src = FrameSource(
+        "rtsp://mtx/cam-1?jwt=OLD", width=4, height=4, fps=5,
+        spawn=lambda cmd: _FakeProc(b"\x00" * frame_size_bytes(4, 4)),
+        url_provider=boom, max_restarts=0, backoff_seconds=0,
+        _sleep=lambda s: None,
+    )
+    assert len(list(src.stream())) == 1           # keeps the URL it has
+    assert src.rtsp_url.endswith("OLD")
+
+
+def test_stream_urls_are_redacted_in_logs(caplog):
+    """The tap URL's ?jwt= is a live wildcard-read credential."""
+    import logging
+
+    from detect_pipeline.frame_source import FrameSource, redact_url
+
+    secret = "rtsp://mtx:8554/cam-1?jwt=eyJhbGciOiJSUzI1NiJ9.SECRETPAYLOAD.SIG"
+    assert redact_url(secret) == "rtsp://mtx:8554/cam-1?<redacted>"
+    assert "SECRET" not in redact_url(secret)
+    assert redact_url("rtsp://cam/no-query") == "rtsp://cam/no-query"
+
+    with caplog.at_level(logging.INFO):
+        src = FrameSource(
+            secret, width=4, height=4, fps=5,
+            spawn=lambda cmd: _EmptyProc(), max_fruitless_restarts=2,
+            backoff_seconds=0, _sleep=lambda s: None,
+        )
+        list(src.stream())
+    assert caplog.text, "expected restart/give-up logging"
+    assert "SECRETPAYLOAD" not in caplog.text, "JWT leaked into logs"

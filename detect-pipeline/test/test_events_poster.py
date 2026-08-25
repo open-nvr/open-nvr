@@ -133,3 +133,58 @@ def test_lifecycle_threads_nvr_camera_id_into_visits():
     lc.observe([_Tr(1)], T0 + 5)
     done = lc.observe([], T0 + 6)
     assert (done[0].camera_id, done[0].nvr_camera_id) == ("cam3", 3)
+
+
+# ── history loss is now countable (the docstring's promised metric) ──
+
+def test_dropped_visits_are_counted_by_reason():
+    from dataclasses import replace as _replace
+
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+
+    # 1. queue full
+    p = VisitPoster("http://core:8000", None, maxsize=1)
+    p.submit(_visit())
+    p.submit(_visit())
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "3", "reason": "queue_full"}
+    ) == 1
+
+    # 2. a post that can never succeed (unresolvable camera id)
+    def opener(req, timeout=None):
+        raise AssertionError("must not reach the network")
+
+    bad = VisitPoster("http://core:8000", None, opener=opener)
+    bad._q.put_nowait(_replace(_visit(), camera_id="front-door"))
+    try:
+        bad._post(bad._q.get())
+    except ValueError:
+        m.record_visit_dropped("front-door", "unresolved_camera")
+    assert m.metrics.value(
+        "tier0_visits_dropped_total",
+        {"camera": "front-door", "reason": "unresolved_camera"},
+    ) == 1
+    m.metrics.reset()
+
+
+def test_junk_suppression_is_counted_not_silent():
+    """Flickers are dropped by design — but silently dropping them made a
+    misconfigured floor indistinguishable from an empty scene."""
+    from detect_pipeline import metrics as m
+
+    m.metrics.reset()
+    lc = VisitLifecycle("7", nvr_camera_id=7, min_duration_s=1.0)
+    lc.observe([_Tr(1, confirmed=False)], T0)
+    assert lc.observe([], T0 + 10) == []                 # never confirmed
+    lc.observe([_Tr(2)], T0)
+    assert lc.observe([], T0 + 0.3) == []                # under the floor
+
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "7", "reason": "unconfirmed"}
+    ) == 1
+    assert m.metrics.value(
+        "tier0_visits_dropped_total", {"camera": "7", "reason": "too_short"}
+    ) == 1
+    m.metrics.reset()
