@@ -110,6 +110,38 @@ reconstructing pixels at all); it's research-grade and noted on the
 [roadmap](ROADMAP.md) horizon, not needed while the dials above still leave
 headroom.
 
+## Verifying what a camera is actually doing
+
+Every dial above is exported, so a dashboard can answer "is this camera
+really running what I configured?" without reading container logs:
+
+| Signal | Metric |
+|---|---|
+| The static decode dials in force | `tier0_decode_config{camera,skip,threads,fast,hwaccel,idle}` |
+| Currently in cheap keyframe-only mode? | `tier0_decode_idle{camera}` (1 = idle) |
+| Adaptive decode flapping? | `tier0_decode_mode_changes_total{camera}` |
+| Decoding a main stream by mistake | `tier0_mainstream_fallback{camera}` |
+| Detector work avoided by the motion gate | `tier0_detector_skipped_total{camera,reason}` |
+| Detector work avoided by stationary gating | `tier0_stationary_skipped_total{camera}` |
+| Where the load shedder settled | `tier0_regions_budget` vs `tier0_regions_configured` |
+| What it all cost | `tier0_process_cpu_percent`, `tier0_frame_latency_seconds` |
+
+`tier0_decode_config` is a Prometheus info-metric — its value is always 1
+and the payload is the labels, so it joins onto the numeric series:
+
+```promql
+tier0_process_cpu_percent
+  * on(camera) group_left(skip, hwaccel) tier0_decode_config
+```
+
+It reports the **effective** backend, not the requested one. A camera
+configured for `vaapi` whose GPU turned out unusable reports
+`hwaccel="cpu"` — that downgrade is silent apart from one startup warning,
+and it is the difference between ~0.3 and ~2 cores. The same applies to an
+invalid `DETECT_DECODE_SKIP`, which degrades to a safe default rather than
+refusing to start. OpenNVR's own AI page shows this per camera beside the
+load signals.
+
 ## If your detect container is still hot, in order
 
 1. Is a camera decoding its main stream? (`tier0_mainstream_fallback` on

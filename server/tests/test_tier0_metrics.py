@@ -352,3 +352,44 @@ def test_no_cameras_yields_empty_list_not_a_crash():
     r = reduce_metrics(parse_prometheus_text("tier0_frames_total 5\n"))
     assert r["cameras"] == []
     assert r["events_flow"]["bus_events_published"] == 0
+
+
+# ── per-camera decode config (tier0_decode_config info-metric) ─────────
+
+def test_camera_row_carries_the_decode_config():
+    """The dials that shape decode cost land next to the struggling-camera
+    signals, so "cam1 is shedding" and "cam1 decodes on CPU with skip=none"
+    are one answer rather than two lookups."""
+    text = (
+        'tier0_worker_up{camera="cam1"} 1\n'
+        'tier0_decode_config{camera="cam1",skip="nonref",threads="2",'
+        'fast="false",hwaccel="vaapi",idle="nokey"} 1\n'
+    )
+    snap = reduce_metrics(parse_prometheus_text(text))
+    (cam,) = snap["cameras"]
+    assert cam["decode"] == {
+        "skip": "nonref", "threads": 2, "fast": False,
+        "hwaccel": "vaapi", "idle": "nokey",
+    }
+
+
+def test_missing_decode_config_reads_as_unknown_not_a_default():
+    """An older detect-pipeline image against a newer core reports nothing
+    here. None is the honest answer — inventing 'cpu/none' would put a
+    fabricated config on the page and send an operator chasing a dial that
+    was never set."""
+    snap = reduce_metrics(parse_prometheus_text('tier0_worker_up{camera="cam1"} 1\n'))
+    (cam,) = snap["cameras"]
+    assert cam["decode"] is None
+
+
+def test_decode_config_survives_a_malformed_thread_count():
+    text = (
+        'tier0_worker_up{camera="cam1"} 1\n'
+        'tier0_decode_config{camera="cam1",skip="noref",threads="oops",'
+        'fast="true",hwaccel="cpu",idle="off"} 1\n'
+    )
+    snap = reduce_metrics(parse_prometheus_text(text))
+    (cam,) = snap["cameras"]
+    assert cam["decode"]["threads"] == 0        # degraded, not a 500
+    assert cam["decode"]["fast"] is True

@@ -808,3 +808,60 @@ def test_worker_exports_the_region_ceiling_beside_the_budget(monkeypatch):
     text = _m.render()
     assert 'tier0_regions_budget{camera="cam-gauges"}' in text
     assert 'tier0_regions_configured{camera="cam-gauges"}' in text
+
+
+# ── tier0_decode_config carries the EFFECTIVE decode backend ───────────
+
+def test_decode_config_metric_reports_the_hwaccel_actually_used(monkeypatch):
+    """A camera configured for GPU decode that silently fell back to CPU must
+    say ``cpu`` on /metrics.
+
+    This is the whole reason the metric exists: resolve_hwaccel() downgrades
+    to CPU when the device is unusable (missing render node, no driver), and
+    the only previous evidence was one WARNING line at worker start. An
+    operator watching a dashboard would see the configured intent, not the
+    ~5x-more-expensive reality. Reporting ``self.hwaccel`` (the REQUEST)
+    instead of the resolved backend re-hides exactly that.
+    """
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as service_mod
+    from detect_pipeline.ffmpeg_presets import HwAccel
+    from detect_pipeline.metrics import metrics
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+    # The GPU the operator asked for is unusable here.
+    monkeypatch.setattr(
+        service_mod, "resolve_hwaccel",
+        lambda requested, device=None: (HwAccel.CPU, "no render node"),
+    )
+    metrics.drop_series("tier0_decode_config", "camera", "cam-gpu")
+
+    sink = _FakeSink()
+    worker = CameraWorker(
+        _spec("cam-gpu"), sink,
+        detector=_MotionAllDetector(), frame_source=_FramesSource(2),
+        hwaccel="vaapi",
+    )
+    worker.start()
+    for _ in range(50):
+        if sink.events:
+            break
+        time.sleep(0.02)
+    worker.stop()
+
+    series = [
+        dict(key[1]) for key in metrics._gauges
+        if key[0] == "tier0_decode_config" and ("camera", "cam-gpu") in key[1]
+    ]
+    assert len(series) == 1, "exactly one decode-config series per camera"
+    assert series[0]["hwaccel"] == "cpu", (
+        "the metric must report the EFFECTIVE backend after a downgrade — "
+        "reporting the requested 'vaapi' hides the fallback it exists to show"
+    )

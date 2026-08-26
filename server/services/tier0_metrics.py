@@ -110,6 +110,36 @@ def _by_camera(samples: list[Sample], name: str) -> dict[str, float]:
     return out
 
 
+def _labels_by_camera(samples: list[Sample], name: str) -> dict[str, dict]:
+    """Label sets of an info-metric family, keyed by camera.
+
+    Info-metrics (value always 1) carry their payload in the LABELS, so
+    ``_by_camera`` — which keeps the value — reads nothing useful from them.
+    """
+    out: dict[str, dict] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels:
+            out[s.labels["camera"]] = dict(s.labels)
+    return out
+
+
+def _decode_row(labels: dict | None) -> dict | None:
+    """Shape one camera's decode config for the API, or None if unreported."""
+    if not labels:
+        return None
+    try:
+        threads = int(labels.get("threads", "0"))
+    except ValueError:                      # a malformed scrape is not a crash
+        threads = 0
+    return {
+        "skip": labels.get("skip") or "none",
+        "threads": threads,
+        "fast": labels.get("fast") == "true",
+        "hwaccel": labels.get("hwaccel") or "cpu",
+        "idle": labels.get("idle") or "off",
+    }
+
+
 def _dominant_label(samples: list[Sample], name: str, label: str) -> str | None:
     """The label value carrying the most weight (e.g. the active detector model)."""
     grouped = _sums_grouped_by(samples, name, label)
@@ -218,6 +248,10 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     visits_drop = _by_camera(samples, "tier0_visits_dropped_total")
     capped = _by_camera(samples, "tier0_regions_capped_total")
     up_by_cam = _by_camera(samples, "tier0_worker_up")
+    # The decode dials this camera actually opened with. Sits next to the
+    # struggling-camera signals on purpose: "cam3 is shedding" and "cam3 is
+    # decoding on the CPU with skip=none" is one answer, not two lookups.
+    decode_cfg = _labels_by_camera(samples, "tier0_decode_config")
     all_cams = sorted(set(proc) | set(tgt) | set(up_by_cam) | set(frame_age))
     cameras = []
     for cam in all_cams:
@@ -239,6 +273,10 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "visits_posted": int(visits_ok.get(cam, 0)),
             "visits_dropped": int(visits_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+            # None when the pipeline predates the metric — an older
+            # detect-pipeline image against a newer core must render as
+            # "unknown", never as a fabricated default config.
+            "decode": _decode_row(decode_cfg.get(cam)),
         })
 
     health = {
