@@ -390,6 +390,13 @@ detect_llm_hardware() {
         if command -v nvidia-smi >/dev/null 2>&1 \
            && nvidia-smi -L >/dev/null 2>&1; then
             HW_ACCEL="cuda"
+        elif [[ "${NVIDIA_REBOOT_PENDING:-}" == "yes" ]]; then
+            # The driver is installed but not LOADED until this box
+            # reboots, so nvidia-smi answers nothing. Sizing for the CPU
+            # here bakes a small model into .env for a machine one reboot
+            # away from a GPU — the field report this came from had a
+            # 30 GB CUDA box suggesting qwen3:1.7b.
+            HW_ACCEL="cuda"
         fi
     fi
 }
@@ -553,6 +560,214 @@ pick_model_from_catalog() {
     fi
 }
 
+# --- ollama runtime helpers (tested: test_installer_ollama_gate.sh) ---
+# One probe, one waiter, one starter. These used to be five copy-pasted
+# curl lines and — worse — "the binary is on PATH" was accepted as "the
+# runtime is up". That is how a finished install ended up pointing the
+# agent at a :11434 that answered nothing. The rule now lives in one
+# place: ONLY A LIVE ENDPOINT COUNTS.
+# 127.0.0.1, never "localhost": where localhost resolves to ::1 first
+# (the Windows default, and some Linux /etc/hosts), a v4-only Ollama
+# bind makes the probe time out and a RUNNING Ollama reads as dead.
+OLLAMA_LOCAL_URL="http://127.0.0.1:11434"
+
+ollama_endpoint_up() {
+    curl -sf --max-time 2 "${OLLAMA_LOCAL_URL}/api/version" >/dev/null 2>&1
+}
+
+# ollama_installed → is the binary on PATH? Answers "should we offer to
+# install it", and nothing else. Never "is it working".
+ollama_installed() {
+    command -v ollama >/dev/null 2>&1
+}
+
+# wait_for_ollama <seconds> — poll until it answers. Prints progress: a
+# silent 60-second wait is indistinguishable from a hung installer, and
+# the old 10-second SILENT poll declared defeat while the service was
+# still coming up (reported from the field on a CUDA box).
+wait_for_ollama() {
+    local secs="${1:-60}" waited=0
+    if ollama_endpoint_up; then
+        return 0
+    fi
+    printf '  Waiting for Ollama to answer on :11434 (up to %ss)' "$secs"
+    while (( waited < secs )); do
+        sleep 2
+        waited=$((waited + 2))
+        printf '.'
+        if ollama_endpoint_up; then
+            printf ' up after %ss\n' "$waited"
+            return 0
+        fi
+    done
+    printf ' still silent\n'
+    return 1
+}
+
+# try_start_ollama — actually start the service rather than printing a
+# hint and hoping. Returns 0 only when a start was attempted and worked.
+try_start_ollama() {
+    if [[ "$PLATFORM" == "macOS" ]]; then
+        if command -v brew >/dev/null 2>&1; then
+            info "Starting Ollama (brew services start ollama)..."
+            if brew services start ollama >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        info "Starting the Ollama app..."
+        open -a Ollama >/dev/null 2>&1
+        return
+    fi
+    command -v systemctl >/dev/null 2>&1 || return 1
+    if ask_yes_no "Start Ollama now (sudo systemctl start ollama)?" y; then
+        if sudo systemctl start ollama; then
+            return 0
+        fi
+        warn "systemctl start ollama failed."
+    fi
+    return 1
+}
+
+# ollama_start_diagnosis — what to look at when it will not come up. The
+# old message ("start it: sudo systemctl start ollama") was wrong exactly
+# when it mattered: the operator had already started it.
+ollama_start_diagnosis() {
+    if [[ "$PLATFORM" == "macOS" ]]; then
+        warn "Open the Ollama app (or: brew services start ollama)."
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        warn "ollama.service is: $(systemctl is-active ollama 2>/dev/null || echo unknown)"
+        warn "See why:  journalctl -u ollama -n 20 --no-pager"
+    else
+        warn "Start it with:  ollama serve"
+    fi
+    return 0
+}
+
+# --- pending NVIDIA driver reboot (Linux) --------------------------
+# Ollama's official installer installs a CUDA driver when it finds an
+# NVIDIA card without one, and signs off with ">>> Reboot to complete
+# NVIDIA CUDA driver install." Until that reboot nvidia-smi cannot talk
+# to the GPU — so detect_llm_hardware read a 30 GB CUDA box as CPU-only
+# and wrote a CPU-tier model into .env for a machine one reboot away
+# from running something far bigger. That is the bug this flag exists
+# for.
+NVIDIA_REBOOT_PENDING=""
+
+nvidia_hardware_present() {
+    [[ "$PLATFORM" == "macOS" ]] && return 1
+    if command -v lspci >/dev/null 2>&1; then
+        if lspci 2>/dev/null | grep -qi nvidia; then
+            return 0
+        fi
+    fi
+    # No pciutils on a minimal server — ask the PCI bus directly.
+    # 0x10de is NVIDIA's vendor id.
+    grep -qil 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null
+}
+
+nvidia_driver_live() {
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
+}
+
+# detect_nvidia_reboot_pending [installer-log] → sets NVIDIA_REBOOT_PENDING.
+# Two signals: the installer's own wording, and the state it leaves
+# behind (a card on the bus with no driver answering). The second is the
+# backstop for the first — Ollama can reword its output, and the state
+# is the thing that actually matters. Called ONLY right after Ollama's
+# installer runs: on any other machine "an NVIDIA card with no live
+# driver" could as easily mean nobody ever installed one, and telling
+# that operator to reboot would be a guess.
+detect_nvidia_reboot_pending() {
+    local log="${1:-}"
+    [[ "$PLATFORM" == "macOS" ]] && return 0
+    if [[ -n "$log" && -f "$log" ]] && grep -qi "reboot to complete" "$log"; then
+        NVIDIA_REBOOT_PENDING="yes"
+    elif nvidia_hardware_present && ! nvidia_driver_live; then
+        NVIDIA_REBOOT_PENDING="yes"
+    fi
+    return 0
+}
+
+# nvidia_reboot_notice — printed at detection AND again as the last
+# thing before the stack starts. main() ends in `exec start.sh up`,
+# after which this script never gets another word in, and compose output
+# would bury a single early warning several screens up.
+nvidia_reboot_notice() {
+    printf '\n'
+    warn "────────────────────────────────────────────────────────"
+    warn "NVIDIA driver installed — THIS MACHINE NEEDS A REBOOT."
+    warn ""
+    warn "Until you reboot, nvidia-smi cannot see the GPU, so Ollama"
+    warn "answers on the CPU or fails to start at all."
+    warn ""
+    warn "The models below are sized for the GPU you will have AFTER"
+    warn "the reboot, not for the CPU-only machine this looks like"
+    warn "right now."
+    warn ""
+    warn "When this finishes:"
+    warn "    sudo reboot"
+    warn "    cd ${PROJECT_ROOT} && ./start.sh up"
+    warn "Every answer is already saved in .env — nothing to redo."
+    warn "────────────────────────────────────────────────────────"
+    printf '\n'
+}
+
+# check_ollama_bridge_reachable — probe :11434 from the address the
+# CONTAINER will use, not from this shell.
+#
+# A host-local probe is not the test that matters. The agent runs in a
+# container and reaches this machine through host.docker.internal, which
+# on Linux Docker Engine is the bridge gateway (the `host-gateway` entry
+# in docker-compose.camera-agent.yml). Ollama's Linux service binds
+# 127.0.0.1, which answers localhost and REFUSES that gateway: a green
+# install that fails on the very first question. Docker Desktop proxies
+# host.docker.internal to the host loopback, so this is Linux Docker
+# Engine's problem alone.
+check_ollama_bridge_reachable() {
+    local gw
+    gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    [[ -n "$gw" ]] || return 0
+    if curl -sf --max-time 3 "http://${gw}:11434/api/version" >/dev/null 2>&1; then
+        ok "Docker can reach Ollama at ${gw}:11434 — the address the agent uses."
+        return 0
+    fi
+    warn "Ollama answers on localhost but REFUSES ${gw}:11434, which is what"
+    warn "host.docker.internal resolves to inside the container. The agent"
+    warn "would fail its first question with 'connection refused'."
+    warn "Cause: Ollama's Linux service binds 127.0.0.1 by default."
+    info ""
+    info "The fix — a systemd drop-in that binds every interface:"
+    info "    sudo mkdir -p /etc/systemd/system/ollama.service.d"
+    info "    sudo tee /etc/systemd/system/ollama.service.d/10-opennvr-host.conf <<CONF"
+    info "    [Service]"
+    info '    Environment="OLLAMA_HOST=0.0.0.0:11434"'
+    info "    CONF"
+    info "    sudo systemctl daemon-reload && sudo systemctl restart ollama"
+    info ""
+    if ! ask_yes_no "Apply that now?" y; then
+        warn "Skipped — apply it before first use, or the agent cannot reach Ollama."
+        return 0
+    fi
+    if ! { sudo mkdir -p /etc/systemd/system/ollama.service.d \
+           && printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\n' \
+              | sudo tee /etc/systemd/system/ollama.service.d/10-opennvr-host.conf >/dev/null \
+           && sudo systemctl daemon-reload \
+           && sudo systemctl restart ollama; }; then
+        warn "Could not apply the drop-in — run the commands above by hand."
+        return 0
+    fi
+    wait_for_ollama 30 || true
+    if curl -sf --max-time 3 "http://${gw}:11434/api/version" >/dev/null 2>&1; then
+        ok "Docker can now reach Ollama at ${gw}:11434."
+    else
+        warn "Still refused from ${gw}:11434 — the bind was not the only cause."
+        warn "Check the host firewall:  sudo ufw allow in on docker0"
+    fi
+    return 0
+}
+
 choose_example() {
     EXAMPLE_NAME=""; EXAMPLE_COMPOSE=""; EXAMPLE_PROFILE=""
     env_set OPENNVR_EXAMPLE ""
@@ -567,19 +782,39 @@ choose_example() {
     while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
     [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
 
+    # Default to the Camera Agent: it is the example this installer is
+    # built around -- the mode, LLM-runtime and model prompts below all
+    # exist to serve it -- and the only one shipping a Compose manifest
+    # today, so a default of 0 made Enter decline the very thing this
+    # section had just finished pitching. Its NUMBER moves whenever an
+    # example directory is added, so look it up by name; if it is ever
+    # missing or unshippable the default falls back to 0 (core only).
+    local default_choice=0 mark
+    index=1
+    for name in "${names[@]}"; do
+        if [[ "$name" == "camera-agent" ]] && find_example_compose "$name" >/dev/null; then
+            default_choice="$index"
+        fi
+        index=$((index + 1))
+    done
+
     printf '\n  Available examples:\n'
     index=1
     for name in "${names[@]}"; do
+        mark=""
+        if (( index == default_choice )); then
+            mark="  <- default"
+        fi
         if manifest=$(find_example_compose "$name"); then
-            printf '  %2d. %-30s [installable: %s]\n' "$index" "$name" "$manifest"
+            printf '  %2d. %-30s [installable: %s]%s\n' "$index" "$name" "$manifest" "$mark"
         else
             printf '  %2d. %-30s [no Compose manifest]\n' "$index" "$name"
         fi
         index=$((index + 1))
     done
     printf '   0. Core stack only\n\n'
-    read -r -p "  Select an example [0]: " choice || true  # EOF-safe under set -e (see ask_* note)
-    choice="${choice:-0}"
+    read -r -p "  Select an example [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
+    choice="${choice:-$default_choice}"
     [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
     (( choice == 0 )) && return 0
     (( choice >= 1 && choice <= ${#names[@]} )) || die "Selection out of range"
@@ -599,22 +834,21 @@ choose_example() {
         # Asked BEFORE the model prompts: where the LLM runs decides
         # which hardware the model suggestion below should be sized
         # for (host GPU/RAM vs the Docker VM's CPU-only allowance).
-        # Platform-aware default: on macOS the Docker VM has no GPU
-        # access (no Metal for Linux guests), so the bundled container
-        # answers on plain CPU — minutes per turn — while host Ollama
-        # uses the Apple Silicon GPU. On Linux the container is native
-        # and compose-managed: keep it the default there. A host
-        # Ollama already answering on :11434 flips the default too.
-        local llm_default="1" host_ollama="" llm_where="container"
-        if command -v curl >/dev/null 2>&1 \
-           && curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+        # Host Ollama is the default on EVERY platform. On macOS and
+        # Windows the Docker VM has no GPU access (no Metal/CUDA for
+        # Linux guests), so the bundled container answers on plain CPU
+        # — minutes per turn. On Linux the container can reach the GPU,
+        # but only once the host toolkit is wired up, and it still
+        # costs a 3.2 GB image plus a second model store beside the
+        # Ollama the box likely already has. Host Ollama is the answer
+        # that is right on all three, and the gate below installs and
+        # starts it when it is missing rather than leaving a broken URL.
+        local llm_default="2" host_ollama="" llm_where="container"
+        if command -v curl >/dev/null 2>&1 && ollama_endpoint_up; then
             host_ollama="yes"
         fi
-        if [[ "$PLATFORM" == "macOS" || -n "$host_ollama" ]]; then
-            llm_default="2"
-        fi
-        explain "Where should the LLM run? In Docker on macOS/Windows the container CANNOT use the GPU — answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU (Metal on Apple Silicon) and skips a 3.2 GB image. On a Linux server the bundled container is fine." \
-            "pick one" "$llm_default"
+        explain "Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image — the installer offers to set it up if you do not have it. In Docker on macOS/Windows the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else." \
+            "pick one" "$llm_default (Ollama on this machine)"
         if [[ -n "$host_ollama" ]]; then
             ok "Found Ollama already running on this machine (:11434)"
         fi
@@ -630,6 +864,13 @@ choose_example() {
             # is not enough: seen in the field on Linux, the installer
             # printed the download URL, carried on, and produced a finished
             # install whose agent pointed at :11434 with nothing listening.
+            #
+            # THE RULE: only a live endpoint counts. An earlier version of
+            # this gate accepted `command -v ollama` as a runtime and
+            # shipped exactly the dead-endpoint install it exists to
+            # prevent — with a louder warning attached. The binary being on
+            # PATH decides whether to OFFER an install; it never decides
+            # whether the LLM works.
             if [[ -z "$host_ollama" ]]; then
                 local ext_url ollama_ready=""
                 ext_url=$(env_get OLLAMA_EXTERNAL_URL)
@@ -637,19 +878,23 @@ choose_example() {
                     ""|*host.docker.internal*|*localhost*|*127.0.0.1*)
                         # The endpoint is THIS machine — a local Ollama is
                         # genuinely required.
-                        if command -v ollama >/dev/null 2>&1; then
-                            ollama_ready="yes"
-                            warn "Ollama is installed but not answering on :11434 — start it"
-                            if [[ "$PLATFORM" == "macOS" ]]; then
-                                warn "(open the Ollama app, or: brew services start ollama)."
+                        if ollama_installed; then
+                            warn "Ollama is installed but not answering on :11434."
+                            if try_start_ollama && wait_for_ollama 60; then
+                                ok "Ollama is answering on :11434."
+                                ollama_ready="yes"
                             else
-                                warn "(sudo systemctl start ollama — or run: ollama serve)."
+                                ollama_start_diagnosis
                             fi
                         elif [[ "$PLATFORM" == "macOS" ]] && command -v brew >/dev/null 2>&1; then
                             if ask_yes_no "Ollama is not installed. Install it now with Homebrew?" y; then
-                                { brew install ollama && brew services start ollama \
-                                    && ok "Ollama installed and started." && ollama_ready="yes"; } \
-                                    || warn "Install failed — get it from https://ollama.com/download"
+                                if brew install ollama && brew services start ollama \
+                                   && wait_for_ollama 60; then
+                                    ok "Ollama installed and answering on :11434."
+                                    ollama_ready="yes"
+                                else
+                                    warn "Install did not produce a live endpoint — https://ollama.com/download"
+                                fi
                             fi
                         elif [[ "$PLATFORM" != "macOS" ]] && command -v curl >/dev/null 2>&1; then
                             if ask_yes_no "Ollama is not installed. Install it now (Ollama's official installer: curl -fsSL https://ollama.com/install.sh | sh)?" y; then
@@ -658,33 +903,49 @@ choose_example() {
                                 # and exits 0, so a dead network reads as a
                                 # successful install and we ship the exact
                                 # broken state this gate exists to prevent.
-                                local _tmp _i
-                                _tmp=$(mktemp)
+                                local _tmp _log
+                                _tmp=$(mktemp); _log=$(mktemp)
+                                # tee, not a bare run: the operator still watches
+                                # it live AND we get to read what it said. Under
+                                # `set -o pipefail` the pipeline still reports
+                                # sh's real exit status, not tee's.
                                 if curl -fsSL https://ollama.com/install.sh -o "$_tmp" \
-                                   && sh "$_tmp"; then
-                                    rm -f "$_tmp"
-                                    # The official installer starts the systemd
-                                    # service; give it a moment to answer.
-                                    for _i in 1 2 3 4 5; do
-                                        curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1 && break
-                                        sleep 2
-                                    done
-                                    # "The script ran" is not "Ollama exists":
-                                    # only a live endpoint or a real binary
-                                    # counts as installed.
-                                    if curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+                                   && sh "$_tmp" 2>&1 | tee "$_log"; then
+                                    # ">>> Reboot to complete NVIDIA CUDA driver
+                                    # install." is the line that made a 30 GB
+                                    # CUDA box size itself as CPU-only.
+                                    detect_nvidia_reboot_pending "$_log"
+                                    rm -f "$_tmp" "$_log"
+                                    if wait_for_ollama 60; then
                                         ok "Ollama installed and answering on :11434."
                                         ollama_ready="yes"
-                                    elif command -v ollama >/dev/null 2>&1; then
-                                        warn "Ollama installed but not answering yet — start it: sudo systemctl start ollama"
+                                    elif ollama_installed \
+                                         && try_start_ollama && wait_for_ollama 60; then
+                                        ok "Ollama is answering on :11434."
                                         ollama_ready="yes"
+                                    elif ollama_installed; then
+                                        warn "Ollama is installed but will not answer on :11434."
+                                        ollama_start_diagnosis
                                     else
                                         warn "The installer ran but ollama is still not available."
                                     fi
                                 else
-                                    rm -f "$_tmp"
+                                    rm -f "$_tmp" "$_log"
                                     warn "Install failed — get it from https://ollama.com/download"
                                 fi
+                            fi
+                        fi
+                        # A pending NVIDIA driver reboot is the one known
+                        # cause of a dead endpoint that has a known remedy:
+                        # the service comes up once the box reboots. Falling
+                        # back to the bundled container here would hand a GPU
+                        # machine the CPU runtime permanently. This is the
+                        # ONLY way past this gate without a live endpoint,
+                        # and it still takes an explicit yes.
+                        if [[ -z "$ollama_ready" && "${NVIDIA_REBOOT_PENDING:-}" == "yes" ]]; then
+                            nvidia_reboot_notice
+                            if ask_yes_no "Keep Ollama on this machine (it starts after the reboot)?" y; then
+                                ollama_ready="yes"
                             fi
                         fi
                         if [[ -z "$ollama_ready" ]]; then
@@ -720,16 +981,22 @@ choose_example() {
                                     ok "Switched to the bundled ollama container."
                                     ;;
                                 *)
-                                    if curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+                                    if ollama_endpoint_up; then
                                         ok "Ollama is answering on :11434."
                                         ollama_ready="yes"
-                                    elif command -v ollama >/dev/null 2>&1; then
-                                        if [[ "$PLATFORM" == "macOS" ]]; then
-                                            warn "Ollama found but not answering yet — open the Ollama app (or: brew services start ollama)."
+                                    elif ollama_installed; then
+                                        # Installed but silent: try to START it
+                                        # rather than tell the operator to. The
+                                        # old branch called this "ready" and
+                                        # walked out of the loop with a dead
+                                        # endpoint.
+                                        warn "Ollama is installed but still not answering on :11434."
+                                        if try_start_ollama && wait_for_ollama 60; then
+                                            ok "Ollama is answering on :11434."
+                                            ollama_ready="yes"
                                         else
-                                            warn "Ollama found but not answering yet — start it: sudo systemctl start ollama (or: ollama serve)."
+                                            ollama_start_diagnosis
                                         fi
-                                        ollama_ready="yes"
                                     else
                                         warn "Ollama is still not installed."
                                     fi
@@ -747,6 +1014,20 @@ choose_example() {
                             warn "make sure it is up (and reachable from Docker) before first use."
                         fi
                         ;;
+                esac
+            fi
+            # Reachability from the CONTAINER, not from this shell. Runs on
+            # the already-running path too (host_ollama=yes skips everything
+            # above) — that operator's bind is exactly as suspect, and it is
+            # the commonest way to reach this point.
+            if [[ "$llm_where" == "host" && "$PLATFORM" != "macOS" ]]; then
+                case "$(env_get OLLAMA_EXTERNAL_URL)" in
+                    ""|*host.docker.internal*|*localhost*|*127.0.0.1*)
+                        if ollama_endpoint_up; then
+                            check_ollama_bridge_reachable
+                        fi
+                        ;;
+                    *) ;;   # a LAN box: not ours to probe or fix
                 esac
             fi
             # --- end ollama-availability gate ---
@@ -768,7 +1049,14 @@ choose_example() {
         hw_desc="${HW_RAM_GB} GB RAM, ${HW_CORES} cores"
         case "$HW_ACCEL" in
             metal) hw_desc="Apple Silicon GPU (Metal), $hw_desc" ;;
-            cuda)  hw_desc="NVIDIA GPU (CUDA), $hw_desc" ;;
+            cuda)
+                # Do not claim a GPU this box cannot use yet — say when.
+                if [[ "${NVIDIA_REBOOT_PENDING:-}" == "yes" ]]; then
+                    hw_desc="NVIDIA GPU (CUDA, after reboot), $hw_desc"
+                else
+                    hw_desc="NVIDIA GPU (CUDA), $hw_desc"
+                fi
+                ;;
             *)     hw_desc="CPU only, $hw_desc" ;;
         esac
         if [[ "$llm_where" == "container" && "$PLATFORM" == "macOS" ]]; then
@@ -790,7 +1078,10 @@ choose_example() {
         if [[ "$llm_where" == "host" ]]; then
             local ext_model
             ext_model=$(env_get OLLAMA_MODEL); ext_model=${ext_model:-$llm_suggest}
-            if command -v ollama >/dev/null 2>&1; then
+            # Gate on the ENDPOINT, not the binary: `ollama pull` needs a
+            # running server, so with a dead :11434 (a pending driver reboot,
+            # say) the binary check only bought a noisy failure.
+            if ollama_endpoint_up; then
                 if ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$ext_model"; then
                     ok "Model ${ext_model} is already available on this machine."
                 elif ask_yes_no "Pull the model now (ollama pull ${ext_model})?" y; then
@@ -800,9 +1091,15 @@ choose_example() {
                     warn "Before first use:  ollama pull ${ext_model}"
                 fi
             else
-                warn "Before first use, pull the model ON THE HOST:  ollama pull ${ext_model}"
+                if [[ "${NVIDIA_REBOOT_PENDING:-}" == "yes" ]]; then
+                    warn "Ollama is not answering yet. AFTER THE REBOOT, pull the model:"
+                else
+                    warn "Ollama is not answering, so nothing can be pulled yet."
+                    warn "Before first use, ON THIS MACHINE:"
+                fi
+                warn "    ollama pull ${ext_model}"
                 if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
-                    warn "And the vision model:                        ollama pull $(env_get OLLAMA_VLM_MODEL)"
+                    warn "    ollama pull $(env_get OLLAMA_VLM_MODEL)"
                 fi
             fi
         fi
@@ -925,6 +1222,11 @@ main() {
     prepare_environment
     pull_and_build
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
+    # Last word before exec — after this, compose owns the terminal and a
+    # notice printed 200 lines ago is gone.
+    if [[ "${NVIDIA_REBOOT_PENDING:-}" == "yes" ]]; then
+        nvidia_reboot_notice
+    fi
     exec "$PROJECT_ROOT/start.sh" up
 }
 main "$@"
