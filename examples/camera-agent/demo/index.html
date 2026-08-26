@@ -1279,26 +1279,92 @@
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
     }
-    async function loadCameras(){ try{ const r=await fetch("/cameras"); if(!r.ok)return;
+    // ── the camera roster: a live view, not a boot snapshot ─────────────
+    // This used to run exactly ONCE, at page load, and the /updates socket
+    // carries tasks, monitors, reports, events and alarms but NOT cameras.
+    // So a camera added in OpenNVR never showed up until someone reloaded,
+    // and a deleted one kept its strip tile forever (stuck on "no frame")
+    // and stayed pickable in the history/alarm/watch/task selects — you
+    // could arm an alarm on a camera that no longer exists. The agent
+    // already reconciles its own roster against OpenNVR on a ~30s cadence
+    // (_sync_camera_roster); the page now follows it.
+    //
+    // Rebuild only when the roster actually CHANGED. The signature covers
+    // id AND role, because the pickers render the role. Rebuilding blindly
+    // every 30s would recreate every strip <img>, flashing the tiles and
+    // throwing away frames that were just fetched.
+    let _rosterSig=null, _rosterWired=false, _rosterBusy=false;
+    async function loadCameras(){
+      // Wired before the fetch, not after it: a /cameras that fails at boot
+      // (agent still starting, token not yet accepted) must not cost the
+      // page its retry timer forever.
+      if(!_rosterWired){ _rosterWired=true; wireRosterOnce(); }
+      // The 30s timer, the visibilitychange handler and useLocalCamera() can
+      // all ask at once; one in flight is enough.
+      if(_rosterBusy) return;
+      _rosterBusy=true;
+      try{ const r=await fetch("/cameras"); if(!r.ok)return;
       const cams=((await r.json()).cameras||[]);
+      const sig=JSON.stringify(cams.map(c=>[c.camera_id,String(c.role||"").trim()]));
+      if(sig===_rosterSig) return;                      // nothing moved
+      _rosterSig=sig;
+      renderCamChecks(cams);
+      renderCamSelects(cams);
+      buildCamStrip(cams);
+    }catch{} finally{ _rosterBusy=false; } }
+    // The "All cameras / cam1 / cam2…" row that scopes a chat question.
+    // Every label carrying a .cam-cb is ours to replace — including the
+    // ad-hoc one useLocalCamera() appends, which would otherwise survive
+    // as a duplicate once /cameras starts reporting that device.
+    function renderCamChecks(cams){
+      const old=[...camboxEl.querySelectorAll(".cam-cb")];
+      const ticked=new Set(old.filter(c=>c.checked).map(c=>c.value));
+      for(const cb of old) (cb.closest("label")||cb).remove();
       for(const cam of cams){ const lab=document.createElement("label");
-        const role=(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
+        const role=String(cam.role||"").trim(); const txt=role&&role!=="(no role configured)"?`${cam.camera_id} · ${role.slice(0,28)}`:cam.camera_id;
         // DOM + textContent: camera ids/roles are server-configured strings.
         const cb=document.createElement("input"); cb.type="checkbox"; cb.className="cam-cb"; cb.value=cam.camera_id;
+        cb.checked=ticked.has(cam.camera_id);           // keep the operator's scope
         lab.appendChild(cb); lab.appendChild(document.createTextNode(" "+txt)); camboxEl.appendChild(lab); }
-      const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
-      all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
-      camboxEl.addEventListener("change",(e)=>{ if(e.target.classList.contains("cam-cb")&&e.target.checked) all.checked=false;
-        if(!cbs().some(c=>c.checked)) all.checked=true; });
-      buildCamStrip(cams);
-      // History filter + the alarm/watch/task camera pickers share the roster.
-      for(const sel of [$("histCam"), $("alarmCam"), $("watchCam"), $("taskCam")]){
+      const all=$("cam-all");
+      if(all && ![...camboxEl.querySelectorAll(".cam-cb")].some(c=>c.checked)) all.checked=true; }
+    // History filter + the alarm/watch/task camera pickers share the roster.
+    // Each keeps its own static first option ("all cameras" / "Any camera")
+    // and, where the camera is still present, the operator's choice.
+    function renderCamSelects(cams){
+      const hist=$("histCam");
+      for(const sel of [hist, $("alarmCam"), $("watchCam"), $("taskCam")]){
         if(!sel) continue;
+        const was=sel.value;
+        while(sel.options.length>1) sel.remove(1);
         for(const cam of cams){ const o=document.createElement("option");
           o.value=cam.camera_id;
           o.textContent=cam.camera_id+(cam.role?(" · "+String(cam.role).slice(0,22)):"");
-          sel.appendChild(o); } }
-    }catch{} }
+          sel.appendChild(o); }
+        // A camera that went away falls back to the static option rather
+        // than silently arming/filtering on a stale id.
+        sel.value=[...sel.options].some(o=>o.value===was)?was:sel.options[0].value;
+        // The history picker is a live FILTER, not just a form field: the
+        // list under it was fetched for the camera that just disappeared.
+        // Assigning .value fires no change event, so the reload has to be
+        // asked for, or the card reads "all cameras" over one camera's rows.
+        if(sel===hist && sel.value!==was) loadHistory(); } }
+    // Listeners and timers that must exist exactly once, however many
+    // times the roster is rebuilt underneath them.
+    function wireRosterOnce(){
+      const all=$("cam-all"), cbs=()=>[...document.querySelectorAll(".cam-cb")];
+      if(all) all.addEventListener("change",()=>{ if(all.checked) cbs().forEach(c=>{c.checked=false;}); });
+      // Delegated: the checkboxes themselves are replaced on every rebuild.
+      camboxEl.addEventListener("change",(e)=>{ if(!e.target.classList.contains("cam-cb")) return;
+        if(e.target.checked && all) all.checked=false;
+        if(all && !cbs().some(c=>c.checked)) all.checked=true; });
+      // Follow the agent's own reconcile cadence, and only while someone is
+      // looking — a hidden tab has nothing to re-render.
+      setInterval(()=>{ if(document.visibilityState==="visible") loadCameras(); },30000);
+      document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") loadCameras(); });
+      // The strip's own frame poll: one timer for the page's lifetime, not
+      // one more every time buildCamStrip() runs.
+      setInterval(()=>{ if(document.visibilityState==="visible" && !window._camScreenCam) refreshCamStrip(); },6000); }
 
     // ── what can set off an alarm/watch: the detector's real vocabulary ─
     // Fills the shared <datalist> behind every target input, so operators
@@ -1414,8 +1480,18 @@
     // tap = PEEK (the agent drops the camera's current frame into the
     // chat with an Open link) · ⤢ / name = the camera's own screen.
     const _camRoles={};
-    function buildCamStrip(cams){ const strip=$("camstrip"); if(!strip||!cams.length) return;
+    function buildCamStrip(cams){ const strip=$("camstrip"); if(!strip) return;
+      // Every tile holds an object URL for the frame it is showing. Dropping
+      // the elements does NOT free those — the browser keeps each blob alive
+      // until it is revoked — so the last roster's frames must be released
+      // before the strip is thrown away, or a site that adds and removes
+      // cameras leaks a JPEG per tile per rebuild.
+      for(const img of strip.querySelectorAll("img[data-blob-url]")) URL.revokeObjectURL(img.dataset.blobUrl);
       strip.innerHTML="";
+      // An empty roster clears the strip rather than leaving the old tiles
+      // standing: "no cameras" is an answer, not a reason to keep stale ones.
+      for(const k of Object.keys(_camRoles)) delete _camRoles[k];
+      if(!cams.length) return;
       for(const cam of cams){ _camRoles[cam.camera_id]=(cam.role||"").trim();
         const t=document.createElement("div"); t.className="camtile"; t.dataset.cam=cam.camera_id;
         t.title="Tap to peek — the agent shows this camera in the chat";
@@ -1427,7 +1503,17 @@
         t.querySelector(".ct-nm span").addEventListener("click",()=>openCamScreen(cam.camera_id));
         t.querySelector(".ct-x").addEventListener("click",(e)=>{ e.stopPropagation(); openCamScreen(cam.camera_id); });
         strip.appendChild(t); }
-      refreshCamStrip(); setInterval(()=>{ if(document.visibilityState==="visible" && !window._camScreenCam) refreshCamStrip(); },6000); }
+      // The 6s frame poll is started once, in wireRosterOnce() — starting it
+      // here would add another timer on every rebuild.
+      //
+      // Prime the new tiles now, but NOT while the operator is on a camera's
+      // own screen: the strip is hidden behind it, and every /frame miss is
+      // a fresh ffmpeg waiting for that camera's next keyframe. A roster
+      // change would otherwise spawn one per camera in the fleet for a strip
+      // nobody can see, on top of the live stream the screen is already
+      // pulling. closeCamScreen() calls refreshCamStrip() on the way back,
+      // and the 6s tick covers the rest — nothing is lost by waiting.
+      if(!window._camScreenCam) refreshCamStrip(); }
     // Strip refresh. Each /frame miss is a fresh ffmpeg that waits for the
     // camera's next KEYFRAME (1-4s on long-GOP H.265 OEM cameras), so this
     // used to be a strictly sequential await loop: with four cameras the
@@ -1461,7 +1547,11 @@
       const img=t.querySelector("img"), off=t.querySelector(".ct-off");
       try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
         if(!r.ok) throw new Error();
-        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+        const blob=await r.blob();
+        // A roster rebuild can land mid-fetch. Painting a detached tile
+        // would mint a blob URL nothing can ever revoke — drop the frame.
+        if(!t.isConnected) return;
+        setBlobSrc(img,blob); img.hidden=false; off.hidden=true;
       }catch{ img.hidden=true; off.hidden=false; } }
     // One blob URL per <img>: revoke the previous BEFORE assigning — onload
     // revocation leaks when a new src lands before the old one loaded.
@@ -1930,6 +2020,10 @@
             lab.innerHTML=`<input type="checkbox" class="cam-cb" value="${cam.camera_id}" checked> ${cam.camera_id} · this machine`;
             camboxEl.appendChild(lab); }
           const all=$("cam-all"); if(all) all.checked=false;
+          // Pull the roster now instead of waiting up to 30s: the rebuild
+          // replaces the ad-hoc label above and gives the new camera its
+          // strip tile and its entry in the history/alarm/watch/task pickers.
+          loadCameras();
           setStatus(`Using this machine's camera (${added.map(c=>c.camera_id).join(", ")}). Ask a question!`,"ok");
         }
       }catch(err){ setStatus("Could not access a local camera: "+err.message,"error"); }
