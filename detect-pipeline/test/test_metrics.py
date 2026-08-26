@@ -291,3 +291,118 @@ def test_track_population_gauge_shows_what_the_cap_counts():
     assert m.metrics.value("tier0_tracks_active", cam) == 2.0
     assert m.metrics.value("tier0_tracks_population", cam) == 7.0
     m.metrics.reset()
+
+
+# ── tier0_decode_config: the static decode dials, made scrapeable ──────
+#
+# Every DYNAMIC decode saving already had a metric (tier0_decode_idle,
+# tier0_regions_budget). The static dials that shape the dominant cost —
+# skip token, decoder threads, fast-decode, effective hwaccel — were only
+# logged at worker start, so no dashboard could contradict a silent
+# fallback. #306 shipped an invalid skip token; nothing exported would
+# have shown it.
+
+def _decode_labels(m: Metrics, camera: str = "cam1") -> dict:
+    """The one tier0_decode_config series for a camera, as a label dict."""
+    found = [
+        dict(key[1]) for key in m._gauges
+        if key[0] == "tier0_decode_config" and ("camera", camera) in key[1]
+    ]
+    assert len(found) <= 1, f"expected at most one series, got {found}"
+    return found[0] if found else {}
+
+
+def test_decode_config_exports_the_effective_dials(monkeypatch):
+    from detect_pipeline import metrics as mod
+
+    m = Metrics()
+    monkeypatch.setattr(mod, "metrics", m)
+    mod.record_decode_config(
+        "cam1", skip="nonref", threads=2, fast=False, hwaccel="cpu", idle="nokey",
+    )
+    labels = _decode_labels(m)
+    assert labels == {
+        "camera": "cam1", "skip": "nonref", "threads": "2",
+        "fast": "false", "hwaccel": "cpu", "idle": "nokey",
+    }
+    # Info-metric convention: the value carries nothing, the labels do.
+    assert m.value("tier0_decode_config", labels) == 1.0
+
+
+def test_decode_config_replaces_its_series_when_config_changes(monkeypatch):
+    # The bug this guards: an info-metric's payload is its LABELS, so a
+    # worker restarting under changed config would mint a SECOND series and
+    # /metrics would render two answers — one describing a decode config
+    # that no longer exists.
+    from detect_pipeline import metrics as mod
+
+    m = Metrics()
+    monkeypatch.setattr(mod, "metrics", m)
+    mod.record_decode_config(
+        "cam1", skip="nonref", threads=2, fast=False, hwaccel="vaapi", idle="nokey",
+    )
+    # Second open: the GPU turned out unusable and decode fell back to CPU.
+    mod.record_decode_config(
+        "cam1", skip="nonref", threads=2, fast=False, hwaccel="cpu", idle="nokey",
+    )
+    series = [k for k in m._gauges if k[0] == "tier0_decode_config"]
+    assert len(series) == 1, "config change must replace, never accumulate"
+    assert _decode_labels(m)["hwaccel"] == "cpu"
+
+
+def test_decode_config_is_per_camera(monkeypatch):
+    from detect_pipeline import metrics as mod
+
+    m = Metrics()
+    monkeypatch.setattr(mod, "metrics", m)
+    mod.record_decode_config(
+        "cam1", skip="nonref", threads=2, fast=False, hwaccel="cpu", idle="nokey",
+    )
+    mod.record_decode_config(
+        "cam2", skip="nokey", threads=4, fast=True, hwaccel="vaapi", idle=None,
+    )
+    assert _decode_labels(m, "cam1")["skip"] == "nonref"
+    cam2 = _decode_labels(m, "cam2")
+    assert cam2["skip"] == "nokey" and cam2["threads"] == "4"
+    assert cam2["fast"] == "true"
+    # Adaptive decode OFF is a definite answer, not an absent label.
+    assert cam2["idle"] == "off"
+
+
+def test_decode_config_renders_in_prometheus_text(monkeypatch):
+    from detect_pipeline import metrics as mod
+
+    m = Metrics()
+    monkeypatch.setattr(mod, "metrics", m)
+    mod.record_decode_config(
+        "cam1", skip="noref", threads=2, fast=False, hwaccel="cpu", idle="nokey",
+    )
+    text = m.render()
+    assert "tier0_decode_config{" in text
+    assert 'skip="noref"' in text and 'hwaccel="cpu"' in text
+
+
+def test_forget_camera_still_clears_the_config_series(monkeypatch):
+    # A deleted camera must not keep describing a decode config forever —
+    # the same staleness drop_label() was introduced for.
+    from detect_pipeline import metrics as mod
+
+    m = Metrics()
+    monkeypatch.setattr(mod, "metrics", m)
+    mod.record_decode_config(
+        "cam1", skip="nonref", threads=2, fast=False, hwaccel="cpu", idle="nokey",
+    )
+    mod.forget_camera("cam1")
+    assert _decode_labels(m) == {}
+
+
+def test_drop_series_only_touches_the_named_metric():
+    m = Metrics()
+    m.gauge("tier0_decode_config", 1.0, {"camera": "cam1", "skip": "nonref"})
+    m.gauge("tier0_worker_up", 1.0, {"camera": "cam1"})
+    m.inc("tier0_frames_total", {"camera": "cam1"})
+    assert m.drop_series("tier0_decode_config", "camera", "cam1") == 1
+    # Neighbours on the same camera survive — that is the whole point of the
+    # narrower helper next to drop_label().
+    assert m.value("tier0_worker_up", {"camera": "cam1"}) == 1.0
+    assert m.value("tier0_frames_total", {"camera": "cam1"}) == 1.0

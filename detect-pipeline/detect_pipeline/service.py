@@ -40,6 +40,7 @@ from .metrics import (
     record_frame,
     record_gate,
     record_processing_fps,
+    record_decode_config,
     record_mainstream_fallback,
     record_published,
     record_sink_error,
@@ -484,6 +485,18 @@ class CameraWorker:
         # the README's "why is my CPU high" section can point at it.
         mainstream = (w or 0) * (h or 0) > 1280 * 720
         record_mainstream_fallback(self.spec.camera_id, mainstream)
+        # Publish the decode dials this camera actually opened with. Emitted
+        # HERE — after the source opened — so the hwaccel label carries the
+        # EFFECTIVE backend (resolve_hwaccel may have downgraded to CPU),
+        # which is the discrepancy the metric exists to surface.
+        record_decode_config(
+            self.spec.camera_id,
+            skip=self.decode_skip,
+            threads=self.decode_threads,
+            fast=self.fast_decode,
+            hwaccel=self._effective_hwaccel().value,
+            idle=self.decode_idle,
+        )
         if mainstream:
             log.warning(
                 "tier0 %s: decoding a %dx%d stream — this looks like a MAIN "

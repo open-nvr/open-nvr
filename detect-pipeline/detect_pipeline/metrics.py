@@ -20,6 +20,7 @@ pipeline/gate core stays metric-free and unit-testable. Names follow
     gate_suppressions_total{camera,reason}             counter
     gate_shadow_would_suppress_total{camera}           counter
     tier0_frame_latency_seconds{camera}                histogram
+    tier0_decode_config{camera,skip,threads,fast,hwaccel,idle}  info (always 1)
 
 Derived KPIs (compute in Prometheus/Grafana or the benchmark harness):
 motion-gate ratio = skipped / (runs + skipped); expensive-call reduction =
@@ -111,6 +112,25 @@ class Metrics:
         with self._lock:
             for store in (self._counters, self._gauges, self._hist):
                 for key in [k for k in store if pair in k[1]]:
+                    store.pop(key, None)
+                    removed += 1
+        return removed
+
+    def drop_series(self, name: str, label: str, value: str) -> int:
+        """Remove every series of ONE metric carrying ``label=value``.
+
+        Narrower than ``drop_label``, and it exists for info-metrics: their
+        payload lives in the LABELS, so re-emitting after a config change
+        mints a second series instead of updating the first. Both would then
+        render — one describing a decode config that no longer exists —
+        which is worse than not exporting the config at all. Callers
+        drop-then-set to keep exactly one series per camera.
+        """
+        pair = (label, value)
+        removed = 0
+        with self._lock:
+            for store in (self._counters, self._gauges, self._hist):
+                for key in [k for k in store if k[0] == name and pair in k[1]]:
                     store.pop(key, None)
                     removed += 1
         return removed
@@ -343,6 +363,56 @@ def record_worker_state(camera_id: str, up: bool, *, target_fps: float | None = 
     metrics.gauge("tier0_worker_up", 1.0 if up else 0.0, {"camera": camera_id})
     if target_fps is not None:
         metrics.gauge("tier0_target_fps", float(target_fps), {"camera": camera_id})
+
+
+def record_decode_config(
+    camera_id: str,
+    *,
+    skip: str,
+    threads: int,
+    fast: bool,
+    hwaccel: str,
+    idle: str | None,
+) -> None:
+    """Export the decode configuration this camera is ACTUALLY running under.
+
+    Every other decode saving is measurable — ``tier0_decode_idle`` says
+    whether a camera is in cheap keyframe-only mode right now,
+    ``tier0_regions_budget`` says where the shedder settled — but the static
+    dials that shape the dominant cost (decode) were only ever logged at
+    worker start. From a dashboard there was no way to answer "is this camera
+    really running noref on 2 threads, or did a typo fall back?", and the
+    fallbacks are deliberately silent: an invalid DECODE_SKIP degrades to a
+    safe default (see run.py), and hwaccel downgrades to CPU when the device
+    is unusable. That is exactly the state worth seeing — a camera whose
+    config says ``vaapi`` while its decode says ``cpu`` is the difference
+    between ~0.3 and ~2 cores, and #306 shipped a decode token that no
+    dashboard could have contradicted.
+
+    Prometheus info-metric convention: the value is always 1 and the payload
+    is the label set, so it joins onto the numeric series in a query —
+    e.g. ``tier0_process_cpu_percent * on(camera) group_left(skip,hwaccel)
+    tier0_decode_config``.
+
+    ``hwaccel`` must be the EFFECTIVE backend (after any downgrade), not the
+    requested one — reporting the request would re-hide the fallback this
+    metric exists to reveal.
+    """
+    labels = {
+        "camera": camera_id,
+        "skip": str(skip or "none"),
+        "threads": str(int(threads)),
+        "fast": "true" if fast else "false",
+        "hwaccel": str(hwaccel or "cpu"),
+        # "off" rather than an empty label: an absent value reads as "unknown"
+        # in a query, and adaptive decode being OFF is a definite answer.
+        "idle": str(idle or "off"),
+    }
+    # Drop-then-set: a worker restarting under changed config (reconcile, an
+    # edited .env, an hwaccel downgrade on the second attempt) must REPLACE
+    # its series, never accumulate a second one describing the old world.
+    metrics.drop_series("tier0_decode_config", "camera", camera_id)
+    metrics.gauge("tier0_decode_config", 1.0, labels)
 
 
 def record_worker_restart(camera_id: str) -> None:
