@@ -761,7 +761,29 @@ type Tier0MetricsResp = {
     detector_runs: number
     skipped_no_motion: number
     skipped_calibrating: number
+    skipped_stationary?: number
     motion_gate_ratio: number | null
+  }
+  cameras?: Array<{
+    camera: string
+    up: boolean
+    fps: number | null
+    target_fps: number | null
+    frame_age_s: number | null
+    regions_budget: number | null
+    regions_configured: number | null
+    shedding: boolean
+    regions_capped_total: number
+    tracks_active: number
+    visits_posted: number
+    visits_dropped: number
+    mainstream_fallback: boolean
+  }>
+  events_flow?: {
+    bus_events_published: number
+    visits_posted: number
+    visits_dropped: number
+    sink_errors: number
   }
   gate?: { escalations: number; suppressions: number; shadow_would_suppress: number }
   tier1?: {
@@ -967,6 +989,77 @@ function ComputeGatedPanel() {
           <StatTile label="Frames" value={(f?.total ?? 0).toLocaleString()}
             sub={`${(f?.detector_runs ?? 0).toLocaleString()} ran the detector`} />
         </div>
+
+        {/* Per-camera detail — the fleet aggregate hides exactly the camera
+            that is struggling. "Regions 3/8 · shedding" is the load-shedder
+            protecting the stream by detecting less; "main stream" flags the
+            5x-decode-cost misconfiguration the operator can actually fix. */}
+        {(d.cameras?.length ?? 0) > 0 && (
+          <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3 overflow-x-auto">
+            <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">
+              Cameras
+            </div>
+            <table className="w-full font-mono text-xs">
+              <thead>
+                <tr className="text-[var(--text-dim)] text-left">
+                  <th className="pr-4 pb-1 font-normal">camera</th>
+                  <th className="pr-4 pb-1 font-normal">fps</th>
+                  <th className="pr-4 pb-1 font-normal">frame age</th>
+                  <th className="pr-4 pb-1 font-normal">regions</th>
+                  <th className="pr-4 pb-1 font-normal">tracks</th>
+                  <th className="pr-4 pb-1 font-normal">visits</th>
+                  <th className="pb-1 font-normal">flags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.cameras!.map((c) => {
+                  const fpsLow = c.fps != null && c.target_fps != null && c.target_fps > 0 && c.fps / c.target_fps < 0.9
+                  return (
+                    <tr key={c.camera} className="border-t border-[var(--border)]">
+                      <td className="pr-4 py-1">
+                        <span className={c.up ? '' : 'text-red-400'}>{c.camera}{c.up ? '' : ' (down)'}</span>
+                      </td>
+                      <td className={`pr-4 py-1 tabular-nums ${fpsLow ? 'text-amber-400' : ''}`}>
+                        {c.fps ?? '—'}{c.target_fps != null ? ` / ${c.target_fps}` : ''}
+                      </td>
+                      <td className="pr-4 py-1 tabular-nums">
+                        {c.frame_age_s != null ? `${c.frame_age_s}s` : '—'}
+                      </td>
+                      <td className={`pr-4 py-1 tabular-nums ${c.shedding ? 'text-amber-400' : ''}`}>
+                        {c.regions_budget ?? '—'}{c.regions_configured != null ? ` / ${c.regions_configured}` : ''}
+                        {c.shedding ? ' · shedding' : ''}
+                      </td>
+                      <td className="pr-4 py-1 tabular-nums">{c.tracks_active}</td>
+                      <td className={`pr-4 py-1 tabular-nums ${c.visits_dropped > 0 ? 'text-amber-400' : ''}`}>
+                        {c.visits_posted.toLocaleString()}
+                        {c.visits_dropped > 0 ? ` (+${c.visits_dropped} dropped)` : ''}
+                      </td>
+                      <td className="py-1">
+                        {c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Outputs leaving the pipeline — detections becoming NATS events (what
+            alarms and apps consume) and finished visits becoming history rows.
+            Zero here while detections climb is "detected but nobody was told". */}
+        {d.events_flow && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <StatTile label="Bus events" value={d.events_flow.bus_events_published.toLocaleString()}
+              sub="published to NATS (alarms, apps)" />
+            <StatTile label="Visits posted" value={d.events_flow.visits_posted.toLocaleString()}
+              sub="written to history" />
+            <StatTile label="Visits dropped" value={d.events_flow.visits_dropped.toLocaleString()}
+              sub="lost before history" warn={d.events_flow.visits_dropped > 0} />
+            <StatTile label="Sink errors" value={d.events_flow.sink_errors.toLocaleString()}
+              sub="event-store write failures" warn={d.events_flow.sink_errors > 0} />
+          </div>
+        )}
 
         {/* Detector model — speed + output volume, the aspects you A/B two models on */}
         {d.detector && (
