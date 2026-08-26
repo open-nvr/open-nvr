@@ -170,3 +170,39 @@ def test_demo_has_suggestion_chips_and_health_dot():
     assert 'id="healthDot"' in _HTML
     assert "pollHealth" in _HTML
     assert "vision_error" in _HTML
+
+
+# ── History collapse ───────────────────────────────────────────────────
+
+def test_history_card_can_be_collapsed_like_the_others():
+    # Activity and Hardware both fold; History — the card that grows most,
+    # up to 30 visits each with a photo — was the only one that could not.
+    assert 'id="histToggle"' in _HTML
+    assert "applyHistCollapse" in _HTML
+    # Same session-scoped persistence + glyph convention as Activity.
+    assert 'sessionStorage.setItem("histCollapsed"' in _HTML
+    assert 'sessionStorage.getItem("histCollapsed")' in _HTML
+
+
+def test_collapsed_history_skips_the_evidence_photo_fetches():
+    """Collapsing must stop the work, not just hide it.
+
+    Each visible visit fires its own authenticated evidence fetch, so a
+    30-row card is 30 requests per refresh. The availability call above the
+    guard still runs (it decides whether the card and its phone tab exist),
+    but nothing below it should build rows nobody can see.
+    """
+    body = _HTML[_HTML.index("async function loadHistory"):]
+    guard = body.index("if(_histCollapsed()) return;")
+    first_thumb_fetch = body.index('fetch("/history/"')
+    assert guard < first_thumb_fetch, (
+        "the collapsed-return must come BEFORE the per-visit evidence fetches"
+    )
+
+
+def test_expanding_history_reloads_so_thumbs_are_not_blank():
+    # Because the photos are skipped while collapsed, unfolding without a
+    # reload would show rows with permanently empty thumbnails.
+    toggle = _HTML[_HTML.index('const b=$("histToggle")'):]
+    toggle = toggle[:toggle.index("async function loadHistory")]
+    assert "loadHistory()" in toggle
