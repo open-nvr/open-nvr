@@ -333,3 +333,59 @@ def test_live_video_pauses_when_tab_hidden(script: str) -> None:
     assert re.search(r"document\.hidden[\s\S]{0,200}goLive\(\)", script), (
         "returning to a live camera screen should re-establish the stream"
     )
+
+
+# ── camera widget: strip concurrency + honest WebRTC drop ──────────────
+
+def _demo_html() -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
+
+
+def test_camera_strip_refreshes_cameras_concurrently():
+    """The strip must not serialise cameras.
+
+    Every /frame miss is a fresh ffmpeg waiting for the camera's next
+    KEYFRAME (1-4s on long-GOP OEM cameras). Awaiting them one at a time
+    made the last tile land ~N x that behind the first, and the server was
+    built for the opposite: context.get_frame takes a PER-CAMERA lock so
+    different cameras proceed in parallel while callers on the SAME camera
+    coalesce. Measured in-browser at 4 cameras x 1.2s: 4809ms -> 1211ms.
+    """
+    html = _demo_html()
+    assert "_STRIP_LANES" in html
+    assert "Promise.all(" in html[html.index("async function refreshCamStrip"):]
+    # The old shape: a for-loop awaiting each tile inline.
+    body = html[html.index("async function refreshCamStrip"):]
+    body = body[:body.index("async function _refreshTile")]
+    assert "for(const t of document.querySelectorAll" not in body
+
+
+def test_camera_strip_cycles_cannot_overlap():
+    """A refresh slower than the 6s interval used to stack a second cycle on
+    top of the first — two loops racing, double the ffmpeg processes.
+    Measured in-browser: 11 fetches for 4 cameras, now 4."""
+    html = _demo_html()
+    assert "_stripBusy" in html
+    body = html[html.index("async function refreshCamStrip"):]
+    assert "if(!authReady() || _stripBusy) return;" in body
+    assert "finally { _stripBusy = false; }" in body
+
+
+def test_a_dropped_webrtc_stream_stops_claiming_to_be_live():
+    """A WHEP session dying after connect was invisible: _pc stayed non-null
+    (gating the still-poller OFF) and the caption still said 'real-time
+    stream', so the player showed a FROZEN frame under a green LIVE pill.
+    """
+    html = _demo_html()
+    assert "function handleWebrtcState" in html
+    assert "pc.onconnectionstatechange=()=>handleWebrtcState(pc);" in html
+    fn = html[html.index("function handleWebrtcState"):]
+    fn = fn[:fn.index("function stopWebrtc")]
+    # Only real terminal states act — a healthy transition must be a no-op.
+    assert '["failed","disconnected","closed"]' in fn
+    # It must clear the session (stills resume) AND correct the caption.
+    assert "stopWebrtc();" in fn
+    assert "real-time stream dropped" in fn
+    # And it must ignore a peer that has already been superseded.
+    assert "if(_pc!==pc) return;" in fn
