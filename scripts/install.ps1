@@ -435,11 +435,19 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
 # this gate accepted the binary as a runtime and shipped exactly the
 # dead-endpoint install it exists to prevent, with a louder warning
 # attached.
+# NEVER probe 'localhost' here. Windows resolves it to ::1 first and
+# Ollama listens on 127.0.0.1 ONLY, so the v6 attempt is dropped (not
+# refused) and the probe burns its whole timeout - a running Ollama then
+# reads as 'installed but not answering on :11434'. Try the v4 loopback
+# first, and [::1] after it for the rare v6-only bind.
 function Test-OllamaUp {
-    try {
-        $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-        return $true
-    } catch { return $false }
+    foreach ($h in @('127.0.0.1', '[::1]')) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://${h}:11434/api/version" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            return $true
+        } catch {}
+    }
+    return $false
 }
 
 # Wait-ForOllama - poll with visible progress. A silent wait is
@@ -525,11 +533,7 @@ function Choose-Example {
         # and on Linux the bundled container still costs a 3.2 GB image
         # and a second model store beside the host's own Ollama. The
         # gate below installs and starts Ollama when it is missing.
-        $hostOllama = $false
-        try {
-            $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-            $hostOllama = $true
-        } catch {}
+        $hostOllama = Test-OllamaUp
         $llmDefault = '2'
         Explain 'Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image - the installer offers to set it up if you do not have it. In Docker on Windows/macOS the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else.' 'pick one' "$llmDefault (Ollama on this machine)"
         if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
@@ -622,12 +626,7 @@ function Choose-Example {
                             Set-EnvValue OLLAMA_EXTERNAL_URL ''
                             Ok 'Switched to the bundled ollama container.'
                         } else {
-                            $answering = $false
-                            try {
-                                $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-                                $answering = $true
-                            } catch {}
-                            if ($answering) {
+                            if (Test-OllamaUp) {
                                 Ok 'Ollama is answering on :11434.'
                                 $ollamaReady = $true
                             } elseif (Get-Command ollama -ErrorAction SilentlyContinue) {

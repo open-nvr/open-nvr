@@ -566,7 +566,10 @@ pick_model_from_catalog() {
 # runtime is up". That is how a finished install ended up pointing the
 # agent at a :11434 that answered nothing. The rule now lives in one
 # place: ONLY A LIVE ENDPOINT COUNTS.
-OLLAMA_LOCAL_URL="http://localhost:11434"
+# 127.0.0.1, never "localhost": where localhost resolves to ::1 first
+# (the Windows default, and some Linux /etc/hosts), a v4-only Ollama
+# bind makes the probe time out and a RUNNING Ollama reads as dead.
+OLLAMA_LOCAL_URL="http://127.0.0.1:11434"
 
 ollama_endpoint_up() {
     curl -sf --max-time 2 "${OLLAMA_LOCAL_URL}/api/version" >/dev/null 2>&1
@@ -841,8 +844,7 @@ choose_example() {
         # that is right on all three, and the gate below installs and
         # starts it when it is missing rather than leaving a broken URL.
         local llm_default="2" host_ollama="" llm_where="container"
-        if command -v curl >/dev/null 2>&1 \
-           && curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+        if command -v curl >/dev/null 2>&1 && ollama_endpoint_up; then
             host_ollama="yes"
         fi
         explain "Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image — the installer offers to set it up if you do not have it. In Docker on macOS/Windows the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else." \
