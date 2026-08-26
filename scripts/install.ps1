@@ -483,22 +483,98 @@ function Choose-Example {
             Configure-Value OLLAMA_EXTERNAL_URL 'External LLM endpoint' 'http://host.docker.internal:11434' `
                 'Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker.' 'yes' `
                 'Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434'
+            # Prompt for the re-check loop. $null means the input is GONE —
+            # deterministically (redirected stdin with nothing left to read),
+            # or a host where Read-Host throws. An empty string is a real
+            # Enter. The distinction matters: on redirected-but-exhausted
+            # stdin Read-Host returns "" forever WITHOUT throwing, so a
+            # catch-only guard loops an unattended run to infinity.
+            function Read-GateResponse([string]$Prompt) {
+                try {
+                    if ([Console]::IsInputRedirected -and [Console]::In.Peek() -lt 0) {
+                        return $null
+                    }
+                } catch {}
+                try { return (Read-Host $Prompt) } catch { return $null }
+            }
+            # --- ollama-availability gate (tested: test_installer_ollama_gate_ps1.sh) ---
+            # Warning-and-proceeding is not enough: seen in the field, the
+            # installer printed the download URL, carried on, and produced a
+            # finished install whose agent pointed at :11434 with nothing
+            # listening. Keep in sync with install.sh.
             if (-not $hostOllama) {
-                if ($ollamaCmd) {
-                    Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
-                } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-                    if (Ask-YesNo 'Ollama is not installed. Install it now with winget?' $true) {
-                        winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
-                        if ($LASTEXITCODE -eq 0) { Ok 'Ollama installed - launch it once so it starts serving.' }
-                        else { Warn 'Install failed - get it from https://ollama.com/download' }
-                        $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
-                    } else {
-                        Warn 'Install Ollama before first use: https://ollama.com/download'
+                $extUrl = Get-EnvValue OLLAMA_EXTERNAL_URL
+                $targetsHere = (-not $extUrl) -or ($extUrl -match 'host\.docker\.internal|localhost|127\.0\.0\.1')
+                if (-not $targetsHere) {
+                    # A remote endpoint (another box on the LAN): a local
+                    # Ollama is irrelevant - just check the endpoint answers.
+                    try {
+                        $null = Invoke-WebRequest -Uri ($extUrl.TrimEnd('/') + '/api/version') -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+                    } catch {
+                        Warn "Remote LLM endpoint $extUrl is not answering right now - make sure it is up (and reachable from Docker) before first use."
                     }
                 } else {
-                    Warn 'Install Ollama on this machine first: https://ollama.com/download'
+                    $ollamaReady = $false
+                    if ($ollamaCmd) {
+                        $ollamaReady = $true
+                        Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
+                    } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+                        if (Ask-YesNo 'Ollama is not installed. Install it now with winget?' $true) {
+                            winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
+                            if ($LASTEXITCODE -eq 0) {
+                                Ok 'Ollama installed - launch it once so it starts serving.'
+                                $ollamaReady = $true
+                            } else { Warn 'Install failed - get it from https://ollama.com/download' }
+                            $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+                        }
+                    }
+                    if (-not $ollamaReady) {
+                        # Proceeding as-is ships an agent wired to a dead
+                        # endpoint - the honest default is the runtime that works.
+                        if (Ask-YesNo 'Without Ollama on this machine that endpoint answers nothing. Use the bundled ollama container instead?' $true) {
+                            $llmWhere = 'container'
+                            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+                            Ok 'Switched to the bundled ollama container.'
+                        }
+                    }
+                    # The installer does NOT proceed without a working LLM
+                    # runtime. The only ways past this point are a verified
+                    # Ollama here or an explicit switch to the bundled
+                    # container. Keep in sync with install.sh.
+                    while ($llmWhere -eq 'host' -and -not $ollamaReady) {
+                        $resp = Read-GateResponse "  Install Ollama (https://ollama.com/download) in another window, then press Enter to re-check - or type 'container' to use the bundled runtime"
+                        if ($null -eq $resp) {
+                            # Stdin ran dry (unattended run): hanging forever
+                            # helps no one - take the runtime that works.
+                            Warn 'No interactive input - using the bundled ollama container.'
+                            $resp = 'container'
+                        }
+                        if ($resp -in @('container', 'c', 'C')) {
+                            $llmWhere = 'container'
+                            Set-EnvValue OLLAMA_EXTERNAL_URL ''
+                            Ok 'Switched to the bundled ollama container.'
+                        } else {
+                            $answering = $false
+                            try {
+                                $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+                                $answering = $true
+                            } catch {}
+                            if ($answering) {
+                                Ok 'Ollama is answering on :11434.'
+                                $ollamaReady = $true
+                            } elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
+                                Warn 'Ollama found but not answering yet - launch the Ollama app.'
+                                $ollamaReady = $true
+                            } else {
+                                Warn 'Ollama is still not installed.'
+                            }
+                        }
+                    }
                 }
             }
+            # --- end ollama-availability gate ---
+        }
+        if ($llmWhere -eq 'host') {
             Info 'The bundled ollama container will be skipped entirely.'
         } else {
             Set-EnvValue OLLAMA_EXTERNAL_URL ''

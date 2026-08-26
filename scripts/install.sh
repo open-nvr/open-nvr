@@ -624,24 +624,134 @@ choose_example() {
             configure_value OLLAMA_EXTERNAL_URL "External LLM endpoint" "http://host.docker.internal:11434" \
                 "Ollama-compatible endpoint the agent calls for the LLM. host.docker.internal reaches this machine from inside Docker." "yes" \
                 "Native Ollama: http://host.docker.internal:11434 | LAN box: http://<ip>:11434"
+            # --- ollama-availability gate (tested: test_installer_ollama_gate.sh) ---
             # Offer to install / start right here, so "external" never
-            # means "broken until you read the docs".
+            # means "broken until you read the docs". Warning-and-proceeding
+            # is not enough: seen in the field on Linux, the installer
+            # printed the download URL, carried on, and produced a finished
+            # install whose agent pointed at :11434 with nothing listening.
             if [[ -z "$host_ollama" ]]; then
-                if command -v ollama >/dev/null 2>&1; then
-                    warn "Ollama is installed but not answering on :11434 — start it"
-                    warn "(macOS: open the Ollama app, or: brew services start ollama)."
-                elif [[ "$PLATFORM" == "macOS" ]] && command -v brew >/dev/null 2>&1; then
-                    if ask_yes_no "Ollama is not installed. Install it now with Homebrew?" y; then
-                        { brew install ollama && brew services start ollama \
-                            && ok "Ollama installed and started."; } \
-                            || warn "Install failed — get it from https://ollama.com/download"
-                    else
-                        warn "Install Ollama before first use: https://ollama.com/download"
-                    fi
-                else
-                    warn "Install Ollama on this machine first: https://ollama.com/download"
-                fi
+                local ext_url ollama_ready=""
+                ext_url=$(env_get OLLAMA_EXTERNAL_URL)
+                case "$ext_url" in
+                    ""|*host.docker.internal*|*localhost*|*127.0.0.1*)
+                        # The endpoint is THIS machine — a local Ollama is
+                        # genuinely required.
+                        if command -v ollama >/dev/null 2>&1; then
+                            ollama_ready="yes"
+                            warn "Ollama is installed but not answering on :11434 — start it"
+                            if [[ "$PLATFORM" == "macOS" ]]; then
+                                warn "(open the Ollama app, or: brew services start ollama)."
+                            else
+                                warn "(sudo systemctl start ollama — or run: ollama serve)."
+                            fi
+                        elif [[ "$PLATFORM" == "macOS" ]] && command -v brew >/dev/null 2>&1; then
+                            if ask_yes_no "Ollama is not installed. Install it now with Homebrew?" y; then
+                                { brew install ollama && brew services start ollama \
+                                    && ok "Ollama installed and started." && ollama_ready="yes"; } \
+                                    || warn "Install failed — get it from https://ollama.com/download"
+                            fi
+                        elif [[ "$PLATFORM" != "macOS" ]] && command -v curl >/dev/null 2>&1; then
+                            if ask_yes_no "Ollama is not installed. Install it now (Ollama's official installer: curl -fsSL https://ollama.com/install.sh | sh)?" y; then
+                                # Download THEN run — never `curl | sh` for the
+                                # verdict: when curl fails, sh reads empty input
+                                # and exits 0, so a dead network reads as a
+                                # successful install and we ship the exact
+                                # broken state this gate exists to prevent.
+                                local _tmp _i
+                                _tmp=$(mktemp)
+                                if curl -fsSL https://ollama.com/install.sh -o "$_tmp" \
+                                   && sh "$_tmp"; then
+                                    rm -f "$_tmp"
+                                    # The official installer starts the systemd
+                                    # service; give it a moment to answer.
+                                    for _i in 1 2 3 4 5; do
+                                        curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1 && break
+                                        sleep 2
+                                    done
+                                    # "The script ran" is not "Ollama exists":
+                                    # only a live endpoint or a real binary
+                                    # counts as installed.
+                                    if curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+                                        ok "Ollama installed and answering on :11434."
+                                        ollama_ready="yes"
+                                    elif command -v ollama >/dev/null 2>&1; then
+                                        warn "Ollama installed but not answering yet — start it: sudo systemctl start ollama"
+                                        ollama_ready="yes"
+                                    else
+                                        warn "The installer ran but ollama is still not available."
+                                    fi
+                                else
+                                    rm -f "$_tmp"
+                                    warn "Install failed — get it from https://ollama.com/download"
+                                fi
+                            fi
+                        fi
+                        if [[ -z "$ollama_ready" ]]; then
+                            # No local Ollama and none installed. Proceeding
+                            # as-is ships an agent wired to a dead endpoint —
+                            # the honest default is the runtime that works.
+                            if ask_yes_no "Without Ollama on this machine that endpoint answers nothing. Use the bundled ollama container instead?" y; then
+                                llm_where="container"
+                                env_set OLLAMA_EXTERNAL_URL ""
+                                ok "Switched to the bundled ollama container."
+                            fi
+                        fi
+                        # The installer does NOT proceed without a working LLM
+                        # runtime (operator decision, from the field). The only
+                        # ways past this point are a verified Ollama here or an
+                        # explicit switch to the bundled container — the first
+                        # version of this gate kept a warn-and-continue exit,
+                        # which was the original bug wearing a louder warning.
+                        while [[ "$llm_where" == "host" && -z "$ollama_ready" ]]; do
+                            local _resp=""
+                            if ! read -r -p "  Install Ollama (https://ollama.com/download) in another terminal, then press Enter to re-check — or type 'container' to use the bundled runtime: " _resp; then
+                                # Stdin ran dry (unattended run): hanging
+                                # forever helps no one, and proceeding broken
+                                # is the bug this gate exists to prevent.
+                                # Take the runtime that works.
+                                warn "No interactive input — using the bundled ollama container."
+                                _resp="container"
+                            fi
+                            case "$_resp" in
+                                container|c|C)
+                                    llm_where="container"
+                                    env_set OLLAMA_EXTERNAL_URL ""
+                                    ok "Switched to the bundled ollama container."
+                                    ;;
+                                *)
+                                    if curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+                                        ok "Ollama is answering on :11434."
+                                        ollama_ready="yes"
+                                    elif command -v ollama >/dev/null 2>&1; then
+                                        if [[ "$PLATFORM" == "macOS" ]]; then
+                                            warn "Ollama found but not answering yet — open the Ollama app (or: brew services start ollama)."
+                                        else
+                                            warn "Ollama found but not answering yet — start it: sudo systemctl start ollama (or: ollama serve)."
+                                        fi
+                                        ollama_ready="yes"
+                                    else
+                                        warn "Ollama is still not installed."
+                                    fi
+                                    ;;
+                            esac
+                        done
+                        ;;
+                    *)
+                        # A remote endpoint (another box on the LAN). A local
+                        # Ollama is irrelevant — do not nag about installing
+                        # one; just check the endpoint actually answers.
+                        if command -v curl >/dev/null 2>&1 \
+                           && ! curl -sf --max-time 3 "${ext_url%/}/api/version" >/dev/null 2>&1; then
+                            warn "Remote LLM endpoint ${ext_url} is not answering right now —"
+                            warn "make sure it is up (and reachable from Docker) before first use."
+                        fi
+                        ;;
+                esac
             fi
+            # --- end ollama-availability gate ---
+        fi
+        if [[ "$llm_where" == "host" ]]; then
             info "The bundled ollama container will be skipped entirely."
         else
             env_set OLLAMA_EXTERNAL_URL ""
