@@ -439,14 +439,26 @@ function Choose-Example {
     if (-not (Ask-YesNo 'Set up an example app now?' $false)) { return }
     $examples = @(Get-ChildItem 'examples' -Directory | Sort-Object Name)
     if ($examples.Count -eq 0) { Warn 'No examples were found'; return }
+    # Default to the Camera Agent: it is the example this installer is
+    # built around -- the mode, LLM-runtime and model prompts below all
+    # exist to serve it -- and the only one shipping a Compose manifest
+    # today, so a default of 0 made Enter decline the very thing this
+    # section had just finished pitching. Its NUMBER moves whenever an
+    # example directory is added, so look it up by name; if it is ever
+    # missing or unshippable the default falls back to 0 (core only).
+    $defaultChoice = 0
     Write-Host ''; Info 'Available examples:'
     for ($i=0; $i -lt $examples.Count; $i++) {
         $manifest = Find-ExampleCompose $examples[$i].Name
         $status = if ($manifest) { "installable: $manifest" } else { 'no Compose manifest' }
-        Write-Host ('  {0,2}. {1,-30} [{2}]' -f ($i+1), $examples[$i].Name, $status)
+        $mark = ''
+        if ($examples[$i].Name -eq 'camera-agent' -and $manifest) {
+            $defaultChoice = $i + 1; $mark = '  <- default'
+        }
+        Write-Host ('  {0,2}. {1,-30} [{2}]{3}' -f ($i+1), $examples[$i].Name, $status, $mark)
     }
     Write-Host '   0. Core stack only'; Write-Host ''
-    $choiceRaw = Read-Host '  Select an example [0]'; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = '0' }
+    $choiceRaw = Read-Host "  Select an example [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
     $choice = 0; if (-not [int]::TryParse($choiceRaw, [ref]$choice)) { Fail 'Invalid selection' }
     if ($choice -eq 0) { return }
     if ($choice -lt 1 -or $choice -gt $examples.Count) { Fail 'Selection out of range' }

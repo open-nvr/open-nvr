@@ -567,19 +567,39 @@ choose_example() {
     while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
     [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
 
+    # Default to the Camera Agent: it is the example this installer is
+    # built around -- the mode, LLM-runtime and model prompts below all
+    # exist to serve it -- and the only one shipping a Compose manifest
+    # today, so a default of 0 made Enter decline the very thing this
+    # section had just finished pitching. Its NUMBER moves whenever an
+    # example directory is added, so look it up by name; if it is ever
+    # missing or unshippable the default falls back to 0 (core only).
+    local default_choice=0 mark
+    index=1
+    for name in "${names[@]}"; do
+        if [[ "$name" == "camera-agent" ]] && find_example_compose "$name" >/dev/null; then
+            default_choice="$index"
+        fi
+        index=$((index + 1))
+    done
+
     printf '\n  Available examples:\n'
     index=1
     for name in "${names[@]}"; do
+        mark=""
+        if (( index == default_choice )); then
+            mark="  <- default"
+        fi
         if manifest=$(find_example_compose "$name"); then
-            printf '  %2d. %-30s [installable: %s]\n' "$index" "$name" "$manifest"
+            printf '  %2d. %-30s [installable: %s]%s\n' "$index" "$name" "$manifest" "$mark"
         else
             printf '  %2d. %-30s [no Compose manifest]\n' "$index" "$name"
         fi
         index=$((index + 1))
     done
     printf '   0. Core stack only\n\n'
-    read -r -p "  Select an example [0]: " choice || true  # EOF-safe under set -e (see ask_* note)
-    choice="${choice:-0}"
+    read -r -p "  Select an example [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
+    choice="${choice:-$default_choice}"
     [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
     (( choice == 0 )) && return 0
     (( choice >= 1 && choice <= ${#names[@]} )) || die "Selection out of range"
