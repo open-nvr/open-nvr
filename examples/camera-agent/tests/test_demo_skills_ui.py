@@ -382,10 +382,70 @@ def test_a_dropped_webrtc_stream_stops_claiming_to_be_live():
     assert "pc.onconnectionstatechange=()=>handleWebrtcState(pc);" in html
     fn = html[html.index("function handleWebrtcState"):]
     fn = fn[:fn.index("function stopWebrtc")]
-    # Only real terminal states act — a healthy transition must be a no-op.
-    assert '["failed","disconnected","closed"]' in fn
+    # 'failed' and 'closed' are terminal and act at once. 'disconnected' is
+    # NOT — see test_a_transient_ice_blip_does_not_demote_to_stills.
+    assert 'st==="failed"||st==="closed"' in fn
     # It must clear the session (stills resume) AND correct the caption.
     assert "stopWebrtc();" in fn
     assert "real-time stream dropped" in fn
     # And it must ignore a peer that has already been superseded.
     assert "if(_pc!==pc) return;" in fn
+
+
+def test_a_transient_ice_blip_does_not_demote_to_stills():
+    """'disconnected' is not 'failed'.
+
+    ICE recovers from 'disconnected' on its own — a Wi-Fi roam or a brief
+    reroute trips it for a second or two. Treating it as terminal tore down
+    the WHEP session (DELETEing the resource), and because the agent never
+    retries, a two-second blip left the operator on 1 fps stills until they
+    left the camera screen and came back. The core player (app/src/
+    components/VideoPlayer/VideoPlayer.tsx) gives ICE a 5s grace; the agent
+    now matches it.
+    """
+    html = _demo_html()
+    fn = html[html.index("function handleWebrtcState"):html.index("function whepDropped")]
+    assert 'st==="disconnected"' in fn
+    # The load-bearing assertion: everything the blip branch does BEFORE it
+    # arms the timer must be non-destructive. Slicing to the timer (rather
+    # than checking the whole function) is what makes this fail when someone
+    # reintroduces an inline teardown — the timer below it would still be
+    # present, just unreachable, so a bare "is setTimeout there?" check would
+    # happily pass. The condition is matched loosely so an added clause
+    # doesn't slip past the guard.
+    m = re.search(r'st==="disconnected"[^{]*\{(.*?)if\(!_whepGrace\)', fn, re.S)
+    assert m, "the disconnected branch no longer arms the grace timer"
+    inline = m.group(1)
+    assert "whepDropped" not in inline, "a blip tears the session down inline again"
+    assert "stopWebrtc" not in inline, "a blip tears the session down inline again"
+    # One clock per outage: repeated 'disconnected' must not extend the wait.
+    assert "if(!_whepGrace) _whepGrace=setTimeout(" in fn
+    # The timer only gives up if the peer is STILL not connected, and is
+    # still the current one.
+    assert '_pc===pc && pc.connectionState!=="connected"' in fn
+    # Recovery cancels the clock and restores the honest caption.
+    assert 'st==="connected"' in fn
+    assert "_clearWhepGrace();" in fn
+    assert "real-time stream · marks" in fn
+
+
+def test_the_caption_tells_the_truth_during_a_blip():
+    """Media really has stopped during the grace window, so the player must
+    not keep claiming 'real-time stream' — that was the original bug, just
+    for 5s instead of forever."""
+    html = _demo_html()
+    fn = html[html.index("function handleWebrtcState"):html.index("function whepDropped")]
+    assert "reconnecting…" in fn
+    # And the note is only painted when the LIVE view actually owns the
+    # caption — not over a scrub into review or a recorded segment.
+    helper = html[html.index("function _setLiveNote"):html.index("function handleWebrtcState")]
+    assert "if(!window._camScreenCam || _revTs || _playback) return;" in helper
+
+
+def test_leaving_the_camera_screen_cancels_a_pending_grace_timer():
+    """Otherwise the timer wakes 5s later and stomps the caption of whatever
+    the operator is looking at by then."""
+    html = _demo_html()
+    fn = html[html.index("function stopWebrtc"):]
+    fn = fn[:fn.index("// The same WebRTC")]
+    assert "_clearWhepGrace();" in fn

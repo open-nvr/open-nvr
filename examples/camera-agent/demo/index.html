@@ -1686,9 +1686,48 @@
     // what is true. Named (not an inline closure) so it is directly callable
     // from a test — the drop path is otherwise unreachable without a real
     // WHEP peer.
+    // 'disconnected' is NOT 'failed'. Per the WebRTC spec ICE can recover
+    // from 'disconnected' on its own — a Wi-Fi roam, a brief reroute or a
+    // few lost packets flip a healthy session to it for a second or two and
+    // then back to 'connected'. The first version of this handler treated
+    // all three states as terminal, and because the teardown DELETEs the
+    // WHEP resource and the agent (unlike the OpenNVR Live view) never
+    // retries, a two-second blip demoted the camera screen to 1 fps stills
+    // until the operator left the screen and came back. Give ICE the same
+    // grace the core player gives it, and only then fall back.
+    //
+    // The caption still refuses to lie during the wait: media really has
+    // stopped, so it says "reconnecting…" rather than "real-time stream",
+    // and goes back when the session recovers.
+    const _WHEP_GRACE_MS=5000;
+    let _whepGrace=null;
+    function _clearWhepGrace(){ if(_whepGrace){ clearTimeout(_whepGrace); _whepGrace=null; } }
+    // Only paint the player's caption while the live view is what's on
+    // screen — a scrub into review or a recorded segment owns it instead.
+    function _setLiveNote(txt){
+      if(!window._camScreenCam || _revTs || _playback) return;
+      const n=$("camTnote"); if(n) n.textContent=txt; }
     function handleWebrtcState(pc){
       if(_pc!==pc) return;                          // already superseded
-      if(!["failed","disconnected","closed"].includes(pc.connectionState)) return;
+      const st=pc.connectionState;
+      if(st==="connected"){                         // first connect, or recovered
+        _clearWhepGrace();
+        _setLiveNote("Live · real-time stream · marks = detections · drag to review");
+        return; }
+      if(st==="disconnected"){
+        _setLiveNote("Live · real-time stream · reconnecting…");
+        // One clock per outage: a second 'disconnected' without an
+        // intervening 'connected' must not keep pushing the deadline out.
+        if(!_whepGrace) _whepGrace=setTimeout(()=>{
+          _whepGrace=null;
+          if(_pc===pc && pc.connectionState!=="connected") whepDropped(pc);
+        },_WHEP_GRACE_MS);
+        return; }
+      if(st==="failed"||st==="closed") whepDropped(pc);   // terminal, no waiting
+    }
+    // Giving up on WebRTC: back to honest stills, and say so.
+    function whepDropped(pc){
+      if(_pc!==pc) return;
       const cam=window._camScreenCam;
       stopWebrtc();                                 // clears _pc → stills resume
       if(cam && !_revTs && !_playback){
@@ -1699,6 +1738,9 @@
       }
     }
     function stopWebrtc(){
+      // Leaving the camera screen mid-blip must not leave a timer that wakes
+      // 5s later and stomps the caption of whatever is on screen by then.
+      _clearWhepGrace();
       if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
       if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
       // Hide the video surface too — leaving it visible stacks a dead
