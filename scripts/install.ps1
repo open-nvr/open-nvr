@@ -429,6 +429,50 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
     return $answer
 }
 
+# --- ollama runtime helpers (keep in sync with install.sh) ---
+# ONLY A LIVE ENDPOINT COUNTS. Get-Command ollama answers 'should we
+# offer to install it', never 'is it working' - an earlier version of
+# this gate accepted the binary as a runtime and shipped exactly the
+# dead-endpoint install it exists to prevent, with a louder warning
+# attached.
+function Test-OllamaUp {
+    try {
+        $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        return $true
+    } catch { return $false }
+}
+
+# Wait-ForOllama - poll with visible progress. A silent wait is
+# indistinguishable from a hung installer.
+function Wait-ForOllama([int]$Seconds = 60) {
+    if (Test-OllamaUp) { return $true }
+    Write-Host -NoNewline "  Waiting for Ollama to answer on :11434 (up to ${Seconds}s)"
+    $waited = 0
+    while ($waited -lt $Seconds) {
+        Start-Sleep -Seconds 2
+        $waited += 2
+        Write-Host -NoNewline '.'
+        if (Test-OllamaUp) { Write-Host " up after ${waited}s"; return $true }
+    }
+    Write-Host ' still silent'
+    return $false
+}
+
+# Start-OllamaHost - actually start it rather than printing a hint and
+# hoping. On Windows that is the server itself, not a systemd unit.
+function Start-OllamaHost {
+    $exe = Get-Command ollama -ErrorAction SilentlyContinue
+    if (-not $exe) { return $false }
+    if (-not (Ask-YesNo 'Ollama is not answering. Start it now?' $true)) { return $false }
+    try {
+        Start-Process -FilePath $exe.Source -ArgumentList 'serve' -WindowStyle Hidden
+        return $true
+    } catch {
+        Warn 'Could not start Ollama - launch the Ollama app by hand.'
+        return $false
+    }
+}
+
 function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
@@ -530,14 +574,24 @@ function Choose-Example {
                 } else {
                     $ollamaReady = $false
                     if ($ollamaCmd) {
-                        $ollamaReady = $true
-                        Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
+                        Warn 'Ollama is installed but not answering on :11434.'
+                        if ((Start-OllamaHost) -and (Wait-ForOllama 60)) {
+                            Ok 'Ollama is answering on :11434.'
+                            $ollamaReady = $true
+                        } else {
+                            Warn 'Ollama will not answer on :11434 - launch the Ollama app, then re-check below.'
+                        }
                     } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
                         if (Ask-YesNo 'Ollama is not installed. Install it now with winget?' $true) {
                             winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
                             if ($LASTEXITCODE -eq 0) {
-                                Ok 'Ollama installed - launch it once so it starts serving.'
-                                $ollamaReady = $true
+                                $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+                                if ((Wait-ForOllama 60) -or ((Start-OllamaHost) -and (Wait-ForOllama 60))) {
+                                    Ok 'Ollama installed and answering on :11434.'
+                                    $ollamaReady = $true
+                                } else {
+                                    Warn 'Ollama installed but nothing answers on :11434 yet - launch the Ollama app.'
+                                }
                             } else { Warn 'Install failed - get it from https://ollama.com/download' }
                             $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
                         }
@@ -577,8 +631,16 @@ function Choose-Example {
                                 Ok 'Ollama is answering on :11434.'
                                 $ollamaReady = $true
                             } elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
-                                Warn 'Ollama found but not answering yet - launch the Ollama app.'
-                                $ollamaReady = $true
+                                # Installed but silent: try to START it. The old
+                                # branch called this ready and walked out of the
+                                # loop with a dead endpoint.
+                                Warn 'Ollama is installed but still not answering on :11434.'
+                                if ((Start-OllamaHost) -and (Wait-ForOllama 60)) {
+                                    Ok 'Ollama is answering on :11434.'
+                                    $ollamaReady = $true
+                                } else {
+                                    Warn 'Still nothing on :11434 - launch the Ollama app.'
+                                }
                             } else {
                                 Warn 'Ollama is still not installed.'
                             }
