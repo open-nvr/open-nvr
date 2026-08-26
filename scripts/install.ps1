@@ -464,16 +464,18 @@ function Choose-Example {
         Write-Host ''
         # LLM runtime FIRST: where the LLM runs decides which hardware the
         # model suggestion below is sized for (host GPU/RAM vs the Docker
-        # VM's CPU-only allowance). Windows/macOS default to the host
-        # (container VMs have no GPU access); Linux keeps the bundled
-        # container. A host Ollama already on :11434 flips the default.
+        # VM's CPU-only allowance). The host is the default on EVERY
+        # platform: container VMs have no GPU access on Windows/macOS,
+        # and on Linux the bundled container still costs a 3.2 GB image
+        # and a second model store beside the host's own Ollama. The
+        # gate below installs and starts Ollama when it is missing.
         $hostOllama = $false
         try {
             $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
             $hostOllama = $true
         } catch {}
-        $llmDefault = if ($script:Platform -eq 'Linux' -and -not $hostOllama) { '1' } else { '2' }
-        Explain 'Where should the LLM run? In Docker on Windows/macOS the container CANNOT use the GPU - answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU and skips a 3.2 GB image. On a Linux server the bundled container is fine.' 'pick one' $llmDefault
+        $llmDefault = '2'
+        Explain 'Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image - the installer offers to set it up if you do not have it. In Docker on Windows/macOS the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else.' 'pick one' "$llmDefault (Ollama on this machine)"
         if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
         $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' $llmDefault
         $llmWhere = 'container'

@@ -599,22 +599,22 @@ choose_example() {
         # Asked BEFORE the model prompts: where the LLM runs decides
         # which hardware the model suggestion below should be sized
         # for (host GPU/RAM vs the Docker VM's CPU-only allowance).
-        # Platform-aware default: on macOS the Docker VM has no GPU
-        # access (no Metal for Linux guests), so the bundled container
-        # answers on plain CPU — minutes per turn — while host Ollama
-        # uses the Apple Silicon GPU. On Linux the container is native
-        # and compose-managed: keep it the default there. A host
-        # Ollama already answering on :11434 flips the default too.
-        local llm_default="1" host_ollama="" llm_where="container"
+        # Host Ollama is the default on EVERY platform. On macOS and
+        # Windows the Docker VM has no GPU access (no Metal/CUDA for
+        # Linux guests), so the bundled container answers on plain CPU
+        # — minutes per turn. On Linux the container can reach the GPU,
+        # but only once the host toolkit is wired up, and it still
+        # costs a 3.2 GB image plus a second model store beside the
+        # Ollama the box likely already has. Host Ollama is the answer
+        # that is right on all three, and the gate below installs and
+        # starts it when it is missing rather than leaving a broken URL.
+        local llm_default="2" host_ollama="" llm_where="container"
         if command -v curl >/dev/null 2>&1 \
            && curl -sf --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
             host_ollama="yes"
         fi
-        if [[ "$PLATFORM" == "macOS" || -n "$host_ollama" ]]; then
-            llm_default="2"
-        fi
-        explain "Where should the LLM run? In Docker on macOS/Windows the container CANNOT use the GPU — answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU (Metal on Apple Silicon) and skips a 3.2 GB image. On a Linux server the bundled container is fine." \
-            "pick one" "$llm_default"
+        explain "Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image — the installer offers to set it up if you do not have it. In Docker on macOS/Windows the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else." \
+            "pick one" "$llm_default (Ollama on this machine)"
         if [[ -n "$host_ollama" ]]; then
             ok "Found Ollama already running on this machine (:11434)"
         fi
