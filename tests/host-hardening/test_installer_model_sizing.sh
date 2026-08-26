@@ -183,6 +183,51 @@ done
 [[ -z "$bad" ]] && pass || fail "untested model suggested:${bad}"
 
 # ── 6. the two installers must not drift apart ──
+# ── the machine one reboot away from a GPU ──
+# Field report: Ollama's installer put a CUDA driver on a 30 GB box and
+# asked for a reboot. nvidia-smi could not answer until that reboot, so
+# the installer read the machine as CPU-only and suggested qwen3:1.7b for
+# a GPU box. detect_llm_hardware has to treat a pending driver reboot as
+# the CUDA it is about to be.
+DETECT=$(awk '/^detect_llm_hardware\(\) \{/,/^\}/' scripts/install.sh)
+start_test "detect_llm_hardware is still extractable"
+[[ -n "$DETECT" ]] && pass || fail "could not extract detect_llm_hardware"
+
+# accel_with_pending <yes|""> → HW_ACCEL, on a box where nvidia-smi does
+# not answer (exactly the pre-reboot state).
+accel_with_pending() {
+    bash -u -c '
+        PLATFORM="Linux"; NVIDIA_REBOOT_PENDING="'"$1"'"
+        HW_RAM_GB=0; HW_CORES=0; HW_ACCEL=""
+        command() {
+            [[ "$1" == "-v" && "$2" == "nvidia-smi" ]] && return 1
+            builtin command "$@"
+        }
+        nproc() { echo 8; }
+        '"$DETECT"'
+        detect_llm_hardware host
+        printf "%s" "$HW_ACCEL"
+    ' 2>/dev/null
+}
+
+start_test "a pending NVIDIA driver reboot is sized as CUDA, not CPU"
+got=$(accel_with_pending yes)
+[[ "$got" == "cuda" ]] && pass \
+    || fail "pre-reboot CUDA box detected as '${got}' — it would be sized for CPU"
+
+start_test "no pending reboot and no nvidia-smi is still plain CPU"
+got=$(accel_with_pending "")
+[[ "$got" == "cpu" ]] && pass \
+    || fail "a CPU box must not claim a GPU, got '${got}'"
+
+start_test "the pending-reboot flag actually changes the suggestion"
+# The consequence the operator sees: same 30 GB machine, the only
+# difference is whether the driver has loaded yet.
+cpu_llm=$(cut -d"|" -f1 <<<"$(size 30 8 cpu)")
+gpu_llm=$(cut -d"|" -f1 <<<"$(size 30 8 cuda)")
+[[ "$cpu_llm" != "$gpu_llm" ]] && pass \
+    || fail "pre/post reboot suggest the same model (${cpu_llm}) — the flag buys nothing"
+
 start_test "install.ps1 carries the same budget arithmetic"
 if grep -q 'stackGb = 3; \$osHeadroomGb = 2' scripts/install.ps1 \
    && grep -q 'budgetGb = \[math\]::Max(0, \$ramGb - \$stackGb - \$osHeadroomGb)' scripts/install.ps1; then
