@@ -1394,14 +1394,41 @@
         t.querySelector(".ct-x").addEventListener("click",(e)=>{ e.stopPropagation(); openCamScreen(cam.camera_id); });
         strip.appendChild(t); }
       refreshCamStrip(); setInterval(()=>{ if(document.visibilityState==="visible" && !window._camScreenCam) refreshCamStrip(); },6000); }
+    // Strip refresh. Each /frame miss is a fresh ffmpeg that waits for the
+    // camera's next KEYFRAME (1-4s on long-GOP H.265 OEM cameras), so this
+    // used to be a strictly sequential await loop: with four cameras the
+    // last tile updated ~6s after the first, and the 6s interval then
+    // overlapped the next cycle — two loops racing, double the ffmpegs.
+    //
+    // Fetching several cameras at once is what the server was BUILT for:
+    // context.get_frame takes a PER-CAMERA lock precisely so different
+    // cameras "proceed in parallel on their own locks" while callers on the
+    // same camera coalesce onto one fetch. The old loop defeated that
+    // design. Bounded to a few lanes rather than Promise.all over the whole
+    // fleet — a 24-camera site should not open 24 RTSP sessions at once —
+    // and an in-flight guard means a slow cycle delays the next instead of
+    // stacking on top of it. No cache, lock or coalescing behaviour changes.
+    const _STRIP_LANES = 4;
+    let _stripBusy = false;
     async function refreshCamStrip(){
-      if(!authReady())return;
-      for(const t of document.querySelectorAll(".camtile")){ const cam=t.dataset.cam;
-        const img=t.querySelector("img"), off=t.querySelector(".ct-off");
-        try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
-          if(!r.ok) throw new Error();
-          setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
-        }catch{ img.hidden=true; off.hidden=false; } } }
+      if(!authReady() || _stripBusy) return;
+      _stripBusy = true;
+      try{
+        const tiles=[...document.querySelectorAll(".camtile")];
+        let next=0;
+        const lane=async()=>{ while(next<tiles.length) await _refreshTile(tiles[next++]); };
+        await Promise.all(
+          Array.from({length: Math.min(_STRIP_LANES, tiles.length)}, lane)
+        );
+      } finally { _stripBusy = false; }
+    }
+    async function _refreshTile(t){
+      const cam=t.dataset.cam;
+      const img=t.querySelector("img"), off=t.querySelector(".ct-off");
+      try{ const r=await fetch("/frame/"+encodeURIComponent(cam)+"?t="+Date.now());
+        if(!r.ok) throw new Error();
+        setBlobSrc(img,await r.blob()); img.hidden=false; off.hidden=true;
+      }catch{ img.hidden=true; off.hidden=false; } }
     // One blob URL per <img>: revoke the previous BEFORE assigning — onload
     // revocation leaks when a new src lands before the old one loaded.
     function setBlobSrc(img,blob){ if(img.dataset.blobUrl) URL.revokeObjectURL(img.dataset.blobUrl);
@@ -1525,6 +1552,28 @@
     function stopPlayback(){ _playback=false; const v=$("camVideo"); if(!v) return;
       try{ v.pause(); }catch{} v.removeAttribute("src"); v.load(); v.hidden=true;
       document.querySelectorAll(".rec-seg.on").forEach(el=>el.classList.remove("on")); }
+    // A stream that DIES after connecting was invisible: nothing watched the
+    // connection, so _pc stayed non-null (which gates the 1 fps still-poller
+    // OFF), the last decoded frame stayed on screen, and the caption still
+    // read "Live · real-time stream". A MediaMTX restart or a network blip
+    // therefore showed a FROZEN picture under a green LIVE pill — the player
+    // claiming live while showing the past. Tear the session down instead:
+    // _pc goes null so stills resume within a second, and the caption says
+    // what is true. Named (not an inline closure) so it is directly callable
+    // from a test — the drop path is otherwise unreachable without a real
+    // WHEP peer.
+    function handleWebrtcState(pc){
+      if(_pc!==pc) return;                          // already superseded
+      if(!["failed","disconnected","closed"].includes(pc.connectionState)) return;
+      const cam=window._camScreenCam;
+      stopWebrtc();                                 // clears _pc → stills resume
+      if(cam && !_revTs && !_playback){
+        const n=$("camTnote");
+        if(n) n.textContent="Live preview — up to 1 frame/s (real-time stream dropped)";
+        const im=$("camImg"); if(im) im.hidden=false;
+        refreshPlayerLive();                        // don't wait for the tick
+      }
+    }
     function stopWebrtc(){
       if(_pc){ try{ _pc.close(); }catch{} _pc=null; }
       if(_whepResource){ fetch(_whepResource,{method:"DELETE"}).catch(()=>{}); _whepResource=null; }
@@ -1545,6 +1594,15 @@
       try{
         const pc=new RTCPeerConnection({iceServers:[{urls:["stun:stun.l.google.com:19302"]}]});
         _pc=pc;
+        // A stream that DIES after connecting was invisible: nothing watched
+        // the connection, so _pc stayed non-null (which gates the 1 fps
+        // still-poller off), the last decoded frame stayed on screen, and
+        // the caption still read "Live · real-time stream". A MediaMTX
+        // restart or a network blip therefore showed a FROZEN picture under
+        // a green LIVE pill — the player claiming live while showing the
+        // past. Tear the session down instead: _pc goes null, the stills
+        // resume within a second, and the caption says what is true.
+        pc.onconnectionstatechange=()=>handleWebrtcState(pc);
         pc.addTransceiver("video",{direction:"recvonly"});
         pc.addTransceiver("audio",{direction:"recvonly"});
         const gotTrack=new Promise((res)=>{ pc.ontrack=(ev)=>{ const [stream]=ev.streams;
