@@ -429,6 +429,58 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
     return $answer
 }
 
+# --- ollama runtime helpers (keep in sync with install.sh) ---
+# ONLY A LIVE ENDPOINT COUNTS. Get-Command ollama answers 'should we
+# offer to install it', never 'is it working' - an earlier version of
+# this gate accepted the binary as a runtime and shipped exactly the
+# dead-endpoint install it exists to prevent, with a louder warning
+# attached.
+# NEVER probe 'localhost' here. Windows resolves it to ::1 first and
+# Ollama listens on 127.0.0.1 ONLY, so the v6 attempt is dropped (not
+# refused) and the probe burns its whole timeout - a running Ollama then
+# reads as 'installed but not answering on :11434'. Try the v4 loopback
+# first, and [::1] after it for the rare v6-only bind.
+function Test-OllamaUp {
+    foreach ($h in @('127.0.0.1', '[::1]')) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://${h}:11434/api/version" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            return $true
+        } catch {}
+    }
+    return $false
+}
+
+# Wait-ForOllama - poll with visible progress. A silent wait is
+# indistinguishable from a hung installer.
+function Wait-ForOllama([int]$Seconds = 60) {
+    if (Test-OllamaUp) { return $true }
+    Write-Host -NoNewline "  Waiting for Ollama to answer on :11434 (up to ${Seconds}s)"
+    $waited = 0
+    while ($waited -lt $Seconds) {
+        Start-Sleep -Seconds 2
+        $waited += 2
+        Write-Host -NoNewline '.'
+        if (Test-OllamaUp) { Write-Host " up after ${waited}s"; return $true }
+    }
+    Write-Host ' still silent'
+    return $false
+}
+
+# Start-OllamaHost - actually start it rather than printing a hint and
+# hoping. On Windows that is the server itself, not a systemd unit.
+function Start-OllamaHost {
+    $exe = Get-Command ollama -ErrorAction SilentlyContinue
+    if (-not $exe) { return $false }
+    if (-not (Ask-YesNo 'Ollama is not answering. Start it now?' $true)) { return $false }
+    try {
+        Start-Process -FilePath $exe.Source -ArgumentList 'serve' -WindowStyle Hidden
+        return $true
+    } catch {
+        Warn 'Could not start Ollama - launch the Ollama app by hand.'
+        return $false
+    }
+}
+
 function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
@@ -439,14 +491,26 @@ function Choose-Example {
     if (-not (Ask-YesNo 'Set up an example app now?' $false)) { return }
     $examples = @(Get-ChildItem 'examples' -Directory | Sort-Object Name)
     if ($examples.Count -eq 0) { Warn 'No examples were found'; return }
+    # Default to the Camera Agent: it is the example this installer is
+    # built around -- the mode, LLM-runtime and model prompts below all
+    # exist to serve it -- and the only one shipping a Compose manifest
+    # today, so a default of 0 made Enter decline the very thing this
+    # section had just finished pitching. Its NUMBER moves whenever an
+    # example directory is added, so look it up by name; if it is ever
+    # missing or unshippable the default falls back to 0 (core only).
+    $defaultChoice = 0
     Write-Host ''; Info 'Available examples:'
     for ($i=0; $i -lt $examples.Count; $i++) {
         $manifest = Find-ExampleCompose $examples[$i].Name
         $status = if ($manifest) { "installable: $manifest" } else { 'no Compose manifest' }
-        Write-Host ('  {0,2}. {1,-30} [{2}]' -f ($i+1), $examples[$i].Name, $status)
+        $mark = ''
+        if ($examples[$i].Name -eq 'camera-agent' -and $manifest) {
+            $defaultChoice = $i + 1; $mark = '  <- default'
+        }
+        Write-Host ('  {0,2}. {1,-30} [{2}]{3}' -f ($i+1), $examples[$i].Name, $status, $mark)
     }
     Write-Host '   0. Core stack only'; Write-Host ''
-    $choiceRaw = Read-Host '  Select an example [0]'; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = '0' }
+    $choiceRaw = Read-Host "  Select an example [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
     $choice = 0; if (-not [int]::TryParse($choiceRaw, [ref]$choice)) { Fail 'Invalid selection' }
     if ($choice -eq 0) { return }
     if ($choice -lt 1 -or $choice -gt $examples.Count) { Fail 'Selection out of range' }
@@ -464,16 +528,14 @@ function Choose-Example {
         Write-Host ''
         # LLM runtime FIRST: where the LLM runs decides which hardware the
         # model suggestion below is sized for (host GPU/RAM vs the Docker
-        # VM's CPU-only allowance). Windows/macOS default to the host
-        # (container VMs have no GPU access); Linux keeps the bundled
-        # container. A host Ollama already on :11434 flips the default.
-        $hostOllama = $false
-        try {
-            $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-            $hostOllama = $true
-        } catch {}
-        $llmDefault = if ($script:Platform -eq 'Linux' -and -not $hostOllama) { '1' } else { '2' }
-        Explain 'Where should the LLM run? In Docker on Windows/macOS the container CANNOT use the GPU - answers take minutes of pure CPU. Ollama running ON this machine uses the real GPU and skips a 3.2 GB image. On a Linux server the bundled container is fine.' 'pick one' $llmDefault
+        # VM's CPU-only allowance). The host is the default on EVERY
+        # platform: container VMs have no GPU access on Windows/macOS,
+        # and on Linux the bundled container still costs a 3.2 GB image
+        # and a second model store beside the host's own Ollama. The
+        # gate below installs and starts Ollama when it is missing.
+        $hostOllama = Test-OllamaUp
+        $llmDefault = '2'
+        Explain 'Where should the LLM run? Ollama running ON this machine uses the real GPU (Metal on Apple Silicon, CUDA on Linux) and skips a 3.2 GB image - the installer offers to set it up if you do not have it. In Docker on Windows/macOS the container CANNOT use the GPU at all: answers take minutes of pure CPU. Pick the bundled container only if you want the LLM compose-managed with everything else.' 'pick one' "$llmDefault (Ollama on this machine)"
         if ($hostOllama) { Ok 'Found Ollama already running on this machine (:11434)' }
         $llmMode = Ask-Value 'LLM runtime: 1=bundled container, 2=Ollama on this machine / external URL' $llmDefault
         $llmWhere = 'container'
@@ -516,14 +578,24 @@ function Choose-Example {
                 } else {
                     $ollamaReady = $false
                     if ($ollamaCmd) {
-                        $ollamaReady = $true
-                        Warn 'Ollama is installed but not answering on :11434 - start it (launch the Ollama app).'
+                        Warn 'Ollama is installed but not answering on :11434.'
+                        if ((Start-OllamaHost) -and (Wait-ForOllama 60)) {
+                            Ok 'Ollama is answering on :11434.'
+                            $ollamaReady = $true
+                        } else {
+                            Warn 'Ollama will not answer on :11434 - launch the Ollama app, then re-check below.'
+                        }
                     } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
                         if (Ask-YesNo 'Ollama is not installed. Install it now with winget?' $true) {
                             winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
                             if ($LASTEXITCODE -eq 0) {
-                                Ok 'Ollama installed - launch it once so it starts serving.'
-                                $ollamaReady = $true
+                                $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+                                if ((Wait-ForOllama 60) -or ((Start-OllamaHost) -and (Wait-ForOllama 60))) {
+                                    Ok 'Ollama installed and answering on :11434.'
+                                    $ollamaReady = $true
+                                } else {
+                                    Warn 'Ollama installed but nothing answers on :11434 yet - launch the Ollama app.'
+                                }
                             } else { Warn 'Install failed - get it from https://ollama.com/download' }
                             $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
                         }
@@ -554,17 +626,20 @@ function Choose-Example {
                             Set-EnvValue OLLAMA_EXTERNAL_URL ''
                             Ok 'Switched to the bundled ollama container.'
                         } else {
-                            $answering = $false
-                            try {
-                                $null = Invoke-WebRequest -Uri 'http://localhost:11434/api/version' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-                                $answering = $true
-                            } catch {}
-                            if ($answering) {
+                            if (Test-OllamaUp) {
                                 Ok 'Ollama is answering on :11434.'
                                 $ollamaReady = $true
                             } elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
-                                Warn 'Ollama found but not answering yet - launch the Ollama app.'
-                                $ollamaReady = $true
+                                # Installed but silent: try to START it. The old
+                                # branch called this ready and walked out of the
+                                # loop with a dead endpoint.
+                                Warn 'Ollama is installed but still not answering on :11434.'
+                                if ((Start-OllamaHost) -and (Wait-ForOllama 60)) {
+                                    Ok 'Ollama is answering on :11434.'
+                                    $ollamaReady = $true
+                                } else {
+                                    Warn 'Still nothing on :11434 - launch the Ollama app.'
+                                }
                             } else {
                                 Warn 'Ollama is still not installed.'
                             }

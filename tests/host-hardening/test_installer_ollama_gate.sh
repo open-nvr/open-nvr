@@ -6,12 +6,22 @@
 # CARRIED ON — producing a finished install whose agent pointed at :11434
 # with nothing listening. A warning is not a runtime.
 #
+# The second field bug, same shape: the gate then started accepting
+# `command -v ollama` as proof of a runtime. A CUDA box whose ollama.service
+# was still coming up got "installed but not answering yet — start it",
+# and the installer walked on and finished. A binary is not a runtime
+# either.
+#
 # The rules these tests defend:
 #   * endpoint on THIS machine + no Ollama → offer to install; on decline or
 #     failure, offer the bundled container; never silently proceed broken.
 #   * a REMOTE endpoint (LAN box) must not nag about a local install at all.
-#   * Ollama installed-but-not-running counts as present (a start hint, not
-#     a reinstall or a fallback).
+#   * ONLY A LIVE ENDPOINT COUNTS. Installed-but-silent means try to START
+#     it and WAIT — and if it still will not answer, it is not a runtime.
+#   * the one exception: a pending NVIDIA driver reboot is a known cause
+#     with a known remedy, and takes an explicit yes.
+#   * a host-local probe is not enough — the agent reaches Ollama from a
+#     CONTAINER, through the bridge gateway.
 set -u
 
 . "$(dirname "$0")/_lib.sh"
@@ -29,29 +39,56 @@ echo "Running installer ollama-gate tests"
 echo ""
 
 # Extract the REAL gate from install.sh (between its markers), so the tests
-# exercise the shipped logic rather than a copy that can drift.
+# exercise the shipped logic rather than a copy that can drift. The helpers
+# the gate leans on come along the same way, for the same reason.
 GATE=$(awk '/--- ollama-availability gate/,/--- end ollama-availability gate ---/' scripts/install.sh)
+HELPERS=$(awk '/--- ollama runtime helpers/,/^choose_example\(\) \{/' scripts/install.sh | sed '$d')
 if [[ -z "$GATE" ]]; then
     echo "✗ could not extract the ollama gate from scripts/install.sh" >&2
     exit 1
 fi
+if [[ -z "$HELPERS" ]] || ! grep -q 'ollama_endpoint_up()' <<< "$HELPERS"; then
+    echo "✗ could not extract the ollama runtime helpers from scripts/install.sh" >&2
+    exit 1
+fi
 
 # run_gate <ext_url> <have_ollama:yes|no> <answers csv> [appears_after]
-#          [platform] [have_brew:yes|no] [brew_ok:yes|no]
+#          [platform] [have_brew:yes|no] [brew_ok:yes|no] [KEY=VALUE ...]
 #   Drives the gate with everything stubbed; answers feed BOTH yes/no
 #   questions and the re-check loop prompt, in call order. When the answers
-#   run out, prompts report EOF (a dried-up stdin). ``appears_after`` makes
-#   `command -v ollama` start succeeding after that many checks — an install
-#   completing in another terminal mid-loop. Emits a result line:
-#   "where=<llm_where> url=<OLLAMA_EXTERNAL_URL> asked=<questions>|..."
+#   run out, yes/no questions answer "n" and the loop prompt reports EOF (a
+#   dried-up stdin). ``appears_after`` makes `command -v ollama` start
+#   succeeding after that many checks — an install completing in another
+#   terminal mid-loop.
+#
+#   Trailing KEY=VALUE knobs, all optional:
+#     HAVE_SYSTEMCTL=yes|no   is there a systemd to start (default: Linux=yes)
+#     START_OK=yes|no         does `systemctl start ollama` succeed
+#     CURL_UP_AFTER=<n>       :11434 starts answering after n probes — the
+#                             service finally coming up during the wait
+#     DOCKER_GW=<ip>          the bridge gateway `docker network inspect`
+#                             reports (empty: no bridge, probe skipped)
+#     BRIDGE_OK=yes|no        does :11434 answer on that gateway
+#     NVIDIA_REBOOT_PENDING=yes      a CUDA driver install is awaiting a reboot
+#
+#   Emits: "where=<llm_where> url=<OLLAMA_EXTERNAL_URL> asked=<questions>|..."
 run_gate() {
     local ext_url="$1" have_ollama="$2" answers="$3" appears="${4:-}"
     local platform="${5:-Linux}" have_brew="${6:-no}" brew_ok="${7:-no}"
+    shift $(( $# < 7 ? $# : 7 ))
+    local extras="" kv
+    for kv in "$@"; do extras="${extras}${kv%%=*}=\"${kv#*=}\"; "; done
+    local sysctl_default="yes"
+    [[ "$platform" == "macOS" ]] && sysctl_default="no"
     bash -u -c '
         PLATFORM="'"$platform"'"; host_ollama=""; llm_where="host"
+        PROJECT_ROOT="/repo"
         EXT_URL="'"$ext_url"'"; HAVE_OLLAMA="'"$have_ollama"'"
         HAVE_BREW="'"$have_brew"'"; BREW_OK="'"$brew_ok"'"
         APPEARS_AFTER="'"$appears"'"; OLLAMA_CHECKS=0
+        HAVE_SYSTEMCTL="'"$sysctl_default"'"; START_OK="no"
+        CURL_UP_AFTER=""; CURL_CALLS=0
+        DOCKER_GW=""; BRIDGE_OK="no"; NVIDIA_REBOOT_PENDING=""
         IFS="," read -r -a ANSWERS <<< "'"$answers"'"
         A_I=0; ASKED=""
         env_get() { printf "%s" "$EXT_URL"; }
@@ -76,7 +113,7 @@ run_gate() {
         }
         warn() { WARNED="${WARNED:-}|$1"; }
         ok() { :; }; info() { :; }
-        command() {          # intercept `command -v ollama` / `command -v curl`
+        command() {          # intercept `command -v <tool>`
             if [[ "$1" == "-v" && "$2" == "ollama" ]]; then
                 OLLAMA_CHECKS=$((OLLAMA_CHECKS+1))
                 [[ "$HAVE_OLLAMA" == "yes" ]] && return 0
@@ -87,12 +124,35 @@ run_gate() {
             if [[ "$1" == "-v" && "$2" == "brew" ]]; then
                 [[ "$HAVE_BREW" == "yes" ]]; return
             fi
+            if [[ "$1" == "-v" && ( "$2" == "systemctl" || "$2" == "nvidia-smi" \
+                                   || "$2" == "lspci" ) ]]; then
+                [[ "$2" == "systemctl" && "$HAVE_SYSTEMCTL" == "yes" ]]; return
+            fi
             builtin command "$@"
         }
         brew() {             # brew install / brew services start
             [[ "$BREW_OK" == "yes" ]]
         }
-        curl() { return 1; }     # nothing answers anywhere in tests
+        # Nothing answers until CURL_UP_AFTER probes have gone by; the
+        # bridge gateway answers on its own switch, so the two failures
+        # (dead endpoint vs. loopback-only bind) stay distinguishable.
+        curl() {
+            _url=""
+            for _a in "$@"; do case "$_a" in http*) _url="$_a" ;; esac; done
+            if [[ -n "$DOCKER_GW" && "$_url" == *"$DOCKER_GW"* ]]; then
+                [[ "$BRIDGE_OK" == "yes" ]]; return
+            fi
+            CURL_CALLS=$((CURL_CALLS+1))
+            [[ -n "$CURL_UP_AFTER" ]] && (( CURL_CALLS > CURL_UP_AFTER )) && return 0
+            return 1
+        }
+        systemctl() {
+            [[ "$1" == "is-active" ]] && { echo inactive; return 0; }
+            [[ "$START_OK" == "yes" ]]
+        }
+        sudo() { "$@"; }
+        open() { return 1; }
+        docker() { printf "%s" "$DOCKER_GW"; }
         sleep() { :; }           # no real waiting in tests
         # The gate declares with `local`, which only exists inside functions.
         # The assignments must land in THIS scope, and `declare -g` needs
@@ -105,6 +165,8 @@ run_gate() {
                 esac
             done
         }
+        '"$HELPERS"'
+        '"$extras"'
         '"$GATE"'
         printf "where=%s url=%s asked=%s warned=%s\n" \
             "$llm_where" "$EXT_URL" "$ASKED" "${WARNED:-}"
@@ -141,16 +203,6 @@ else
     fail "expected the re-check loop then container, got: $out"
 fi
 
-start_test "the loop notices an Ollama installed mid-loop in another terminal"
-# decline install, decline container, press Enter — by then `command -v
-# ollama` starts succeeding (appears_after=1: the operator installed it).
-out=$(run_gate "$LOCAL_URL" no "n,n,ENTER" 1)
-if [[ "$out" == *"where=host"* && "$out" == *"start it"* ]]; then
-    pass
-else
-    fail "expected the re-check to find the new install, got: $out"
-fi
-
 start_test "a dried-up stdin takes the container, never a hang, never broken"
 # Answers exhaust after the two declines: the loop prompt hits EOF. An
 # unattended run must end with a WORKING runtime, not an infinite loop
@@ -176,14 +228,64 @@ out=$(run_gate "$LAN_URL" no "")
 [[ "$out" == *"not answering right now"* ]] && pass \
     || fail "expected a reachability warning, got: $out"
 
-# ── 4. installed-but-not-running is a start hint, not a fallback ──
-start_test "Ollama installed but not answering keeps the host runtime"
+# ── 4. a binary on PATH is NOT a runtime ──
+# This is the second field bug, inverted into a test: the gate used to set
+# ollama_ready=yes here and finish the install pointing at a dead port.
+start_test "installed but silent: not accepted, not called ready"
 out=$(run_gate "$LOCAL_URL" yes "")
-if [[ "$out" == *"where=host"* && "$out" == *"start it"* && "$out" != *"asked=|"* ]]; then
+if [[ "$out" == *"where=container"* && "$out" != *"where=host"* \
+      && "$out" == *"installed but not answering"* ]]; then
     pass
 else
-    fail "expected a start hint and no questions, got: $out"
+    fail "a binary alone must not count as a runtime, got: $out"
 fi
+
+start_test "installed but silent: the gate tries to START it"
+out=$(run_gate "$LOCAL_URL" yes "y" "" Linux no no START_OK=yes CURL_UP_AFTER=1)
+if [[ "$out" == *"where=host"* && "$out" == *"Start Ollama now"* \
+      && "$out" != *"bundled ollama container instead"* ]]; then
+    pass
+else
+    fail "a successful start should keep the host runtime, got: $out"
+fi
+
+start_test "installed but silent: a FAILED start still cannot proceed"
+out=$(run_gate "$LOCAL_URL" yes "y,y" "" Linux no no START_OK=no)
+if [[ "$out" == *"where=container"* && "$out" == *"systemctl start ollama failed"* ]]; then
+    pass
+else
+    fail "a failed start must fall back, got: $out"
+fi
+
+start_test "no systemd: the gate diagnoses instead of guessing"
+out=$(run_gate "$LOCAL_URL" yes "y" "" Linux no no HAVE_SYSTEMCTL=no)
+if [[ "$out" == *"where=container"* && "$out" == *"ollama serve"* \
+      && "$out" != *"Start Ollama now"* ]]; then
+    pass
+else
+    fail "expected a serve hint and no systemctl prompt, got: $out"
+fi
+
+start_test "the diagnosis points at the journal, not at 'start it'"
+out=$(run_gate "$LOCAL_URL" yes "n,n")
+[[ "$out" == *"journalctl -u ollama"* ]] && pass \
+    || fail "expected a journalctl pointer, got: $out"
+
+start_test "the loop no longer accepts an Ollama that appears but stays silent"
+# decline install, decline container, press Enter — by then `command -v
+# ollama` starts succeeding (appears_after=1: the operator installed it in
+# another terminal). It still has to ANSWER.
+out=$(run_gate "$LOCAL_URL" no "n,n,ENTER" 1)
+if [[ "$out" == *"where=container"* && "$out" == *"still not answering"* ]]; then
+    pass
+else
+    fail "a mid-loop install that stays silent must not pass, got: $out"
+fi
+
+start_test "the loop DOES accept one that comes up during the wait"
+out=$(run_gate "$LOCAL_URL" no "n,n,ENTER,y" 1 Linux no no START_OK=yes CURL_UP_AFTER=1)
+[[ "$out" == *"where=host"* ]] && pass \
+    || fail "an Ollama that answers should be accepted, got: $out"
 
 # ── 5. accepting the install offer keeps the host runtime ──
 start_test "accepting the install offer never falls back behind your back"
@@ -193,16 +295,81 @@ out=$(run_gate "$LOCAL_URL" no "y,y")
 [[ "$out" == *"where=container"* ]] && pass \
     || fail "failed install then accepted fallback should switch, got: $out"
 
-# ── 6. the two installers must not drift apart ──
-# ── 7. macOS: the same gate, the right words ──
-start_test "macOS + Homebrew: accepted brew install keeps the host runtime"
-out=$(run_gate "$LOCAL_URL" no "y" "" macOS yes yes)
+# ── 6. a pending NVIDIA driver reboot: the ONE known-cause exception ──
+start_test "pending driver reboot keeps the host runtime on an explicit yes"
+out=$(run_gate "$LOCAL_URL" yes "n,y" "" Linux no no NVIDIA_REBOOT_PENDING=yes)
+if [[ "$out" == *"where=host"* && "$out" == *"NEEDS A REBOOT"* ]]; then
+    pass
+else
+    fail "a pending reboot should be able to keep the host runtime, got: $out"
+fi
+
+start_test "the reboot exception still says what to do after the reboot"
+out=$(run_gate "$LOCAL_URL" yes "n,y" "" Linux no no NVIDIA_REBOOT_PENDING=yes)
+if [[ "$out" == *"sudo reboot"* && "$out" == *"start.sh up"* ]]; then
+    pass
+else
+    fail "expected post-reboot instructions, got: $out"
+fi
+
+start_test "the reboot exception is an offer, not an assumption"
+# Declining it must land on a runtime that works TODAY.
+out=$(run_gate "$LOCAL_URL" yes "n,n,y" "" Linux no no NVIDIA_REBOOT_PENDING=yes)
+[[ "$out" == *"where=container"* ]] && pass \
+    || fail "declining the reboot exception should fall back, got: $out"
+
+# ── 7. the probe that matters: from the CONTAINER, not from this shell ──
+start_test "a loopback-only bind is caught and named"
+out=$(run_gate "$LOCAL_URL" yes "y,n" "" Linux no no START_OK=yes CURL_UP_AFTER=1 \
+        DOCKER_GW=172.17.0.1 BRIDGE_OK=no)
+if [[ "$out" == *"where=host"* && "$out" == *"REFUSES 172.17.0.1:11434"* \
+      && "$out" == *"Apply that now?"* ]]; then
+    pass
+else
+    fail "expected the bridge probe to catch the bind, got: $out"
+fi
+
+start_test "declining the bind fix is a warning, not a fallback"
+out=$(run_gate "$LOCAL_URL" yes "y,n" "" Linux no no START_OK=yes CURL_UP_AFTER=1 \
+        DOCKER_GW=172.17.0.1 BRIDGE_OK=no)
+if [[ "$out" == *"where=host"* && "$out" == *"apply it before first use"* ]]; then
+    pass
+else
+    fail "declining should warn and keep the runtime, got: $out"
+fi
+
+start_test "a reachable bridge asks nothing at all"
+out=$(run_gate "$LOCAL_URL" yes "y" "" Linux no no START_OK=yes CURL_UP_AFTER=1 \
+        DOCKER_GW=172.17.0.1 BRIDGE_OK=yes)
+if [[ "$out" == *"where=host"* && "$out" != *"Apply that now?"* \
+      && "$out" != *"REFUSES"* ]]; then
+    pass
+else
+    fail "a working bridge should be silent, got: $out"
+fi
+
+start_test "a LAN endpoint is never bridge-probed — not ours to fix"
+out=$(run_gate "$LAN_URL" no "" "" Linux no no DOCKER_GW=172.17.0.1 BRIDGE_OK=no)
+if [[ "$out" != *"REFUSES"* && "$out" != *"Apply that now?"* ]]; then
+    pass
+else
+    fail "a remote endpoint must not get the local bind lecture, got: $out"
+fi
+
+# ── 8. macOS: the same gate, the right words ──
+start_test "macOS + Homebrew: an install that answers keeps the host runtime"
+out=$(run_gate "$LOCAL_URL" no "y" "" macOS yes yes CURL_UP_AFTER=0)
 if [[ "$out" == *"where=host"* && "$out" == *"Install it now with Homebrew?"* \
       && "$out" != *"press Enter to re-check"* ]]; then
     pass
 else
     fail "expected a clean brew install, got: $out"
 fi
+
+start_test "macOS + Homebrew: brew succeeding but nothing answering is not ready"
+out=$(run_gate "$LOCAL_URL" no "y,y" "" macOS yes yes)
+[[ "$out" == *"where=container"* ]] && pass \
+    || fail "a silent endpoint after brew must not pass, got: $out"
 
 start_test "macOS + Homebrew: failed brew install still cannot proceed broken"
 out=$(run_gate "$LOCAL_URL" no "y,y" "" macOS yes no)
@@ -220,20 +387,24 @@ else
     fail "brewless Mac should skip install offers but keep the loop, got: $out"
 fi
 
-start_test "macOS re-check hint names the app, not systemctl"
+start_test "macOS start hint names the app, never systemctl"
 out=$(run_gate "$LOCAL_URL" no "n,ENTER" 1 macOS no no)
-if [[ "$out" == *"where=host"* && "$out" == *"Ollama app"* \
-      && "$out" != *"systemctl"* ]]; then
+if [[ "$out" == *"Ollama app"* && "$out" != *"systemctl"* ]]; then
     pass
 else
     fail "expected a macOS start hint, got: $out"
 fi
 
-start_test "Linux re-check hint still says systemctl"
-out=$(run_gate "$LOCAL_URL" no "n,n,ENTER" 1)
-[[ "$out" == *"where=host"* && "$out" == *"systemctl"* ]] && pass \
-    || fail "expected the Linux start hint, got: $out"
+start_test "macOS is never bridge-probed — Docker Desktop proxies the loopback"
+out=$(run_gate "$LOCAL_URL" no "y" "" macOS yes yes CURL_UP_AFTER=0 \
+        DOCKER_GW=172.17.0.1 BRIDGE_OK=no)
+if [[ "$out" == *"where=host"* && "$out" != *"REFUSES"* ]]; then
+    pass
+else
+    fail "the bridge probe is Linux-only, got: $out"
+fi
 
+# ── 9. the two installers must not drift apart ──
 start_test "install.ps1 carries the container fallback"
 grep -q "Use the bundled ollama container instead" scripts/install.ps1 && pass \
     || fail "install.ps1 lost the container-fallback question"
@@ -248,6 +419,18 @@ if grep -q "press Enter to re-check" scripts/install.ps1 \
     pass
 else
     fail "install.ps1 lost the re-check loop or kept the proceed-broken exit"
+fi
+
+start_test "install.ps1 also refuses to call a bare binary a runtime"
+# Every place it finds an ollama binary must go through the wait, and the
+# old 'found it, good enough' assignments must be gone.
+if grep -q 'function Wait-ForOllama' scripts/install.ps1 \
+   && grep -q 'function Start-OllamaHost' scripts/install.ps1 \
+   && ! grep -q 'Ollama found but not answering yet' scripts/install.ps1 \
+   && ! grep -q 'launch it once so it starts serving' scripts/install.ps1; then
+    pass
+else
+    fail "install.ps1 still accepts a binary as a runtime"
 fi
 
 echo ""
