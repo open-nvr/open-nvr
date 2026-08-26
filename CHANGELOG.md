@@ -4,6 +4,107 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-08-26
+
+The Tier-0 detect pipeline gets a CPU budget it actually respects, the
+camera agent becomes a usable front end rather than a demo surface, and the
+installer stops producing installs that look finished but cannot answer a
+question. 99 merges since 0.1.3.
+
+### Added
+
+- **Per-camera Tier 0.** Capability assignments are stored per camera
+  (schema + endpoint), the Assignments editor suggests and annotates them,
+  and unassigned cameras can be skipped outright. Per-camera detail and the
+  events flow are visible on the AI page.
+- **Decode dials that cut CPU without costing detections.**
+  `DETECT_DECODE_SKIP=nonref` drops non-reference frames inside the decoder
+  rather than after it (default on, provably lossless), decoder threads are
+  capped, loop-filter skip is opt-in, and adaptive decode
+  (`DETECT_DECODE_IDLE=nokey`, default on) decodes keyframes only while a
+  scene is quiet and goes full-rate on activity. Decode is the dominant
+  cost in the pipeline, so this is where the savings are.
+- **The decode config a camera is actually running is exported as a
+  metric,** so the dials can be verified from Prometheus instead of
+  inferred from env files. Joins to the other per-camera series on
+  `camera`.
+- **RF-DETR detector head plus an eval harness,** so swapping detectors is
+  a measured change rather than a hopeful one. `onnxruntime` now ships in
+  the service image and the loaded detector names itself loudly at boot.
+- **Camera agent, substantially rebuilt.** A History card with the photos
+  the NVR kept, ask-me chips and a header health dot; Activity plus one
+  Automations card covering alarms, watches, background tasks and reports;
+  a docked chat bar with dictation by default and one compact Talk button;
+  a phone tab bar so the page is one section at a time instead of one long
+  scroll; 1 fps live stills on the camera screen; per-turn pipeline traces;
+  timestamps on every message; and absolute clock windows
+  ("from 2pm to 3pm") reaching `search_history`.
+- **End-to-end system self-check** with honest degradation — every
+  capability path exercised and reported, rather than a green light that
+  means "the process started".
+- **Live camera connectivity on the camera list response,** and the camera
+  list refreshes when the socket reports a change.
+- **Model identity and domain metrics flow through the rollup to the AI
+  Adapters page,** with sparklines for output trends.
+- **ONVIF substreams by default** — a camera's own low-res stream is stored
+  and used, which is what makes the Tier-0 tap cheap.
+
+### Changed
+
+- **Defaults now match what was actually tested:** `CAPTION_ADAPTER=ollamavlm`
+  with `DETECT_FPS=2` out of the box, and the installer promotes the
+  field-tested `qwen3:1.7b` + `gemma3:4b` pairing sized to the detected
+  hardware. `occupancy-counting` and `footage-search` are on by default.
+- **The live AI-models polling loop is retired** in favour of the
+  event-driven path.
+- **Image pins move to `0.1.4`** for both `CORE_TAG` and `ADAPTER_TAG`.
+  `CAPTION_ADAPTER_TAG` is now blank: adapter releases from 0.1.4 publish
+  the `ollamavlm` image, so every adapter rides one pin again.
+
+### Fixed
+
+- **CRITICAL — detection was dead by default.** `nonref` emitted a token
+  ffmpeg rejects, so the decoder failed on startup for anyone on the
+  default config.
+- **`DETECT_HWACCEL` never reached the workers,** so hardware decode was
+  configured and not used.
+- **Visits were posted with `int('cam1')`** instead of core's numeric
+  camera id, losing history for every camera whose id was not a bare
+  number.
+- **Tier-0 gate records masked the detections behind them,** so alarms
+  could not see people the pipeline had already found.
+- Pipeline robustness under load: NATS retries no longer give up, visit
+  persistence stops losing history, Tier-1 dispatch is fair, ORT threads
+  are capped, heavy motion no longer starves track re-verification,
+  recovery is desynchronised so a fleet stops retrying in lockstep, the
+  best-frame store has a per-camera quota, the frame-age map is guarded
+  against concurrent workers, expiring stream tokens self-heal without
+  leaking, and worker shutdown is parallel and interruptible.
+- **A powered-off camera no longer leaks secrets or looks like a crash,**
+  and a fixed-shape model no longer takes its camera down.
+- **Evidence crops carry context** rather than the bare box.
+- **Alarms:** they point at the sighting, tick in the site's timezone and
+  speak am/pm, refuse to arm on a target that cannot fire, dedup and delete
+  idempotently, and history admits a visit that is still being written.
+- **Camera agent:** the roster follows OpenNVR instead of freezing at page
+  load, cameras deleted in OpenNVR are forgotten and tool enums re-baked,
+  the camera strip stops serialising cameras, a dropped WebRTC stream stops
+  claiming to be live while a transient ICE blip no longer demotes it,
+  frame URLs refresh on reconcile so previews survive JWT expiry, voice
+  turns are cancellable with honest TTS failure, and the phone layout stops
+  pushing Talk/Reset off-canvas.
+- **Installer:** a bare `ollama` binary is no longer accepted as a working
+  runtime, the bundled ollama pull is skipped when an external LLM is set,
+  the VLM is pre-pulled at `up` so a picked `gemma3`/`qwen2.5vl` does not
+  arrive broken, `system_check.py` ships in the image, and models are sized
+  to the machine.
+- **Cameras:** editing one re-points its MediaMTX path, the recording badge
+  reconciles with the stream beside it, the streaming port shown is the one
+  actually in use, discovered cameras with no password can be connected,
+  and "Recording" is no longer claimed beside a disconnected stream.
+- **Sovereignty:** host-local egress is respected, and the WebRTC ICE port
+  is configurable.
+
 ## [0.1.3] — 2026-08-18
 
 ### Added
@@ -1801,7 +1902,8 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/open-nvr/open-nvr/compare/v0.1.0...v0.1.1

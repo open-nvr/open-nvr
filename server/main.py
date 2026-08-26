@@ -94,7 +94,7 @@ from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
 # The OpenNVR release this build is cut from. Surfaced in /health and in the
 # OpenAPI schema, and quoted in bug reports (see SECURITY.md) — so it tracks the
 # git tag, not the API shape. Bump it in the release commit.
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # FFmpeg-based RTSP proxy and recorder removed
 

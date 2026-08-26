@@ -273,10 +273,11 @@ image at a time.
   move to `:main`/`:latest` or a release tag newer than that.
 - **`*-adapter`** — built in
   [`open-nvr/ai-adapter`](https://github.com/open-nvr/ai-adapter).
-  ARM64 manifest lists start at adapter tag **0.1.3** (the current
-  `.env.example` pin); tags 0.1.1 and earlier are amd64-only. If you are
-  named one of these, your `.env` carries a stale `ADAPTER_TAG` — raise it
-  to `0.1.3` or later, or run the adapters emulated.
+  ARM64 manifest lists start at adapter tag **0.1.3**; tags 0.1.1 and
+  earlier are amd64-only. The current `.env.example` pin is **0.1.4**, so a
+  fresh install is already clear of this. If you are named one of these,
+  your `.env` carries a stale `ADAPTER_TAG` — raise it to 0.1.3 or later,
+  or run the adapters emulated.
 
 **Running the amd64 images under emulation** works and is the fastest way to
 get a demo up on an M-series Mac, at a real cost in inference latency:
