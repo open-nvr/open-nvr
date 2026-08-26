@@ -197,3 +197,96 @@ def test_demo_chat_dock_present_on_camera_screen_too():
     log = _HTML.index('<div class="log" id="log">')
     bar = _HTML.index('<div class="row askrow">')
     assert cam_screen < log < bar
+
+
+# ── live dictation: waveform, phrase-by-phrase text, ✓/✕ ────────────────
+# The mic used to buffer the whole utterance, transcribe it once at the
+# end, and drop the text in as a lump — with no sign the mic was hearing
+# anything and no way to reject the result but selecting it and deleting
+# it. These guard the three things that replaced that.
+
+
+def _fn(name: str) -> str:
+    """Source of one top-level ``function name(``, to its matching close."""
+    start = _HTML.index(f"function {name}(")
+    depth = 0
+    for j in range(_HTML.index("{", start), len(_HTML)):
+        if _HTML[j] == "{":
+            depth += 1
+        elif _HTML[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return _HTML[start:j + 1]
+    raise AssertionError(f"unbalanced braces in {name}")
+
+
+def test_dictation_shows_what_the_mic_is_hearing():
+    # A muted mic and a silent room used to look identical: both said
+    # "Listening…" and nothing else.
+    for needle in ('id="dictbar"', 'id="dictwave"', 'id="dictnote"'):
+        assert needle in _HTML, needle
+    assert "body.dictating .dictbar" in _HTML
+    # The meter is driven by the SAME rms the segmenter decides on, not by
+    # a decorative animation — otherwise it can show bars while the VAD
+    # hears nothing.
+    tick = _fn("dictVadTick")
+    assert "dictWavePush(level)" in tick
+    assert "dictRms()" in tick
+
+
+def test_dictation_transcribes_each_phrase_once():
+    """The CPU guard, and the reason this is phrase-by-phrase rather than
+    word-by-word. faster-whisper has no streaming endpoint, so the only
+    other way to get live text is re-transcribing the growing buffer every
+    couple of seconds — 4-5x the STT work for one utterance, on a box
+    where Whisper shares a CPU with Ollama and the detect pipeline.
+    Cutting on silence sends each second of speech exactly once."""
+    tick = _fn("dictVadTick")
+    # Segments are cut on a SILENCE gate, not on a fixed interval.
+    assert "SILENCE_MS" in tick and "dictSegStop()" in tick
+    assert "setInterval" not in _fn("dictSend"), "no periodic re-send of the buffer"
+    # One request at a time: keeps phrases in spoken order AND stops a fast
+    # talker stacking Whisper calls.
+    send = _fn("dictSend")
+    assert "dictQueue=dictQueue.then(" in send
+
+
+def test_dictation_reuses_the_tuned_vad_gates():
+    # The Talk VAD already adapts to the room's noise floor; dictation must
+    # not invent a second set of thresholds that drift from it.
+    tick = _fn("dictVadTick")
+    for gate in ("START_RMS", "SILENCE_RMS", "START_FRAMES",
+                 "START_MARGIN", "SILENCE_MARGIN", "FLOOR_EMA"):
+        assert gate in tick, gate
+
+
+def test_dictation_has_an_explicit_keep_and_discard():
+    assert 'id="dictDone"' in _HTML and 'id="dictCancel"' in _HTML
+    assert "dictStop(true)" in _HTML and "dictStop(false)" in _HTML
+    stop = _fn("dictStop")
+    # ✕ puts the box back exactly as it was found — including anything that
+    # was still in flight when the button was pressed.
+    assert "inp.value=dictBase" in stop
+    assert "dictQueue=dictQueue.then(" in stop
+
+
+def test_stopping_dictation_flushes_the_phrase_in_progress():
+    # Tearing the mic down first would lose the last thing said.
+    stop = _fn("dictStop")
+    assert stop.index("dictRec.stop()") < stop.index("getTracks()"), \
+        "the mic is released before the phrase in progress is flushed"
+
+
+def test_dictation_releases_everything_it_opened():
+    stop = _fn("dictStop")
+    for needle in ("clearInterval(dictTick)", "clearTimeout(dictTimer)",
+                   "getTracks().forEach", "dictCtx.close()"):
+        assert needle in stop, needle
+    assert 'classList.remove("dictating")' in stop
+
+
+def test_dictation_still_works_without_an_analyser():
+    # No Web Audio (older browser) means no level gate, so capture would
+    # never start — fall back to one segment for the session instead.
+    tog = _fn("toggleDictate")
+    assert "if(!dictAnalyser) dictSegStart();" in tog

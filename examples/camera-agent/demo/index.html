@@ -566,6 +566,30 @@
     .micbtn:hover:not(:disabled){filter:brightness(1.07);}
     .micbtn:disabled{opacity:0.5; cursor:progress;}
     .micbtn.rec{background:linear-gradient(180deg,#ff6a6f,var(--danger)); color:#fff; animation:hpulse 1.2s ease infinite;}
+    /* ── live dictation strip ──────────────────────────────────────
+       Sits above the input bar only while dictating. Three jobs: show
+       that the mic is HEARING something (a dead-silent mic and a muted
+       one used to look identical), say what stage we're at, and give
+       the two decisions an explicit control each — discarding used to
+       mean selecting the text and deleting it by hand. */
+    .dictbar{display:none; align-items:center; gap:0.5rem; margin:0 0 0.5rem;
+      padding:0.4rem 0.65rem; border-radius:var(--radius-sm);
+      border:1px solid var(--stroke2); background:var(--glass2);}
+    body.dictating .dictbar{display:flex;}
+    .dictwave{display:flex; align-items:flex-end; gap:3px; height:20px; flex:0 0 auto;}
+    /* Bars are driven from the SAME rms() the Talk VAD uses, so what you
+       see is the level the segmenter is deciding on — not a decoration. */
+    .dictwave i{display:block; width:3px; height:3px; border-radius:2px;
+      background:var(--accent); transition:height 90ms linear;}
+    .dicttext{flex:1; min-width:0; font-size:0.8rem; color:var(--muted);
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+    .dictbtn{flex:0 0 auto; border-radius:8px; border:1px solid var(--stroke2);
+      background:transparent; color:var(--text); cursor:pointer;
+      padding:0.28rem 0.6rem; font-size:0.85rem; line-height:1.2;}
+    .dictbtn:hover{border-color:var(--accent);}
+    .dictbtn.ok{border-color:rgba(94,179,246,0.45); color:var(--accent);}
+    .dictbtn.no:hover{border-color:var(--danger); color:var(--danger);}
+    @media (prefers-reduced-motion: reduce){ .dictwave i{transition:none;} }
   </style>
 </head>
 <body>
@@ -712,6 +736,13 @@
             <span class="chip" id="working" hidden></span>
             <span class="chip" id="lat" hidden title="Per-turn latency: STT · LLM · TTS · total"></span>
             <button id="sysCheck" class="ghost" type="button" title="Exercise every capability path — frame, detector, VLM, LLM, voice, alarms, events — and report what actually works">System check</button>
+          </div>
+          <!-- Only visible while dictating (body.dictating). -->
+          <div class="dictbar" id="dictbar">
+            <span class="dictwave" id="dictwave" aria-hidden="true"></span>
+            <span class="dicttext" id="dictnote" role="status" aria-live="polite">Listening…</span>
+            <button id="dictCancel" class="dictbtn no" type="button" title="Discard what was dictated and restore the box" aria-label="Discard dictation">✕</button>
+            <button id="dictDone" class="dictbtn ok" type="button" title="Stop dictating and keep the text" aria-label="Keep dictated text">✓</button>
           </div>
           <div class="row askrow">
             <button id="dictate" class="micbtn" type="button" title="Dictate — speak, and your words land in the box" aria-label="Dictate into the text box"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
@@ -2201,42 +2232,168 @@
     function syncSegTalk(){ document.body.classList.add("ui-talk"); }
 
     // ── dictation: mic → /transcribe → words land in the text box ───
-    // One utterance per tap (tap again to finish, 30 s cap). STT only —
-    // the user reads, edits, and sends; nothing is spoken back.
+    // Was: one blob per tap, transcribed once at the end, text appearing
+    // in a single lump after a silent wait. Now the phrase you just spoke
+    // lands while you carry on with the next one, and the two decisions
+    // (keep / throw away) are buttons instead of "select the text and
+    // delete it yourself".
+    //
+    // WHY PHRASE-BY-PHRASE AND NOT WORD-BY-WORD: faster-whisper is not a
+    // streaming model and the adapter's /infer is one blocking call, so
+    // there are no partial results to subscribe to. The other way to fake
+    // live text — re-transcribing the whole buffer every couple of
+    // seconds — costs 4-5x the STT work for one utterance, on a box where
+    // Whisper already shares a CPU with Ollama and the detect pipeline.
+    // Cutting on silence instead transcribes each second of audio EXACTLY
+    // ONCE, same total STT load as the old one-shot version, and the
+    // VAD that finds those cuts is the one Talk mode already tunes
+    // against the room's noise floor.
     let dictRec=null, dictStream=null, dictChunks=[], dictTimer=null;
-    async function toggleDictate(){
-      const btn=$("dictate"); if(!btn) return;
-      if(dictRec){ try{ dictRec.stop(); }catch{} return; }
-      if(sessionActive){ setStatus("Talk mode is live — switch to Chat to dictate.","error"); return; }
-      try{ dictStream=await navigator.mediaDevices.getUserMedia({audio:true}); }
-      catch{ setStatus("Microphone permission is needed to dictate.","error"); return; }
+    let dictCtx=null, dictAnalyser=null, dictBuf=null, dictTick=null;
+    let dictActive=false, dictCapturing=false, dictFloor=0.01;
+    let dictLoud=0, dictStart=0, dictLastVoice=0, dictBase="", dictGotAny=false;
+    // Transcriptions are chained, never fired in parallel: it keeps the
+    // phrases in the order they were spoken AND holds STT to one request
+    // at a time, so a fast talker cannot stack Whisper calls on a shared box.
+    let dictQueue=Promise.resolve(), dictPending=0;
+    const DICT_MAX_MS=120000;   // whole-session cap (segments flush as we go)
+
+    function dictRms(){ if(!dictAnalyser) return 0;
+      dictAnalyser.getFloatTimeDomainData(dictBuf);
+      let s=0; for(let i=0;i<dictBuf.length;i++) s+=dictBuf[i]*dictBuf[i];
+      return Math.sqrt(s/dictBuf.length); }
+    // 14 bars, newest on the right — a plain level history. Its only job is
+    // to prove the mic is hearing you; a muted mic and a silent room used
+    // to look exactly the same (both "Listening…" and nothing else).
+    function dictWaveInit(){ const w=$("dictwave"); if(!w) return;
+      w.innerHTML=""; for(let i=0;i<14;i++) w.appendChild(document.createElement("i")); }
+    function dictWavePush(level){ const w=$("dictwave"); if(!w) return;
+      const bars=w.children; if(!bars.length) return;
+      for(let i=0;i<bars.length-1;i++) bars[i].style.height=bars[i+1].style.height||"3px";
+      const h=Math.max(3,Math.min(20,Math.round(level*260)));
+      bars[bars.length-1].style.height=h+"px"; }
+    function dictNote(txt){ const n=$("dictnote"); if(n) n.textContent=txt; }
+
+    function dictVadTick(){
+      if(!dictActive) return;
+      const level=dictRms();
+      dictWavePush(level);
+      const startGate=Math.max(START_RMS, dictFloor*START_MARGIN);
+      const silenceGate=Math.max(SILENCE_RMS, dictFloor*SILENCE_MARGIN);
+      const now=performance.now();
+      if(!dictCapturing){
+        // Learn the room only from quiet frames, never from speech.
+        if(level<startGate) dictFloor=(1-FLOOR_EMA)*dictFloor+FLOOR_EMA*level;
+        dictLoud=level>startGate?dictLoud+1:0;
+        if(dictLoud>=START_FRAMES) dictSegStart();
+        return; }
+      if(level>silenceGate) dictLastVoice=now;
+      const dur=now-dictStart;
+      // A pause ends the phrase; the cap stops one long unbroken monologue
+      // from becoming a single oversized blob.
+      if((now-dictLastVoice>SILENCE_MS && dur>MIN_UTTER_MS) || dur>MAX_UTTER_MS) dictSegStop();
+    }
+    function dictSegStart(){
+      if(dictCapturing||!dictStream) return;
       const m=pickMimeType(); dictChunks=[];
       dictRec=new MediaRecorder(dictStream, m?{mimeType:m}:undefined);
       dictRec.ondataavailable=e=>{ if(e.data&&e.data.size) dictChunks.push(e.data); };
-      dictRec.onstop=async ()=>{
-        if(dictTimer){ clearTimeout(dictTimer); dictTimer=null; }
-        const blob=new Blob(dictChunks,{type:(dictRec&&dictRec.mimeType)||"audio/webm"});
-        dictRec=null; dictChunks=[];
-        if(dictStream){ dictStream.getTracks().forEach(tr=>tr.stop()); dictStream=null; }
-        btn.classList.remove("rec"); btn.title="Dictate — speak, and your words land in the box";
-        if(blob.size<200){ setStatus("Didn't catch anything — try again."); return; }
-        btn.disabled=true; setStatus("Transcribing…","active");
+      dictRec.onstop=()=>{
+        const type=(dictRec&&dictRec.mimeType)||"audio/webm";
+        const blob=new Blob(dictChunks,{type}); dictChunks=[]; dictRec=null;
+        // Each segment is a COMPLETE recording, header and all. Slicing one
+        // long MediaRecorder stream would not work — only its first chunk
+        // carries the container header, so the rest decode as garbage.
+        if(blob.size>=200) dictSend(blob);
+        else if(!dictPending) dictNote(dictGotAny?"Listening…":"Listening… (nothing caught yet)"); };
+      try{ dictRec.start(); }catch{ dictRec=null; return; }
+      dictCapturing=true; dictStart=dictLastVoice=performance.now();
+      dictNote("Listening…"); }
+    function dictSegStop(){
+      dictCapturing=false; dictLoud=0;
+      if(dictRec){ try{ dictRec.stop(); }catch{} } }
+    function dictSend(blob){
+      dictPending++; dictNote("Transcribing…");
+      dictQueue=dictQueue.then(async()=>{
         try{
           const r=await fetch("/transcribe",{method:"POST",
             headers:{"Content-Type":"application/octet-stream"}, body:blob});
           const d=await r.json().catch(()=>({}));
-          if(r.ok && d.text){ const inp=$("askInput");
-            inp.value=(inp.value?inp.value.replace(/\s+$/,"")+" ":"")+d.text;
-            inp.focus(); setStatus("Ready — edit if you like, then Send."); }
-          else setStatus(d.error||"Didn't catch that — try again.", r.ok?"":"error");
-        }catch{ setStatus("Transcription failed — agent unreachable?","error"); }
-        btn.disabled=false; };
-      dictRec.start();
-      btn.classList.add("rec"); btn.title="Stop dictating";
-      setStatus("Listening… tap the mic again when done.","active");
-      dictTimer=setTimeout(()=>{ try{ dictRec&&dictRec.stop(); }catch{} },30000);
+          if(r.ok && d.text) dictAppend(d.text);
+          else if(!r.ok) dictNote(d.error||"Transcription failed.");
+        }catch{ dictNote("Transcription failed — agent unreachable?"); }
+        finally{ dictPending--;
+          if(!dictPending && dictActive) dictNote(dictGotAny?"Listening…":"Listening…"); }
+      });
     }
-    (function(){ const b=$("dictate"); if(b) b.addEventListener("click",toggleDictate); })();
+    // Straight into the box the operator is about to send, as asked — the
+    // text stays editable the whole time, so a mis-heard word can be fixed
+    // while the next phrase is still being spoken.
+    function dictAppend(text){
+      const inp=$("askInput"); if(!inp) return;
+      inp.value=(inp.value?inp.value.replace(/\s+$/,"")+" ":"")+text;
+      dictGotAny=true; }
+
+    async function toggleDictate(){
+      const btn=$("dictate"); if(!btn) return;
+      if(dictActive){ dictStop(true); return; }
+      if(sessionActive){ setStatus("Talk mode is live — switch to Chat to dictate.","error"); return; }
+      try{ dictStream=await navigator.mediaDevices.getUserMedia({audio:true}); }
+      catch{ setStatus("Microphone permission is needed to dictate.","error"); return; }
+      try{
+        dictCtx=new (window.AudioContext||window.webkitAudioContext)();
+        dictAnalyser=dictCtx.createAnalyser(); dictAnalyser.fftSize=1024;
+        dictBuf=new Float32Array(dictAnalyser.fftSize);
+        dictCtx.createMediaStreamSource(dictStream).connect(dictAnalyser);
+      }catch{ dictAnalyser=null; }   // no meter, but dictation still works
+      dictBase=($("askInput")||{}).value||"";
+      dictActive=true; dictCapturing=false; dictGotAny=false;
+      dictLoud=0; dictFloor=0.01;
+      document.body.classList.add("dictating");
+      dictWaveInit(); dictNote("Listening…");
+      btn.classList.add("rec"); btn.title="Stop dictating";
+      setStatus("Listening — speak, then ✓ to keep it.","active");
+      // Same 40ms cadence as the Talk VAD: one timer, and it exists only
+      // while the strip is on screen.
+      dictTick=setInterval(dictVadTick,TICK_MS);
+      dictTimer=setTimeout(()=>dictStop(true),DICT_MAX_MS);
+      // No analyser (older browser): fall back to one segment for the whole
+      // session rather than never starting one — level-gated capture would
+      // simply never fire.
+      if(!dictAnalyser) dictSegStart();
+    }
+    // keep=false is the ✕: put the box back exactly as it was found.
+    function dictStop(keep){
+      if(!dictActive) return;
+      dictActive=false; dictCapturing=false;
+      if(dictTick){ clearInterval(dictTick); dictTick=null; }
+      if(dictTimer){ clearTimeout(dictTimer); dictTimer=null; }
+      // Flush whatever is mid-phrase BEFORE tearing the mic down, or the
+      // last thing said is the one thing lost.
+      if(dictRec){ try{ dictRec.stop(); }catch{} }
+      if(dictStream){ dictStream.getTracks().forEach(tr=>tr.stop()); dictStream=null; }
+      if(dictCtx){ try{ dictCtx.close(); }catch{} dictCtx=null; }
+      dictAnalyser=null; dictBuf=null;
+      document.body.classList.remove("dictating");
+      const btn=$("dictate");
+      if(btn){ btn.classList.remove("rec");
+        btn.title="Dictate — speak, and your words land in the box"; }
+      const inp=$("askInput");
+      if(!keep){
+        // Discard, including anything still in flight.
+        dictQueue=dictQueue.then(()=>{ if(inp) inp.value=dictBase; });
+        setStatus("Dictation discarded.");
+        return; }
+      dictQueue=dictQueue.then(()=>{
+        if(inp) inp.focus();
+        setStatus(dictGotAny?"Ready — edit if you like, then Send."
+                            :"Didn't catch anything — try again."); });
+    }
+    (function(){
+      const b=$("dictate"); if(b) b.addEventListener("click",toggleDictate);
+      const ok=$("dictDone"); if(ok) ok.addEventListener("click",()=>dictStop(true));
+      const no=$("dictCancel"); if(no) no.addEventListener("click",()=>dictStop(false));
+    })();
 
     // ── tasks ──
     async function pollTasks(data){ if(!authReady())return; let tasks; if(data){ tasks=data.tasks||[]; } else try{ tasks=(await (await fetch("/tasks")).json()).tasks||[]; }catch{ return; }
