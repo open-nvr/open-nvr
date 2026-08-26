@@ -729,7 +729,7 @@
           <div id="eventsList"><div class="empty-note">Nothing yet — alarm rings, watch hits, and app alerts land here.</div></div>
         </div>
         <div class="card" id="historyCard" hidden>
-          <div class="cardhead"><h2>History</h2><button class="addbtn" id="histRefresh" type="button" title="Refresh remembered visits" aria-label="Refresh history">↻</button></div>
+          <div class="cardhead"><h2>History</h2><span class="headbtns"><button class="addbtn" id="histRefresh" type="button" title="Refresh remembered visits" aria-label="Refresh history">↻</button><button class="addbtn" id="histToggle" type="button" title="Collapse / expand" aria-label="Toggle history">▾</button></span></div>
           <div class="skillhint">Visits the NVR remembers, with the photo it kept. Tap 💬 to ask about one.</div>
           <div class="histfilters">
             <select id="histLabel" aria-label="What to look for">
@@ -1390,6 +1390,34 @@
     // Thumbnails are fetched with fetch() (which carries the bearer token)
     // into object URLs — a bare <img src> would arrive without auth.
     let _histUrls=[];
+    // ── History collapse ────────────────────────────────────────────
+    // The card that grows most (up to 30 visits, each with a photo) was the
+    // only rail card you could not fold away — Activity and Hardware both
+    // collapse. Same sessionStorage + glyph pattern as Activity; the hint,
+    // the filters and the list fold together so a collapsed card is just
+    // its title bar.
+    const _histCollapsed=()=>sessionStorage.getItem("histCollapsed")==="1";
+    function applyHistCollapse(){
+      const c=_histCollapsed(), card=$("historyCard"); if(!card) return;
+      for(const el of [card.querySelector(".skillhint"),
+                       card.querySelector(".histfilters"), $("histList")]){
+        if(el) el.hidden=c;
+      }
+      const b=$("histToggle"); if(b) b.textContent=c?"▸":"▾";
+      // Refresh is meaningless while nothing is shown, and a disabled
+      // control that still looks live invites a click that does nothing.
+      const r=$("histRefresh"); if(r) r.hidden=c;
+    }
+    (function(){ const b=$("histToggle"); if(!b) return;
+      b.addEventListener("click",()=>{
+        sessionStorage.setItem("histCollapsed", _histCollapsed()?"0":"1");
+        applyHistCollapse();
+        // Expanding re-loads: while collapsed the evidence photos are
+        // deliberately never fetched, so the list would otherwise unfold
+        // showing rows with permanently blank thumbnails.
+        if(!_histCollapsed()) loadHistory();
+      }); })();
+
     async function loadHistory(){ if(!authReady()) return;
       const card=$("historyCard"), list=$("histList"); if(!card||!list) return;
       let d; try{ d=await (await fetch("/history?label="+encodeURIComponent(($("histLabel")||{}).value||"")
@@ -1399,8 +1427,14 @@
       const htab=$("mtabHistory");
       if(!d || d.available===false){ card.hidden=true; if(htab) htab.hidden=true; return; }
       card.hidden=false; if(htab) htab.hidden=false;
+      applyHistCollapse();
       for(const u of _histUrls) URL.revokeObjectURL(u); _histUrls=[];
       list.innerHTML="";
+      // Collapsed: the availability check above still ran (one cheap JSON
+      // call, and it decides whether the card and its phone tab exist at
+      // all), but building rows nobody can see — and firing up to 30
+      // authenticated evidence-photo fetches for them — is pure waste.
+      if(_histCollapsed()) return;
       if(d.ok===false){ list.innerHTML='<div class="empty-note">Couldn’t reach the history store just now.</div>'; return; }
       const rows=d.events||[];
       if(!rows.length){ list.innerHTML='<div class="empty-note">No remembered visits in this window.</div>'; return; }
