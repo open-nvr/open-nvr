@@ -540,8 +540,8 @@ configure_nginx_bind_host() {
         local single_host
         single_host=$(detect_lan_ip 2>/dev/null || echo "")
         if [ -n "$single_host" ]; then
-            export MEDIAMTX_PUBLIC_URL="https://${single_host}"
-            export MEDIAMTX_WEBRTC_HOSTS="${single_host}"
+            set_env_var MEDIAMTX_PUBLIC_URL "https://${single_host}"
+            set_env_var MEDIAMTX_WEBRTC_HOSTS "${single_host}"
             # ISSUE-6 v9: propagate to cert SAN — see dual-declared
             # branch for the rationale.
             if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
@@ -575,8 +575,8 @@ configure_nginx_bind_host() {
         # emits HTTPS URLs through nginx. MEDIAMTX_WEBRTC_HOSTS →
         # mediamtx advertises ICE candidates the LAN browser can
         # reach for the UDP/8189 media path.
-        export MEDIAMTX_PUBLIC_URL="https://${mgmt_ip}"
-        export MEDIAMTX_WEBRTC_HOSTS="${mgmt_ip}"
+        set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}"
+        set_env_var MEDIAMTX_WEBRTC_HOSTS "${mgmt_ip}"
         # ISSUE-6 v9: propagate the IP to the cert init containers
         # so the TLS cert SAN list includes the IP browsers will
         # actually visit. Without this, the cert is generated with
@@ -622,8 +622,8 @@ configure_nginx_bind_host() {
     local fallback_host
     fallback_host=$(detect_lan_ip 2>/dev/null || echo "")
     if [ -n "$fallback_host" ]; then
-        export MEDIAMTX_PUBLIC_URL="https://${fallback_host}"
-        export MEDIAMTX_WEBRTC_HOSTS="${fallback_host}"
+        set_env_var MEDIAMTX_PUBLIC_URL "https://${fallback_host}"
+        set_env_var MEDIAMTX_WEBRTC_HOSTS "${fallback_host}"
         if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
             export OPENNVR_HOST_IP="${fallback_host}"
         fi
@@ -679,6 +679,24 @@ write_env_var() {
     else
         echo "${key}=${value}" >> "$file"
     fi
+}
+
+# export + persist in one step.
+#
+# Values detected from the host topology (the LAN IP browsers reach us on)
+# used to be exported only, so they lived just in this script's process. Any
+# `docker compose up -d` that recreated a container without them baked an
+# empty value in — which silently killed live WebRTC, because MediaMTX then
+# advertises only its own Docker-bridge address as an ICE candidate. Writing
+# them to .env makes every compose entry point see the same value.
+#
+# Always overwrites: these are DETECTED, so a host whose LAN IP changed must
+# refresh rather than keep a stale value. Operator-set values are read via
+# get_env_var by the callers before they decide, so they are not clobbered.
+set_env_var() {
+    local key="$1" value="$2"
+    export "${key}=${value}"
+    write_env_var "$key" "$value"
 }
 
 prompt_nic_topology() {
@@ -741,8 +759,8 @@ prompt_nic_topology() {
             # cert SAN includes the LAN IP — see dual-declared
             # branch for the rationale.
             if [ -n "$lan_hint" ]; then
-                export MEDIAMTX_PUBLIC_URL="https://${lan_hint}"
-                export MEDIAMTX_WEBRTC_HOSTS="${lan_hint}"
+                set_env_var MEDIAMTX_PUBLIC_URL "https://${lan_hint}"
+                set_env_var MEDIAMTX_WEBRTC_HOSTS "${lan_hint}"
                 if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
                     export OPENNVR_HOST_IP="${lan_hint}"
                 fi
@@ -794,8 +812,8 @@ prompt_nic_topology() {
             # https://localhost for the browser-facing stream URLs and
             # advertises no reachable WebRTC ICE host — live view
             # broken until a restart nobody knows they need.
-            export MEDIAMTX_PUBLIC_URL="https://${mgmt_ip}"
-            export MEDIAMTX_WEBRTC_HOSTS="${mgmt_ip}"
+            set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}"
+            set_env_var MEDIAMTX_WEBRTC_HOSTS "${mgmt_ip}"
             if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
                 export OPENNVR_HOST_IP="${mgmt_ip}"
             fi

@@ -203,6 +203,41 @@ class NatsPublisher:
             self._client = None
             return False
 
+    async def publish_domain_event(self, subject: str, envelope: dict) -> bool:
+        """Publish one RFC-0002 domain event (``opennvr.events.*``).
+
+        Same never-raise, best-effort semantics as
+        ``publish_inference_completed`` and the same counters — a
+        domain event lost to a bus outage is surfaced by
+        ``failed_count`` on /metrics exactly like a lost completion.
+        """
+        if not self.enabled:
+            return False
+        try:
+            await self._ensure_connected()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "NATS domain publish skipped (connect failure): %s "
+                "[subject=%s]", exc, subject,
+            )
+            self.failed_count += 1
+            return False
+        import json
+
+        payload = json.dumps(envelope).encode("utf-8")
+        try:
+            await self._client.publish(subject, payload)
+            self.published_count += 1
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "NATS domain publish to %r failed: %s [correlation_id=%s]",
+                subject, exc, envelope.get("correlation_id"),
+            )
+            self.failed_count += 1
+            self._client = None
+            return False
+
     # ── Internals ──────────────────────────────────────────────────
 
     async def _ensure_connected(self) -> None:

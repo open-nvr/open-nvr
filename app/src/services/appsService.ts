@@ -23,6 +23,10 @@ import { api } from '../lib/api'
 export const appsService = {
   getApps: () => api.get('/api/v1/apps'),
   getAppIndex: () => api.get('/api/v1/apps/index'),
+  // RFC-0002 Phase 1: the platform skills registry — one derivation over
+  // adapters, apps, assignments and health. The catalog reads it to show
+  // the skill each installed app provides (status + published events).
+  getSkills: () => api.get('/api/v1/skills'),
   enableApp: (id: string) => api.post(`/api/v1/apps/${id}/enable`),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>

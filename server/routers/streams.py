@@ -27,7 +27,7 @@ Security Architecture:
 - MediaMTX validates tokens via JWKS endpoint
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
@@ -249,11 +249,38 @@ async def get_hls_url(
     }
 
 
+async def _learn_ice_host(request: Request | None, db: Session) -> None:
+    """Teach MediaMTX the address this request arrived on, if it is new.
+
+    ``X-Server-Addr`` is set by nginx from ``$server_addr`` — its own listening
+    socket — so it describes this host, not anything the client chose. It is
+    honored only from a trusted proxy peer; the client-controlled ``Host``
+    header is deliberately never used here, since it would let any caller
+    inject arbitrary values into MediaMTX's advertised candidates.
+    """
+    if request is None:
+        return
+    try:
+        from services.webrtc_ice_host_service import WebRTCIceHostService
+
+        peer = request.client.host if request.client else ""
+        if not WebRTCIceHostService.is_trusted_proxy(peer):
+            return
+        addr = (request.headers.get("x-server-addr") or "").strip()
+        if addr:
+            await WebRTCIceHostService.learn(db, addr)
+    except Exception:
+        # Advertising is an optimization for live view; a failure here must
+        # never cost the caller its token and URLs.
+        pass
+
+
 @router.get("/{camera_id}/info")
 async def get_stream_info(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
+    request: Request = None,
 ):
     """
     Get comprehensive stream information and JWT token for a camera.
@@ -261,6 +288,13 @@ async def get_stream_info(
     Returns all stream URLs and a single token valid for all protocols.
     """
     camera = _check_camera_permission(db, camera_id, current_user)
+
+    # Every WHEP attempt is preceded by this call, so it is where we learn the
+    # address the browser actually reached us on and make sure MediaMTX
+    # advertises it as an ICE candidate. Without it MediaMTX offers only its
+    # own container addresses and live WebRTC fails silently into HLS.
+    # Best-effort: never let this break the stream info response.
+    await _learn_ice_host(request, db)
 
     stream_name = _build_stream_name(
         settings.mediamtx_stream_prefix, camera_id, camera.ip_address

@@ -177,6 +177,14 @@ class Settings(BaseSettings):
     mediamtx_admin_token: str | None = None
     mediamtx_auto_provision: bool = True  # Enable/disable auto-provisioning on startup
 
+    # Seed for the ICE host addresses MediaMTX advertises to browsers
+    # (``webrtcAdditionalHosts``). Comma-separated. This is only a seed: the
+    # authoritative list lives in the DB and is learned from the address
+    # browsers actually reach this server on. See
+    # services/webrtc_ice_host_service.py for why the env var alone is not
+    # enough (it is baked in at container-create time and silently lost).
+    mediamtx_webrtc_hosts: str = ""
+
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
     # RECORDING_SEGMENT_SECONDS. Default 60 (1-minute clips) to match the
@@ -334,6 +342,11 @@ class Settings(BaseSettings):
     # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
     # and store plate_text on the event row. Best-effort; off = rows only.
     events_plate_enrichment: bool = True
+    # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
+    # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
+    # empty disables consumption (enrichment's synchronous fallback still
+    # writes plate_text).
+    nats_url: str = ""
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod
