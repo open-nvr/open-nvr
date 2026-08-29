@@ -526,6 +526,20 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_recording_reconciler())
 
+    # RFC-0002 Phase 0: consume plate.recognized.v1 from the bus and write
+    # plate_text onto timeline rows — producer-independent (EVENT_CONTRACTS.md
+    # convergence). No NATS_URL / no nats-py degrades to the enrichment
+    # fallback's synchronous writes; the loop itself never raises.
+    async def background_plate_event_consumer():
+        try:
+            from services.plate_event_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+        except Exception as e:
+            main_logger.error(f"Plate event consumer failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_plate_event_consumer())
+
     # Start camera connectivity reconciler — safety net for the MediaMTX
     # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
     # either process). The loop delays its first pass internally so startup
