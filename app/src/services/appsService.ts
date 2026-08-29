@@ -32,6 +32,11 @@ export const appsService = {
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),
   getAppStatus: (id: string) => api.get(`/api/v1/apps/${id}/status`),
+  // RFC-0002 Phase 4 app-surface convention: the app's self-contained
+  // HTML dashboard, proxied off its contract port. Rendered in a
+  // sandboxed iframe by AppView; refetched on an interval (the page is
+  // a static snapshot, not an app).
+  getAppUi: (id: string) => api.get(`/api/v1/apps/${id}/ui`, { responseType: 'text' }),
 
   // Opt-in one-click install: the agent GUIDES the operator, the backend
   // enforces opt-in + RBAC. install/uninstall 403 when APPS_INSTALL_ENABLED is

@@ -94,6 +94,7 @@ MANIFEST = AppManifest(
         AlertType("plate_expected", severity="low"),
         AlertType("plate_watchlist", severity="high"),
     ],
+    has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
     state_schema=[
         StateView(name="allowlist_size", label="Allowlist",
                   kind="metric", path="allowlist_size"),
@@ -348,6 +349,61 @@ class PlateAlerter(Detector):
             "denylist_size": len(self._watchlists[1]),
             "recent": list(self._recent),
         }
+
+    def ui_html(self) -> str:
+        """The app dashboard (RFC-0002 Phase 4 app-surface convention):
+        ONE self-contained, static HTML document — no scripts (core's
+        catalog renders it in a sandboxed iframe and refetches on an
+        interval, so the page is a snapshot, not an app)."""
+        import html as _html
+
+        snap = self.state_snapshot()
+        allow, deny = self._watchlists
+        rows = []
+        for item in reversed(list(self._recent)[-12:]):
+            level = str(item.get("level", "info"))
+            color = {"high": "#e5484d", "low": "#46a758"}.get(level, "#8b8d98")
+            age_min = max(0, int((time.time() - item.get("time", 0)) / 60))
+            rows.append(
+                f"<tr><td style='color:{color};font-weight:600'>"
+                f"{_html.escape(str(item.get('message', '')))}</td>"
+                f"<td>{_html.escape(level)}</td><td>{age_min}m ago</td></tr>"
+            )
+        table = (
+            "<table><tr><th>Read</th><th>Severity</th><th>When</th></tr>"
+            + "".join(rows) + "</table>" if rows
+            else "<p class='dim'>No plate reads yet.</p>"
+        )
+        scope = snap.get("cameras") or []
+        scope_line = (
+            ", ".join(_html.escape(c) for c in scope)
+            if scope else "all cameras (no assignment restriction)"
+        )
+        return f"""<title>License Plate Recognition</title>
+<style>
+ body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a;
+        background: #fafafa; }}
+ h1 {{ font-size: 1.1rem; margin: 0 0 .2rem }}
+ .dim {{ color: #6b6f76 }}
+ .stats {{ display: flex; gap: 1.5rem; margin: .8rem 0 }}
+ .stats b {{ font-size: 1.3rem; display: block }}
+ table {{ border-collapse: collapse; width: 100% }}
+ th, td {{ text-align: left; padding: .3rem .6rem;
+          border-bottom: 1px solid #e0e0e0; font-size: .9rem }}
+ th {{ color: #6b6f76; font-weight: 500 }}
+ .note {{ margin-top: 1rem; font-size: .85rem; color: #6b6f76 }}
+</style>
+<h1>License Plate Recognition</h1>
+<div class="dim">Watching: {scope_line}</div>
+<div class="stats">
+ <div><b>{len(allow)}</b><span class="dim">allowlist</span></div>
+ <div><b>{len(deny)}</b><span class="dim">denylist</span></div>
+ <div><b>{snap.get("deduped_plates_tracked", 0)}</b><span class="dim">plates deduped</span></div>
+</div>
+{table}
+<div class="note">Watchlists are edited in the App Catalog's config
+form (applied live). Full history: the timeline's plate search.</div>
+"""
 
     def on_config_update(self, config: dict[str, Any]) -> None:
         """Live watchlist edits from the catalog's config form — one

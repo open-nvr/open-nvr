@@ -1188,3 +1188,62 @@ async def get_install_status(
             "message": None,
         }
     return _serialize_intent(row)
+
+
+# Cap on proxied app-UI documents. An app dashboard is a small
+# self-contained page; anything bigger is a bug or an abuse vector.
+UI_PROXY_MAX_BYTES = 1_000_000
+
+
+@router.get("/{app_id}/ui")
+async def get_app_ui(
+    app_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Proxy the app's ``GET /ui`` dashboard (RFC-0002 Phase 4).
+
+    The app-surface routing convention: an app that sets ``has_ui`` in
+    its manifest serves ONE self-contained HTML document at ``/ui`` on
+    its contract port, and this route is how the operator UI reaches it
+    — apps never get their own public ports. Deliberately minimal:
+
+    * **user-JWT only** (like actions): dashboards are operator surface;
+      the service key must never satisfy this route.
+    * ``/ui`` exactly — no subpaths, no assets, no methods but GET. A
+      dashboard that needs more than one self-contained document should
+      argue for widening the convention in an RFC, not around it.
+    * the response is size-capped and always served as text/html; the
+      catalog renders it inside a SANDBOXED iframe (no scripts), so
+      pages should be static HTML/CSS.
+    """
+    row = _get_app_or_404(db, app_id)
+    manifest = row.manifest_json if isinstance(row.manifest_json, dict) else {}
+    if not manifest.get("has_ui"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"App '{app_id}' declares no UI (manifest.has_ui).",
+        )
+    base_url = row.url.rstrip("/")
+    if validate_app_url(base_url) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App URL is blocked by policy.",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
+            resp = await client.get(f"{base_url}/ui")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"App '{app_id}' is unreachable.",
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"App '{app_id}' answered {resp.status_code} for /ui.",
+        )
+    body = resp.content[:UI_PROXY_MAX_BYTES]
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(content=body.decode("utf-8", errors="replace"))

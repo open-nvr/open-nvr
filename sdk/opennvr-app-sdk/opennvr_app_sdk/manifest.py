@@ -193,6 +193,10 @@ class AppManifest:
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
     actions: list[Action] = field(default_factory=list)
+    # RFC-0002 Phase 4 app-surface convention: True ⇒ the app serves an
+    # HTML dashboard at GET /ui on its contract port, and core proxies
+    # it at /api/v1/apps/{id}/ui (the catalog renders it sandboxed).
+    has_ui: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload (and the ``manifest_json``
@@ -209,4 +213,5 @@ class AppManifest:
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
+            "has_ui": bool(self.has_ui),
         }

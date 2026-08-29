@@ -69,6 +69,23 @@ function useLiveStatus(appId: string, enabled: boolean) {
   })
 }
 
+// RFC-0002 Phase 4 app-surface convention: the app's self-contained HTML
+// dashboard through core's JWT-gated proxy. The page is a static snapshot
+// (no scripts — rendered sandboxed), so we refetch on an interval instead
+// of letting the page self-refresh.
+function useAppUi(appId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['app-ui', appId],
+    queryFn: async () => {
+      const { data } = await apiService.getAppUi(appId)
+      return typeof data === 'string' ? data : ''
+    },
+    enabled,
+    retry: 0,
+    refetchInterval: enabled ? 15000 : false,
+  })
+}
+
 function useCapabilities() {
   return useQuery({
     queryKey: ['kai-c-capabilities'],
@@ -102,6 +119,8 @@ export function AppView() {
     return set
   }, [caps.data])
 
+  const hasUi = Boolean(app?.manifest?.has_ui)
+  const appUi = useAppUi(appId, hasUi && Boolean(app?.enabled))
   const requires = asStringList(app?.manifest?.requires_tasks)
   const missing = requires.filter((t) => !availableTasks.has(t))
   const stateSchema = Array.isArray(app?.manifest?.state_schema) ? app!.manifest!.state_schema! : []
@@ -226,6 +245,33 @@ export function AppView() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* ── Live dashboard ─────────────────────────────────────── */}
         <div className="lg:col-span-2 space-y-4">
+          {hasUi && app.enabled && (
+            <Card>
+              <CardHeader>
+                <CardTitle>App dashboard</CardTitle>
+                <span className="ml-auto text-xs text-[var(--text-dim)]">
+                  served by the app · refreshes every 15s
+                </span>
+              </CardHeader>
+              <CardContent>
+                {appUi.isError ? (
+                  <div className="text-sm text-[var(--text-dim)]">
+                    The app's dashboard is unreachable right now.
+                  </div>
+                ) : (
+                  <iframe
+                    title={`${app.name} dashboard`}
+                    // No scripts, no navigation, no same-origin: the page
+                    // is app-authored HTML — render it inert.
+                    sandbox=""
+                    srcDoc={appUi.data ?? ''}
+                    className="w-full rounded-md border border-[var(--border)] bg-white"
+                    style={{ height: 360 }}
+                  />
+                )}
+              </CardContent>
+            </Card>
+          )}
           <Card>
             <CardHeader>
               <Activity size={16} className="text-[var(--text-dim)]" />
