@@ -177,6 +177,14 @@ class Settings(BaseSettings):
     mediamtx_admin_token: str | None = None
     mediamtx_auto_provision: bool = True  # Enable/disable auto-provisioning on startup
 
+    # Seed for the ICE host addresses MediaMTX advertises to browsers
+    # (``webrtcAdditionalHosts``). Comma-separated. This is only a seed: the
+    # authoritative list lives in the DB and is learned from the address
+    # browsers actually reach this server on. See
+    # services/webrtc_ice_host_service.py for why the env var alone is not
+    # enough (it is baked in at container-create time and silently lost).
+    mediamtx_webrtc_hosts: str = ""
+
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
     # RECORDING_SEGMENT_SECONDS. Default 60 (1-minute clips) to match the
