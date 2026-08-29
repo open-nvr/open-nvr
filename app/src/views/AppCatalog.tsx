@@ -114,6 +114,18 @@ type IndexApp = {
 
 type CapabilitiesResp = { kai_c?: Record<string, any>; adapters?: Record<string, Record<string, any>> }
 
+// One entry from GET /api/v1/skills (RFC-0002 Phase 1) — the platform
+// registry's view of a capability: who provides it, its lifecycle status
+// derived from real signals, and the contracted events it publishes.
+export type SkillEntry = {
+  id: string
+  name: string
+  provider: { kind: 'app' | 'adapter'; providers: string[] }
+  status: 'available' | 'dormant' | 'active' | 'degraded' | 'missing-dependency'
+  reason?: string | null
+  publishes: string[]
+}
+
 // Reconciler-driven install lifecycle. install/uninstall POST an intent that
 // lands "pending"; the reconciler later flips it to "applied" or "failed".
 type InstallStatusPhase = 'none' | 'pending' | 'applied' | 'failed'
@@ -159,6 +171,20 @@ function useAppIndex() {
       const { data } = await apiService.getAppIndex()
       const apps = (data as { apps?: unknown })?.apps
       return (Array.isArray(apps) ? apps : []) as IndexApp[]
+    },
+    retry: 0,
+  })
+}
+
+// Best-effort like the index: an older backend without /skills (or an
+// errored fetch) simply omits the per-app skill line. retry:0.
+function useSkillsRegistry() {
+  return useQuery({
+    queryKey: ['skills-registry'],
+    queryFn: async () => {
+      const { data } = await apiService.getSkills()
+      const skills = (data as { skills?: unknown })?.skills
+      return (Array.isArray(skills) ? skills : []) as SkillEntry[]
     },
     retry: 0,
   })
@@ -971,7 +997,24 @@ export function LiveStateViews({ appId, views }: { appId: string; views: StateVi
 
 /* ---------------------------- App card --------------------------- */
 
-function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<string>; onConfigure: () => void }) {
+// The registry's lifecycle vocabulary → badge colors. Distinct from
+// statusVariant (health strings): dormant is a normal resting state, not
+// a warning.
+function skillStatusVariant(status: SkillEntry['status']): BadgeVariant {
+  switch (status) {
+    case 'active':
+    case 'available':
+      return 'success'
+    case 'degraded':
+      return 'warning'
+    case 'missing-dependency':
+      return 'destructive'
+    default:
+      return 'neutral'
+  }
+}
+
+function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks: Set<string>; skill?: SkillEntry; onConfigure: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
@@ -1050,6 +1093,23 @@ function AppCard({ app, tasks, onConfigure }: { app: RegisteredApp; tasks: Set<s
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <div className="text-[var(--text-dim)]">{app.manifest?.summary || 'No summary provided.'}</div>
+
+        {/* RFC-0002 Phase 1: the skill this app provides, as the platform
+            registry sees it — same derivation the agent's panel renders,
+            so the two consumers can never tell a different story. */}
+        {skill && (
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <Badge variant={skillStatusVariant(skill.status)}>
+              skill: {skill.status}
+              {skill.reason ? ` — ${skill.reason}` : ''}
+            </Badge>
+            {skill.publishes.length > 0 && (
+              <span className="text-[var(--text-dim)]">
+                publishes {skill.publishes.join(', ')}
+              </span>
+            )}
+          </div>
+        )}
 
         {requires.length > 0 && (
           <div>
@@ -1330,11 +1390,24 @@ export function AppCatalog() {
   const appsQuery = useApps()
   const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
+  const skillsQuery = useSkillsRegistry()
   const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
   const [installApp, setInstallApp] = useState<IndexApp | null>(null)
 
   const tasks = useMemo(() => availableTasks(capsQuery.data), [capsQuery.data])
   const apps = appsQuery.data ?? []
+
+  // Registry entries for app-provided skills, keyed by app id ("app:<id>"
+  // entries carry the bare app id in provider.providers[0]).
+  const skillsByApp = useMemo(() => {
+    const m = new Map<string, SkillEntry>()
+    for (const s of skillsQuery.data ?? []) {
+      if (s?.provider?.kind === 'app' && s.provider.providers?.[0]) {
+        m.set(s.provider.providers[0], s)
+      }
+    }
+    return m
+  }, [skillsQuery.data])
 
   // Available = index entries not yet installed. Entries with installed=true are
   // already registered and render in the Installed group (deduped by id there).
@@ -1380,7 +1453,7 @@ export function AppCatalog() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
             {apps.map((app) => (
-              <AppCard key={app.id} app={app} tasks={tasks} onConfigure={() => setConfigApp(app)} />
+              <AppCard key={app.id} app={app} tasks={tasks} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
             ))}
           </div>
         )}
