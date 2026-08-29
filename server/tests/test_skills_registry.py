@@ -202,3 +202,22 @@ def test_real_tasks_yml_derives_without_error():
     assert len(view["skills"]) >= 5
     assert all(s["status"] in {
         "available", "degraded", "missing-dependency"} for s in view["skills"])
+
+
+def test_internal_agent_door_serves_the_same_view():
+    # RFC-0002 Phase 1: the camera agent (a service with an internal
+    # key, not a user with a JWT) gets the registry on the internal
+    # router. Presence + auth-gating checked here; the derivation
+    # itself is the same function tested above, so the two doors
+    # cannot drift.
+    from routers.internal_camera_agent import router as internal_router
+    routes = {r.path: r for r in internal_router.routes}
+    path = "/internal/camera-agent/skills"
+    assert path in routes, "internal skills route is gone"
+    deps = [
+        d.dependency.__name__
+        for d in routes[path].dependencies
+        if getattr(d, "dependency", None)
+    ]
+    assert "_require_internal_key" in deps, (
+        "internal skills route lost its X-Internal-Api-Key gate")

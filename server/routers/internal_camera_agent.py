@@ -421,3 +421,27 @@ async def internal_recording_frame(
         content=jpeg, media_type="image/jpeg",
         headers={"Cache-Control": "max-age=86400"},
     )
+
+
+@router.get("/skills", dependencies=[Depends(_require_internal_key)])
+async def internal_skills_registry(db: Session = Depends(get_db)):
+    """RFC-0002 Phase 1: the skills-registry view, on the internal door.
+
+    Same derivation (and same TTL-cached KAI-C probes) as the operator's
+    ``GET /api/v1/skills`` — this route exists because the camera agent
+    is a service authenticating with ``X-Internal-Api-Key``, not a user
+    with a JWT. One view, two doors; the derivation stays in
+    ``services/skills_registry.py`` so they can never drift.
+    """
+    from models import InstalledApp
+    from routers.ai_models import _load_tasks_registry
+    from routers.skills import _kai_c_view
+    from services.skills_registry import derive_skills
+
+    health, caps = await _kai_c_view()
+    return derive_skills(
+        tasks_registry=_load_tasks_registry(),
+        adapters_health=health,
+        adapters_caps=caps,
+        apps_rows=db.query(InstalledApp).all(),
+    )
