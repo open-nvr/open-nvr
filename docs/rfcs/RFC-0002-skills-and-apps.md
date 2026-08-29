@@ -330,12 +330,31 @@ fresh install.
 
 ### Phase 5 — Budgets and scopes
 
-- [ ] Per-skill Tier-1 budgets at KAI-C (calls/min per camera per
+- [x] Per-skill Tier-1 budgets at KAI-C (calls/min per camera per
       skill), with shed-and-report semantics like Tier-0's region
-      shedding — never silent drops.
-- [ ] Subscription scopes: manifests request event scopes
-      (`events:plate.recognized`); install grants; bus-side
-      enforcement; grants visible in App Catalog; every grant audited.
+      shedding — never silent drops. *(shipped — `kai_c/budgets.py`:
+      sliding per-(adapter, camera) windows, env-configured
+      (`KAIC_BUDGET_PER_CAMERA_PER_MIN` + per-adapter overrides),
+      429 + `inference.refused_budget` audit +
+      `kaic_budget_shed_total` metric + rate-limited WARNING; calls
+      without a camera_id are exempt.)*
+- [x] Subscription scopes: manifests request event scopes
+      (`events:plate.recognized`); install grants; grants visible in
+      App Catalog; every grant audited. *(shipped —
+      `AppManifest.requires_scopes`; registration auto-grants and
+      writes one `app.scope_granted` audit row per scope; the catalog
+      renders the granted scopes on the app page; LPR declares
+      `events:plate.recognized`.)*
+- [ ] **Bus-side scope enforcement** *(staged follow-up — the one
+      Phase 5 piece not shipped)*: today every bus client shares the
+      deployment token, so a granted scope is policy + audit, not a
+      wire-level barrier. The enforcement design: NATS authorization
+      config with one user per installed app, whose `subscribe`
+      permissions are exactly its granted scopes' subjects; core
+      renders that config from the grant table on install/uninstall
+      and reloads the broker. Requires per-app credential delivery to
+      app containers — a deployment-surface change big enough to want
+      its own review.
 
 **Accept when:** an app without the plate scope cannot receive plate
 events, and a runaway subscriber degrades predictably instead of

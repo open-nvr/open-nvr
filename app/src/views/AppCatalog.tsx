@@ -70,6 +70,10 @@ export type AppManifest = {
   // RFC-0002 Phase 4: the app serves an HTML dashboard at /ui on its
   // contract port; AppView renders it via core's proxy, sandboxed.
   has_ui?: boolean
+  // RFC-0002 Phase 5: event scopes the app requested (granted at
+  // registration, each grant audited) — plate reads are PII, so who
+  // consumes them is visible here, not buried in code.
+  requires_scopes?: string[]
 }
 
 export type ManifestAction = {

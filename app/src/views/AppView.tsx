@@ -335,6 +335,18 @@ export function AppView() {
                   </div>
                 </div>
               )}
+              {(app.manifest?.requires_scopes ?? []).length > 0 && (
+                <div>
+                  <div className="text-xs text-[var(--text-dim)] mb-1">
+                    Event scopes (granted at registration, audited)
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(app.manifest?.requires_scopes ?? []).map((sc) => (
+                      <Badge key={sc} variant="info">{sc}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
               {app.url && (
                 <div className="text-xs text-[var(--text-dim)]">
                   Contract: <span className="font-mono">{app.url}</span>
