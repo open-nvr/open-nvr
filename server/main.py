@@ -79,6 +79,7 @@ from routers import (
     recordings,
     roles,
     security,
+    skills as skills_router,
     streams,
     suricata_logs,
     suricata_stream,
@@ -750,6 +751,9 @@ app.include_router(ai_models.router, prefix=settings.api_prefix)
 app.include_router(ai_model_management.router, prefix=settings.api_prefix)
 app.include_router(ai_detection_results.router, prefix=settings.api_prefix)
 app.include_router(apps.router, prefix=settings.api_prefix)
+# RFC-0002 Phase 1: the skills registry — index over adapters, apps,
+# assignments (Phase 2) and health. GET /api/v1/skills.
+app.include_router(skills_router.router, prefix=settings.api_prefix)
 app.include_router(cloud_providers.router, prefix=settings.api_prefix)
 app.include_router(cloud_inference.router, prefix=settings.api_prefix)
 app.include_router(compliance.router, prefix=settings.api_prefix)
