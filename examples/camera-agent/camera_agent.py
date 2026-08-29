@@ -3051,6 +3051,7 @@ class CameraAgentRuntime:
         # else kaic_api_key, else the INTERNAL_API_KEY env var.
         self.app_registry: AppRegistryClient | None = None
         self.skills_registry: SkillsRegistryClient | None = None
+        self._registry_key: str = ""
         if cfg.opennvr_api_url:
             import os
 
@@ -3070,6 +3071,8 @@ class CameraAgentRuntime:
             self.skills_registry = SkillsRegistryClient(
                 base_url=cfg.opennvr_api_url, api_key=app_key,
             )
+            # Kept for contract-parity self-registration (RFC-0002 gap 8).
+            self._registry_key = app_key
             logger.info(
                 "app door enabled: reading installed apps from %s "
                 "(read-only — the agent never enables/disables/configures)",
@@ -4544,7 +4547,80 @@ class CameraAgentRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    def contract_state(self) -> dict[str, Any]:
+        """The ``GET /state`` payload (RFC-0002 contract parity): coarse
+        live state in the same spirit as SDK apps' StateView payloads —
+        identity-level facts, no controls, no media. Everything here is
+        already visible on /health or the skills panel; /state is the
+        CONTRACT-shaped door to it."""
+        try:
+            skills = self.skills_payload()
+        except Exception:  # noqa: BLE001 — state must never 500 the probe
+            skills = []
+        return {
+            "cameras": [cam.camera_id for cam in self.cfg.cameras],
+            "monitors": len(getattr(self.monitors, "_monitors", {}) or {}),
+            "skills": {
+                "enabled": sum(1 for s in skills if s.get("enabled")),
+                "total": len(skills),
+            },
+            "llm_model": self.cfg.llm_model,
+            "llm_error": getattr(self, "last_llm_error", None),
+            "vision_error": getattr(self.tools, "last_vision_error", None),
+        }
+
+    async def register_with_app_catalog(self) -> bool:
+        """RFC-0002 gap 8: self-register with the App Catalog on boot, the
+        way every SDK app does (POST /api/v1/apps/register, best-effort).
+        Never raises; False = not registered (unwired, unreachable, or
+        rejected) and the agent runs exactly as before — registration
+        makes the platform SEE the agent, it gates nothing.
+        """
+        base = self.cfg.opennvr_api_url
+        if not base:
+            return False
+        import socket
+
+        scheme = "https" if self.cfg.tls_certfile else "http"
+        own_url = (
+            self.cfg.agent_public_url
+            or f"{scheme}://{socket.gethostname()}:{self.cfg.port}"
+        ).rstrip("/")
+        payload = {"url": own_url, "manifest": agent_manifest()}
+        headers: dict[str, str] = {}
+        if self._registry_key:
+            # Both header shapes, same reason as the SDK: one configured
+            # key must work whether the operator provisioned the internal
+            # service key or a user token.
+            headers["X-Internal-Api-Key"] = self._registry_key
+            headers["Authorization"] = f"Bearer {self._registry_key}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                resp = await client.post(
+                    f"{base.rstrip('/')}/api/v1/apps/register",
+                    json=payload, headers=headers,
+                )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "app-catalog self-registration rejected: HTTP %d %s",
+                    resp.status_code, resp.text[:200])
+                return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "app-catalog self-registration failed: %s — continuing "
+                "without the registry", exc)
+            return False
+        logger.info("registered with the App Catalog as %s", own_url)
+        return True
+
     async def startup(self) -> None:
+        # Contract parity (RFC-0002 gap 8): make the platform see the
+        # flagship. Fire-and-forget so a slow core never delays boot.
+        if self.cfg.opennvr_api_url:
+            asyncio.create_task(
+                self.register_with_app_catalog(),
+                name="camera-agent-app-catalog-register",
+            )
         if self.cfg.nats_inference_url:
             self._subscriber_task = asyncio.create_task(
                 run_event_subscriber(
@@ -4968,8 +5044,39 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
 # ── FastAPI app + WebSocket entry point ────────────────────────────
 
 
+AGENT_VERSION = "1.0.0"
+
+
+def agent_manifest() -> dict[str, Any]:
+    """RFC-0002 gap 8 (contract parity): the flagship app's identity, in
+    the same shape every SDK app serves. AppManifest is an identity
+    dataclass, not a base class — the agent still doesn't ride
+    Detector/FrameApp/AlertSubscriber (that debt stays on the SDK-rule
+    conformance allowlist); what changes is that the App Catalog and the
+    skills registry can finally SEE it.
+
+    ``requires_tasks`` is empty on purpose: every capability degrades
+    gracefully (that's the agent's whole design), so nothing is a hard
+    requirement the catalog should warn about.
+    """
+    from opennvr_app_sdk import AppManifest
+
+    return AppManifest(
+        id="camera-agent",
+        name="OpenNVR Agent",
+        version=AGENT_VERSION,
+        category="assistant",
+        summary=(
+            "Conversational monitoring agent: looks at cameras, answers "
+            "questions, runs watch monitors, and relays app alerts. Every "
+            "capability degrades gracefully when its backend is absent."
+        ),
+        requires_tasks=[],
+    ).to_dict()
+
+
 def build_app(runtime: CameraAgentRuntime) -> FastAPI:
-    app = FastAPI(title="OpenNVR camera-agent", version="1.0.0")
+    app = FastAPI(title="OpenNVR camera-agent", version=AGENT_VERSION)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -4985,7 +5092,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     # ranks: viewer < operator < admin. The PAGE SHELL stays open (it
     # renders the login overlay); every data/action endpoint is gated.
     _TIER_RANK = {"viewer": 0, "operator": 1, "admin": 2}
-    _OPEN_PATHS = {"/health", "/auth/login", "/auth/refresh", "/agent"}
+    # /manifest and /state are the RFC-0002 contract surface: core's App
+    # Catalog probes them without an OpenNVR bearer (same trust story as
+    # /health — identity + coarse live state, no controls, no media).
+    _OPEN_PATHS = {"/health", "/manifest", "/state",
+                   "/auth/login", "/auth/refresh", "/agent"}
 
     def _user_tier(user: dict[str, Any]) -> str:
         if user.get("is_superuser"):
@@ -5118,6 +5229,19 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "llm_error": getattr(runtime, "last_llm_error", None),
             "history": getattr(runtime, "events_client", None) is not None,
         }
+
+    # ── RFC-0002 contract parity (gap 8) ───────────────────────────
+    # The two contract routes every SDK app serves, so the App Catalog's
+    # status probe and the skills registry's app-manifest source finally
+    # see the flagship. Same trust level as /health (open paths).
+
+    @app.get("/manifest")
+    async def _manifest() -> dict[str, Any]:
+        return agent_manifest()
+
+    @app.get("/state")
+    async def _state() -> dict[str, Any]:
+        return runtime.contract_state()
 
     @app.get("/demo", response_class=HTMLResponse)
     async def _demo() -> HTMLResponse:
