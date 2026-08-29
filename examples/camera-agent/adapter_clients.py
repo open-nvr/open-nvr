@@ -614,7 +614,20 @@ class OllamaClient(_ReusableClientMixin):
         resp = await self._client().post(self._url, json=body, headers=headers)
         if "think" in body and getattr(resp, "status_code", 200) >= 400:
             # Some Ollama versions / non-thinking models reject the ``think``
-            # field. Retry once without it rather than failing the turn.
+            # field. Retry once without it rather than failing the turn — but
+            # READ THE BODY FIRST. This used to fire on any 4xx, so a missing
+            # model ("model 'x' not found, try pulling it first", HTTP 404)
+            # burned the retry on a request doomed to the same 404 and logged
+            # a misleading "rejected with think=..." line (issue #344's box).
+            # A think rejection names the field; a missing model says "not
+            # found". Only the former is worth a second request.
+            err_text = ""
+            try:
+                err_text = (resp.text or "").lower()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            if "not found" in err_text and "think" not in err_text:
+                resp.raise_for_status()
             logger.info("ollama: request rejected with think=%s; retrying without it", body["think"])
             body.pop("think", None)
             resp = await self._client().post(self._url, json=body, headers=headers)
