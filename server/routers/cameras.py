@@ -1034,6 +1034,16 @@ async def update_camera(
         )
 
         update_fields = camera_update.model_dump(exclude_unset=True)
+        # RFC-0002 Phase 2: the editor's assignments write routes through
+        # the assignment TABLE as the 'operator' consumer — full-replace
+        # of the operator's claims only, so app/agent claims survive an
+        # operator edit (union semantics, decision 8). Camera.assignments
+        # itself becomes the table's projection, recomputed inside.
+        operator_assignments = update_fields.pop("assignments", None)
+        if operator_assignments is not None:
+            from services.skill_assignments import set_operator_assignments
+
+            set_operator_assignments(db, camera, operator_assignments)
         for field, value in update_fields.items():
             setattr(camera, field, value)
 

@@ -436,6 +436,7 @@ async def internal_skills_registry(db: Session = Depends(get_db)):
     from models import InstalledApp
     from routers.ai_models import _load_tasks_registry
     from routers.skills import _kai_c_view
+    from services import skill_assignments
     from services.skills_registry import derive_skills
 
     health, caps = await _kai_c_view()
@@ -444,4 +445,5 @@ async def internal_skills_registry(db: Session = Depends(get_db)):
         adapters_health=health,
         adapters_caps=caps,
         apps_rows=db.query(InstalledApp).all(),
+        assignments=skill_assignments.assignments_by_skill(db),
     )

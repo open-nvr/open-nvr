@@ -424,6 +424,45 @@ class CameraCapability(Base):
     camera = relationship("Camera", back_populates="capability")
 
 
+class SkillAssignment(Base):
+    """RFC-0002 Phase 2: the declarative camera-assignment table.
+
+    Desired state with union semantics (decision 8): one row per
+    (skill, camera, **consumer**) claim. A skill runs on the UNION of
+    its consumers' cameras; releasing one consumer's row shrinks the
+    union, and releasing the last makes the skill dormant (gap 7).
+
+    ``Camera.assignments`` (the JSON column Tier-0 reconcile, the SDK's
+    ``cameras_for_skill`` and the internal camera-agent endpoint already
+    read) becomes the PROJECTION of this table — recomputed by
+    ``services/skill_assignments.py`` on every write, so no existing
+    consumer changes to keep working.
+
+    ``skill`` is an open-vocabulary string on purpose (the tasks.yml
+    canonical names and app-derived skills both land here; annotate,
+    never gate — the per-camera-assignment design rule). ``consumer``
+    identifies who wants it: ``operator`` (the camera-settings editor),
+    ``app:<id>``, ``agent``. ``params`` is the per-claim narrowing
+    (e.g. ``{"labels": [...]}``); claims merge additively in the
+    projection.
+    """
+
+    __tablename__ = "skill_assignments"
+    __table_args__ = (
+        Index("uq_skill_assignment", "skill", "camera_id", "consumer",
+              unique=True),
+        Index("ix_skill_assignments_camera", "camera_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    skill = Column(String(100), nullable=False, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    consumer = Column(String(100), nullable=False)
+    params = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
 class TimelineEvent(Base):
     """Canonical event & evidence store (RFC-0001 Challenge 1) — one row per
     object VISIT (a Tier-0 track lifecycle), alarm, or app alert.

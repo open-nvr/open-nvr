@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
@@ -29,6 +29,7 @@ from core.database import get_db
 from core.logging_config import main_logger
 from models import InstalledApp, User
 from routers.ai_models import _load_tasks_registry
+from services import skill_assignments
 from services.kai_c_service import get_kai_c_service
 from services.skills_registry import derive_skills
 
@@ -82,4 +83,70 @@ async def list_skills(
         adapters_health=health,
         adapters_caps=caps,
         apps_rows=apps_rows,
+        assignments=skill_assignments.assignments_by_skill(db),
     )
+
+
+# ── RFC-0002 Phase 2: the declarative camera-assignment surface ────
+# One table, union semantics (decision 8). GET shows the union WITH the
+# per-consumer claims, so a release is never a surprise; PUT/DELETE act
+# on exactly one (skill, camera, consumer) claim. Releasing the last
+# claim makes the skill dormant — visible immediately in GET /skills.
+
+
+@router.get("/{skill_id}/cameras")
+async def get_skill_cameras(
+    skill_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    return skill_assignments.skill_view(db, skill_id)
+
+
+@router.put("/{skill_id}/cameras/{camera_id}")
+async def declare_skill_camera(
+    skill_id: str,
+    camera_id: int,
+    consumer: str = Body(..., embed=True),
+    params: dict[str, Any] | None = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    """Declare one consumer's claim (desired state; idempotent upsert).
+
+    The vocabulary stays open — an assignment may name a skill whose
+    capability isn't installed yet (annotate-never-gate, the
+    per-camera-assignment design rule); GET /skills is where its status
+    shows as missing-dependency.
+    """
+    try:
+        skill_assignments.declare(
+            db, skill=skill_id, camera_id=camera_id,
+            consumer=consumer, params=params,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    db.commit()
+    return skill_assignments.skill_view(db, skill_id)
+
+
+@router.delete("/{skill_id}/cameras/{camera_id}")
+async def release_skill_camera(
+    skill_id: str,
+    camera_id: int,
+    consumer: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    """Release one consumer's claim. The union shrinks by exactly this
+    claim; other consumers' assignments survive (decision 8)."""
+    if not skill_assignments.release(
+            db, skill=skill_id, camera_id=camera_id, consumer=consumer):
+        raise HTTPException(
+            status_code=404,
+            detail=f"no claim by {consumer!r} on camera {camera_id} "
+                   f"for skill {skill_id!r}")
+    db.commit()
+    return skill_assignments.skill_view(db, skill_id)
