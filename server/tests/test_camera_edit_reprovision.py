@@ -232,6 +232,7 @@ def _full_form(cam, **overrides) -> dict:
         "username": cam.username,
         "rtsp_url": cam.rtsp_url,
         "substream_url": cam.substream_url,
+        "display_aspect_ratio": cam.display_aspect_ratio,
         "is_active": cam.is_active,
     }
     body.update(overrides)
@@ -335,6 +336,54 @@ def test_port_only_change_does_not_reprovision(env):
         f"/api/v1/cameras/{cam.id}", json=_full_form(cam, port=8554), headers=_auth()
     )
     assert resp.status_code == 200, resp.text
+    assert env.calls == []
+
+
+def test_display_aspect_change_does_not_reprovision(env):
+    """The display aspect is a rendering hint the browser applies — it never
+    reaches MediaMTX. Bouncing the stream to change how a tile is shaped would
+    drop every viewer for nothing (issue #354)."""
+    cam = env.make_camera()
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json=_full_form(cam, display_aspect_ratio="16:9"),
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert env.calls == []
+    assert resp.json()["stream_action"] in (None, "none")
+
+    env.db.expire_all()
+    assert env.db.get(Camera, cam.id).display_aspect_ratio == "16:9"
+
+
+def test_display_aspect_auto_is_stored_as_null(env):
+    """"auto" and "" are spellings of "no override"; the DB keeps exactly one
+    representation of it so the frontend never has to test for three."""
+    cam = env.make_camera()
+    env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json=_full_form(cam, display_aspect_ratio="16:9"),
+        headers=_auth(),
+    )
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json=_full_form(cam, display_aspect_ratio="auto"),
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    env.db.expire_all()
+    assert env.db.get(Camera, cam.id).display_aspect_ratio is None
+
+
+def test_display_aspect_rejects_junk(env):
+    cam = env.make_camera()
+    resp = env.client.put(
+        f"/api/v1/cameras/{cam.id}",
+        json=_full_form(cam, display_aspect_ratio="1080N"),
+        headers=_auth(),
+    )
+    assert resp.status_code == 422, resp.text
     assert env.calls == []
 
 

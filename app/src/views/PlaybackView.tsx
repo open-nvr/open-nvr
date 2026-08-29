@@ -21,7 +21,7 @@ import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
-import { useRecordingsByDate } from '../lib/queries'
+import { useCameraAspects, useRecordingsByDate } from '../lib/queries'
 import { formatDuration } from '../lib/time'
 import {
   Calendar,
@@ -94,6 +94,9 @@ interface CloudUploadStatus {
 export function PlaybackView() {
   const { token, loading: authLoading, user } = useAuth()
   const { showError, showSuccess } = useSnackbar()
+  // Recordings hold the camera's coded frames untouched, so an anamorphic
+  // camera needs the same correction here as in Live View (#354).
+  const cameraAspects = useCameraAspects()
 
   // Data states
   const [cameras, setCameras] = useState<CameraWithRecordings[]>([])
@@ -581,6 +584,7 @@ export function PlaybackView() {
           cameraName={consoleTarget.cameraName}
           date={consoleTarget.date}
           onClose={closePlayer}
+          {...(cameraAspects[consoleTarget.cameraId] ?? {})}
         />
       )}
 

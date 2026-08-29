@@ -18,6 +18,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
+import { displayAspect } from '../../lib/aspect'
+import type { AspectOverride } from '../../lib/aspect'
 import { Button } from '../../components/ui'
 
 type Pt = [number, number]
@@ -25,7 +27,11 @@ type Dir = 'both' | 'a_to_b' | 'b_to_a'
 type Tripwire = { a: Pt; b: Pt; count_direction: Dir }
 type PerCam = Record<string, Pt[] | Tripwire>
 
-type Camera = { id: number | string; name?: string }
+type Camera = {
+  id: number | string
+  name?: string
+  display_aspect_ratio?: AspectOverride | null
+}
 
 // Parse whatever is currently stored (JSON string or object) into the
 // per-camera map; tolerate junk by starting empty rather than throwing.
@@ -98,6 +104,12 @@ export function GeometryEditor({
   }, [cam, perCam, cameras])
 
   const snap = useSnapshotUrl(cam || null)
+  // Natural size of the still. The snapshot comes off the camera at its CODED
+  // size, so a 1080N frame arrives 960x1080 — see lib/aspect.ts (#354).
+  const [snapDims, setSnapDims] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    setSnapDims(null)
+  }, [snap.data])
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [drag, setDrag] = useState<number | 'a' | 'b' | null>(null)
 
@@ -151,14 +163,24 @@ export function GeometryEditor({
     write(next)
   }
 
-  // The SVG uses a 160×90 (16:9) viewBox with the container locked to
-  // aspect-ratio 16/9, so x and y scale equally — circles stay round and
-  // strokes uniform. Crucially, `<polygon points>` needs UNITLESS
-  // numbers (percentages are invalid there and render nothing — the bug
-  // the first draft had); viewBox coords fix that. VW/VH map normalized
-  // 0–1 into that space.
-  const VW = 160
+  // Draw surface aspect. It must match the still's DISPLAY aspect, not the
+  // container's old hard-coded 16:9: the overlay's normalized 0–1 coordinates
+  // span the whole box, so if the image doesn't span exactly the same box
+  // every point an operator places lands somewhere else in the frame the
+  // pipeline processes. Falls back to 16:9 until the still loads.
+  const camOverride = cameras.find((c) => String(c.id) === cam)
+  const drawAspect =
+    displayAspect(snapDims?.w, snapDims?.h, camOverride?.display_aspect_ratio) ?? 16 / 9
+
+  // The SVG viewBox is VH tall and VW wide, with the container locked to the
+  // same aspect, so x and y scale equally — circles stay round and strokes
+  // uniform. Deriving VW from drawAspect is what preserves that for a camera
+  // that isn't 16:9. Crucially, `<polygon points>` needs UNITLESS numbers
+  // (percentages are invalid there and render nothing — the bug the first
+  // draft had); viewBox coords fix that. VW/VH map normalized 0–1 into that
+  // space.
   const VH = 90
+  const VW = Math.round(VH * drawAspect)
   const vx = (n: number) => n * VW
   const vy = (n: number) => n * VH
 
@@ -201,9 +223,23 @@ export function GeometryEditor({
       </div>
 
       {/* Draw surface: snapshot (or grid) + SVG overlay */}
-      <div className="relative w-full rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)]" style={{ aspectRatio: '16 / 9' }}>
+      <div className="relative w-full rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)]" style={{ aspectRatio: String(drawAspect) }}>
         {snap.data ? (
-          <img src={snap.data} alt="camera still" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
+          /* object-fill, not object-cover: cover crops a still whose aspect
+             differs from the box, and the cropped-away band is frame the
+             operator would then be unable to draw on (and would mis-map). */
+          <img
+            src={snap.data}
+            alt="camera still"
+            className="absolute inset-0 w-full h-full object-fill"
+            draggable={false}
+            onLoad={(e) =>
+              setSnapDims({
+                w: e.currentTarget.naturalWidth,
+                h: e.currentTarget.naturalHeight,
+              })
+            }
+          />
         ) : (
           <div className="absolute inset-0" style={{
             backgroundImage:

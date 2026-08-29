@@ -30,6 +30,7 @@ import type { BadgeVariant } from '../components/ui'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { QrScanner } from '../components/QrScanner'
 import { parseCameraQr } from '../lib/cameraQr'
+import { ASPECT_OPTIONS, isCustomAspect } from '../lib/aspect'
 import { parseRtspUrl, rtspPortFromUrl, syncCameraIdentity } from '../lib/cameraIdentity'
 import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
@@ -61,6 +62,8 @@ type Camera = {
   password?: string | null
   rtsp_url?: string | null
   substream_url?: string | null
+  /** Display-only aspect override; null = auto-detect. See lib/aspect.ts. */
+  display_aspect_ratio?: string | null
   location?: string | null
   vlan?: string | null
   status?: string | null
@@ -88,6 +91,23 @@ type Camera = {
   assignments?: CameraAssignment[] | null
 }
 
+/** Which preset the stored display-aspect value corresponds to. A stored
+ *  ratio that isn't one of the presets lands on 'custom'. */
+function aspectChoiceOf(stored: string | null | undefined): string {
+  if (!stored) return 'auto'
+  if (isCustomAspect(stored)) return 'custom'
+  return stored
+}
+
+/** The value to persist: null means "auto", which is how the API and the DB
+ *  both spell "no override". */
+function aspectValueOf(form: CameraForm): string | null {
+  const choice = form.display_aspect_choice || 'auto'
+  if (choice === 'auto') return null
+  if (choice === 'custom') return form.display_aspect_custom?.trim() || null
+  return choice
+}
+
 // Form-side assignment row: labels edited as a comma-separated string.
 type AssignmentRow = { skill: string; labels: string }
 
@@ -100,6 +120,10 @@ type CameraForm = {
   password?: string
   rtsp_url?: string
   substream_url?: string
+  /** Preset key: 'auto' | 'native' | '16:9' | '4:3' | 'custom'. */
+  display_aspect_choice?: string
+  /** Free-form "W:H", only meaningful while display_aspect_choice is 'custom'. */
+  display_aspect_custom?: string
   location?: string
   vlan?: string
   status?: string
@@ -207,6 +231,8 @@ export function Cameras() {
     password: '',
     rtsp_url: '',
     substream_url: '',
+    display_aspect_choice: 'auto',
+    display_aspect_custom: '',
     location: '',
     vlan: '',
     status: 'unknown',
@@ -222,6 +248,8 @@ export function Cameras() {
     password: '',
     rtsp_url: '',
     substream_url: '',
+    display_aspect_choice: 'auto',
+    display_aspect_custom: '',
     location: '',
     vlan: '',
     status: 'unknown',
@@ -356,6 +384,7 @@ export function Cameras() {
         ...(form.password ? { password: form.password } : {}),
         rtsp_url: form.rtsp_url || null,
         substream_url: form.substream_url || null,
+        display_aspect_ratio: aspectValueOf(form),
         location: form.location || null,
         vlan: form.vlan || null,
         status: form.status || undefined,
@@ -473,6 +502,10 @@ export function Cameras() {
       password: '',
       rtsp_url: c.rtsp_url || '',
       substream_url: c.substream_url || '',
+      display_aspect_choice: aspectChoiceOf(c.display_aspect_ratio),
+      display_aspect_custom: isCustomAspect(c.display_aspect_ratio)
+        ? (c.display_aspect_ratio as string)
+        : '',
       location: c.location || '',
       vlan: c.vlan || '',
       status: c.status || 'unknown',
@@ -826,6 +859,36 @@ export function Cameras() {
             )}
             <Field label="Substream URL">
               <input className={EDIT_INPUT} value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
+            </Field>
+
+            {/* Display only — it never re-encodes and never re-provisions the
+                stream. Auto covers encoders that squash the picture and signal
+                no aspect ratio (Dahua/CP Plus "1080N" = 960x1080 for a 16:9
+                scene); Native is the escape hatch if detection guesses wrong. */}
+            <Field label="Display aspect ratio">
+              <div className="space-y-1">
+                <select
+                  className={EDIT_INPUT}
+                  value={form.display_aspect_choice || 'auto'}
+                  onChange={(e) => setForm({ ...form, display_aspect_choice: e.target.value })}
+                >
+                  {ASPECT_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                {form.display_aspect_choice === 'custom' && (
+                  <input
+                    className={EDIT_INPUT}
+                    value={form.display_aspect_custom || ''}
+                    onChange={(e) => setForm({ ...form, display_aspect_custom: e.target.value })}
+                    placeholder="e.g. 16:9"
+                  />
+                )}
+                <p className="text-xs text-[var(--muted)]">
+                  How OpenNVR shows this camera. Display only — recordings are
+                  stored exactly as the camera sends them.
+                </p>
+              </div>
             </Field>
 
             <Field label="Assignments">

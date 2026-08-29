@@ -18,5 +18,6 @@
 
 export { VideoPlayer } from './VideoPlayer'
 export type { VideoPlayerProps, VideoPlayerHandle, VideoPlayerMode, StreamType } from './VideoPlayer'
+export { AspectFrame } from './AspectFrame'
 export { VideoControls } from './VideoControls'
 export type { VideoControlsProps } from './VideoControls'

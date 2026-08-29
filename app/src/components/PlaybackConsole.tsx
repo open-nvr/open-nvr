@@ -38,6 +38,10 @@ import {
   Radio,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { displayAspect, isStretched } from '../lib/aspect'
+import type { AspectOverride } from '../lib/aspect'
+import { useVideoSize } from '../hooks/useVideoAspect'
+import { AspectFrame } from './VideoPlayer'
 import { loadHls, warmHls } from '../lib/loadHls'
 import { useCameraSegments } from '../lib/queries'
 import { localDayEnd, localDayStart } from '../lib/time'
@@ -62,6 +66,10 @@ interface PlaybackConsoleProps {
   /** YYYY-MM-DD */
   date: string
   onClose: () => void
+  /** Per-camera display-aspect override; recordings are stored exactly as the
+      camera sent them, so an anamorphic stream plays back squished without it
+      (issue #354). Omitted for a deleted camera — detection still applies. */
+  displayAspectOverride?: AspectOverride | null
 }
 
 // Zoom presets (visible span in ms) — mirrors the "1 Day / …" control.
@@ -98,7 +106,13 @@ const sameSegs = (a: Seg[], b: Seg[]) =>
   a.length === b.length &&
   a.every((s, i) => s.startMs === b[i].startMs && s.endMs === b[i].endMs)
 
-export function PlaybackConsole({ cameraId, cameraName, date, onClose }: PlaybackConsoleProps) {
+export function PlaybackConsole({
+  cameraId,
+  cameraName,
+  date,
+  onClose,
+  displayAspectOverride,
+}: PlaybackConsoleProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -109,6 +123,15 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
   useEffect(() => {
     warmHls()
   }, [])
+  // A clip's coded size is not always the size it should be shown at — see
+  // lib/aspect.ts. MediaMTX records the camera's bytes untouched, so a 1080N
+  // recording is 960x1080 exactly like the live stream it came from.
+  const videoSize = useVideoSize(videoRef)
+  const videoAspect = useMemo(
+    () => displayAspect(videoSize?.width, videoSize?.height, displayAspectOverride),
+    [videoSize?.width, videoSize?.height, displayAspectOverride]
+  )
+  const stretched = isStretched(videoSize?.width, videoSize?.height, videoAspect)
   const sessionIdRef = useRef<string | null>(null)
   // Guards against out-of-order async loads: only the latest load token wins.
   const loadTokenRef = useRef(0)
@@ -698,10 +721,14 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
         </div>
 
         {/* Video */}
+        {/* Size container so AspectFrame's 100cqw resolves to this box's width.
+            Both branches have a definite height — aspect-video derives one from
+            the width, flex-1 min-h-0 takes one from the column. */}
         <div
           className={`relative bg-black flex items-center justify-center ${
             isFullscreen ? 'flex-1 min-h-0' : 'aspect-video'
           }`}
+          style={{ containerType: 'size' }}
         >
           {error ? (
             <div className="text-center p-8">
@@ -710,13 +737,15 @@ export function PlaybackConsole({ cameraId, cameraName, date, onClose }: Playbac
             </div>
           ) : (
             <>
-              <video
-                ref={videoRef}
-                className="w-full h-full object-contain"
-                playsInline
-                crossOrigin="anonymous"
-                onClick={togglePlay}
-              />
+              <AspectFrame aspect={videoAspect}>
+                <video
+                  ref={videoRef}
+                  className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
+                  playsInline
+                  crossOrigin="anonymous"
+                  onClick={togglePlay}
+                />
+              </AspectFrame>
               {(loading || buffering) && !livePrompt && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
                   <Loader2 size={40} className="animate-spin text-[var(--accent)]" />
