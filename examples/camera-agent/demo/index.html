@@ -1412,7 +1412,14 @@
     // /health is an open path, so the dot works even behind the login.
     async function pollHealth(){ const d=$("healthDot"); if(!d) return;
       try{ const h=await (await fetch("/health")).json();
-        if(h.vision_error){ d.className="hdot warn";
+        // LLM first: a dead brain outranks a degraded eye — with it down,
+        // EVERY question fails, so the dot goes red, not amber. The title
+        // carries the server's actual reason ("model X not found — pull
+        // it", "unreachable at host.docker.internal:11434"), because a
+        // red dot with no diagnosis is how issue #344 took three people.
+        if(h.llm_error){ d.className="hdot down";
+          d.title="LLM failing: "+h.llm_error; }
+        else if(h.vision_error){ d.className="hdot warn";
           d.title="Vision degraded: "+h.vision_error; }
         else { d.className="hdot ok"; d.title="Agent healthy"; }
       }catch{ d.className="hdot down"; d.title="Agent unreachable"; } }

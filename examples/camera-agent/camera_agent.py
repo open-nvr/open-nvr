@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -2972,6 +2973,14 @@ class CameraAgentRuntime:
     def __init__(self, cfg: AppConfig) -> None:
         self.cfg = cfg
 
+        # The last LLM failure, for /health and the demo's header dot — None
+        # while the brain answers. Issue #344: Ollama crash-looped for three
+        # days while the dot glowed green and every question said only
+        # "assistant failed"; this is the field that would have said why.
+        # Set/cleared ONLY by the turn loop (real questions), never by
+        # boot-time prewarm, whose transient failures are not a verdict.
+        self.last_llm_error: str | None = None
+
         self.context = CameraContext(
             cameras=cfg.cameras,
             frame_cache_ttl_seconds=cfg.frame_cache_ttl_seconds,
@@ -5069,6 +5078,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # failure reason (None = last look succeeded or none ran yet) and
             # whether the events store (History) is wired.
             "vision_error": getattr(runtime.tools, "last_vision_error", None),
+            # The last LLM failure from a real turn (None = answering).
+            # Issue #344: the brain crash-looped for days behind a green dot.
+            "llm_error": getattr(runtime, "last_llm_error", None),
             "history": getattr(runtime, "events_client", None) is not None,
         }
 
@@ -5791,6 +5803,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # racing thumbnail fetch may have overwritten the cache seed,
             # and the chat must show the frame the answer was ABOUT.
             frames = _frames_for(runtime)
+        except LLMTurnError as exc:
+            # The diagnosis IS the message (issue #344): "model X not found,
+            # try pulling it first" must reach the operator, not the log.
+            logger.error("ask: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=502)
         except Exception:
             logger.exception("ask: turn failed")
             return JSONResponse({"error": "assistant failed"}, status_code=502)
@@ -5974,6 +5991,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 return JSONResponse({"transcript": transcript, "reply": "",
                                      "audio_b64": None, "timings_ms": timings,
                                      "cancelled": True})
+            except LLMTurnError as exc:
+                logger.error("converse: %s", exc)
+                return JSONResponse({"error": str(exc)}, status_code=502)
             except Exception:
                 logger.exception("converse: LLM turn failed")
                 return JSONResponse({"error": "assistant failed"}, status_code=502)
@@ -6519,6 +6539,57 @@ def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) ->
     return cameras[0]
 
 
+class LLMTurnError(RuntimeError):
+    """The LLM leg of a turn failed, with a message worth SHOWING.
+
+    Issue #344's shape: httpx raised, the generic handler said "assistant
+    failed", and the one line that named the fix — Ollama's own error body,
+    literally "model not found, try pulling it first" — was thrown away.
+    Handlers turn this into a 502 whose ``error`` is the diagnosis, and the
+    same text lands in ``runtime.last_llm_error`` for /health.
+    """
+
+
+async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str, Any]:
+    """One LLM call that either succeeds (clearing ``last_llm_error``) or
+    raises :class:`LLMTurnError` carrying a human-usable reason.
+
+    The URL in the message is the one the AGENT dials — on a compose install
+    that is ``host.docker.internal:11434``, and naming it is what turns
+    "assistant failed" into "go start Ollama on the host"."""
+    where = (runtime.cfg.llm_base_url or runtime.cfg.ollama_url
+             if runtime.cfg.llm_provider.strip().lower() == "openai"
+             else runtime.cfg.ollama_url)
+    try:
+        response = await runtime.ollama.chat(**kw)
+    except httpx.HTTPStatusError as exc:
+        # The body is the diagnosis ("model X not found, try pulling it
+        # first") — keep it. Cap it: error pages can be arbitrarily long.
+        body = ""
+        try:
+            body = (exc.response.text or "").strip()[:300]
+        except Exception:  # pragma: no cover - defensive
+            pass
+        msg = (f"LLM at {where} answered HTTP "
+               f"{exc.response.status_code}: {body or 'no detail'}")
+        runtime.last_llm_error = msg
+        raise LLMTurnError(msg) from exc
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        msg = (f"LLM unreachable at {where} ({exc.__class__.__name__}) — "
+               f"is the runtime (e.g. Ollama) running and reachable from "
+               f"the agent?")
+        runtime.last_llm_error = msg
+        raise LLMTurnError(msg) from exc
+    except httpx.TimeoutException as exc:
+        msg = f"LLM at {where} timed out ({exc.__class__.__name__})"
+        runtime.last_llm_error = msg
+        raise LLMTurnError(msg) from exc
+    # Answers clear the flag — the dot goes green again on the next /health
+    # poll, no separate probe, no extra traffic.
+    runtime.last_llm_error = None
+    return response
+
+
 async def _run_conversation_turn(
     runtime: "CameraAgentRuntime",
     history: list[dict[str, str]],
@@ -6582,7 +6653,8 @@ async def _run_conversation_turn(
     #                        gets the real detection/caption instead of "Sorry".
     for iteration in range(max_iterations):
         _llm_t0 = time.perf_counter()
-        response = await runtime.ollama.chat(
+        response = await _chat_or_explain(
+            runtime,
             messages=messages,
             tools=tools,
             temperature=runtime.cfg.llm_temperature,

@@ -476,6 +476,15 @@ services:
       - MEDIAMTX_HLS_URL=http://mediamtx:8888
       - MEDIAMTX_RTSP_URL=rtsp://mediamtx:8554
       - MEDIAMTX_RTSPS_URL=rtsps://mediamtx:8322
+      # Where the app's "Compute-gated inference" panel reads the Tier-0
+      # detect-pipeline's Prometheus /metrics. The server's config default
+      # is localhost:9109, which is correct only when server and pipeline
+      # share a host — inside this container it is the CORE's own loopback,
+      # so without this line the panel says "not reachable" on every
+      # compose install regardless of the pipeline's actual health.
+      # Follows DETECT_METRICS_PORT (0 disables exposition on the pipeline;
+      # the server treats a :0 URL as "disabled", not "unreachable").
+      - DETECT_PIPELINE_METRICS_URL=http://detect-pipeline:${DETECT_METRICS_PORT:-9109}
       # Tier-0 tap selection (auto | sub | main) + the hardware-decode
       # signal 'auto' keys off — same DETECT_HWACCEL the detect-pipeline
       # container gets, so both sides agree on what the hardware can do.
