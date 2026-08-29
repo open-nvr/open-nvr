@@ -43,6 +43,7 @@ from urllib.parse import urlparse
 from fastapi import Header
 
 from kai_c.audit import AuditEventType, AuditStore, new_correlation_id
+from kai_c.budgets import SkillBudgets
 from kai_c.connector import KaiConnector
 from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
 from kai_c.domain_events import normalise_completion
@@ -254,6 +255,10 @@ def _validate_adapters_match_sovereignty() -> None:
 _audit = AuditStore()
 _registry: AdapterRegistry | None = None
 _nats_publisher: NatsPublisher | None = None
+
+# RFC-0002 Phase 5: per-(adapter, camera) inference budgets. Built once
+# from env at import (config is env-only; tests construct their own).
+_skill_budgets = SkillBudgets.from_env()
 
 
 # ============================================================
@@ -884,7 +889,7 @@ async def kaic_prometheus_metrics():
     from kai_c.metrics import proxy_metrics
     summaries = get_registry().list_summaries()
     return PlainTextResponse(
-        proxy_metrics.render(summaries),
+        proxy_metrics.render(summaries) + _skill_budgets.render_metrics(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
@@ -1345,6 +1350,37 @@ async def v1_infer(
         correlation_id = new_correlation_id()
 
     camera_id = payload.get("camera_id") if isinstance(payload, dict) else None
+
+    # RFC-0002 Phase 5: shed-and-report, never silent. Over-budget calls
+    # are refused BEFORE the adapter sees them — audited, counted in
+    # /metrics (kaic_budget_shed_total), and answered with a §3.5-shaped
+    # 429 the caller can distinguish from an adapter failure. Calls
+    # without a camera_id (probes, operator one-offs) are exempt.
+    if not _skill_budgets.admit(adapter_name, camera_id):
+        audit.emit(
+            AuditEventType.INFERENCE_REFUSED_BUDGET,
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            camera_id=camera_id,
+            error_category="budget",
+            error_code="skill_budget_exceeded",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": {
+                    "category": "budget",
+                    "code": "skill_budget_exceeded",
+                    "message": (
+                        f"over {_skill_budgets.limit_for(adapter_name)} "
+                        f"calls/min for {adapter_name} on camera "
+                        f"{camera_id} — retry after the window drains"
+                    ),
+                    "transient": True,
+                }
+            },
+        )
+
     started = time.monotonic()
 
     try:

@@ -187,6 +187,15 @@ class AppManifest:
     summary: str = ""
     requires_tasks: list[str] = field(default_factory=list)
     requires_adapters: list[str] = field(default_factory=list)
+    # RFC-0002 Phase 5: event scopes this app requests, e.g.
+    # ["events:plate.recognized"]. Scopes name DOMAIN events (the
+    # opennvr.events.* tree, docs/EVENT_CONTRACTS.md) — plate reads are
+    # PII (decision 6), so consuming them is a declared, granted,
+    # audited capability, visible in the App Catalog. Registration
+    # auto-grants and audits each scope today; bus-side enforcement
+    # (per-app NATS users whose subscribe permissions ARE the grants)
+    # is the staged follow-up recorded in the RFC.
+    requires_scopes: list[str] = field(default_factory=list)
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
@@ -214,6 +223,7 @@ class AppManifest:
             "summary": self.summary,
             "requires_tasks": list(self.requires_tasks),
             "requires_adapters": list(self.requires_adapters),
+            "requires_scopes": list(self.requires_scopes),
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],

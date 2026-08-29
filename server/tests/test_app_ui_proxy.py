@@ -57,3 +57,11 @@ def test_route_is_user_jwt_only_like_actions():
 def test_size_cap_is_a_real_number():
     # A dashboard is a small page; the cap guards the proxy, not taste.
     assert 0 < UI_PROXY_MAX_BYTES <= 5_000_000
+
+
+def test_register_route_audits_scope_grants():
+    # RFC-0002 Phase 5: "every grant audited" — source-level guard that
+    # registration writes one app.scope_granted row per manifest scope.
+    src = (_HERE / "routers" / "apps.py").read_text()
+    assert 'action="app.scope_granted"' in src
+    assert '"policy": "grant-on-registration"' in src

@@ -80,6 +80,9 @@ MANIFEST = AppManifest(
     # Decision 7: the OCR adapter installs WITH the app (the overlay
     # ships + registers it); yolov8 is the standard stack's, reused.
     requires_adapters=["fast_plate_ocr"],
+    # Plates are PII (decision 6): consuming plate.recognized.v1 is a
+    # declared scope — granted at registration, audited, catalog-visible.
+    requires_scopes=["events:plate.recognized"],
     subscribes=PLATE_SUBJECT_PATTERN,
     params=[
         Param("dedup_window_seconds", float, default=60.0,
