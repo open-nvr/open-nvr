@@ -106,9 +106,15 @@ async def enrich_event_plate(event_id: int) -> None:
         # camera_id threaded through so KAI-C's audit row and NATS subject
         # attribute this OCR call to the right camera (same convention as
         # process_inference's governed path).
+        # camera_id and event_id thread through KAI-C untouched: camera_id
+        # attributes the audit row + NATS subjects, event_id joins the
+        # resulting plate.recognized.v1 back to this timeline row (RFC-0002
+        # Phase 0 — this call is now the *fallback* producer; the write can
+        # arrive via the bus consumer or the synchronous path below,
+        # whichever lands first).
         payload = build_infer_payload(
             task=PLATE_TASK, jpeg_bytes=jpeg,
-            params={"camera_id": str(row.camera_id)},
+            params={"camera_id": str(row.camera_id), "event_id": int(row.id)},
         )
         try:
             async with _OCR_CONCURRENCY:

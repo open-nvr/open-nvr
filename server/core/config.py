@@ -334,6 +334,11 @@ class Settings(BaseSettings):
     # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
     # and store plate_text on the event row. Best-effort; off = rows only.
     events_plate_enrichment: bool = True
+    # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
+    # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
+    # empty disables consumption (enrichment's synchronous fallback still
+    # writes plate_text).
+    nats_url: str = ""
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod
