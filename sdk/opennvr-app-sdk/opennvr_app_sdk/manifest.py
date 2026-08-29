@@ -173,7 +173,11 @@ class AppManifest:
     ``subscribes`` is the NATS subject pattern for InferenceSubscriber
     apps (``None`` for FrameApps that drive inference themselves).
     ``requires_tasks`` names adapter task types the app depends on,
-    e.g. ``["object_detection"]``.
+    e.g. ``["object_detection"]``. ``requires_adapters`` (RFC-0002
+    Phase 3, decision 7) names the specific KAI-C adapters that must be
+    PROVISIONED with the app — the installer ups them alongside the app
+    and refcounts them across apps on uninstall. Adapters the standard
+    stack already ships (yolov8) are reused, not listed.
     """
 
     id: str
@@ -182,6 +186,7 @@ class AppManifest:
     category: str
     summary: str = ""
     requires_tasks: list[str] = field(default_factory=list)
+    requires_adapters: list[str] = field(default_factory=list)
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
@@ -208,6 +213,7 @@ class AppManifest:
             "category": self.category,
             "summary": self.summary,
             "requires_tasks": list(self.requires_tasks),
+            "requires_adapters": list(self.requires_adapters),
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],

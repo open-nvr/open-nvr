@@ -214,6 +214,11 @@
   image: ghcr.io/open-nvr/license-plate-recognition:latest
   build_context: examples/license-plate-recognition
   requires_tasks: [object_detection, license_plate_recognition]
+  # RFC-0002 Phase 3 (decision 7): adapters that must be provisioned
+  # WITH the app. The overlay ships fast-plate-ocr-adapter + its
+  # register sidecar; the one-click reconciler ups it alongside the app
+  # and refcounts it across apps on uninstall. yolov8 = standard stack.
+  requires_adapters: [fast_plate_ocr]
   emits: [plate_read, plate_expected, plate_watchlist]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/license-plate-recognition/README.md
   install:
@@ -245,6 +250,12 @@
   image: ghcr.io/open-nvr/smart-doorbell:latest
   build_context: examples/smart-doorbell
   requires_tasks: [face_recognition]
+  # The compose NOTE, machine-checked (RFC-0002 Phase 3): this app needs
+  # an InsightFace adapter that the repo does NOT ship an overlay
+  # service for — the validator warns, the store card greys the app via
+  # its unavailable face_recognition task, and an install without the
+  # adapter degrades exactly as the app's README documents.
+  requires_adapters: [insightface]
   emits: [known_visitor, unknown_visitor]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/smart-doorbell/README.md
   install:
