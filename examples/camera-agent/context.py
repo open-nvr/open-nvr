@@ -68,6 +68,23 @@ class EventRecord:
 
 
 @dataclass
+class PlateRecord:
+    """One ``plate.recognized.v1`` domain event (docs/EVENT_CONTRACTS.md),
+    trimmed for prompt context — RFC-0002 Phase 4: 'what plates today?'
+    answers from the CONTRACT event, whichever platform path produced it
+    (Tier-1 dispatch or core's enrichment). Same seq tiebreak as the
+    other rings."""
+    received_at: float
+    camera_id: str
+    plate_text: str
+    confidence: float | None = None
+    vehicle_label: str | None = None
+    correlation_id: str | None = None
+    producer: str | None = None
+    seq: int = 0
+
+
+@dataclass
 class AlertRecord:
     """One app-emitted alert off the NATS bus (§11.5 envelope), trimmed
     to the bits the LLM cares about — the read side of the app door's
@@ -146,6 +163,14 @@ class CameraContext:
         self._alert_ring_size = self._event_ring_size
         self._app_alerts: dict[str, deque[AlertRecord]] = {}
         self._app_alert_seq = 0
+        # plate.recognized.v1 ring (RFC-0002 Phase 4). One flat ring, not
+        # per-camera: plates are sparse relative to inference events, and
+        # the tool filters by camera at read time.
+        self._plates: deque[PlateRecord] = deque(maxlen=256)
+        self._plate_seq = 0
+        # True once the NATS subscriber loop has started for this context —
+        # lets tools phrase "bus not wired" vs "just quiet" honestly.
+        self.nats_wired = False
         # Cap on DISTINCT app rings. app_id comes off the bus (the alert's
         # own source.name / subject segment), i.e. publisher-controlled — a
         # buggy or malicious publisher minting a fresh app_id per message
@@ -384,6 +409,32 @@ class CameraContext:
 
     # ── App alert ring (app door — read/relay) ─────────────────────
 
+    def record_plate(self, rec: PlateRecord) -> None:
+        rec.seq = self._plate_seq
+        self._plate_seq += 1
+        self._plates.append(rec)
+
+    def recent_plates(
+        self,
+        *,
+        camera_id: str | None = None,
+        plate: str | None = None,
+        window_seconds: float,
+    ) -> list[PlateRecord]:
+        """Plate reads from the last ``window_seconds``, newest-first
+        (seq tiebreak, like the other rings). ``plate`` is a
+        case-insensitive substring match — 'ends in 234' questions."""
+        cutoff = time.time() - max(0.0, float(window_seconds))
+        needle = "".join(plate.split()).upper() if plate else None
+        out = [
+            r for r in self._plates
+            if r.received_at >= cutoff
+            and (camera_id is None or r.camera_id == camera_id)
+            and (needle is None or needle in r.plate_text)
+        ]
+        out.sort(key=lambda r: (r.received_at, r.seq), reverse=True)
+        return out
+
     def record_app_alert(self, alert: AlertRecord) -> None:
         if (
             alert.app_id not in self._app_alerts
@@ -454,6 +505,10 @@ async def run_event_subscriber(
         logger.warning("nats-py not installed; recent_events tool will be empty")
         await stop_event.wait()
         return
+    # Only truthful once the import succeeded and the loop below will
+    # actually dial: tools use this to phrase "bus not wired" vs "just
+    # quiet", and a missing nats-py must read as not wired.
+    context.nats_wired = True
 
     while not stop_event.is_set():
         try:
@@ -482,7 +537,21 @@ async def run_event_subscriber(
                 if record is not None:
                     context.record_event(record)
 
+            async def _plate_handler(msg) -> None:  # noqa: ANN001
+                try:
+                    payload = json.loads(msg.data.decode("utf-8"))
+                except Exception:
+                    return
+                rec = parse_plate_event(payload)
+                if rec is not None:
+                    context.record_plate(rec)
+
             sub = await nc.subscribe("opennvr.inference.>", cb=_handler)
+            # RFC-0002 Phase 4: the contracted plate event, producer-
+            # independent (EVENT_CONTRACTS.md). Separate subscription so
+            # the inference ring's parser never has to guess trees.
+            plate_sub = await nc.subscribe(
+                "opennvr.events.plate.recognized.v1.>", cb=_plate_handler)
             logger.info("nats subscriber: connected to %s", nats_url)
             # Park until stop — but wake periodically to check the connection
             # still exists. nats-py gives up auto-reconnecting after its
@@ -503,6 +572,7 @@ async def run_event_subscriber(
                 )
             else:
                 await sub.unsubscribe()
+                await plate_sub.unsubscribe()
         except Exception:
             logger.exception("nats subscriber: error in run loop; reconnecting")
         finally:
@@ -511,6 +581,35 @@ async def run_event_subscriber(
                     await nc.drain()
                 except Exception:
                     logger.exception("nats subscriber: drain failed")
+
+
+def parse_plate_event(payload: Any) -> PlateRecord | None:
+    """One plate.recognized.v1 envelope -> PlateRecord, or None for
+    anything else (foreign schema, malformed shape). Pure, tested."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema") != "plate.recognized.v1":
+        return None
+    body = payload.get("payload")
+    camera_id = payload.get("camera_id")
+    if not isinstance(body, dict) or not camera_id:
+        return None
+    plate = body.get("plate_text")
+    if not isinstance(plate, str) or not plate.strip():
+        return None
+    confidence = body.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = None
+    return PlateRecord(
+        received_at=time.time(),
+        camera_id=str(camera_id),
+        plate_text="".join(plate.split()).upper(),
+        confidence=float(confidence) if confidence is not None else None,
+        vehicle_label=(
+            str(body["vehicle_label"]) if body.get("vehicle_label") else None),
+        correlation_id=payload.get("correlation_id"),
+        producer=payload.get("producer"),
+    )
 
 
 def _parse_inference_event(
@@ -663,6 +762,7 @@ async def run_app_alert_subscriber(
                 )
             else:
                 await sub.unsubscribe()
+                await plate_sub.unsubscribe()
         except Exception:
             logger.exception(
                 "app-alert subscriber: error in run loop; reconnecting"
