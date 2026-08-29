@@ -134,8 +134,8 @@ def _skip_unassigned() -> bool:
     )
 
 
-def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool]:
-    """(per-camera labels, analyze) from a camera dict's ``assignments``.
+def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[str] | None]:
+    """(per-camera labels, analyze, skills) from a camera dict's ``assignments``.
 
     Labels come from an ``object_detection`` assignment carrying labels —
     "camera 4 wants person + truck" — and REPLACE the global DETECT_LABELS
@@ -147,7 +147,7 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool]:
     """
     assignments = c.get("assignments")
     if not isinstance(assignments, list) or not assignments:
-        return None, True
+        return None, True, None
     labels: frozenset[str] | None = None
     skills: set[str] = set()
     for a in assignments:
@@ -169,7 +169,7 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool]:
             "and DETECT_SKIP_UNASSIGNED is on",
             c.get("camera_id"), ", ".join(sorted(skills)),
         )
-    return labels, analyze
+    return labels, analyze, (frozenset(skills) or None)
 
 
 # Cameras already warned about a missing/garbled open_nvr_camera_id — the
@@ -182,7 +182,7 @@ def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
     # is honoured if the endpoint ever adds per-camera opt-out.
-    labels, assignment_analyze = _assignment_view(c)
+    labels, assignment_analyze, skills = _assignment_view(c)
     # Core's numeric Camera.id, sent alongside the "cam{id}" handle — the
     # events store keys on the number (see CameraSpec.nvr_camera_id). The
     # str() round-trip rejects bools/floats (int(True) == 1 would file
@@ -211,6 +211,7 @@ def _to_spec(c: dict) -> CameraSpec:
         fps=int(c.get("fps", _default_fps())),
         hwaccel=(c.get("hwaccel") or None),   # None = not declared → global applies
         labels=labels,
+        skills=skills,
     )
 
 
