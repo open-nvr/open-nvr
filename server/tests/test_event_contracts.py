@@ -32,6 +32,16 @@ CONTRACTS = REPO_ROOT / "docs" / "EVENT_CONTRACTS.md"
 # Where first-party bus traffic can originate.
 SCANNED_TREES = ("server", "kai-c", "detect-pipeline", "examples", "sdk")
 
+# Test directories are exempt from the scans: expected-value literals in
+# tests legitimately hard-code cameras and invent throwaway subjects.
+# Subjects that matter live in producers and consumers — source files.
+_TEST_DIR_PARTS = frozenset({"test", "tests"})
+
+
+def _is_test_file(path: Path) -> bool:
+    return bool(_TEST_DIR_PARTS.intersection(path.parts))
+
+
 # A contracted name as it appears in code AND in the doc:
 # opennvr.events.<domain>.<event>.v<N>
 SUBJECT_RE = re.compile(r"opennvr\.events\.([a-z_]+)\.([a-z_]+)\.v(\d+)")
@@ -61,6 +71,8 @@ def _schemas_used_in_code() -> dict[str, set[str]]:
         if not root.is_dir():
             continue
         for src in root.rglob("*.py"):
+            if _is_test_file(src.relative_to(REPO_ROOT)):
+                continue
             try:
                 text = src.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
@@ -113,6 +125,8 @@ def test_camera_id_is_the_last_subject_token_in_code():
         if not root.is_dir():
             continue
         for src in root.rglob("*.py"):
+            if _is_test_file(src.relative_to(REPO_ROOT)):
+                continue
             try:
                 text = src.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):

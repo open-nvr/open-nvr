@@ -45,6 +45,7 @@ from fastapi import Header
 from kai_c.audit import AuditEventType, AuditStore, new_correlation_id
 from kai_c.connector import KaiConnector
 from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
+from kai_c.domain_events import normalise_completion
 from kai_c.events import InferenceCompletedEvent
 from kai_c.nats_publisher import NatsPublisher
 from kai_c.registry import AdapterRegistry
@@ -1225,6 +1226,7 @@ async def _publish_inference_completed(
     correlation_id: str,
     latency_ms: int,
     body: Dict[str, Any],
+    event_id: Optional[int] = None,
 ) -> None:
     """Build an ``InferenceCompletedEvent`` from the response body the
     adapter returned and publish it on NATS. Shared by HTTP and WS
@@ -1286,6 +1288,21 @@ async def _publish_inference_completed(
         )
         return
     await publisher.publish_inference_completed(event)
+
+    # RFC-0002 Phase 0: the completion publish site also emits the
+    # domain event (EVENT_CONTRACTS.md, "the split decision"). The
+    # normaliser returns None for the common no-domain-mapping case
+    # and never raises; publish is the same best-effort as above.
+    normalised = normalise_completion(
+        adapter_name,
+        body.get("result"),
+        camera_id=camera_id,
+        correlation_id=correlation_id,
+        event_id=event_id,
+    )
+    if normalised is not None:
+        subject, envelope = normalised
+        await publisher.publish_domain_event(subject, envelope)
 
 
 @app.post("/api/v1/adapters/refresh", dependencies=[Depends(require_internal_api_key)])
@@ -1368,6 +1385,11 @@ async def v1_infer(
         # delay the HTTP response. (Peer review H1 — earlier we
         # ``await``ed the publish which could add up to 5 s of
         # latency on the first request after a NATS outage.)
+        # ``event_id`` is an optional client reference (the timeline row
+        # an initiator wants this inference joined back to — see
+        # EVENT_CONTRACTS.md, plate.recognized.v1). Plucked like
+        # camera_id: a top-level request param, echoed never interpreted.
+        raw_event_id = payload.get("event_id") if isinstance(payload, dict) else None
         asyncio.create_task(_publish_inference_completed(
             adapter_name=adapter_name,
             adapter=adapter,
@@ -1375,6 +1397,9 @@ async def v1_infer(
             correlation_id=correlation_id,
             latency_ms=latency_ms,
             body=body,
+            event_id=raw_event_id
+            if isinstance(raw_event_id, int) and not isinstance(raw_event_id, bool)
+            else None,
         ))
         return body
 
