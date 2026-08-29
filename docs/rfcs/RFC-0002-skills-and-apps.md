@@ -195,6 +195,27 @@ What exists today, file-verified:
 7. **No dormant state.** Installed apps start working immediately on
    whatever their config names (LPR: the placeholder). "Installed →
    capable → idle until assigned" is not a platform lifecycle.
+8. **The flagship app is invisible to its own platform.** 12 of 13
+   first-party examples extend an SDK base class (`Detector`,
+   `FrameApp`, or `AlertSubscriber`) and therefore serve the §03
+   contract (`/health /manifest /state`) and self-register. The one
+   exception is the **camera agent**: it imports SDK utilities but
+   extends no base, serves no `/manifest` or `/state`, and never
+   registers with the App Catalog — so the registry's app-manifest
+   source (decision 2) cannot see the platform's most important app.
+
+## The SDK rule (conformance)
+
+Every first-party example app extends an SDK base class — that is what
+makes "copy an example, write your predicate" a real contributor path
+rather than folklore. The rule is CI-enforced
+(`server/tests/test_apps_ride_the_sdk.py`): an app that extends no base
+fails the build unless it is on the explicit allowlist, and an
+allowlist entry for an app that HAS since conformed also fails — the
+allowlist may only shrink. The camera agent is the sole allowlisted
+debt, retired by the Phase 1 contract-parity task below (full
+base-class migration is not the goal for it; serving the contract and
+registering is).
 
 ## Phases
 
@@ -237,6 +258,12 @@ producer fired them.
 - [ ] The camera agent's skills panel consumes this endpoint instead of
       its private derivation (its `suggested_apps` on-ramp becomes a
       registry field, so every consumer gets it).
+- [ ] **Agent contract parity (retires gap 8):** the agent mounts
+      `/manifest` and `/state` in its existing FastAPI, self-registers
+      via the `AppRegistryClient` it already carries, and comes off the
+      conformance allowlist. Not a base-class rewrite — contract
+      parity only, so the registry and App Catalog finally see the
+      flagship.
 - [ ] App Catalog shows the skills each installed app provides.
 
 **Accept when:** the agent's skills panel renders from the platform
