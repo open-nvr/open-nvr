@@ -68,8 +68,8 @@ def test_hidden_tool_reported_and_partial_flagged():
 
 
 def test_fully_advertised_events_skill_not_partial():
-    rt = _runtime(["recent_events", "search_history", "describe_event",
-                   "describe_window"], nats="nats://n")
+    rt = _runtime(["recent_events", "recent_plates", "search_history",
+                   "describe_event", "describe_window"], nats="nats://n")
     entry = _entry(rt, "events")
     assert entry["partial"] is False
     assert all(t["advertised"] for t in entry["tools"])

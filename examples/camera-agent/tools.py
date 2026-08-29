@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import time
 from typing import Any
 
@@ -309,6 +310,47 @@ def build_tool_definitions(
                             "description": (
                                 "How far back, in SECONDS (60=1min, "
                                 "3600=1hr)."
+                            ),
+                        },
+                    },
+                    "required": ["camera_id", "window_seconds"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recent_plates",
+                "description": (
+                    "Look back at recently READ license plates (live "
+                    "plate.recognized events from the platform's OCR "
+                    "chain). Use for 'what plates came today?', 'was "
+                    "plate AB12 here?', 'any trucks at the gate this "
+                    "hour?'. Newest-first with camera, plate text, and "
+                    "confidence. For history beyond the last hours, use "
+                    "search_history with a plate filter instead."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "camera_id": {
+                            "type": "string",
+                            "enum": camera_enum + ["__any__"],
+                            "description": "One camera, or '__any__' for all.",
+                        },
+                        "window_seconds": {
+                            "type": "number",
+                            "description": (
+                                "How far back, in SECONDS (3600=1hr, "
+                                "86400=1day)."
+                            ),
+                        },
+                        "plate": {
+                            "type": "string",
+                            "description": (
+                                "Optional: match plates CONTAINING this "
+                                "text (case-insensitive), e.g. '234' for "
+                                "'ends in 234'. Omit for all plates."
                             ),
                         },
                     },
@@ -859,6 +901,62 @@ class CameraTools:
             for e in events[:6]
         ]
         return "Recent events:\n" + "\n".join(lines)
+
+    # ── recent_plates (RFC-0002 Phase 4: the contract event) ───────
+
+    async def recent_plates(self, args: dict[str, Any]) -> str:
+        """Report recently read plates from the live plate.recognized.v1
+        ring — producer-independent by contract: the answer is the same
+        whether Tier-1 dispatch or core's enrichment ran the OCR."""
+        camera_arg = args.get("camera_id")
+        try:
+            window = float(args.get("window_seconds", 0))
+        except (TypeError, ValueError):
+            return "ERROR: window_seconds must be a number."
+        if not math.isfinite(window) or window <= 0:
+            return "ERROR: window_seconds must be a positive finite number."
+        window = min(window, 7 * 86400.0)
+
+        camera_id: str | None
+        if camera_arg in (None, "", "__any__"):
+            camera_id = None
+        elif isinstance(camera_arg, str) and self._ctx.known_camera(camera_arg):
+            camera_id = camera_arg
+        else:
+            return (
+                f"ERROR: unknown camera_id {camera_arg!r}. Use one of "
+                f"{sorted(c.camera_id for c in self._ctx.cameras)} "
+                f"or '__any__'."
+            )
+        plate_arg = args.get("plate")
+        plate = str(plate_arg).strip() if plate_arg not in (None, "") else None
+
+        reads = self._ctx.recent_plates(
+            camera_id=camera_id, plate=plate, window_seconds=window
+        )
+        if not reads:
+            scope = camera_id or "any camera"
+            mins = int(window / 60) or 1
+            hint = (
+                " (Note: the live event bus isn't configured — for stored "
+                "history use search_history with a plate filter.)"
+                if not getattr(self._ctx, "nats_wired", True) else
+                " For older reads, use search_history with a plate filter."
+            )
+            what = f"plates matching '{plate}'" if plate else "plate reads"
+            return f"No {what} on {scope} in the last {mins} minute(s).{hint}"
+        import time as _time
+        now = _time.time()
+        lines = []
+        for r in reads[:8]:
+            conf = f", conf {r.confidence:.2f}" if r.confidence is not None else ""
+            veh = f" ({r.vehicle_label})" if r.vehicle_label else ""
+            lines.append(
+                f"{int(now - r.received_at)}s ago — {r.camera_id}: "
+                f"{r.plate_text}{veh}{conf}"
+            )
+        more = f" (+{len(reads) - 8} more)" if len(reads) > 8 else ""
+        return "Recent plate reads:\n" + "\n".join(lines) + more
 
     # ── search_footage ─────────────────────────────────────────────
 
