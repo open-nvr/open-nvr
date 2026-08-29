@@ -512,10 +512,16 @@ class RetentionService:
             orphan_root = base_path / ORPHANED_DIR_NAME
             if not orphan_root.is_dir():
                 return stats
-            for tree in orphan_root.iterdir():
+            for tree in list(orphan_root.iterdir()):
                 if not tree.is_dir():
                     continue
-                for f in iter_recording_files(tree):
+                # Materialize BEFORE deleting: iter_recording_files is a
+                # lazy walk, and _delete_empty_directories removes the
+                # emptied parents mid-loop — resuming the generator on a
+                # deleted directory raises FileNotFoundError, aborting the
+                # whole pass with the tree still on disk (the bug this
+                # method's own test kept catching intermittently).
+                for f in list(iter_recording_files(tree)):
                     try:
                         st = f.stat()
                     except OSError:
