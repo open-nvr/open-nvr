@@ -31,18 +31,29 @@ def test_lpr_ships_its_ocr_adapter():
     assert "OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}" in _APPS
 
 
-def test_ocr_adapter_registers_with_kaic_under_the_name_the_app_calls():
-    # The register name becomes KAI-C's route /api/v1/infer/<name>, and the
-    # app's config names ``ocr_adapter: "fast_plate_ocr"`` — a drifted name
-    # is a 404 on every plate read.
+def test_ocr_adapter_registers_with_kaic_under_the_name_the_platform_calls():
+    # The register name becomes KAI-C's route /api/v1/infer/<name>. Since
+    # the app's v2 pure-consumer conversion (RFC-0002 Phase 4), the CALLERS
+    # are the platform: core's plate enrichment (PLATE_MODEL) and Tier-1
+    # dispatch (PLATE_ADAPTER), and the name also keys KAI-C's
+    # domain-event normaliser map — a drifted name is a 404 on every OCR
+    # call AND a silent end to plate.recognized.v1.
     assert 'name="fast_plate_ocr"' in _APPS
     assert "http://fast-plate-ocr-adapter:9004" in _APPS
     assert "/api/v1/adapters/register" in _APPS
-    cfg = (REPO_ROOT / "examples/license-plate-recognition/"
-           "config.docker.yml").read_text()
-    assert 'ocr_adapter: "fast_plate_ocr"' in cfg, (
-        "the app no longer calls the adapter this overlay registers — "
-        "update both sides together")
+    enrichment = (REPO_ROOT / "server/services/plate_enrichment.py").read_text()
+    assert 'PLATE_MODEL = "fast_plate_ocr"' in enrichment, (
+        "core's enrichment no longer calls the adapter this overlay "
+        "registers — update both sides together")
+    dispatch = (REPO_ROOT / "detect-pipeline/detect_pipeline/dispatch.py"
+                ).read_text()
+    assert 'PLATE_ADAPTER = "fast_plate_ocr"' in dispatch, (
+        "Tier-1 dispatch no longer routes to the adapter this overlay "
+        "registers — update both sides together")
+    normaliser = (REPO_ROOT / "kai-c/kai_c/domain_events.py").read_text()
+    assert '"fast_plate_ocr": _normalise_fast_plate_ocr' in normaliser, (
+        "KAI-C's normaliser map no longer covers the adapter this overlay "
+        "registers — plate.recognized.v1 would stop flowing")
 
 
 def test_lpr_waits_for_its_dependency():

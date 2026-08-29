@@ -12,37 +12,31 @@
 # DO NOT edit the substituted values directly. To change the secret,
 # update .env and re-run ``docker compose up`` so the init container
 # re-templates the file.
+#
+# v2 (RFC-0002 Phase 4): the app is a PURE CONSUMER of the platform's
+# plate.recognized.v1 events — no camera URLs, no KAI-C endpoint, no
+# polling knobs. The detect→crop→OCR chain runs inside the platform;
+# assign cameras the license_plate_recognition skill (camera settings →
+# Assignments) and this app alerts on their reads.
 
-# ── KAI-C endpoint (runs inside the opennvr-core container, :8100) ──
-# KAI-C proxies inference to the YOLOv8 + fast-plate-ocr adapters and
-# audits every call.
-kaic_url: "http://opennvr-core:8100"
-# The standard stack authenticates internal calls with INTERNAL_API_KEY
-# (the X-Internal-Api-Key header value).
-kaic_api_key: "${INTERNAL_API_KEY}"
+# ── The event bus (where plate.recognized.v1 flows) ─────────────────
+nats_url: "nats://nats:4222"
+nats_token: "${INTERNAL_API_KEY}"
 
-# Adapter names as registered with KAI-C.
-detector_adapter: "yolov8"
-ocr_adapter: "fast_plate_ocr"
+# ── Camera scope ────────────────────────────────────────────────────
+# Default: cameras assigned the license_plate_recognition skill in the
+# assignment table (resolved via opennvr_url below, refreshed live).
+# An explicit list here overrides that; empty + no opennvr_url = alert
+# on every camera's plate events.
+cameras: []
 
-# ── Cameras — EDIT for your scene ───────────────────────────────────
-# One entry per camera; frame_url is the camera's JPEG-snapshot
-# endpoint (NVR endpoint, ONVIF snapshot, ipcam HTTP, file://, …).
-cameras:
-  - camera_id: "cam-1"
-    frame_url: "http://192.168.1.50/snapshot.jpg"
-
-# ── Pipeline tuning ─────────────────────────────────────────────────
-poll_interval_seconds: 2.0
-request_timeout_seconds: 30.0
-vehicle_labels: ["car", "truck", "bus", "motorcycle"]
-detection_confidence: 0.40
-ocr_confidence: 0.50
-crop_strategy: "lower_third"
-
+# ── The app's job ───────────────────────────────────────────────────
 # Plate-level dedup: don't re-fire the same plate within this window
 # (per camera). Set to 0 to fire every read.
 dedup_window_seconds: 60.0
+# Drop reads below this OCR confidence (0 keeps all; reads without a
+# reported confidence always pass).
+min_confidence: 0.0
 
 # Optional plate watchlists (case-insensitive). ``allowlist`` reads
 # fire low-severity "expected vehicle" alerts; ``denylist`` reads fire
