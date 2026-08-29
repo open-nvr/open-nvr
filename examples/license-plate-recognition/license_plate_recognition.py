@@ -240,11 +240,10 @@ class PlateAlerter(Detector):
             except Exception:  # noqa: BLE001 — scope is advisory, never fatal
                 assigned = None
             # None = "no restriction declared / couldn't tell" — the SDK
-            # helper's contract. Keep the previous answer on failure.
+            # helper's contract. On failure keep the previous answer
+            # (advisory scope must never turn a hiccup into a policy).
             if assigned is not None:
                 self._assigned_scope = frozenset(assigned)
-            elif self._scope_fetched_at == now and self._assigned_scope is None:
-                self._assigned_scope = None
         return self._assigned_scope
 
     # ── The rule (one domain envelope) ─────────────────────────────

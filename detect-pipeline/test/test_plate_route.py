@@ -107,11 +107,41 @@ def test_no_once_filter_keeps_legacy_behaviour():
 
 def test_once_per_track_is_bounded():
     once = OncePerTrack(maxlen=2)
-    assert once.already(1, "x") is False
-    assert once.already(2, "x") is False
-    assert once.already(3, "x") is False   # evicts (1, x)
-    assert once.already(1, "x") is False   # aged out -> re-dispatch once
-    assert once.already(1, "x") is True
+    for tid in (1, 2, 3):                  # 3 evicts (1, x)
+        assert once.seen(tid, "x") is False
+        once.mark(tid, "x")
+    assert once.seen(1, "x") is False      # aged out -> re-dispatch once
+    once.mark(1, "x")
+    assert once.seen(1, "x") is True
+
+
+def test_backpressure_drop_does_not_consume_the_visits_ocr():
+    # A dropped dispatch (False) must NOT mark the track: the next
+    # escalation retries the visit's one OCR instead of losing it.
+    router = router_for_skills(frozenset({"license_plate_recognition"}),
+                               base=DispatchRouter())
+    once = OncePerTrack()
+    car = _Track(7, "car")
+
+    class _Dropping:
+        def __init__(self):
+            self.calls = []
+        def dispatch(self, cam, adapter, crop, track):
+            self.calls.append(adapter)
+            return False                   # explicit drop
+    dropping = _Dropping()
+    dispatch_escalations("cam1", [car], _escalate(car), router, dropping,
+                         once=once)
+    assert "fast_plate_ocr" in dropping.calls
+    # Retry after the drop: the OCR fires again (and marks this time).
+    accepting = _FakeDispatcher()
+    dispatch_escalations("cam1", [car], _escalate(car), router, accepting,
+                         once=once)
+    assert [a for (_, a, _) in accepting.calls].count("fast_plate_ocr") == 1
+    # Now marked: a third escalation does not re-OCR.
+    dispatch_escalations("cam1", [car], _escalate(car), router, accepting,
+                         once=once)
+    assert [a for (_, a, _) in accepting.calls].count("fast_plate_ocr") == 1
 
 
 # ── per-adapter task ───────────────────────────────────────────────

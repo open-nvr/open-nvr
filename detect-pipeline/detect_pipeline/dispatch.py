@@ -93,16 +93,21 @@ class OncePerTrack:
         self._seen: "OrderedDict[tuple, None]" = OrderedDict()
         self._maxlen = max(1, int(maxlen))
 
-    def already(self, track_id, adapter: str) -> bool:
-        """True if seen before; marks it seen either way."""
+    def seen(self, track_id, adapter: str) -> bool:
+        """Has this pair been marked? Read-only — see :meth:`mark`."""
         key = (track_id, adapter)
         if key in self._seen:
             self._seen.move_to_end(key)
             return True
-        self._seen[key] = None
+        return False
+
+    def mark(self, track_id, adapter: str) -> None:
+        """Record a pair. Callers mark AFTER the dispatcher accepted the
+        call, never before: a backpressure drop must not consume the
+        track's one OCR — the next escalation retries it."""
+        self._seen[(track_id, adapter)] = None
         if len(self._seen) > self._maxlen:
             self._seen.popitem(last=False)
-        return False
 
 
 class DispatchRouter:
@@ -141,7 +146,7 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
 
 
 class Dispatcher(Protocol):
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> "bool | None":
         ...
 
 
@@ -216,22 +221,26 @@ class KaicDispatcher:
             else:
                 self._cam_inflight.pop(camera_id, None)
 
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> bool:
+        """True = submitted; False = dropped (backpressure / camera share /
+        pool shutdown). The once-per-track filter marks only on True."""
         if not self._claim_camera_slot(camera_id):
             metrics.inc("tier1_dispatch_dropped_total",
                         {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch: %s already at its share; dropping", camera_id)
-            return
+            return False
         if not self._sem.acquire(blocking=False):
             self._release_camera_slot(camera_id)
             metrics.inc("tier1_dispatch_dropped_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch backpressure; dropping %s/%s", camera_id, adapter)
-            return
+            return False
         try:
             self._pool.submit(self._run, camera_id, adapter, crop_bgr, track)
         except Exception:                          # pool shutting down, etc.
             self._sem.release()
             self._release_camera_slot(camera_id)
+            return False
+        return True
 
     def _run(self, camera_id, adapter, crop_bgr, track) -> None:
         self._bump_inflight(1)
@@ -280,9 +289,15 @@ def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRo
         if crop is None:
             continue
         for adapter in router.route(d.label):
-            if (once is not None and adapter in ONCE_PER_TRACK_ADAPTERS
-                    and once.already(t.id, adapter)):
+            gated = once is not None and adapter in ONCE_PER_TRACK_ADAPTERS
+            if gated and once.seen(t.id, adapter):
                 continue
-            dispatcher.dispatch(camera_id, adapter, crop, t)
+            accepted = dispatcher.dispatch(camera_id, adapter, crop, t)
+            # Mark only when the dispatcher took the call. False = an
+            # explicit drop (backpressure / camera share) — the track's
+            # one OCR must survive for the next escalation. None (older
+            # dispatchers, test fakes) counts as accepted.
+            if gated and accepted is not False:
+                once.mark(t.id, adapter)
             issued += 1
     return issued
