@@ -124,9 +124,16 @@ async def run_consumer_loop() -> None:
             "plate event consumer disabled: nats-py not installed")
         return
 
+    # The compose broker runs token auth (--auth $INTERNAL_API_KEY):
+    # connecting without the token is an Authorization Violation and this
+    # loop would retry forever without ever subscribing. Same key the
+    # rest of the stack uses (detect-pipeline's _nats_connect_options
+    # documents the identical lesson).
+    token = (getattr(settings, "internal_api_key", "") or "").strip() or None
+
     while True:
         try:
-            client = await nats.connect(url, connect_timeout=5)
+            client = await nats.connect(url, connect_timeout=5, token=token)
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
             logger.info("plate event consumer subscribed to %s", SUBJECT)
             try:

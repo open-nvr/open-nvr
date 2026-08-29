@@ -125,6 +125,12 @@ class CameraSpec:
     # core's events store keys on this numeric id instead. Appended LAST so
     # existing positional constructions keep their meaning.
     nvr_camera_id: int | None = None
+    # The camera's assigned skill set (lowercased), from the assignment
+    # table's projection. Activates per-camera Tier-1 routes (RFC-0002
+    # Phase 4: license_plate_recognition adds the plate route). None =
+    # nothing declared. In _baked, so an assignment change restarts the
+    # worker on the next reconcile tick like a label change does.
+    skills: frozenset[str] | None = None
 
 
 def hwaccel_for(spec: "CameraSpec", default: str) -> str:
@@ -322,7 +328,12 @@ class CameraWorker:
         self.gate = gate
         self.gate_sink = gate_sink
         self.dispatcher = dispatcher
-        self.router = router
+        # Per-camera routing: the shared base router plus whatever routes
+        # this camera's assigned skills activate (identity when none —
+        # unassigned cameras share the base). RFC-0002 Phase 4.
+        from .dispatch import OncePerTrack, router_for_skills
+        self.router = router_for_skills(spec.skills, base=router)
+        self._dispatch_once = OncePerTrack()
         self.visit_poster = visit_poster
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -693,7 +704,8 @@ class CameraWorker:
             # Tier-1 dispatch (#10) — enforce-only; shadow/off dispatch nothing.
             if self.dispatcher is not None and self.router is not None:
                 dispatch_escalations(
-                    self.spec.camera_id, result.tracks, gres, self.router, self.dispatcher
+                    self.spec.camera_id, result.tracks, gres, self.router,
+                    self.dispatcher, once=self._dispatch_once,
                 )
         except Exception:
             log.debug("tier0 %s: gate error", self.spec.camera_id, exc_info=True)

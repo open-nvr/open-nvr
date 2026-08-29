@@ -39,6 +39,76 @@ DEFAULT_ROUTES: dict[str, list[str]] = {
     "bus": ["caption"], "truck": ["caption"],
 }
 
+# Per-adapter §3.5 task strings. One dispatcher serves many adapters, and
+# the infer body's ``task`` must match what each adapter actually serves —
+# the shared ``KaicDispatcher.task`` ("caption") stays the fallback for
+# unlisted adapters.
+ADAPTER_TASKS: dict[str, str] = {
+    "fast_plate_ocr": "license_plate_recognition",
+}
+
+# RFC-0002 Phase 4 (decision 9): the plate chain is a declarative route,
+# activated PER CAMERA by the assignment table — a camera assigned the
+# license_plate_recognition skill routes its escalated vehicles through
+# the OCR adapter. Not a default: plates are privacy-sensitive, so the
+# route exists only where an operator (or an app's claim) assigned it.
+PLATE_SKILL = "license_plate_recognition"
+PLATE_ROUTE_LABELS: tuple[str, ...] = ("bicycle", "bus", "car",
+                                       "motorcycle", "truck")
+PLATE_ADAPTER = "fast_plate_ocr"
+
+# Adapters dispatched at most ONCE per (camera, track): a vehicle visit
+# has one plate — re-OCRing it on every escalate_cooldown tick is pure
+# cost. caption stays cooldown-paced (a scene evolves; a plate doesn't).
+ONCE_PER_TRACK_ADAPTERS = frozenset({PLATE_ADAPTER})
+
+
+def router_for_skills(skills, base: "DispatchRouter | None" = None) -> "DispatchRouter | None":
+    """The per-camera router: ``base`` plus the routes this camera's
+    assigned skills activate. Returns ``base`` unchanged (identity —
+    including None) when the skills add nothing, so unassigned cameras
+    share the one base router."""
+    if not skills or PLATE_SKILL not in skills:
+        return base
+    src = base.routes if base is not None else None
+    router = DispatchRouter(routes=src,
+                            default=list(base.default) if base else None)
+    for label in PLATE_ROUTE_LABELS:
+        row = router.routes.setdefault(label, [])
+        if PLATE_ADAPTER not in row:
+            row.append(PLATE_ADAPTER)
+    return router
+
+
+class OncePerTrack:
+    """Bounded memory of (track_id, adapter) pairs already dispatched.
+
+    One instance per worker (per camera), so track ids can't collide
+    across cameras. Bounded FIFO: at ``maxlen`` the oldest pair ages
+    out — a recycled track id after thousands of visits re-OCRs once,
+    which is the cheap failure direction."""
+
+    def __init__(self, maxlen: int = 1024) -> None:
+        from collections import OrderedDict
+        self._seen: "OrderedDict[tuple, None]" = OrderedDict()
+        self._maxlen = max(1, int(maxlen))
+
+    def seen(self, track_id, adapter: str) -> bool:
+        """Has this pair been marked? Read-only — see :meth:`mark`."""
+        key = (track_id, adapter)
+        if key in self._seen:
+            self._seen.move_to_end(key)
+            return True
+        return False
+
+    def mark(self, track_id, adapter: str) -> None:
+        """Record a pair. Callers mark AFTER the dispatcher accepted the
+        call, never before: a backpressure drop must not consume the
+        track's one OCR — the next escalation retries it."""
+        self._seen[(track_id, adapter)] = None
+        if len(self._seen) > self._maxlen:
+            self._seen.popitem(last=False)
+
 
 class DispatchRouter:
     """Maps an escalated track's class → the expensive adapter(s) to run.
@@ -76,7 +146,7 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
 
 
 class Dispatcher(Protocol):
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> "bool | None":
         ...
 
 
@@ -151,22 +221,26 @@ class KaicDispatcher:
             else:
                 self._cam_inflight.pop(camera_id, None)
 
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> None:
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> bool:
+        """True = submitted; False = dropped (backpressure / camera share /
+        pool shutdown). The once-per-track filter marks only on True."""
         if not self._claim_camera_slot(camera_id):
             metrics.inc("tier1_dispatch_dropped_total",
                         {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch: %s already at its share; dropping", camera_id)
-            return
+            return False
         if not self._sem.acquire(blocking=False):
             self._release_camera_slot(camera_id)
             metrics.inc("tier1_dispatch_dropped_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch backpressure; dropping %s/%s", camera_id, adapter)
-            return
+            return False
         try:
             self._pool.submit(self._run, camera_id, adapter, crop_bgr, track)
         except Exception:                          # pool shutting down, etc.
             self._sem.release()
             self._release_camera_slot(camera_id)
+            return False
+        return True
 
     def _run(self, camera_id, adapter, crop_bgr, track) -> None:
         self._bump_inflight(1)
@@ -174,7 +248,8 @@ class KaicDispatcher:
         t0 = time.monotonic()
         try:
             body = build_infer_body(
-                self.task, _encode_jpeg(crop_bgr, self.jpeg_quality),
+                ADAPTER_TASKS.get(adapter, self.task),
+                _encode_jpeg(crop_bgr, self.jpeg_quality),
                 {"camera_id": camera_id, "track_id": track.id, "label": track.label},
             )
             self._post(f"{self.base_url}/api/v1/infer/{adapter}", body, self.api_key, self.timeout)
@@ -192,12 +267,17 @@ class KaicDispatcher:
 
 
 def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRouter,
-                         dispatcher: Dispatcher | None) -> int:
+                         dispatcher: Dispatcher | None,
+                         once: OncePerTrack | None = None) -> int:
     """Dispatch the expensive model for each **enforced** escalation.
 
     Returns the number of (adapter) dispatches issued. In `shadow`/`off`,
     ``gate_result.to_dispatch()`` is empty → nothing runs. A track with no retained
     ``best_crop`` (e.g. the tracker was never fed pixels) is skipped.
+
+    ``once`` (per-camera) suppresses re-dispatch of ONCE_PER_TRACK_ADAPTERS
+    for a track already served — one OCR per vehicle visit, not one per
+    escalate-cooldown tick.
     """
     if dispatcher is None:
         return 0
@@ -209,6 +289,15 @@ def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRo
         if crop is None:
             continue
         for adapter in router.route(d.label):
-            dispatcher.dispatch(camera_id, adapter, crop, t)
+            gated = once is not None and adapter in ONCE_PER_TRACK_ADAPTERS
+            if gated and once.seen(t.id, adapter):
+                continue
+            accepted = dispatcher.dispatch(camera_id, adapter, crop, t)
+            # Mark only when the dispatcher took the call. False = an
+            # explicit drop (backpressure / camera share) — the track's
+            # one OCR must survive for the next escalation. None (older
+            # dispatchers, test fakes) counts as accepted.
+            if gated and accepted is not False:
+                once.mark(t.id, adapter)
             issued += 1
     return issued

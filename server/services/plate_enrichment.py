@@ -112,9 +112,15 @@ async def enrich_event_plate(event_id: int) -> None:
         # Phase 0 — this call is now the *fallback* producer; the write can
         # arrive via the bus consumer or the synchronous path below,
         # whichever lands first).
+        # camera_id is the platform HANDLE ("cam{N}"), not the bare numeric
+        # id: the internal /cameras endpoint, Tier-0, and Tier-1 dispatch
+        # all speak handles, so the plate.recognized.v1 this call produces
+        # must too — a consumer scoping to assigned cameras (the LPR app)
+        # compares against handles, and "3" != "cam3" would silently drop
+        # every enrichment-produced event.
         payload = build_infer_payload(
             task=PLATE_TASK, jpeg_bytes=jpeg,
-            params={"camera_id": str(row.camera_id), "event_id": int(row.id)},
+            params={"camera_id": f"cam{row.camera_id}", "event_id": int(row.id)},
         )
         try:
             async with _OCR_CONCURRENCY:

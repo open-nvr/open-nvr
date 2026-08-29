@@ -172,3 +172,16 @@ def test_enrichment_fallback_threads_event_id():
         "the plate.recognized.v1 it triggers can't be joined back to the "
         "visit row, so the bus consumer becomes a no-op for the fallback "
         "path (RFC-0002 Phase 0 convergence)")
+
+
+def test_enrichment_sends_the_camera_handle_not_the_numeric_id():
+    # Both plate producers must put the platform HANDLE ("cam{N}") in
+    # camera_id: Tier-1 dispatch already speaks handles, and a consumer
+    # scoping to assigned cameras (the LPR app) compares against
+    # handles — "3" != "cam3" would silently drop every
+    # enrichment-produced event.
+    src = (_HERE / "services" / "plate_enrichment.py").read_text()
+    assert '"camera_id": f"cam{row.camera_id}"' in src, (
+        "plate_enrichment no longer sends the camera handle — "
+        "enrichment-produced plate.recognized.v1 events become "
+        "invisible to camera-scoped consumers")

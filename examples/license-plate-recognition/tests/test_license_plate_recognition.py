@@ -1,261 +1,213 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""
-Tests for the LicensePlateRecognizer orchestrator + config loader.
+"""Tests for the pure-consumer PlateAlerter (RFC-0002 Phase 4).
 
-The pipeline + KAI-C HTTP clients are exercised separately; here we
-stub the pipeline so we can verify dedup, watchlist severity routing,
-and the SIGINT-clean shutdown contract.
+The app's whole job now: consume ``plate.recognized.v1`` envelopes,
+route severity through the watchlists, dedup per (camera, plate),
+scope to assigned cameras, deliver alerts. Everything here runs
+without NATS, KAI-C, or core — envelopes go straight through
+``handle_event``.
 """
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Iterable
 from unittest.mock import MagicMock
 
 import pytest
 
+import license_plate_recognition as lpr
 from license_plate_recognition import (
     AppConfig,
-    CameraConfig,
-    LicensePlateRecognizer,
+    PLATE_SUBJECT_PATTERN,
+    PlateAlerter,
     load_config,
 )
-from plate_pipeline import PlateRead
 
 
-# ── Helpers ─────────────────────────────────────────────────────────
-
-
-def _app_config(**overrides) -> AppConfig:
-    # frame_url uses http:// so build_frame_source doesn't validate
-    # a filesystem path at init time. The test stubs the FrameSource
-    # afterwards so no HTTP call is ever made.
-    base = AppConfig(
-        kaic_url="http://localhost:8100",
-        kaic_api_key="test-key",
-        cameras=[CameraConfig(camera_id="cam-1", frame_url="http://example.invalid/frame.jpg")],
-        poll_interval_seconds=0.0,
-        request_timeout_seconds=1.0,
-    )
+def _config(**overrides) -> AppConfig:
+    base = AppConfig(nats_url="nats://test:4222")
     for k, v in overrides.items():
         setattr(base, k, v)
     return base
 
 
-def _plate_read(plate: str, vehicle_label: str = "car") -> PlateRead:
-    return PlateRead(
-        plate_text=plate,
-        ocr_confidence=0.91,
-        vehicle_label=vehicle_label,
-        vehicle_confidence=0.88,
-        vehicle_bbox=(10, 10, 200, 200),
-        model_id="fake-model",
-        correlation_id="cid-1",
-    )
-
-
-def _build_recognizer(reads_per_step: Iterable[Iterable[PlateRead]], config: AppConfig | None = None):
-    """Build a LicensePlateRecognizer whose pipeline yields scripted
-    PlateRead lists on successive process_frame calls."""
-    cfg = config or _app_config()
-    pipeline = MagicMock()
-    pipeline.process_frame.side_effect = [list(reads) for reads in reads_per_step]
-
+def _alerter(**overrides) -> tuple[PlateAlerter, MagicMock]:
     dispatcher = MagicMock()
-
-    recognizer = LicensePlateRecognizer(cfg, pipeline, dispatcher)
-
-    # Replace each camera's FrameSource with a stub that returns a
-    # canned JPEG byte string. Tests don't need a real frame; the
-    # pipeline is mocked so the bytes never reach Pillow / a real
-    # adapter.
-    class _StubFrameSource:
-        def fetch(self) -> bytes:
-            return b"\xff\xd8jpeg"
-
-    for cam_id in list(recognizer._frame_sources):
-        recognizer._frame_sources[cam_id] = _StubFrameSource()
-
-    return recognizer, pipeline, dispatcher
+    return PlateAlerter(_config(**overrides), dispatcher), dispatcher
 
 
-# ── Config loader ──────────────────────────────────────────────────
+def _envelope(plate="ABC1234", camera="cam-1", *, confidence=0.9,
+              vehicle="car", schema="plate.recognized.v1", **extra):
+    env = {
+        "id": "evt_0123456789ab",
+        "schema": schema,
+        "correlation_id": "corr-1",
+        "camera_id": camera,
+        "ts": "2026-08-29T10:00:00+00:00",
+        "producer": "kai-c",
+        "payload": {
+            "plate_text": plate,
+            "confidence": confidence,
+            "vehicle_label": vehicle,
+            "event_id": 42,
+        },
+    }
+    env.update(extra)
+    return env
 
 
-def test_load_config_requires_kaic_url_and_api_key(tmp_path: Path):
-    cfg = tmp_path / "c.yml"
-    cfg.write_text("cameras:\n  - {camera_id: a, frame_url: file:///x}\n")
-    with pytest.raises(SystemExit, match="kaic_url"):
-        load_config(cfg)
+# ── Severity routing ────────────────────────────────────────────────
 
 
-def test_load_config_requires_at_least_one_camera(tmp_path: Path):
-    cfg = tmp_path / "c.yml"
-    cfg.write_text(
-        "kaic_url: http://x\n"
-        "kaic_api_key: y\n"
-        "cameras: []\n"
+def test_unlisted_plate_fires_info_read():
+    alerter, dispatcher = _alerter()
+    fired = alerter.handle_event(_envelope())
+    assert len(fired) == 1 and fired[0].severity == "info"
+    assert "ABC1234" in fired[0].title
+    assert dispatcher.fire.call_count == 1
+    assert fired[0].evidence["vehicle_label"] == "car"
+    assert fired[0].correlation_id == "corr-1"
+
+
+def test_denylist_plate_fires_high():
+    alerter, _ = _alerter(denylist=["BAD001"])
+    fired = alerter.handle_event(_envelope(plate="bad 001"))
+    assert fired[0].severity == "high"
+    assert fired[0].evidence["in_denylist"] is True
+
+
+def test_allowlist_plate_fires_low():
+    alerter, _ = _alerter(allowlist=["OK123"])
+    fired = alerter.handle_event(_envelope(plate="ok123"))
+    assert fired[0].severity == "low"
+
+
+# ── Dedup ledger ────────────────────────────────────────────────────
+
+
+def test_dedup_suppresses_within_window_per_camera():
+    alerter, dispatcher = _alerter(dedup_window_seconds=60.0)
+    assert len(alerter.handle_event(_envelope())) == 1
+    assert alerter.handle_event(_envelope()) == []          # suppressed
+    # Same plate on ANOTHER camera is its own ledger entry.
+    assert len(alerter.handle_event(_envelope(camera="cam-2"))) == 1
+    assert dispatcher.fire.call_count == 2
+
+
+def test_dedup_zero_fires_every_read():
+    alerter, _ = _alerter(dedup_window_seconds=0.0)
+    assert len(alerter.handle_event(_envelope())) == 1
+    assert len(alerter.handle_event(_envelope())) == 1
+
+
+def test_dedup_expires_after_window(monkeypatch):
+    alerter, _ = _alerter(dedup_window_seconds=10.0)
+    t = {"now": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: t["now"])
+    assert len(alerter.handle_event(_envelope())) == 1
+    t["now"] += 11.0
+    assert len(alerter.handle_event(_envelope())) == 1
+
+
+# ── Confidence + malformed input ────────────────────────────────────
+
+
+def test_min_confidence_drops_weak_reads():
+    alerter, _ = _alerter(min_confidence=0.5)
+    assert alerter.handle_event(_envelope(confidence=0.3)) == []
+    assert len(alerter.handle_event(_envelope(confidence=0.9))) == 1
+    # An event WITHOUT confidence must not be dropped by the filter.
+    alerter2, _ = _alerter(min_confidence=0.5, dedup_window_seconds=0)
+    assert len(alerter2.handle_event(_envelope(confidence=None))) == 1
+
+
+def test_foreign_and_malformed_events_are_ignored():
+    alerter, dispatcher = _alerter()
+    assert alerter.handle_event("junk") == []
+    assert alerter.handle_event({"schema": "opennvr.tier0.v1"}) == []
+    assert alerter.handle_event(_envelope(schema="plate.recognized.v2")) == []
+    assert alerter.handle_event(_envelope(payload="junk")) == []
+    assert alerter.handle_event(_envelope(plate="")) == []
+    assert alerter.handle_event(_envelope(camera="")) == []
+    assert dispatcher.fire.call_count == 0
+
+
+# ── Camera scope (Phase 2 integration) ──────────────────────────────
+
+
+def test_explicit_camera_scope_wins():
+    alerter, _ = _alerter(cameras=["cam-1"])
+    assert len(alerter.handle_event(_envelope(camera="cam-1"))) == 1
+    assert alerter.handle_event(_envelope(camera="cam-9")) == []
+
+
+def test_assignment_scope_via_sdk(monkeypatch):
+    alerter, _ = _alerter(opennvr_url="http://core:8000")
+    monkeypatch.setattr(lpr, "cameras_for_skill",
+                        lambda url, skill, api_key=None: ["cam-7"])
+    assert alerter.handle_event(_envelope(camera="cam-1")) == []
+    assert len(alerter.handle_event(_envelope(camera="cam-7"))) == 1
+
+
+def test_scope_fetch_failure_means_no_restriction(monkeypatch):
+    alerter, _ = _alerter(opennvr_url="http://core:8000")
+
+    def boom(url, skill, api_key=None):
+        raise RuntimeError("core down")
+    monkeypatch.setattr(lpr, "cameras_for_skill", boom)
+    assert len(alerter.handle_event(_envelope(camera="anything"))) == 1
+
+
+# ── Contract surface ────────────────────────────────────────────────
+
+
+def test_state_snapshot_shape():
+    alerter, _ = _alerter(allowlist=["OK1"], denylist=["BAD1", "BAD2"])
+    alerter.handle_event(_envelope())
+    snap = alerter.state_snapshot()
+    assert snap["allowlist_size"] == 1
+    assert snap["denylist_size"] == 2
+    assert snap["deduped_plates_tracked"] == 1
+    assert snap["recent"][0]["message"] == "ABC1234 on cam-1"
+
+
+def test_live_watchlist_update_applies_atomically():
+    alerter, _ = _alerter(dedup_window_seconds=0)
+    assert alerter.handle_event(_envelope(plate="XYZ9"))[0].severity == "info"
+    alerter.on_config_update({"denylist": ["xyz9 "], "allowlist": []})
+    assert alerter.handle_event(_envelope(plate="XYZ9"))[0].severity == "high"
+
+
+def test_manifest_declares_the_consumer_contract():
+    m = PlateAlerter.manifest
+    assert m.subscribes == PLATE_SUBJECT_PATTERN
+    assert m.version == "2.0.0"
+    assert "object_detection" in m.requires_tasks
+    assert "license_plate_recognition" in m.requires_tasks
+
+
+# ── Config loader ───────────────────────────────────────────────────
+
+
+def test_load_config_requires_nats_url(tmp_path: Path):
+    p = tmp_path / "c.yml"
+    p.write_text("dedup_window_seconds: 5\n")
+    with pytest.raises(ValueError, match="nats_url"):
+        load_config(p)
+
+
+def test_load_config_normalises(tmp_path: Path):
+    p = tmp_path / "c.yml"
+    p.write_text(
+        "nats_url: nats://n:4222\n"
+        "allowlist: [' ab12 ', '']\n"
+        "denylist: ['bad1']\n"
+        "cameras: ['cam-1', ' ']\n"
     )
-    with pytest.raises(SystemExit, match="camera"):
-        load_config(cfg)
-
-
-def test_load_config_uppercases_watchlists(tmp_path: Path):
-    cfg = tmp_path / "c.yml"
-    cfg.write_text(
-        "kaic_url: http://x\n"
-        "kaic_api_key: y\n"
-        "cameras:\n  - {camera_id: a, frame_url: file:///x}\n"
-        "allowlist: [abc-001, def-002]\n"
-        "denylist: ['bad-999']\n"
-    )
-    cfg_obj = load_config(cfg)
-    assert cfg_obj.allowlist == ["ABC-001", "DEF-002"]
-    assert cfg_obj.denylist == ["BAD-999"]
-
-
-# ── Severity routing ──────────────────────────────────────────────
-
-
-def test_denylist_plate_fires_high_severity():
-    cfg = _app_config(denylist=["BAD-001"])
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("bad-001")]], config=cfg
-    )
-    recognizer.step()
-    dispatcher.dispatch.assert_called_once()
-    alert = dispatcher.dispatch.call_args.args[0]
-    assert alert.severity == "high"
-    assert "Watchlist" in alert.title
-
-
-def test_allowlist_plate_fires_low_severity():
-    cfg = _app_config(allowlist=["MY-CAR"])
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("my-car")]], config=cfg
-    )
-    recognizer.step()
-    alert = dispatcher.dispatch.call_args.args[0]
-    assert alert.severity == "low"
-    assert "Expected" in alert.title
-
-
-def test_unlisted_plate_fires_info_severity():
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("abc-123")]]
-    )
-    recognizer.step()
-    alert = dispatcher.dispatch.call_args.args[0]
-    assert alert.severity == "info"
-
-
-# ── Dedup ──────────────────────────────────────────────────────────
-
-
-def test_dedup_suppresses_repeat_plate_within_window():
-    cfg = _app_config(dedup_window_seconds=60.0)
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("abc-123")], [_plate_read("abc-123")]],
-        config=cfg,
-    )
-    recognizer.step()
-    recognizer.step()
-    # Second step's read was within the dedup window → only one dispatch.
-    assert dispatcher.dispatch.call_count == 1
-
-
-def test_dedup_zero_window_fires_every_time():
-    cfg = _app_config(dedup_window_seconds=0.0)
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("abc-123")], [_plate_read("abc-123")]],
-        config=cfg,
-    )
-    recognizer.step()
-    recognizer.step()
-    assert dispatcher.dispatch.call_count == 2
-
-
-def test_dedup_is_keyed_per_camera():
-    cfg = _app_config(
-        cameras=[
-            CameraConfig(camera_id="cam-1", frame_url="http://example.invalid/a.jpg"),
-            CameraConfig(camera_id="cam-2", frame_url="http://example.invalid/b.jpg"),
-        ],
-        dedup_window_seconds=60.0,
-    )
-    # process_frame called once per camera per step; we run one step
-    # with two cameras → two scripted return values.
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("abc-123")], [_plate_read("abc-123")]],
-        config=cfg,
-    )
-    recognizer.step()
-    # Same plate read on TWO different cameras should fire twice.
-    assert dispatcher.dispatch.call_count == 2
-
-
-# ── Multi-vehicle frame ────────────────────────────────────────────
-
-
-def test_multiple_reads_in_one_frame_each_fire_once():
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[_plate_read("aaa-111"), _plate_read("bbb-222", vehicle_label="truck")]]
-    )
-    recognizer.step()
-    assert dispatcher.dispatch.call_count == 2
-
-
-# ── Live config delivery (SDK registry poll → on_config_update) ────────
-
-
-def test_on_config_update_swaps_watchlists_live():
-    """Registry watchlist edits apply WITHOUT a restart: the hook
-    rebuilds the allow/deny sets with the same normalization
-    load_config uses (upper + strip, empties dropped)."""
-    recognizer, _pipeline, _dispatcher = _build_recognizer(
-        [], config=_app_config(allowlist=["OLD1"], denylist=[])
-    )
-    assert recognizer._watchlists == ({"OLD1"}, set())
-
-    recognizer.on_config_update(
-        {"allowlist": [" abc123 ", ""], "denylist": ["evil1", "EVIL1"]}
-    )
-    assert recognizer._watchlists == ({"ABC123"}, {"EVIL1"})
-
-
-def test_on_config_update_is_idempotent_noop_on_same_values():
-    """The first poll re-delivers the boot config — same values must
-    not churn the sets (identity preserved ⇒ no spurious log/work)."""
-    recognizer, _pipeline, _dispatcher = _build_recognizer(
-        [], config=_app_config(allowlist=["AAA111"], denylist=["BBB222"])
-    )
-    before = recognizer._watchlists
-    recognizer.on_config_update(
-        {"allowlist": ["aaa111"], "denylist": ["bbb222"]}
-    )
-    # Equal → early return → the exact same tuple still bound (one
-    # rebind for BOTH lists — a reader can never see a mixed pair).
-    assert recognizer._watchlists is before
-
-
-def test_on_config_update_severity_routing_follows_live_lists():
-    """End-to-end: a plate moved onto the denylist AFTER boot fires the
-    high-severity watchlist alert on the next read."""
-    read = _plate_read("XYZ789")
-    recognizer, _pipeline, dispatcher = _build_recognizer(
-        [[read], [read]], config=_app_config(
-            allowlist=[], denylist=[], dedup_window_seconds=0.0,
-        ))
-
-    recognizer.step()
-    first = dispatcher.dispatch.call_args_list[0][0][0]
-    assert first.severity == "info"          # plain read, not watched
-
-    recognizer.on_config_update({"allowlist": [], "denylist": ["XYZ789"]})
-    recognizer.step()
-    second = dispatcher.dispatch.call_args_list[1][0][0]
-    assert second.severity == "high"         # denylist applied live
-    assert "Watchlist plate XYZ789" in second.title
+    cfg = load_config(p)
+    assert cfg.subject_pattern == PLATE_SUBJECT_PATTERN
+    assert cfg.allowlist == ["AB12", ""]  # blank filtered at setup, not load
+    assert cfg.denylist == ["BAD1"]
+    assert cfg.cameras == ["cam-1"]
