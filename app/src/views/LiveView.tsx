@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { apiService } from '../lib/apiService'
 import { rebaseToCurrentOrigin } from '../lib/streamUrl'
 import { VideoPlayer, type VideoPlayerHandle } from '../components/VideoPlayer'
+import type { AspectOverride } from '../lib/aspect'
 import { QrScanner } from '../components/QrScanner'
 import { AddCameraDialog } from '../components/AddCameraDialog'
 import { useFullscreen } from '../hooks/useFullscreen'
@@ -203,7 +204,7 @@ export function LiveView() {
   const { toggle: toggleFs, isFullscreen } = useFullscreen(gridRef as React.RefObject<HTMLDivElement>)
   // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
-  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null}>>([])
+  const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>>([])
   
   // Camera display order - array of camera IDs in display sequence
   // This determines which camera appears in which tile position
@@ -273,7 +274,14 @@ export function LiveView() {
       // transitions, so without this the overlay waits for the camera to
       // change state — which, for one that is simply still offline, never
       // happens, and the tile just shows a dead player.
-      const cameraList = cameras.map((cam: any) => ({ id: cam.id, name: cam.name, live_online: cam.live_online }))
+      const cameraList = cameras.map((cam: any) => ({
+        id: cam.id,
+        name: cam.name,
+        live_online: cam.live_online,
+        // The display-aspect override rides along so the tile can render an
+        // anamorphic stream at its true shape — see lib/aspect.ts (#354).
+        display_aspect_ratio: cam.display_aspect_ratio,
+      }))
       setAvailableCameras(cameraList)
       
       // Update display order: add new cameras, remove deleted ones
@@ -654,7 +662,7 @@ function Tile({
   canManage = false
 }: { 
   index: number
-  availableCameras: Array<{id: number, name: string, live_online?: boolean | null}>
+  availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>
   assignedCameraId?: number | null
   onCameraSelected?: (cameraId: number) => void
   onCameraAdded?: () => void
@@ -737,6 +745,7 @@ function Tile({
 
   const hasLink = !!urls?.whep || !!urls?.hls
   const displayName = cameraName || `Camera ${cameraId || index + 1}`
+  const assignedCamera = availableCameras.find((c) => c.id === assignedCameraId)
   
   const handleSnapshot = (dataUrl: string) => {
     const a = document.createElement('a')
@@ -770,8 +779,8 @@ function Tile({
         {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
 
         {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
-            stretch the box taller than 16:9 — the box height comes only from
-            aspect-video, and object-contain letter/pillarboxes the stream. */}
+            stretch this box — the player sizes itself to the stream's DISPLAY
+            aspect inside it and letter/pillarboxes against the panel bg. */}
         <div className="absolute inset-0">
           {hasLink ? (
             <VideoPlayer
@@ -787,6 +796,7 @@ function Tile({
               autoPlay
               muted
               onSnapshot={handleSnapshot}
+              displayAspectOverride={assignedCamera?.display_aspect_ratio}
               onTogglePtz={() => setPtzOpen((s) => !s)}
               ptzActive={ptzOpen}
               overlay={ptzOpen && cameraId ? (

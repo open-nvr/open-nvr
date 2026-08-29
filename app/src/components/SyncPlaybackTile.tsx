@@ -16,10 +16,14 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type Hls from 'hls.js'
 import { CameraOff, Loader2, Radio, AlertCircle, Volume2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { displayAspect, isStretched } from '../lib/aspect'
+import type { AspectOverride } from '../lib/aspect'
+import { useVideoSize } from '../hooks/useVideoAspect'
+import { AspectFrame } from './VideoPlayer'
 import { loadHls } from '../lib/loadHls'
 import type { TimelineSegment } from './PlaybackTimeline'
 
@@ -38,6 +42,8 @@ interface SyncPlaybackTileProps {
   /** Highlighted tile (audio focus). */
   active: boolean
   onActivate: () => void
+  /** Per-camera display-aspect override — see lib/aspect.ts (issue #354). */
+  displayAspectOverride?: AspectOverride | null
 }
 
 type TileStatus = 'idle' | 'loading' | 'ok' | 'gap' | 'live' | 'error'
@@ -63,6 +69,7 @@ export function SyncPlaybackTile({
   muted,
   active,
   onActivate,
+  displayAspectOverride,
 }: SyncPlaybackTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -362,16 +369,34 @@ export function SyncPlaybackTile({
     }
   }, [teardownMedia])
 
+  // Coded size of the loaded clip vs. the aspect it should be shown at.
+  const videoSize = useVideoSize(videoRef)
+  const videoAspect = useMemo(
+    () => displayAspect(videoSize?.width, videoSize?.height, displayAspectOverride),
+    [videoSize?.width, videoSize?.height, displayAspectOverride]
+  )
+  const stretched = isStretched(videoSize?.width, videoSize?.height, videoAspect)
+
   const showSpinner = status === 'loading' || (status === 'ok' && buffering)
 
   return (
     <div
       onClick={onActivate}
-      className={`relative bg-black overflow-hidden cursor-pointer aspect-video lg:aspect-auto border ${
+      className={`relative bg-black overflow-hidden cursor-pointer flex items-center justify-center aspect-video lg:aspect-auto border ${
         active ? 'border-[var(--accent)]' : 'border-[var(--border)]'
       }`}
+      style={{ containerType: 'size' }}
     >
-      <video ref={videoRef} className="w-full h-full object-contain" playsInline crossOrigin="anonymous" />
+      {/* The clip carries the camera's coded size, which for an anamorphic
+          stream is not the size to show it at — see lib/aspect.ts (#354). */}
+      <AspectFrame aspect={videoAspect}>
+        <video
+          ref={videoRef}
+          className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
+          playsInline
+          crossOrigin="anonymous"
+        />
+      </AspectFrame>
 
       {/* Name chip */}
       <div className="absolute top-1 left-1 flex items-center gap-1 max-w-[85%] px-1.5 py-0.5 bg-black/60 text-white text-[10px] leading-tight">

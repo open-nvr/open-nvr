@@ -20,8 +20,10 @@
 // these instead of calling apiService in a useEffect, so concurrent mounts
 // share one request and one cache entry.
 
+import { useMemo } from 'react'
 import { QueryClient, keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
 import { apiService } from './apiService'
+import type { AspectOverride } from './aspect'
 import { todayLocalKey } from './time'
 
 export const queryClient = new QueryClient({
@@ -51,6 +53,14 @@ export type CameraItem = {
   /** Observed recording health: 'recording' | 'stalled' | 'never' | 'off'. */
   recording_state?: string | null
   last_recording_at?: string | null
+  /** Operator's display-aspect override; null means auto-detect (#354). */
+  display_aspect_ratio?: AspectOverride | null
+}
+
+/** What a video surface needs to render a camera at the right shape. A named
+ *  type so the props can be spread at every call site as one unit. */
+export type CameraAspect = {
+  displayAspectOverride?: AspectOverride | null
 }
 
 export type CameraListResp = { cameras: CameraItem[]; total: number }
@@ -92,6 +102,25 @@ export function useCameras(
     // this the table would blank out and remount on every keystroke pause.
     placeholderData: keepPreviousData,
   })
+}
+
+/**
+ * Per-camera display-aspect settings, keyed by camera id, for surfaces that
+ * show video but only know a camera_id (playback, sync playback).
+ *
+ * active_only:false because a paused camera's recordings are still played
+ * back, and they need the same correction. A missing entry is not a problem:
+ * it means "auto", and the known-mode detection in lib/aspect.ts still runs.
+ */
+export function useCameraAspects(): Record<number, CameraAspect> {
+  const { data } = useCameras({ limit: 200, active_only: false })
+  return useMemo(() => {
+    const out: Record<number, CameraAspect> = {}
+    for (const c of data?.cameras ?? []) {
+      out[c.id] = { displayAspectOverride: c.display_aspect_ratio ?? null }
+    }
+    return out
+  }, [data])
 }
 
 /**

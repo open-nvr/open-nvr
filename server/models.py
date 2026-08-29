@@ -227,6 +227,15 @@ class Camera(Base):
     # vendor default — covers cameras whose substream path isn't a known
     # Hikvision/Dahua convention.
     substream_url = Column(String(500), nullable=True)
+    # How the UI should DISPLAY this camera's picture: NULL (auto-detect),
+    # "native", or a "W:H" ratio. Purely a rendering hint — it never reaches
+    # MediaMTX and never re-provisions a path. Exists because Dahua-family
+    # DVRs (CP Plus "1080N" = 960x1080 for a 16:9 scene) encode anamorphically
+    # and signal no aspect ratio at all, so a passthrough player has nothing
+    # to correct from. NULL means "detect", which the UI resolves against a
+    # table of known anamorphic encoder modes. Nullable so the additive column
+    # self-heal can add it to old create_all databases.
+    display_aspect_ratio = Column(String(16), nullable=True)
     is_active = Column(Boolean, default=True)
     # Tombstone for irreversible soft delete. NULL = live (active or paused);
     # set = camera is in the bin: hidden from every normal list, not editable,
