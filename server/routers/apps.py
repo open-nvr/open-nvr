@@ -111,6 +111,9 @@ class IndexEntry(BaseModel):
     version: str
     image: str
     requires_tasks: list[str] = []
+    # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
+    # provisioned with the app; the reconciler ups + refcounts them.
+    requires_adapters: list[str] = []
     emits: list[str] = []
     docs_url: str
     install: InstallSpec

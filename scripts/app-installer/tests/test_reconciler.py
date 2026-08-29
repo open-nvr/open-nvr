@@ -69,6 +69,7 @@ TEST_INDEX: dict[str, CuratedApp] = {
         id="license-plate-recognition",
         image="ghcr.io/open-nvr/license-plate-recognition:latest",
         image_digest="sha256:" + "d" * 64,
+        requires_adapters=("fast_plate_ocr",),
     ),
 }
 
@@ -399,3 +400,97 @@ def test_status_write_is_guarded_on_acted_desired():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── RFC-0002 Phase 3: refcounted adapter provisioning (decision 7) ──
+
+
+def _lpr_intent(**kw) -> Intent:
+    base = dict(
+        id="license-plate-recognition",
+        image="ghcr.io/open-nvr/license-plate-recognition:latest",
+        image_digest="sha256:" + "d" * 64,
+        desired="installed",
+        status="pending",
+    )
+    base.update(kw)
+    return Intent(**base)
+
+
+def test_install_ups_required_adapters_ahead_of_the_app():
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    status, _ = _reconcile(_lpr_intent(), runner)
+    assert status == "applied"
+    argv = runner.calls[0]
+    up_at = argv.index("-d")
+    services = argv[up_at + 1:]
+    # The adapter service is upped in the same command, BEFORE the app —
+    # an already-running adapter is a compose no-op (reuse), a missing
+    # service block fails the whole install loudly.
+    assert services == ["fast-plate-ocr-adapter", "license-plate-recognition"]
+
+
+def test_uninstall_releases_the_last_holders_adapter():
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    status, _ = _reconcile(
+        _lpr_intent(desired="absent"), runner, held_adapters=frozenset()
+    )
+    assert status == "applied"
+    argv = runner.calls[0]
+    rm_at = argv.index("rm")
+    assert argv[rm_at + 1:] == [
+        "-s", "-f", "license-plate-recognition", "fast-plate-ocr-adapter"]
+
+
+def test_uninstall_never_removes_an_adapter_another_app_holds():
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    _reconcile(
+        _lpr_intent(desired="absent"), runner,
+        held_adapters=frozenset({"fast_plate_ocr"}),
+    )
+    argv = runner.calls[0]
+    assert "fast-plate-ocr-adapter" not in argv
+
+
+def test_delisted_app_releases_no_adapters():
+    # An id no longer in the curated index: its requirements are unknown,
+    # so teardown removes ONLY the app service — never guess an adapter.
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    status, _ = _reconcile(
+        _intent(id="ghost-app", desired="absent"), runner,
+    )
+    assert status == "applied"
+    assert [a for a in runner.calls[0] if a.endswith("-adapter")] == []
+
+
+def test_sweep_computes_held_from_other_installed_intents():
+    # LPR uninstalling while a second (hypothetical) app that also
+    # requires fast_plate_ocr stays installed -> the adapter survives.
+    index = dict(TEST_INDEX)
+    index["parking-audit"] = CuratedApp(
+        id="parking-audit",
+        image="ghcr.io/open-nvr/parking-audit:latest",
+        image_digest="sha256:" + "e" * 64,
+        requires_adapters=("fast_plate_ocr",),
+    )
+    intents = [
+        _lpr_intent(desired="absent"),
+        _intent(id="parking-audit",
+                image="ghcr.io/open-nvr/parking-audit:latest",
+                image_digest="sha256:" + "e" * 64,
+                desired="installed", status="applied"),
+    ]
+    runner = FakeRunner(RunResult(0, "ok", ""))
+    store = FakeStore(intents)
+    outcomes = reconcile_once(store, runner, index=index)
+    assert [o[0] for o in outcomes] == ["license-plate-recognition"]
+    assert "fast-plate-ocr-adapter" not in runner.calls[0]
+
+
+def test_shipped_index_carries_lpr_adapter_requirement():
+    repo_root = Path(__file__).resolve().parents[3]
+    index = load_curated_index(
+        repo_root / "server" / "config" / "apps_index.yml")
+    assert index["license-plate-recognition"].requires_adapters == (
+        "fast_plate_ocr",)
+    assert index["smart-doorbell"].requires_adapters == ("insightface",)

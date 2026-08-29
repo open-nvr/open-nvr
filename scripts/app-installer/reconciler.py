@@ -145,6 +145,10 @@ class CuratedApp:
     id: str
     image: str
     image_digest: str | None
+    # RFC-0002 Phase 3 (decision 7): KAI-C adapters provisioned WITH the
+    # app. Upped alongside it; refcounted across installed apps on
+    # uninstall (released only when no other installed app requires it).
+    requires_adapters: tuple[str, ...] = ()
 
 
 def load_curated_index(path: str | Path) -> dict[str, CuratedApp]:
@@ -177,15 +181,33 @@ def load_curated_index(path: str | Path) -> dict[str, CuratedApp]:
                          entry.get("id"))
             continue
         digest = entry.get("image_digest")
+        raw_adapters = entry.get("requires_adapters") or []
+        adapters = tuple(
+            a for a in raw_adapters
+            if isinstance(a, str) and _ADAPTER_RE.fullmatch(a)
+        ) if isinstance(raw_adapters, list) else ()
         index[app_id] = CuratedApp(
             id=app_id,
             image=image,
             image_digest=digest if isinstance(digest, str) else None,
+            requires_adapters=adapters,
         )
     return index
 
 
 # ── The real docker runner (production only; never imported by tests) ──
+
+
+# Adapter names are snake_case KAI-C registry names; their overlay
+# service is <name-with-dashes>-adapter (the fast-plate-ocr-adapter
+# convention). Same trust rule as app ids: only names from the baked
+# curated index ever reach an argv, and only in this validated shape.
+_ADAPTER_RE = re.compile(r"[a-z0-9]+(_[a-z0-9]+)*")
+
+
+def adapter_service_name(adapter: str) -> str:
+    """KAI-C adapter name -> its compose service (decision 7 convention)."""
+    return adapter.replace("_", "-") + "-adapter"
 
 
 def docker_runner(
@@ -237,6 +259,7 @@ def _compose_base(compose_files: tuple[str, ...], profile: str) -> list[str]:
 def build_up_argv(
     intent: Intent,
     *,
+    adapters: tuple[str, ...] = (),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
 ) -> list[str]:
@@ -248,19 +271,33 @@ def build_up_argv(
     (``<ID>_IMAGE``), so the reconciler deploys the exact bytes the
     curated index vouched for. When absent, the service's own ``image:``
     default is used (unpinned — dev only).
+
+    RFC-0002 Phase 3 (decision 7): the app's required adapters (from the
+    curated index) are upped in the same command, ahead of the app — an
+    already-running adapter is a no-op (reuse), a missing service block
+    fails the whole install LOUDLY (the "cannot be provisioned" refusal).
     """
-    return _compose_base(compose_files, profile) + ["up", "-d", intent.id]
+    services = [
+        adapter_service_name(a) for a in (adapters or ())
+    ] + [intent.id]
+    return _compose_base(compose_files, profile) + ["up", "-d", *services]
 
 
 def build_down_argv(
     intent: Intent,
     *,
+    release_adapters: tuple[str, ...] = (),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
 ) -> list[str]:
-    """``docker compose ... rm -s -f <id>`` — stop and remove exactly the
-    one app service, leaving the rest of the stack untouched."""
-    return _compose_base(compose_files, profile) + ["rm", "-s", "-f", intent.id]
+    """``docker compose ... rm -s -f <id> [adapters]`` — stop and remove
+    the app service plus any of its adapters whose refcount dropped to
+    zero (decision 7: uninstall RELEASES, and the last release removes;
+    an adapter another installed app still requires is never listed)."""
+    services = [intent.id] + [
+        adapter_service_name(a) for a in (release_adapters or ())
+    ]
+    return _compose_base(compose_files, profile) + ["rm", "-s", "-f", *services]
 
 
 def image_env_key(app_id: str) -> str:
@@ -309,6 +346,7 @@ def reconcile_intent(
     runner: Runner,
     *,
     index: dict[str, CuratedApp],
+    held_adapters: frozenset[str] = frozenset(),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
 ) -> tuple[str, str]:
@@ -375,7 +413,8 @@ def reconcile_intent(
         else:
             logger.info("Pinning app %r to %s", intent.id, pin)
         argv = build_up_argv(
-            intent, compose_files=compose_files, profile=profile
+            intent, adapters=curated.requires_adapters,
+            compose_files=compose_files, profile=profile,
         )
         result = runner(argv, override or None)
         if result.returncode == 0:
@@ -385,8 +424,18 @@ def reconcile_intent(
         ).strip()
 
     if intent.desired == "absent":
+        # Decision 7 refcount: release this app's adapters, but only the
+        # ones NO other installed app requires (``held_adapters``, computed
+        # by the sweep from the full intent list). A delisted app releases
+        # nothing (its requirements are unknown) — never guess a teardown.
+        curated = index.get(intent.id)
+        release = tuple(
+            a for a in (curated.requires_adapters if curated else ())
+            if a not in held_adapters
+        )
         argv = build_down_argv(
-            intent, compose_files=compose_files, profile=profile
+            intent, release_adapters=release,
+            compose_files=compose_files, profile=profile,
         )
         # No image override on teardown — ``rm`` doesn't resolve the image.
         result = runner(argv, None)
@@ -425,14 +474,28 @@ def reconcile_once(
     Returns a list of ``(id, status, message)`` for observability.
     """
     outcomes: list[tuple[str, str, str]] = []
-    for intent in store.list_intents():
+    intents = store.list_intents()
+    for intent in intents:
         if intent.status == "applied":
             continue  # nothing to do until the server flips it to pending
         if intent.id in skip_ids:
             continue  # failure backoff — the caller will retry later
+        # Decision 7 refcount: adapters still required by ANY other app
+        # whose desired state is installed. Desired state (not live
+        # containers) is the source of truth the reconciler converges on.
+        held = frozenset(
+            a
+            for other in intents
+            if other.id != intent.id and other.desired == "installed"
+            for a in (
+                index[other.id].requires_adapters
+                if other.id in index else ()
+            )
+        )
         status_, message = reconcile_intent(
             intent, runner,
-            index=index, compose_files=compose_files, profile=profile,
+            index=index, held_adapters=held,
+            compose_files=compose_files, profile=profile,
         )
         store.set_status(intent.id, status_, message, desired=intent.desired)
         outcomes.append((intent.id, status_, message))

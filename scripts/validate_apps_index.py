@@ -407,6 +407,35 @@ def validate_entry(
                 "sha256:<64 lowercase hex chars>"
             )
 
+    # requires_adapters (RFC-0002 Phase 3, decision 7): adapters that must
+    # be provisioned WITH the app. Names are snake_case KAI-C registry
+    # names; each maps to the overlay service <name-with-dashes>-adapter.
+    # A requirement without a service block is a WARNING, not an error —
+    # it machine-checks the "cannot be provisioned" state (the historical
+    # smart-doorbell NOTE): the store card already greys the app via its
+    # unavailable task, and an install proceeds degraded exactly as the
+    # app documents. Shipping the adapter service upgrades it silently.
+    adapters = entry.get("requires_adapters", [])
+    if not isinstance(adapters, list):
+        errors.append(f"{label}: requires_adapters must be a list")
+    else:
+        for adapter in adapters:
+            if not isinstance(adapter, str) or not re.fullmatch(
+                    r"[a-z0-9]+(_[a-z0-9]+)*", adapter):
+                errors.append(
+                    f"{label}: requires_adapters entry {adapter!r} must be "
+                    "a snake_case KAI-C adapter name")
+                continue
+            service = adapter.replace("_", "-") + "-adapter"
+            if overlay_services is not None and service not in overlay_services:
+                warnings.append(
+                    f"{label}: required adapter '{adapter}' has no "
+                    f"'{service}' service in docker-compose.apps.yml — the "
+                    "app installs but that capability stays degraded until "
+                    "an operator registers the adapter with KAI-C "
+                    "themselves (RFC-0002 Phase 3)."
+                )
+
     # requires_tasks: must be a list; unknown tasks warn (free-text allowed).
     tasks = entry.get("requires_tasks", [])
     if not isinstance(tasks, list):

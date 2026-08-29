@@ -77,6 +77,9 @@ MANIFEST = AppManifest(
     # The chain the PLATFORM must be able to run for plates to flow —
     # the catalog uses this to warn when the OCR adapter is missing.
     requires_tasks=["object_detection", "license_plate_recognition"],
+    # Decision 7: the OCR adapter installs WITH the app (the overlay
+    # ships + registers it); yolov8 is the standard stack's, reused.
+    requires_adapters=["fast_plate_ocr"],
     subscribes=PLATE_SUBJECT_PATTERN,
     params=[
         Param("dedup_window_seconds", float, default=60.0,
