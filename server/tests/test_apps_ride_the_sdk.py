@@ -37,11 +37,14 @@ BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber"})
 # Not apps at all: build-support directories with no Python entrypoint.
 EXCLUDED = frozenset({"yolov8-weights"})
 
-# RFC-0002 gap 8 ("The flagship app is invisible to its own platform"):
-# the camera agent imports SDK utilities but extends no base class, serves
-# no /manifest or /state, and never self-registers. Phase 1's "Agent
-# contract parity" task retires this entry. This set may ONLY shrink —
-# see test_allowlist_only_shrinks.
+# Gap 8's VISIBILITY debt is retired: the agent now serves /manifest and
+# /state and self-registers with the App Catalog (Phase 1 contract
+# parity — test_contract_parity.py in the agent's suite). What remains
+# allowlisted is the narrower base-class debt: the agent still extends
+# no Detector/FrameApp/AlertSubscriber, which is what THIS suite checks.
+# That was a deliberate scope choice ("contract parity only, not a
+# base-class rewrite"); adopting a base someday removes this entry via
+# test_allowlist_only_shrinks. This set may ONLY shrink.
 ALLOWLISTED = frozenset({"camera-agent"})
 
 

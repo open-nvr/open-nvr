@@ -78,7 +78,9 @@ def _tasks_by_adapter(adapters_caps: Optional[dict]) -> Optional[dict[str, set[s
 def _adapter_skill(entry: Any, *,
                    registered: Optional[set[str]],
                    healthy: Optional[set[str]],
-                   advertised: Optional[dict[str, set[str]]]) -> dict[str, Any]:
+                   advertised: Optional[dict[str, set[str]]],
+                   assigned_cameras: Optional[list[int]] = None,
+                   assignments_known: bool = False) -> dict[str, Any]:
     """One taxonomy task (server/config/tasks.yml TaskEntry) → one entry."""
     names = {entry.task.lower()} | {a.lower() for a in entry.aliases}
 
@@ -100,7 +102,17 @@ def _adapter_skill(entry: Any, *,
         status, reason = "missing-dependency", (
             "no registered adapter provides this task")
     elif healthy and set(providers) & healthy:
-        status, reason = "available", None
+        # Phase 2 (gap 7): a healthy capability's lifecycle position comes
+        # from the assignment table — assigned somewhere = active, assigned
+        # nowhere = dormant. When the assignment source wasn't consulted
+        # (older callers), "available" honestly says "capable, activity
+        # unknown".
+        if not assignments_known:
+            status, reason = "available", None
+        elif assigned_cameras:
+            status, reason = "active", None
+        else:
+            status, reason = "dormant", "no camera assigned"
     else:
         status, reason = "degraded", "no healthy provider"
 
@@ -116,7 +128,9 @@ def _adapter_skill(entry: Any, *,
         "reason": reason,
         "publishes": sorted(set(publishes)),
         "config": {},                     # adapters carry no operator params here
-        "assignments": None,              # Phase 2: the camera-assignment table
+        "assignments": (
+            {"cameras": assigned_cameras or []} if assignments_known else None
+        ),
         "agent_skill": entry.agent_skill,
         "suggested_adapters": list(entry.suggested_adapters),
         "suggested_apps": list(entry.suggested_apps),
@@ -166,6 +180,7 @@ def derive_skills(
     adapters_health: Optional[dict],
     adapters_caps: Optional[dict],
     apps_rows: Iterable[Any],
+    assignments: Optional[dict[str, list[int]]] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """The whole view, from already-fetched inputs. Pure: no I/O, no
@@ -185,9 +200,12 @@ def derive_skills(
     healthy = _healthy_adapters(adapters_health)
     advertised = _tasks_by_adapter(adapters_caps)
 
+    assignments_known = assignments is not None
     skills = [
         _adapter_skill(
-            e, registered=registered, healthy=healthy, advertised=advertised)
+            e, registered=registered, healthy=healthy, advertised=advertised,
+            assigned_cameras=(assignments or {}).get(e.task),
+            assignments_known=assignments_known)
         for e in tasks_registry
     ]
     skills.extend(_app_skill(row, now) for row in apps_rows)
@@ -198,7 +216,10 @@ def derive_skills(
             "adapter_registry": "ok" if registered is not None else "unreachable",
             "adapter_capabilities": "ok" if advertised is not None else "unavailable",
             "app_catalog": "ok",
-            "assignments": {"implemented": False, "phase": 2},
+            "assignments": (
+                {"implemented": True}
+                if assignments_known else {"implemented": False, "phase": 2}
+            ),
         },
         "generated_at": now.replace(microsecond=0).isoformat(),
     }
