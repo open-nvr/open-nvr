@@ -361,7 +361,11 @@ async def get_tier0_metrics() -> dict[str, Any]:
     unreachable — a normal state (gate off / pipeline not deployed), not an error.
     """
     base = (settings.detect_pipeline_metrics_url or "").rstrip("/")
-    if not base:
+    # ``:0`` is DETECT_METRICS_PORT=0 flowing through the compose URL
+    # (docker-compose.yml builds it as http://detect-pipeline:${PORT}):
+    # the operator disabled exposition on the pipeline, so report
+    # "disabled" — probing port 0 would misreport it as "unreachable".
+    if not base or base.endswith(":0"):
         return {"available": False, "reason": "disabled"}
     url = f"{base}/metrics"
     try:
