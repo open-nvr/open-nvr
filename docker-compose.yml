@@ -498,6 +498,12 @@ services:
       - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
+      # Seed for the ICE hosts MediaMTX advertises. The backend owns the
+      # authoritative list (DB-backed, learned from the address browsers
+      # actually reach) and re-pushes it on every MediaMTX start, so this is
+      # only a first-boot hint — unlike MTX_WEBRTCADDITIONALHOSTS on the
+      # mediamtx service, losing it no longer breaks live WebRTC.
+      - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
       - KAI_C_URL=http://127.0.0.1:8100
       # ONVIF discovery auto-detection: inside this bridge container the only
       # visible network is the compose bridge, so the launchers export the

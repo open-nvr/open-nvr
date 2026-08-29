@@ -416,6 +416,21 @@ async def mediamtx_startup_hook(
             await _apply_stored_ice_to_mediamtx()
         except Exception as e:
             mediamtx_logger.warning(f"Could not apply stored WebRTC ICE servers: {e}")
+        # Re-advertise the ICE host addresses. MediaMTX gathers only its own
+        # container interfaces (127.0.0.1 + the Docker bridge), neither of
+        # which a LAN browser can route to, so without this every WHEP session
+        # dies on a 10s ICE timeout and the UI silently falls back to HLS.
+        # Doing it here — on every MediaMTX start — is what makes it survive a
+        # `docker compose up -d` that recreates the container with an empty
+        # MTX_WEBRTCADDITIONALHOSTS.
+        try:
+            from core.database import SessionLocal
+            from services.webrtc_ice_host_service import WebRTCIceHostService
+
+            with SessionLocal() as db:
+                await WebRTCIceHostService.apply_to_mediamtx(db)
+        except Exception as e:
+            mediamtx_logger.warning(f"Could not apply WebRTC ICE hosts: {e}")
 
     # Start background task
     asyncio.create_task(run_auto_provision())

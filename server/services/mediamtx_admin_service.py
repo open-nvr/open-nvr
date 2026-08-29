@@ -415,6 +415,33 @@ class MediaMtxAdminService:
         except Exception as e:
             return {"status": "error", "message": f"Request failed: {e!s}"}
 
+    @staticmethod
+    async def set_webrtc_additional_hosts(hosts: list[str]) -> dict[str, Any]:
+        """Set the ICE host addresses MediaMTX advertises (``webrtcAdditionalHosts``).
+
+        Same shape and rationale as ``set_webrtc_ice_servers`` above: the field
+        is in READ_ONLY_INFRASTRUCTURE_FIELDS so the generic admin PATCH cannot
+        reach it, but OpenNVR owns it, so this dedicated method patches it
+        directly. PATCH (not set) so env-supplied global config survives.
+
+        Called from the MediaMTX startup hook on every MediaMTX start, which is
+        what makes the value survive a container recreate — see
+        services/webrtc_ice_host_service.py.
+        """
+        if not MediaMtxAdminService.is_configured():
+            return {"status": "no_admin_api"}
+        url = MediaMtxAdminService._base() + "/config/global/patch"
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.patch(
+                    url,
+                    json={"webrtcAdditionalHosts": hosts},
+                    headers=MediaMtxAdminService._headers(),
+                )
+            return MediaMtxAdminService._to_result("global", resp)
+        except Exception as e:
+            return {"status": "error", "message": f"Request failed: {e!s}"}
+
     # === PATH DEFAULTS ===
 
     @staticmethod
