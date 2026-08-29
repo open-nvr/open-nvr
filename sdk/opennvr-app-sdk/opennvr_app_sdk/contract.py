@@ -119,6 +119,23 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 — http.server API
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        # RFC-0002 Phase 4 app-surface convention: GET /ui is the one
+        # HTML route — core proxies /api/v1/apps/{id}/ui here. Optional
+        # (apps opt in via a ui callable); everything else stays JSON.
+        if path == "/ui" and getattr(self.server, "ui", None) is not None:
+            try:
+                html = self.server.ui()
+            except Exception:
+                logger.exception("contract /ui failed")
+                self._send_json(500, {"error": "internal error"})
+                return
+            payload = str(html).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         route = self.server.routes.get(path)
         if route is None:
             self._send_json(404, {"error": f"unknown path {path!r}"})
@@ -215,6 +232,8 @@ class _ContractHTTPServer(ThreadingHTTPServer):
     action: "Callable[[str, dict[str, Any]], Any] | None"
     # When set, POST /actions requires this X-Internal-Api-Key value.
     action_token: "str | None"
+    # Optional GET /ui HTML renderer (RFC-0002 Phase 4). None = no UI.
+    ui: "Callable[[], str] | None"
 
 
 class ContractServer:
@@ -234,6 +253,7 @@ class ContractServer:
         state: Callable[[], dict[str, Any]],
         action: "Callable[[str, dict[str, Any]], Any] | None" = None,
         action_token: "str | None" = None,
+        ui: "Callable[[], str] | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
@@ -242,6 +262,7 @@ class ContractServer:
         self._routes = {"/health": health, "/manifest": manifest, "/state": state}
         self._action = action
         self._action_token = action_token
+        self._ui = ui
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -261,6 +282,7 @@ class ContractServer:
         server.routes = self._routes
         server.action = self._action
         server.action_token = self._action_token
+        server.ui = self._ui
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -399,6 +421,8 @@ class ContractMixin:
             state=self.state_snapshot,
             action=self._dispatch_action,
             action_token=action_token,
+            # Apps opt into the /ui surface by defining ui_html() -> str.
+            ui=getattr(self, "ui_html", None),
             host=bind_host,
             port=int(port),
         )

@@ -67,6 +67,9 @@ export type AppManifest = {
   // Declarative operator actions (SDK Action.to_dict()) — generic forms
   // POSTed through the server's user-JWT-only proxy.
   actions?: ManifestAction[]
+  // RFC-0002 Phase 4: the app serves an HTML dashboard at /ui on its
+  // contract port; AppView renders it via core's proxy, sandboxed.
+  has_ui?: boolean
 }
 
 export type ManifestAction = {

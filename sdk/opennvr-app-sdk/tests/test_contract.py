@@ -739,3 +739,49 @@ def test_tier0_bridged_into_on_detections_when_opted_in():
     fired = det.handle_event(_tier0_ev())
     assert len(fired) == 1
     assert det._events_seen == 1
+
+
+# ── GET /ui (RFC-0002 Phase 4 app-surface convention) ──────────────
+
+
+class _UiDetector(_EchoDetector):
+    def ui_html(self) -> str:
+        return "<title>Echo</title><h1>hello dashboard</h1>"
+
+
+class _BrokenUiDetector(_EchoDetector):
+    def ui_html(self) -> str:
+        raise RuntimeError("renderer bug")
+
+
+def test_serves_ui_as_html_when_the_app_defines_it():
+    det = _UiDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    try:
+        resp = _get(server.port, "/ui")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "hello dashboard" in resp.text
+    finally:
+        det.stop_contract_server()
+
+
+def test_no_ui_hook_means_404_not_a_blank_page():
+    det = _detector()
+    server = det.start_contract_server()
+    try:
+        resp = _get(server.port, "/ui")
+        assert resp.status_code == 404
+    finally:
+        det.stop_contract_server()
+
+
+def test_a_raising_ui_renderer_is_a_500_never_a_crash():
+    det = _BrokenUiDetector(_cfg(), AlertDispatcher([_RecorderChannel()]))
+    server = det.start_contract_server()
+    try:
+        assert _get(server.port, "/ui").status_code == 500
+        # The contract surface survives the renderer bug.
+        assert _get(server.port, "/health").status_code == 200
+    finally:
+        det.stop_contract_server()

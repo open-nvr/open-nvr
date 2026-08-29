@@ -211,3 +211,27 @@ def test_load_config_normalises(tmp_path: Path):
     assert cfg.allowlist == ["AB12", ""]  # blank filtered at setup, not load
     assert cfg.denylist == ["BAD1"]
     assert cfg.cameras == ["cam-1"]
+
+
+# ── The /ui dashboard (RFC-0002 Phase 4 app-surface convention) ────
+
+
+def test_manifest_declares_the_ui():
+    assert PlateAlerter.manifest.has_ui is True
+
+
+def test_ui_html_renders_state_and_escapes():
+    alerter, _ = _alerter(allowlist=["OK1"], denylist=["BAD1"])
+    # A hostile "plate" from a rogue producer must render inert — the
+    # page is sandboxed AND escaped (defense in depth).
+    alerter.handle_event(_envelope(plate="<script>x</script>AB", camera="cam-1"))
+    html = alerter.ui_html()
+    assert "License Plate Recognition" in html
+    # The plate is normalised (upper, no separators) before storage, so
+    # the hostile payload survives as <SCRIPT>… — assert the ESCAPED
+    # uppercase form renders and the raw tag never does.
+    assert "<SCRIPT>" not in html and "<script>" not in html
+    assert "&lt;SCRIPT&gt;" in html
+    assert ">1<" in html                         # allowlist count renders
+    assert "App Catalog" in html                 # points at the config form
+    assert "<script" not in html.lower()         # the page itself has no JS
