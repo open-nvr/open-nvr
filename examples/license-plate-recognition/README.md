@@ -78,6 +78,25 @@ Known limitations to be aware of when you read alerts in real life:
 
 ## Quick start
 
+**On a compose install, skip this section.** The apps overlay ships and
+registers the OCR adapter with the app (RFC-0002 decision 7 — an app's
+required adapters install with it; yolov8 is already part of the standard
+stack and is reused, not duplicated):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.apps.yml \
+  --profile apps up -d license-plate-recognition
+```
+
+Then edit `config.docker.yml`'s cameras (the template ships a
+placeholder), re-run the `license-plate-recognition-config-init` service,
+and restart the app. Results: `docker compose logs -f
+license-plate-recognition` plus the alerts inbox; the adapter appears on
+the AI Adapters page.
+
+The manual path below is for **dev mode** — running the chain outside
+compose:
+
 ```bash
 # 1. Start the two upstream adapters (in the ai-adapter repo)
 cd ai-adapter

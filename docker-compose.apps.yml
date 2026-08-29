@@ -379,6 +379,93 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
+  # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
+  # WITH the app (RFC-0002 decision 7 / Phase 3 fast-track): before
+  # this, `--profile apps up license-plate-recognition` succeeded and
+  # produced an app that could never work — nothing ran or registered
+  # its OCR dependency, so every plate read 404'd at KAI-C. An app's
+  # required adapters install with the app; an already-present adapter
+  # is reused, never duplicated.
+  # Weights (~3 MB) download on first load() into /root/.cache; the
+  # volume keeps that across container recreates (and can be pre-warmed
+  # for air-gapped installs — see the adapter's Dockerfile notes).
+  # ──────────────────────────────────────────────────────────────
+  fast-plate-ocr-adapter:
+    profiles: [apps]
+    image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_fast_plate_ocr_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    volumes:
+      - opennvr_fast_plate_ocr_cache:/root/.cache
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9004/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  # One-shot KAI-C registration for the OCR adapter — same pattern as
+  # the camera-agent overlay's caption-adapter-register. The name MUST
+  # be ``fast_plate_ocr``: it becomes KAI-C's route
+  # /api/v1/infer/fast_plate_ocr, which is what the app's
+  # ``ocr_adapter`` config names. Registration also puts the adapter on
+  # the AI Adapters page (60s health + metrics poll), so a dead OCR
+  # becomes a red row instead of a mystery. Always exits 0: a failed
+  # registration degrades to a WARN + the app's own KAI-C 404 handling,
+  # never a wedged compose up.
+  fast-plate-ocr-register:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_fast_plate_ocr_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      fast-plate-ocr-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="fast_plate_ocr"
+        url="http://fast-plate-ocr-adapter:9004"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if OCR 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — plate reads will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # License plate recognition — YOLOv8 → crop → fast-plate-ocr chain
   # via KAI-C, with allow/deny watchlist severity routing. Contract
   # surface on :9205.
@@ -422,6 +509,12 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      # RFC-0002 decision 7: the app starts only once its required OCR
+      # adapter is up and its (best-effort) registration has run.
+      fast-plate-ocr-adapter:
+        condition: service_healthy
+      fast-plate-ocr-register:
+        condition: service_completed_successfully
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
@@ -721,6 +814,7 @@ volumes:
   opennvr_abandoned_object_config:
   opennvr_intrusion_detection_config:
   opennvr_license_plate_recognition_config:
+  opennvr_fast_plate_ocr_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
   opennvr_footage_search_config:
