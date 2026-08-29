@@ -38,7 +38,7 @@ import {
   Video,
 } from 'lucide-react'
 import { warmHls } from '../lib/loadHls'
-import { useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
+import { useCameraAspects, useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
 import { localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
 import { useSnackbar } from '../components/Snackbar'
 import { RecordingCalendar } from '../components/RecordingCalendar'
@@ -120,6 +120,8 @@ function formatDateLong(date: string) {
 export function SyncPlayback() {
   const { showError } = useSnackbar()
   const stageRef = useRef<HTMLDivElement>(null)
+  // Per-camera display-aspect settings for the grid tiles (#354).
+  const cameraAspects = useCameraAspects()
 
   // Download the hls.js chunk while the overview request is in flight — the
   // tiles will need it the moment segments land.
@@ -557,6 +559,7 @@ export function SyncPlayback() {
                 muted={muted || cam.camera_id !== activeId}
                 active={cam.camera_id === activeId}
                 onActivate={() => setActiveId(cam.camera_id)}
+                {...(cameraAspects[cam.camera_id] ?? {})}
               />
             ))
           )}

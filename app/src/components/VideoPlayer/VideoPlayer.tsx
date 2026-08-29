@@ -23,10 +23,14 @@ import {
   useState,
   useImperativeHandle,
   useCallback,
+  useMemo,
 } from 'react'
 import { apiService } from '../../lib/apiService'
 import type Hls from 'hls.js'
 import { loadHls } from '../../lib/loadHls'
+import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
+import type { AspectOverride } from '../../lib/aspect'
+import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
 import { AlertCircle } from 'lucide-react'
 
@@ -74,6 +78,9 @@ export interface VideoPlayerProps {
   /** Extra overlay rendered inside the player (e.g. the PTZ pad) — kept
       inside so it stays visible when the player element goes fullscreen */
   overlay?: React.ReactNode
+  /** Operator's per-camera display-aspect override ('auto' | 'native' | 'W:H').
+      Absent or 'auto' runs the detection in lib/aspect.ts (issue #354). */
+  displayAspectOverride?: AspectOverride | null
 }
 
 export interface VideoPlayerHandle {
@@ -107,6 +114,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       onTogglePtz,
       ptzActive = false,
       overlay,
+      displayAspectOverride,
     },
     ref
   ) {
@@ -158,9 +166,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const onAuthExpiredRef = useRef(onAuthExpired)
     onAuthExpiredRef.current = onAuthExpired
     const [isReconnecting, setIsReconnecting] = useState(false)
-    // Real aspect ratio of the incoming stream (width/height), read from the
-    // video metadata. null until known (or after the source is torn down).
-    const [videoAspect, setVideoAspect] = useState<number | null>(null)
+    // Coded frame size of the incoming stream, read from the video metadata.
+    // null until known (or after the source is torn down).
+    const videoSize = useVideoSize(videoRef)
     // Title chip fades to half opacity after a few seconds so it stops
     // competing with the camera's burned-in OSD; tile hover restores it
     // purely via CSS (group-hover), so there are no re-renders on hover.
@@ -171,6 +179,43 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     }, [])
 
     const isLive = mode === 'live'
+
+    // The aspect the picture is DISPLAYED at, which is not always the aspect it
+    // is CODED at: a Dahua-family "1080N" stream is 960x1080 for a 16:9 scene
+    // and declares no SAR to correct from. Every box below sizes off this —
+    // never off videoWidth/videoHeight directly. See lib/aspect.ts.
+    const videoAspect = useMemo(
+      () => displayAspect(videoSize?.width, videoSize?.height, displayAspectOverride),
+      [videoSize?.width, videoSize?.height, displayAspectOverride]
+    )
+    // True only when the two disagree, i.e. the frame has to be stretched
+    // rather than letterboxed. Drives object-fit on the <video> below.
+    const stretched = isStretched(videoSize?.width, videoSize?.height, videoAspect)
+
+    /** JPEG of the current frame at the CORRECTED width. An anamorphic stream
+        has to be un-squished in the export too, or the saved file looks nothing
+        like the tile it was taken from; drawImage's explicit destination rect
+        does the stretch. null when no frame is capturable — callers report why. */
+    const captureSnapshot = useCallback((): string | null => {
+      const el = videoRef.current
+      if (!el || el.readyState < 2) return null
+      const codedW = el.videoWidth || el.clientWidth
+      const codedH = el.videoHeight || el.clientHeight
+      if (!codedW || !codedH) return null
+      const aspect = displayAspect(codedW, codedH, displayAspectOverride)
+      const { width, height } = snapshotSize(codedW, codedH, aspect)
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      try {
+        ctx.drawImage(el, 0, 0, width, height)
+      } catch {
+        return null
+      }
+      return canvas.toDataURL('image/jpeg', 0.92)
+    }, [displayAspectOverride])
 
     // Determine available stream types
     const availableStreamTypes: Array<'webrtc' | 'hls'> = []
@@ -189,24 +234,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         pause: () => {
           if (videoRef.current) videoRef.current.pause()
         },
-        snapshot: () => {
-          const el = videoRef.current
-          if (!el || el.readyState < 2) return null
-          const w = el.videoWidth || el.clientWidth
-          const h = el.videoHeight || el.clientHeight
-          if (!w || !h) return null
-          const canvas = document.createElement('canvas')
-          canvas.width = w
-          canvas.height = h
-          const ctx = canvas.getContext('2d')
-          if (!ctx) return null
-          try {
-            ctx.drawImage(el, 0, 0, w, h)
-          } catch {
-            return null
-          }
-          return canvas.toDataURL('image/jpeg', 0.92)
-        },
+        snapshot: captureSnapshot,
         requestFullscreen: () => {
           if (containerRef.current) {
             const fn =
@@ -221,7 +249,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           if (isLive) setStreamType(type)
         },
       }),
-      [isLive]
+      [isLive, captureSnapshot]
     )
 
     // Cleanup function
@@ -835,26 +863,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [])
 
-    // Track the stream's true aspect ratio. 'resize' fires when the decoded
-    // frame size changes mid-stream (e.g. adaptive HLS level switch); 'emptied'
-    // resets it when the source is torn down.
-    useEffect(() => {
-      const el = videoRef.current
-      if (!el) return
-      const update = () => {
-        setVideoAspect(el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : null)
-      }
-      update()
-      el.addEventListener('loadedmetadata', update)
-      el.addEventListener('resize', update)
-      el.addEventListener('emptied', update)
-      return () => {
-        el.removeEventListener('loadedmetadata', update)
-        el.removeEventListener('resize', update)
-        el.removeEventListener('emptied', update)
-      }
-    }, [])
-
     // Fullscreen change listener
     useEffect(() => {
       const onFullscreenChange = () => {
@@ -930,28 +938,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         console.warn('[VideoPlayer] Snapshot failed: Video not ready, readyState:', el.readyState)
         return
       }
-      const w = el.videoWidth || el.clientWidth
-      const h = el.videoHeight || el.clientHeight
-      if (!w || !h) {
-        console.warn('[VideoPlayer] Snapshot failed: Invalid dimensions', w, h)
+      const dataUrl = captureSnapshot()
+      if (!dataUrl) {
+        console.warn('[VideoPlayer] Snapshot failed: no frame could be captured')
         return
       }
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        console.warn('[VideoPlayer] Snapshot failed: Could not get canvas context')
-        return
-      }
-      try {
-        ctx.drawImage(el, 0, 0, w, h)
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
-        console.log('[VideoPlayer] Snapshot captured, length:', dataUrl.length)
-        onSnapshot?.(dataUrl)
-      } catch (err) {
-        console.error('[VideoPlayer] Snapshot failed:', err)
-      }
+      console.log('[VideoPlayer] Snapshot captured, length:', dataUrl.length)
+      onSnapshot?.(dataUrl)
     }
     const restartStream = () => {
       cleanup()
@@ -1072,11 +1065,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           style={videoAspect ? { aspectRatio: String(videoAspect) } : { width: '100%' }}
         >
 
-        {/* Video element — the feed box already matches its aspect ratio,
-            so object-contain leaves no internal bars once metadata is known */}
+        {/* Video element. The feed box already carries the stream's DISPLAY
+            aspect, so object-fill stretches an anamorphic frame across it with
+            nothing cropped — exactly what the DVR's own client does, and a
+            no-op whenever the coded and display aspects agree. object-contain
+            until metadata lands, when the box has no aspect of its own yet and
+            fill would smear the frame across the whole tile. */}
         <video
           ref={videoRef}
-          className="block w-full h-full object-contain"
+          className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
           playsInline
           muted={isMuted}
           autoPlay={autoPlay}

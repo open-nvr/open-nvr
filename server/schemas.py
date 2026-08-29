@@ -22,6 +22,7 @@ Defines the structure of data exchanged between the API and clients.
 import html
 import ipaddress
 import os
+import re
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -89,6 +90,8 @@ class CameraBase(BaseModel):
     rtsp_url: str | None = Field(None, max_length=500)
     # Optional low-res secondary RTSP profile for the camera-agent live view.
     substream_url: str | None = Field(None, max_length=500)
+    # Display-only aspect hint; see _validate_display_aspect.
+    display_aspect_ratio: str | None = Field(None, max_length=16)
     location: str | None = Field(None, max_length=200)
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field("unknown", max_length=20)
@@ -113,6 +116,11 @@ class CameraBase(BaseModel):
         if v:
             return html.escape(v)
         return v
+
+    @field_validator("display_aspect_ratio")
+    @classmethod
+    def validate_display_aspect(cls, v: str | None) -> str | None:
+        return _validate_display_aspect(v)
 
     @field_validator("rtsp_url", "substream_url")
     @classmethod
@@ -408,6 +416,31 @@ def _validate_assignments(
     return v
 
 
+_DISPLAY_ASPECT_RE = re.compile(r"^\d{1,5}(?:\.\d{1,3})?[:/]\d{1,5}(?:\.\d{1,3})?$")
+
+
+def _validate_display_aspect(v: str | None) -> str | None:
+    """Shared display-aspect rules: NULL/"auto" mean detect, else "native"
+    or a "W:H" ratio. Normalizing the empty and "auto" spellings to None here
+    means the DB has exactly one representation of "no override" (issue #354).
+    """
+    if v is None:
+        return None
+    s = v.strip().lower()
+    if s in ("", "auto"):
+        return None
+    if s == "native":
+        return s
+    if not _DISPLAY_ASPECT_RE.match(s):
+        raise ValueError(
+            'display aspect must be "auto", "native" or a "W:H" ratio (e.g. "16:9")'
+        )
+    w, h = (float(part) for part in s.replace("/", ":").split(":"))
+    if w <= 0 or h <= 0:
+        raise ValueError("display aspect ratio parts must be positive")
+    return s
+
+
 class CameraUpdate(BaseModel):
     """Schema for updating a camera."""
 
@@ -419,6 +452,8 @@ class CameraUpdate(BaseModel):
     password: str | None = Field(None, max_length=255)
     rtsp_url: str | None = Field(None, max_length=500)
     substream_url: str | None = Field(None, max_length=500)
+    # Display-only aspect hint; "auto"/"" normalize to None (auto-detect).
+    display_aspect_ratio: str | None = Field(None, max_length=16)
     location: str | None = Field(None, max_length=200)
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)
@@ -426,6 +461,11 @@ class CameraUpdate(BaseModel):
     # Per-camera capability assignment (see CameraAssignment). Send the FULL
     # list each time — this replaces, it does not merge. [] clears.
     assignments: list[CameraAssignment] | None = None
+
+    @field_validator("display_aspect_ratio")
+    @classmethod
+    def validate_display_aspect(cls, v: str | None) -> str | None:
+        return _validate_display_aspect(v)
 
     @field_validator("assignments")
     @classmethod
