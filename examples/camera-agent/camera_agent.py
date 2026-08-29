@@ -60,6 +60,7 @@ from adapter_clients import (
     OpennvrAuthClient,
     OpennvrRecordingsClient,
     PiperClient,
+    SkillsRegistryClient,
     SyntheticDetectionClient,
     WhisperClient,
 )
@@ -3049,6 +3050,7 @@ class CameraAgentRuntime:
         # deployment INTERNAL_API_KEY the infer path uses: opennvr_api_key,
         # else kaic_api_key, else the INTERNAL_API_KEY env var.
         self.app_registry: AppRegistryClient | None = None
+        self.skills_registry: SkillsRegistryClient | None = None
         if cfg.opennvr_api_url:
             import os
 
@@ -3058,6 +3060,14 @@ class CameraAgentRuntime:
                 or os.environ.get("INTERNAL_API_KEY", "")
             )
             self.app_registry = AppRegistryClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            # RFC-0002 Phase 1: the platform skills registry replaces the
+            # agent's private derivations for platform-owned panel facts
+            # (backing availability, the suggested_adapters/apps on-ramp).
+            # Advisory like every registry client here: unreachable →
+            # None → skills_payload falls back to the private derivation.
+            self.skills_registry = SkillsRegistryClient(
                 base_url=cfg.opennvr_api_url, api_key=app_key,
             )
             logger.info(
@@ -3442,6 +3452,15 @@ class CameraAgentRuntime:
         skill reports ``tasks_available: true`` — i.e. exactly the previous
         config-based behavior, never a spuriously greyed-out tool."""
         live_tasks = self.kaic_capabilities.tasks_advertised   # None = unknown
+        # RFC-0002 Phase 1: platform-owned facts come from the skills
+        # registry when it answered (availability includes provider
+        # HEALTH, which the raw tasks_advertised union never saw), with
+        # the private derivations kept as the fallback chain:
+        # registry → KAI-C capabilities → config-based (never grey out
+        # on "unknown"). None/{} = registry unknown.
+        reg = self.skills_registry
+        reg_available = reg.availability_by_agent_skill() if reg else None
+        reg_suggestions = reg.suggestions_by_agent_skill() if reg else {}
         advertised = {t["function"]["name"] for t in self.tool_definitions}
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
         # The events skill's caption names what is ACTUALLY wired — it has
@@ -3479,12 +3498,17 @@ class CameraAgentRuntime:
             # missing backend must still read as not-enabled in the panel.)
             enabled = (primary in advertised) and req_met
             backing = _SKILL_BACKING_TASKS.get(sid, [])
-            # Live availability from the tasks_advertised intersection. Unknown
-            # (KAI-C unreachable) or nothing to back → don't grey anything out.
-            tasks_available = (
-                live_tasks is None or not backing
-                or bool(set(backing) & live_tasks)
-            )
+            # Live availability: the platform registry's verdict when it
+            # has one for this skill (it factors provider health), else
+            # the tasks_advertised intersection. Unknown (both sources
+            # unreachable) or nothing to back → don't grey anything out.
+            if reg_available is not None and sid in reg_available:
+                tasks_available = reg_available[sid]
+            else:
+                tasks_available = (
+                    live_tasks is None or not backing
+                    or bool(set(backing) & live_tasks)
+                )
             # Tool-level honesty: a skill card bundles several tools, and the
             # old panel only reflected the PRIMARY one — "Look back at recent
             # events" showed on while search_history (the tool the user's
@@ -3515,7 +3539,14 @@ class CameraAgentRuntime:
             # action behind OpenNVR's permission gate. Additive: not-greyed
             # skills omit both fields.
             if not tasks_available:
-                entry["suggested_adapters"] = _SKILL_SUGGESTED_ADAPTERS.get(sid, [])
+                # On-ramp guidance: the registry's fields when it answered
+                # (RFC-0002: suggested_apps is a registry field so every
+                # consumer renders the same guidance), else the private
+                # editorial maps.
+                reg_sugg = reg_suggestions.get(sid)
+                entry["suggested_adapters"] = (
+                    reg_sugg["adapters"] if reg_sugg
+                    else _SKILL_SUGGESTED_ADAPTERS.get(sid, []))
                 entry["enable_url"] = (
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/ai-adapters"
                     if self.cfg.opennvr_ui_url else None
@@ -3525,7 +3556,9 @@ class CameraAgentRuntime:
                 # when we know the main UI's base URL, deep-link the App
                 # Catalog. Guide-only — no install POST; the operator
                 # installs from the catalog behind OpenNVR's permission gate.
-                entry["suggested_apps"] = _SKILL_SUGGESTED_APPS.get(sid, [])
+                entry["suggested_apps"] = (
+                    reg_sugg["apps"] if reg_sugg
+                    else _SKILL_SUGGESTED_APPS.get(sid, []))
                 entry["app_enable_url"] = (
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog"
                     if self.cfg.opennvr_ui_url else None
@@ -4681,6 +4714,8 @@ class CameraAgentRuntime:
             closers.append(self.recordings.aclose())
         if self.app_registry:
             closers.append(self.app_registry.aclose())
+        if self.skills_registry:
+            closers.append(self.skills_registry.aclose())
         await asyncio.gather(*closers, return_exceptions=True)
 
     # ── System prompt construction ────────────────────────────────
@@ -5416,6 +5451,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         await runtime.kaic_capabilities.refresh()
         if runtime.app_registry is not None:
             await runtime.app_registry.list_apps()   # 60s TTL; never raises
+        if runtime.skills_registry is not None:
+            await runtime.skills_registry.refresh()  # 60s TTL; never raises
         return {"skills": runtime.skills_payload()}
 
     @app.get("/hardware")

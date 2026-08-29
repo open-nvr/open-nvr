@@ -1025,3 +1025,103 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
         except Exception as exc:
             logger.warning("streams: info proxy failed: %s", exc)
             return 502, {"error": "OpenNVR server unreachable"}
+
+
+class SkillsRegistryClient(_ReusableClientMixin):
+    """Cached view of the platform skills registry (RFC-0002 Phase 1).
+
+    ``GET {base}/api/v1/internal/camera-agent/skills`` with the same
+    ``X-Internal-Api-Key`` the events store uses. This replaces the
+    agent's PRIVATE derivations for the platform-owned facts on the
+    skills panel: whether a skill's backing capability has a healthy
+    provider, and which adapters/apps to suggest when it doesn't (the
+    ``suggested_apps`` on-ramp is a registry field now, so every
+    consumer renders the same truth).
+
+    ADVISORY, like :class:`KaicCapabilitiesClient`: :meth:`refresh`
+    never raises; unreachable → cached ``None`` = unknown (negative-
+    cached per TTL), and callers fall back to their previous private
+    derivation instead of greying anything out. The agent-local halves
+    of the panel (advertised tools, config gating) never come from
+    here — they are process state only the agent knows.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 60.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        self._fetched_at: float | None = None
+        self._skills: list[dict[str, Any]] | None = None   # None = unknown
+
+    @property
+    def skills_cached(self) -> list[dict[str, Any]] | None:
+        """Last-known registry entries (``None`` = unknown/unreachable)."""
+        return self._skills
+
+    def availability_by_agent_skill(self) -> dict[str, bool] | None:
+        """agent-skill id -> "a healthy provider exists", from the last
+        refresh. Only skills the registry maps (``agent_skill`` set on a
+        taxonomy entry) appear; ``None`` = registry unknown. A skill
+        with several backing entries is available if ANY is."""
+        if self._skills is None:
+            return None
+        out: dict[str, bool] = {}
+        for entry in self._skills:
+            sid = entry.get("agent_skill")
+            if not sid:
+                continue
+            out[sid] = out.get(sid, False) or entry.get("status") == "available"
+        return out
+
+    def suggestions_by_agent_skill(self) -> dict[str, dict[str, list[str]]]:
+        """agent-skill id -> {"adapters": [...], "apps": [...]} unioned
+        across that skill's backing registry entries. Empty dict when the
+        registry is unknown — callers keep their private fallback."""
+        if self._skills is None:
+            return {}
+        out: dict[str, dict[str, list[str]]] = {}
+        for entry in self._skills:
+            sid = entry.get("agent_skill")
+            if not sid:
+                continue
+            slot = out.setdefault(sid, {"adapters": [], "apps": []})
+            for key, field in (("adapters", "suggested_adapters"),
+                               ("apps", "suggested_apps")):
+                for name in entry.get(field) or []:
+                    if name not in slot[key]:
+                        slot[key].append(name)
+        return out
+
+    async def refresh(self) -> list[dict[str, Any]] | None:
+        """Fetch (at most once per TTL) the registry view. Never raises."""
+        now = time.monotonic()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
+            return self._skills
+        self._fetched_at = now   # stamp first: negative-cache failures
+        try:
+            headers = (
+                {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+            )
+            resp = await self._client().get(
+                f"{self._base}/api/v1/internal/camera-agent/skills",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            skills = data.get("skills") if isinstance(data, dict) else None
+            self._skills = list(skills) if isinstance(skills, list) else None
+        except Exception as exc:
+            logger.debug(
+                "skills registry fetch failed (%s); panel falls back to "
+                "private derivation", exc,
+            )
+            self._skills = None
+        return self._skills
