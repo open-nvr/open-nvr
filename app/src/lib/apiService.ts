@@ -32,6 +32,7 @@ import { integrationService } from '../services/integrationService'
 import { mediaSourceService } from '../services/mediaSourceService'
 import { complianceService } from '../services/complianceService'
 import { appsService } from '../services/appsService'
+import { vehiclesService } from '../services/vehiclesService'
 
 export const apiService = {
   ...authService,
@@ -47,5 +48,6 @@ export const apiService = {
   ...mediaSourceService,
   ...complianceService,
   ...appsService,
+  ...vehiclesService,
 }
 

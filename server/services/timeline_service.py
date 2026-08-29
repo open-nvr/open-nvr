@@ -74,6 +74,7 @@ def query_events(
     limit: int = 100,
     owner_id: int | None = None,
     plate: str | None = None,
+    has_plate: bool = False,
 ) -> list[TimelineEvent]:
     """Newest-first visits/alarms/alerts intersecting [from, to).
 
@@ -97,6 +98,10 @@ def query_events(
         # so "1234" finds KA01AB1234 — how people actually recall plates.
         norm = "".join(plate.split()).upper()
         q = q.filter(TimelineEvent.plate_text.ilike(f"%{norm}%"))
+    elif has_plate:
+        # The Vehicles page: every row must BE a plate read (a plate
+        # filter implies this already).
+        q = q.filter(TimelineEvent.plate_text.isnot(None))
     if to is not None:
         q = q.filter(TimelineEvent.started_at < to)
     if from_ is not None:
@@ -115,3 +120,67 @@ def can_access_event(db: Session, event: TimelineEvent, *, user) -> bool:
         return True
     cam = db.query(Camera).filter(Camera.id == event.camera_id).first()
     return bool(cam and cam.owner_id == user.id)
+
+
+def plate_stats(
+    db: Session,
+    *,
+    days: int = 7,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Aggregates for the Vehicles page: plate reads over the last
+    ``days`` (visits whose ``plate_text`` is set), owner-scoped exactly
+    like ``query_events``. One grouped pass each for per-camera and
+    per-day; portable SQL (sqlite + postgres).
+    """
+    from datetime import timedelta, timezone
+
+    from sqlalchemy import func
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max(1, int(days)))
+    base = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.started_at >= cutoff)
+    )
+    if owner_id is not None:
+        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+
+    total = base.count()
+    unique_plates = (
+        base.with_entities(func.count(func.distinct(TimelineEvent.plate_text)))
+        .scalar()
+        or 0
+    )
+    per_camera = [
+        {"camera_id": cid, "reads": int(n)}
+        for cid, n in (
+            base.with_entities(
+                TimelineEvent.camera_id, func.count(TimelineEvent.id)
+            )
+            .group_by(TimelineEvent.camera_id)
+            .all()
+        )
+    ]
+    # Day bucketing in SQL is dialect-divergent (date_trunc vs strftime);
+    # the window is small (<= a few thousand rows of (id, started_at)),
+    # so bucket in Python for portability.
+    per_day_counts: dict[str, int] = {}
+    for (started_at,) in base.with_entities(TimelineEvent.started_at).all():
+        day = started_at.date().isoformat()
+        per_day_counts[day] = per_day_counts.get(day, 0) + 1
+    per_day = [
+        {"day": day, "reads": per_day_counts[day]}
+        for day in sorted(per_day_counts)
+    ]
+    return {
+        "days": int(days),
+        "total_reads": int(total),
+        "unique_plates": int(unique_plates),
+        "per_camera": per_camera,
+        "per_day": per_day,
+    }

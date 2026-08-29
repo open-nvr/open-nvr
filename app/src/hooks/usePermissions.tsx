@@ -123,6 +123,7 @@ export function usePermissions() {
 export const NAV_PERMISSIONS = {
   '/': null, // Dashboard - always visible
   '/live': 'live.view',
+  '/vehicles': 'live.view', // plate reads are camera history — same tier as live view
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',

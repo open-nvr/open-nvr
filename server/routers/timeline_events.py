@@ -66,6 +66,7 @@ async def list_events(
     label: str | None = None,
     source: str | None = None,
     plate: str | None = None,
+    has_plate: bool = False,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = 100,
@@ -82,7 +83,7 @@ async def list_events(
 
     rows = query_events(
         db, camera_id=camera_id, label=label, source=source, plate=plate,
-        from_=from_, to=to, limit=limit,
+        has_plate=has_plate, from_=from_, to=to, limit=limit,
         # Camera data is owner-scoped everywhere in OpenNVR; history and
         # evidence photos are the MOST sensitive camera data, so the same
         # rule applies here. Superusers see the fleet.
@@ -113,3 +114,21 @@ async def get_event_evidence(
         raise HTTPException(status_code=404, detail="evidence file missing")
     return FileResponse(path, media_type="image/jpeg",
                         headers={"Cache-Control": "max-age=86400"})
+
+
+@router.get("/events/plate-stats")
+async def get_plate_stats(
+    days: int = 7,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Aggregates for the Vehicles page (plate reads over the last
+    ``days``): totals, unique plates, per-camera and per-day counts.
+    Owner-scoped like /events; superusers see the fleet."""
+    from services.timeline_service import plate_stats
+
+    return plate_stats(
+        db,
+        days=max(1, min(int(days), 90)),
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )

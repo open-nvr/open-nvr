@@ -18,7 +18,9 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Menu, Monitor, Camera, Car, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
@@ -137,11 +139,44 @@ export function AppShell() {
     return hasPermission(requiredPerm)
   }
 
+  // Application surfaces LIGHT UP per install: a first-class page appears
+  // only when an enabled catalog app provides its capability — so the nav
+  // scales with what THIS deployment enabled, never with catalog size.
+  // Capability-keyed (requires_tasks), so a community-built replacement
+  // app lights the same page. Best-effort: registry down = no app pages.
+  const appsNav = useQuery({
+    queryKey: ['apps'],
+    queryFn: async () => {
+      const { data } = await apiService.getApps()
+      return (Array.isArray(data) ? data : []) as {
+        enabled?: boolean
+        manifest?: { requires_tasks?: string[] } | null
+      }[]
+    },
+    retry: 0,
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  })
+  const lprEnabled = (appsNav.data ?? []).some(
+    (a) => a.enabled && (a.manifest?.requires_tasks ?? []).includes('license_plate_recognition')
+  )
+
   const visibleGroups = useMemo(
-    () =>
-      NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0),
+    () => {
+      const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0)
+      const appItems = [
+        ...(lprEnabled && canView('/vehicles')
+          ? [{ to: '/vehicles', label: 'Vehicles', icon: <Car size={16} />, perm: '/vehicles' as const }]
+          : []),
+      ]
+      if (appItems.length > 0) {
+        // Right after the pinned NVR group: these are operational pages.
+        groups.splice(1, 0, { key: 'applications', label: 'Applications', items: appItems })
+      }
+      return groups
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission]
+    [hasPermission, lprEnabled]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)
