@@ -192,6 +192,33 @@ def test_get_tier0_metrics_disabled_config(monkeypatch):
     assert out == {"available": False, "reason": "disabled"}
 
 
+def test_get_tier0_metrics_port_zero_is_disabled_not_unreachable(monkeypatch):
+    # DETECT_METRICS_PORT=0 disables exposition on the pipeline; compose
+    # builds the URL as http://detect-pipeline:${PORT}, so the server sees
+    # ":0". That is the operator saying OFF — probing it would misreport
+    # a deliberate choice as a fault.
+    from services import tier0_metrics as mod
+    monkeypatch.setattr(mod.settings, "detect_pipeline_metrics_url",
+                        "http://detect-pipeline:0", raising=False)
+    out = asyncio.run(get_tier0_metrics())
+    assert out == {"available": False, "reason": "disabled"}
+
+
+def test_compose_wires_core_to_the_detect_pipeline_metrics():
+    """The bug this guards: the config default is http://localhost:9109,
+    which inside the core container is core's OWN loopback — the panel
+    read "not reachable" on every compose install regardless of the
+    pipeline's actual health, because compose never overrode it. (No
+    commit in history ever set DETECT_PIPELINE_METRICS_URL before this.)
+    """
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert ("DETECT_PIPELINE_METRICS_URL=http://detect-pipeline:"
+            "${DETECT_METRICS_PORT:-9109}") in compose, (
+        "the core service no longer tells the server where the "
+        "detect-pipeline's /metrics lives — the Compute-gated panel "
+        "will read 'not reachable' on every Docker install")
+
+
 def test_nan_and_inf_values_are_dropped_not_crashing():
     # float() accepts NaN/+Inf; they must be filtered so int() casts can't blow up.
     text = "\n".join([
