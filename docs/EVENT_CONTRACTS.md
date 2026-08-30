@@ -194,6 +194,35 @@ dispatcher dual-publishes to the domain subject so consumers that
 only care "an alert fired on this camera" stop encoding app names in
 subscriptions. New consumers use the domain subject.
 
+### `access.decided.v1`
+
+Subject: `opennvr.events.access.decided.v1.<camera_id>`
+Producer: `app:license-plate-recognition` (or any app making gate
+decisions — consumers must not branch on the producer, per the
+envelope contract).
+
+One event per plate read **on a gate-in camera while the publishing
+app's barrier mode is enabled** — the app's admission decision as a
+fact on the bus. Actuation is a separate concern on purpose: a
+gateway app (the `gate-controller` example) subscribes and drives the
+site's relay/barrier hardware, so decision policy and hardware wiring
+evolve independently, and an audit trail of every decision exists
+whether or not a barrier is attached.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `plate_text` | string | The normalised read (uppercase, no separators). |
+| `decision` | string | `allow` or `deny`. |
+| `reason` | string | Why: `registered`, `allowlisted`, `monitored`, `expired_pass`, `unknown`. |
+| `owner` | string \| null | Registry owner, when the plate is registered (helps gate displays/logs). |
+| `unit` | string \| null | Registry unit/flat, when registered. |
+| `confidence` | number \| null | OCR confidence carried from the read, when available. |
+
+Consumers MUST treat any decision other than `allow` as "do not
+actuate" — unknown future decision values fail closed.
+
 ## Out of contract (deliberately)
 
 * `opennvr.inference.>` payload internals beyond what each adapter's

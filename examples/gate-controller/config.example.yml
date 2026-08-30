@@ -1,0 +1,34 @@
+# gate-controller example config. Copy to config.yml and edit.
+
+# ── The event bus (where access.decided.v1 flows) ───────────────────
+nats_url: "nats://localhost:4222"
+nats_token: null
+
+# ── Which relay opens which gate ────────────────────────────────────
+# Keys are camera core ids ("1") or platform handles ("cam1"); values
+# are the relay's trigger URL (GET default) or {url, method: POST}.
+# Any HTTP relay works: Shelly (http://<ip>/relay/0?turn=on), Tasmota
+# (http://<ip>/cm?cmnd=Power%20TOGGLE), ESPHome, commercial barrier
+# relays with an HTTP input.
+relays: {}
+#  "1": "http://192.168.1.50/relay/0?turn=on"
+#  "2": { url: "http://192.168.1.51/pulse", method: POST }
+
+# One car, one pulse: suppress re-triggering the same gate within
+# this many seconds (the boom is already up).
+pulse_cooldown_seconds: 5.0
+
+# Commissioning mode: log + alert as if opening, never call the relay.
+dry_run: false
+
+# ── Alert delivery ──────────────────────────────────────────────────
+webhook_url: null
+nats_alerts_url: null
+nats_alerts_token: null
+
+# ── App contract (spec §03) — powers the App Catalog ────────────────
+contract_port: 9210
+contract_bind_host: "0.0.0.0"
+contract_host: "localhost"
+opennvr_url: null
+opennvr_token: null

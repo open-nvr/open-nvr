@@ -48,7 +48,10 @@ from alerts import (
     AlertSource,
     DEFAULT_ALERT_SUBJECT_PREFIX,
 )
-from opennvr_app_sdk import AlertType, AppManifest, Detector, Param, StateView, app
+from opennvr_app_sdk import (
+    AlertType, AppManifest, Detector, DomainEventPublisher, Param,
+    StateView, app,
+)
 from opennvr_app_sdk.cameras import cameras_for_skill
 
 logger = logging.getLogger("license-plate-recognition")
@@ -57,6 +60,10 @@ SKILL = "license_plate_recognition"
 
 #: The contracted subject this app consumes (EVENT_CONTRACTS.md).
 PLATE_SUBJECT_PATTERN = "opennvr.events.plate.recognized.v1.>"
+
+#: The decision event this app publishes on gate-in reads while
+#: barrier mode is on (docs/EVENT_CONTRACTS.md `access.decided.v1`).
+ACCESS_DECISION_SCHEMA = "access.decided.v1"
 
 #: Re-resolve the assignment-table camera scope this often. Cheap (one
 #: internal GET) and keeps "assign a camera in one place" true for a
@@ -150,6 +157,23 @@ def parse_monitors(raw: Any) -> dict[str, dict[str, Any]]:
     return monitors
 
 
+def gate_in_cameras(camera_roles: Any) -> frozenset[str]:
+    """Platform handles of gate-IN cameras from the ``camera_roles``
+    config map. Keys may be numeric core ids (``"3"`` — what the
+    Vehicles page writes) or platform handles (``"cam3"``); values are
+    ``{role, label?}`` records or bare role strings."""
+    out: set[str] = set()
+    if isinstance(camera_roles, dict):
+        for key, value in camera_roles.items():
+            role = value.get("role") if isinstance(value, dict) else value
+            if role != "gate_in":
+                continue
+            k = str(key).strip()
+            if k:
+                out.add(k if k.startswith("cam") else f"cam{k}")
+    return frozenset(out)
+
+
 def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = None) -> bool:
     """True when a register entry currently counts as registered.
 
@@ -171,7 +195,7 @@ def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = 
 MANIFEST = AppManifest(
     id="license-plate-recognition",
     name="License Plate Recognition",
-    version="2.3.0",
+    version="2.4.0",
     category="vehicle",
     summary=(
         "Consumes the platform's plate.recognized.v1 events and routes "
@@ -216,6 +240,14 @@ MANIFEST = AppManifest(
                   "Society mode: raise a high-severity alarm for any "
                   "plate NOT in the registry/allowlist (denylist still "
                   "wins). Off = unknown plates log as info reads.")),
+        Param("barrier_mode", str, default="off",
+              description=(
+                  "Gate automation: 'off' publishes nothing; "
+                  "'registered' publishes an access.decided.v1 event "
+                  "for every plate read on a gate-IN camera — allow "
+                  "for active registry/allowlist plates, deny "
+                  "otherwise. The gate-controller app consumes these "
+                  "and drives the barrier relay.")),
         Param("camera_roles", dict, default={},
               description=(
                   "The site layout: {camera_id: {role, label?}} with "
@@ -274,6 +306,7 @@ MANIFEST = AppManifest(
     use_cases=[
         "Alert the moment a watchlisted plate passes any camera",
         "Society mode: register every resident vehicle, alarm on any stranger",
+        "Automatic barrier: publish allow/deny gate decisions (gate-controller opens the boom)",
         "Industrial & company automation: factory gates, truck logging, campus access",
         "Log every vehicle with plate, time and evidence photo",
         "Expected-vehicle handling for known cars (allowlist / registry)",
@@ -334,6 +367,9 @@ class AppConfig:
     # as shorthand for active high-severity monitors.
     monitors: list[Any] = field(default_factory=list)
     alarm_on_unknown: bool = False
+    # Gate automation: publish access.decided.v1 on gate-IN reads.
+    barrier_mode: str = "off"
+    camera_roles: dict[str, Any] = field(default_factory=dict)
     unknown_cooldown_seconds: float = 300.0
 
     # Alert delivery channels (see alerts.py / the SDK alert stack).
@@ -373,6 +409,8 @@ def load_config(path: str | Path) -> AppConfig:
         denylist=[str(p).upper().strip() for p in (raw.get("denylist") or [])],
         registry=list(raw.get("registry") or []),
         monitors=list(raw.get("monitors") or []),
+        barrier_mode=str(raw.get("barrier_mode") or "off"),
+        camera_roles=dict(raw.get("camera_roles") or {}),
         alarm_on_unknown=bool(raw.get("alarm_on_unknown", False)),
         unknown_cooldown_seconds=float(raw.get("unknown_cooldown_seconds", 300.0)),
         webhook_url=raw.get("webhook_url"),
@@ -429,6 +467,16 @@ class PlateAlerter(Detector):
         self._unknown_cooldown: float = max(0.0, float(cfg.unknown_cooldown_seconds))
         self._unknown_last: dict[str, float] = {}
         self._unknown_alarms: int = 0
+        # Gate automation (access.decided.v1). The publisher's channel
+        # connects lazily on first publish and never raises on bus
+        # trouble; mode values other than 'registered' mean off.
+        self._barrier_mode: str = (
+            "registered" if cfg.barrier_mode == "registered" else "off")
+        self._gate_in: frozenset[str] = gate_in_cameras(cfg.camera_roles)
+        self._decision_publisher = DomainEventPublisher(
+            cfg.nats_url, token=cfg.nats_token,
+            producer="app:license-plate-recognition")
+        self._decisions_published: int = 0
         # Camera scope: explicit config wins and never refreshes; else
         # the assignment table (refreshed lazily per SCOPE_REFRESH_
         # SECONDS); None = no restriction declared.
@@ -567,6 +615,38 @@ class PlateAlerter(Detector):
             unknown_alarm=unknown_alarm,
         )
         self._dispatcher.fire(alert)
+
+        # Gate automation: on a gate-IN read, put the admission decision
+        # on the bus as a FACT (access.decided.v1). Actuation is the
+        # gate-controller app's job — policy here, hardware there.
+        if self._barrier_mode == "registered" and camera_id in self._gate_in:
+            if monitor is not None or plate in self._monitors:
+                decision, reason = "deny", "monitored"
+            elif registry_active:
+                decision, reason = "allow", "registered"
+            elif plate in allowlist:
+                decision, reason = "allow", "allowlisted"
+            elif registry_entry is not None:
+                decision, reason = "deny", "expired_pass"
+            else:
+                decision, reason = "deny", "unknown"
+            entry_meta = registry_entry or {}
+            published = self._decision_publisher.publish(
+                ACCESS_DECISION_SCHEMA,
+                camera_id=camera_id,
+                payload={
+                    "plate_text": plate,
+                    "decision": decision,
+                    "reason": reason,
+                    "owner": entry_meta.get("owner"),
+                    "unit": entry_meta.get("unit"),
+                    "confidence": confidence,
+                },
+                correlation_id=event.get("correlation_id"),
+            )
+            if published:
+                self._decisions_published += 1
+
         self._recent.append({
             "message": f"{plate} on {camera_id}",
             "time": time.time(),
@@ -651,6 +731,9 @@ class PlateAlerter(Detector):
             "registry_size": len(self._registry),
             "monitored_plates": len(self._monitors),
             "alarm_on_unknown": self._alarm_on_unknown,
+            "barrier_mode": self._barrier_mode,
+            "gate_in_cameras": sorted(self._gate_in),
+            "decisions_published": self._decisions_published,
             "unknown_alarms": self._unknown_alarms,
             "recent": list(self._recent),
         }
@@ -707,7 +790,9 @@ class PlateAlerter(Detector):
  <div><b>{self._unknown_alarms}</b><span class="dim">unknown alarms</span></div>
  <div><b>{snap.get("deduped_plates_tracked", 0)}</b><span class="dim">plates deduped</span></div>
 </div>
-<div class="dim">Unknown-vehicle alarm: {"ON" if self._alarm_on_unknown else "off"}</div>
+<div class="dim">Unknown-vehicle alarm: {"ON" if self._alarm_on_unknown else "off"}
+ · Barrier: {"AUTO (registered vehicles)" if self._barrier_mode == "registered" else "off"}
+ · Decisions published: {self._decisions_published}</div>
 {table}
 <div class="note">Watchlists are edited in the App Catalog's config
 form (applied live). Full history: the timeline's plate search.</div>
@@ -747,6 +832,12 @@ form (applied live). Full history: the timeline's plate search.</div>
                 logger.info("monitors updated live: %d plates", len(monitors))
         if "alarm_on_unknown" in config:
             self._alarm_on_unknown = bool(config.get("alarm_on_unknown"))
+        if "barrier_mode" in config:
+            self._barrier_mode = (
+                "registered" if config.get("barrier_mode") == "registered"
+                else "off")
+        if "camera_roles" in config:
+            self._gate_in = gate_in_cameras(config.get("camera_roles"))
         if "unknown_cooldown_seconds" in config:
             try:
                 self._unknown_cooldown = max(

@@ -428,6 +428,8 @@ export function Vehicles() {
     [registry]
   )
   const alarmOnUnknown = Boolean((lprApp?.config as any)?.alarm_on_unknown)
+  const barrierMode: 'off' | 'registered' =
+    (lprApp?.config as any)?.barrier_mode === 'registered' ? 'registered' : 'off'
 
   // Camera roles — which camera is the entry gate, the exit, parking,
   // or another named location — are the vertical's settings, so they
@@ -633,6 +635,14 @@ export function Vehicles() {
         <RegistryTab
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
+          barrierMode={barrierMode}
+          onToggleBarrier={(on) => {
+            saveConfig.mutate({ barrier_mode: on ? 'registered' : 'off' }, {
+              onSuccess: () => showSuccess(
+                on ? 'Automatic barrier ON — allow/deny decisions now publish for every gate-IN read'
+                   : 'Automatic barrier off'),
+            })
+          }}
           canEdit={Boolean(lprApp)}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
@@ -992,6 +1002,8 @@ export function Vehicles() {
 function RegistryTab({
   registry,
   alarmOnUnknown,
+  barrierMode,
+  onToggleBarrier,
   canEdit,
   saving,
   cameras,
@@ -1002,6 +1014,8 @@ function RegistryTab({
 }: {
   registry: RegistryEntry[]
   alarmOnUnknown: boolean
+  barrierMode: 'off' | 'registered'
+  onToggleBarrier: (on: boolean) => void
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
@@ -1090,6 +1104,34 @@ function RegistryTab({
             disabled={saving}
           >
             {alarmOnUnknown ? 'Turn off' : 'Turn on'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Automatic barrier — the decision half of gate automation */}
+      <Card>
+        <CardContent className="py-3 flex flex-wrap items-center gap-3">
+          <Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Automatic barrier</div>
+            <div className="text-xs text-[var(--text-dim)]">
+              Publish an allow/deny decision for every read on a Gate IN camera —
+              registered and allowlisted vehicles allow, everything else denies.
+              Install the <b>Gate Controller</b> app from the catalog to wire the
+              decisions to your relay; it ships in dry-run so nothing moves until
+              you say so.
+              {!Object.values(cameraRoles).some((r) => r.role === 'gate_in') &&
+                ' Needs at least one Gate IN camera below.'}
+            </div>
+          </div>
+          <Button
+            variant={barrierMode === 'registered' ? 'outline' : 'primary'}
+            className={barrierMode === 'registered'
+              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
+            onClick={() => onToggleBarrier(barrierMode !== 'registered')}
+            disabled={saving}
+          >
+            {barrierMode === 'registered' ? 'Turn off' : 'Turn on'}
           </Button>
         </CardContent>
       </Card>

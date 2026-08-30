@@ -531,6 +531,67 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
+  # Gate controller — barrier actuation for access.decided.v1: pulses
+  # an HTTP relay per gate camera when the LPR app (barrier mode)
+  # publishes an allow; deny and unknown decisions actuate nothing.
+  # Ships with dry_run: true — commission from the catalog, then turn
+  # it off. Contract surface on :9210.
+  # ──────────────────────────────────────────────────────────────
+  gate-controller-config-init:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_gate_controller_config_init
+    logging: *svc-logs
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (gate-controller) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/gate-controller:/template:ro
+      - opennvr_gate_controller_config:/generated
+
+  gate-controller:
+    profiles: [apps]
+    build:
+      context: .
+      dockerfile: examples/gate-controller/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${GATE_CONTROLLER_IMAGE:-opennvr/gate-controller:local-build}
+    container_name: opennvr_gate_controller
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      gate-controller-config-init:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - NATS_URL=nats://nats:4222
+      - OPENNVR_URL=http://opennvr-core:8000
+    # Contract surface (/health /manifest /state) — internal-only.
+    expose:
+      - "9210"
+    volumes:
+      - opennvr_gate_controller_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Smart doorbell — face recognition at the door via InsightFace
   # through KAI-C (FrameApp); known visitors low-severity, strangers
   # high with a snapshot. Contract surface on :9206.
@@ -814,6 +875,7 @@ volumes:
   opennvr_abandoned_object_config:
   opennvr_intrusion_detection_config:
   opennvr_license_plate_recognition_config:
+  opennvr_gate_controller_config:
   opennvr_fast_plate_ocr_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
