@@ -1,0 +1,30 @@
+# alert-notifier example config. Copy to config.yml and edit.
+
+nats_url: "nats://localhost:4222"
+nats_token: null
+
+# Forward alerts at or above this severity
+# (info / low / medium / high / critical).
+min_severity: high
+
+# Telegram: create a bot with @BotFather, add it to the guard-house
+# group, and put the group's chat id here.
+telegram_bot_token: ""
+telegram_chat_id: ""
+
+# Generic POST target — gets {message, alert}. Works with Slack/Teams
+# incoming hooks, SMS gateway HTTP APIs (Twilio, MSG91), sirens, SIEMs.
+notify_webhook_url: ""
+
+# One alarm, one push: the same (camera, title) re-firing within this
+# window is counted, not re-sent.
+repeat_cooldown_seconds: 300.0
+# Global push ceiling per minute (flood guard of last resort).
+max_per_minute: 20
+
+# ── App contract (spec §03) — powers the App Catalog ────────────────
+contract_port: 9211
+contract_bind_host: "0.0.0.0"
+contract_host: "localhost"
+opennvr_url: null
+opennvr_token: null

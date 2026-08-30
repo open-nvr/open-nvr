@@ -1,0 +1,24 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# alert-notifier config consumed by docker-compose.apps.yml.
+# ${INTERNAL_API_KEY} is substituted by the config-init container at
+# compose-up time (same pattern as the other shipped apps).
+#
+# Channels are OPERATOR CONFIG: set the Telegram bot token / chat id
+# (or a webhook) from the App Catalog's Configure form — applied live.
+
+nats_url: "nats://nats:4222"
+nats_token: "${INTERNAL_API_KEY}"
+
+min_severity: high
+telegram_bot_token: ""
+telegram_chat_id: ""
+notify_webhook_url: ""
+repeat_cooldown_seconds: 300.0
+max_per_minute: 20
+
+contract_port: 9211
+contract_bind_host: "0.0.0.0"
+contract_host: "alert-notifier"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"

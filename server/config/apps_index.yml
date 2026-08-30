@@ -275,6 +275,38 @@
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gate-controller
 
+- id: alert-notifier
+  name: Alert Notifier
+  summary: "The guard's phone: pushes alerts at/above a severity bar to Telegram and/or any webhook (SMS gateways, Slack, sirens) — one alarm, one push, flood-safe."
+  category: notifications
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/alert-notifier:latest
+  build_context: examples/alert-notifier
+  # No inference and no adapters — bus in, push out.
+  requires_tasks: []
+  emits: []
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/alert-notifier/README.md
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        alert-notifier:
+          profiles: [apps]
+          image: ${ALERT_NOTIFIER_IMAGE:-opennvr/alert-notifier:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9211"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d alert-notifier
+
 - id: smart-doorbell
   name: Smart Doorbell
   summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.

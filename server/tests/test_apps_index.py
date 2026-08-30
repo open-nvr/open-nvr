@@ -192,6 +192,7 @@ _EXPECTED_IDS = {
     "intrusion-detection",
     "license-plate-recognition",
     "gate-controller",
+    "alert-notifier",
     "smart-doorbell",
     "package-delivery",
     "footage-search",
