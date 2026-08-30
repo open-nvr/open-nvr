@@ -94,3 +94,49 @@ def test_state_view_serializes_and_defaults_empty():
         "columns": [], "description": "",
     }
     assert wire[1]["columns"] == ["id", "count"]
+
+
+# ── App-UI mode + store listing ─────────────────────────────────────
+
+
+def test_ui_and_listing_defaults():
+    d = AppManifest(id="x", name="X", version="1", category="test").to_dict()
+    assert d["ui_mode"] == "internal"
+    assert d["ui_url"] == ""
+    assert d["description"] == ""
+    assert d["author"] == ""
+    assert d["website"] == ""
+    assert d["license"] == ""
+    assert d["use_cases"] == []
+
+
+def test_external_ui_mode_serializes():
+    m = AppManifest(
+        id="x", name="X", version="1", category="test",
+        ui_mode="external", ui_url="http://{host}:8090/",
+        description="Long form.\n\nSecond paragraph.",
+        author="Acme", website="https://acme.example", license="MIT",
+        use_cases=["Alarm on unregistered vehicles", "Gate history"],
+    )
+    d = m.to_dict()
+    assert d["ui_mode"] == "external"
+    assert d["ui_url"] == "http://{host}:8090/"
+    assert d["use_cases"] == ["Alarm on unregistered vehicles", "Gate history"]
+    import json
+    json.dumps(d)  # listing fields must stay JSON-serializable
+
+
+def test_unknown_ui_mode_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="ui_mode"):
+        AppManifest(id="x", name="X", version="1", category="test",
+                    ui_mode="popup")
+
+
+def test_external_without_url_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="ui_url"):
+        AppManifest(id="x", name="X", version="1", category="test",
+                    ui_mode="external")
