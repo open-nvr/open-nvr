@@ -213,3 +213,24 @@ async def get_gate_occupancy(
         hours=max(1, min(int(hours), 24 * 7)),
         owner_id=None if current_user.is_superuser else current_user.id,
     )
+
+
+@router.get("/events/vehicle-report")
+async def get_vehicle_report(
+    year: int,
+    month: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """One calendar month of vehicle movement, aggregated for the
+    printable monthly report. Owner-scoped like /events."""
+    from services.timeline_service import vehicle_report
+
+    if not (1 <= int(month) <= 12):
+        raise HTTPException(status_code=422, detail="month must be 1..12")
+    return vehicle_report(
+        db,
+        year=year,
+        month=month,
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )

@@ -347,3 +347,101 @@ def gate_occupancy(
         p for p, r in last_by_plate.items() if r.camera_id in in_set
     )
     return {"inside": len(inside), "plates": inside[:200]}
+
+
+def vehicle_report(
+    db: Session,
+    *,
+    year: int,
+    month: int,
+    owner_id: int | None = None,
+    per_plate_limit: int = 1000,
+) -> dict:
+    """One calendar month of vehicle movement, aggregated for the
+    Vehicles page's printable report: totals, per-plate reads with
+    first/last seen and per-camera counts, per-camera totals and a
+    per-day series. Owner-scoped like everything else. The registry
+    join (which plate belongs to which flat) happens client-side —
+    the register lives in the providing app's config, not in core.
+    """
+    from calendar import monthrange
+    from datetime import timedelta, timezone
+
+    from sqlalchemy import func
+
+    year = max(2000, min(int(year), 2100))
+    month = max(1, min(int(month), 12))
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=monthrange(year, month)[1])
+
+    base = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.started_at >= start)
+        .filter(TimelineEvent.started_at < end)
+    )
+    if owner_id is not None:
+        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+
+    total = base.count()
+    per_camera = [
+        {"camera_id": cid, "reads": int(n)}
+        for cid, n in base.with_entities(
+            TimelineEvent.camera_id, func.count(TimelineEvent.id)
+        ).group_by(TimelineEvent.camera_id).all()
+    ]
+
+    # Per-plate rollup in one grouped pass; day series in Python
+    # (dialect portability, same call as plate_stats).
+    plate_rows = (
+        base.with_entities(
+            TimelineEvent.plate_text,
+            func.count(TimelineEvent.id),
+            func.min(TimelineEvent.started_at),
+            func.max(TimelineEvent.started_at),
+        )
+        .group_by(TimelineEvent.plate_text)
+        .order_by(func.count(TimelineEvent.id).desc())
+        .limit(max(1, int(per_plate_limit)))
+        .all()
+    )
+    per_plate_cameras: dict[str, dict[int, int]] = {}
+    per_day_counts: dict[str, int] = {}
+    for plate, cid, started_at in base.with_entities(
+        TimelineEvent.plate_text, TimelineEvent.camera_id,
+        TimelineEvent.started_at,
+    ).all():
+        per_plate_cameras.setdefault(plate, {})
+        per_plate_cameras[plate][cid] = per_plate_cameras[plate].get(cid, 0) + 1
+        day = started_at.date().isoformat()
+        per_day_counts[day] = per_day_counts.get(day, 0) + 1
+
+    per_plate = [
+        {
+            "plate": plate,
+            "reads": int(n),
+            "first_seen": first.isoformat() if first else None,
+            "last_seen": last.isoformat() if last else None,
+            "per_camera": [
+                {"camera_id": cid, "reads": reads}
+                for cid, reads in sorted(
+                    per_plate_cameras.get(plate, {}).items())
+            ],
+        }
+        for plate, n, first, last in plate_rows
+    ]
+
+    return {
+        "year": year,
+        "month": month,
+        "total_reads": int(total),
+        "unique_plates": len(per_plate_cameras),
+        "per_camera": per_camera,
+        "per_plate": per_plate,
+        "per_day": [
+            {"day": d, "reads": per_day_counts[d]}
+            for d in sorted(per_day_counts)
+        ],
+    }

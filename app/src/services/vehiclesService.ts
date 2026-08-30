@@ -59,6 +59,11 @@ export const vehiclesService = {
       },
     }),
 
+  // One calendar month of movement, aggregated for the printable
+  // monthly report (registry join happens client-side).
+  getVehicleReport: (year: number, month: number) =>
+    api.get('/api/v1/events/vehicle-report', { params: { year, month } }),
+
   // Evidence photos are auth-gated (JWT header), so a bare <img src>
   // can't load them — fetch as a blob and objectURL it (AuthedImage).
   getEventEvidence: (eventId: number) =>
