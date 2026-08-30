@@ -40,6 +40,25 @@ export const vehiclesService = {
   getPlateSummary: (plate: string) =>
     api.get('/api/v1/events/plate-summary', { params: { plate } }),
 
+  // Gate in / gate out. WHICH camera is which gate lives in the
+  // providing app's config (gate_directions) — the endpoints take the
+  // sets and stay stateless.
+  getPlateSessions: (plate: string, inCameras: number[], outCameras: number[]) =>
+    api.get('/api/v1/events/plate-sessions', {
+      params: {
+        plate,
+        in_cameras: inCameras.join(','),
+        out_cameras: outCameras.join(','),
+      },
+    }),
+  getGateOccupancy: (inCameras: number[], outCameras: number[]) =>
+    api.get('/api/v1/events/gate-occupancy', {
+      params: {
+        in_cameras: inCameras.join(','),
+        out_cameras: outCameras.join(','),
+      },
+    }),
+
   // Evidence photos are auth-gated (JWT header), so a bare <img src>
   // can't load them — fetch as a blob and objectURL it (AuthedImage).
   getEventEvidence: (eventId: number) =>

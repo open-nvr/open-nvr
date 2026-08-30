@@ -183,7 +183,7 @@ def test_live_watchlist_update_applies_atomically():
 def test_manifest_declares_the_consumer_contract():
     m = PlateAlerter.manifest
     assert m.subscribes == PLATE_SUBJECT_PATTERN
-    assert m.version == "2.1.0"
+    assert m.version == "2.2.0"
     assert "object_detection" in m.requires_tasks
     assert "license_plate_recognition" in m.requires_tasks
 
@@ -354,3 +354,45 @@ def test_denylist_plate_never_counts_as_unknown():
     assert "Watchlist plate" in fired[0].title
     assert fired[0].evidence["unknown_alarm"] is False
     assert alerter.state_snapshot()["unknown_alarms"] == 0
+
+
+# ── Vehicle model + visitor-pass expiry ─────────────────────────────
+
+
+def test_parse_registry_keeps_model_and_expires():
+    reg = lpr.parse_registry([
+        {"plate": "MH12DE1433", "owner": "A. Sharma", "model": "Honda City",
+         "expires": "2030-01-31"},
+    ])
+    assert reg["MH12DE1433"]["model"] == "Honda City"
+    assert reg["MH12DE1433"]["expires"] == "2030-01-31"
+
+
+def test_expired_pass_counts_as_unknown():
+    from datetime import date as _date
+    assert lpr.registry_entry_active({"expires": "2030-01-01"},
+                                     today=_date(2026, 8, 30)) is True
+    assert lpr.registry_entry_active({"expires": "2026-08-29"},
+                                     today=_date(2026, 8, 30)) is False
+    # Boundary: the expiry DAY itself is still valid.
+    assert lpr.registry_entry_active({"expires": "2026-08-30"},
+                                     today=_date(2026, 8, 30)) is True
+    # A typo'd date must NOT turn a resident into a stranger.
+    assert lpr.registry_entry_active({"expires": "not-a-date"}) is True
+    assert lpr.registry_entry_active({}) is True
+    assert lpr.registry_entry_active(None) is False
+
+
+def test_expired_visitor_pass_alarms_when_unknown_mode_on():
+    alerter, _ = _alerter(alarm_on_unknown=True, registry=[
+        {"plate": "GU3STPASS1", "owner": "Visitor", "expires": "2020-01-01"},
+        {"plate": "MH12DE1433", "owner": "Resident"},
+    ])
+    expired = alerter.handle_event(_envelope(plate="GU3STPASS1"))
+    assert expired[0].severity == "high"
+    assert "Unknown vehicle" in expired[0].title
+    assert expired[0].evidence["registry_expired"] is True
+    assert expired[0].evidence["in_registry"] is False
+    resident = alerter.handle_event(_envelope(plate="MH12DE1433"))
+    assert resident[0].severity == "low"
+    assert resident[0].evidence["registry_expired"] is False

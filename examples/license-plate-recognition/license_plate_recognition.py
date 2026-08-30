@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
+from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,14 +71,21 @@ def _normalize_plate(value: Any) -> str:
     return "".join(str(value).split()).upper()
 
 
+#: Metadata keys a register entry may carry. ``model`` is the vehicle
+#: model (Honda City); ``expires`` (YYYY-MM-DD) makes an entry a
+#: visitor pass — past the date it no longer counts as registered.
+REGISTRY_FIELDS = ("owner", "unit", "type", "model", "note", "expires")
+
+
 def parse_registry(raw: Any) -> dict[str, dict[str, str]]:
     """Parse the ``registry`` config into ``{PLATE: metadata}``.
 
     Entries may be bare plate strings or dicts with a ``plate`` key
-    plus optional ``owner`` / ``unit`` / ``type`` / ``note`` metadata
-    (a society's vehicle register: whose car, which flat). Unknown
-    keys are dropped; entries without a plate are skipped — a partly
-    bad CSV import must not break the register.
+    plus optional metadata (:data:`REGISTRY_FIELDS` — a society's
+    vehicle register: whose car, which flat, which model, and an
+    optional expiry for visitor passes). Unknown keys are dropped;
+    entries without a plate are skipped — a partly bad import must
+    not break the register.
     """
     registry: dict[str, dict[str, str]] = {}
     for entry in raw or []:
@@ -93,16 +101,34 @@ def parse_registry(raw: Any) -> dict[str, dict[str, str]]:
             continue
         registry[plate] = {
             k: str(entry[k]).strip()
-            for k in ("owner", "unit", "type", "note")
+            for k in REGISTRY_FIELDS
             if str(entry.get(k) or "").strip()
         }
     return registry
 
 
+def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = None) -> bool:
+    """True when a register entry currently counts as registered.
+
+    No ``expires`` = permanent. An unparseable expiry keeps the entry
+    ACTIVE (a typo in a date must not turn a resident into a stranger
+    at 2am); the register UI is where bad dates get surfaced.
+    """
+    if entry is None:
+        return False
+    expires = entry.get("expires")
+    if not expires:
+        return True
+    try:
+        return (today or date.today()) <= date.fromisoformat(expires.strip())
+    except (TypeError, ValueError):
+        return True
+
+
 MANIFEST = AppManifest(
     id="license-plate-recognition",
     name="License Plate Recognition",
-    version="2.1.0",
+    version="2.2.0",
     category="vehicle",
     summary=(
         "Consumes the platform's plate.recognized.v1 events and routes "
@@ -131,8 +157,9 @@ MANIFEST = AppManifest(
               description="Plates that fire a high-severity 'watchlist plate' alert."),
         Param("registry", list, default=[],
               description=(
-                  "The vehicle register: entries are plates or "
-                  "{plate, owner, unit, type, note} records. Registered "
+                  "The vehicle register: entries are plates or {plate, "
+                  "owner, unit, type, model, note, expires} records "
+                  "(expires YYYY-MM-DD = visitor pass). Registered "
                   "vehicles pass as expected; with alarm_on_unknown they "
                   "define who is known.")),
         Param("alarm_on_unknown", bool, default=False,
@@ -408,9 +435,12 @@ class PlateAlerter(Detector):
         # plate is a WATCHLIST alarm, not an unknown-vehicle one.
         allowlist, denylist = self._watchlists
         registry_entry = self._registry.get(plate)
+        # A visitor pass past its expiry no longer counts as registered
+        # — the plate becomes a stranger again (the point of a pass).
+        registry_active = registry_entry_active(registry_entry)
         unknown_alarm = False
         if (self._alarm_on_unknown
-                and registry_entry is None
+                and not registry_active
                 and plate not in allowlist
                 and plate not in denylist):
             last_alarm = self._unknown_last.get(plate)
@@ -430,7 +460,8 @@ class PlateAlerter(Detector):
             confidence=confidence,
             vehicle_label=payload.get("vehicle_label"),
             correlation_id=event.get("correlation_id"),
-            registry_entry=registry_entry,
+            registry_entry=registry_entry if registry_active else None,
+            registry_expired=(registry_entry is not None and not registry_active),
             unknown_alarm=unknown_alarm,
         )
         self._dispatcher.fire(alert)
@@ -448,6 +479,7 @@ class PlateAlerter(Detector):
         vehicle_label: str | None,
         correlation_id: str | None,
         registry_entry: dict[str, str] | None = None,
+        registry_expired: bool = False,
         unknown_alarm: bool = False,
     ) -> Alert:
         allowlist, denylist = self._watchlists   # one read = one generation
@@ -490,6 +522,7 @@ class PlateAlerter(Detector):
                 "in_denylist": plate in denylist,
                 "in_registry": registry_entry is not None,
                 "registry": registry_entry,
+                "registry_expired": registry_expired,
                 "unknown_alarm": unknown_alarm,
             },
         )

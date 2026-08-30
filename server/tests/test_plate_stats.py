@@ -139,3 +139,75 @@ def test_plate_summary_owner_scoped_and_unknown_plate(db):
     none = plate_summary(s, plate="ZZ00XX", owner_id=None)
     assert none == {"plate": "ZZ00XX", "total_reads": 0,
                     "first_seen": None, "last_seen": None, "per_camera": []}
+
+
+# ── plate_sessions + gate_occupancy (gate in / gate out) ────────────
+
+
+def test_plate_sessions_pairs_in_and_out(db):
+    from services.timeline_service import plate_sessions
+
+    s, users, cams = db
+    # Existing fixture: AAA111 read on gate 2h ago and 1h ago (both IN).
+    # Add an OUT read on yard 30 min ago → the 1h-ago entry closes.
+    s.add(models.TimelineEvent(
+        camera_id=cams["yard"].id, source="tier0", event_type="track",
+        label="car", plate_text="AAA111",
+        started_at=NOW - timedelta(minutes=30)))
+    s.commit()
+    got = plate_sessions(
+        s, plate="AAA111",
+        in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
+        owner_id=users["alice"].id)
+    assert got["inside_now"] is False
+    assert len(got["sessions"]) == 2  # newest first
+    closed = got["sessions"][0]
+    assert closed["entry_camera_id"] == cams["gate"].id
+    assert closed["exit_camera_id"] == cams["yard"].id
+    assert closed["duration_seconds"] == 30 * 60
+    # The older entry (2h ago) had no exit before the next entry →
+    # closed with a missed exit.
+    missed = got["sessions"][1]
+    assert missed["exited_at"] is None
+
+
+def test_plate_sessions_open_session_means_inside(db):
+    from services.timeline_service import plate_sessions
+
+    s, users, cams = db
+    got = plate_sessions(
+        s, plate="AAA111",
+        in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
+        owner_id=users["alice"].id)
+    # No OUT reads in the base fixture: latest entry is still open.
+    assert got["inside_now"] is True
+    assert got["sessions"][0]["exited_at"] is None
+
+
+def test_gate_occupancy_counts_last_direction(db):
+    from services.timeline_service import gate_occupancy
+
+    s, users, cams = db
+    # AAA111 last gate read = IN (1h ago) → inside. Add BBB222: IN 3h
+    # ago then OUT 1h ago → not inside.
+    s.add(models.TimelineEvent(
+        camera_id=cams["gate"].id, source="tier0", event_type="track",
+        label="car", plate_text="BBB222",
+        started_at=NOW - timedelta(hours=3)))
+    s.add(models.TimelineEvent(
+        camera_id=cams["yard"].id, source="tier0", event_type="track",
+        label="car", plate_text="BBB222",
+        started_at=NOW - timedelta(hours=1)))
+    s.commit()
+    got = gate_occupancy(
+        s, in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
+        hours=24, owner_id=users["alice"].id, now=NOW)
+    assert got == {"inside": 1, "plates": ["AAA111"]}
+
+
+def test_gate_occupancy_needs_both_directions(db):
+    from services.timeline_service import gate_occupancy
+
+    s, users, cams = db
+    assert gate_occupancy(s, in_cameras=[cams["gate"].id], out_cameras=[],
+                          owner_id=users["alice"].id) == {"inside": 0, "plates": []}

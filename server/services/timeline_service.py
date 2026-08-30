@@ -233,3 +233,117 @@ def plate_summary(
         "last_seen": last_seen.isoformat() if last_seen else None,
         "per_camera": per_camera,
     }
+
+
+def plate_sessions(
+    db: Session,
+    *,
+    plate: str,
+    in_cameras: list[int],
+    out_cameras: list[int],
+    owner_id: int | None = None,
+    limit: int = 50,
+) -> dict:
+    """Entry/exit pairing for ONE plate — gate in / gate out history.
+
+    Stateless on purpose: which cameras are entry vs exit gates lives
+    in the providing app's config (the vertical owns its settings);
+    the caller passes both sets and this pairs the plate's reads on
+    them chronologically. An entry with no later exit is an OPEN
+    session (the vehicle is inside); consecutive entries close the
+    earlier one with a missed exit; an exit with no prior entry shows
+    as a session with no entry (a missed entry read).
+    """
+    normalized = "".join(str(plate).split()).upper()
+    in_set = {int(c) for c in in_cameras}
+    out_set = {int(c) for c in out_cameras} - in_set  # a camera can't be both
+    gates = in_set | out_set
+    if not gates:
+        return {"plate": normalized, "sessions": [], "inside_now": False}
+
+    q = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text == normalized)
+        .filter(TimelineEvent.camera_id.in_(gates))
+    )
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    reads = q.order_by(TimelineEvent.started_at.asc()).all()
+
+    def _row(entry, exit_) -> dict:
+        duration = None
+        if entry is not None and exit_ is not None:
+            duration = max(
+                0, int((exit_.started_at - entry.started_at).total_seconds())
+            )
+        return {
+            "entered_at": entry.started_at.isoformat() if entry else None,
+            "entry_camera_id": entry.camera_id if entry else None,
+            "exited_at": exit_.started_at.isoformat() if exit_ else None,
+            "exit_camera_id": exit_.camera_id if exit_ else None,
+            "duration_seconds": duration,
+        }
+
+    sessions: list[dict] = []
+    open_entry = None
+    for r in reads:
+        if r.camera_id in in_set:
+            if open_entry is not None:
+                sessions.append(_row(open_entry, None))  # missed exit
+            open_entry = r
+        else:
+            sessions.append(_row(open_entry, r))
+            open_entry = None
+    inside_now = open_entry is not None
+    if open_entry is not None:
+        sessions.append(_row(open_entry, None))  # still inside
+
+    sessions.reverse()  # newest first
+    return {
+        "plate": normalized,
+        "sessions": sessions[: max(1, int(limit))],
+        "inside_now": inside_now,
+    }
+
+
+def gate_occupancy(
+    db: Session,
+    *,
+    in_cameras: list[int],
+    out_cameras: list[int],
+    hours: int = 24,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Who is inside right now: plates whose LAST gate read within the
+    window was on an entry camera. Windowed so a missed exit ages out
+    instead of counting a vehicle as inside forever."""
+    from datetime import timedelta, timezone
+
+    in_set = {int(c) for c in in_cameras}
+    out_set = {int(c) for c in out_cameras} - in_set
+    gates = in_set | out_set
+    if not in_set or not out_set:
+        return {"inside": 0, "plates": []}
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max(1, int(hours)))
+    q = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.camera_id.in_(gates))
+        .filter(TimelineEvent.started_at >= cutoff)
+    )
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    last_by_plate: dict[str, TimelineEvent] = {}
+    for r in q.order_by(TimelineEvent.started_at.asc()).all():
+        last_by_plate[r.plate_text] = r
+    inside = sorted(
+        p for p, r in last_by_plate.items() if r.camera_id in in_set
+    )
+    return {"inside": len(inside), "plates": inside[:200]}

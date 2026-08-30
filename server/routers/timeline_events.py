@@ -152,3 +152,64 @@ async def get_plate_summary(
         plate=plate,
         owner_id=None if current_user.is_superuser else current_user.id,
     )
+
+
+def _parse_camera_ids(raw: str) -> list[int]:
+    out = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(int(part))
+            except ValueError:
+                raise HTTPException(status_code=422,
+                                    detail=f"bad camera id: {part!r}")
+    return out
+
+
+@router.get("/events/plate-sessions")
+async def get_plate_sessions(
+    plate: str,
+    in_cameras: str = "",
+    out_cameras: str = "",
+    limit: int = 50,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Gate in / gate out history for one plate. ``in_cameras`` /
+    ``out_cameras`` are comma-separated camera ids — which camera is
+    which gate lives in the providing app's config, so the caller
+    passes the sets and this stays stateless. Owner-scoped."""
+    from services.timeline_service import plate_sessions
+
+    if not plate or not plate.strip():
+        raise HTTPException(status_code=422, detail="plate is required")
+    return plate_sessions(
+        db,
+        plate=plate,
+        in_cameras=_parse_camera_ids(in_cameras),
+        out_cameras=_parse_camera_ids(out_cameras),
+        owner_id=None if current_user.is_superuser else current_user.id,
+        limit=max(1, min(int(limit), 200)),
+    )
+
+
+@router.get("/events/gate-occupancy")
+async def get_gate_occupancy(
+    in_cameras: str = "",
+    out_cameras: str = "",
+    hours: int = 24,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """How many vehicles are inside right now (last gate read within
+    the window was an entry). Windowed so missed exits age out."""
+    from services.timeline_service import gate_occupancy
+
+    return gate_occupancy(
+        db,
+        in_cameras=_parse_camera_ids(in_cameras),
+        out_cameras=_parse_camera_ids(out_cameras),
+        hours=max(1, min(int(hours), 24 * 7)),
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )

@@ -84,13 +84,26 @@ export function findLprApp(apps: RegisteredApp[] | undefined): RegisteredApp | n
   )
 }
 
-/** One row of the society's vehicle register (app config `registry`). */
+/** One row of the society's vehicle register (app config `registry`).
+ * `expires` (YYYY-MM-DD) makes an entry a visitor pass — past the date
+ * the app treats the plate as a stranger again. */
 export type RegistryEntry = {
   plate: string
   owner?: string
   unit?: string
   type?: string
+  model?: string
   note?: string
+  expires?: string
+}
+
+const REGISTRY_FIELDS = ['owner', 'unit', 'type', 'model', 'note', 'expires'] as const
+
+/** Is a register entry currently valid (visitor pass not expired)? */
+export function entryActive(e: RegistryEntry, today = new Date()): boolean {
+  if (!e.expires) return true
+  const d = new Date(`${e.expires}T23:59:59`)
+  return Number.isNaN(d.getTime()) ? true : today <= d
 }
 
 /** The platform's plate normalisation: upper-case, no separators. */
@@ -110,7 +123,7 @@ export function parseRegistry(raw: unknown): RegistryEntry[] {
       const plate = normalizePlate(String((e as any).plate ?? ''))
       if (!plate) continue
       const r: RegistryEntry = { plate }
-      for (const k of ['owner', 'unit', 'type', 'note'] as const) {
+      for (const k of REGISTRY_FIELDS) {
         const v = String((e as any)[k] ?? '').trim()
         if (v) r[k] = v
       }
@@ -120,9 +133,61 @@ export function parseRegistry(raw: unknown): RegistryEntry[] {
   return out
 }
 
-/** Minimal CSV parse (quoted fields supported) → registry entries.
- * With a header row, columns are matched by name; without one, the
- * first column is the plate. */
+// Society spreadsheets rarely use our exact column names — match the
+// obvious variants ("Vehicle No", "Flat No", "Car Model", …) so a
+// secretary's existing sheet imports as-is.
+const HEADER_SYNONYMS: Record<string, (typeof REGISTRY_FIELDS)[number] | 'plate'> = {
+  plate: 'plate', 'plate no': 'plate', 'plate number': 'plate',
+  'number plate': 'plate', number: 'plate', 'vehicle no': 'plate',
+  'vehicle number': 'plate', 'reg no': 'plate', 'registration no': 'plate',
+  'registration number': 'plate', 'car no': 'plate', 'car number': 'plate',
+  owner: 'owner', 'owner name': 'owner', name: 'owner', resident: 'owner',
+  unit: 'unit', flat: 'unit', 'flat no': 'unit', 'flat number': 'unit',
+  house: 'unit', 'house no': 'unit', apartment: 'unit', wing: 'unit',
+  type: 'type', 'vehicle type': 'type', category: 'type',
+  model: 'model', 'vehicle model': 'model', 'car model': 'model',
+  make: 'model', 'make and model': 'model', 'make/model': 'model',
+  note: 'note', notes: 'note', remark: 'note', remarks: 'note',
+  expires: 'expires', expiry: 'expires', 'expiry date': 'expires',
+  'valid till': 'expires', 'valid until': 'expires', 'valid upto': 'expires',
+}
+
+/** Rows (first row possibly a header) → registry entries. Shared by
+ * the CSV and Excel importers. Without a recognisable header, the
+ * first column is the plate and the second the owner. */
+export function registryFromRows(rows: (string | number | null | undefined)[][]): RegistryEntry[] {
+  const clean = rows
+    .map((r) => r.map((c) => String(c ?? '').trim()))
+    .filter((r) => r.some(Boolean))
+  if (!clean.length) return []
+
+  const header = clean[0].map((h) => HEADER_SYNONYMS[h.toLowerCase()] ?? null)
+  const hasHeader = header.includes('plate')
+  const cols: (string | null)[] = hasHeader
+    ? header
+    : ['plate', 'owner', 'unit', 'type', 'model', 'note', 'expires']
+  const body = hasHeader ? clean.slice(1) : clean
+
+  const out: RegistryEntry[] = []
+  for (const r of body) {
+    const rec: Record<string, string> = {}
+    r.forEach((v, i) => {
+      const k = cols[i]
+      if (k && v) rec[k] = v
+    })
+    const plate = normalizePlate(rec.plate ?? '')
+    if (!plate) continue
+    const entry: RegistryEntry = { plate }
+    for (const k of REGISTRY_FIELDS) {
+      if (rec[k]) entry[k] = rec[k]
+    }
+    out.push(entry)
+  }
+  return out
+}
+
+/** Minimal CSV parse (quoted fields supported) → registry entries via
+ * the shared row parser (header synonyms and all). */
 export function registryFromCsv(text: string): RegistryEntry[] {
   const rows: string[][] = []
   let field = '', row: string[] = [], inQ = false
@@ -143,40 +208,40 @@ export function registryFromCsv(text: string): RegistryEntry[] {
   }
   row.push(field)
   if (row.some((f) => f.trim())) rows.push(row)
-  if (!rows.length) return []
+  return registryFromRows(rows)
+}
 
-  const KNOWN = ['plate', 'owner', 'unit', 'type', 'note']
-  const header = rows[0].map((h) => h.trim().toLowerCase())
-  const hasHeader = header.includes('plate')
-  const cols = hasHeader
-    ? header.map((h) => (KNOWN.includes(h) ? h : null))
-    : ['plate', 'owner', 'unit', 'type', 'note']
-  const body = hasHeader ? rows.slice(1) : rows
-
-  const out: RegistryEntry[] = []
-  for (const r of body) {
-    const rec: Record<string, string> = {}
-    r.forEach((v, i) => {
-      const k = cols[i]
-      if (k && v.trim()) rec[k] = v.trim()
-    })
-    const plate = normalizePlate(rec.plate ?? '')
-    if (!plate) continue
-    const entry: RegistryEntry = { plate }
-    for (const k of ['owner', 'unit', 'type', 'note'] as const) {
-      if (rec[k]) entry[k] = rec[k]
-    }
-    out.push(entry)
-  }
-  return out
+/** Excel (.xlsx/.xls) → registry entries. SheetJS is lazy-loaded so
+ * the page's normal bundle doesn't carry it; the first sheet's rows
+ * go through the same header matching as CSV. */
+export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+  const XLSX = await import('xlsx')
+  const wb = XLSX.read(buf, { type: 'array' })
+  const sheet = wb.Sheets[wb.SheetNames[0]]
+  if (!sheet) return []
+  const rows = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: false,   // dates and numbers come back as displayed strings
+    defval: '',
+  }) as (string | number | null)[][]
+  return registryFromRows(rows)
 }
 
 function registryToCsv(entries: RegistryEntry[]): string {
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
   return [
-    'plate,owner,unit,type,note',
-    ...entries.map((e) => [e.plate, e.owner, e.unit, e.type, e.note].map(esc).join(',')),
+    'plate,owner,unit,type,model,note,expires',
+    ...entries.map((e) =>
+      [e.plate, e.owner, e.unit, e.type, e.model, e.note, e.expires].map(esc).join(',')),
   ].join('\n')
+}
+
+function formatStay(seconds: number): string {
+  const m = Math.round(seconds / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m % 60}m`
+  return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
 const RANGE_PRESETS = [
@@ -264,11 +329,63 @@ export function Vehicles() {
     () => parseRegistry((lprApp?.config as any)?.registry),
     [lprApp]
   )
+  // Expired visitor passes are strangers again — the badges track that.
   const registryPlates = useMemo(
-    () => new Set(registry.map((r) => r.plate)),
+    () => new Set(registry.filter((r) => entryActive(r)).map((r) => r.plate)),
+    [registry]
+  )
+  const expiredPlates = useMemo(
+    () => new Set(registry.filter((r) => !entryActive(r)).map((r) => r.plate)),
     [registry]
   )
   const alarmOnUnknown = Boolean((lprApp?.config as any)?.alarm_on_unknown)
+
+  // Gate directions — which camera is an entry gate, which an exit —
+  // are the vertical's settings, so they live in the app's config too
+  // (keys are camera ids as strings).
+  const gateDirections = useMemo(
+    () => ((lprApp?.config as any)?.gate_directions ?? {}) as Record<string, 'in' | 'out'>,
+    [lprApp]
+  )
+  const inCams = useMemo(
+    () => Object.entries(gateDirections).filter(([, d]) => d === 'in').map(([id]) => Number(id)),
+    [gateDirections]
+  )
+  const outCams = useMemo(
+    () => Object.entries(gateDirections).filter(([, d]) => d === 'out').map(([id]) => Number(id)),
+    [gateDirections]
+  )
+  const gatesConfigured = inCams.length > 0 && outCams.length > 0
+
+  const occupancyQuery = useQuery({
+    queryKey: ['gate-occupancy', inCams.join('.'), outCams.join('.')],
+    queryFn: async () => {
+      const { data } = await apiService.getGateOccupancy(inCams, outCams)
+      return data as { inside: number; plates: string[] }
+    },
+    enabled: gatesConfigured,
+    retry: 0,
+    refetchInterval: 60_000,
+  })
+
+  const sessionsQuery = useQuery({
+    queryKey: ['plate-sessions', historyPlate, inCams.join('.'), outCams.join('.')],
+    queryFn: async () => {
+      const { data } = await apiService.getPlateSessions(historyPlate as string, inCams, outCams)
+      return data as {
+        sessions: {
+          entered_at: string | null
+          entry_camera_id: number | null
+          exited_at: string | null
+          exit_camera_id: number | null
+          duration_seconds: number | null
+        }[]
+        inside_now: boolean
+      }
+    },
+    enabled: Boolean(historyPlate) && gatesConfigured,
+    retry: 0,
+  })
 
   const saveConfig = useMutation({
     mutationFn: async (patch: Record<string, any>) => {
@@ -350,9 +467,11 @@ export function Vehicles() {
         {[
           { label: 'Reads (7d)', value: stats?.total_reads },
           { label: 'Unique plates (7d)', value: stats?.unique_plates },
-          { label: 'Busiest camera (7d)', value: stats?.per_camera?.length
-              ? cameraName([...stats.per_camera].sort((a, b) => b.reads - a.reads)[0].camera_id)
-              : '—' },
+          gatesConfigured
+            ? { label: 'Inside now', value: occupancyQuery.data?.inside }
+            : { label: 'Busiest camera (7d)', value: stats?.per_camera?.length
+                ? cameraName([...stats.per_camera].sort((a, b) => b.reads - a.reads)[0].camera_id)
+                : '—' },
           { label: 'Registered vehicles', value: lprApp ? registry.length : '—' },
         ].map((t) => (
           <Card key={t.label}>
@@ -393,6 +512,14 @@ export function Vehicles() {
           alarmOnUnknown={alarmOnUnknown}
           canEdit={Boolean(lprApp)}
           saving={saveConfig.isPending}
+          cameras={camerasQuery.data ?? []}
+          gateDirections={gateDirections}
+          onSetDirection={(cameraId, dir) => {
+            const next = { ...gateDirections }
+            if (dir === '') delete next[String(cameraId)]
+            else next[String(cameraId)] = dir
+            saveConfig.mutate({ gate_directions: next })
+          }}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
               onSuccess: () => showSuccess(`Register saved — ${entries.length} vehicles`),
@@ -510,13 +637,22 @@ export function Vehicles() {
                           {p} <History size={12} className="text-[var(--text-dim)]" />
                         </button>
                       </td>
-                      <td className="px-3 py-1.5">{cameraName(e.camera_id)}</td>
+                      <td className="px-3 py-1.5">
+                        {cameraName(e.camera_id)}
+                        {gateDirections[String(e.camera_id)] === 'in' && (
+                          <Badge variant="success" className="ml-1.5">IN</Badge>
+                        )}
+                        {gateDirections[String(e.camera_id)] === 'out' && (
+                          <Badge variant="neutral" className="ml-1.5">OUT</Badge>
+                        )}
+                      </td>
                       <td className="px-3 py-1.5 text-[var(--text-dim)]">
                         {e.started_at ? new Date(e.started_at).toLocaleString() : '—'}
                       </td>
                       <td className="px-3 py-1.5">
                         {inDeny ? <Badge variant="destructive">watchlist</Badge>
                           : registered ? <Badge variant="success">registered</Badge>
+                          : expiredPlates.has(p) ? <Badge variant="warning">pass expired</Badge>
                           : inAllow ? <Badge variant="success">expected</Badge>
                           : alarmOnUnknown ? <Badge variant="warning">unknown</Badge>
                           : <Badge variant="neutral">{e.label || 'vehicle'}</Badge>}
@@ -565,12 +701,14 @@ export function Vehicles() {
             <div className="space-y-3 text-sm">
               {(() => {
                 const reg = registry.find((r) => r.plate === historyPlate)
-                return reg && (reg.owner || reg.unit || reg.type || reg.note) ? (
+                return reg && (reg.owner || reg.unit || reg.type || reg.model || reg.note) ? (
                   <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2">
                     Registered{reg.owner ? ` to ${reg.owner}` : ''}
                     {reg.unit ? ` · ${reg.unit}` : ''}
-                    {reg.type ? ` · ${reg.type}` : ''}
+                    {reg.model ? ` · ${reg.model}` : reg.type ? ` · ${reg.type}` : ''}
+                    {reg.expires ? ` · valid till ${reg.expires}` : ''}
                     {reg.note ? ` — ${reg.note}` : ''}
+                    {!entryActive(reg) && <Badge variant="warning" className="ml-2">expired</Badge>}
                   </div>
                 ) : null
               })()}
@@ -594,6 +732,50 @@ export function Vehicles() {
                   <div className="text-xs text-[var(--text-dim)]">last seen</div>
                 </div>
               </div>
+              {gatesConfigured && sessionsQuery.data && (
+                <div>
+                  <div className="text-xs text-[var(--text-dim)] mb-1 flex items-center gap-2">
+                    Gate in / gate out
+                    {sessionsQuery.data.inside_now && (
+                      <Badge variant="success">inside now</Badge>
+                    )}
+                  </div>
+                  {sessionsQuery.data.sessions.length === 0 ? (
+                    <div className="text-xs text-[var(--text-dim)]">No gate passages yet.</div>
+                  ) : (
+                    <div className="max-h-48 overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-[var(--text-dim)]">
+                            <th className="py-1 pr-2">In</th>
+                            <th className="py-1 pr-2">Out</th>
+                            <th className="py-1 text-right">Stay</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sessionsQuery.data.sessions.map((s, i) => (
+                            <tr key={i} className="border-t border-[var(--border)]">
+                              <td className="py-1 pr-2">
+                                {s.entered_at
+                                  ? `${new Date(s.entered_at).toLocaleString()} · ${cameraName(s.entry_camera_id as number)}`
+                                  : <span className="text-[var(--text-dim)]">missed</span>}
+                              </td>
+                              <td className="py-1 pr-2">
+                                {s.exited_at
+                                  ? `${new Date(s.exited_at).toLocaleString()} · ${cameraName(s.exit_camera_id as number)}`
+                                  : <span className="text-[var(--text-dim)]">{i === 0 && sessionsQuery.data!.inside_now ? 'still inside' : 'missed'}</span>}
+                              </td>
+                              <td className="py-1 text-right font-mono">
+                                {s.duration_seconds != null ? formatStay(s.duration_seconds) : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
               {(historyQuery.data?.per_camera ?? []).length > 0 && (
                 <div>
                   <div className="text-xs text-[var(--text-dim)] mb-1">By camera</div>
@@ -649,6 +831,9 @@ function RegistryTab({
   alarmOnUnknown,
   canEdit,
   saving,
+  cameras,
+  gateDirections,
+  onSetDirection,
   onSaveRegistry,
   onToggleAlarm,
 }: {
@@ -656,17 +841,21 @@ function RegistryTab({
   alarmOnUnknown: boolean
   canEdit: boolean
   saving: boolean
+  cameras: CameraRow[]
+  gateDirections: Record<string, 'in' | 'out'>
+  onSetDirection: (cameraId: number, dir: 'in' | 'out' | '') => void
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
   const [draft, setDraft] = useState<RegistryEntry>({ plate: '' })
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const { showError, showSuccess } = useSnackbar()
 
   const addDraft = () => {
     const plate = normalizePlate(draft.plate)
     if (!plate) return
     const entry: RegistryEntry = { plate }
-    for (const k of ['owner', 'unit', 'type', 'note'] as const) {
+    for (const k of REGISTRY_FIELDS) {
       const v = (draft[k] ?? '').trim()
       if (v) entry[k] = v
     }
@@ -674,17 +863,25 @@ function RegistryTab({
     setDraft({ plate: '' })
   }
 
-  const importCsv = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const imported = registryFromCsv(String(reader.result ?? ''))
-      if (!imported.length) return
+  // CSV or Excel — a society's list usually already exists as a sheet.
+  const importFile = async (file: File) => {
+    try {
+      const isExcel = /\.xlsx?$/i.test(file.name)
+      const imported = isExcel
+        ? await registryFromExcel(await file.arrayBuffer())
+        : registryFromCsv(await file.text())
+      if (!imported.length) {
+        showError('No plates found in that file — the plate column was not recognised.')
+        return
+      }
       // Imported rows win over existing ones with the same plate.
       const merged = new Map(registry.map((r) => [r.plate, r] as const))
       for (const e of imported) merged.set(e.plate, e)
       onSaveRegistry([...merged.values()])
+      showSuccess(`Imported ${imported.length} vehicles from ${file.name}`)
+    } catch (e: any) {
+      showError(e?.message || 'Could not read that file.')
     }
-    reader.readAsText(file)
   }
 
   const exportCsv = () => {
@@ -734,24 +931,59 @@ function RegistryTab({
         </CardContent>
       </Card>
 
+      {/* Gate directions — entry vs exit cameras */}
+      <Card>
+        <CardContent className="py-3">
+          <div className="text-sm font-medium mb-1">Gate cameras</div>
+          <div className="text-xs text-[var(--text-dim)] mb-2">
+            Mark which cameras face the way IN and which the way OUT — reads pair
+            into gate-in/gate-out history per vehicle, and the page shows who is
+            inside right now.
+          </div>
+          <div className="flex flex-wrap gap-3">
+            {cameras.map((c) => (
+              <label key={c.id} className="inline-flex items-center gap-2 text-sm">
+                <span>{c.name}</span>
+                <select
+                  value={gateDirections[String(c.id)] ?? ''}
+                  onChange={(e) => onSetDirection(c.id, e.target.value as 'in' | 'out' | '')}
+                  disabled={saving}
+                  className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                >
+                  <option value="">not a gate</option>
+                  <option value="in">gate IN</option>
+                  <option value="out">gate OUT</option>
+                </select>
+              </label>
+            ))}
+            {cameras.length === 0 && (
+              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Add + import */}
       <Card>
         <CardContent className="py-3 flex flex-wrap items-end gap-2">
           {([
-            ['plate', 'Plate *', 'MH12DE1433'],
-            ['owner', 'Owner', 'A. Sharma'],
-            ['unit', 'Flat / unit', 'B-402'],
-            ['type', 'Type', 'car / truck'],
-            ['note', 'Note', ''],
-          ] as const).map(([k, label, ph]) => (
+            ['plate', 'Plate *', 'MH12DE1433', 'text'],
+            ['owner', 'Owner', 'A. Sharma', 'text'],
+            ['unit', 'Flat / unit', 'B-402', 'text'],
+            ['type', 'Type', 'car / truck', 'text'],
+            ['model', 'Model', 'Honda City', 'text'],
+            ['note', 'Note', '', 'text'],
+            ['expires', 'Valid till', '', 'date'],
+          ] as const).map(([k, label, ph, kind]) => (
             <label key={k} className="text-xs text-[var(--text-dim)]">
               {label}
               <input
+                type={kind}
                 value={draft[k] ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
                 onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
                 placeholder={ph}
-                className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-36"
+                className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-32"
               />
             </label>
           ))}
@@ -762,16 +994,16 @@ function RegistryTab({
             <input
               ref={fileRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0]
-                if (f) importCsv(f)
+                if (f) void importFile(f)
                 e.target.value = ''
               }}
             />
             <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={saving}>
-              <Upload size={14} /> Import CSV
+              <Upload size={14} /> Import CSV / Excel
             </Button>
             <Button variant="outline" onClick={exportCsv} disabled={!registry.length}>
               <Download size={14} /> Export CSV
@@ -797,6 +1029,8 @@ function RegistryTab({
                   <th className="px-3 py-2">Owner</th>
                   <th className="px-3 py-2">Flat / unit</th>
                   <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Model</th>
+                  <th className="px-3 py-2">Valid till</th>
                   <th className="px-3 py-2">Note</th>
                   <th className="px-3 py-2 text-right pr-4" />
                 </tr>
@@ -804,10 +1038,17 @@ function RegistryTab({
               <tbody>
                 {[...registry].sort((a, b) => a.plate.localeCompare(b.plate)).map((r) => (
                   <tr key={r.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">{r.plate}</td>
+                    <td className="px-3 py-1.5 font-mono font-semibold">
+                      {r.plate}
+                      {!entryActive(r) && (
+                        <Badge variant="warning" className="ml-1.5">expired</Badge>
+                      )}
+                    </td>
                     <td className="px-3 py-1.5">{r.owner || '—'}</td>
                     <td className="px-3 py-1.5">{r.unit || '—'}</td>
                     <td className="px-3 py-1.5">{r.type || '—'}</td>
+                    <td className="px-3 py-1.5">{r.model || '—'}</td>
+                    <td className="px-3 py-1.5">{r.expires || '—'}</td>
                     <td className="px-3 py-1.5 text-[var(--text-dim)]">{r.note || ''}</td>
                     <td className="px-3 py-1.5 text-right pr-4">
                       <button
