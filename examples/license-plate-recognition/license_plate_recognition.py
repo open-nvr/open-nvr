@@ -101,6 +101,33 @@ MANIFEST = AppManifest(
         AlertType("plate_watchlist", severity="high"),
     ],
     has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
+    ui_mode="internal",
+    # Store listing — what the catalog's Details section renders. This
+    # example is the reference for community manifests: fill these in
+    # and your app has a storefront, no frontend work needed.
+    description=(
+        "Turns any camera into a license plate reader. The platform runs "
+        "the detect → crop → OCR chain once per vehicle visit and "
+        "publishes plate.recognized.v1 events; this app consumes them "
+        "and applies your watchlists live.\n\n"
+        "Plates on the denylist raise a high-severity alert the moment "
+        "they are read; allowlisted plates log as expected vehicles; "
+        "everything else is recorded with its evidence photo. Every read "
+        "is kept in the timeline with the best frame, searchable from "
+        "the Vehicles page.\n\n"
+        "Assign cameras the License Plate Recognition skill "
+        "(Cameras → edit → Assignments) to choose where OCR runs — "
+        "inference is budgeted and runs in the platform, not in this app."
+    ),
+    author="OpenNVR",
+    website="https://github.com/open-nvr/open-nvr",
+    license="AGPL-3.0",
+    use_cases=[
+        "Alert the moment a watchlisted plate passes any camera",
+        "Log every vehicle with plate, time and evidence photo",
+        "Expected-vehicle handling for known cars (allowlist)",
+        "Searchable vehicle history from the Vehicles page",
+    ],
     state_schema=[
         StateView(name="allowlist_size", label="Allowlist",
                   kind="metric", path="allowlist_size"),
