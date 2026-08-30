@@ -51,6 +51,7 @@ from .frame_sources import (
 from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import Action, AlertType, AppManifest, Param, StateView
 from .state import KeyedState, StateRecord, keyed_state
+from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
 from .events import EventsClient, StoredEvent
 from .tier0 import (
     BestFrameClient,
@@ -65,6 +66,10 @@ from .tier0 import (
 __version__ = "0.2.0"
 
 __all__ = [
+    # Domain events (producing side of docs/EVENT_CONTRACTS.md)
+    "DomainEventPublisher",
+    "domain_envelope",
+    "domain_subject",
     # Archetype bases + runners
     "Detector",
     "FrameApp",

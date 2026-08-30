@@ -183,7 +183,7 @@ def test_live_watchlist_update_applies_atomically():
 def test_manifest_declares_the_consumer_contract():
     m = PlateAlerter.manifest
     assert m.subscribes == PLATE_SUBJECT_PATTERN
-    assert m.version == "2.3.0"
+    assert m.version == "2.4.0"
     assert "object_detection" in m.requires_tasks
     assert "license_plate_recognition" in m.requires_tasks
 
@@ -471,6 +471,120 @@ def test_manifest_declares_every_key_the_vehicles_page_writes():
     page_writes = {
         "allowlist", "denylist", "monitors", "registry",
         "alarm_on_unknown", "unknown_cooldown_seconds", "camera_roles",
+        "barrier_mode",
     }
     missing = page_writes - declared
     assert not missing, f"undeclared config keys the page writes: {missing}"
+
+
+# ── Gate automation (access.decided.v1) ─────────────────────────────
+
+
+def _decisions(alerter):
+    """Patch the publisher; return the captured publish calls."""
+    calls = []
+
+    def fake_publish(schema, *, camera_id, payload, correlation_id=None):
+        calls.append({"schema": schema, "camera_id": camera_id,
+                      "payload": payload, "correlation_id": correlation_id})
+        return True
+
+    alerter._decision_publisher.publish = fake_publish
+    return calls
+
+
+def test_barrier_off_publishes_nothing():
+    alerter, _ = _alerter(camera_roles={"1": {"role": "gate_in"}},
+                          registry=["MH12DE1433"])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
+    assert calls == []
+
+
+def test_registered_plate_on_gate_in_allows():
+    alerter, _ = _alerter(
+        barrier_mode="registered",
+        camera_roles={"1": {"role": "gate_in"}, "2": {"role": "gate_out"}},
+        registry=[{"plate": "MH12DE1433", "owner": "A. Sharma", "unit": "B-402"}])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
+    assert len(calls) == 1
+    d = calls[0]
+    assert d["schema"] == "access.decided.v1"
+    assert d["camera_id"] == "cam1"
+    assert d["payload"]["decision"] == "allow"
+    assert d["payload"]["reason"] == "registered"
+    assert d["payload"]["owner"] == "A. Sharma"
+    assert d["correlation_id"] == "corr-1"
+    assert alerter.state_snapshot()["decisions_published"] == 1
+
+
+def test_unknown_plate_on_gate_in_denies():
+    alerter, _ = _alerter(barrier_mode="registered",
+                          camera_roles={"1": {"role": "gate_in"}})
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam1"))
+    assert calls[0]["payload"] == {
+        "plate_text": "XX99ZZ0001", "decision": "deny", "reason": "unknown",
+        "owner": None, "unit": None, "confidence": 0.9}
+
+
+def test_monitored_plate_denied_even_if_registered():
+    alerter, _ = _alerter(
+        barrier_mode="registered",
+        camera_roles={"1": {"role": "gate_in"}},
+        registry=["BAD001"], denylist=["BAD001"])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="BAD001", camera="cam1"))
+    assert calls[0]["payload"]["decision"] == "deny"
+    assert calls[0]["payload"]["reason"] == "monitored"
+
+
+def test_expired_pass_denied_with_reason():
+    alerter, _ = _alerter(
+        barrier_mode="registered",
+        camera_roles={"1": {"role": "gate_in"}},
+        registry=[{"plate": "GU3ST1", "owner": "Guest",
+                   "expires": "2020-01-01"}])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="GU3ST1", camera="cam1"))
+    assert calls[0]["payload"]["decision"] == "deny"
+    assert calls[0]["payload"]["reason"] == "expired_pass"
+    assert calls[0]["payload"]["owner"] == "Guest"
+
+
+def test_non_gate_camera_publishes_no_decision():
+    alerter, _ = _alerter(barrier_mode="registered",
+                          camera_roles={"1": {"role": "gate_in"}},
+                          registry=["MH12DE1433"])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam2"))
+    assert calls == []
+
+
+def test_gate_in_cameras_accepts_ids_and_handles():
+    got = lpr.gate_in_cameras({
+        "1": {"role": "gate_in"}, "cam7": {"role": "gate_in"},
+        "2": {"role": "gate_out"}, "3": {"role": "parking"},
+        "x": "gate_in",
+    })
+    assert got == frozenset({"cam1", "cam7", "camx"})
+
+
+def test_barrier_config_updates_live():
+    alerter, _ = _alerter(registry=["MH12DE1433"])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
+    assert calls == []  # off by default
+    alerter.on_config_update({
+        "allowlist": [], "denylist": [],
+        "barrier_mode": "registered",
+        "camera_roles": {"1": {"role": "gate_in"}},
+    })
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1",
+                                   confidence=0.8))
+    # dedup: same (camera, plate) within window suppresses — use a
+    # fresh plate to prove the live switch took effect.
+    alerter.handle_event(_envelope(plate="KA05MJ6021", camera="cam1"))
+    assert len(calls) >= 1
+    assert calls[-1]["payload"]["decision"] in ("allow", "deny")

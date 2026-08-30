@@ -1,0 +1,27 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# gate-controller config consumed by docker-compose.apps.yml.
+# ${INTERNAL_API_KEY} is substituted by the config-init container at
+# compose-up time (same pattern as the other shipped apps).
+#
+# The relay map is OPERATOR CONFIG: set it from the App Catalog's
+# Configure form (applied live), or edit here and re-up. Dry-run ships
+# ON so a fresh install can never pulse hardware by surprise —
+# commission the site, then turn it off from the catalog.
+
+nats_url: "nats://nats:4222"
+nats_token: "${INTERNAL_API_KEY}"
+
+relays: {}
+pulse_cooldown_seconds: 5.0
+dry_run: true
+
+webhook_url: null
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+contract_port: 9210
+contract_bind_host: "0.0.0.0"
+contract_host: "gate-controller"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"

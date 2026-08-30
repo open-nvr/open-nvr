@@ -242,6 +242,39 @@
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d license-plate-recognition
 
+- id: gate-controller
+  name: Gate Controller
+  summary: Opens the barrier for allowed vehicles — pulses an HTTP relay per gate camera on the LPR app's access.decided.v1 allow decisions; deny and unknown fail closed.
+  category: automation
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/gate-controller:latest
+  build_context: examples/gate-controller
+  # No inference and no adapters — this app is bus + relay only. Pair
+  # it with license-plate-recognition (barrier_mode: registered).
+  requires_tasks: []
+  emits: [barrier_opened, barrier_fault]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/gate-controller/README.md
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        gate-controller:
+          profiles: [apps]
+          image: ${GATE_CONTROLLER_IMAGE:-opennvr/gate-controller:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9210"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gate-controller
+
 - id: smart-doorbell
   name: Smart Doorbell
   summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.

@@ -381,7 +381,15 @@ class NatsAlertChannel:
 
     def send(self, alert: Alert) -> bool:
         subject = alert_subject(alert, prefix=self._subject_prefix)
-        payload = json.dumps(alert.to_wire()).encode("utf-8")
+        return self.publish_json(subject, alert.to_wire())
+
+    def publish_json(self, subject: str, obj: Any) -> bool:
+        """Publish ``obj`` as JSON on ``subject`` — the channel's
+        machinery (background loop, lazy connect, hard timeouts,
+        log-never-raise) for ANY payload. ``send`` is now a thin
+        wrapper; ``domain_events.DomainEventPublisher`` composes this
+        to publish contracted ``opennvr.events.*`` envelopes."""
+        payload = json.dumps(obj).encode("utf-8")
         try:
             self._ensure_thread()
         except Exception as exc:  # noqa: BLE001
