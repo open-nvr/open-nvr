@@ -187,6 +187,15 @@ class AppManifest:
     summary: str = ""
     requires_tasks: list[str] = field(default_factory=list)
     requires_adapters: list[str] = field(default_factory=list)
+    # RFC-0002 Phase 5: event scopes this app requests, e.g.
+    # ["events:plate.recognized"]. Scopes name DOMAIN events (the
+    # opennvr.events.* tree, docs/EVENT_CONTRACTS.md) — plate reads are
+    # PII (decision 6), so consuming them is a declared, granted,
+    # audited capability, visible in the App Catalog. Registration
+    # auto-grants and audits each scope today; bus-side enforcement
+    # (per-app NATS users whose subscribe permissions ARE the grants)
+    # is the staged follow-up recorded in the RFC.
+    requires_scopes: list[str] = field(default_factory=list)
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
@@ -202,6 +211,44 @@ class AppManifest:
     # HTML dashboard at GET /ui on its contract port, and core proxies
     # it at /api/v1/apps/{id}/ui (the catalog renders it sandboxed).
     has_ui: bool = False
+    # How the app's UI reaches the operator:
+    #   "internal" (default) — the sandboxed GET /ui dashboard above is
+    #       the whole surface, embedded in the catalog's app page.
+    #   "external" — the app is a full application with its own web UI
+    #       (multi-page, scripted, its own auth); the catalog renders an
+    #       "Open app" button instead of embedding. External UIs are NOT
+    #       proxied by core: the operator's browser talks to the app
+    #       directly, so ``ui_url`` must be reachable from the browser,
+    #       not just the compose network.
+    ui_mode: str = "internal"
+    # Where "Open app" points when ``ui_mode="external"``. Apps rarely
+    # know their deployment hostname at build time, so the literal
+    # placeholder ``{host}`` is replaced by the catalog with the hostname
+    # the operator is browsing from: ``"http://{host}:8090/"``.
+    ui_url: str = ""
+
+    # ── Store listing (the catalog's Details section) ───────────────
+    # The app's storefront: the catalog app page renders these so an
+    # operator can understand the app completely before enabling it.
+    # ``description`` is long-form text — blank-line-separated blocks
+    # render as paragraphs. ``use_cases`` is a short list of the
+    # concrete jobs the app solves ("Alarm on unregistered vehicles").
+    description: str = ""
+    author: str = ""
+    website: str = ""
+    license: str = ""
+    use_cases: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.ui_mode not in ("internal", "external"):
+            raise ValueError(
+                f"ui_mode must be 'internal' or 'external', got {self.ui_mode!r}"
+            )
+        if self.ui_mode == "external" and not self.ui_url:
+            raise ValueError(
+                "ui_mode='external' requires ui_url (the browser-reachable "
+                "URL of the app's UI; '{host}' is substituted by the catalog)"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload (and the ``manifest_json``
@@ -214,10 +261,18 @@ class AppManifest:
             "summary": self.summary,
             "requires_tasks": list(self.requires_tasks),
             "requires_adapters": list(self.requires_adapters),
+            "requires_scopes": list(self.requires_scopes),
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
             "has_ui": bool(self.has_ui),
+            "ui_mode": self.ui_mode,
+            "ui_url": self.ui_url,
+            "description": self.description,
+            "author": self.author,
+            "website": self.website,
+            "license": self.license,
+            "use_cases": list(self.use_cases),
         }

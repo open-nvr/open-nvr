@@ -626,6 +626,24 @@ async def register_app(
             ),
         },
     )
+    # RFC-0002 Phase 5: event-scope grants. v1 policy is grant-on-
+    # registration — but every grant is a distinct audit row (the RFC's
+    # "every grant audited"), the manifest snapshot makes grants
+    # catalog-visible, and the audit trail is what a future deny policy
+    # or bus-side enforcement (per-app NATS users) will reconcile from.
+    scopes = manifest.get("requires_scopes") or []
+    if isinstance(scopes, list):
+        for scope in scopes:
+            if not isinstance(scope, str) or not scope.strip():
+                continue
+            write_audit_log(
+                db,
+                action="app.scope_granted",
+                user_id=principal.id if principal is not None else None,
+                entity_type="app",
+                entity_id=app_id,
+                details={"scope": scope.strip(), "policy": "grant-on-registration"},
+            )
     return _serialize_app(row)
 
 

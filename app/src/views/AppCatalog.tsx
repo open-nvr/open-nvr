@@ -70,6 +70,31 @@ export type AppManifest = {
   // RFC-0002 Phase 4: the app serves an HTML dashboard at /ui on its
   // contract port; AppView renders it via core's proxy, sandboxed.
   has_ui?: boolean
+  // RFC-0002 Phase 5: event scopes the app requested (granted at
+  // registration, each grant audited) — plate reads are PII, so who
+  // consumes them is visible here, not buried in code.
+  requires_scopes?: string[]
+  // How the app's UI reaches the operator: "internal" (default) embeds
+  // the sandboxed /ui dashboard; "external" means the app is a full
+  // application — the catalog shows an "Open app" button to ui_url
+  // ("{host}" in it is replaced with the browser's hostname).
+  ui_mode?: 'internal' | 'external'
+  ui_url?: string
+  // Store listing (the Details section): long-form description
+  // (blank-line-separated paragraphs), authorship, and the concrete
+  // jobs the app solves.
+  description?: string
+  author?: string
+  website?: string
+  license?: string
+  use_cases?: string[]
+}
+
+/** Resolve an external ui_url for THIS browser: apps rarely know their
+ * deployment hostname at build time, so "{host}" is substituted with
+ * wherever the operator is browsing from. */
+export function resolveUiUrl(uiUrl: string): string {
+  return uiUrl.split('{host}').join(window.location.hostname)
 }
 
 export type ManifestAction = {

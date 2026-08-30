@@ -26,7 +26,7 @@
 import { useMemo, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Boxes, RefreshCw, Settings2, Trash2, Activity } from 'lucide-react'
+import { ArrowLeft, Boxes, RefreshCw, Settings2, Trash2, Activity, ExternalLink, BookOpen } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
@@ -37,6 +37,7 @@ import {
   LiveStateViews,
   asStringList,
   statusVariant,
+  resolveUiUrl,
   type RegisteredApp,
   type AppStatusResp,
   type ManifestAction,
@@ -119,7 +120,12 @@ export function AppView() {
     return set
   }, [caps.data])
 
-  const hasUi = Boolean(app?.manifest?.has_ui)
+  // "internal" embeds the sandboxed /ui dashboard; "external" means the
+  // app is a full application — we link out instead of embedding.
+  const uiMode = app?.manifest?.ui_mode === 'external' ? 'external' : 'internal'
+  const externalUrl =
+    uiMode === 'external' && app?.manifest?.ui_url ? resolveUiUrl(app.manifest.ui_url) : null
+  const hasUi = Boolean(app?.manifest?.has_ui) && uiMode === 'internal'
   const appUi = useAppUi(appId, hasUi && Boolean(app?.enabled))
   const requires = asStringList(app?.manifest?.requires_tasks)
   const missing = requires.filter((t) => !availableTasks.has(t))
@@ -218,6 +224,16 @@ export function AppView() {
               <span className="text-xs text-[var(--text-dim)]">up {formatUptime(uptimeS)}</span>
             )}
             <div className="flex items-center gap-2 pt-1">
+              {externalUrl && (
+                <Button
+                  variant="primary"
+                  onClick={() => window.open(externalUrl, '_blank', 'noopener,noreferrer')}
+                  disabled={!app.enabled}
+                  title={app.enabled ? externalUrl : 'Enable the app first'}
+                >
+                  <ExternalLink size={14} /> Open app
+                </Button>
+              )}
               <Button
                 variant={app.enabled ? 'default' : 'primary'}
                 onClick={() => toggle.mutate()}
@@ -243,8 +259,35 @@ export function AppView() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* ── Live dashboard ─────────────────────────────────────── */}
+        {/* ── Details + live dashboard ───────────────────────────── */}
         <div className="lg:col-span-2 space-y-4">
+          {(app.manifest?.description || (app.manifest?.use_cases ?? []).length > 0) && (
+            <Card>
+              <CardHeader>
+                <BookOpen size={16} className="text-[var(--text-dim)]" />
+                <CardTitle>Details</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                {(app.manifest?.description ?? '')
+                  .split(/\n{2,}/)
+                  .map((p) => p.trim())
+                  .filter(Boolean)
+                  .map((p, i) => (
+                    <p key={i} className="leading-relaxed">{p}</p>
+                  ))}
+                {(app.manifest?.use_cases ?? []).length > 0 && (
+                  <div>
+                    <div className="text-xs text-[var(--text-dim)] mb-1">What you can do with it</div>
+                    <ul className="list-disc pl-5 space-y-0.5">
+                      {(app.manifest?.use_cases ?? []).map((u) => (
+                        <li key={u}>{u}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
           {hasUi && app.enabled && (
             <Card>
               <CardHeader>
@@ -333,6 +376,44 @@ export function AppView() {
                       <Badge key={e.name} variant={e.severity === 'high' ? 'destructive' : 'neutral'}>{e.name}</Badge>
                     ))}
                   </div>
+                </div>
+              )}
+              {(app.manifest?.requires_scopes ?? []).length > 0 && (
+                <div>
+                  <div className="text-xs text-[var(--text-dim)] mb-1">
+                    Event scopes (granted at registration, audited)
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(app.manifest?.requires_scopes ?? []).map((sc) => (
+                      <Badge key={sc} variant="info">{sc}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(app.manifest?.author || app.manifest?.website || app.manifest?.license) && (
+                <div className="space-y-1">
+                  {app.manifest?.author && (
+                    <div className="text-xs text-[var(--text-dim)]">
+                      By <span className="text-[var(--text)]">{app.manifest.author}</span>
+                    </div>
+                  )}
+                  {app.manifest?.website && (
+                    <div className="text-xs">
+                      <a
+                        href={app.manifest.website}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-[var(--accent,var(--text))] hover:underline inline-flex items-center gap-1"
+                      >
+                        <ExternalLink size={11} /> {app.manifest.website}
+                      </a>
+                    </div>
+                  )}
+                  {app.manifest?.license && (
+                    <div className="text-xs text-[var(--text-dim)]">
+                      License: {app.manifest.license}
+                    </div>
+                  )}
                 </div>
               )}
               {app.url && (
