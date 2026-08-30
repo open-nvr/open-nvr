@@ -183,7 +183,7 @@ def test_live_watchlist_update_applies_atomically():
 def test_manifest_declares_the_consumer_contract():
     m = PlateAlerter.manifest
     assert m.subscribes == PLATE_SUBJECT_PATTERN
-    assert m.version == "2.2.0"
+    assert m.version == "2.3.0"
     assert "object_detection" in m.requires_tasks
     assert "license_plate_recognition" in m.requires_tasks
 
@@ -300,7 +300,7 @@ def test_denylist_beats_registry():
                           registry=["BAD001"])
     fired = alerter.handle_event(_envelope(plate="BAD001"))
     assert fired[0].severity == "high"
-    assert "Watchlist plate" in fired[0].title
+    assert "Monitored plate" in fired[0].title
     assert fired[0].evidence["unknown_alarm"] is False
 
 
@@ -351,7 +351,7 @@ def test_denylist_plate_never_counts_as_unknown():
     alerter, _ = _alerter(alarm_on_unknown=True, denylist=["BAD001"])
     fired = alerter.handle_event(_envelope(plate="BAD001"))
     assert fired[0].severity == "high"
-    assert "Watchlist plate" in fired[0].title
+    assert "Monitored plate" in fired[0].title
     assert fired[0].evidence["unknown_alarm"] is False
     assert alerter.state_snapshot()["unknown_alarms"] == 0
 
@@ -396,3 +396,68 @@ def test_expired_visitor_pass_alarms_when_unknown_mode_on():
     resident = alerter.handle_event(_envelope(plate="MH12DE1433"))
     assert resident[0].severity == "low"
     assert resident[0].evidence["registry_expired"] is False
+
+
+# ── Per-plate monitors (configurable surveillance alerts) ───────────
+
+
+def test_monitor_fires_with_configured_severity_and_note():
+    alerter, _ = _alerter(monitors=[
+        {"plate": "mh 12 de 1433", "note": "court order 42/2026",
+         "severity": "critical"},
+    ])
+    fired = alerter.handle_event(_envelope(plate="MH12DE1433"))
+    assert fired[0].severity == "critical"
+    assert "Monitored plate MH12DE1433 seen — court order 42/2026" in fired[0].title
+    assert fired[0].evidence["monitor"] == {
+        "severity": "critical", "note": "court order 42/2026"}
+
+
+def test_inactive_monitor_is_silent_but_still_known():
+    alerter, _ = _alerter(alarm_on_unknown=True, monitors=[
+        {"plate": "BAD001", "active": False},
+    ])
+    fired = alerter.handle_event(_envelope(plate="BAD001"))
+    # Not the monitor alert…
+    assert fired[0].evidence["monitor"] is None
+    # …and NOT an unknown-vehicle alarm either: the plate is known.
+    assert fired[0].evidence["unknown_alarm"] is False
+    assert fired[0].severity == "info"
+
+
+def test_monitor_camera_scope_restricts_where_it_fires():
+    alerter, _ = _alerter(dedup_window_seconds=0, monitors=[
+        {"plate": "BAD001", "cameras": ["cam-2"], "severity": "high"},
+    ])
+    at_gate = alerter.handle_event(_envelope(plate="BAD001", camera="cam-1"))
+    assert at_gate[0].evidence["monitor"] is None
+    assert at_gate[0].severity == "info"
+    at_scope = alerter.handle_event(_envelope(plate="BAD001", camera="cam-2"))
+    assert at_scope[0].evidence["monitor"] is not None
+    assert at_scope[0].severity == "high"
+
+
+def test_explicit_monitor_wins_over_denylist_shorthand():
+    alerter, _ = _alerter(denylist=["BAD001"], monitors=[
+        {"plate": "BAD001", "severity": "medium", "note": "downgraded"},
+    ])
+    fired = alerter.handle_event(_envelope(plate="BAD001"))
+    assert fired[0].severity == "medium"
+
+
+def test_bad_monitor_severity_falls_back_to_high():
+    reg = lpr.parse_monitors([{"plate": "X1", "severity": "apocalyptic"}])
+    assert reg["X1"]["severity"] == "high"
+
+
+def test_monitors_update_live():
+    alerter, _ = _alerter(dedup_window_seconds=0)
+    assert alerter.handle_event(_envelope(plate="NEW999"))[0].severity == "info"
+    alerter.on_config_update({
+        "allowlist": [], "denylist": [],
+        "monitors": [{"plate": "NEW999", "severity": "high", "note": "stolen"}],
+    })
+    fired = alerter.handle_event(_envelope(plate="NEW999"))
+    assert fired[0].severity == "high"
+    assert "stolen" in fired[0].title
+    assert alerter.state_snapshot()["monitored_plates"] == 1

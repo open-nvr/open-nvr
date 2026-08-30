@@ -236,6 +236,92 @@ function registryToCsv(entries: RegistryEntry[]): string {
   ].join('\n')
 }
 
+// ── Camera roles ────────────────────────────────────────────────────
+// Every camera can be given a place in the vehicle story: a Gate IN
+// camera is what makes the vertical work (entries, unknown alarms at
+// the gate); Gate OUT unlocks stays and "inside now"; Parking and
+// custom-named locations enrich the history. Stored in the app's
+// config as camera_roles: {cameraId: {role, label?}}.
+
+export type CameraRole = 'gate_in' | 'gate_out' | 'parking' | 'other'
+export type CameraRoleEntry = { role: CameraRole; label?: string }
+
+export function parseCameraRoles(cfg: any): Record<string, CameraRoleEntry> {
+  const out: Record<string, CameraRoleEntry> = {}
+  const roles = cfg?.camera_roles
+  if (roles && typeof roles === 'object') {
+    for (const [id, v] of Object.entries(roles as Record<string, any>)) {
+      const role = String((v as any)?.role ?? v ?? '')
+      if (role === 'gate_in' || role === 'gate_out' || role === 'parking' || role === 'other') {
+        const label = String((v as any)?.label ?? '').trim()
+        out[id] = label ? { role: role as CameraRole, label } : { role: role as CameraRole }
+      }
+    }
+  }
+  // Back-compat: the earlier gate_directions map ('in'/'out').
+  const legacy = cfg?.gate_directions
+  if (legacy && typeof legacy === 'object') {
+    for (const [id, d] of Object.entries(legacy as Record<string, string>)) {
+      if (out[id]) continue
+      if (d === 'in') out[id] = { role: 'gate_in' }
+      else if (d === 'out') out[id] = { role: 'gate_out' }
+    }
+  }
+  return out
+}
+
+export function roleLabel(entry: CameraRoleEntry | undefined): string | null {
+  if (!entry) return null
+  if (entry.role === 'gate_in') return 'IN'
+  if (entry.role === 'gate_out') return 'OUT'
+  if (entry.role === 'parking') return 'Parking'
+  return entry.label || 'Other'
+}
+
+// ── Plate monitors ──────────────────────────────────────────────────
+// A monitor is one plate under surveillance with its own alert
+// configuration; the legacy denylist reads as active high monitors.
+
+export type Monitor = {
+  plate: string
+  note?: string
+  severity?: 'info' | 'low' | 'medium' | 'high' | 'critical'
+  active?: boolean
+  cameras?: string[]
+}
+
+export const MONITOR_SEVERITIES = ['info', 'low', 'medium', 'high', 'critical'] as const
+
+export function parseMonitors(cfg: any): Monitor[] {
+  const out = new Map<string, Monitor>()
+  for (const e of Array.isArray(cfg?.monitors) ? cfg.monitors : []) {
+    if (typeof e === 'string') {
+      const plate = normalizePlate(e)
+      if (plate) out.set(plate, { plate, severity: 'high', active: true })
+      continue
+    }
+    if (!e || typeof e !== 'object') continue
+    const plate = normalizePlate(String((e as any).plate ?? ''))
+    if (!plate) continue
+    const sev = String((e as any).severity ?? 'high') as Monitor['severity']
+    out.set(plate, {
+      plate,
+      note: String((e as any).note ?? '').trim() || undefined,
+      severity: (MONITOR_SEVERITIES as readonly string[]).includes(sev as string) ? sev : 'high',
+      active: (e as any).active !== false,
+      cameras: Array.isArray((e as any).cameras)
+        ? (e as any).cameras.map((c: any) => String(c)).filter(Boolean)
+        : undefined,
+    })
+  }
+  // Denylist shorthand — never overriding an explicit monitor.
+  for (const p of Array.isArray(cfg?.denylist) ? cfg.denylist : []) {
+    const plate = normalizePlate(String(p))
+    if (plate && !out.has(plate)) out.set(plate, { plate, severity: 'high', active: true })
+  }
+  return [...out.values()]
+}
+
 function formatStay(seconds: number): string {
   const m = Math.round(seconds / 60)
   if (m < 60) return `${m}m`
@@ -266,7 +352,7 @@ export function Vehicles() {
   const [cameraId, setCameraId] = useState<number | ''>('')
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
   const [preview, setPreview] = useState<PlateEvent | null>(null)
-  const [tab, setTab] = useState<'reads' | 'registry'>('reads')
+  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring'>('reads')
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
 
   const camerasQuery = useQuery({
@@ -321,7 +407,6 @@ export function Vehicles() {
 
   const lprApp = findLprApp(appsQuery.data)
   const allow: string[] = (lprApp?.config as any)?.allowlist ?? []
-  const deny: string[] = (lprApp?.config as any)?.denylist ?? []
 
   // The society register + alarm mode live in the providing app's
   // config, exactly like the watchlists (live-applied by the app).
@@ -340,22 +425,29 @@ export function Vehicles() {
   )
   const alarmOnUnknown = Boolean((lprApp?.config as any)?.alarm_on_unknown)
 
-  // Gate directions — which camera is an entry gate, which an exit —
-  // are the vertical's settings, so they live in the app's config too
-  // (keys are camera ids as strings).
-  const gateDirections = useMemo(
-    () => ((lprApp?.config as any)?.gate_directions ?? {}) as Record<string, 'in' | 'out'>,
+  // Camera roles — which camera is the entry gate, the exit, parking,
+  // or another named location — are the vertical's settings, so they
+  // live in the app's config too (keys are camera ids as strings).
+  const cameraRoles = useMemo(
+    () => parseCameraRoles(lprApp?.config),
     [lprApp]
   )
   const inCams = useMemo(
-    () => Object.entries(gateDirections).filter(([, d]) => d === 'in').map(([id]) => Number(id)),
-    [gateDirections]
+    () => Object.entries(cameraRoles).filter(([, r]) => r.role === 'gate_in').map(([id]) => Number(id)),
+    [cameraRoles]
   )
   const outCams = useMemo(
-    () => Object.entries(gateDirections).filter(([, d]) => d === 'out').map(([id]) => Number(id)),
-    [gateDirections]
+    () => Object.entries(cameraRoles).filter(([, r]) => r.role === 'gate_out').map(([id]) => Number(id)),
+    [cameraRoles]
   )
   const gatesConfigured = inCams.length > 0 && outCams.length > 0
+
+  // Monitors (surveillance list) — merged view incl. legacy denylist.
+  const monitors = useMemo(() => parseMonitors(lprApp?.config), [lprApp])
+  const monitoredPlates = useMemo(
+    () => new Set(monitors.map((m) => m.plate)),
+    [monitors]
+  )
 
   const occupancyQuery = useQuery({
     queryKey: ['gate-occupancy', inCams.join('.'), outCams.join('.')],
@@ -410,24 +502,42 @@ export function Vehicles() {
     retry: 0,
   })
 
-  // Add-to-watchlist writes through the providing app's config endpoint
-  // (the app applies watchlists LIVE — the same path the catalog form
-  // uses), merging over the current config so nothing else is lost.
+  // Quick actions off the reads table: allowlist stays a plain list;
+  // "monitor this plate" writes a monitor rule (the denylist's
+  // successor — same live-update path, per-plate alert config).
   const watchlist = useMutation({
-    mutationFn: async ({ plateText, list }: { plateText: string; list: 'allowlist' | 'denylist' }) => {
+    mutationFn: async ({ plateText, list }: { plateText: string; list: 'allowlist' | 'monitor' }) => {
       if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
       const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
-      const current: string[] = Array.isArray(cfg[list]) ? cfg[list] : []
-      if (current.includes(plateText)) return
-      cfg[list] = [...current, plateText]
+      if (list === 'allowlist') {
+        const current: string[] = Array.isArray(cfg.allowlist) ? cfg.allowlist : []
+        if (current.includes(plateText)) return
+        cfg.allowlist = [...current, plateText]
+      } else {
+        if (monitoredPlates.has(plateText)) return
+        cfg.monitors = [
+          ...monitors,
+          { plate: plateText, severity: 'high', active: true },
+        ]
+      }
       await apiService.updateAppConfig(lprApp.id, cfg)
     },
     onSuccess: (_d, vars) => {
       queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(`${vars.plateText} added to the ${vars.list}`)
+      showSuccess(vars.list === 'monitor'
+        ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
+        : `${vars.plateText} added to the allowlist`)
     },
     onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
   })
+
+  // Replace the whole monitors list (Monitoring tab edits). The tab
+  // edits the MERGED view (explicit monitors + denylist shorthand), so
+  // every save migrates the legacy denylist into explicit monitors and
+  // clears it — deletions included.
+  const saveMonitors = (next: Monitor[]) => {
+    saveConfig.mutate({ monitors: next, denylist: [] })
+  }
 
   const cameraName = (id: number) =>
     camerasQuery.data?.find((c) => c.id === id)?.name ?? `cam${id}`
@@ -488,6 +598,7 @@ export function Vehicles() {
         {([
           { key: 'reads', label: 'Plate reads' },
           { key: 'registry', label: `Vehicle register (${registry.length})` },
+          { key: 'monitoring', label: `Monitoring (${monitors.length})` },
         ] as const).map((t) => (
           <button
             key={t.key}
@@ -506,19 +617,28 @@ export function Vehicles() {
         )}
       </div>
 
-      {tab === 'registry' ? (
+      {tab === 'monitoring' ? (
+        <MonitoringTab
+          monitors={monitors}
+          canEdit={Boolean(lprApp)}
+          saving={saveConfig.isPending}
+          cameras={camerasQuery.data ?? []}
+          onSave={saveMonitors}
+        />
+      ) : tab === 'registry' ? (
         <RegistryTab
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
           canEdit={Boolean(lprApp)}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
-          gateDirections={gateDirections}
-          onSetDirection={(cameraId, dir) => {
-            const next = { ...gateDirections }
-            if (dir === '') delete next[String(cameraId)]
-            else next[String(cameraId)] = dir
-            saveConfig.mutate({ gate_directions: next })
+          cameraRoles={cameraRoles}
+          onSetRole={(cameraId, role, label) => {
+            const next = { ...cameraRoles }
+            if (!role) delete next[String(cameraId)]
+            else next[String(cameraId)] = label ? { role, label } : { role }
+            // Writing camera_roles supersedes the legacy map entirely.
+            saveConfig.mutate({ camera_roles: next, gate_directions: {} })
           }}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
@@ -610,7 +730,7 @@ export function Vehicles() {
               <tbody>
                 {events.map((e) => {
                   const p = (e.plate_text ?? '').toUpperCase()
-                  const inDeny = deny.includes(p)
+                  const inDeny = monitoredPlates.has(p)
                   const inAllow = allow.includes(p)
                   const registered = registryPlates.has(p)
                   return (
@@ -639,18 +759,25 @@ export function Vehicles() {
                       </td>
                       <td className="px-3 py-1.5">
                         {cameraName(e.camera_id)}
-                        {gateDirections[String(e.camera_id)] === 'in' && (
-                          <Badge variant="success" className="ml-1.5">IN</Badge>
-                        )}
-                        {gateDirections[String(e.camera_id)] === 'out' && (
-                          <Badge variant="neutral" className="ml-1.5">OUT</Badge>
-                        )}
+                        {(() => {
+                          const r = cameraRoles[String(e.camera_id)]
+                          const label = roleLabel(r)
+                          if (!label) return null
+                          return (
+                            <Badge
+                              variant={r!.role === 'gate_in' ? 'success' : 'neutral'}
+                              className="ml-1.5"
+                            >
+                              {label}
+                            </Badge>
+                          )
+                        })()}
                       </td>
                       <td className="px-3 py-1.5 text-[var(--text-dim)]">
                         {e.started_at ? new Date(e.started_at).toLocaleString() : '—'}
                       </td>
                       <td className="px-3 py-1.5">
-                        {inDeny ? <Badge variant="destructive">watchlist</Badge>
+                        {inDeny ? <Badge variant="destructive" title={monitors.find((m) => m.plate === p)?.note}>monitored</Badge>
                           : registered ? <Badge variant="success">registered</Badge>
                           : expiredPlates.has(p) ? <Badge variant="warning">pass expired</Badge>
                           : inAllow ? <Badge variant="success">expected</Badge>
@@ -660,9 +787,9 @@ export function Vehicles() {
                       <td className="px-3 py-1.5 text-right pr-4 whitespace-nowrap">
                         {lprApp && !inDeny && (
                           <button
-                            title="Alert at high severity when this plate is seen"
+                            title="Monitor this plate — alert whenever it is seen (configure in the Monitoring tab)"
                             className="text-[var(--text-dim)] hover:text-[var(--text)] mr-2"
-                            onClick={() => watchlist.mutate({ plateText: p, list: 'denylist' })}
+                            onClick={() => watchlist.mutate({ plateText: p, list: 'monitor' })}
                           >
                             <ShieldAlert size={15} />
                           </button>
@@ -832,8 +959,8 @@ function RegistryTab({
   canEdit,
   saving,
   cameras,
-  gateDirections,
-  onSetDirection,
+  cameraRoles,
+  onSetRole,
   onSaveRegistry,
   onToggleAlarm,
 }: {
@@ -842,8 +969,8 @@ function RegistryTab({
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
-  gateDirections: Record<string, 'in' | 'out'>
-  onSetDirection: (cameraId: number, dir: 'in' | 'out' | '') => void
+  cameraRoles: Record<string, CameraRoleEntry>
+  onSetRole: (cameraId: number, role: CameraRole | '', label?: string) => void
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
@@ -931,31 +1058,73 @@ function RegistryTab({
         </CardContent>
       </Card>
 
-      {/* Gate directions — entry vs exit cameras */}
+      {/* Camera roles — the site's layout in the vehicle story */}
       <Card>
         <CardContent className="py-3">
-          <div className="text-sm font-medium mb-1">Gate cameras</div>
+          <div className="text-sm font-medium mb-1">Camera roles</div>
           <div className="text-xs text-[var(--text-dim)] mb-2">
-            Mark which cameras face the way IN and which the way OUT — reads pair
-            into gate-in/gate-out history per vehicle, and the page shows who is
-            inside right now.
+            Give each camera its place: <b>Gate IN</b> (required for gate features),
+            <b> Gate OUT</b> (optional — unlocks exits, stay durations and "inside now"),
+            <b> Parking</b>, or a named location of your own — every role enriches the
+            per-vehicle history.
           </div>
+          {(() => {
+            const hasIn = Object.values(cameraRoles).some((r) => r.role === 'gate_in')
+            const hasOut = Object.values(cameraRoles).some((r) => r.role === 'gate_out')
+            if (!hasIn) {
+              return (
+                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
+                  No Gate IN camera yet — mark at least one. Until then there is no gate
+                  history and no "inside now"; reads still collect normally.
+                </div>
+              )
+            }
+            if (!hasOut) {
+              return (
+                <div className="text-xs rounded border border-[var(--border)] text-[var(--text-dim)] px-3 py-2 mb-2">
+                  No Gate OUT camera — entries are recorded, but exit times, stay
+                  durations and "inside now" stay off until you mark one.
+                </div>
+              )
+            }
+            return null
+          })()}
           <div className="flex flex-wrap gap-3">
-            {cameras.map((c) => (
-              <label key={c.id} className="inline-flex items-center gap-2 text-sm">
-                <span>{c.name}</span>
-                <select
-                  value={gateDirections[String(c.id)] ?? ''}
-                  onChange={(e) => onSetDirection(c.id, e.target.value as 'in' | 'out' | '')}
-                  disabled={saving}
-                  className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                >
-                  <option value="">not a gate</option>
-                  <option value="in">gate IN</option>
-                  <option value="out">gate OUT</option>
-                </select>
-              </label>
-            ))}
+            {cameras.map((c) => {
+              const entry = cameraRoles[String(c.id)]
+              return (
+                <label key={c.id} className="inline-flex items-center gap-2 text-sm">
+                  <span>{c.name}</span>
+                  <select
+                    value={entry?.role ?? ''}
+                    onChange={(e) => {
+                      const role = e.target.value as CameraRole | ''
+                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
+                    }}
+                    disabled={saving}
+                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                  >
+                    <option value="">no role</option>
+                    <option value="gate_in">Gate IN</option>
+                    <option value="gate_out">Gate OUT</option>
+                    <option value="parking">Parking</option>
+                    <option value="other">Other…</option>
+                  </select>
+                  {entry?.role === 'other' && (
+                    <input
+                      defaultValue={entry.label ?? ''}
+                      placeholder="name it (e.g. Basement)"
+                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                      }}
+                      disabled={saving}
+                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                    />
+                  )}
+                </label>
+              )
+            })}
             {cameras.length === 0 && (
               <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
             )}
@@ -1067,6 +1236,195 @@ function RegistryTab({
           </CardContent>
         </Card>
       )}
+    </div>
+  )
+}
+
+// ── Monitoring (surveillance list) ──────────────────────────────────
+// Each monitored plate is ITS OWN rule: why it's watched, how loud the
+// alert is, whether it's currently armed, and (optionally) at which
+// camera it matters. Edits write through the app's config and apply
+// live — the same path as the register and the watchlists.
+
+function MonitoringTab({
+  monitors,
+  canEdit,
+  saving,
+  cameras,
+  onSave,
+}: {
+  monitors: Monitor[]
+  canEdit: boolean
+  saving: boolean
+  cameras: CameraRow[]
+  onSave: (next: Monitor[]) => void
+}) {
+  const [draft, setDraft] = useState<{ plate: string; note: string; severity: Monitor['severity'] }>({
+    plate: '', note: '', severity: 'high',
+  })
+
+  if (!canEdit) {
+    return (
+      <EmptyState
+        icon={<ShieldAlert size={28} />}
+        title="Monitoring needs an enabled LPR app"
+        description="Install and enable a License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
+      />
+    )
+  }
+
+  const upsert = (m: Monitor) => {
+    onSave([...monitors.filter((x) => x.plate !== m.plate), m])
+  }
+
+  const addDraft = () => {
+    const plate = normalizePlate(draft.plate)
+    if (!plate) return
+    upsert({
+      plate,
+      note: draft.note.trim() || undefined,
+      severity: draft.severity ?? 'high',
+      active: true,
+    })
+    setDraft({ plate: '', note: '', severity: 'high' })
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="py-3 flex flex-wrap items-end gap-2">
+          <label className="text-xs text-[var(--text-dim)]">
+            Plate *
+            <input
+              value={draft.plate}
+              onChange={(e) => setDraft((d) => ({ ...d, plate: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
+              placeholder="MH12DE1433"
+              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-36"
+            />
+          </label>
+          <label className="text-xs text-[var(--text-dim)]">
+            Reason / note
+            <input
+              value={draft.note}
+              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
+              placeholder="reported stolen — FIR 42/2026"
+              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-64"
+            />
+          </label>
+          <label className="text-xs text-[var(--text-dim)]">
+            Alert severity
+            <select
+              value={draft.severity}
+              onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as Monitor['severity'] }))}
+              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+            >
+              {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </label>
+          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
+            <Plus size={14} /> Monitor plate
+          </Button>
+        </CardContent>
+      </Card>
+
+      {monitors.length === 0 ? (
+        <EmptyState
+          icon={<ShieldAlert size={28} />}
+          title="No plates under monitoring"
+          description="Add a plate above — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                  <th className="px-3 py-2">Plate</th>
+                  <th className="px-3 py-2">Reason / note</th>
+                  <th className="px-3 py-2">Severity</th>
+                  <th className="px-3 py-2">Where</th>
+                  <th className="px-3 py-2">Armed</th>
+                  <th className="px-3 py-2 text-right pr-4" />
+                </tr>
+              </thead>
+              <tbody>
+                {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
+                  <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
+                    <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
+                    <td className="px-3 py-1.5">
+                      <input
+                        defaultValue={m.note ?? ''}
+                        placeholder="add a reason…"
+                        onBlur={(e) => {
+                          const v = e.target.value.trim()
+                          if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
+                        }}
+                        disabled={saving}
+                        className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
+                      />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <select
+                        value={m.severity ?? 'high'}
+                        onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
+                        disabled={saving}
+                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                      >
+                        {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <select
+                        value={(m.cameras ?? [])[0] ?? ''}
+                        onChange={(e) => upsert({
+                          ...m,
+                          cameras: e.target.value ? [e.target.value] : undefined,
+                        })}
+                        disabled={saving}
+                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                      >
+                        <option value="">any camera</option>
+                        {cameras.map((c) => (
+                          <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <button
+                        onClick={() => upsert({ ...m, active: m.active === false })}
+                        disabled={saving}
+                        title={m.active !== false
+                          ? 'Armed — click to silence without deleting'
+                          : 'Silenced — click to re-arm'}
+                      >
+                        {m.active !== false
+                          ? <Badge variant="destructive">armed</Badge>
+                          : <Badge variant="neutral">silenced</Badge>}
+                      </button>
+                    </td>
+                    <td className="px-3 py-1.5 text-right pr-4">
+                      <button
+                        title="Stop monitoring this plate"
+                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+                        onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
+                        disabled={saving}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+      <div className="text-xs text-[var(--text-dim)]">
+        Monitored plates never trigger the unknown-vehicle alarm — they fire their own
+        alert at the severity set here, and "silenced" keeps the rule without alerting.
+      </div>
     </div>
   )
 }
