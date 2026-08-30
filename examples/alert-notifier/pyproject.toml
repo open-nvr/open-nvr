@@ -1,0 +1,40 @@
+[project]
+name = "opennvr-example-alert-notifier"
+version = "1.0.0"
+description = "OpenNVR alert-notifier example app — pushes contracted alerts to Telegram and webhooks"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+
+# The SDK owns the runtime stack (nats-py subscriber loop, httpx deliveries,
+# PyYAML config, the alert dispatcher and contract surface) — this app
+# is a subscription and an HTTP call.
+dependencies = [
+    "opennvr-app-sdk",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
