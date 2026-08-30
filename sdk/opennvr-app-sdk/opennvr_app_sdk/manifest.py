@@ -238,6 +238,11 @@ class AppManifest:
     website: str = ""
     license: str = ""
     use_cases: list[str] = field(default_factory=list)
+    # Where a deployment can reach the developer for custom work —
+    # SMS/phone alert channels, site automation, bespoke features. A
+    # mailto: or https: URL; the catalog and vertical pages render it
+    # as a "contact" action. Empty = no contact surface shown.
+    contact: str = ""
 
     def __post_init__(self) -> None:
         if self.ui_mode not in ("internal", "external"):
@@ -275,4 +280,5 @@ class AppManifest:
             "website": self.website,
             "license": self.license,
             "use_cases": list(self.use_cases),
+            "contact": self.contact,
         }

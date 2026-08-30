@@ -414,6 +414,18 @@ export function AppView() {
                       License: {app.manifest.license}
                     </div>
                   )}
+                  {app.manifest?.contact && (
+                    <div className="text-xs pt-1">
+                      <a
+                        href={app.manifest.contact}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-[var(--accent,var(--text))] hover:underline"
+                      >
+                        Need SMS/phone alerts, automation, or a custom feature? Contact us →
+                      </a>
+                    </div>
+                  )}
                 </div>
               )}
               {app.url && (

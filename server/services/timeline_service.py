@@ -74,6 +74,7 @@ def query_events(
     limit: int = 100,
     owner_id: int | None = None,
     plate: str | None = None,
+    has_plate: bool = False,
 ) -> list[TimelineEvent]:
     """Newest-first visits/alarms/alerts intersecting [from, to).
 
@@ -97,6 +98,10 @@ def query_events(
         # so "1234" finds KA01AB1234 — how people actually recall plates.
         norm = "".join(plate.split()).upper()
         q = q.filter(TimelineEvent.plate_text.ilike(f"%{norm}%"))
+    elif has_plate:
+        # The Vehicles page: every row must BE a plate read (a plate
+        # filter implies this already).
+        q = q.filter(TimelineEvent.plate_text.isnot(None))
     if to is not None:
         q = q.filter(TimelineEvent.started_at < to)
     if from_ is not None:
@@ -115,3 +120,230 @@ def can_access_event(db: Session, event: TimelineEvent, *, user) -> bool:
         return True
     cam = db.query(Camera).filter(Camera.id == event.camera_id).first()
     return bool(cam and cam.owner_id == user.id)
+
+
+def plate_stats(
+    db: Session,
+    *,
+    days: int = 7,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Aggregates for the Vehicles page: plate reads over the last
+    ``days`` (visits whose ``plate_text`` is set), owner-scoped exactly
+    like ``query_events``. One grouped pass each for per-camera and
+    per-day; portable SQL (sqlite + postgres).
+    """
+    from datetime import timedelta, timezone
+
+    from sqlalchemy import func
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max(1, int(days)))
+    base = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.started_at >= cutoff)
+    )
+    if owner_id is not None:
+        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+
+    total = base.count()
+    unique_plates = (
+        base.with_entities(func.count(func.distinct(TimelineEvent.plate_text)))
+        .scalar()
+        or 0
+    )
+    per_camera = [
+        {"camera_id": cid, "reads": int(n)}
+        for cid, n in (
+            base.with_entities(
+                TimelineEvent.camera_id, func.count(TimelineEvent.id)
+            )
+            .group_by(TimelineEvent.camera_id)
+            .all()
+        )
+    ]
+    # Day bucketing in SQL is dialect-divergent (date_trunc vs strftime);
+    # the window is small (<= a few thousand rows of (id, started_at)),
+    # so bucket in Python for portability.
+    per_day_counts: dict[str, int] = {}
+    for (started_at,) in base.with_entities(TimelineEvent.started_at).all():
+        day = started_at.date().isoformat()
+        per_day_counts[day] = per_day_counts.get(day, 0) + 1
+    per_day = [
+        {"day": day, "reads": per_day_counts[day]}
+        for day in sorted(per_day_counts)
+    ]
+    return {
+        "days": int(days),
+        "total_reads": int(total),
+        "unique_plates": int(unique_plates),
+        "per_camera": per_camera,
+        "per_day": per_day,
+    }
+
+
+def plate_summary(
+    db: Session,
+    *,
+    plate: str,
+    owner_id: int | None = None,
+) -> dict:
+    """Everything the platform knows about ONE plate — the Vehicles
+    page's history drill-down ("when did this car last come in?").
+
+    ``plate`` is normalised the same way the producers do (upper, no
+    separators) and matched exactly; owner-scoped like ``query_events``.
+    All-time on purpose: first_seen is the point of the question.
+    """
+    from sqlalchemy import func
+
+    normalized = "".join(str(plate).split()).upper()
+    base = db.query(TimelineEvent).filter(TimelineEvent.plate_text == normalized)
+    if owner_id is not None:
+        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+
+    total = base.count()
+    first_seen, last_seen = (
+        base.with_entities(
+            func.min(TimelineEvent.started_at), func.max(TimelineEvent.started_at)
+        ).one()
+        if total
+        else (None, None)
+    )
+    per_camera = [
+        {"camera_id": cid, "reads": int(n)}
+        for cid, n in (
+            base.with_entities(
+                TimelineEvent.camera_id, func.count(TimelineEvent.id)
+            )
+            .group_by(TimelineEvent.camera_id)
+            .all()
+        )
+    ]
+    return {
+        "plate": normalized,
+        "total_reads": int(total),
+        "first_seen": first_seen.isoformat() if first_seen else None,
+        "last_seen": last_seen.isoformat() if last_seen else None,
+        "per_camera": per_camera,
+    }
+
+
+def plate_sessions(
+    db: Session,
+    *,
+    plate: str,
+    in_cameras: list[int],
+    out_cameras: list[int],
+    owner_id: int | None = None,
+    limit: int = 50,
+) -> dict:
+    """Entry/exit pairing for ONE plate — gate in / gate out history.
+
+    Stateless on purpose: which cameras are entry vs exit gates lives
+    in the providing app's config (the vertical owns its settings);
+    the caller passes both sets and this pairs the plate's reads on
+    them chronologically. An entry with no later exit is an OPEN
+    session (the vehicle is inside); consecutive entries close the
+    earlier one with a missed exit; an exit with no prior entry shows
+    as a session with no entry (a missed entry read).
+    """
+    normalized = "".join(str(plate).split()).upper()
+    in_set = {int(c) for c in in_cameras}
+    out_set = {int(c) for c in out_cameras} - in_set  # a camera can't be both
+    gates = in_set | out_set
+    if not gates:
+        return {"plate": normalized, "sessions": [], "inside_now": False}
+
+    q = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text == normalized)
+        .filter(TimelineEvent.camera_id.in_(gates))
+    )
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    reads = q.order_by(TimelineEvent.started_at.asc()).all()
+
+    def _row(entry, exit_) -> dict:
+        duration = None
+        if entry is not None and exit_ is not None:
+            duration = max(
+                0, int((exit_.started_at - entry.started_at).total_seconds())
+            )
+        return {
+            "entered_at": entry.started_at.isoformat() if entry else None,
+            "entry_camera_id": entry.camera_id if entry else None,
+            "exited_at": exit_.started_at.isoformat() if exit_ else None,
+            "exit_camera_id": exit_.camera_id if exit_ else None,
+            "duration_seconds": duration,
+        }
+
+    sessions: list[dict] = []
+    open_entry = None
+    for r in reads:
+        if r.camera_id in in_set:
+            if open_entry is not None:
+                sessions.append(_row(open_entry, None))  # missed exit
+            open_entry = r
+        else:
+            sessions.append(_row(open_entry, r))
+            open_entry = None
+    inside_now = open_entry is not None
+    if open_entry is not None:
+        sessions.append(_row(open_entry, None))  # still inside
+
+    sessions.reverse()  # newest first
+    return {
+        "plate": normalized,
+        "sessions": sessions[: max(1, int(limit))],
+        "inside_now": inside_now,
+    }
+
+
+def gate_occupancy(
+    db: Session,
+    *,
+    in_cameras: list[int],
+    out_cameras: list[int],
+    hours: int = 24,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Who is inside right now: plates whose LAST gate read within the
+    window was on an entry camera. Windowed so a missed exit ages out
+    instead of counting a vehicle as inside forever."""
+    from datetime import timedelta, timezone
+
+    in_set = {int(c) for c in in_cameras}
+    out_set = {int(c) for c in out_cameras} - in_set
+    gates = in_set | out_set
+    if not in_set or not out_set:
+        return {"inside": 0, "plates": []}
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max(1, int(hours)))
+    q = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.camera_id.in_(gates))
+        .filter(TimelineEvent.started_at >= cutoff)
+    )
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    last_by_plate: dict[str, TimelineEvent] = {}
+    for r in q.order_by(TimelineEvent.started_at.asc()).all():
+        last_by_plate[r.plate_text] = r
+    inside = sorted(
+        p for p, r in last_by_plate.items() if r.camera_id in in_set
+    )
+    return {"inside": len(inside), "plates": inside[:200]}

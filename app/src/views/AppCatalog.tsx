@@ -88,6 +88,9 @@ export type AppManifest = {
   website?: string
   license?: string
   use_cases?: string[]
+  // Where a deployment can reach the developer for custom work
+  // (mailto: or https:) — rendered as a "Contact" action.
+  contact?: string
 }
 
 /** Resolve an external ui_url for THIS browser: apps rarely know their
