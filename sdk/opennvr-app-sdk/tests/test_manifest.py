@@ -108,6 +108,7 @@ def test_ui_and_listing_defaults():
     assert d["website"] == ""
     assert d["license"] == ""
     assert d["use_cases"] == []
+    assert d["contact"] == ""
 
 
 def test_external_ui_mode_serializes():

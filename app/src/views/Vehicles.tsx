@@ -30,7 +30,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  BellRing, Car, Download, History, Plus, RefreshCw, Search,
+  BellRing, Car, Download, History, PhoneCall, Plus, RefreshCw, Search,
   ShieldAlert, ShieldCheck, Trash2, Upload,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
@@ -814,6 +814,34 @@ export function Vehicles() {
       )}
       </>
       )}
+
+      {/* ── Custom solutions (the providing app's contact) ────────── */}
+      {(() => {
+        const contact =
+          (lprApp?.manifest as any)?.contact || (lprApp?.manifest as any)?.website
+        if (!contact) return null
+        return (
+          <Card>
+            <CardContent className="py-3 flex flex-wrap items-center gap-3">
+              <PhoneCall size={18} className="text-[var(--text-dim)] shrink-0" />
+              <div className="min-w-0 flex-1 text-sm">
+                <span className="font-medium">Need more for your site?</span>{' '}
+                <span className="text-[var(--text-dim)]">
+                  Phone-number &amp; SMS alerts, WhatsApp notifications, complete gate
+                  automation (barrier lift for registered vehicles), scheduled reports,
+                  or any custom feature — we build per-site solutions.
+                </span>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => window.open(contact, '_blank', 'noopener,noreferrer')}
+              >
+                Contact us
+              </Button>
+            </CardContent>
+          </Card>
+        )
+      })()}
 
       {/* ── Per-plate history (all-time) ──────────────────────────── */}
       {historyPlate && (

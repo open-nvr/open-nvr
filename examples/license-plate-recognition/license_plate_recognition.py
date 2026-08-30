@@ -249,11 +249,19 @@ MANIFEST = AppManifest(
         "the Vehicles page.\n\n"
         "Assign cameras the License Plate Recognition skill "
         "(Cameras → edit → Assignments) to choose where OCR runs — "
-        "inference is budgeted and runs in the platform, not in this app."
+        "inference is budgeted and runs in the platform, not in this app.\n\n"
+        "Need more for your site? Phone-number and SMS alert delivery, "
+        "WhatsApp notifications, complete gate automation (barrier lift "
+        "on registered vehicles), scheduled reports, or any custom "
+        "feature — contact us and we'll build it for your deployment."
     ),
     author="OpenNVR",
     website="https://github.com/open-nvr/open-nvr",
     license="AGPL-3.0",
+    # Custom work — SMS/phone alert channels, barrier automation,
+    # bespoke features per site. Rendered as "Contact us" in the
+    # catalog and on the Vehicles page.
+    contact="https://github.com/open-nvr/open-nvr/discussions",
     use_cases=[
         "Alert the moment a watchlisted plate passes any camera",
         "Society mode: register every resident vehicle, alarm on any stranger",
