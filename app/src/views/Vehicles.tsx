@@ -827,9 +827,11 @@ export function Vehicles() {
               <div className="min-w-0 flex-1 text-sm">
                 <span className="font-medium">Need more for your site?</span>{' '}
                 <span className="text-[var(--text-dim)]">
-                  Phone-number &amp; SMS alerts, WhatsApp notifications, complete gate
-                  automation (barrier lift for registered vehicles), scheduled reports,
-                  or any custom feature — we build per-site solutions.
+                  Housing societies, industrial estates, factories, company campuses,
+                  warehouses and logistics yards — phone-number &amp; SMS alerts, WhatsApp
+                  notifications, complete gate &amp; process automation (barrier lift for
+                  registered vehicles, truck-bay logging), scheduled reports, or any
+                  custom feature. We build per-site solutions.
                 </span>
               </div>
               <Button

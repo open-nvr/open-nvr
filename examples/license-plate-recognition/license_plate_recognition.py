@@ -250,10 +250,13 @@ MANIFEST = AppManifest(
         "Assign cameras the License Plate Recognition skill "
         "(Cameras → edit → Assignments) to choose where OCR runs — "
         "inference is budgeted and runs in the platform, not in this app.\n\n"
-        "Need more for your site? Phone-number and SMS alert delivery, "
-        "WhatsApp notifications, complete gate automation (barrier lift "
-        "on registered vehicles), scheduled reports, or any custom "
-        "feature — contact us and we'll build it for your deployment."
+        "Built for housing societies AND industrial or company sites — "
+        "factory gates, company campuses, warehouses, logistics yards. "
+        "Need more? Phone-number and SMS alert delivery, WhatsApp "
+        "notifications, complete gate and process automation (barrier "
+        "lift on registered vehicles, truck-bay logging), scheduled "
+        "reports, or any custom feature — contact us and we'll build "
+        "it for your deployment."
     ),
     author="OpenNVR",
     website="https://github.com/open-nvr/open-nvr",
@@ -265,6 +268,7 @@ MANIFEST = AppManifest(
     use_cases=[
         "Alert the moment a watchlisted plate passes any camera",
         "Society mode: register every resident vehicle, alarm on any stranger",
+        "Industrial & company automation: factory gates, truck logging, campus access",
         "Log every vehicle with plate, time and evidence photo",
         "Expected-vehicle handling for known cars (allowlist / registry)",
         "Searchable per-plate history from the Vehicles page",
