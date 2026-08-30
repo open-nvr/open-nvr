@@ -132,3 +132,23 @@ async def get_plate_stats(
         days=max(1, min(int(days), 90)),
         owner_id=None if current_user.is_superuser else current_user.id,
     )
+
+
+@router.get("/events/plate-summary")
+async def get_plate_summary(
+    plate: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """All-time history for ONE plate — the Vehicles page drill-down:
+    first seen, last seen, total reads, per-camera counts. Owner-scoped
+    like /events; superusers see the fleet."""
+    from services.timeline_service import plate_summary
+
+    if not plate or not plate.strip():
+        raise HTTPException(status_code=422, detail="plate is required")
+    return plate_summary(
+        db,
+        plate=plate,
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )

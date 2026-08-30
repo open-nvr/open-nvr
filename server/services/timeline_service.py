@@ -184,3 +184,52 @@ def plate_stats(
         "per_camera": per_camera,
         "per_day": per_day,
     }
+
+
+def plate_summary(
+    db: Session,
+    *,
+    plate: str,
+    owner_id: int | None = None,
+) -> dict:
+    """Everything the platform knows about ONE plate — the Vehicles
+    page's history drill-down ("when did this car last come in?").
+
+    ``plate`` is normalised the same way the producers do (upper, no
+    separators) and matched exactly; owner-scoped like ``query_events``.
+    All-time on purpose: first_seen is the point of the question.
+    """
+    from sqlalchemy import func
+
+    normalized = "".join(str(plate).split()).upper()
+    base = db.query(TimelineEvent).filter(TimelineEvent.plate_text == normalized)
+    if owner_id is not None:
+        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+
+    total = base.count()
+    first_seen, last_seen = (
+        base.with_entities(
+            func.min(TimelineEvent.started_at), func.max(TimelineEvent.started_at)
+        ).one()
+        if total
+        else (None, None)
+    )
+    per_camera = [
+        {"camera_id": cid, "reads": int(n)}
+        for cid, n in (
+            base.with_entities(
+                TimelineEvent.camera_id, func.count(TimelineEvent.id)
+            )
+            .group_by(TimelineEvent.camera_id)
+            .all()
+        )
+    ]
+    return {
+        "plate": normalized,
+        "total_reads": int(total),
+        "first_seen": first_seen.isoformat() if first_seen else None,
+        "last_seen": last_seen.isoformat() if last_seen else None,
+        "per_camera": per_camera,
+    }

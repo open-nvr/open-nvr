@@ -63,10 +63,46 @@ PLATE_SUBJECT_PATTERN = "opennvr.events.plate.recognized.v1.>"
 SCOPE_REFRESH_SECONDS = 60.0
 
 
+def _normalize_plate(value: Any) -> str:
+    """The platform's plate normalisation (KAI-C normaliser / core's
+    extract_plate): upper-case, no separators — one rule everywhere so
+    registry and watchlist entries match regardless of producer."""
+    return "".join(str(value).split()).upper()
+
+
+def parse_registry(raw: Any) -> dict[str, dict[str, str]]:
+    """Parse the ``registry`` config into ``{PLATE: metadata}``.
+
+    Entries may be bare plate strings or dicts with a ``plate`` key
+    plus optional ``owner`` / ``unit`` / ``type`` / ``note`` metadata
+    (a society's vehicle register: whose car, which flat). Unknown
+    keys are dropped; entries without a plate are skipped — a partly
+    bad CSV import must not break the register.
+    """
+    registry: dict[str, dict[str, str]] = {}
+    for entry in raw or []:
+        if isinstance(entry, str):
+            plate = _normalize_plate(entry)
+            if plate:
+                registry[plate] = {}
+            continue
+        if not isinstance(entry, dict):
+            continue
+        plate = _normalize_plate(entry.get("plate", ""))
+        if not plate:
+            continue
+        registry[plate] = {
+            k: str(entry[k]).strip()
+            for k in ("owner", "unit", "type", "note")
+            if str(entry.get(k) or "").strip()
+        }
+    return registry
+
+
 MANIFEST = AppManifest(
     id="license-plate-recognition",
     name="License Plate Recognition",
-    version="2.0.0",
+    version="2.1.0",
     category="vehicle",
     summary=(
         "Consumes the platform's plate.recognized.v1 events and routes "
@@ -93,12 +129,32 @@ MANIFEST = AppManifest(
               description="Plates that fire a low-severity 'expected vehicle' alert."),
         Param("denylist", list, default=[],
               description="Plates that fire a high-severity 'watchlist plate' alert."),
+        Param("registry", list, default=[],
+              description=(
+                  "The vehicle register: entries are plates or "
+                  "{plate, owner, unit, type, note} records. Registered "
+                  "vehicles pass as expected; with alarm_on_unknown they "
+                  "define who is known.")),
+        Param("alarm_on_unknown", bool, default=False,
+              description=(
+                  "Society mode: raise a high-severity alarm for any "
+                  "plate NOT in the registry/allowlist (denylist still "
+                  "wins). Off = unknown plates log as info reads.")),
+        Param("unknown_cooldown_seconds", float, default=300.0,
+              description=(
+                  "Per-plate re-alarm suppression for unknown vehicles, "
+                  "across cameras — one stranger, one alarm, not one "
+                  "per gate camera.")),
     ],
     emits=[
         AlertType("plate_read", severity="low",
                   description="Info-severity read for unlisted plates."),
         AlertType("plate_expected", severity="low"),
         AlertType("plate_watchlist", severity="high"),
+        AlertType("plate_unknown", severity="high",
+                  description=(
+                      "Unregistered vehicle seen while alarm_on_unknown "
+                      "is enabled.")),
     ],
     has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
     ui_mode="internal",
@@ -124,15 +180,21 @@ MANIFEST = AppManifest(
     license="AGPL-3.0",
     use_cases=[
         "Alert the moment a watchlisted plate passes any camera",
+        "Society mode: register every resident vehicle, alarm on any stranger",
         "Log every vehicle with plate, time and evidence photo",
-        "Expected-vehicle handling for known cars (allowlist)",
-        "Searchable vehicle history from the Vehicles page",
+        "Expected-vehicle handling for known cars (allowlist / registry)",
+        "Searchable per-plate history from the Vehicles page",
     ],
     state_schema=[
         StateView(name="allowlist_size", label="Allowlist",
                   kind="metric", path="allowlist_size"),
         StateView(name="denylist_size", label="Denylist",
                   kind="metric", path="denylist_size"),
+        StateView(name="registry_size", label="Registered vehicles",
+                  kind="metric", path="registry_size"),
+        StateView(name="unknown_alarms", label="Unknown-vehicle alarms",
+                  kind="metric", path="unknown_alarms",
+                  description="Alarms fired for unregistered plates since start."),
         StateView(name="deduped", label="Plates deduped",
                   kind="metric", path="deduped_plates_tracked",
                   description="Distinct (camera, plate) pairs in the dedup window."),
@@ -165,6 +227,15 @@ class AppConfig:
     min_confidence: float = 0.0
     allowlist: list[str] = field(default_factory=list)
     denylist: list[str] = field(default_factory=list)
+
+    # The society register: plates (or {plate, owner, unit, type, note}
+    # records) of every known vehicle. With ``alarm_on_unknown`` on, any
+    # plate outside registry+allowlist raises a high-severity alarm,
+    # rate-limited per plate by ``unknown_cooldown_seconds`` across
+    # cameras (one stranger = one alarm, not one per gate camera).
+    registry: list[Any] = field(default_factory=list)
+    alarm_on_unknown: bool = False
+    unknown_cooldown_seconds: float = 300.0
 
     # Alert delivery channels (see alerts.py / the SDK alert stack).
     webhook_url: str | None = None
@@ -201,6 +272,9 @@ def load_config(path: str | Path) -> AppConfig:
         min_confidence=float(raw.get("min_confidence", 0.0)),
         allowlist=[str(p).upper().strip() for p in (raw.get("allowlist") or [])],
         denylist=[str(p).upper().strip() for p in (raw.get("denylist") or [])],
+        registry=list(raw.get("registry") or []),
+        alarm_on_unknown=bool(raw.get("alarm_on_unknown", False)),
+        unknown_cooldown_seconds=float(raw.get("unknown_cooldown_seconds", 300.0)),
         webhook_url=raw.get("webhook_url"),
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
@@ -245,6 +319,14 @@ class PlateAlerter(Detector):
             {p for p in cfg.allowlist if p},
             {p for p in cfg.denylist if p},
         )
+        # The society register + unknown-vehicle alarm state. The
+        # cooldown ledger is per PLATE (not per camera): one stranger
+        # driving past three gate cameras is one alarm.
+        self._registry: dict[str, dict[str, str]] = parse_registry(cfg.registry)
+        self._alarm_on_unknown: bool = bool(cfg.alarm_on_unknown)
+        self._unknown_cooldown: float = max(0.0, float(cfg.unknown_cooldown_seconds))
+        self._unknown_last: dict[str, float] = {}
+        self._unknown_alarms: int = 0
         # Camera scope: explicit config wins and never refreshes; else
         # the assignment table (refreshed lazily per SCOPE_REFRESH_
         # SECONDS); None = no restriction declared.
@@ -300,7 +382,7 @@ class PlateAlerter(Detector):
         # Same normalisation as the platform's producer (KAI-C normaliser /
         # core's extract_plate): upper, no separators — so watchlist entries
         # match regardless of which producer fired the event.
-        plate = "".join(plate.split()).upper()
+        plate = _normalize_plate(plate)
 
         scope = self._scope()
         if scope is not None and camera_id not in scope:
@@ -321,11 +403,35 @@ class PlateAlerter(Detector):
                 return []
             self._last_fired[key] = now
 
+        # Society mode: is this plate known to the install at all?
+        # Denylist and allowlist still count as "known" — a watchlisted
+        # plate is a WATCHLIST alarm, not an unknown-vehicle one.
+        allowlist, denylist = self._watchlists
+        registry_entry = self._registry.get(plate)
+        unknown_alarm = False
+        if (self._alarm_on_unknown
+                and registry_entry is None
+                and plate not in allowlist
+                and plate not in denylist):
+            last_alarm = self._unknown_last.get(plate)
+            if last_alarm is None or (now - last_alarm) >= self._unknown_cooldown:
+                self._unknown_last[plate] = now
+                self._unknown_alarms += 1
+                unknown_alarm = True
+                if len(self._unknown_last) > 4096:
+                    # Bound the cooldown ledger: evict the stalest half.
+                    for stale, _ts in sorted(
+                            self._unknown_last.items(), key=lambda kv: kv[1]
+                    )[:2048]:
+                        self._unknown_last.pop(stale, None)
+
         alert = self._build_alert(
             camera_id, plate,
             confidence=confidence,
             vehicle_label=payload.get("vehicle_label"),
             correlation_id=event.get("correlation_id"),
+            registry_entry=registry_entry,
+            unknown_alarm=unknown_alarm,
         )
         self._dispatcher.fire(alert)
         self._recent.append({
@@ -341,10 +447,24 @@ class PlateAlerter(Detector):
         confidence: float | None,
         vehicle_label: str | None,
         correlation_id: str | None,
+        registry_entry: dict[str, str] | None = None,
+        unknown_alarm: bool = False,
     ) -> Alert:
         allowlist, denylist = self._watchlists   # one read = one generation
         if plate in denylist:
             severity, title = "high", f"Watchlist plate {plate} seen"
+        elif unknown_alarm:
+            severity, title = "high", f"Unknown vehicle {plate}"
+        elif registry_entry is not None:
+            owner = registry_entry.get("owner", "")
+            unit = registry_entry.get("unit", "")
+            tag = (
+                f" ({owner}, {unit})" if owner and unit
+                else f" ({owner})" if owner
+                else f" (unit {unit})" if unit
+                else ""
+            )
+            severity, title = "low", f"Registered vehicle {plate} seen{tag}"
         elif plate in allowlist:
             severity, title = "low", f"Expected plate {plate} seen"
         else:
@@ -368,6 +488,9 @@ class PlateAlerter(Detector):
                 "vehicle_label": vehicle_label,
                 "in_allowlist": plate in allowlist,
                 "in_denylist": plate in denylist,
+                "in_registry": registry_entry is not None,
+                "registry": registry_entry,
+                "unknown_alarm": unknown_alarm,
             },
         )
 
@@ -380,6 +503,9 @@ class PlateAlerter(Detector):
             "deduped_plates_tracked": len(self._last_fired),
             "allowlist_size": len(self._watchlists[0]),
             "denylist_size": len(self._watchlists[1]),
+            "registry_size": len(self._registry),
+            "alarm_on_unknown": self._alarm_on_unknown,
+            "unknown_alarms": self._unknown_alarms,
             "recent": list(self._recent),
         }
 
@@ -431,8 +557,11 @@ class PlateAlerter(Detector):
 <div class="stats">
  <div><b>{len(allow)}</b><span class="dim">allowlist</span></div>
  <div><b>{len(deny)}</b><span class="dim">denylist</span></div>
+ <div><b>{len(self._registry)}</b><span class="dim">registered</span></div>
+ <div><b>{self._unknown_alarms}</b><span class="dim">unknown alarms</span></div>
  <div><b>{snap.get("deduped_plates_tracked", 0)}</b><span class="dim">plates deduped</span></div>
 </div>
+<div class="dim">Unknown-vehicle alarm: {"ON" if self._alarm_on_unknown else "off"}</div>
 {table}
 <div class="note">Watchlists are edited in the App Catalog's config
 form (applied live). Full history: the timeline's plate search.</div>
@@ -451,13 +580,27 @@ form (applied live). Full history: the timeline's plate search.</div>
             for p in (config.get("denylist") or [])
             if str(p).strip()
         }
-        if (allow, deny) == self._watchlists:
-            return
-        self._watchlists = (allow, deny)
-        logger.info(
-            "watchlists updated live from the registry: allowlist=%d denylist=%d",
-            len(allow), len(deny),
-        )
+        if (allow, deny) != self._watchlists:
+            self._watchlists = (allow, deny)
+            logger.info(
+                "watchlists updated live: allowlist=%d denylist=%d",
+                len(allow), len(deny),
+            )
+        # The society register + alarm mode update live too — the whole
+        # point of the Vehicles page's registry editor.
+        if "registry" in config:
+            registry = parse_registry(config.get("registry"))
+            if registry != self._registry:
+                self._registry = registry
+                logger.info("vehicle register updated live: %d plates", len(registry))
+        if "alarm_on_unknown" in config:
+            self._alarm_on_unknown = bool(config.get("alarm_on_unknown"))
+        if "unknown_cooldown_seconds" in config:
+            try:
+                self._unknown_cooldown = max(
+                    0.0, float(config.get("unknown_cooldown_seconds", 300.0)))
+            except (TypeError, ValueError):
+                pass
 
 
 # ── CLI ─────────────────────────────────────────────────────────────

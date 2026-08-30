@@ -34,6 +34,12 @@ export const vehiclesService = {
   getPlateStats: (days: number) =>
     api.get('/api/v1/events/plate-stats', { params: { days } }),
 
+  // Everything the platform knows about ONE plate (all-time): first
+  // seen, last seen, total reads, per-camera counts — the history
+  // drill-down behind clicking a plate.
+  getPlateSummary: (plate: string) =>
+    api.get('/api/v1/events/plate-summary', { params: { plate } }),
+
   // Evidence photos are auth-gated (JWT header), so a bare <img src>
   // can't load them — fetch as a blob and objectURL it (AuthedImage).
   getEventEvidence: (eventId: number) =>

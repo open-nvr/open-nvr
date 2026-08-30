@@ -106,3 +106,36 @@ def test_window_days(db):
     s, users, _ = db
     wide = plate_stats(s, days=90, owner_id=None, now=NOW)
     assert wide["total_reads"] == 5             # OLD999 now inside
+
+
+# ── plate_summary (the per-plate history drill-down) ────────────────
+
+
+def test_plate_summary_all_time_counts_and_range(db):
+    from services.timeline_service import plate_summary
+
+    s, users, cams = db
+    got = plate_summary(s, plate="aaa 111", owner_id=users["alice"].id)
+    assert got["plate"] == "AAA111"
+    assert got["total_reads"] == 2
+    assert got["per_camera"] == [{"camera_id": cams["gate"].id, "reads": 2}]
+    # first/last seen span the two visits (2h ago .. 1h ago)
+    assert got["first_seen"] < got["last_seen"]
+    # ALL-time: the 30-day-old read of another plate is still visible
+    old = plate_summary(s, plate="OLD999", owner_id=users["alice"].id)
+    assert old["total_reads"] == 1
+
+
+def test_plate_summary_owner_scoped_and_unknown_plate(db):
+    from services.timeline_service import plate_summary
+
+    s, users, _cams = db
+    # bob's camera read is invisible to alice…
+    assert plate_summary(s, plate="CCC333",
+                         owner_id=users["alice"].id)["total_reads"] == 0
+    # …and visible fleet-wide (owner_id=None = superuser)
+    assert plate_summary(s, plate="CCC333", owner_id=None)["total_reads"] == 1
+    # A plate never seen: zeroes, not an error.
+    none = plate_summary(s, plate="ZZ00XX", owner_id=None)
+    assert none == {"plate": "ZZ00XX", "total_reads": 0,
+                    "first_seen": None, "last_seen": None, "per_camera": []}

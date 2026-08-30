@@ -183,7 +183,7 @@ def test_live_watchlist_update_applies_atomically():
 def test_manifest_declares_the_consumer_contract():
     m = PlateAlerter.manifest
     assert m.subscribes == PLATE_SUBJECT_PATTERN
-    assert m.version == "2.0.0"
+    assert m.version == "2.1.0"
     assert "object_detection" in m.requires_tasks
     assert "license_plate_recognition" in m.requires_tasks
 
@@ -235,3 +235,122 @@ def test_ui_html_renders_state_and_escapes():
     assert ">1<" in html                         # allowlist count renders
     assert "App Catalog" in html                 # points at the config form
     assert "<script" not in html.lower()         # the page itself has no JS
+
+
+# ── The society register + unknown-vehicle alarms ───────────────────
+
+
+def test_registry_plate_fires_low_with_owner_in_title():
+    alerter, _ = _alerter(registry=[
+        {"plate": "mh 12 de 1433", "owner": "A. Sharma", "unit": "B-402"},
+    ])
+    fired = alerter.handle_event(_envelope(plate="MH12DE1433"))
+    assert fired[0].severity == "low"
+    assert "Registered vehicle MH12DE1433" in fired[0].title
+    assert "A. Sharma" in fired[0].title and "B-402" in fired[0].title
+    assert fired[0].evidence["in_registry"] is True
+    assert fired[0].evidence["registry"]["owner"] == "A. Sharma"
+    assert fired[0].evidence["unknown_alarm"] is False
+
+
+def test_unknown_alarm_fires_high_for_unregistered_plate():
+    alerter, _ = _alerter(alarm_on_unknown=True,
+                          registry=["MH12DE1433"])
+    stranger = alerter.handle_event(_envelope(plate="XX99ZZ0001"))
+    assert stranger[0].severity == "high"
+    assert "Unknown vehicle XX99ZZ0001" in stranger[0].title
+    assert stranger[0].evidence["unknown_alarm"] is True
+    # The registered vehicle stays quiet (low, not an alarm).
+    known = alerter.handle_event(_envelope(plate="MH12DE1433"))
+    assert known[0].severity == "low"
+    assert known[0].evidence["unknown_alarm"] is False
+
+
+def test_unknown_alarm_off_by_default_keeps_info_reads():
+    alerter, _ = _alerter(registry=["MH12DE1433"])
+    fired = alerter.handle_event(_envelope(plate="XX99ZZ0001"))
+    assert fired[0].severity == "info"
+    assert fired[0].evidence["unknown_alarm"] is False
+
+
+def test_unknown_cooldown_is_per_plate_across_cameras(monkeypatch):
+    alerter, _ = _alerter(alarm_on_unknown=True,
+                          unknown_cooldown_seconds=300.0,
+                          dedup_window_seconds=0)
+    t = {"now": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: t["now"])
+    first = alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam-1"))
+    assert first[0].severity == "high"
+    # Same stranger at the SECOND gate camera 30s later: still a read,
+    # but not a second alarm — one stranger, one alarm.
+    t["now"] += 30.0
+    second = alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam-2"))
+    assert second[0].severity == "info"
+    assert second[0].evidence["unknown_alarm"] is False
+    # After the cooldown the alarm can fire again.
+    t["now"] += 300.0
+    third = alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam-1"))
+    assert third[0].severity == "high"
+    assert alerter.state_snapshot()["unknown_alarms"] == 2
+
+
+def test_denylist_beats_registry():
+    alerter, _ = _alerter(alarm_on_unknown=True,
+                          denylist=["BAD001"],
+                          registry=["BAD001"])
+    fired = alerter.handle_event(_envelope(plate="BAD001"))
+    assert fired[0].severity == "high"
+    assert "Watchlist plate" in fired[0].title
+    assert fired[0].evidence["unknown_alarm"] is False
+
+
+def test_parse_registry_accepts_strings_dicts_and_skips_bad_rows():
+    reg = lpr.parse_registry([
+        "ka 05 mj 6021",
+        {"plate": "MH14GH0007", "owner": "R. Iyer", "unit": "A-101",
+         "type": "car", "junk": "dropped"},
+        {"owner": "no plate — skipped"},
+        42,
+        "",
+    ])
+    assert set(reg) == {"KA05MJ6021", "MH14GH0007"}
+    assert reg["KA05MJ6021"] == {}
+    assert reg["MH14GH0007"] == {"owner": "R. Iyer", "unit": "A-101", "type": "car"}
+    assert "junk" not in reg["MH14GH0007"]
+
+
+def test_live_registry_and_alarm_update():
+    alerter, _ = _alerter(dedup_window_seconds=0)
+    # Initially: unknown mode off, stranger is an info read.
+    assert alerter.handle_event(_envelope(plate="XX99ZZ0001"))[0].severity == "info"
+    alerter.on_config_update({
+        "allowlist": [], "denylist": [],
+        "registry": [{"plate": "XX99ZZ0001", "owner": "New resident"}],
+        "alarm_on_unknown": True,
+    })
+    # Now registered → low; a different stranger → high alarm.
+    assert alerter.handle_event(_envelope(plate="XX99ZZ0001"))[0].severity == "low"
+    assert alerter.handle_event(_envelope(plate="YY88AA0002"))[0].severity == "high"
+    snap = alerter.state_snapshot()
+    assert snap["registry_size"] == 1
+    assert snap["alarm_on_unknown"] is True
+
+
+def test_state_snapshot_reports_register():
+    alerter, _ = _alerter(registry=["A1", "B2"], alarm_on_unknown=True)
+    snap = alerter.state_snapshot()
+    assert snap["registry_size"] == 2
+    assert snap["alarm_on_unknown"] is True
+    assert snap["unknown_alarms"] == 0
+
+
+def test_denylist_plate_never_counts_as_unknown():
+    # In alarm mode a watchlisted plate NOT in the registry must fire as
+    # a WATCHLIST alarm — and must not touch the unknown-cooldown ledger
+    # or counter (it is a known-bad vehicle, not a stranger).
+    alerter, _ = _alerter(alarm_on_unknown=True, denylist=["BAD001"])
+    fired = alerter.handle_event(_envelope(plate="BAD001"))
+    assert fired[0].severity == "high"
+    assert "Watchlist plate" in fired[0].title
+    assert fired[0].evidence["unknown_alarm"] is False
+    assert alerter.state_snapshot()["unknown_alarms"] == 0
