@@ -216,12 +216,16 @@ export function registryFromCsv(text: string): RegistryEntry[] {
  * go through the same header matching as CSV. */
 export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
   const XLSX = await import('xlsx')
-  const wb = XLSX.read(buf, { type: 'array' })
+  // cellDates + dateNF: a date-TYPED "Valid Till" cell must land as
+  // YYYY-MM-DD (what the app's expiry check parses), not the sheet's
+  // locale format like 9/5/26 — which would silently never expire.
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true })
   const sheet = wb.Sheets[wb.SheetNames[0]]
   if (!sheet) return []
   const rows = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
-    raw: false,   // dates and numbers come back as displayed strings
+    raw: false,   // numbers come back as displayed strings
+    dateNF: 'yyyy-mm-dd',
     defval: '',
   }) as (string | number | null)[][]
   return registryFromRows(rows)
@@ -637,8 +641,10 @@ export function Vehicles() {
             const next = { ...cameraRoles }
             if (!role) delete next[String(cameraId)]
             else next[String(cameraId)] = label ? { role, label } : { role }
-            // Writing camera_roles supersedes the legacy map entirely.
-            saveConfig.mutate({ camera_roles: next, gate_directions: {} })
+            // Only declared manifest params may be written — the server
+            // rejects unknown config keys. camera_roles is declared;
+            // the legacy gate_directions map is read-only fallback.
+            saveConfig.mutate({ camera_roles: next })
           }}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {

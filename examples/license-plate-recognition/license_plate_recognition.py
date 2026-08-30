@@ -216,6 +216,12 @@ MANIFEST = AppManifest(
                   "Society mode: raise a high-severity alarm for any "
                   "plate NOT in the registry/allowlist (denylist still "
                   "wins). Off = unknown plates log as info reads.")),
+        Param("camera_roles", dict, default={},
+              description=(
+                  "The site layout: {camera_id: {role, label?}} with "
+                  "role gate_in | gate_out | parking | other. Consumed "
+                  "by the Vehicles page (gate history, inside-now); "
+                  "declared here so config saves validate.")),
         Param("unknown_cooldown_seconds", float, default=300.0,
               description=(
                   "Per-plate re-alarm suppression for unknown vehicles, "

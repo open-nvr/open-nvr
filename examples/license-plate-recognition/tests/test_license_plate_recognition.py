@@ -461,3 +461,16 @@ def test_monitors_update_live():
     assert fired[0].severity == "high"
     assert "stolen" in fired[0].title
     assert alerter.state_snapshot()["monitored_plates"] == 1
+
+
+def test_manifest_declares_every_key_the_vehicles_page_writes():
+    """Core's PUT /config validator REJECTS unknown config keys, so
+    every key the Vehicles page can write must be a declared param —
+    this list is the frontend's write-surface, kept in lockstep."""
+    declared = {p.name for p in PlateAlerter.manifest.params}
+    page_writes = {
+        "allowlist", "denylist", "monitors", "registry",
+        "alarm_on_unknown", "unknown_cooldown_seconds", "camera_roles",
+    }
+    missing = page_writes - declared
+    assert not missing, f"undeclared config keys the page writes: {missing}"

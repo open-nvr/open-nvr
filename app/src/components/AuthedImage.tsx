@@ -52,7 +52,11 @@ export function AuthedImage({
     return () => URL.revokeObjectURL(u)
   }, [blobQuery.data])
 
-  if (blobQuery.isError || (!blobQuery.isPending && !url)) {
+  // "no photo" only on a real failure; a successful blob whose
+  // objectURL hasn't been minted yet (the effect runs post-render)
+  // keeps the pulse — otherwise every image flashes "no photo" for
+  // one frame.
+  if (blobQuery.isError || (blobQuery.isSuccess && !(blobQuery.data instanceof Blob))) {
     return (
       <div className={`grid place-items-center text-[10px] text-[var(--text-dim)] bg-[var(--bg-2)] ${className ?? ''}`}>
         no photo
