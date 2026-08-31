@@ -30,8 +30,8 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  BellRing, Car, Download, History, PhoneCall, Plus, RefreshCw, Search,
-  ShieldAlert, ShieldCheck, Trash2, Upload,
+  BellRing, Car, Download, FileText, History, PhoneCall, Plus, RefreshCw,
+  Search, ShieldAlert, ShieldCheck, Trash2, Upload,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -73,6 +73,22 @@ type PlateSummary = {
   first_seen: string | null
   last_seen: string | null
   per_camera: { camera_id: number; reads: number }[]
+}
+
+type VehicleReport = {
+  year: number
+  month: number
+  total_reads: number
+  unique_plates: number
+  per_camera: { camera_id: number; reads: number }[]
+  per_plate: {
+    plate: string
+    reads: number
+    first_seen: string | null
+    last_seen: string | null
+    per_camera: { camera_id: number; reads: number }[]
+  }[]
+  per_day: { day: string; reads: number }[]
 }
 
 /** The enabled app providing LPR — capability-keyed (community-proof). */
@@ -358,6 +374,7 @@ export function Vehicles() {
   const [preview, setPreview] = useState<PlateEvent | null>(null)
   const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring'>('reads')
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
+  const [reportOpen, setReportOpen] = useState(false)
 
   const camerasQuery = useQuery({
     queryKey: ['cameras'],
@@ -568,6 +585,9 @@ export function Vehicles() {
         description="License plate reads across your cameras — searched from the evidence store, whichever part of the platform ran the OCR. Watchlists apply live."
         actions={
           <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setReportOpen(true)}>
+              <FileText size={14} /> Monthly report
+            </Button>
             <Button variant="outline" onClick={exportCsv} disabled={!events.length}>
               <Download size={14} /> Export CSV
             </Button>
@@ -860,6 +880,17 @@ export function Vehicles() {
           </Card>
         )
       })()}
+
+      {/* ── Printable monthly report ──────────────────────────────── */}
+      {reportOpen && (
+        <ReportOverlay
+          registry={registry}
+          monitors={monitors}
+          cameraRoles={cameraRoles}
+          cameraName={cameraName}
+          onClose={() => setReportOpen(false)}
+        />
+      )}
 
       {/* ── Per-plate history (all-time) ──────────────────────────── */}
       {historyPlate && (
@@ -1502,6 +1533,269 @@ function MonitoringTab({
       <div className="text-xs text-[var(--text-dim)]">
         Monitored plates never trigger the unknown-vehicle alarm — they fire their own
         alert at the severity set here, and "silenced" keeps the rule without alerting.
+      </div>
+    </div>
+  )
+}
+
+// ── The printable monthly report ────────────────────────────────────
+// One click → a clean document the society committee or facility
+// manager files: totals, registered vehicles grouped by flat/unit,
+// visitors, monitored sightings, per-gate counts. "Save as PDF" is the
+// browser's print dialog — zero dependencies, works everywhere. The
+// print CSS isolates .print-report so only the document prints.
+
+function monthLabel(year: number, month: number): string {
+  return new Date(year, month - 1, 1).toLocaleString(undefined, {
+    month: 'long', year: 'numeric',
+  })
+}
+
+function lastMonths(n: number): { year: number; month: number }[] {
+  const out: { year: number; month: number }[] = []
+  const d = new Date()
+  for (let i = 0; i < n; i++) {
+    out.push({ year: d.getFullYear(), month: d.getMonth() + 1 })
+    d.setMonth(d.getMonth() - 1)
+  }
+  return out
+}
+
+function ReportOverlay({
+  registry,
+  monitors,
+  cameraRoles,
+  cameraName,
+  onClose,
+}: {
+  registry: RegistryEntry[]
+  monitors: Monitor[]
+  cameraRoles: Record<string, CameraRoleEntry>
+  cameraName: (id: number) => string
+  onClose: () => void
+}) {
+  const months = useMemo(() => lastMonths(12), [])
+  const [sel, setSel] = useState(months[0])
+
+  const reportQuery = useQuery({
+    queryKey: ['vehicle-report', sel.year, sel.month],
+    queryFn: async () => {
+      const { data } = await apiService.getVehicleReport(sel.year, sel.month)
+      return data as VehicleReport
+    },
+    retry: 0,
+    staleTime: 60_000,
+  })
+  const report = reportQuery.data
+
+  const byPlate = useMemo(
+    () => new Map(registry.map((r) => [r.plate, r] as const)),
+    [registry]
+  )
+  const monitorByPlate = useMemo(
+    () => new Map(monitors.map((m) => [m.plate, m] as const)),
+    [monitors]
+  )
+
+  // Registered rows grouped by unit; everything else is a visitor.
+  const { registered, visitors, monitored } = useMemo(() => {
+    const reg: { unit: string; entry: RegistryEntry; reads: number; last: string | null }[] = []
+    const vis: VehicleReport['per_plate'] = []
+    const mon: { plate: string; note?: string; reads: number; last: string | null }[] = []
+    for (const p of report?.per_plate ?? []) {
+      const m = monitorByPlate.get(p.plate)
+      if (m) mon.push({ plate: p.plate, note: m.note, reads: p.reads, last: p.last_seen })
+      const entry = byPlate.get(p.plate)
+      if (entry) {
+        reg.push({ unit: entry.unit || '—', entry, reads: p.reads, last: p.last_seen })
+      } else {
+        vis.push(p)
+      }
+    }
+    reg.sort((a, b) => a.unit.localeCompare(b.unit) || a.entry.plate.localeCompare(b.entry.plate))
+    return { registered: reg, visitors: vis.slice(0, 60), monitored: mon }
+  }, [report, byPlate, monitorByPlate])
+
+  const busiestDay = useMemo(() => {
+    const days = report?.per_day ?? []
+    if (!days.length) return null
+    return [...days].sort((a, b) => b.reads - a.reads)[0]
+  }, [report])
+
+  const dt = (v: string | null | undefined) =>
+    v ? new Date(v).toLocaleString(undefined, {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    }) : '—'
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 overflow-y-auto print:overflow-visible">
+      <style>{`
+        @media print {
+          body * { visibility: hidden !important; }
+          .print-report, .print-report * { visibility: visible !important; }
+          .print-report { position: absolute !important; inset: 0 !important;
+            margin: 0 !important; box-shadow: none !important;
+            border-radius: 0 !important; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="print-report bg-white text-neutral-900 max-w-3xl mx-auto my-6 rounded-lg shadow-xl p-8 print:p-0">
+        {/* controls (screen only) */}
+        <div className="no-print flex items-center gap-2 mb-6 pb-4 border-b border-neutral-200">
+          <select
+            value={`${sel.year}-${sel.month}`}
+            onChange={(e) => {
+              const [y, m] = e.target.value.split('-').map(Number)
+              setSel({ year: y, month: m })
+            }}
+            className="py-1.5 px-2 rounded border border-neutral-300 bg-white text-sm"
+          >
+            {months.map((m) => (
+              <option key={`${m.year}-${m.month}`} value={`${m.year}-${m.month}`}>
+                {monthLabel(m.year, m.month)}
+              </option>
+            ))}
+          </select>
+          <Button onClick={() => window.print()} disabled={!report}>
+            <FileText size={14} /> Print / Save as PDF
+          </Button>
+          <button
+            className="ml-auto text-neutral-500 hover:text-neutral-900 text-sm"
+            onClick={onClose}
+          >
+            ✕ Close
+          </button>
+        </div>
+
+        {reportQuery.isPending ? (
+          <Skeleton className="h-64" />
+        ) : reportQuery.isError ? (
+          <div className="text-sm text-neutral-500">
+            {extractApiError(reportQuery.error, 'Could not build the report.')}
+          </div>
+        ) : report && (
+          <div className="text-sm leading-relaxed">
+            {/* header */}
+            <div className="mb-6">
+              <div className="text-2xl font-semibold">Vehicle Movement Report</div>
+              <div className="text-neutral-500">
+                {monthLabel(report.year, report.month)} · generated {new Date().toLocaleDateString()} · OpenNVR
+              </div>
+            </div>
+
+            {/* summary */}
+            <div className="grid grid-cols-4 gap-3 mb-6">
+              {[
+                ['Total reads', report.total_reads],
+                ['Unique vehicles', report.unique_plates],
+                ['Registered seen', registered.length],
+                ['Visitors / unknown', visitors.length],
+              ].map(([label, value]) => (
+                <div key={String(label)} className="border border-neutral-200 rounded p-3">
+                  <div className="text-xl font-semibold">{value}</div>
+                  <div className="text-xs text-neutral-500">{label}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mb-6 text-neutral-600">
+              {(report.per_camera ?? []).map((c) => {
+                const label = roleLabel(cameraRoles[String(c.camera_id)])
+                return `${cameraName(c.camera_id)}${label ? ` (${label})` : ''}: ${c.reads} reads`
+              }).join(' · ')}
+              {busiestDay && ` · busiest day ${busiestDay.day} (${busiestDay.reads})`}
+            </div>
+
+            {/* registered by unit */}
+            <div className="text-base font-semibold mb-1 mt-6">Registered vehicles</div>
+            {registered.length === 0 ? (
+              <div className="text-neutral-500">No registered vehicle was seen this month.</div>
+            ) : (
+              <table className="w-full border-collapse mb-2">
+                <thead>
+                  <tr className="text-left text-xs text-neutral-500 border-b border-neutral-300">
+                    <th className="py-1 pr-2">Flat / unit</th>
+                    <th className="py-1 pr-2">Plate</th>
+                    <th className="py-1 pr-2">Owner</th>
+                    <th className="py-1 pr-2">Model</th>
+                    <th className="py-1 pr-2 text-right">Visits</th>
+                    <th className="py-1 pl-3">Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {registered.map((r) => (
+                    <tr key={r.entry.plate} className="border-b border-neutral-100">
+                      <td className="py-1 pr-2">{r.unit}</td>
+                      <td className="py-1 pr-2 font-mono font-semibold">{r.entry.plate}</td>
+                      <td className="py-1 pr-2">{r.entry.owner || '—'}</td>
+                      <td className="py-1 pr-2">{r.entry.model || r.entry.type || '—'}</td>
+                      <td className="py-1 pr-2 text-right font-mono">{r.reads}</td>
+                      <td className="py-1 pl-3 text-neutral-600">{dt(r.last)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {/* visitors */}
+            <div className="text-base font-semibold mb-1 mt-6">Visitors &amp; unknown vehicles</div>
+            {visitors.length === 0 ? (
+              <div className="text-neutral-500">No unregistered vehicle was seen this month.</div>
+            ) : (
+              <table className="w-full border-collapse mb-2">
+                <thead>
+                  <tr className="text-left text-xs text-neutral-500 border-b border-neutral-300">
+                    <th className="py-1 pr-2">Plate</th>
+                    <th className="py-1 pr-2 text-right">Visits</th>
+                    <th className="py-1 pl-3">First seen</th>
+                    <th className="py-1 pl-3">Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visitors.map((v) => (
+                    <tr key={v.plate} className="border-b border-neutral-100">
+                      <td className="py-1 pr-2 font-mono font-semibold">{v.plate}</td>
+                      <td className="py-1 pr-2 text-right font-mono">{v.reads}</td>
+                      <td className="py-1 pl-3 text-neutral-600">{dt(v.first_seen)}</td>
+                      <td className="py-1 pl-3 text-neutral-600">{dt(v.last_seen)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {/* monitored */}
+            {monitored.length > 0 && (
+              <>
+                <div className="text-base font-semibold mb-1 mt-6">Monitored plate sightings</div>
+                <table className="w-full border-collapse mb-2">
+                  <thead>
+                    <tr className="text-left text-xs text-neutral-500 border-b border-neutral-300">
+                      <th className="py-1 pr-2">Plate</th>
+                      <th className="py-1 pr-2">Reason</th>
+                      <th className="py-1 pr-2 text-right">Sightings</th>
+                      <th className="py-1 pl-3">Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {monitored.map((m) => (
+                      <tr key={m.plate} className="border-b border-neutral-100">
+                        <td className="py-1 pr-2 font-mono font-semibold">{m.plate}</td>
+                        <td className="py-1 pr-2">{m.note || '—'}</td>
+                        <td className="py-1 pr-2 text-right font-mono">{m.reads}</td>
+                        <td className="py-1 pl-3 text-neutral-600">{dt(m.last)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+
+            <div className="mt-8 pt-3 border-t border-neutral-200 text-xs text-neutral-400">
+              Generated by OpenNVR · plate reads are recorded with photographic
+              evidence; individual entries can be verified on the Vehicles page.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

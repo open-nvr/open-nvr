@@ -211,3 +211,36 @@ def test_gate_occupancy_needs_both_directions(db):
     s, users, cams = db
     assert gate_occupancy(s, in_cameras=[cams["gate"].id], out_cameras=[],
                           owner_id=users["alice"].id) == {"inside": 0, "plates": []}
+
+
+# ── vehicle_report (the printable monthly report) ───────────────────
+
+
+def test_vehicle_report_month_window_and_rollups(db):
+    from services.timeline_service import vehicle_report
+
+    s, users, cams = db
+    # Fixture reads are around NOW (2026-08-29): AAA111 ×2 on gate,
+    # BBB222 on yard, CCC333 on bob's lot, OLD999 ~30 days back
+    # (2026-07-30 — the PREVIOUS month), plus a plateless row.
+    got = vehicle_report(s, year=2026, month=8, owner_id=None)
+    assert got["total_reads"] == 4          # OLD999 + plateless excluded
+    assert got["unique_plates"] == 3
+    plates = {p["plate"]: p for p in got["per_plate"]}
+    assert plates["AAA111"]["reads"] == 2
+    assert plates["AAA111"]["per_camera"] == [
+        {"camera_id": cams["gate"].id, "reads": 2}]
+    assert plates["AAA111"]["first_seen"] < plates["AAA111"]["last_seen"]
+    assert sum(d["reads"] for d in got["per_day"]) == 4
+    # July catches the old read.
+    july = vehicle_report(s, year=2026, month=7, owner_id=None)
+    assert {p["plate"] for p in july["per_plate"]} == {"OLD999"}
+
+
+def test_vehicle_report_owner_scoped(db):
+    from services.timeline_service import vehicle_report
+
+    s, users, _cams = db
+    got = vehicle_report(s, year=2026, month=8, owner_id=users["alice"].id)
+    assert {p["plate"] for p in got["per_plate"]} == {"AAA111", "BBB222"}
+    assert got["total_reads"] == 3
