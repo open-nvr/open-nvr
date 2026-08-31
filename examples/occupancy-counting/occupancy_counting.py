@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,6 +79,7 @@ from opennvr_app_sdk import (
     AlertType,
     AppManifest,
     Detector,
+    DomainEventPublisher,
     Param,
     StateView,
     app,
@@ -126,10 +128,17 @@ def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
     return scoped
 
 
+#: The contracted history feed this app publishes (EVENT_CONTRACTS.md):
+#: on every committed level transition, and otherwise at most once per
+#: this many seconds per camera while the count moves.
+OCCUPANCY_SCHEMA = "occupancy.changed.v1"
+PUBLISH_MIN_INTERVAL_SECONDS = 10.0
+
+
 MANIFEST = AppManifest(
     id="occupancy-counting",
     name="Occupancy Counting",
-    version="1.1.0",
+    version="1.2.0",
     category="analytics",
     summary="Alerts on zone occupancy threshold crossings (over / under / cleared).",
     requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
@@ -538,6 +547,13 @@ class OccupancyCounter(Detector):
 
     def setup(self) -> None:
         self._states: dict[str, _ZoneState] = {}
+        # occupancy.changed.v1 sampling state: last published (count, ts)
+        # per camera. The publisher never raises on bus trouble.
+        self._occupancy_publisher = DomainEventPublisher(
+            self._config.nats_url, token=self._config.nats_token,
+            producer="app:occupancy-counting")
+        self._last_published: dict[str, tuple[int, float]] = {}
+        self._history_events_published: int = 0
         # Only auto-derived camera sets are refreshed; an explicit list is
         # the operator's word and is never second-guessed.
         self._auto_cameras: bool = bool(
@@ -685,6 +701,10 @@ class OccupancyCounter(Detector):
         candidate = self._classify(camera, count)
         state = self._states.setdefault(camera_id, _ZoneState())
         state.last_count = count
+        # History feed (EVENT_CONTRACTS.md occupancy.changed.v1) —
+        # sampled here, forced below on committed transitions.
+        self._publish_occupancy(camera_id, camera, count, state.level,
+                                force=False)
 
         # Already in the candidate band → nothing to commit; clear any
         # half-formed pending transition (the level is stable).
@@ -708,6 +728,8 @@ class OccupancyCounter(Detector):
         state.level = candidate
         state.pending = None
         state.pending_count = 0
+        self._publish_occupancy(camera_id, camera, count, candidate,
+                                force=True)
 
         # Returning to normal → only fire if clear_alerts is on.
         if candidate == "normal" and not self._config.clear_alerts:
@@ -718,6 +740,33 @@ class OccupancyCounter(Detector):
             previous=previous, event=event,
         )]
 
+    def _publish_occupancy(self, camera_id: str, camera: Any,
+                           count: int, level: str, *, force: bool) -> None:
+        """Sampled occupancy.changed.v1 publish: always on a committed
+        level transition (``force``), otherwise only when the count
+        changed and the per-camera interval has passed. Bus trouble is
+        the channel's problem (log-never-raise), never the counter's."""
+        last = self._last_published.get(camera_id)
+        now = time.monotonic()
+        if not force:
+            if last is not None and last[0] == count:
+                return
+            if last is not None and (now - last[1]) < PUBLISH_MIN_INTERVAL_SECONDS:
+                return
+        self._last_published[camera_id] = (count, now)
+        ok = self._occupancy_publisher.publish(
+            OCCUPANCY_SCHEMA,
+            camera_id=camera_id,
+            payload={
+                "count": count,
+                "level": level,
+                "max_occupancy": getattr(camera, "max_occupancy", None),
+                "min_occupancy": getattr(camera, "min_occupancy", None),
+            },
+        )
+        if ok:
+            self._history_events_published += 1
+
     def state_snapshot(self) -> dict[str, Any]:
         """``GET /state`` — live occupancy per configured camera plus
         two roll-ups (total people, zones over limit) for the app's
@@ -725,6 +774,7 @@ class OccupancyCounter(Detector):
         return {
             "total_people": sum(s.last_count for s in self._states.values()),
             "zones_over": sum(1 for s in self._states.values() if s.level == "over"),
+            "history_events_published": self._history_events_published,
             "cameras": {
                 camera_id: {
                     "level": state.level,

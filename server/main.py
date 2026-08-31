@@ -72,6 +72,7 @@ from routers import (
     mediamtx_admin,
     mediamtx_hooks,
     network as network_router,
+    occupancy as occupancy_router,
     onvif as onvif_router,
     orphaned_recordings,
     password_policy,
@@ -541,6 +542,18 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_plate_event_consumer())
 
+    # Occupancy history: consume occupancy.changed.v1 samples into the
+    # history store (EVENT_CONTRACTS.md). Same best-effort posture.
+    async def background_occupancy_event_consumer():
+        try:
+            from services.occupancy_event_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+        except Exception as e:
+            main_logger.error(f"Occupancy consumer failed: {e}", exc_info=True)
+
+    asyncio.create_task(background_occupancy_event_consumer())
+
     # Start camera connectivity reconciler — safety net for the MediaMTX
     # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
     # either process). The loop delays its first pass internally so startup
@@ -770,6 +783,7 @@ app.include_router(
 )
 app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
+app.include_router(occupancy_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================
