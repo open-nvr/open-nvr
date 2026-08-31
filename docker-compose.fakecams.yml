@@ -1,0 +1,58 @@
+# ==========================================
+# OpenNVR — fake cameras from video files (opt-in overlay, test only)
+# ==========================================
+# Turns a folder of .mp4 files into looping RTSP streams on the internal
+# Docker network, so you can add them as cameras and exercise the real
+# ingest → record → detect → LPR path without any hardware.
+#
+#     ./data/fake-cameras/gate-entry.mp4
+#         -> rtsp://172.28.90.10:8554/gate-entry
+#
+# Usage:
+#     # 1. drop your clips in ./data/fake-cameras (or point FAKECAM_VIDEO_DIR
+#     #    at any host folder)
+#     docker compose -f docker-compose.yml -f docker-compose.fakecams.yml \
+#         --profile fakecams up -d fakecams
+#     # 2. register them as OpenNVR cameras (adds the LPR skill assignment)
+#     docker exec -i opennvr_core python - < scripts/fakecams/register_fake_cameras.py
+#
+# The rig has NO RTSP authentication and speaks plaintext. It is pinned to the
+# internal network on a static address so cameras can carry a real IP (the API
+# validates ip_address as an IP, not a hostname). Never expose it to a LAN.
+# ==========================================
+
+services:
+  fakecams:
+    profiles: [fakecams]
+    # Same MediaMTX the stack already runs, in the variant that ships ffmpeg.
+    image: bluenviron/mediamtx:1.15.4-ffmpeg
+    container_name: opennvr_fakecams
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/fakecams/entrypoint.sh"]
+    environment:
+      - FAKECAM_VIDEO_DIR=/videos
+      # auto | copy | transcode — see scripts/fakecams/entrypoint.sh
+      - FAKECAM_MODE=${FAKECAM_MODE:-auto}
+      # Output fps cap, transcode only (e.g. 10 to keep CPU down).
+      - FAKECAM_FPS=${FAKECAM_FPS:-}
+    volumes:
+      - ./scripts/fakecams/entrypoint.sh:/opt/fakecams/entrypoint.sh:ro
+      - ${FAKECAM_VIDEO_DIR:-./data/fake-cameras}:/videos:ro
+    ports:
+      # Host loopback only, so you can sanity-check a stream with
+      # `ffplay rtsp://127.0.0.1:8554/<name>` before adding the camera.
+      # Drop this block if the port is unbindable — on Windows a single
+      # unbindable port aborts every publication for the service (#298).
+      - "127.0.0.1:${FAKECAM_HOST_RTSP_PORT:-8554}:8554"
+    networks:
+      opennvr_internal:
+        # Static: the camera record stores this as the camera's IP address.
+        # Change it (and FAKECAM_IP for the register script) if you have
+        # overridden OPENNVR_DOCKER_SUBNET.
+        ipv4_address: ${FAKECAM_IP:-172.28.90.10}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
