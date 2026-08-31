@@ -91,6 +91,9 @@ export type AppManifest = {
   // Where a deployment can reach the developer for custom work
   // (mailto: or https:) — rendered as a "Contact" action.
   contact?: string
+  // Vertical capabilities this app provides ("vehicles", "occupancy")
+  // — first-class pages in the main nav light up per capability.
+  provides?: string[]
 }
 
 /** Resolve an external ui_url for THIS browser: apps rarely know their

@@ -196,6 +196,13 @@ class AppManifest:
     # (per-app NATS users whose subscribe permissions ARE the grants)
     # is the staged follow-up recorded in the RFC.
     requires_scopes: list[str] = field(default_factory=list)
+    # Vertical capabilities this app PROVIDES to the platform UI —
+    # e.g. ["vehicles"], ["occupancy"]. A first-class page in the main
+    # product lights up when any enabled app provides its capability,
+    # so a community-built replacement app declaring the same
+    # capability lights the same page (three-tier model: few curated
+    # pages, capability-keyed; everything else generic).
+    provides: list[str] = field(default_factory=list)
     subscribes: str | None = None
     params: list[Param] = field(default_factory=list)
     emits: list[AlertType] = field(default_factory=list)
@@ -267,6 +274,7 @@ class AppManifest:
             "requires_tasks": list(self.requires_tasks),
             "requires_adapters": list(self.requires_adapters),
             "requires_scopes": list(self.requires_scopes),
+            "provides": list(self.provides),
             "subscribes": self.subscribes,
             "params": [p.to_dict() for p in self.params],
             "emits": [a.to_dict() for a in self.emits],

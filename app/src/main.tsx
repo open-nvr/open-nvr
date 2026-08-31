@@ -80,6 +80,7 @@ const PlaybackView = lazy(() => importPlaybackView().then((m) => ({ default: m.P
 const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.SyncPlayback })))
 const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
+const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
 const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => ({ default: m.Updates }))))
@@ -163,6 +164,7 @@ const router = createBrowserRouter([
           { path: 'playback/sync', element: <SyncPlayback /> },
           { path: 'cameras', element: <Cameras /> },
           { path: 'vehicles', element: <Vehicles /> },
+          { path: 'occupancy', element: <Occupancy /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },
           { path: 'network/*', element: <NetworkView /> },
