@@ -129,7 +129,40 @@ have no netsh."
     fi
 fi
 
-# ── 7. Every table row is resolvable by both launchers ──
+# ── 7. The EACCES asymmetry is deliberate and documented ──
+# start.sh must treat EACCES on a port <1024 as usable: on Linux and macOS
+# that is the privileged-port rule, and Docker binds as root anyway, so
+# counting it as a conflict hard-fails every non-root start on 443/80.
+# start.ps1 must NOT: on Windows the same errno means a WinNAT reservation,
+# which is a real conflict. This is the kind of asymmetry someone "tidies
+# up" later, so pin it down.
+start_test "the privileged-port carve-out is bash-only and explained"
+bad=""
+probe=$(sed -n '/^port_bindable() {/,/^}/p' "$SH")
+printf '%s\n' "$probe" | grep -q 'errno.EACCES' \
+    || bad="start.sh port_bindable() lost the EACCES carve-out — every
+      non-root ./start.sh on Linux/macOS would now die on 443/80; "
+printf '%s\n' "$probe" | grep -q 'p < 1024' \
+    || bad="${bad}start.sh must scope the carve-out to privileged ports; "
+grep -q 'errno' "$PS" \
+    && bad="${bad}start.ps1 copied the carve-out — on Windows EACCES is a
+      WinNAT reservation and must stay a hard failure; "
+grep -q 'WinNAT reservation' "$PS" \
+    || bad="${bad}start.ps1 should say why it deliberately differs; "
+if [ -z "$bad" ]; then pass; else fail "$bad"; fi
+
+# ── 8. Both scope resolution to what compose actually publishes ──
+# The table covers opt-in services; resolving rows nothing publishes warns
+# about ports that will never be bound, and can abort a start outright.
+start_test "both launchers resolve only published ports"
+bad=""
+grep -q 'published_port_entries' "$SH" || bad="${bad}start.sh does not query the published set; "
+grep -q 'Get-PublishedPortEntries' "$PS" || bad="${bad}start.ps1 does not query the published set; "
+sed -n '/^resolve_ports() {/,/^}/p' "$SH" | grep -q 'published_port_entries' \
+    || bad="${bad}start.sh resolve_ports does not filter by it; "
+if [ -z "$bad" ]; then pass; else fail "$bad"; fi
+
+# ── 9. Every table row is resolvable by both launchers ──
 # Neither launcher may special-case a variable: they iterate the table.
 start_test "neither launcher hardcodes a per-port special case"
 bad=""

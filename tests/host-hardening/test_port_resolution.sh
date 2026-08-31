@@ -53,6 +53,13 @@ port_usable() {
     return 0
 }
 get_env_var() { eval "printf '%s' \"\${ENVFILE_$1:-}\""; }
+# Stands in for the `docker compose config` query. Empty means "no parser /
+# no config", which must make the resolver fall back to every table row.
+published_port_entries() {
+    [ -n "${PUBLISHED_STUB:-}" ] || return 1
+    for _p in $PUBLISHED_STUB; do echo "$_p tcp 0.0.0.0"; done
+    return 0
+}
 STUB
     for fn in load_port_table port_help resolve_one_port resolve_ports; do
         sed -n "/^${fn}() {/,/^}/p" "$START_SH"
@@ -71,8 +78,11 @@ done
 #   $2 = space-separated VAR=VALUE operator settings ("env:" prefix = process
 #        environment, otherwise treated as a value in .env)
 # Prints "rc=<code>" then one VAR=value line per resolved variable.
+#   $3 = space-separated ports compose publishes ("" = parser unavailable,
+#        which must fall back to resolving every row)
 run_case() (
     BLOCKED="$1"
+    PUBLISHED_STUB="${3:-}"
     for assign in ${2:-}; do
         case "$assign" in
             env:*) eval "export ${assign#env:}" ;;
@@ -81,7 +91,11 @@ run_case() (
     done
     # shellcheck disable=SC1090
     . "$HARNESS"
-    resolve_ports >/dev/null 2>&1
+    if [ -n "$PUBLISHED_STUB" ]; then
+        resolve_ports "stub-compose-args" >/dev/null 2>&1
+    else
+        resolve_ports >/dev/null 2>&1
+    fi
     echo "rc=$?"
     for v in $ALL_VARS OPENNVR_HTTPS_SUFFIX; do
         eval "printf '%s=%s\n' \"\$v\" \"\${$v-<unset>}\""
@@ -244,6 +258,106 @@ proto=$(sed -e 's/#.*$//' "${REPO_ROOT}/scripts/ports.conf" \
         | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$3)}
                      $1=="WEBRTC_ICE_PORT" {print $3}')
 if [ "$proto" = "both" ]; then pass; else fail "WEBRTC_ICE_PORT proto='${proto}', expected 'both'"; fi
+
+# ── 15. Ports nothing publishes are left alone ──
+# The table covers opt-in services (the debug overlay, the camera-agent
+# profiles, the log viewer). Without scoping, a blocked 8888 would warn
+# about MediaMTX's debug HLS port on a host that never publishes it — and
+# with every candidate blocked, would abort a start over a port nothing was
+# going to bind.
+start_test "a blocked port for an unpublished service does not fail the start"
+# Compose publishes the default set; the camera-agent profile is off.
+out=$(run_case "9100 19100 29100 39100" "" "443 80 8189 8322 8000")
+if [ "$(field "$out" rc)" = "0" ] && [ "$(field "$out" AGENT_PORT)" = "<unset>" ]; then
+    pass
+else
+    fail "rc=$(field "$out" rc) AGENT_PORT=$(field "$out" AGENT_PORT).
+The camera-agent profile is not active, so 9100 is not published and must
+be neither probed nor reported."
+fi
+
+# ── 16. ...but published ports are still resolved ──
+start_test "a blocked port for a published service still shifts"
+out=$(run_case "$blocked" "" "443 80 8189 8322 8000 9100")
+if [ "$(field "$out" rc)" = "0" ] && [ "$(field "$out" AGENT_PORT)" = "19100" ]; then
+    pass
+else
+    fail "rc=$(field "$out" rc) AGENT_PORT=$(field "$out" AGENT_PORT), expected 19100"
+fi
+
+# ── 17. No compose config: resolve everything rather than nothing ──
+start_test "without a parser the resolver falls back to every row"
+out=$(run_case "" "")
+if [ "$(field "$out" AGENT_PORT)" = "9100" ] && [ "$(field "$out" HLS_PORT)" = "8888" ]; then
+    pass
+else
+    fail "AGENT_PORT=$(field "$out" AGENT_PORT) HLS_PORT=$(field "$out" HLS_PORT).
+Warning about a port that is not published is a better failure than
+silently skipping one that is."
+fi
+
+# ── 18. The bind probe itself ──
+# The tests above stub port_usable, so they never reach port_bindable().
+# That is exactly where a privileged-port bug can hide: an unprivileged
+# bind() of 443 fails with EACCES on Linux and macOS, but says nothing
+# about whether DOCKER can publish it (the daemon and its proxy bind as
+# root). Counting that as a conflict would hard-fail every non-root
+# ./start.sh on the two ports the stack cannot do without.
+PROBE=$(sed -n '/^port_bindable() {/,/^}/p' "$START_SH" \
+        | sed -n '/^import errno/,/^        s.close()/p')
+if [ -z "$PROBE" ] || ! command -v python3 >/dev/null 2>&1 \
+   || ! python3 -c 'import socket' >/dev/null 2>&1; then
+    start_test "bind probe behaviour (needs python3)"
+    echo "SKIP"
+    TESTS_RUN=$((TESTS_RUN - 1))
+else
+    probe_file="$(mktemp)"
+    printf '%s\n' "$PROBE" > "$probe_file"
+
+    start_test "bind probe: a free port is bindable, a busy one is not"
+    bad=""
+    python3 "$probe_file" 45321 tcp 0.0.0.0 >/dev/null 2>&1 || bad="free port reported unbindable; "
+    python3 - "$probe_file" <<'PY' >/dev/null 2>&1 || bad="${bad}busy port reported bindable; "
+import socket, subprocess, sys
+s = socket.socket(); s.bind(("0.0.0.0", 45322)); s.listen(1)
+rc = subprocess.call([sys.executable, sys.argv[1], "45322", "tcp", "0.0.0.0"])
+s.close()
+sys.exit(0 if rc != 0 else 1)
+PY
+    if [ -z "$bad" ]; then pass; else fail "$bad"; fi
+
+    start_test "bind probe: EACCES on a privileged port is not a conflict"
+    # Simulate the refusal rather than requiring a real unprivileged 443.
+    if python3 - "$probe_file" <<'PY' >/dev/null 2>&1
+import io, sys
+src = io.open(sys.argv[1], encoding="utf-8").read()
+sim = (src.replace("s.bind((host, p))", 'raise OSError(13, "sim")')
+          .replace('getattr(os, "geteuid", lambda: 0)()', "1000"))
+code = compile(sim, "sim", "exec")
+
+def run(port):
+    sys.argv = ["probe", str(port), "tcp", "0.0.0.0"]
+    try:
+        exec(code, {"__name__": "__main__"})
+        return 0
+    except SystemExit as e:
+        return e.code or 0
+
+# 443 refused to an unprivileged probe -> Docker still binds it as root.
+# 8443 refused -> a genuine reservation (this is the WSL/WinNAT case).
+sys.exit(0 if (run(443) == 0 and run(8443) != 0) else 1)
+PY
+    then
+        pass
+    else
+        fail "port_bindable() must treat EACCES on a port <1024 from an
+unprivileged probe as usable, while still failing on EACCES for a
+non-privileged port. Without the first half, every non-root ./start.sh on
+Linux and macOS dies on 443/80; without the second, a WinNAT reservation
+under WSL would slip through."
+    fi
+    rm -f "$probe_file"
+fi
 
 echo ""
 if [ "$TESTS_FAILED" -eq 0 ]; then

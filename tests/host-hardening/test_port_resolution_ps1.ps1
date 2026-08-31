@@ -38,6 +38,15 @@ function Test-PortUsable {
     param([int]$Port, [string]$Protocol = 'both', [string]$HostIp = '0.0.0.0', [int]$WaitSeconds = 6)
     return -not ($script:Blocked -contains $Port)
 }
+# Stands in for the `docker compose config` query. $null means "config
+# unreadable", which must make the resolver fall back to every table row.
+function Get-PublishedPortEntries {
+    param([string[]]$ComposeArgs)
+    if ($null -eq $script:PublishedStub) { return $null }
+    return @($script:PublishedStub | ForEach-Object {
+        [PSCustomObject]@{ Published = [int]$_; Protocol = 'tcp'; HostIp = '0.0.0.0' }
+    })
+}
 $PSScriptRoot_Override = $true
 '@
 
@@ -57,6 +66,7 @@ function Reset-Env {
     }
     $script:EnvFile = @{}
     $script:PortPolicyMode = 'auto'
+    $script:PublishedStub = $null
 }
 
 $fails = 0
@@ -119,6 +129,27 @@ Check "auto mode still shifts" ($ok -and $env:AGENT_PORT -eq '19100') "ok=$ok AG
 Reset-Env; $script:Blocked = @(); $script:EnvFile = @{ 'OPENNVR_PORT_POLICY' = 'sometimes' }
 $ok = Resolve-Ports
 Check "invalid policy rejected" (-not $ok) "ok=$ok"
+
+# 11. A blocked port for a service the active profiles do not publish must
+# not warn, and must not abort the start.
+Reset-Env; $script:Blocked = @(9100, 19100, 29100, 39100)
+$script:PublishedStub = @(443, 80, 8189, 8322, 8000)
+$ok = Resolve-Ports -ComposeArgs @('-f', 'docker-compose.yml')
+Check "unpublished blocked port does not fail the start" ($ok -and -not $env:AGENT_PORT) `
+    "ok=$ok AGENT_PORT=$env:AGENT_PORT"
+
+# 12. ...but a published one still shifts (control for the test above).
+Reset-Env; $script:Blocked = 9011..9110
+$script:PublishedStub = @(443, 80, 8189, 8322, 8000, 9100)
+$ok = Resolve-Ports -ComposeArgs @('-f', 'docker-compose.yml')
+Check "published blocked port still shifts" ($ok -and $env:AGENT_PORT -eq '19100') `
+    "ok=$ok AGENT_PORT=$env:AGENT_PORT"
+
+# 13. No readable compose config -> resolve everything rather than nothing.
+Reset-Env; $script:Blocked = @()
+$ok = Resolve-Ports -ComposeArgs @('-f', 'docker-compose.yml')
+Check "unreadable compose config falls back to every row" ($ok -and $env:HLS_PORT -eq '8888') `
+    "ok=$ok HLS_PORT=$env:HLS_PORT"
 
 ""
 if ($fails -eq 0) { "All PowerShell resolver checks passed"; exit 0 }

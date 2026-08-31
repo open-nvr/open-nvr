@@ -169,7 +169,7 @@ port_bindable() {
     local port="$1" proto="${2:-both}" host_ip="${3:-0.0.0.0}"
     if python3_usable; then
         python3 -c '
-import socket, sys
+import errno, os, socket, sys
 p, proto, host = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 types = {"tcp": [socket.SOCK_STREAM], "udp": [socket.SOCK_DGRAM]}.get(
     proto, [socket.SOCK_STREAM, socket.SOCK_DGRAM])
@@ -177,7 +177,19 @@ for typ in types:
     s = socket.socket(socket.AF_INET, typ)
     try:
         s.bind((host, p))
-    except OSError:
+    except OSError as exc:
+        # A privileged port refused to an UNPRIVILEGED probe says nothing
+        # about whether Docker can publish it: the daemon and its userland
+        # proxy bind as root. Counting that as a conflict would hard-fail
+        # every non-root start on Linux and macOS, on the two ports the
+        # stack cannot do without (443 and 80).
+        #
+        # POSIX-only reasoning. On Windows the very same errno means a
+        # WinNAT reservation, which IS a real conflict, so start.ps1
+        # deliberately keeps treating it as unbindable.
+        if (exc.errno == errno.EACCES and p < 1024
+                and getattr(os, "geteuid", lambda: 0)() != 0):
+            continue
         sys.exit(1)
     finally:
         s.close()
@@ -235,15 +247,23 @@ port_usable() {
 # Reads the resolved config so overlays and profiles are included and this
 # stays correct as compose changes. Skipped (non-fatal) when no JSON parser
 # is available — a missing pre-flight must never block a working start.
-preflight_published_ports() {
+# Emit "PUBLISHED PROTO HOST_IP" for every port the resolved compose config
+# will publish, one per line. Reads the RESOLVED config so overlays and
+# profiles are included: a service excluded by profile is already gone from
+# this output, which is what lets callers ignore ports nothing publishes.
+#
+#   rc 0  entries on stdout
+#   rc 1  compose config unavailable or unreadable
+#   rc 2  no JSON parser on this host
+published_port_entries() {
     local args="$1"
-    local json entries port proto host_ip blocked=""
+    local json
 
-    json=$(docker compose $args config --format json 2>/dev/null) || return 0
-    [ -n "$json" ] || return 0
+    json=$(docker compose $args config --format json 2>/dev/null) || return 1
+    [ -n "$json" ] || return 1
 
     if python3_usable; then
-        entries=$(printf '%s' "$json" | python3 -c '
+        printf '%s' "$json" | python3 -c '
 import json, sys
 try:
     cfg = json.load(sys.stdin)
@@ -262,13 +282,33 @@ for svc in (cfg.get("services") or {}).values():
         if key not in seen:
             seen.add(key)
             print(key[0], key[1], key[2])
-')
-    elif command -v jq >/dev/null 2>&1; then
-        entries=$(printf '%s' "$json" \
+'
+        return 0
+    fi
+
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" \
             | jq -r '.services[].ports[]? | select(.published != null)
                      | "\(.published) \(.protocol // "tcp") \(.host_ip // "0.0.0.0")"' 2>/dev/null \
-            | grep -E '^[0-9]+ ' | sort -u)
-    else
+            | grep -E '^[0-9]+ ' | sort -u
+        return 0
+    fi
+
+    return 2
+}
+
+# Pre-flight every port the resolved compose config will publish.
+#
+# resolve_ports() already probed the ports it owns, but this is the backstop
+# for anything the table does not cover, and it re-checks after resolution
+# so the ports compose will really bind are the ones that were tested.
+preflight_published_ports() {
+    local args="$1"
+    local entries port proto host_ip blocked="" rc
+
+    entries=$(published_port_entries "$args" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
         # Previously a silent `return 0`, which disabled the entire
         # pre-flight without a word and left operators facing the raw
         # Docker error this function exists to translate.
@@ -276,7 +316,7 @@ for svc in (cfg.get("services") or {}).values():
         echo -e "  ${GRAY}  An unbindable port will surface as a raw Docker error.${NC}" >&2
         return 0
     fi
-
+    [ "$rc" -eq 0 ] || return 0
     [ -n "$entries" ] || return 0
 
     while read -r port proto host_ip; do
@@ -444,7 +484,8 @@ resolve_one_port() {
 
 # Resolve every row, then derive the values that must follow a moved port.
 resolve_ports() {
-    local table var default proto candidates policy label
+    local args="${1:-}"
+    local table published published_raw current var default proto candidates policy label
 
     # auto (default): a "shift" row walks its candidate list, so a WinNAT
     # range that re-rolls at every boot cannot keep the stack down.
@@ -473,8 +514,32 @@ resolve_ports() {
         return 0
     fi
 
+    # Only resolve ports the CURRENT compose selection actually publishes.
+    # The table covers opt-in services too — the debug overlay, the
+    # camera-agent profiles, the log viewer — and without this filter a
+    # blocked 8888 would warn about MediaMTX's debug HLS port on a host that
+    # never publishes it, or, with every candidate blocked, abort a start
+    # over a port nothing was going to bind. Compose reads .env itself, so
+    # the values it reports here already reflect the operator's settings.
+    #
+    # No parser or no compose config: fall through to resolving every row.
+    # Warning about a port that is not published is a far better failure
+    # than silently skipping one that is.
+    published=""
+    if [ -n "$args" ]; then
+        if published_raw=$(published_port_entries "$args" 2>/dev/null); then
+            published=$(printf '%s\n' "$published_raw" | awk 'NF {print $1}' | sort -u)
+        fi
+    fi
+
     while IFS='|' read -r var default proto candidates policy label; do
         [ -n "$var" ] || continue
+        if [ -n "$published" ]; then
+            eval "current=\"\${$var:-}\""
+            [ -n "$current" ] || current="$(get_env_var "$var" 2>/dev/null || echo "")"
+            [ -n "$current" ] || current="$default"
+            printf '%s\n' "$published" | grep -qx "$current" || continue
+        fi
         resolve_one_port "$var" "$default" "$proto" "$candidates" "$policy" "$label" || return 1
     done <<PORT_TABLE_EOF
 $table
@@ -1447,7 +1512,7 @@ run_up() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
-    resolve_ports || exit 1
+    resolve_ports "$ARGS" || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
@@ -1470,7 +1535,7 @@ run_build() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
-    resolve_ports || exit 1
+    resolve_ports "$ARGS" || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
@@ -1644,7 +1709,7 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
-    resolve_ports || exit 1
+    resolve_ports "$ARGS" || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints

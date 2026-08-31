@@ -117,6 +117,12 @@ function Test-PortInUse {
 # 0.0.0.0). It matters: probing a "127.0.0.1:8000" publication as a
 # wildcard bind reports a conflict against any unrelated listener on
 # another interface's :8000, and misses nothing in return.
+#
+# NOTE: start.sh treats EACCES on a port below 1024 as usable, because on
+# Linux and macOS that is just the privileged-port rule and Docker binds as
+# root anyway. Windows has no such rule, and here the SAME error means a
+# WinNAT reservation — a real conflict. So that carve-out is deliberately
+# absent on this side; do not "fix" the asymmetry by copying it over.
 function Test-PortBindable {
     param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both',
           [string]$HostIp = '0.0.0.0')
@@ -213,16 +219,21 @@ function Test-PortUsable {
 # Reads the resolved config so overlays and profiles are included and this
 # stays correct as compose changes. Any failure to read or parse it is
 # non-fatal — a missing pre-flight must never block a working start.
-function Invoke-PreflightPublishedPorts {
+# Every port the resolved compose config will publish, as objects with
+# Published / Protocol / HostIp. Reads the RESOLVED config so overlays and
+# profiles are included: a service excluded by profile is already gone from
+# this output, which is what lets callers ignore ports nothing publishes.
+# Returns $null when the config cannot be read or parsed.
+function Get-PublishedPortEntries {
     param([string[]]$ComposeArgs)
 
     $json = & docker compose @ComposeArgs config --format json 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $json) { return $true }
-    try { $cfg = ($json | Out-String | ConvertFrom-Json) } catch { return $true }
-    if (-not $cfg.services) { return $true }
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
+    try { $cfg = ($json | Out-String | ConvertFrom-Json) } catch { return $null }
+    if (-not $cfg.services) { return $null }
 
     $seen = @{}
-    $blocked = @()
+    $entries = @()
     foreach ($svc in $cfg.services.PSObject.Properties) {
         foreach ($p in @($svc.Value.ports)) {
             if (-not $p -or -not $p.published) { continue }
@@ -235,7 +246,30 @@ function Invoke-PreflightPublishedPorts {
             $key = "$pub/$proto"
             if ($seen.ContainsKey($key)) { continue }
             $seen[$key] = $true
-            if (-not (Test-PortUsable -Port ([int]$pub) -Protocol $proto -HostIp $hostIp)) { $blocked += $key }
+            $entries += [PSCustomObject]@{
+                Published = [int]$pub; Protocol = $proto; HostIp = $hostIp
+            }
+        }
+    }
+    return $entries
+}
+
+# Pre-flight every port the resolved compose config will publish.
+#
+# Resolve-Ports already probed the ports it owns, but this is the backstop
+# for anything the table does not cover, and it re-checks after resolution
+# so the ports compose will really bind are the ones that were tested.
+function Invoke-PreflightPublishedPorts {
+    param([string[]]$ComposeArgs)
+
+    $entries = Get-PublishedPortEntries -ComposeArgs $ComposeArgs
+    if ($null -eq $entries) { return $true }
+
+    $seen = @{}
+    $blocked = @()
+    foreach ($e in $entries) {
+        if (-not (Test-PortUsable -Port $e.Published -Protocol $e.Protocol -HostIp $e.HostIp)) {
+            $blocked += "$($e.Published)/$($e.Protocol)"
         }
     }
 
@@ -384,6 +418,8 @@ function Resolve-OnePort {
 
 # Resolve every row, then derive the values that must follow a moved port.
 function Resolve-Ports {
+    param([string[]]$ComposeArgs = @())
+
     # auto (default): a "shift" row walks its candidate list, so a WinNAT
     # range that re-rolls at every boot cannot keep the stack down.
     # strict: nothing moves on its own — see Resolve-OnePort.
@@ -408,7 +444,32 @@ function Resolve-Ports {
         return $true
     }
 
+    # Only resolve ports the CURRENT compose selection actually publishes.
+    # The table covers opt-in services too — the debug overlay, the
+    # camera-agent profiles, the log viewer — and without this filter a
+    # blocked 8888 would warn about MediaMTX's debug HLS port on a host that
+    # never publishes it, or, with every candidate blocked, abort a start
+    # over a port nothing was going to bind. Compose reads .env itself, so
+    # the values it reports here already reflect the operator's settings.
+    #
+    # No compose config: fall through to resolving every row. Warning about
+    # a port that is not published is a far better failure than silently
+    # skipping one that is.
+    $published = $null
+    if ($ComposeArgs -and $ComposeArgs.Count -gt 0) {
+        $entries = Get-PublishedPortEntries -ComposeArgs $ComposeArgs
+        if ($null -ne $entries) { $published = @($entries | ForEach-Object { $_.Published }) }
+    }
+
     foreach ($row in $rows) {
+        if ($null -ne $published) {
+            $current = [Environment]::GetEnvironmentVariable($row.Var)
+            if ([string]::IsNullOrWhiteSpace($current)) { $current = Get-EnvVar $row.Var }
+            if ([string]::IsNullOrWhiteSpace($current)) { $current = "$($row.Default)" }
+            $currentInt = 0
+            if (-not [int]::TryParse("$current".Trim(), [ref]$currentInt)) { $currentInt = $row.Default }
+            if ($published -notcontains $currentInt) { continue }
+        }
         if (-not (Resolve-OnePort -Row $row)) { return $false }
     }
 
@@ -836,9 +897,9 @@ function Invoke-Up {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
-    if (-not (Resolve-Ports)) { exit 1 }
-    Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Resolve-Ports -ComposeArgs $ca)) { exit 1 }
+    Write-NetHints
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Starting all services ..." Green
     docker compose @ca up -d --remove-orphans
@@ -854,9 +915,9 @@ function Invoke-Build {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
-    if (-not (Resolve-Ports)) { exit 1 }
-    Write-NetHints
     $ca = Get-ComposeArgs
+    if (-not (Resolve-Ports -ComposeArgs $ca)) { exit 1 }
+    Write-NetHints
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build
