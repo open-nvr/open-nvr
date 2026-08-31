@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Car, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
@@ -150,16 +150,26 @@ export function AppShell() {
       const { data } = await apiService.getApps()
       return (Array.isArray(data) ? data : []) as {
         enabled?: boolean
-        manifest?: { requires_tasks?: string[] } | null
+        manifest?: { requires_tasks?: string[]; provides?: string[] } | null
       }[]
     },
     retry: 0,
     staleTime: 60_000,
     refetchInterval: 120_000,
   })
-  const lprEnabled = (appsNav.data ?? []).some(
-    (a) => a.enabled && (a.manifest?.requires_tasks ?? []).includes('license_plate_recognition')
-  )
+  // The curated first-class pages, capability-keyed on manifest
+  // `provides` (with a legacy predicate for manifests that predate the
+  // field). Adding a vertical = one row here + its page — the nav
+  // scales with what THIS install enabled, never with catalog size.
+  const apps = appsNav.data ?? []
+  const providesEnabled = (capability: string, legacy?: (m: any) => boolean) =>
+    apps.some((a) => a.enabled && (
+      (a.manifest?.provides ?? []).includes(capability) ||
+      (legacy ? legacy(a.manifest ?? {}) : false)
+    ))
+  const lprEnabled = providesEnabled('vehicles',
+    (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'))
+  const occupancyEnabled = providesEnabled('occupancy')
 
   const visibleGroups = useMemo(
     () => {
@@ -167,6 +177,9 @@ export function AppShell() {
       const appItems = [
         ...(lprEnabled && canView('/vehicles')
           ? [{ to: '/vehicles', label: 'Vehicles', icon: <Car size={16} />, perm: '/vehicles' as const }]
+          : []),
+        ...(occupancyEnabled && canView('/occupancy')
+          ? [{ to: '/occupancy', label: 'Occupancy', icon: <Users size={16} />, perm: '/occupancy' as const }]
           : []),
       ]
       if (appItems.length > 0) {
@@ -176,7 +189,7 @@ export function AppShell() {
       return groups
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission, lprEnabled]
+    [hasPermission, lprEnabled, occupancyEnabled]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)

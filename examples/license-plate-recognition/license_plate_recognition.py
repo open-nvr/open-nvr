@@ -212,6 +212,8 @@ MANIFEST = AppManifest(
     # Plates are PII (decision 6): consuming plate.recognized.v1 is a
     # declared scope — granted at registration, audited, catalog-visible.
     requires_scopes=["events:plate.recognized"],
+    # This app powers the first-class Vehicles page.
+    provides=["vehicles"],
     subscribes=PLATE_SUBJECT_PATTERN,
     params=[
         Param("dedup_window_seconds", float, default=60.0,

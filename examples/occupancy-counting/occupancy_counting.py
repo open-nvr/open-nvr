@@ -129,10 +129,12 @@ def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
 MANIFEST = AppManifest(
     id="occupancy-counting",
     name="Occupancy Counting",
-    version="1.0.0",
+    version="1.1.0",
     category="analytics",
     summary="Alerts on zone occupancy threshold crossings (over / under / cleared).",
     requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
+    # This app powers the first-class Occupancy page.
+    provides=["occupancy"],
     subscribes="opennvr.inference.>",
     params=[
         Param("watch_labels", list, default=["person"]),
@@ -145,6 +147,27 @@ MANIFEST = AppManifest(
         Param("clear_alerts", bool, default=False,
               description="Also fire a low-severity alert when a zone returns to normal."),
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+    ],
+    # Store listing (the catalog's Details section).
+    description=(
+        "Live head-counts for the spaces you care about. Draw a zone "
+        "on any camera and the app counts the people (or any watched "
+        "label) inside it, riding the detection stream the platform "
+        "already produces — zero extra inference cost.\n\n"
+        "Set a maximum and it alerts the moment a zone goes over "
+        "(and, optionally, when it drops under a minimum or returns "
+        "to normal). The first-class Occupancy page shows every zone "
+        "live; thresholds apply immediately."
+    ),
+    author="OpenNVR",
+    website="https://github.com/open-nvr/open-nvr",
+    license="AGPL-3.0",
+    contact="https://github.com/open-nvr/open-nvr/discussions",
+    use_cases=[
+        "Over-occupancy alarms for halls, gyms, canteens, waiting areas",
+        "Factory floor and warehouse zone limits (safety compliance)",
+        "Live 'people now' board across every watched space",
+        "Under-occupancy: know when a manned post is left empty",
     ],
     emits=[
         AlertType("occupancy_over", severity="high"),
