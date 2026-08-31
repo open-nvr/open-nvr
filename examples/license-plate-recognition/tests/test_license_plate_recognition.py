@@ -750,3 +750,13 @@ def test_trust_settings_update_live():
     assert alerter._fuzzy_max == 2
     assert len(alerter._formats) == 1
     assert alerter._overstay_hours == 4.0
+
+
+def test_fuzzy_allowlist_wording_is_expected_not_registered():
+    alerter, _ = _alerter(alarm_on_unknown=True, fuzzy_max_distance=1,
+                          allowlist=["KA05MJ6021"])
+    fired = alerter.handle_event(_envelope(plate="KA05MJ6O21"))  # O for 0
+    assert fired[0].severity == "low"
+    assert "Probable expected vehicle KA05MJ6021" in fired[0].title
+    assert "registered" not in fired[0].title
+    assert fired[0].evidence["unknown_alarm"] is False

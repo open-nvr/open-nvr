@@ -932,12 +932,16 @@ class PlateAlerter(Detector):
                 title += f" (read ≈ {fuzzy_match['plate']})"
         elif fuzzy_match is not None and fuzzy_match.get("kind") in ("registry", "allowlist"):
             canonical = str(fuzzy_match["plate"])
-            entry = self._registry.get(canonical) or {}
-            owner = entry.get("owner", "")
-            tag = f" ({owner})" if owner else ""
             severity = "low"
-            title = (f"Probable registered vehicle {canonical}{tag} — "
-                     f"read {plate}")
+            if fuzzy_match["kind"] == "registry":
+                entry = self._registry.get(canonical) or {}
+                owner = entry.get("owner", "")
+                tag = f" ({owner})" if owner else ""
+                title = (f"Probable registered vehicle {canonical}{tag} — "
+                         f"read {plate}")
+            else:
+                title = (f"Probable expected vehicle {canonical} — "
+                         f"read {plate}")
         elif unknown_alarm:
             severity, title = "high", f"Unknown vehicle {plate}"
         elif registry_entry is not None:
