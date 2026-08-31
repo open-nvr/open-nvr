@@ -171,7 +171,7 @@ docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml \
 ```
 
 **Live, centrally, in a browser** — opt-in profile `logs` adds
-[Dozzle](https://dozzle.dev) at `http://127.0.0.1:9999`, streaming every
+[Dozzle](https://dozzle.dev) at `http://127.0.0.1:9999` (`LOGS_PORT`), streaming every
 `opennvr_*` container side by side with search:
 
 ```bash

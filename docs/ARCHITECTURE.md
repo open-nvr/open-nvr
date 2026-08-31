@@ -163,14 +163,57 @@ Auth is JWT (access + refresh); MFA is mandatory. See the auth section of
 
 ## Ports (default single-host stack)
 
-| Service | Port(s) | Exposure |
-|---|---|---|
-| nginx (the only LAN edge) | 443 (+ 80→443) | LAN |
-| backend API + frontend | 8000 | `127.0.0.1` (fronted by nginx) |
-| KAI-C | 8100 | internal (backend → loopback) |
-| AI adapter (e.g. yolov8) | 9002 (docker) / 9100 (bare dev) | internal |
-| MediaMTX | RTSPS 8322 · HLS 8888 · WebRTC 8889 (+ICE 8189) · RTSP 8554 · admin 9997 · playback 9996 | `127.0.0.1` except WebRTC ICE |
-| PostgreSQL, NATS | 5432 · 4222/8222 | internal |
+Every **host-published** port below is declared in `scripts/ports.conf` and
+resolved by the launcher before Compose runs. Leave the variable unset and the
+launcher probes the default, falling back through a short candidate list if the
+host refuses to bind it — see [Port resolution](#port-resolution) below.
+
+| Service | Port(s) | Variable | Exposure |
+|---|---|---|---|
+| nginx (the only LAN edge) | 443 (+ 80→443) | `HTTPS_PORT` / `HTTP_PORT` | LAN |
+| backend API + frontend | 8000 | `CORE_HOST_PORT` | `127.0.0.1` (fronted by nginx) |
+| KAI-C | 8100 | — | internal (backend → loopback) |
+| AI adapter (e.g. yolov8) | 9002 (docker) / 9100 (bare dev) | — | internal |
+| MediaMTX | RTSPS 8322 · ICE 8189 | `RTSPS_PORT` · `WEBRTC_ICE_PORT` | `127.0.0.1` except WebRTC ICE |
+| MediaMTX (debug, opt-in) | HLS 8888 · WebRTC 8889 · admin 9997 · playback 9996 | `HLS_PORT` · `WEBRTC_HTTP_PORT` · `MEDIAMTX_API_PORT` · `PLAYBACK_PORT` | `127.0.0.1`, only with `OPENNVR_DEBUG_PORTS=1` |
+| Camera-agent example (opt-in) | 9100 | `AGENT_PORT` | LAN, only with the agent profile |
+| Log viewer (opt-in) | 9999 | `LOGS_PORT` | `127.0.0.1`, only with profile `logs` |
+| RTSP 8554 (container-internal) | 8554 | — | not published |
+| PostgreSQL, NATS | 5432 · 4222/8222 | — | internal |
+
+Only the **host** side of each publication moves. Container ports are fixed —
+they are baked into `nginx/opennvr.conf`, `mediamtx.docker.yml`,
+`supervisord.conf` and the healthchecks.
+
+### Port resolution
+
+A published port can be impossible to bind while nothing is listening on it.
+Windows WinNAT/Hyper-V reserves ranges that are **re-rolled at every boot**, so
+a host that started fine yesterday fails today; macOS has AirPlay Receiver on
+5000/7000; Linux has `ip_local_reserved_ports` and systemd socket activation.
+Because Docker publishes all of a service's ports or none, one unbindable port
+aborts **every** publication for that service.
+
+So the launcher resolves each port before starting:
+
+- **`auto`** (default) — probe the default, then walk the candidate list,
+  exporting the first bindable port and warning loudly that it moved.
+- **`strict`** (`OPENNVR_PORT_POLICY=strict`) — never relocate anything; fail
+  with an explanation naming the variable to set.
+
+An explicit value in `.env` is **never** auto-overridden under either policy: it
+usually has a firewall rule or router port-forward behind it, so drifting off it
+would break remote access in a way that is very hard to trace. If it cannot be
+bound, the launcher fails and says so.
+
+`HTTPS_PORT` and `HTTP_PORT` never move automatically even under `auto` — they
+appear in every documented URL and in the TLS certificate.
+
+> **Production deployments should set `OPENNVR_PORT_POLICY=strict`** and pin the
+> ports they publish. Once a site is real the ports are load-bearing (firewall
+> rules, router port-forwards, an upstream reverse proxy, monitoring checks,
+> operator bookmarks), and a port that quietly moves after a reboot is worse
+> than a start that refuses to come up and tells you why.
 
 ## Code map — where things live
 

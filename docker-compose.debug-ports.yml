@@ -23,7 +23,7 @@
 services:
   mediamtx:
     ports:
-      - "127.0.0.1:8888:8888" # HLS (browsers normally use nginx /hls/)
-      - "127.0.0.1:8889:8889" # WebRTC signalling (normally nginx /webrtc/)
-      - "127.0.0.1:9996:9996" # Recording playback (normally nginx /playback/)
-      - "127.0.0.1:9997:9997" # MediaMTX admin API / metrics
+      - "127.0.0.1:${HLS_PORT:-8888}:8888" # HLS (browsers normally use nginx /hls/)
+      - "127.0.0.1:${WEBRTC_HTTP_PORT:-8889}:8889" # WebRTC signalling (normally nginx /webrtc/)
+      - "127.0.0.1:${PLAYBACK_PORT:-9996}:9996" # Recording playback (normally nginx /playback/)
+      - "127.0.0.1:${MEDIAMTX_API_PORT:-9997}:9997" # MediaMTX admin API / metrics

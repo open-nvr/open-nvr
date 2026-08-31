@@ -112,19 +112,30 @@ function Test-PortInUse {
 # $Protocol must match what compose actually publishes: probing UDP for a
 # TCP-only publication would reject a perfectly good port whose UDP twin
 # happens to be reserved.
+#
+# -HostIp is the address the publication actually binds to (default
+# 0.0.0.0). It matters: probing a "127.0.0.1:8000" publication as a
+# wildcard bind reports a conflict against any unrelated listener on
+# another interface's :8000, and misses nothing in return.
 function Test-PortBindable {
-    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both')
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both',
+          [string]$HostIp = '0.0.0.0')
     $tcp = $null
     $udp = $null
+    $addr = [System.Net.IPAddress]::Any
+    if ($HostIp -and $HostIp -ne '0.0.0.0') {
+        try { $addr = [System.Net.IPAddress]::Parse($HostIp) } catch { $addr = [System.Net.IPAddress]::Any }
+    }
     try {
         if ($Protocol -ne 'udp') {
             # ExclusiveAddressUse defaults to true, which is what we want:
             # a shared bind would report success on a port already in use.
-            $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+            $tcp = New-Object System.Net.Sockets.TcpListener($addr, $Port)
             $tcp.Start()
         }
         if ($Protocol -ne 'tcp') {
-            $udp = New-Object System.Net.Sockets.UdpClient($Port)
+            $udp = New-Object System.Net.Sockets.UdpClient(
+                (New-Object System.Net.IPEndPoint($addr, $Port)))
         }
         return $true
     } catch {
@@ -161,8 +172,9 @@ function Test-PortHasListener {
 }
 
 function Test-PortUsable {
-    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both', [int]$WaitSeconds = 6)
-    if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
+    param([int]$Port, [ValidateSet('tcp','udp','both')][string]$Protocol = 'both',
+          [string]$HostIp = '0.0.0.0', [int]$WaitSeconds = 6)
+    if (Test-PortBindable -Port $Port -Protocol $Protocol -HostIp $HostIp) { return $true }
     if (Test-PortOwnedByStack -Port $Port) { return $true }
 
     # The bind failed. Which reason matters:
@@ -181,7 +193,7 @@ function Test-PortUsable {
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 400
-        if (Test-PortBindable -Port $Port -Protocol $Protocol) { return $true }
+        if (Test-PortBindable -Port $Port -Protocol $Protocol -HostIp $HostIp) { return $true }
     }
     return $false
 }
@@ -219,10 +231,11 @@ function Invoke-PreflightPublishedPorts {
             # normalises our entries to single ports anyway.
             if ($pub -notmatch '^\d+$') { continue }
             $proto = if ($p.protocol) { "$($p.protocol)" } else { 'tcp' }
+            $hostIp = if ($p.host_ip) { "$($p.host_ip)" } else { '0.0.0.0' }
             $key = "$pub/$proto"
             if ($seen.ContainsKey($key)) { continue }
             $seen[$key] = $true
-            if (-not (Test-PortUsable -Port ([int]$pub) -Protocol $proto)) { $blocked += $key }
+            if (-not (Test-PortUsable -Port ([int]$pub) -Protocol $proto -HostIp $hostIp)) { $blocked += $key }
         }
     }
 
@@ -232,74 +245,183 @@ function Invoke-PreflightPublishedPorts {
     Write-Color "      $($blocked -join ', ')" Red
     Write-Color "    Docker publishing is all-or-nothing per container, so the" DarkGray
     Write-Color "    affected service would fail to publish ANY of its ports." DarkGray
-    Write-Color "    A port can be unbindable while nothing is listening on it:" DarkGray
-    Write-Color "    WinNAT reserves ranges that are re-rolled at every boot," DarkGray
-    Write-Color "    loopback publications included. Inspect them with:" DarkGray
-    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
-    Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
-    Write-Color "    Free the port, or reserve it permanently (admin):" DarkGray
-    Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent" DarkGray
+    Show-PortHelp
+    Write-Color "    Most of these ports can be moved: see scripts\ports.conf for" DarkGray
+    Write-Color "    the variable that controls each one, and set it in .env." DarkGray
     return $false
 }
 
-# Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
-# compose interpolation in docker-compose.yml. Returns $false if no usable
-# port could be found, so the caller can fail with a clear message instead
-# of letting `docker compose up` die on an opaque daemon error.
-function Set-WebRtcIcePort {
-    # Fixed, ordered candidate list rather than a random free port: the set
-    # of ports an operator may need to allow through a firewall has to stay
-    # small and documentable. Spread far apart because the reserved ranges
-    # are allocated as runs of contiguous 100-port blocks.
-    $candidates = @(8189, 18189, 28189, 38189)
-    $preferred = $candidates[0]
+# ── Published-port resolution (scripts\ports.conf) ─────────
+# Generalises what used to be Set-WebRtcIcePort to EVERY published host
+# port. The ICE probe protected exactly one port, but Docker's publishing
+# is all-or-nothing per container: a reserved 9100 or 8322 takes a whole
+# service down just as effectively (#298, #368). The table is shared with
+# start.sh so the two launchers cannot drift apart.
+$script:PortTableFile = Join-Path $PSScriptRoot "scripts\ports.conf"
 
-    # An explicit operator choice is never silently overridden — it is
-    # usually mirrored by a firewall rule or router port-forward, so moving
-    # off it would break remote viewing in a way that is very hard to trace.
-    $explicit = $env:WEBRTC_ICE_PORT
-    if ([string]::IsNullOrWhiteSpace($explicit)) { $explicit = Get-EnvVar "WEBRTC_ICE_PORT" }
+# Returns one PSCustomObject per row, comments and blank lines dropped.
+function Import-PortTable {
+    if (-not (Test-Path $script:PortTableFile)) { return @() }
+    $rows = @()
+    foreach ($line in (Get-Content $script:PortTableFile)) {
+        $stripped = ($line -replace '#.*$', '').Trim()
+        if (-not $stripped) { continue }
+        $f = $stripped -split '\|'
+        if ($f.Count -ne 6) { continue }
+        $f = $f | ForEach-Object { $_.Trim() }
+        if (-not $f[0]) { continue }
+        $rows += [PSCustomObject]@{
+            Var        = $f[0]
+            Default    = [int]$f[1]
+            Protocol   = $f[2]
+            Candidates = @($f[3] -split ',' | ForEach-Object { [int]$_.Trim() })
+            Policy     = $f[4]
+            Label      = $f[5]
+        }
+    }
+    return $rows
+}
+
+# Windows is the platform where a port can be unbindable with nothing
+# listening on it, so this is the WinNAT branch. start.sh carries the
+# macOS/Linux/WSL equivalents.
+function Show-PortHelp {
+    param([int]$Port = 0)
+    Write-Color "    A port can be unbindable while nothing is listening on it:" DarkGray
+    Write-Color "    WinNAT/Hyper-V reserves ranges that are RE-ROLLED AT EVERY BOOT," DarkGray
+    Write-Color "    loopback publications included, so a host that worked yesterday" DarkGray
+    Write-Color "    can fail today. Inspect them with:" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
+    Write-Color "    Free the port, or reserve it permanently (ADMIN PowerShell)." DarkGray
+    Write-Color "    WinNAT must be stopped first: a persistent exclusion cannot be" DarkGray
+    Write-Color "    added over an existing dynamic one." DarkGray
+    $p = if ($Port -gt 0) { "$Port" } else { "<port>" }
+    Write-Color "      net stop winnat" DarkGray
+    Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=$p numberofports=1 store=persistent" DarkGray
+    Write-Color "      net start winnat" DarkGray
+}
+
+# Resolve one table row into an environment variable compose will read.
+#
+# An operator value (environment, then .env) ALWAYS wins and is NEVER
+# auto-overridden, whatever the policy: it is usually mirrored by a
+# firewall rule or a router port-forward, so drifting off it breaks remote
+# viewing in a way that is very hard to trace. If it cannot be bound we
+# fail loudly naming the variable instead.
+function Resolve-OnePort {
+    param([PSObject]$Row)
+
+    $explicit = [Environment]::GetEnvironmentVariable($Row.Var)
+    if ([string]::IsNullOrWhiteSpace($explicit)) { $explicit = Get-EnvVar $Row.Var }
 
     if (-not [string]::IsNullOrWhiteSpace($explicit)) {
         $port = 0
-        if (-not [int]::TryParse($explicit.Trim(), [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
-            Write-Color "  WEBRTC_ICE_PORT='$($explicit.Trim())' is not a valid port (1024-65535)." Red
+        # Lower bound is 1, not 1024: 443 and 80 are legitimate operator
+        # choices here, and Docker's proxy binds privileged ports itself.
+        if (-not [int]::TryParse($explicit.Trim(), [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+            Write-Color "  $($Row.Var)='$($explicit.Trim())' is not a valid port (1-65535)." Red
             return $false
         }
-        if (-not (Test-PortUsable -Port $port -Protocol both)) {
-            Write-Color "  WEBRTC_ICE_PORT=$port cannot be bound on this host." Red
-            Write-Color "    MediaMTX would fail to publish ALL of its ports, not just this one." DarkGray
-            Write-Color "    Reserved ranges (a port inside one is unbindable even when idle):" DarkGray
-            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
-            Write-Color "      netsh interface ipv4 show excludedportrange protocol=udp" DarkGray
-            Write-Color "    Either pick a free port, or reserve this one permanently (admin):" DarkGray
-            Write-Color "      netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
-            Write-Color "      netsh int ipv4 add excludedportrange protocol=udp startport=$port numberofports=1 store=persistent" DarkGray
+        if (-not (Test-PortUsable -Port $port -Protocol $Row.Protocol)) {
+            Write-Color "  $($Row.Var)=$port ($($Row.Label)) cannot be bound on this host." Red
+            Write-Color "    Docker publishes all of a service's ports or none, so this" DarkGray
+            Write-Color "    would take down every port of the affected service." DarkGray
+            Write-Color "    Free the port, or set $($Row.Var) in .env to a different one." DarkGray
+            Show-PortHelp -Port $port
             return $false
         }
-        $env:WEBRTC_ICE_PORT = "$port"
+        [Environment]::SetEnvironmentVariable($Row.Var, "$port")
         return $true
     }
 
-    foreach ($port in $candidates) {
-        if (-not (Test-PortUsable -Port $port -Protocol both)) { continue }
-        $env:WEBRTC_ICE_PORT = "$port"
-        if ($port -ne $preferred) {
+    # No operator value. "pin" rows are never relocated automatically:
+    # moving the web edge would invalidate every bookmark, every URL in the
+    # docs and the certificate story, so it is worth a clear stop instead.
+    # OPENNVR_PORT_POLICY=strict promotes EVERY row to pin. Self-healing is
+    # the right default for a fresh install, but on a production site the
+    # ports are load-bearing: firewall rules, router port-forwards, upstream
+    # reverse proxies, monitoring checks and operator bookmarks all encode
+    # them. There, a port that quietly moves after a reboot is worse than a
+    # start that refuses to come up and says why.
+    if ($Row.Policy -eq 'pin' -or $script:PortPolicyMode -eq 'strict') {
+        if (Test-PortUsable -Port $Row.Default -Protocol $Row.Protocol) {
+            [Environment]::SetEnvironmentVariable($Row.Var, "$($Row.Default)")
+            return $true
+        }
+        Write-Color "  $($Row.Label) port $($Row.Default) cannot be bound on this host." Red
+        if ($Row.Policy -eq 'pin') {
+            Write-Color "    This port is never moved automatically — it appears in every" DarkGray
+            Write-Color "    documented URL and in the TLS certificate." DarkGray
+        } else {
+            Write-Color "    OPENNVR_PORT_POLICY=strict, so no port is relocated" DarkGray
+            Write-Color "    automatically. Unset it to let the launcher fall back to" DarkGray
+            Write-Color "    $($Row.Candidates -join ', ')." DarkGray
+        }
+        Write-Color "    Free the port, or set $($Row.Var) in .env to choose another." DarkGray
+        Show-PortHelp -Port $Row.Default
+        return $false
+    }
+
+    foreach ($port in $Row.Candidates) {
+        if (-not (Test-PortUsable -Port $port -Protocol $Row.Protocol)) { continue }
+        [Environment]::SetEnvironmentVariable($Row.Var, "$port")
+        if ($port -ne $Row.Default) {
             # Loud on purpose: a silently drifting port is how this turns
             # into an unexplainable firewall problem weeks later.
-            Write-Color "  WebRTC ICE port $preferred is unavailable — using $port for this run." Yellow
-            Write-Color "    Usually a WinNAT/Hyper-V reserved range, which is re-rolled at every boot:" DarkGray
-            Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
-            Write-Color "    For a port that stays put across reboots, set WEBRTC_ICE_PORT in .env and" DarkGray
-            Write-Color "    reserve it (admin): netsh int ipv4 add excludedportrange protocol=tcp startport=$port numberofports=1 store=persistent" DarkGray
+            Write-Color "  $($Row.Label) port $($Row.Default) is unavailable — using $port for this run." Yellow
+            Write-Color "    Usually a WinNAT reserved range, re-rolled at every boot." DarkGray
+            Write-Color "    To pin a stable port for firewall rules, set $($Row.Var) in .env." DarkGray
         }
         return $true
     }
 
-    Write-Color "  No usable WebRTC ICE port found (tried: $($candidates -join ', '))." Red
-    Write-Color "    Set WEBRTC_ICE_PORT in .env to a port outside every reserved range:" DarkGray
-    Write-Color "      netsh interface ipv4 show excludedportrange protocol=tcp" DarkGray
+    Write-Color "  No usable $($Row.Label) port found (tried: $($Row.Candidates -join ', '))." Red
+    Write-Color "    Set $($Row.Var) in .env to a port outside every reserved range." DarkGray
+    Show-PortHelp
     return $false
+}
+
+# Resolve every row, then derive the values that must follow a moved port.
+function Resolve-Ports {
+    # auto (default): a "shift" row walks its candidate list, so a WinNAT
+    # range that re-rolls at every boot cannot keep the stack down.
+    # strict: nothing moves on its own — see Resolve-OnePort.
+    $mode = $env:OPENNVR_PORT_POLICY
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = Get-EnvVar "OPENNVR_PORT_POLICY" }
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = 'auto' }
+    $mode = $mode.Trim().ToLower()
+    if ($mode -ne 'auto' -and $mode -ne 'strict') {
+        Write-Color "  OPENNVR_PORT_POLICY='$mode' is not valid (auto|strict)." Red
+        return $false
+    }
+    $script:PortPolicyMode = $mode
+    if ($mode -eq 'strict') {
+        Write-Color "  Port policy: strict — no port will be relocated automatically." DarkGray
+    }
+
+    $rows = Import-PortTable
+    if (-not $rows -or $rows.Count -eq 0) {
+        Write-Color "  scripts\ports.conf missing or empty — skipping port resolution." Yellow
+        Write-Color "    Compose defaults will be used; an unbindable port will surface" DarkGray
+        Write-Color "    as a raw Docker error instead of a named one." DarkGray
+        return $true
+    }
+
+    foreach ($row in $rows) {
+        if (-not (Resolve-OnePort -Row $row)) { return $false }
+    }
+
+    # $host in the nginx 80->443 redirect carries no port, so a moved
+    # HTTPS_PORT has to be re-attached explicitly. Empty for the default
+    # 443 — see nginx/opennvr.conf and the nginx service in compose.
+    $https = [Environment]::GetEnvironmentVariable('HTTPS_PORT')
+    if ([string]::IsNullOrWhiteSpace($https) -or $https -eq '443') {
+        $env:OPENNVR_HTTPS_SUFFIX = ""
+    } else {
+        $env:OPENNVR_HTTPS_SUFFIX = ":$https"
+    }
+    return $true
 }
 
 # ── Pre-flight validation ──────────────────────────────────
@@ -368,7 +490,16 @@ function Invoke-Validate {
     }
 
     # 7. Port conflicts
-    $busyPorts = @(8000, 8554, 8888, 8889, 9997) | Where-Object { Test-PortInUse $_ }
+    # Intentionally NOT a hardcoded list any more. This used to test
+    # 8000/8554/8888/8889/9997, which had drifted badly out of step with
+    # compose: 8554 is not published at all, 8888/8889/9997 only under the
+    # opt-in debug overlay, while the ports that ARE published by default
+    # (443, 80, 8322, 9100) were absent — so it printed a reassuring green
+    # tick for port sets it never looked at. Resolve-Ports and
+    # Invoke-PreflightPublishedPorts derive the real list from the resolved
+    # compose config, late enough to see the profiles that decide which
+    # ports exist at all.
+    $busyPorts = @()
     if ($busyPorts) {
         Write-Color "  ⚠ Ports already in use: $($busyPorts -join ', ')" Yellow
         Write-Color "      → Check: netstat -ano | findstr LISTENING"
@@ -561,17 +692,17 @@ function Show-RunningInfo {
     if ([string]::IsNullOrWhiteSpace($u)) { $u = 'admin' }
     Write-Color ""
     Write-Color "  ✓ OpenNVR is running!" Green
-    Write-Color "  Web UI (local) → http://localhost:8000  (login: $u)" Cyan
-    Write-Color "  Web UI (HTTPS) → https://localhost/" Cyan
-    Write-Color "  Web UI (LAN)   → https://<this-host-ip>/" Cyan
-    Write-Color "  API Docs       → http://localhost:8000/docs" Cyan
+    Write-Color "  Web UI (local) → http://localhost:$($env:CORE_HOST_PORT)  (login: $u)" Cyan
+    Write-Color "  Web UI (HTTPS) → https://localhost$($env:OPENNVR_HTTPS_SUFFIX)/" Cyan
+    Write-Color "  Web UI (LAN)   → https://<this-host-ip>$($env:OPENNVR_HTTPS_SUFFIX)/" Cyan
+    Write-Color "  API Docs       → http://localhost:$($env:CORE_HOST_PORT)/docs" Cyan
     # If an agent example is active, surface its demo URL(s) too. The agents
     # serve their own https on the LAN (sign in with your OpenNVR account).
     $exProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
     $example = Get-EnvVar "OPENNVR_EXAMPLE"
     if ($exProfile -in @('camera-agent', 'camera-agent-chat') -or $example -eq 'camera-agent') {
-        Write-Color "  Camera Agent   → https://localhost:9100/demo  (ask your cameras - voice or chat)" Cyan
-        Write-Color "  Camera Agent (LAN) → https://<this-host-ip>:9100/demo  (OpenNVR login)" Cyan
+        Write-Color "  Camera Agent   → https://localhost:$($env:AGENT_PORT)/demo  (ask your cameras - voice or chat)" Cyan
+        Write-Color "  Camera Agent (LAN) → https://<this-host-ip>:$($env:AGENT_PORT)/demo  (OpenNVR login)" Cyan
     }
     Write-Color "  First-time setup page opens automatically on first visit." DarkGray
 }
@@ -705,7 +836,7 @@ function Invoke-Up {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
-    if (-not (Set-WebRtcIcePort)) { exit 1 }
+    if (-not (Resolve-Ports)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
@@ -723,7 +854,7 @@ function Invoke-Build {
     Show-Banner
     if (-not (Invoke-Validate)) { exit 1 }
     Set-HostIpEnv
-    if (-not (Set-WebRtcIcePort)) { exit 1 }
+    if (-not (Resolve-Ports)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }

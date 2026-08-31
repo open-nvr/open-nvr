@@ -102,12 +102,19 @@ finish after their setup work is done.
 
 ### Endpoints
 
-| Service | URL |
-|---|---|
-| Web UI | <http://localhost:8000> |
-| API docs (OpenAPI / Swagger) | <http://localhost:8000/docs> |
-| MediaMTX HLS playback | <http://localhost:8888> — needs `OPENNVR_DEBUG_PORTS=1` |
-| MediaMTX WebRTC | <http://localhost:8889> — needs `OPENNVR_DEBUG_PORTS=1` |
+| Service | URL | Port variable |
+|---|---|---|
+| Web UI | <http://localhost:8000> | `CORE_HOST_PORT` |
+| API docs (OpenAPI / Swagger) | <http://localhost:8000/docs> | `CORE_HOST_PORT` |
+| MediaMTX HLS playback | <http://localhost:8888> — needs `OPENNVR_DEBUG_PORTS=1` | `HLS_PORT` |
+| MediaMTX WebRTC | <http://localhost:8889> — needs `OPENNVR_DEBUG_PORTS=1` | `WEBRTC_HTTP_PORT` |
+
+Every host port is declared in `scripts/ports.conf`. If one cannot be bound —
+a WinNAT reserved range on Windows, AirPlay on macOS, something already
+listening on Linux — the launcher falls back to the next candidate and prints
+the port it actually used. Set the variable in `.env` to pin one, or
+`OPENNVR_PORT_POLICY=strict` (recommended for production) to make an
+unbindable port a hard stop instead of a relocation.
 
 MediaMTX’s HLS, WebRTC, playback and admin ports are **not published on
 the host by default** — browsers reach them through nginx (`/hls/`,

@@ -144,7 +144,7 @@ services:
       # Host-loopback only (host-side debugging). See V-015.
       # RTSPS stays published by default: it is user-facing (VLC / ffmpeg
       # from the host, and MEDIAMTX_EXTERNAL_RTSPS_URL below points at it).
-      - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
+      - "127.0.0.1:${RTSPS_PORT:-8322}:8322" # RTSPS (for VLC / ffmpeg from the host)
       # HLS (8888), WHEP signalling (8889), playback (9996) and the admin
       # API (9997) are NOT published by default. Browsers reach the first
       # three through nginx (/hls/, /webrtc/, /playback/) and the container
@@ -453,7 +453,7 @@ services:
       yolov8-adapter:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${CORE_HOST_PORT:-8000}:8000"
     volumes:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
@@ -490,7 +490,7 @@ services:
       # container gets, so both sides agree on what the hardware can do.
       - INFERENCE_TAP_STREAM=${INFERENCE_TAP_STREAM:-auto}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
-      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:${RTSPS_PORT:-8322}
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       # Browser-facing URLs go through nginx (TLS, any LAN device).
       # MEDIAMTX_PUBLIC_URL is set by start.sh from the detected topology and
@@ -630,11 +630,25 @@ services:
     ports:
       # NGINX_BIND_HOST restricts the public edge to a specific interface
       # (e.g. a management VLAN). Default 0.0.0.0 for LAN reachability.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:443:443"
-      - "${NGINX_BIND_HOST:-0.0.0.0}:80:80"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${HTTP_PORT:-80}:80"
     volumes:
       - ./nginx-certs:/etc/nginx/certs:ro
-      - ./nginx/opennvr.conf:/etc/nginx/conf.d/default.conf:ro
+      # Mounted as a TEMPLATE, not straight into conf.d: the official nginx
+      # entrypoint runs envsubst over /etc/nginx/templates/*.template and
+      # writes the result to conf.d. That is what lets the 80->443 redirect
+      # carry a non-default HTTPS_PORT (see OPENNVR_HTTPS_SUFFIX below).
+      - ./nginx/opennvr.conf:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      # Restrict envsubst to OPENNVR_* names. WITHOUT this filter envsubst
+      # would also expand nginx's own $host, $request_uri and $core_upstream
+      # into empty strings and the config would not load.
+      - NGINX_ENVSUBST_FILTER=^OPENNVR_
+      # ":8443" when the launcher moved HTTPS_PORT, empty for the default
+      # 443. Declared here (not only exported by the launcher) so it is
+      # always DEFINED in the container: envsubst leaves undefined names
+      # untouched, which would emit a literal ${...} into the config.
+      - OPENNVR_HTTPS_SUFFIX=${OPENNVR_HTTPS_SUFFIX:-}
     networks:
       - opennvr_internal
     healthcheck:
@@ -668,7 +682,7 @@ services:
     logging: *svc-logs
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9999:8080"
+      - "127.0.0.1:${LOGS_PORT:-9999}:8080"
     environment:
       - DOZZLE_FILTER=name=opennvr
     volumes:

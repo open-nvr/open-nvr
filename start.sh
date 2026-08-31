@@ -160,23 +160,28 @@ python3_usable() {
 # $2 selects the protocol (tcp|udp|both, default both). It has to match
 # what compose actually publishes: probing UDP for a TCP-only publication
 # would reject a perfectly good port whose UDP twin happens to be reserved.
+#
+# $3 is the host IP the publication actually binds to (default 0.0.0.0).
+# It matters: probing a "127.0.0.1:8000" publication as a wildcard bind
+# reports a conflict against any unrelated listener on another interface's
+# :8000, and misses nothing in return.
 port_bindable() {
-    local port="$1" proto="${2:-both}"
+    local port="$1" proto="${2:-both}" host_ip="${3:-0.0.0.0}"
     if python3_usable; then
         python3 -c '
 import socket, sys
-p, proto = int(sys.argv[1]), sys.argv[2]
+p, proto, host = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 types = {"tcp": [socket.SOCK_STREAM], "udp": [socket.SOCK_DGRAM]}.get(
     proto, [socket.SOCK_STREAM, socket.SOCK_DGRAM])
 for typ in types:
     s = socket.socket(socket.AF_INET, typ)
     try:
-        s.bind(("0.0.0.0", p))
+        s.bind((host, p))
     except OSError:
         sys.exit(1)
     finally:
         s.close()
-' "$port" "$proto" >/dev/null 2>&1
+' "$port" "$proto" "$host_ip" >/dev/null 2>&1
         return $?
     fi
     # No python3: fall back to the weaker listener check. It cannot see
@@ -203,14 +208,14 @@ port_owned_by_stack() {
 # is already gone from `docker ps` while the proxy still holds the socket,
 # so a routine stop/start would hard-fail or silently drift.
 port_usable() {
-    local port="$1" proto="${2:-both}" deadline
-    port_bindable "$port" "$proto" && return 0
+    local port="$1" proto="${2:-both}" host_ip="${3:-0.0.0.0}" deadline
+    port_bindable "$port" "$proto" "$host_ip" && return 0
     port_owned_by_stack "$port" && return 0
     port_in_use "$port" || return 1
     deadline=$(( $(date +%s) + 6 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 1
-        port_bindable "$port" "$proto" && return 0
+        port_bindable "$port" "$proto" "$host_ip" && return 0
     done
     return 1
 }
@@ -232,7 +237,7 @@ port_usable() {
 # is available — a missing pre-flight must never block a working start.
 preflight_published_ports() {
     local args="$1"
-    local json entries port proto blocked=""
+    local json entries port proto host_ip blocked=""
 
     json=$(docker compose $args config --format json 2>/dev/null) || return 0
     [ -n "$json" ] || return 0
@@ -252,25 +257,32 @@ for svc in (cfg.get("services") or {}).values():
         # normalises our entries to single ports anyway.
         if not pub.isdigit():
             continue
-        key = (pub, p.get("protocol") or "tcp")
+        key = (pub, p.get("protocol") or "tcp",
+               p.get("host_ip") or "0.0.0.0")
         if key not in seen:
             seen.add(key)
-            print(key[0], key[1])
+            print(key[0], key[1], key[2])
 ')
     elif command -v jq >/dev/null 2>&1; then
         entries=$(printf '%s' "$json" \
             | jq -r '.services[].ports[]? | select(.published != null)
-                     | "\(.published) \(.protocol // "tcp")"' 2>/dev/null \
+                     | "\(.published) \(.protocol // "tcp") \(.host_ip // "0.0.0.0")"' 2>/dev/null \
             | grep -E '^[0-9]+ ' | sort -u)
     else
+        # Previously a silent `return 0`, which disabled the entire
+        # pre-flight without a word and left operators facing the raw
+        # Docker error this function exists to translate.
+        echo -e "  ${YELLOW}⚠ No python3 or jq — skipping the published-port pre-flight.${NC}" >&2
+        echo -e "  ${GRAY}  An unbindable port will surface as a raw Docker error.${NC}" >&2
         return 0
     fi
 
     [ -n "$entries" ] || return 0
 
-    while read -r port proto; do
+    while read -r port proto host_ip; do
         [ -n "$port" ] || continue
-        port_usable "$port" "$proto" || blocked="${blocked}${port}/${proto} "
+        port_usable "$port" "$proto" "${host_ip:-0.0.0.0}" \
+            || blocked="${blocked}${port}/${proto} "
     done <<EOF
 $entries
 EOF
@@ -281,72 +293,202 @@ EOF
     echo -e "  ${RED}    ${blocked}${NC}" >&2
     echo -e "  ${GRAY}  Docker publishing is all-or-nothing per container, so the${NC}" >&2
     echo -e "  ${GRAY}  affected service would fail to publish ANY of its ports.${NC}" >&2
-    echo -e "  ${GRAY}  A port can be unbindable while nothing is listening on it:${NC}" >&2
-    echo -e "  ${GRAY}  on Windows, WinNAT reserves ranges that are re-rolled at every${NC}" >&2
-    echo -e "  ${GRAY}  boot (loopback publications included). Inspect them with:${NC}" >&2
-    echo -e "  ${GRAY}    netsh interface ipv4 show excludedportrange protocol=tcp${NC}" >&2
-    echo -e "  ${GRAY}    netsh interface ipv4 show excludedportrange protocol=udp${NC}" >&2
-    echo -e "  ${GRAY}  Free the port, or reserve it permanently (admin):${NC}" >&2
-    echo -e "  ${GRAY}    netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent${NC}" >&2
+    echo -e "  ${GRAY}  A port can be unbindable while nothing is listening on it.${NC}" >&2
+    port_help
+    echo -e "  ${GRAY}  Most of these ports can be moved: see scripts/ports.conf for${NC}" >&2
+    echo -e "  ${GRAY}  the variable that controls each one, and set it in .env.${NC}" >&2
     return 1
 }
 
-# Chooses the WebRTC ICE media port and exports WEBRTC_ICE_PORT for the
-# compose interpolation in docker-compose.yml. Returns non-zero when no
-# usable port exists, so the caller can fail with a clear message instead
-# of letting `docker compose up` die on an opaque daemon error.
-configure_webrtc_ice_port() {
-    # Fixed, ordered candidate list rather than any free port: the set of
-    # ports an operator may need to allow through a firewall has to stay
-    # small and documentable. Spread far apart because the reserved ranges
-    # are handed out as runs of contiguous 100-port blocks.
-    local candidates="8189 18189 28189 38189"
-    local preferred="8189"
+# ── Published-port resolution (scripts/ports.conf) ────────────────
+# Generalises what used to be configure_webrtc_ice_port to EVERY published
+# host port. The ICE probe protected exactly one port, but Docker's
+# publishing is all-or-nothing per container: a reserved 9100 or 8322 takes
+# a whole service down just as effectively (#298, #368). The table is shared
+# with start.ps1 so the two launchers cannot drift apart.
+PORT_TABLE_FILE="$(dirname "$0")/scripts/ports.conf"
+
+# Emits "VAR|DEFAULT|PROTO|CANDIDATES|POLICY|LABEL" per row, comments and
+# blank lines dropped, surrounding whitespace trimmed.
+load_port_table() {
+    [ -f "$PORT_TABLE_FILE" ] || return 1
+    sed -e 's/#.*$//' "$PORT_TABLE_FILE" \
+        | awk -F'|' 'NF==6 {
+              for (i = 1; i <= 6; i++) { gsub(/^[ \t]+|[ \t]+$/, "", $i) }
+              if ($1 != "") { print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 }
+          }'
+}
+
+# Per-OS guidance for a port that cannot be bound. Split by platform on
+# purpose: this used to print Windows `netsh` instructions verbatim to
+# macOS and Linux operators, sending them after a facility their OS does
+# not have. WSL is the exception — it runs this script but sits behind the
+# Windows network stack, so WinNAT genuinely applies there.
+port_help() {
+    if [ "$OS" = "Linux" ] && grep -qi microsoft /proc/version 2>/dev/null; then
+        echo -e "  ${GRAY}  WSL sits behind the Windows network stack, so WinNAT applies.${NC}" >&2
+        echo -e "  ${GRAY}  WinNAT reserves ranges that are RE-ROLLED AT EVERY BOOT, so a${NC}" >&2
+        echo -e "  ${GRAY}  host that worked yesterday can fail today. In an ADMIN${NC}" >&2
+        echo -e "  ${GRAY}  PowerShell on the Windows side:${NC}" >&2
+        echo -e "  ${GRAY}    netsh interface ipv4 show excludedportrange protocol=tcp${NC}" >&2
+        echo -e "  ${GRAY}    net stop winnat${NC}" >&2
+        echo -e "  ${GRAY}    netsh int ipv4 add excludedportrange protocol=tcp startport=<port> numberofports=1 store=persistent${NC}" >&2
+        echo -e "  ${GRAY}    net start winnat${NC}" >&2
+        return 0
+    fi
+    case "$OS" in
+        Darwin*)
+            echo -e "  ${GRAY}  Find what holds it:${NC}" >&2
+            echo -e "  ${GRAY}    lsof -nP -iTCP:<port> -sTCP:LISTEN${NC}" >&2
+            echo -e "  ${GRAY}  macOS itself listens on some ports: AirPlay Receiver takes${NC}" >&2
+            echo -e "  ${GRAY}  5000 and 7000 — turn it off under System Settings → General${NC}" >&2
+            echo -e "  ${GRAY}  → AirDrop & Handoff. Ports below 1024 are fine here: Docker${NC}" >&2
+            echo -e "  ${GRAY}  Desktop publishes them without root.${NC}" >&2
+            ;;
+        *)
+            echo -e "  ${GRAY}  Find what holds it:${NC}" >&2
+            echo -e "  ${GRAY}    ss -tulpn | grep :<port>${NC}" >&2
+            echo -e "  ${GRAY}  A port with NO listener can still be unbindable:${NC}" >&2
+            echo -e "  ${GRAY}    sysctl net.ipv4.ip_local_reserved_ports${NC}" >&2
+            echo -e "  ${GRAY}    systemctl list-sockets      # socket activation${NC}" >&2
+            ;;
+    esac
+}
+
+# Resolve one table row into an exported variable.
+#
+# An operator value (environment, then .env) ALWAYS wins and is NEVER
+# auto-overridden, whatever the policy: it is usually mirrored by a
+# firewall rule or a router port-forward, so drifting off it breaks remote
+# viewing in a way that is very hard to trace. If it cannot be bound we
+# fail loudly naming the variable instead.
+resolve_one_port() {
+    local var="$1" default="$2" proto="$3" candidates="$4" policy="$5" label="$6"
     local explicit port
 
-    explicit="${WEBRTC_ICE_PORT:-$(get_env_var WEBRTC_ICE_PORT 2>/dev/null || echo "")}"
+    eval "explicit=\"\${$var:-}\""
+    [ -n "$explicit" ] || explicit="$(get_env_var "$var" 2>/dev/null || echo "")"
 
-    # An explicit operator choice is never silently overridden — it is
-    # usually mirrored by a firewall rule or router port-forward, so moving
-    # off it would break remote viewing in a way that is very hard to trace.
     if [ -n "$explicit" ]; then
         case "$explicit" in
             ''|*[!0-9]*)
-                echo -e "  ${RED}WEBRTC_ICE_PORT='${explicit}' is not a valid port (1024-65535).${NC}" >&2
+                echo -e "  ${RED}${var}='${explicit}' is not a valid port (1-65535).${NC}" >&2
                 return 1
                 ;;
         esac
-        if [ "$explicit" -lt 1024 ] || [ "$explicit" -gt 65535 ]; then
-            echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} is out of range (1024-65535).${NC}" >&2
+        # Lower bound is 1, not 1024: 443 and 80 are legitimate operator
+        # choices here, and Docker's proxy binds privileged ports itself.
+        if [ "$explicit" -lt 1 ] || [ "$explicit" -gt 65535 ]; then
+            echo -e "  ${RED}${var}=${explicit} is out of range (1-65535).${NC}" >&2
             return 1
         fi
-        if ! port_usable "$explicit" both; then
-            echo -e "  ${RED}WEBRTC_ICE_PORT=${explicit} cannot be bound on this host.${NC}" >&2
-            echo -e "  ${GRAY}  MediaMTX would fail to publish ALL of its ports, not just this one,${NC}" >&2
-            echo -e "  ${GRAY}  so Live View would break with no visible error.${NC}" >&2
-            echo -e "  ${GRAY}  Free the port, or pick another one via WEBRTC_ICE_PORT in .env.${NC}" >&2
+        if ! port_usable "$explicit" "$proto"; then
+            echo -e "  ${RED}${var}=${explicit} (${label}) cannot be bound on this host.${NC}" >&2
+            echo -e "  ${GRAY}  Docker publishes all of a service's ports or none, so this${NC}" >&2
+            echo -e "  ${GRAY}  would take down every port of the affected service.${NC}" >&2
+            echo -e "  ${GRAY}  Free the port, or set ${var} in .env to a different one.${NC}" >&2
+            port_help
             return 1
         fi
-        export WEBRTC_ICE_PORT="$explicit"
+        export "$var=$explicit"
         return 0
     fi
 
-    for port in $candidates; do
-        if port_usable "$port" both; then
-            export WEBRTC_ICE_PORT="$port"
-            if [ "$port" != "$preferred" ]; then
+    # No operator value. "pin" rows are never relocated automatically:
+    # moving the web edge would invalidate every bookmark, every URL in the
+    # docs and the certificate story, so it is worth a clear stop instead.
+    #
+    # OPENNVR_PORT_POLICY=strict promotes EVERY row to pin. Self-healing is
+    # the right default for a fresh install, but on a production site the
+    # ports are load-bearing: firewall rules, router port-forwards, upstream
+    # reverse proxies, monitoring checks and operator bookmarks all encode
+    # them. There, a port that quietly moves after a reboot is worse than a
+    # start that refuses to come up and says why.
+    if [ "$policy" = "pin" ] || [ "${PORT_POLICY_MODE:-auto}" = "strict" ]; then
+        if port_usable "$default" "$proto"; then
+            export "$var=$default"
+            return 0
+        fi
+        echo -e "  ${RED}${label} port ${default} cannot be bound on this host.${NC}" >&2
+        if [ "$policy" = "pin" ]; then
+            echo -e "  ${GRAY}  This port is never moved automatically — it appears in every${NC}" >&2
+            echo -e "  ${GRAY}  documented URL and in the TLS certificate.${NC}" >&2
+        else
+            echo -e "  ${GRAY}  OPENNVR_PORT_POLICY=strict, so no port is relocated${NC}" >&2
+            echo -e "  ${GRAY}  automatically. Unset it to let the launcher fall back to${NC}" >&2
+            echo -e "  ${GRAY}  ${candidates}.${NC}" >&2
+        fi
+        echo -e "  ${GRAY}  Free the port, or set ${var} in .env to choose another.${NC}" >&2
+        port_help
+        return 1
+    fi
+
+    for port in $(printf '%s' "$candidates" | tr ',' ' '); do
+        if port_usable "$port" "$proto"; then
+            export "$var=$port"
+            if [ "$port" != "$default" ]; then
                 # Loud on purpose: a silently drifting port is how this
                 # turns into an unexplainable firewall problem weeks later.
-                echo -e "  ${YELLOW}WebRTC ICE port ${preferred} is unavailable — using ${port} for this run.${NC}" >&2
-                echo -e "  ${GRAY}  To pin a stable port for firewall rules, set WEBRTC_ICE_PORT in .env.${NC}" >&2
+                echo -e "  ${YELLOW}${label} port ${default} is unavailable — using ${port} for this run.${NC}" >&2
+                echo -e "  ${GRAY}  To pin a stable port for firewall rules, set ${var} in .env.${NC}" >&2
             fi
             return 0
         fi
     done
 
-    echo -e "  ${RED}No usable WebRTC ICE port found (tried: ${candidates}).${NC}" >&2
-    echo -e "  ${GRAY}  Set WEBRTC_ICE_PORT in .env to a port that is free on this host.${NC}" >&2
+    echo -e "  ${RED}No usable ${label} port found (tried: ${candidates}).${NC}" >&2
+    echo -e "  ${GRAY}  Set ${var} in .env to a port that is free on this host.${NC}" >&2
+    port_help
     return 1
+}
+
+# Resolve every row, then derive the values that must follow a moved port.
+resolve_ports() {
+    local table var default proto candidates policy label
+
+    # auto (default): a "shift" row walks its candidate list, so a WinNAT
+    # range that re-rolls at every boot cannot keep the stack down.
+    # strict: nothing moves on its own. Production sites encode these ports
+    # in firewall rules, router port-forwards, upstream proxies, monitoring
+    # checks and operator bookmarks — there a port that quietly moves after
+    # a reboot is worse than a start that refuses and says why.
+    PORT_POLICY_MODE="${OPENNVR_PORT_POLICY:-$(get_env_var OPENNVR_PORT_POLICY 2>/dev/null || echo "")}"
+    [ -n "$PORT_POLICY_MODE" ] || PORT_POLICY_MODE="auto"
+    case "$PORT_POLICY_MODE" in
+        auto|strict) ;;
+        *)
+            echo -e "  ${RED}OPENNVR_PORT_POLICY='${PORT_POLICY_MODE}' is not valid (auto|strict).${NC}" >&2
+            return 1
+            ;;
+    esac
+    if [ "$PORT_POLICY_MODE" = "strict" ]; then
+        echo -e "  ${GRAY}Port policy: strict — no port will be relocated automatically.${NC}" >&2
+    fi
+
+    table="$(load_port_table)" || table=""
+    if [ -z "$table" ]; then
+        echo -e "  ${YELLOW}⚠ scripts/ports.conf missing or empty — skipping port resolution.${NC}" >&2
+        echo -e "  ${GRAY}  Compose defaults will be used; an unbindable port will surface${NC}" >&2
+        echo -e "  ${GRAY}  as a raw Docker error instead of a named one.${NC}" >&2
+        return 0
+    fi
+
+    while IFS='|' read -r var default proto candidates policy label; do
+        [ -n "$var" ] || continue
+        resolve_one_port "$var" "$default" "$proto" "$candidates" "$policy" "$label" || return 1
+    done <<PORT_TABLE_EOF
+$table
+PORT_TABLE_EOF
+
+    # $host in the nginx 80->443 redirect carries no port, so a moved
+    # HTTPS_PORT has to be re-attached explicitly. Empty for the default
+    # 443 — see nginx/opennvr.conf and the nginx service in compose.
+    if [ "${HTTPS_PORT:-443}" = "443" ]; then
+        export OPENNVR_HTTPS_SUFFIX=""
+    else
+        export OPENNVR_HTTPS_SUFFIX=":${HTTPS_PORT}"
+    fi
+    return 0
 }
 
 # ── Pre-flight validation ──────────────────────────────────
@@ -415,19 +557,15 @@ run_validate() {
         fi
     fi
 
-    # 7. Port conflicts
-    local ports=(8000 8554 8888 8889 9997)
-    local busy_ports=()
-    for p in "${ports[@]}"; do
-        port_in_use "$p" && busy_ports+=("$p")
-    done
-    if [ ${#busy_ports[@]} -gt 0 ]; then
-        echo -e "  ${YELLOW}⚠ Ports already in use on host: ${busy_ports[*]}${NC}"
-        echo -e "      → Another service may conflict. Check: ss -tuln"
-        warnings=$((warnings + 1))
-    else
-        echo -e "  ${GREEN}✓ Required ports appear free${NC}"
-    fi
+    # 7. Port conflicts — intentionally NOT checked here.
+    # This used to test a hardcoded list (8000 8554 8888 8889 9997) that had
+    # drifted badly out of step with compose: 8554 is not published at all,
+    # 8888/8889/9997 only under the opt-in debug overlay, while the ports
+    # that ARE published by default (443, 80, 8322, 9100) were absent — so it
+    # printed a reassuring green tick for port sets it never looked at.
+    # resolve_ports() and preflight_published_ports() derive the real list
+    # from the resolved compose config, and run late enough to see the
+    # profiles and overlays that decide which ports exist at all.
 
     echo ""
     if [ $errors -gt 0 ]; then
@@ -540,7 +678,7 @@ configure_nginx_bind_host() {
         local single_host
         single_host=$(detect_lan_ip 2>/dev/null || echo "")
         if [ -n "$single_host" ]; then
-            set_env_var MEDIAMTX_PUBLIC_URL "https://${single_host}"
+            set_env_var MEDIAMTX_PUBLIC_URL "https://${single_host}${OPENNVR_HTTPS_SUFFIX:-}"
             set_env_var MEDIAMTX_WEBRTC_HOSTS "${single_host}"
             # ISSUE-6 v9: propagate to cert SAN — see dual-declared
             # branch for the rationale.
@@ -575,7 +713,7 @@ configure_nginx_bind_host() {
         # emits HTTPS URLs through nginx. MEDIAMTX_WEBRTC_HOSTS →
         # mediamtx advertises ICE candidates the LAN browser can
         # reach for the UDP/8189 media path.
-        set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}"
+        set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}${OPENNVR_HTTPS_SUFFIX:-}"
         set_env_var MEDIAMTX_WEBRTC_HOSTS "${mgmt_ip}"
         # ISSUE-6 v9: propagate the IP to the cert init containers
         # so the TLS cert SAN list includes the IP browsers will
@@ -622,7 +760,7 @@ configure_nginx_bind_host() {
     local fallback_host
     fallback_host=$(detect_lan_ip 2>/dev/null || echo "")
     if [ -n "$fallback_host" ]; then
-        set_env_var MEDIAMTX_PUBLIC_URL "https://${fallback_host}"
+        set_env_var MEDIAMTX_PUBLIC_URL "https://${fallback_host}${OPENNVR_HTTPS_SUFFIX:-}"
         set_env_var MEDIAMTX_WEBRTC_HOSTS "${fallback_host}"
         if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
             export OPENNVR_HOST_IP="${fallback_host}"
@@ -759,7 +897,7 @@ prompt_nic_topology() {
             # cert SAN includes the LAN IP — see dual-declared
             # branch for the rationale.
             if [ -n "$lan_hint" ]; then
-                set_env_var MEDIAMTX_PUBLIC_URL "https://${lan_hint}"
+                set_env_var MEDIAMTX_PUBLIC_URL "https://${lan_hint}${OPENNVR_HTTPS_SUFFIX:-}"
                 set_env_var MEDIAMTX_WEBRTC_HOSTS "${lan_hint}"
                 if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
                     export OPENNVR_HOST_IP="${lan_hint}"
@@ -812,7 +950,7 @@ prompt_nic_topology() {
             # https://localhost for the browser-facing stream URLs and
             # advertises no reachable WebRTC ICE host — live view
             # broken until a restart nobody knows they need.
-            set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}"
+            set_env_var MEDIAMTX_PUBLIC_URL "https://${mgmt_ip}${OPENNVR_HTTPS_SUFFIX:-}"
             set_env_var MEDIAMTX_WEBRTC_HOSTS "${mgmt_ip}"
             if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
                 export OPENNVR_HOST_IP="${mgmt_ip}"
@@ -1120,20 +1258,20 @@ print_access_urls() {
 
     echo -e "  ${GREEN}✓ OpenNVR is running!${NC}"
     if [ -n "$lan_ip" ]; then
-        echo -e "  Web UI (LAN)    → ${CYAN}https://${lan_ip}/${NC}  ${GRAY}(login: ${admin_user})${NC}"
+        echo -e "  Web UI (LAN)    → ${CYAN}https://${lan_ip}${OPENNVR_HTTPS_SUFFIX:-}/${NC}  ${GRAY}(login: ${admin_user})${NC}"
     else
-        echo -e "  Web UI (LAN)    → ${CYAN}https://<server-ip>/${NC}  ${GRAY}(login: ${admin_user})${NC}"
+        echo -e "  Web UI (LAN)    → ${CYAN}https://<server-ip>${OPENNVR_HTTPS_SUFFIX:-}/${NC}  ${GRAY}(login: ${admin_user})${NC}"
     fi
-    echo -e "  Web UI (local)  → ${CYAN}https://localhost/${NC}"
-    echo -e "  API Docs        → ${CYAN}https://localhost/docs${NC}"
+    echo -e "  Web UI (local)  → ${CYAN}https://localhost${OPENNVR_HTTPS_SUFFIX:-}/${NC}"
+    echo -e "  API Docs        → ${CYAN}https://localhost${OPENNVR_HTTPS_SUFFIX:-}/docs${NC}"
     # If an agent example is active, surface its demo URL(s) too. The agents
     # serve their own https on the LAN (sign in with your OpenNVR account).
     _ex_profile="$(get_env_var OPENNVR_EXAMPLE_PROFILE 2>/dev/null)"
     _ex="$(get_env_var OPENNVR_EXAMPLE 2>/dev/null)"
     case "${_ex_profile}:${_ex}" in
         camera-agent:*|camera-agent-chat:*|*:camera-agent)
-            echo -e "  Camera Agent    → ${CYAN}https://localhost:9100/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
-            echo -e "  Camera Agent (LAN) → ${CYAN}https://<server-ip>:9100/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
+            echo -e "  Camera Agent    → ${CYAN}https://localhost:${AGENT_PORT:-9100}/demo${NC}  ${GRAY}(ask your cameras — voice or chat)${NC}"
+            echo -e "  Camera Agent (LAN) → ${CYAN}https://<server-ip>:${AGENT_PORT:-9100}/demo${NC}  ${GRAY}(OpenNVR login)${NC}"
             ;;
     esac
     echo ""
@@ -1309,7 +1447,7 @@ run_up() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
-    configure_webrtc_ice_port || exit 1
+    resolve_ports || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
@@ -1332,7 +1470,7 @@ run_build() {
     run_validate || exit 1
     ARGS=$(compose_args)
     configure_nginx_bind_host || exit 1
-    configure_webrtc_ice_port || exit 1
+    resolve_ports || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
@@ -1506,7 +1644,7 @@ case "$COMMAND" in
     echo -e "  ${GREEN}✓ Old certs removed.${NC}"
     echo -e "  ${YELLOW}Restarting stack to regenerate certs ...${NC}"
     configure_nginx_bind_host || exit 1
-    configure_webrtc_ice_port || exit 1
+    resolve_ports || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
