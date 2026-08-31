@@ -223,6 +223,27 @@ whether or not a barrier is attached.
 Consumers MUST treat any decision other than `allow` as "do not
 actuate" — unknown future decision values fail closed.
 
+### `occupancy.changed.v1`
+
+Subject: `opennvr.events.occupancy.changed.v1.<camera_id>`
+Producer: `app:occupancy-counting` (or any app measuring zone
+occupancy — consumers must not branch on the producer).
+
+Fired when a zone's head-count CHANGES — sampled, not per-frame: the
+producer publishes on every committed level transition and otherwise
+at most once per ~10s per camera while the count moves. This is the
+history feed behind the Occupancy page's charts; core persists the
+samples (90-day retention).
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `count` | int | Entities currently in the zone. |
+| `level` | string | The committed alerting band: `normal`, `over`, `under`. Additive: consumers must tolerate new bands. |
+| `max_occupancy` | int \| null | The zone's configured ceiling at publish time (charts scale against it). |
+| `min_occupancy` | int \| null | The configured floor, when set. |
+
 ## Out of contract (deliberately)
 
 * `opennvr.inference.>` payload internals beyond what each adapter's

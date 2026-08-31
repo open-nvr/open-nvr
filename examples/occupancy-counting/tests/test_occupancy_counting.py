@@ -507,3 +507,47 @@ def test_explicit_camera_list_ignores_assignments(tmp_path, monkeypatch):
         "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
     )))
     assert list(cfg.cameras) == ["cam1"] and called["n"] == 0
+
+
+# ── occupancy.changed.v1 history feed ───────────────────────────────
+
+
+def test_history_publishes_on_count_change_and_transition(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "monotonic", lambda: t["now"])
+    app = _counter(_camera())
+    app.handle_event(_event(1))
+    calls = app._occupancy_publisher.calls
+    assert len(calls) == 1
+    assert calls[0]["schema"] == "occupancy.changed.v1"
+    assert calls[0]["camera_id"] == "cam-1"
+    assert calls[0]["payload"] == {
+        "count": 1, "level": "normal", "max_occupancy": 2,
+        "min_occupancy": None}
+    # Same count again → nothing (change-driven, not per-frame).
+    app.handle_event(_event(1))
+    assert len(calls) == 1
+    # A committed level transition publishes even inside the interval.
+    t["now"] += 1.0
+    app.handle_event(_event(3))  # over max_occ=2, debounce=1 → commit
+    levels = [c["payload"]["level"] for c in calls]
+    assert "over" in levels
+    assert calls[-1]["payload"]["count"] == 3
+
+
+def test_history_interval_suppresses_chatter(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "monotonic", lambda: t["now"])
+    app = _counter(_camera())
+    app.handle_event(_event(1))
+    t["now"] += 2.0
+    app.handle_event(_event(2))   # count changed but < 10s → suppressed…
+    calls = app._occupancy_publisher.calls
+    normal_only = [c for c in calls if c["payload"]["level"] == "normal"]
+    assert len(normal_only) == 1
+    t["now"] += 10.0
+    app.handle_event(_event(2))   # …interval passed → published
+    normal_only = [c for c in app._occupancy_publisher.calls
+                   if c["payload"]["level"] == "normal"]
+    assert len(normal_only) == 2
+    assert app.state_snapshot()["history_events_published"] >= 2

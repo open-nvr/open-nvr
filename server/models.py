@@ -1074,3 +1074,24 @@ class AppInstallIntent(Base):
     requested_by = Column(String(100), nullable=True)
     requested_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class OccupancySample(Base):
+    """One sampled zone head-count from the bus (RFC round: occupancy
+    history). Written by ``services/occupancy_event_consumer.py`` from
+    contracted ``occupancy.changed.v1`` events — change-driven samples,
+    not per-frame — and read by the Occupancy page's history charts.
+    Retention: the consumer prunes rows older than 90 days."""
+
+    __tablename__ = "occupancy_samples"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Core camera id, parsed from the platform handle ("cam3" → 3) so
+    # history queries owner-scope through the cameras table like every
+    # other read surface.
+    camera_id = Column(Integer, nullable=False, index=True)
+    count = Column(Integer, nullable=False)
+    # The committed alerting band at sample time: normal | over | under
+    # (additive — future producers may add bands).
+    level = Column(String(16), nullable=False, default="normal")
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
