@@ -34,6 +34,7 @@ Foreground daemon; SIGINT/SIGTERM stops cleanly.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import deque
 from datetime import date
@@ -174,6 +175,60 @@ def gate_in_cameras(camera_roles: Any) -> frozenset[str]:
     return frozenset(out)
 
 
+def gate_out_cameras(camera_roles: Any) -> frozenset[str]:
+    """Platform handles of gate-OUT cameras (same parsing rules as
+    :func:`gate_in_cameras`)."""
+    out: set[str] = set()
+    if isinstance(camera_roles, dict):
+        for key, value in camera_roles.items():
+            role = value.get("role") if isinstance(value, dict) else value
+            if role != "gate_out":
+                continue
+            k = str(key).strip()
+            if k:
+                out.add(k if k.startswith("cam") else f"cam{k}")
+    return frozenset(out)
+
+
+def bounded_levenshtein(a: str, b: str, *, cap: int = 3) -> int:
+    """Edit distance with an early exit past ``cap`` — fuzzy matching
+    never needs to know HOW far apart two plates are beyond the
+    configured tolerance, only whether they are within it."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        best = cur[0]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[-1] + 1, prev[j - 1] + (ca != cb)))
+            if cur[-1] < best:
+                best = cur[-1]
+        if best > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def compile_plate_formats(raw: Any) -> list[re.Pattern[str]]:
+    """Compile the ``plate_formats`` config (a list of regexes a VALID
+    plate must fully match, e.g. Indian ``[A-Z]{2}\\d{1,2}[A-Z]{1,3}\\d{4}``).
+    Invalid patterns are logged and skipped — one typo must not turn
+    format validation off for the working patterns."""
+    out: list[re.Pattern[str]] = []
+    for item in raw or []:
+        text = str(item).strip()
+        if not text:
+            continue
+        try:
+            out.append(re.compile(text))
+        except re.error as exc:
+            logger.warning("plate_formats: skipping invalid regex %r: %s", text, exc)
+    return out
+
+
 def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = None) -> bool:
     """True when a register entry currently counts as registered.
 
@@ -195,7 +250,7 @@ def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = 
 MANIFEST = AppManifest(
     id="license-plate-recognition",
     name="License Plate Recognition",
-    version="2.4.0",
+    version="2.5.0",
     category="vehicle",
     summary=(
         "Consumes the platform's plate.recognized.v1 events and routes "
@@ -242,6 +297,25 @@ MANIFEST = AppManifest(
                   "Society mode: raise a high-severity alarm for any "
                   "plate NOT in the registry/allowlist (denylist still "
                   "wins). Off = unknown plates log as info reads.")),
+        Param("fuzzy_max_distance", int, default=1,
+              description=(
+                  "OCR tolerance: an unlisted read within this edit "
+                  "distance of a registered/allowlisted/monitored plate "
+                  "matches it for ALARMS (O→0 never makes a resident a "
+                  "stranger). Barrier decisions stay exact-match. "
+                  "0 = exact only.")),
+        Param("plate_formats", list, default=[],
+              description=(
+                  "Regexes a valid plate must fully match, e.g. Indian "
+                  "'[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}'. Reads that "
+                  "match none go to the review queue instead of raising "
+                  "alarms. Empty = no validation.")),
+        Param("overstay_hours", float, default=0.0,
+              description=(
+                  "Alert when a VISITOR (not registered/allowlisted) "
+                  "has been inside longer than this many hours — needs "
+                  "gate IN (and ideally OUT) camera roles. 0 = off. "
+                  "Checked as reads arrive.")),
         Param("barrier_mode", str, default="off",
               description=(
                   "Gate automation: 'off' publishes nothing; "
@@ -267,6 +341,10 @@ MANIFEST = AppManifest(
                   description="Info-severity read for unlisted plates."),
         AlertType("plate_expected", severity="low"),
         AlertType("plate_watchlist", severity="high"),
+        AlertType("vehicle_overstay", severity="medium",
+                  description=(
+                      "A visitor vehicle has been inside longer than "
+                      "overstay_hours.")),
         AlertType("plate_unknown", severity="high",
                   description=(
                       "Unregistered vehicle seen while alarm_on_unknown "
@@ -328,6 +406,11 @@ MANIFEST = AppManifest(
         StateView(name="deduped", label="Plates deduped",
                   kind="metric", path="deduped_plates_tracked",
                   description="Distinct (camera, plate) pairs in the dedup window."),
+        StateView(name="review", label="Needs review",
+                  kind="metric", path="reviews_total",
+                  description="Reads diverted for a human (bad format / low confidence)."),
+        StateView(name="inside", label="Visitors inside",
+                  kind="metric", path="inside_visitors"),
         StateView(name="recent", label="Recent plate reads",
                   kind="log", path="recent", limit=12,
                   description="Latest reads; denylist hits show red."),
@@ -372,6 +455,11 @@ class AppConfig:
     # Gate automation: publish access.decided.v1 on gate-IN reads.
     barrier_mode: str = "off"
     camera_roles: dict[str, Any] = field(default_factory=dict)
+    # Trust round: OCR-tolerant matching, plate-format validation,
+    # visitor overstay.
+    fuzzy_max_distance: int = 1
+    plate_formats: list[str] = field(default_factory=list)
+    overstay_hours: float = 0.0
     unknown_cooldown_seconds: float = 300.0
 
     # Alert delivery channels (see alerts.py / the SDK alert stack).
@@ -413,6 +501,9 @@ def load_config(path: str | Path) -> AppConfig:
         monitors=list(raw.get("monitors") or []),
         barrier_mode=str(raw.get("barrier_mode") or "off"),
         camera_roles=dict(raw.get("camera_roles") or {}),
+        fuzzy_max_distance=int(raw.get("fuzzy_max_distance", 1)),
+        plate_formats=[str(f) for f in (raw.get("plate_formats") or [])],
+        overstay_hours=float(raw.get("overstay_hours", 0.0)),
         alarm_on_unknown=bool(raw.get("alarm_on_unknown", False)),
         unknown_cooldown_seconds=float(raw.get("unknown_cooldown_seconds", 300.0)),
         webhook_url=raw.get("webhook_url"),
@@ -475,6 +566,19 @@ class PlateAlerter(Detector):
         self._barrier_mode: str = (
             "registered" if cfg.barrier_mode == "registered" else "off")
         self._gate_in: frozenset[str] = gate_in_cameras(cfg.camera_roles)
+        self._gate_out: frozenset[str] = gate_out_cameras(cfg.camera_roles)
+        # Trust round state. Review queue: reads we will NOT act on
+        # (bad format / low confidence) surfaced for a human instead of
+        # silently dropped. Overstay ledger: visitor plates currently
+        # inside (entered at a gate-IN camera, not yet seen at gate-OUT).
+        self._fuzzy_max: int = max(0, int(cfg.fuzzy_max_distance))
+        self._formats: list[re.Pattern[str]] = compile_plate_formats(cfg.plate_formats)
+        self._review: deque[dict[str, Any]] = deque(maxlen=50)
+        self._review_last: dict[str, float] = {}
+        self._reviews_total: int = 0
+        self._overstay_hours: float = max(0.0, float(cfg.overstay_hours))
+        self._inside_visitors: dict[str, dict[str, Any]] = {}
+        self._overstay_alerts: int = 0
         self._decision_publisher = DomainEventPublisher(
             cfg.nats_url, token=cfg.nats_token,
             producer="app:license-plate-recognition")
@@ -511,6 +615,113 @@ class PlateAlerter(Detector):
         if cameras and camera_id not in cameras:
             return None
         return rule
+
+    def _add_review(self, camera_id: str, plate: str,
+                    confidence: Any, reason: str) -> None:
+        """Queue a read for human review instead of acting on it.
+        Per-plate 5-minute cooldown so one badly-lit plate doesn't
+        flood the queue."""
+        now = time.monotonic()
+        last = self._review_last.get(plate)
+        if last is not None and (now - last) < 300.0:
+            return
+        self._review_last[plate] = now
+        if len(self._review_last) > 2048:
+            for stale, _ts in sorted(self._review_last.items(),
+                                     key=lambda kv: kv[1])[:1024]:
+                self._review_last.pop(stale, None)
+        self._reviews_total += 1
+        self._review.append({
+            "plate": plate,
+            "camera_id": camera_id,
+            "confidence": confidence,
+            "reason": reason,
+            "time": time.time(),
+        })
+
+    def _fuzzy_lookup(self, plate: str) -> tuple[str, str, int] | None:
+        """Nearest known plate within the fuzzy tolerance, or None.
+
+        Search order encodes priority: monitors first (surveillance
+        must over-alert, never under-alert), then ACTIVE registry
+        entries, then the allowlist. Returns (kind, canonical, distance).
+        """
+        best: tuple[str, str, int] | None = None
+        candidates: list[tuple[str, str]] = []
+        candidates.extend(("monitor", p) for p in self._monitors)
+        candidates.extend(
+            ("registry", p) for p, e in self._registry.items()
+            if registry_entry_active(e))
+        allowlist, _ = self._watchlists
+        candidates.extend(("allowlist", p) for p in allowlist)
+        for kind, canonical in candidates:
+            d = bounded_levenshtein(plate, canonical, cap=self._fuzzy_max)
+            if d == 0 or d > self._fuzzy_max:
+                continue
+            if best is None or d < best[2]:
+                best = (kind, canonical, d)
+                if d == 1 and kind == "monitor":
+                    break  # can't do better than distance-1 monitor
+        return best
+
+    def _track_gates(self, camera_id: str, plate: str, *,
+                     visitor: bool) -> None:
+        """Maintain the inside-visitors ledger from gate reads."""
+        if camera_id in self._gate_out:
+            self._inside_visitors.pop(plate, None)
+            return
+        if camera_id not in self._gate_in or not visitor:
+            return
+        if plate not in self._inside_visitors:
+            if len(self._inside_visitors) > 4096:
+                for stale, rec in sorted(self._inside_visitors.items(),
+                                         key=lambda kv: kv[1]["entered"])[:2048]:
+                    self._inside_visitors.pop(stale, None)
+            self._inside_visitors[plate] = {
+                "entered": time.time(),
+                "camera_id": camera_id,
+                "alerted": False,
+            }
+
+    def _sweep_overstays(self) -> list[Alert]:
+        """Fire ONE overstay alert per visit for visitors inside longer
+        than the threshold. Event-driven by design (checked as reads
+        arrive — no timer thread); week-old entries age out as missed
+        exits."""
+        if self._overstay_hours <= 0:
+            return []
+        fired: list[Alert] = []
+        now = time.time()
+        limit = self._overstay_hours * 3600.0
+        for plate, rec in list(self._inside_visitors.items()):
+            age = now - rec["entered"]
+            if age > 7 * 24 * 3600.0:
+                self._inside_visitors.pop(plate, None)  # missed exit
+                continue
+            if rec["alerted"] or age < limit:
+                continue
+            rec["alerted"] = True
+            hours = age / 3600.0
+            alert = Alert(
+                severity="medium",
+                title=f"Overstay: visitor {plate} inside {hours:.1f}h",
+                description=(
+                    f"Visitor vehicle {plate} entered at "
+                    f"{rec['camera_id']} and has been inside "
+                    f"{hours:.1f} hours (threshold "
+                    f"{self._overstay_hours:g}h) with no gate-out read."),
+                camera_id=rec["camera_id"],
+                source=AlertSource(),
+                evidence={"plate_text": plate,
+                          "entered_at": rec["entered"],
+                          "hours_inside": round(hours, 2),
+                          "overstay": True},
+            )
+            self._dispatcher.fire(alert)
+            self._overstay_alerts += 1
+            self._contract_note_alerts(1)
+            fired.append(alert)
+        return fired
 
     # ── Camera scope (Phase 2 integration) ─────────────────────────
 
@@ -567,9 +778,15 @@ class PlateAlerter(Detector):
         confidence = payload.get("confidence")
         if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
             confidence = None
+        # Trust round: reads we won't act on go to the REVIEW QUEUE,
+        # never silently to the floor — a human decides.
+        if self._formats and not any(rx.fullmatch(plate) for rx in self._formats):
+            self._add_review(camera_id, plate, confidence, "bad_format")
+            return self._sweep_overstays()
         if (self.cfg.min_confidence > 0 and confidence is not None
                 and confidence < self.cfg.min_confidence):
-            return []
+            self._add_review(camera_id, plate, confidence, "low_confidence")
+            return self._sweep_overstays()
 
         now = time.monotonic()
         key = (camera_id, plate)
@@ -589,9 +806,32 @@ class PlateAlerter(Detector):
         # A visitor pass past its expiry no longer counts as registered
         # — the plate becomes a stranger again (the point of a pass).
         registry_active = registry_entry_active(registry_entry)
+
+        # OCR-tolerant matching, asymmetric by design: a near-miss read
+        # is enough to SUPPRESS the unknown-vehicle alarm (O→0 must not
+        # wake the guard for a resident) and enough to FIRE a monitor
+        # alert (surveillance over-alerts, never under-alerts) — but
+        # never enough to open a barrier (actuation stays exact-match).
+        fuzzy_match: dict[str, Any] | None = None
+        exact_known = (monitor is not None or registry_active
+                       or plate in allowlist or plate in self._monitors)
+        if not exact_known and self._fuzzy_max > 0:
+            hit = self._fuzzy_lookup(plate)
+            if hit is not None:
+                kind, canonical, distance = hit
+                fuzzy_match = {"kind": kind, "plate": canonical,
+                               "distance": distance}
+                if kind == "monitor":
+                    rule = self._monitors.get(canonical)
+                    if rule is not None and rule.get("active", True) and (
+                            not rule.get("cameras")
+                            or camera_id in rule["cameras"]):
+                        monitor = rule
+
         unknown_alarm = False
         if (self._alarm_on_unknown
                 and not registry_active
+                and fuzzy_match is None
                 and plate not in allowlist
                 and plate not in self._monitors):
             last_alarm = self._unknown_last.get(plate)
@@ -615,6 +855,7 @@ class PlateAlerter(Detector):
             registry_entry=registry_entry if registry_active else None,
             registry_expired=(registry_entry is not None and not registry_active),
             unknown_alarm=unknown_alarm,
+            fuzzy_match=fuzzy_match,
         )
         self._dispatcher.fire(alert)
 
@@ -630,6 +871,10 @@ class PlateAlerter(Detector):
                 decision, reason = "allow", "allowlisted"
             elif registry_entry is not None:
                 decision, reason = "deny", "expired_pass"
+            elif fuzzy_match is not None:
+                # A near-miss read NEVER opens the barrier — the next
+                # (clean) read will. Actuation is exact-match only.
+                decision, reason = "deny", "uncertain_read"
             else:
                 decision, reason = "deny", "unknown"
             entry_meta = registry_entry or {}
@@ -655,7 +900,16 @@ class PlateAlerter(Detector):
             "level": alert.severity,
         })
         self._contract_note_alerts(1)
-        return [alert]
+
+        # Overstay tracking: visitors (nothing that matched a list,
+        # exactly or fuzzily) enter the ledger at gate-IN and leave it
+        # at gate-OUT; the sweep fires due alerts as reads arrive.
+        is_visitor = (monitor is None and not registry_active
+                      and plate not in allowlist
+                      and plate not in self._monitors
+                      and fuzzy_match is None)
+        self._track_gates(camera_id, plate, visitor=is_visitor)
+        return [alert] + self._sweep_overstays()
 
     def _build_alert(
         self, camera_id: str, plate: str, *,
@@ -666,6 +920,7 @@ class PlateAlerter(Detector):
         registry_entry: dict[str, str] | None = None,
         registry_expired: bool = False,
         unknown_alarm: bool = False,
+        fuzzy_match: dict[str, Any] | None = None,
     ) -> Alert:
         allowlist, _denylist = self._watchlists   # one read = one generation
         if monitor is not None:
@@ -673,6 +928,16 @@ class PlateAlerter(Detector):
             note = str(monitor.get("note") or "")
             title = (f"Monitored plate {plate} seen — {note}" if note
                      else f"Monitored plate {plate} seen")
+            if fuzzy_match is not None and fuzzy_match.get("kind") == "monitor":
+                title += f" (read ≈ {fuzzy_match['plate']})"
+        elif fuzzy_match is not None and fuzzy_match.get("kind") in ("registry", "allowlist"):
+            canonical = str(fuzzy_match["plate"])
+            entry = self._registry.get(canonical) or {}
+            owner = entry.get("owner", "")
+            tag = f" ({owner})" if owner else ""
+            severity = "low"
+            title = (f"Probable registered vehicle {canonical}{tag} — "
+                     f"read {plate}")
         elif unknown_alarm:
             severity, title = "high", f"Unknown vehicle {plate}"
         elif registry_entry is not None:
@@ -718,6 +983,7 @@ class PlateAlerter(Detector):
                 "registry": registry_entry,
                 "registry_expired": registry_expired,
                 "unknown_alarm": unknown_alarm,
+                "fuzzy_match": fuzzy_match,
             },
         )
 
@@ -734,6 +1000,12 @@ class PlateAlerter(Detector):
             "monitored_plates": len(self._monitors),
             "alarm_on_unknown": self._alarm_on_unknown,
             "barrier_mode": self._barrier_mode,
+            "review": list(self._review),
+            "reviews_total": self._reviews_total,
+            "inside_visitors": len(self._inside_visitors),
+            "overstay_hours": self._overstay_hours,
+            "overstay_alerts": self._overstay_alerts,
+            "fuzzy_max_distance": self._fuzzy_max,
             "gate_in_cameras": sorted(self._gate_in),
             "decisions_published": self._decisions_published,
             "unknown_alarms": self._unknown_alarms,
@@ -834,6 +1106,21 @@ form (applied live). Full history: the timeline's plate search.</div>
                 logger.info("monitors updated live: %d plates", len(monitors))
         if "alarm_on_unknown" in config:
             self._alarm_on_unknown = bool(config.get("alarm_on_unknown"))
+        if "fuzzy_max_distance" in config:
+            try:
+                self._fuzzy_max = max(0, int(config.get("fuzzy_max_distance", 1)))
+            except (TypeError, ValueError):
+                pass
+        if "plate_formats" in config:
+            self._formats = compile_plate_formats(config.get("plate_formats"))
+        if "overstay_hours" in config:
+            try:
+                self._overstay_hours = max(
+                    0.0, float(config.get("overstay_hours", 0.0)))
+            except (TypeError, ValueError):
+                pass
+        if "camera_roles" in config:
+            self._gate_out = gate_out_cameras(config.get("camera_roles"))
         if "barrier_mode" in config:
             self._barrier_mode = (
                 "registered" if config.get("barrier_mode") == "registered"

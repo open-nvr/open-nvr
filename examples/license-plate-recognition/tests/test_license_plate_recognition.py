@@ -183,7 +183,7 @@ def test_live_watchlist_update_applies_atomically():
 def test_manifest_declares_the_consumer_contract():
     m = PlateAlerter.manifest
     assert m.subscribes == PLATE_SUBJECT_PATTERN
-    assert m.version == "2.4.0"
+    assert m.version == "2.5.0"
     assert "object_detection" in m.requires_tasks
     assert "license_plate_recognition" in m.requires_tasks
 
@@ -471,7 +471,7 @@ def test_manifest_declares_every_key_the_vehicles_page_writes():
     page_writes = {
         "allowlist", "denylist", "monitors", "registry",
         "alarm_on_unknown", "unknown_cooldown_seconds", "camera_roles",
-        "barrier_mode",
+        "barrier_mode", "overstay_hours",
     }
     missing = page_writes - declared
     assert not missing, f"undeclared config keys the page writes: {missing}"
@@ -588,3 +588,165 @@ def test_barrier_config_updates_live():
     alerter.handle_event(_envelope(plate="KA05MJ6021", camera="cam1"))
     assert len(calls) >= 1
     assert calls[-1]["payload"]["decision"] in ("allow", "deny")
+
+
+# ── Trust round: fuzzy matching, format validation, review, overstay ─
+
+
+def test_levenshtein_bounds():
+    assert lpr.bounded_levenshtein("MH12DE1433", "MH12DE1433") == 0
+    assert lpr.bounded_levenshtein("MH12DE1433", "MH12DE14ЗЗ", cap=3) <= 3
+    assert lpr.bounded_levenshtein("MH12DE1433", "MH12DE1483", cap=1) == 1
+    assert lpr.bounded_levenshtein("AAA", "ZZZZZZZZ", cap=1) == 2  # cap+1
+
+
+def test_fuzzy_read_of_registered_plate_never_alarms():
+    """O→0 must not turn a resident into a stranger at 2am."""
+    alerter, _ = _alerter(alarm_on_unknown=True, fuzzy_max_distance=1,
+                          registry=[{"plate": "MH12DE1433", "owner": "A. Sharma"}])
+    # distance-1 read (…1483 vs …1433)
+    fired = alerter.handle_event(_envelope(plate="MH12DE1483", camera="cam-9"))
+    assert fired[0].severity == "low"
+    assert "Probable registered vehicle MH12DE1433" in fired[0].title
+    assert "A. Sharma" in fired[0].title
+    assert fired[0].evidence["unknown_alarm"] is False
+    assert fired[0].evidence["fuzzy_match"] == {
+        "kind": "registry", "plate": "MH12DE1433", "distance": 1}
+
+
+def test_fuzzy_never_opens_the_barrier():
+    """Alarms tolerant, actuation strict: a near-miss read denies with
+    reason uncertain_read — the next clean read opens the gate."""
+    alerter, _ = _alerter(
+        barrier_mode="registered", fuzzy_max_distance=1,
+        camera_roles={"1": {"role": "gate_in"}},
+        registry=["MH12DE1433"])
+    calls = _decisions(alerter)
+    alerter.handle_event(_envelope(plate="MH12DE1483", camera="cam1"))
+    assert calls[0]["payload"]["decision"] == "deny"
+    assert calls[0]["payload"]["reason"] == "uncertain_read"
+
+
+def test_fuzzy_matches_monitors_and_fires_their_alert():
+    alerter, _ = _alerter(fuzzy_max_distance=1, monitors=[
+        {"plate": "BAD0001", "note": "stolen", "severity": "critical"}])
+    fired = alerter.handle_event(_envelope(plate="BAD0O01"))  # O for 0
+    assert fired[0].severity == "critical"
+    assert "read ≈ BAD0001" in fired[0].title
+
+
+def test_fuzzy_zero_disables():
+    alerter, _ = _alerter(alarm_on_unknown=True, fuzzy_max_distance=0,
+                          registry=["MH12DE1433"])
+    fired = alerter.handle_event(_envelope(plate="MH12DE1483"))
+    assert fired[0].severity == "high"  # unknown alarm — exact only
+
+
+def test_expired_registry_entry_is_not_a_fuzzy_target():
+    alerter, _ = _alerter(alarm_on_unknown=True, fuzzy_max_distance=1,
+                          registry=[{"plate": "GU3STPASS1",
+                                     "expires": "2020-01-01"}])
+    fired = alerter.handle_event(_envelope(plate="GU3STPASS2"))
+    assert fired[0].severity == "high"  # still a stranger
+
+
+def test_bad_format_goes_to_review_not_alarm():
+    alerter, _ = _alerter(
+        alarm_on_unknown=True,
+        plate_formats=[r"[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}"])
+    fired = alerter.handle_event(_envelope(plate="II1III"))
+    assert fired == []
+    snap = alerter.state_snapshot()
+    assert snap["reviews_total"] == 1
+    assert snap["review"][0]["reason"] == "bad_format"
+    # A valid read passes the gate normally.
+    fired = alerter.handle_event(_envelope(plate="MH12DE1433"))
+    assert len(fired) == 1
+
+
+def test_low_confidence_goes_to_review_not_the_floor():
+    alerter, _ = _alerter(min_confidence=0.5)
+    assert alerter.handle_event(_envelope(confidence=0.3)) == []
+    snap = alerter.state_snapshot()
+    assert snap["review"][0]["reason"] == "low_confidence"
+    assert snap["review"][0]["confidence"] == 0.3
+
+
+def test_review_cooldown_prevents_flooding(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: t["now"])
+    alerter, _ = _alerter(min_confidence=0.5, dedup_window_seconds=0)
+    for _ in range(5):
+        alerter.handle_event(_envelope(confidence=0.1))
+    assert alerter.state_snapshot()["reviews_total"] == 1
+    t["now"] += 301.0
+    alerter.handle_event(_envelope(confidence=0.1))
+    assert alerter.state_snapshot()["reviews_total"] == 2
+
+
+def test_invalid_format_regex_skipped():
+    assert lpr.compile_plate_formats(["[A-Z", r"[0-9]+", ""]) is not None
+    pats = lpr.compile_plate_formats(["[A-Z", r"[0-9]+"])
+    assert len(pats) == 1
+
+
+def test_overstay_fires_once_for_visitor(monkeypatch):
+    t = {"wall": 1_000_000.0}
+    monkeypatch.setattr(time, "time", lambda: t["wall"])
+    alerter, _ = _alerter(
+        overstay_hours=2.0, dedup_window_seconds=0,
+        camera_roles={"1": {"role": "gate_in"}, "2": {"role": "gate_out"}},
+        registry=["MH12DE1433"])
+    # Visitor enters at gate-in.
+    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam1"))
+    assert alerter.state_snapshot()["inside_visitors"] == 1
+    # 3 hours later another read arrives → sweep fires the overstay.
+    t["wall"] += 3 * 3600
+    fired = alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
+    over = [a for a in fired if a.evidence.get("overstay")]
+    assert len(over) == 1
+    assert over[0].severity == "medium"
+    assert "XX99ZZ0001" in over[0].title
+    # …and only once.
+    t["wall"] += 3600
+    fired = alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam2"))
+    assert [a for a in fired if a.evidence.get("overstay")] == []
+
+
+def test_gate_out_clears_the_visitor(monkeypatch):
+    t = {"wall": 1_000_000.0}
+    monkeypatch.setattr(time, "time", lambda: t["wall"])
+    alerter, _ = _alerter(
+        overstay_hours=1.0, dedup_window_seconds=0,
+        camera_roles={"1": {"role": "gate_in"}, "2": {"role": "gate_out"}})
+    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam1"))
+    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam2"))  # left
+    assert alerter.state_snapshot()["inside_visitors"] == 0
+    t["wall"] += 2 * 3600
+    fired = alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+    assert [a for a in fired if a.evidence.get("overstay")] == []
+
+
+def test_registered_vehicles_never_overstay(monkeypatch):
+    t = {"wall": 1_000_000.0}
+    monkeypatch.setattr(time, "time", lambda: t["wall"])
+    alerter, _ = _alerter(
+        overstay_hours=1.0, dedup_window_seconds=0,
+        camera_roles={"1": {"role": "gate_in"}},
+        registry=["MH12DE1433"], allowlist=["KA05MJ6021"])
+    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
+    alerter.handle_event(_envelope(plate="KA05MJ6021", camera="cam1"))
+    assert alerter.state_snapshot()["inside_visitors"] == 0
+
+
+def test_trust_settings_update_live():
+    alerter, _ = _alerter(dedup_window_seconds=0)
+    alerter.on_config_update({
+        "allowlist": [], "denylist": [],
+        "fuzzy_max_distance": 2,
+        "plate_formats": [r"[A-Z]{2}[0-9]{6}"],
+        "overstay_hours": 4.0,
+    })
+    assert alerter._fuzzy_max == 2
+    assert len(alerter._formats) == 1
+    assert alerter._overstay_hours == 4.0

@@ -215,7 +215,7 @@ whether or not a barrier is attached.
 |---|---|---|
 | `plate_text` | string | The normalised read (uppercase, no separators). |
 | `decision` | string | `allow` or `deny`. |
-| `reason` | string | Why: `registered`, `allowlisted`, `monitored`, `expired_pass`, `unknown`. |
+| `reason` | string | Why: `registered`, `allowlisted`, `monitored`, `expired_pass`, `uncertain_read` (a fuzzy near-miss read — actuation is exact-match only), `unknown`. Additive: consumers must not branch on unrecognised reasons. |
 | `owner` | string \| null | Registry owner, when the plate is registered (helps gate displays/logs). |
 | `unit` | string \| null | Registry unit/flat, when registered. |
 | `confidence` | number \| null | OCR confidence carried from the read, when available. |

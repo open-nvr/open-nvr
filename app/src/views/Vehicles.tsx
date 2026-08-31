@@ -375,6 +375,7 @@ export function Vehicles() {
   const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring'>('reads')
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
   const [reportOpen, setReportOpen] = useState(false)
+  const [registerPrefill, setRegisterPrefill] = useState('')
 
   const camerasQuery = useQuery({
     queryKey: ['cameras'],
@@ -513,6 +514,23 @@ export function Vehicles() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
     onError: (e) => showError(extractApiError(e, 'Could not save the register.')),
   })
+
+  // The providing app's live state: the review queue (reads a human
+  // should look at) and the inside-visitors count for overstay.
+  const appStateQuery = useQuery({
+    queryKey: ['app-status', lprApp?.id],
+    queryFn: async () => {
+      const { data } = await apiService.getAppStatus(lprApp!.id)
+      return data as { state?: {
+        review?: { plate: string; camera_id: string; confidence?: number | null; reason: string; time: number }[]
+        inside_visitors?: number
+      } }
+    },
+    enabled: Boolean(lprApp),
+    retry: 0,
+    refetchInterval: 15_000,
+  })
+  const reviewQueue = appStateQuery.data?.state?.review ?? []
 
   // All-time history for one plate (the drill-down modal).
   const historyQuery = useQuery({
@@ -656,6 +674,14 @@ export function Vehicles() {
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
           barrierMode={barrierMode}
+          overstayHours={Number((lprApp?.config as any)?.overstay_hours ?? 0) || 0}
+          onSetOverstay={(hours) => {
+            saveConfig.mutate({ overstay_hours: hours }, {
+              onSuccess: () => showSuccess(hours > 0
+                ? `Overstay alert ON — visitors inside longer than ${hours}h raise an alert`
+                : 'Overstay alert off'),
+            })
+          }}
           onToggleBarrier={(on) => {
             saveConfig.mutate({ barrier_mode: on ? 'registered' : 'off' }, {
               onSuccess: () => showSuccess(
@@ -676,6 +702,7 @@ export function Vehicles() {
             // the legacy gate_directions map is read-only fallback.
             saveConfig.mutate({ camera_roles: next })
           }}
+          initialPlate={registerPrefill}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
               onSuccess: () => showSuccess(`Register saved — ${entries.length} vehicles`),
@@ -691,6 +718,55 @@ export function Vehicles() {
         />
       ) : (
       <>
+      {/* ── Needs review (bad format / low confidence reads) ──────── */}
+      {reviewQueue.length > 0 && (
+        <Card>
+          <CardContent className="py-3">
+            <div className="text-sm font-medium mb-1 text-[var(--warning,#b7791f)]">
+              Reads needing review ({reviewQueue.length})
+            </div>
+            <div className="text-xs text-[var(--text-dim)] mb-2">
+              The app did not act on these — bad plate format or OCR confidence
+              below your threshold. A human decides: register the plate if it's
+              real, or ignore it (entries age out on their own).
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <tbody>
+                  {[...reviewQueue].reverse().slice(0, 8).map((r, i) => (
+                    <tr key={`${r.plate}-${r.time}-${i}`} className="border-b border-[var(--border)] last:border-0">
+                      <td className="py-1 pr-3 font-mono font-semibold">{r.plate}</td>
+                      <td className="py-1 pr-3 text-[var(--text-dim)]">{cameraName(Number(String(r.camera_id).replace(/^cam/, '')) || 0)}</td>
+                      <td className="py-1 pr-3">
+                        <Badge variant="warning">
+                          {r.reason === 'low_confidence'
+                            ? `low confidence${r.confidence != null ? ` (${Math.round(r.confidence * 100)}%)` : ''}`
+                            : 'bad format'}
+                        </Badge>
+                      </td>
+                      <td className="py-1 pr-3 text-[var(--text-dim)]">
+                        {new Date(r.time * 1000).toLocaleTimeString()}
+                      </td>
+                      <td className="py-1 text-right">
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setRegisterPrefill(r.plate)
+                            setTab('registry')
+                          }}
+                        >
+                          <Plus size={13} /> Register
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Filters ───────────────────────────────────────────────── */}
       <Card>
         <CardContent className="py-3 flex flex-wrap items-center gap-2">
@@ -1035,6 +1111,9 @@ function RegistryTab({
   alarmOnUnknown,
   barrierMode,
   onToggleBarrier,
+  overstayHours,
+  onSetOverstay,
+  initialPlate,
   canEdit,
   saving,
   cameras,
@@ -1047,6 +1126,9 @@ function RegistryTab({
   alarmOnUnknown: boolean
   barrierMode: 'off' | 'registered'
   onToggleBarrier: (on: boolean) => void
+  overstayHours: number
+  onSetOverstay: (hours: number) => void
+  initialPlate?: string
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
@@ -1055,7 +1137,8 @@ function RegistryTab({
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
-  const [draft, setDraft] = useState<RegistryEntry>({ plate: '' })
+  const [draft, setDraft] = useState<RegistryEntry>({ plate: initialPlate ?? '' })
+  const [overstayDraft, setOverstayDraft] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const { showError, showSuccess } = useSnackbar()
 
@@ -1163,6 +1246,44 @@ function RegistryTab({
             disabled={saving}
           >
             {barrierMode === 'registered' ? 'Turn off' : 'Turn on'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Visitor overstay */}
+      <Card>
+        <CardContent className="py-3 flex flex-wrap items-center gap-3">
+          <History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Visitor overstay alert</div>
+            <div className="text-xs text-[var(--text-dim)]">
+              Alert when a visitor (not registered or allowlisted) has been inside
+              longer than this many hours — one alert per visit, checked as reads
+              arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit.
+            </div>
+          </div>
+          <label className="text-xs text-[var(--text-dim)]">
+            Hours (0 = off)
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={overstayDraft ?? String(overstayHours || 0)}
+              onChange={(e) => setOverstayDraft(e.target.value)}
+              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-28"
+            />
+          </label>
+          <Button
+            onClick={() => {
+              const h = Number(overstayDraft ?? overstayHours)
+              if (Number.isFinite(h) && h >= 0) {
+                onSetOverstay(h)
+                setOverstayDraft(null)
+              }
+            }}
+            disabled={saving || overstayDraft === null}
+          >
+            Save
           </Button>
         </CardContent>
       </Card>
