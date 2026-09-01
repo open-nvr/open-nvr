@@ -87,6 +87,37 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    import os as _os
+    raw = (_os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    log.warning("%s=%r is not a boolean; using %s", name, raw, default)
+    return default
+
+
+def motion_config_from_env() -> "MotionConfig":
+    """#373: the MotionConfig fields, operator-tunable at last. Before
+    this, the worker constructed the motion gate from hardcoded defaults
+    with no env plumbing — a camera whose scene never calibrated could
+    not be tuned or un-gated without a code change. Factored out (and
+    module-level) so tests pin the env-var names to the fields."""
+    return MotionConfig(
+        enabled=_env_bool("DETECT_MOTION_ENABLED", True),
+        threshold=_env_int("DETECT_MOTION_THRESHOLD", 30),
+        contour_area=_env_int("DETECT_MOTION_CONTOUR_AREA", 10),
+        frame_alpha=_env_float("DETECT_MOTION_FRAME_ALPHA", 0.01),
+        lightning_threshold=_env_float(
+            "DETECT_MOTION_LIGHTNING_THRESHOLD", 0.8),
+        calibration_max_frames=_env_int(
+            "DETECT_MOTION_CALIBRATION_MAX_FRAMES", 150),
+    )
+
+
 def _env_labels(name: str, default_csv: str) -> frozenset[str] | None:
     """Parse a comma-separated label allowlist; "all"/"*" → None (no filter)."""
     import os as _os
@@ -520,7 +551,9 @@ class CameraWorker:
         lifecycle = VisitLifecycle(
             self.spec.camera_id, nvr_camera_id=self.spec.nvr_camera_id
         )
-        motion = MotionDetector((h, w), MotionConfig())
+        motion = MotionDetector(
+            (h, w), motion_config_from_env(), label=self.spec.camera_id,
+        )
         tracker = Tracker((h, w), TrackConfig(
             fps=self.spec.fps,
             max_tracks=_env_int("DETECT_MAX_TRACKS", 50),
