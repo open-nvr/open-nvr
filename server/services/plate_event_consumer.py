@@ -37,6 +37,30 @@ SUBJECT = "opennvr.events.plate.recognized.v1.>"
 _RETRY_SECONDS = 60.0
 
 
+def _read_is_clipped(box, evidence_path: str | None) -> bool:
+    """Partial-read guard for the bus path — see plate_box_is_clipped.
+
+    Best-effort by construction: no box, no evidence, or an unreadable
+    crop all answer False, so a missing optional field can never start
+    silently dropping good plates.
+    """
+    if box is None or not evidence_path:
+        return False
+    try:
+        from services.evidence_store import resolve_evidence
+        from services.plate_enrichment import (
+            jpeg_dimensions, plate_box_is_clipped,
+        )
+
+        path = resolve_evidence(evidence_path)
+        if path is None:
+            return False
+        return plate_box_is_clipped(box, jpeg_dimensions(path.read_bytes()))
+    except Exception:  # noqa: BLE001
+        logger.debug("plate consumer: clipping check failed", exc_info=True)
+        return False
+
+
 def apply_plate_event(envelope: object) -> str:
     """Apply one ``plate.recognized.v1`` envelope to the timeline.
 
@@ -78,6 +102,14 @@ def apply_plate_event(envelope: object) -> str:
             return "not-found"
         if row.plate_text:
             return "already-set"
+        # Same partial-read rule as the synchronous producer. The two are
+        # racing writers for one column, so a guard on only one of them is
+        # no guard at all — a clipped read rejected by plate_enrichment
+        # would simply land here instead. KAI-C forwards the plate box
+        # (optional, additive); the crop it was measured in is this row's
+        # evidence, so the geometry is reproducible here.
+        if _read_is_clipped(payload.get("plate_box"), row.evidence_path):
+            return "clipped"
         row.plate_text = plate.strip()[:32]
         db.commit()
         logger.info(

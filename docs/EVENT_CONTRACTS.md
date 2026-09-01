@@ -155,6 +155,7 @@ empty/failed reads do not fire).
 | `confidence` | number \| null | Adapter-reported confidence for the read, when available. |
 | `vehicle_label` | string \| null | Upstream detection label (`car`/`truck`/`bus`) when the chain knows it. |
 | `event_id` | int \| null | Timeline visit row this read enriches, when initiated from a visit. |
+| `plate_box` | `[x1,y1,x2,y2]` \| absent | Optional. Where the adapter localised the plate, in the pixel space of the crop it was given. Consumers use it to reject **partial** reads: a crop whose edge cuts through the plate still OCRs the surviving characters at high confidence, so `confidence` cannot distinguish `K884` (a fragment of `K884RS`) from a whole plate — only the geometry can. Absent when the adapter reports no localisation. |
 
 #### Producer convergence (Phase 0 exit criterion)
 

@@ -239,3 +239,79 @@ def test_extract_plate_and_wants_plate():
     assert wants_plate("person", "ab/x.jpg") is False
     assert wants_plate("car", None) is False
     assert wants_plate("car", "ab/x.jpg", enabled=False) is False
+
+
+# ── Partial plate reads (fragments) ────────────────────────────────
+#
+# A vehicle crop is the tracked box plus a margin, clamped to the frame,
+# so a vehicle leaving frame yields a crop whose edge cuts the plate.
+# fast_plate_ocr then reads the characters that SURVIVED and reports high
+# confidence for them: "K884" (of "K884RS") scored 0.9835. Those landed in
+# events.plate_text as if whole, so one Audi arrived as 66HH07, 66HH, H07
+# and HHO7 — four identities, and the watchlist matched none of them.
+# Confidence cannot separate partial from whole; the geometry can.
+
+def _jpeg_of(width: int, height: int) -> bytes:
+    """Smallest byte string with a readable SOF0 frame header."""
+    return (bytes((0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08))
+            + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+            + bytes(8))
+
+
+def test_jpeg_dimensions_reads_the_sof_header():
+    from services.plate_enrichment import jpeg_dimensions
+    assert jpeg_dimensions(_jpeg_of(1077, 720)) == (1077, 720)
+    assert jpeg_dimensions(_jpeg_of(1, 1)) == (1, 1)
+    # "Cannot judge" cases must be None, never a guess.
+    assert jpeg_dimensions(b"") is None
+    assert jpeg_dimensions(b"not a jpeg at all") is None
+    assert jpeg_dimensions(bytes((0xFF, 0xD8))) is None      # SOI, no frame
+    assert jpeg_dimensions(None) is None
+
+
+def test_plate_box_is_clipped_uses_measured_geometry():
+    from services.plate_enrichment import plate_box_is_clipped
+    # Real fragment: "K884" out of "K884RS", box flush with the right edge.
+    assert plate_box_is_clipped([847, 463, 1076, 550], (1077, 720)) is True
+    # Real whole read: "66HH07", 307 px clear of the nearest edge.
+    assert plate_box_is_clipped([401, 307, 596, 369], (1035, 720)) is False
+    # Every edge counts, not just the right one.
+    assert plate_box_is_clipped([0, 100, 50, 150], (500, 500)) is True
+    assert plate_box_is_clipped([100, 0, 150, 50], (500, 500)) is True
+    assert plate_box_is_clipped([100, 100, 150, 500], (500, 500)) is True
+
+
+def test_plate_box_is_clipped_never_invents_a_rejection():
+    from services.plate_enrichment import plate_box_is_clipped
+    good = [401, 307, 596, 369]
+    assert plate_box_is_clipped(good, None) is False       # size unknown
+    assert plate_box_is_clipped(None, (100, 100)) is False  # no box
+    assert plate_box_is_clipped("nonsense", (100, 100)) is False
+    assert plate_box_is_clipped([1, 2, 3], (100, 100)) is False
+    assert plate_box_is_clipped(good, (0, 0)) is False
+
+
+def test_extract_plate_rejects_a_clipped_read():
+    from services.plate_enrichment import extract_plate
+    clipped = {"result": {
+        "plate_text": "K884", "confidence": 0.9835, "accepted": True,
+        "plate_detection": {"found": True, "box": [847, 463, 1076, 550]},
+    }}
+    # High confidence and accepted=True — only the geometry says otherwise.
+    assert extract_plate(clipped, image_size=(1077, 720)) is None
+    # Without the crop size the check cannot run, so behaviour is unchanged.
+    assert extract_plate(clipped) == "K884"
+
+
+def test_extract_plate_keeps_a_whole_read():
+    from services.plate_enrichment import extract_plate
+    whole = {"result": {
+        "plate_text": "66HH07", "confidence": 0.9993, "accepted": True,
+        "plate_detection": {"found": True, "box": [401, 307, 596, 369]},
+    }}
+    assert extract_plate(whole, image_size=(1035, 720)) == "66HH07"
+    # A response with no localisation block is unaffected by the guard.
+    assert extract_plate(
+        {"result": {"plate_text": "66HH07", "accepted": True}},
+        image_size=(1035, 720),
+    ) == "66HH07"
