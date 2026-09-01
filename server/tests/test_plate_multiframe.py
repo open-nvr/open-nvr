@@ -316,3 +316,61 @@ def test_worker_fires_early_attempts_before_visit_lifecycle():
     assert "early_attempts.observe(result.tracks)" in src, (
         "the worker loop no longer fires early attempts — reads wait for "
         "the track to die again (minutes on a busy road)")
+
+
+# ── the early-attempt background task (race cover) ─────────────────
+
+
+def test_early_attempt_parks_read_and_covers_the_ingest_race(db, monkeypatch):
+    """run_early_plate_attempt must (a) park an accepted read in the
+    cache for the visit to claim, and (b) when the visit ALREADY landed
+    unplated (the attempt raced ingest), write the plate straight onto
+    the row — the cache is a waiting room, not a detour."""
+    from routers import internal_camera_agent as ica
+    from services import plate_attempt_cache as pac
+
+    SessionLocal, row_id = db
+    fresh = pac.PlateAttemptCache()
+    monkeypatch.setattr(pac, "cache", fresh)
+
+    # Attach a track id + window to the fixture row so the race-cover
+    # query can find it.
+    s = SessionLocal()
+    row = s.get(models.TimelineEvent, row_id)
+    row.track_id = "42"
+    started = row.started_at.replace(tzinfo=timezone.utc)
+    s.commit()
+    s.close()
+
+    async def fake_ocr(jpeg, camera_handle, event_id=None):
+        assert camera_handle.startswith("cam")
+        return _accepted("RACE99")
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
+    attempt_ts = started.timestamp() + 5.0
+    s = SessionLocal()
+    cam_id = s.get(models.TimelineEvent, row_id).camera_id
+    s.close()
+    asyncio.run(ica.run_early_plate_attempt(cam_id, "42", attempt_ts, b"jpg"))
+
+    # (a) parked for a future visit...
+    assert len(fresh) == 1
+    # (b) ...AND applied to the already-ingested row.
+    assert _plate_of(SessionLocal, row_id) == "RACE99"
+
+
+def test_early_attempt_rejected_read_parks_nothing(db, monkeypatch):
+    from routers import internal_camera_agent as ica
+    from services import plate_attempt_cache as pac
+
+    SessionLocal, row_id = db
+    fresh = pac.PlateAttemptCache()
+    monkeypatch.setattr(pac, "cache", fresh)
+
+    async def fake_ocr(jpeg, camera_handle, event_id=None):
+        return _rejected("JUNK1", [0.1] * 5)
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
+    asyncio.run(ica.run_early_plate_attempt(1, "42", 1000.0, b"jpg"))
+    assert len(fresh) == 0
+    assert _plate_of(SessionLocal, row_id) is None

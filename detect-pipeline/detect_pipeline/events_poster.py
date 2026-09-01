@@ -50,17 +50,19 @@ class Visit:
     ended_at: datetime
     stationary: bool | None
     jpeg: bytes | None
-    # Multi-frame OCR: up to K plate-candidate crops (JPEG), most
-    # promising first. Core's enrichment sweeps these in order until a
-    # read clears the confidence floor — several diverse lottery
-    # tickets per car instead of one. Empty for non-vehicle visits and
-    # non-LPR cameras.
-    candidate_jpegs: tuple = ()
     # Core's numeric Camera.id — what the events endpoint keys on. The
     # pipeline-facing camera_id is the provider's string handle ("cam1"),
     # which is NOT the DB id; core sends the real one separately as
     # ``open_nvr_camera_id``. None → derived from camera_id at post time.
     nvr_camera_id: int | None = None
+    # Multi-frame OCR: up to K plate-candidate crops (JPEG), most
+    # promising first. Core's enrichment sweeps these in order until a
+    # read clears the confidence floor — several diverse lottery
+    # tickets per car instead of one. Empty for non-vehicle visits and
+    # non-LPR cameras. Appended LAST (after nvr_camera_id, same rule
+    # that field followed) so existing POSITIONAL constructions keep
+    # their meaning.
+    candidate_jpegs: tuple = ()
 
 
 def _core_camera_id(v: Visit) -> int:

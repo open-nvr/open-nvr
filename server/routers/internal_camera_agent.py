@@ -142,7 +142,9 @@ async def ingest_track_event(
     # read this vehicle's plate while it was still in frame — claim it
     # (time-window checked; recycled track ids from a restarted worker
     # fail the window and are ignored).
-    if (row.label or "") in {"car", "truck", "bus", "motorcycle"} \
+    from services.plate_enrichment import VEHICLE_LABELS as _VEHICLES
+
+    if (row.label or "") in _VEHICLES \
             and payload.track_id and not row.plate_text:
         from services.plate_attempt_cache import cache as _attempt_cache
 
