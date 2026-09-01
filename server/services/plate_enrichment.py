@@ -51,6 +51,40 @@ VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle"}
 PLATE_MODEL = "fast_plate_ocr"
 PLATE_TASK = "license_plate_recognition"
 
+# Issue #371: a missing OCR adapter used to be a per-event DEBUG line —
+# operator-invisible, so "restart unregistered the adapter" looked
+# exactly like "no plates in frame" for hours. Best-effort stays
+# best-effort (rows keep plate_text=NULL, ingest never blocks), but a
+# broken dependency now WARNs, rate-limited so a busy gate camera can't
+# flood the log with one line per vehicle.
+_MISSING_ADAPTER_WARN_INTERVAL_SECONDS = 600.0
+# None = never warned. NOT 0.0: time.monotonic() counts from HOST BOOT,
+# so on a machine up for less than the interval, ``now - 0.0 < 600``
+# would swallow the very first warning — the one that matters most.
+# (Caught by CI: fresh runner VMs boot seconds before pytest runs.)
+_last_missing_adapter_warn: float | None = None
+
+
+def _warn_adapter_missing(status_code: int) -> None:
+    """Rate-limited operator signal that plate OCR is failing."""
+    global _last_missing_adapter_warn
+    import time as _time
+
+    now = _time.monotonic()
+    if (_last_missing_adapter_warn is not None
+            and now - _last_missing_adapter_warn
+            < _MISSING_ADAPTER_WARN_INTERVAL_SECONDS):
+        return
+    _last_missing_adapter_warn = now
+    logger.warning(
+        "plate enrichment: KAI-C answered %s for adapter '%s' — plate "
+        "reads are FAILING. The adapter is not registered (or not "
+        "approved) with KAI-C; check the AI Models page or "
+        "GET /api/v1/adapters. This warning repeats at most every %d s.",
+        status_code, PLATE_MODEL,
+        int(_MISSING_ADAPTER_WARN_INTERVAL_SECONDS),
+    )
+
 
 def extract_plate(response: dict | None) -> str | None:
     """Pure parser for the adapter's §5 InferResponse → normalized plate.
@@ -142,6 +176,11 @@ async def enrich_event_plate(event_id: int) -> None:
             logger.debug("plate enrichment: adapter answered %s for event %s "
                          "(fast_plate_ocr not registered?)",
                          resp.status_code, event_id)
+            if resp.status_code in (403, 404):
+                # 404 = adapter unknown to KAI-C (the #371 restart
+                # amnesia); 403 = registered but approval pending.
+                # Either way plate reads are dead until fixed — say so.
+                _warn_adapter_missing(resp.status_code)
             return
         plate = extract_plate(resp.json())
         if not plate:

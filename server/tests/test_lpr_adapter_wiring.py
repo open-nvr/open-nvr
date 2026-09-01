@@ -74,3 +74,35 @@ def test_registration_failure_degrades_it_does_not_wedge():
     assert reg.count("exit 0") == 2, (
         "both the success path and the retries-exhausted path must exit 0")
     assert "WARN: could not register" in reg
+
+
+# ── Issue #371: registrations must survive an opennvr-core restart ──
+#
+# The one-shot registrar above runs ONCE per `compose up`. KAI-C's
+# in-memory registry therefore needs its receipts file on a volume, or
+# any restart of opennvr-core silently forgets fast_plate_ocr and every
+# plate read 404s with no signal. These pin the compose wiring for the
+# persistence added in kai_c/persistence.py.
+
+_BASE = (REPO_ROOT / "docker-compose.yml").read_text()
+_ENTRYPOINT = (REPO_ROOT / "docker-entrypoint.sh").read_text()
+
+
+def test_kai_c_state_dir_is_wired_to_a_volume():
+    assert "KAI_C_STATE_DIR=/app/kai-c-state" in _BASE, (
+        "opennvr-core no longer tells KAI-C where to persist adapter "
+        "registrations — a core restart would silently kill LPR again "
+        "(issue #371)")
+    assert "- opennvr_kai_c_state:/app/kai-c-state" in _BASE, (
+        "the KAI-C state dir is not on a volume — receipts die with the "
+        "container, which is the #371 amnesia with extra steps")
+    assert "\n  opennvr_kai_c_state:" in _BASE, (
+        "the opennvr_kai_c_state volume is mounted but never declared — "
+        "compose config would fail")
+
+
+def test_kai_c_state_dir_is_writable_by_the_service_user():
+    # First mount of a named volume is root-owned; KAI-C runs as the
+    # opennvr user under supervisord. Without the chown, persistence
+    # degrades (with a WARN) back to restart amnesia.
+    assert "chown -R opennvr:opennvr /app/kai-c-state" in _ENTRYPOINT

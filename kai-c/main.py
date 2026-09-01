@@ -49,6 +49,7 @@ from kai_c.correlation import CORRELATION_ID_HEADER, CorrelationIdMiddleware
 from kai_c.domain_events import normalise_completion
 from kai_c.events import InferenceCompletedEvent
 from kai_c.nats_publisher import NatsPublisher
+from kai_c.persistence import RegistryStateStore
 from kai_c.registry import AdapterRegistry
 from kai_c.schemas import KAIRequest
 from kai_c.sovereignty import SovereigntyViolation
@@ -318,6 +319,20 @@ async def lifespan(app: FastAPI):
             "a local dev box."
         )
 
+    # #371: durable receipts for runtime adapter registrations. Default
+    # is a ``kai-c-state`` dir next to the working directory; the Docker
+    # stack points this at a named volume so the file survives container
+    # recreation. ``KAI_C_STATE_DIR=""`` (explicit empty) opts out.
+    state_dir = os.getenv("KAI_C_STATE_DIR", "./kai-c-state")
+    state_store = RegistryStateStore(state_dir or None)
+    if state_store.enabled:
+        logger.info("adapter registration state: %s", state_store.path)
+    else:
+        logger.warning(
+            "KAI_C_STATE_DIR is empty — runtime adapter registrations "
+            "will NOT survive a restart."
+        )
+
     _registry = AdapterRegistry(
         sovereignty_mode=AI_SOVEREIGNTY,
         audit=_audit,
@@ -325,10 +340,11 @@ async def lifespan(app: FastAPI):
         # /health polls authenticated past the adapter's 5-minute grace
         # window (otherwise every poll 401s).
         auth_token=INTERNAL_API_KEY or None,
+        state_store=state_store,
     )
     for name, url in ADAPTER_REGISTRY.items():
         try:
-            adapter = await _registry.register(name, url)
+            adapter = await _registry.register(name, url, source="seed")
         except SovereigntyViolation as exc:
             logger.warning("sovereignty refused %s@%s: %s", name, url, exc)
             _audit.emit(
@@ -339,10 +355,20 @@ async def lifespan(app: FastAPI):
                 registration_url=url,
             )
         except Exception as exc:
-            # Adapter unreachable / malformed /capabilities — log and
-            # continue. Operators can re-register via the v2 endpoint
-            # once the adapter is up.
-            logger.info("registration deferred for %s@%s: %s", name, url, exc)
+            # Adapter unreachable / malformed /capabilities. #371: queue
+            # it for the poll loop's retry pass instead of giving up —
+            # in compose, adapter containers routinely come up AFTER
+            # this process on a whole-stack (re)start, and "deferred
+            # forever" was indistinguishable from working. The retry
+            # keeps the §8.5 config-as-consent grant semantics.
+            logger.info(
+                "registration deferred for %s@%s (%s) — will retry each "
+                "poll cycle", name, url, exc,
+            )
+            _registry.defer(
+                name, url, source="seed",
+                grant_all_on_register=True, error=str(exc),
+            )
         else:
             # Contract §8.5 — config-as-consent. This adapter came from
             # the operator's OWN startup configuration (compose overlay /
@@ -357,6 +383,17 @@ async def lifespan(app: FastAPI):
             # seeded adapter back to pending (see registry.refresh()).
             if adapter.pending_keys():
                 _registry.approve_all(name, actor="system:startup-config")
+
+    # #371: bring back runtime registrations (app-overlay registrars,
+    # operator adds) recorded before the restart, then attempt the whole
+    # pending queue once right away — when only opennvr-core restarted,
+    # the adapter containers are still up and this restores LPR et al.
+    # within seconds instead of one poll interval.
+    _registry.restore_persisted()
+    try:
+        await _registry.retry_pending()
+    except Exception as exc:  # never let a restore problem block boot
+        logger.warning("initial pending-registration pass failed: %s", exc)
     await _registry.start_polling()
 
     # NATS publisher for the event-bus broadcast surface. Starts AFTER
@@ -1065,8 +1102,18 @@ async def v1_deregister_adapter(name: str):
 
 @app.get("/api/v1/adapters", dependencies=[Depends(require_internal_api_key)])
 async def v1_list_adapters():
-    """Lightweight adapter summaries — what the OpenNVR UI lists."""
-    return {"adapters": get_registry().list_summaries()}
+    """Lightweight adapter summaries — what the OpenNVR UI lists.
+
+    ``deferred`` (additive, #371) lists adapters the registry knows it
+    SHOULD have but could not register yet — a seed or restored adapter
+    whose container is down. Before this field existed, that state was
+    indistinguishable from "no such adapter", which is how a restart
+    silently killed LPR."""
+    registry = get_registry()
+    return {
+        "adapters": registry.list_summaries(),
+        "deferred": registry.pending_registrations(),
+    }
 
 
 @app.get("/api/v1/ai/capabilities", dependencies=[Depends(require_internal_api_key)])
