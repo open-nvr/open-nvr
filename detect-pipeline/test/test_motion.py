@@ -184,7 +184,8 @@ def test_motion_config_from_env_defaults(monkeypatch):
     for var in ("DETECT_MOTION_ENABLED", "DETECT_MOTION_THRESHOLD",
                 "DETECT_MOTION_CONTOUR_AREA", "DETECT_MOTION_FRAME_ALPHA",
                 "DETECT_MOTION_LIGHTNING_THRESHOLD",
-                "DETECT_MOTION_CALIBRATION_MAX_FRAMES"):
+                "DETECT_MOTION_CALIBRATION_MAX_FRAMES",
+                "DETECT_MOTION_MAX_FORCED_EXITS"):
         monkeypatch.delenv(var, raising=False)
     cfg = motion_config_from_env()
     assert cfg == MotionConfig()  # env-less = library defaults, verbatim
@@ -198,6 +199,7 @@ def test_motion_config_from_env_overrides(monkeypatch):
     monkeypatch.setenv("DETECT_MOTION_FRAME_ALPHA", "0.05")
     monkeypatch.setenv("DETECT_MOTION_LIGHTNING_THRESHOLD", "0.95")
     monkeypatch.setenv("DETECT_MOTION_CALIBRATION_MAX_FRAMES", "600")
+    monkeypatch.setenv("DETECT_MOTION_MAX_FORCED_EXITS", "5")
     cfg = motion_config_from_env()
     assert cfg.enabled is False
     assert cfg.threshold == 45
@@ -205,6 +207,7 @@ def test_motion_config_from_env_overrides(monkeypatch):
     assert cfg.frame_alpha == 0.05
     assert cfg.lightning_threshold == 0.95
     assert cfg.calibration_max_frames == 600
+    assert cfg.calibration_max_forced_exits == 5
 
 
 def test_motion_config_from_env_rejects_junk(monkeypatch):
@@ -225,3 +228,117 @@ def test_worker_constructs_motion_from_env_with_camera_label():
            / "detect_pipeline" / "service.py").read_text()
     assert "motion_config_from_env(), label=self.spec.camera_id" in src
     assert "MotionDetector((h, w), MotionConfig())" not in src
+
+
+# ── The deadline as a DUTY CYCLE: latch open on an unmodelable scene ──
+#
+# #373 bounded each calibration episode, but on a scene with NO STATIC
+# BACKGROUND (a PTZ mid-pan, a moving source) calibration re-trips the
+# very next frame, so the deadline stops being an escape hatch and
+# becomes a clock: one analysed frame every calibration_max_frames,
+# forever, and quietly — the repeat WARN is demoted to debug. Measured
+# on a real install: 6124/6220 frames skipped (98.5%), plate events
+# arriving in exact 75 s multiples (150 frames / DETECT_FPS=2).
+
+
+def _no_background_frame(rng: np.random.Generator) -> np.ndarray:
+    """Every pixel churns: motion pct ~1.0, above the 0.8 lightning bar.
+
+    This is the regime a moving camera produces — unlike ``_busy_frame``
+    (pct ~0.3), it RE-TRIPS calibration on every frame, so the gate can
+    never stay open and the deadline repeats indefinitely.
+    """
+    return rng.integers(0, 255, (H, W), dtype=np.uint8)
+
+
+def test_repeated_forced_exits_latch_the_gate_open():
+    """The fix: after N consecutive deadline exits the gate concludes
+    the scene has no static background and stops re-gating it."""
+    md = MotionDetector(
+        (H, W),
+        MotionConfig(calibration_max_frames=10, calibration_max_forced_exits=2),
+        label="cam1",
+    )
+    rng = np.random.default_rng(11)
+    for _ in range(100):
+        md.detect(_no_background_frame(rng))
+    assert md.latched_open is True
+    assert md.is_calibrating() is False
+    # The duty cycle is broken: no further forced exits accumulate,
+    # because calibration is never re-entered.
+    assert md.forced_calibration_exits == 2
+    exits_at_latch = md.forced_calibration_exits
+    for _ in range(100):
+        md.detect(_no_background_frame(rng))
+        assert md.is_calibrating() is False, "a latched gate must never re-gate"
+    assert md.forced_calibration_exits == exits_at_latch
+
+
+def test_latch_disabled_preserves_the_deadline_duty_cycle():
+    """Regression guard for #373: with the latch off, behaviour is
+    exactly as before — the deadline keeps firing forever."""
+    md = MotionDetector(
+        (H, W),
+        MotionConfig(calibration_max_frames=10, calibration_max_forced_exits=0),
+    )
+    rng = np.random.default_rng(11)
+    for _ in range(100):
+        md.detect(_no_background_frame(rng))
+    assert md.latched_open is False
+    assert md.forced_calibration_exits > 2, "deadline should keep re-firing"
+
+
+def test_latch_releases_when_the_scene_goes_quiet():
+    """A PTZ that finishes its pan must start being gated again, with
+    no operator action — the latch is an observation, not a setting."""
+    md = MotionDetector(
+        (H, W),
+        # frame_alpha high so the background re-converges within the
+        # test; release speed is a property of the background model,
+        # not of the latch.
+        MotionConfig(calibration_max_frames=10, calibration_max_forced_exits=2,
+                     frame_alpha=0.5),
+    )
+    rng = np.random.default_rng(11)
+    for _ in range(60):
+        md.detect(_no_background_frame(rng))
+    assert md.latched_open is True
+
+    _warm_up(md, frames=120)                 # the pan stops; scene is static
+    assert md.latched_open is False
+    assert md.consecutive_forced_exits == 0
+    assert md.is_calibrating() is False      # gated again, and calibrated
+
+
+def test_natural_calibration_resets_the_forced_exit_counter():
+    """Consecutive is the operative word: a scene that settles between
+    episodes never accumulates its way to a latch."""
+    md = MotionDetector(
+        (H, W),
+        MotionConfig(calibration_max_frames=10, calibration_max_forced_exits=2,
+                     frame_alpha=0.5),
+    )
+    rng = np.random.default_rng(5)
+    for _ in range(3):
+        for _ in range(30):                  # unmodelable stretch -> one exit
+            md.detect(_no_background_frame(rng))
+        _warm_up(md, frames=120)             # ...then the scene settles
+        assert md.consecutive_forced_exits == 0
+    assert md.latched_open is False
+
+
+def test_forced_exit_this_frame_is_a_per_frame_edge():
+    """The metrics counter increments on this flag, so it must be true
+    only on the frame the deadline fires — a sticky flag would inflate
+    tier0_motion_forced_exits_total by one per frame thereafter."""
+    md = MotionDetector(
+        (H, W),
+        MotionConfig(calibration_max_frames=10, calibration_max_forced_exits=0),
+    )
+    rng = np.random.default_rng(11)
+    edges = 0
+    for _ in range(100):
+        md.detect(_no_background_frame(rng))
+        if md.forced_exit_this_frame:
+            edges += 1
+    assert edges == md.forced_calibration_exits

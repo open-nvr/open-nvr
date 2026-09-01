@@ -72,6 +72,13 @@ class FrameResult:
     # True when the per-frame region budget dropped at least one candidate
     # this frame (exported as tier0_regions_capped_total — no silent caps).
     regions_capped: bool = False
+    # Motion-gate state, for metrics. ``motion_forced_exit`` is a per-frame
+    # EDGE (did the calibration deadline fire on this frame?), not the
+    # detector's running total — a cumulative value fed to a Prometheus
+    # ``inc`` would compound every frame. ``motion_latched_open`` says the
+    # gate gave up on a scene with no static background.
+    motion_forced_exit: bool = False
+    motion_latched_open: bool = False
     # Per-stage wall time for the frame (decode/motion/region/detect/track) — lets
     # the test-bed see *where* time goes, not just the end-to-end total.
     stage_latency_s: dict[str, float] = field(default_factory=dict)
@@ -201,7 +208,13 @@ class DetectPipeline:
             _t = time.monotonic()
             tracks = self.tracker.update([])
             stages["track"] = time.monotonic() - _t
-            return FrameResult(tracks, motion_boxes, [], True, stage_latency_s=stages)
+            return FrameResult(
+                tracks, motion_boxes, [], True, stage_latency_s=stages,
+                motion_forced_exit=getattr(
+                    self.motion, "forced_exit_this_frame", False),
+                motion_latched_open=getattr(
+                    self.motion, "latched_open", False),
+            )
 
         frame_shape = (frame.height, frame.width)
         self._frame_idx += 1
@@ -272,6 +285,9 @@ class DetectPipeline:
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
             skipped_stationary=skipped, regions_capped=regions_capped,
             track_population=self.tracker.population,
+            motion_forced_exit=getattr(
+                self.motion, "forced_exit_this_frame", False),
+            motion_latched_open=getattr(self.motion, "latched_open", False),
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
