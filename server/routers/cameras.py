@@ -1474,6 +1474,12 @@ async def delete_camera(
         # Irreversible soft delete: tombstone + deactivate.
         camera.is_active = False
         camera.deleted_at = datetime.now(UTC)
+        # #372: a binned camera must not keep claiming skills — a stale
+        # claim scoped consumers (the LPR app) to a camera that no
+        # longer exists while every live camera was ignored. Released in
+        # the same commit as the tombstone.
+        from services.skill_assignments import release_camera_claims
+        released_claims = release_camera_claims(db, camera_id)
         db.commit()
 
         camera_logger.log_action(
@@ -1497,6 +1503,7 @@ async def delete_camera(
                     "camera_name": camera_name,
                     "deleted_at": camera.deleted_at.isoformat(),
                     "stream_teardown": (teardown or {}).get("status", "failed"),
+                    "skill_claims_released": released_claims,
                 },
                 ip=request.client.host if request and request.client else None,
                 user_agent=request.headers.get("user-agent") if request else None,
@@ -1618,6 +1625,12 @@ async def hard_delete_camera(
     camera_event_rows = (
         db.query(CameraEvent).filter(CameraEvent.camera_id == camera_id).delete()
     )
+    # #372: skill claims have a plain FK to cameras (no cascade) — they
+    # must go before the camera row, and normally already went at soft
+    # delete; this catches rows left by installs that binned the camera
+    # before that cleanup existed.
+    from services.skill_assignments import release_camera_claims
+    release_camera_claims(db, camera_id)
     db.delete(camera)
     db.commit()
 
