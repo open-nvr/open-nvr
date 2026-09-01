@@ -2,8 +2,10 @@
 # OpenNVR — fake cameras from video files (opt-in overlay, test only)
 # ==========================================
 # Turns a folder of .mp4 files into looping RTSP streams on the internal
-# Docker network, so you can add them as cameras and exercise the real
-# ingest → record → detect → LPR path without any hardware.
+# Docker network, so you can add them as ordinary cameras and exercise the
+# real ingest → record → detect path without any hardware. Useful for
+# anything you would normally need a camera for: live view, recording and
+# playback, Tier-0 detection, the event timeline, or any installed app.
 #
 #     ./data/fake-cameras/gate-entry.mp4
 #         -> rtsp://172.28.90.10:8554/gate-entry
@@ -13,7 +15,7 @@
 #     #    at any host folder)
 #     docker compose -f docker-compose.yml -f docker-compose.fakecams.yml \
 #         --profile fakecams up -d fakecams
-#     # 2. register them as OpenNVR cameras (adds the LPR skill assignment)
+#     # 2. register them as OpenNVR cameras
 #     docker exec -i opennvr_core python - < scripts/fakecams/register_fake_cameras.py
 #
 # The rig has NO RTSP authentication and speaks plaintext. It is pinned to the

@@ -7,15 +7,19 @@ provisioned into MediaMTX exactly like a real one:
     docker exec -i opennvr_core python - < scripts/fakecams/register_fake_cameras.py
 
 It asks the fake-camera rig which paths it is currently serving, then creates
-one camera per path (skipping paths that already have a camera) and assigns the
-license_plate_recognition skill so the LPR app scopes to them.
+one camera per path, skipping paths that already have a camera. The new cameras
+behave like any other: live view, recording, playback and Tier-0 detection all
+work on them with no further configuration.
 
 Environment knobs:
     FAKECAM_HOST   host:port of the rig's API      (default fakecams:9997)
     FAKECAM_IP     address cameras are stored with (default 172.28.90.10)
     FAKECAM_PORT   RTSP port                       (default 8554)
-    FAKECAM_SKILL  skill to assign, "" to skip     (default license_plate_recognition)
     FAKECAM_PREFIX camera-name prefix              (default "fake-")
+    FAKECAM_SKILL  optional skill to assign to every new camera (default: none).
+                   Set it when testing a capability that scopes itself by
+                   assignment, e.g. FAKECAM_SKILL=license_plate_recognition
+                   or FAKECAM_SKILL=occupancy_counting.
 """
 
 import json
@@ -40,7 +44,7 @@ API = "http://127.0.0.1:8000/api/v1"
 RIG = os.environ.get("FAKECAM_HOST", "fakecams:9997")
 CAM_IP = os.environ.get("FAKECAM_IP", "172.28.90.10")
 CAM_PORT = int(os.environ.get("FAKECAM_PORT", "8554"))
-SKILL = os.environ.get("FAKECAM_SKILL", "license_plate_recognition")
+SKILL = os.environ.get("FAKECAM_SKILL", "")
 PREFIX = os.environ.get("FAKECAM_PREFIX", "fake-")
 
 
