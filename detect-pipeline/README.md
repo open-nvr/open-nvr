@@ -265,6 +265,13 @@ DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bi
 DETECT_DECODE_IDLE=nokey          # adaptive decode while quiet (dial 6, default on; none = off)
 DETECT_DECODE_IDLE_AFTER=60       # quiet seconds before a camera idles
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
+DETECT_MOTION_ENABLED=true        # false = motion gate OFF: detector runs on every frame (costly)
+DETECT_MOTION_THRESHOLD=30        # pixel-diff threshold 1-255 (raise on noisy sensors)
+DETECT_MOTION_CONTOUR_AREA=10     # min contour area counted as motion (raise to ignore small flicker)
+DETECT_MOTION_FRAME_ALPHA=0.01    # background adapt rate, steady state
+DETECT_MOTION_LIGHTNING_THRESHOLD=0.8  # frame fraction that re-triggers calibration (dawn/IR flash)
+DETECT_MOTION_CALIBRATION_MAX_FRAMES=150  # calibration deadline (#373): force the gate open after
+                                  # N consecutive calibrating frames (0 = old wedge-able behavior)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)

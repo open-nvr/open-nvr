@@ -402,6 +402,16 @@ services:
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
+      # Motion-gate tunables (#373; see .env.example). The calibration
+      # deadline keeps a permanently-busy scene from wedging the gate
+      # shut — before it, a scene that never went quiet skipped EVERY
+      # frame as "calibrating" and detection silently never ran.
+      - DETECT_MOTION_ENABLED=${DETECT_MOTION_ENABLED:-}
+      - DETECT_MOTION_THRESHOLD=${DETECT_MOTION_THRESHOLD:-}
+      - DETECT_MOTION_CONTOUR_AREA=${DETECT_MOTION_CONTOUR_AREA:-}
+      - DETECT_MOTION_FRAME_ALPHA=${DETECT_MOTION_FRAME_ALPHA:-}
+      - DETECT_MOTION_LIGHTNING_THRESHOLD=${DETECT_MOTION_LIGHTNING_THRESHOLD:-}
+      - DETECT_MOTION_CALIBRATION_MAX_FRAMES=${DETECT_MOTION_CALIBRATION_MAX_FRAMES:-}
       # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
       # cameras whose assignments are all detection-free. Empty = off.
       - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}
@@ -461,6 +471,11 @@ services:
       # container recreates; otherwise MediaMTX keeps serving its cached
       # JWKS and rejects every stream token until it is restarted.
       - opennvr_jwt_keys:/app/keys
+      # KAI-C adapter-registration receipts (#371) — runtime-registered
+      # adapters (e.g. fast_plate_ocr from the LPR app overlay) are
+      # re-registered from this file on boot, so restarting/recreating
+      # this container no longer silently kills plate recognition.
+      - opennvr_kai_c_state:/app/kai-c-state
       # Host LAN IP hints, rewritten by the launchers on every run so ONVIF
       # discovery keeps seeing the host's *current* networks even when the
       # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
@@ -505,6 +520,9 @@ services:
       # mediamtx service, losing it no longer breaks live WebRTC.
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
       - KAI_C_URL=http://127.0.0.1:8100
+      # Where KAI-C persists runtime adapter registrations (#371) —
+      # points at the opennvr_kai_c_state volume mounted above.
+      - KAI_C_STATE_DIR=/app/kai-c-state
       # ONVIF discovery auto-detection: inside this bridge container the only
       # visible network is the compose bridge, so the launchers export the
       # host's LAN IPs as the real subnet hints — OPENNVR_HOST_IP (default
@@ -700,3 +718,7 @@ volumes:
   # Rotate by removing the volume with core stopped, then restart
   # mediamtx so it refetches the JWKS.
   opennvr_jwt_keys:
+  # KAI-C runtime adapter registrations + grants (#371). Removing this
+  # volume forgets app-registered adapters — re-run the app overlay's
+  # registrar (or re-register on the AI Models page) to restore them.
+  opennvr_kai_c_state:
