@@ -58,7 +58,11 @@ PLATE_TASK = "license_plate_recognition"
 # broken dependency now WARNs, rate-limited so a busy gate camera can't
 # flood the log with one line per vehicle.
 _MISSING_ADAPTER_WARN_INTERVAL_SECONDS = 600.0
-_last_missing_adapter_warn: float = 0.0
+# None = never warned. NOT 0.0: time.monotonic() counts from HOST BOOT,
+# so on a machine up for less than the interval, ``now - 0.0 < 600``
+# would swallow the very first warning — the one that matters most.
+# (Caught by CI: fresh runner VMs boot seconds before pytest runs.)
+_last_missing_adapter_warn: float | None = None
 
 
 def _warn_adapter_missing(status_code: int) -> None:
@@ -67,7 +71,9 @@ def _warn_adapter_missing(status_code: int) -> None:
     import time as _time
 
     now = _time.monotonic()
-    if now - _last_missing_adapter_warn < _MISSING_ADAPTER_WARN_INTERVAL_SECONDS:
+    if (_last_missing_adapter_warn is not None
+            and now - _last_missing_adapter_warn
+            < _MISSING_ADAPTER_WARN_INTERVAL_SECONDS):
         return
     _last_missing_adapter_warn = now
     logger.warning(

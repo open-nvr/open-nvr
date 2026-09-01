@@ -23,7 +23,7 @@ import services.plate_enrichment as pe  # noqa: E402
 
 
 def _reset():
-    pe._last_missing_adapter_warn = 0.0
+    pe._last_missing_adapter_warn = None
 
 
 def test_missing_adapter_warns_once(caplog):
@@ -37,6 +37,19 @@ def test_missing_adapter_warns_once(caplog):
     assert "fast_plate_ocr" in msg
     assert "404" in msg
     assert "FAILING" in msg
+
+
+def test_first_warn_fires_even_on_a_freshly_booted_host(caplog, monkeypatch):
+    """Regression: the limiter compared against an initial 0.0, and
+    time.monotonic() counts from HOST BOOT — on a machine up for less
+    than the interval (every fresh CI VM, any rebooted NVR host) the
+    FIRST warning was silently swallowed. The sentinel must be None."""
+    _reset()
+    import time as _t
+    monkeypatch.setattr(_t, "monotonic", lambda: 5.0)  # "booted 5s ago"
+    with caplog.at_level(logging.WARNING, logger="plate_enrichment"):
+        pe._warn_adapter_missing(404)
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 def test_warn_fires_again_after_the_window(caplog, monkeypatch):
