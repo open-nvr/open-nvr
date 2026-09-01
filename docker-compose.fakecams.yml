@@ -36,6 +36,8 @@ services:
       # Output fps cap, transcode only (e.g. 10 to keep CPU down).
       - FAKECAM_FPS=${FAKECAM_FPS:-}
     volumes:
+      # NOTE: if this file is missing, Docker silently creates a DIRECTORY in
+      # its place and the container dies with exit 127. Keep it in the repo.
       - ./scripts/fakecams/entrypoint.sh:/opt/fakecams/entrypoint.sh:ro
       - ${FAKECAM_VIDEO_DIR:-./data/fake-cameras}:/videos:ro
     ports:

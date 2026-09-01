@@ -106,7 +106,9 @@ def main():
             "files are in the folder bound to /videos, then restart it."
         )
 
-    status, existing = request("GET", f"{API}/cameras/?limit=500&active_only=false", token)
+    status, existing = request(
+        "GET", f"{API}/cameras/?limit=500&active_only=false", token
+    )
     if status != 200:
         sys.exit(f"Could not list existing cameras (HTTP {status}): {existing}")
     have = {

@@ -18,8 +18,10 @@ RTSP_PORT="${FAKECAM_RTSP_PORT:-8554}"
 API_PORT="${FAKECAM_API_PORT:-9997}"
 # auto      — copy H.264 sources untouched, re-encode anything else
 # copy      — always stream-copy (cheapest; fails on non-H.264 input)
-# transcode — always re-encode to H.264 with a 2s GOP (use when a source has a
-#             huge keyframe interval and streams are slow to start)
+# transcode — always re-encode to H.264 with a 2s GOP. Slower, but it rebuilds
+#             clean keyframes at every loop seam; stream-copy looping emits
+#             corrupt packets there, which can wedge a consumer's motion
+#             detector permanently in "calibrating".
 MODE="${FAKECAM_MODE:-auto}"
 # Output frame rate, transcode only. Empty = take it from the source (falling
 # back to 15 when the source reports something implausible, which recordings
@@ -90,7 +92,9 @@ publish_forever() {
     if [ "$vargs" != "-c:v copy" ]; then
       rate="$FPS"
       if [ -z "$rate" ]; then
-        rate=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate                  -of default=nw=1:nk=1 "$src" 2>/dev/null | head -1                | awk -F/ '{ d = ($2 == "" || $2 == 0) ? 1 : $2; r = $1 / d;
+        rate=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+                 -of default=nw=1:nk=1 "$src" 2>/dev/null | head -1 \
+               | awk -F/ '{ d = ($2 == "" || $2 == 0) ? 1 : $2; r = $1 / d;
                             if (r >= 1 && r <= 60) printf "%.3f", r }')
       fi
       [ -n "$rate" ] || rate=15

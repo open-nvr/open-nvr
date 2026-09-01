@@ -43,17 +43,21 @@ docker compose -f docker-compose.yml -f docker-compose.fakecams.yml \
 docker logs opennvr_fakecams        # one "publishing …" line per file
 ```
 
-PowerShell is the same command on one line, or via the launcher's compose args.
-
 Sanity-check a stream from the host before going further:
 
 ```bash
 ffplay rtsp://127.0.0.1:8554/gate-entry
 ```
 
+Note the two different addresses: `127.0.0.1:8554` works from the **host**
+(that is the published loopback port); OpenNVR itself must use
+`172.28.90.10:8554`, because it connects from inside a container.
+
 ## 3. Register them as cameras
 
-Either add each URL by hand (Cameras → Add → paste the RTSP URL, leave
+ONVIF **discovery will not find these** — the rig is a bare RTSP server with no
+ONVIF device service, and it lives on the Docker network rather than your LAN.
+Add them manually (Cameras → Add → **Manual** tab, paste the RTSP URL, leave
 credentials blank), or let the script do it:
 
 ```bash
@@ -80,10 +84,7 @@ docker logs -f opennvr_license_plate_recognition     # alerts
 docker logs -f opennvr_detect_pipeline               # "tier0 camN: started (WxH)"
 ```
 
-Plate reads also land in the operator UI's alerts inbox. If nothing fires,
-check in this order: the rig is publishing (`docker logs opennvr_fakecams`),
-the camera's path is `ready` in the stack's MediaMTX, Tier-0 started a worker
-for it, and the `fast_plate_ocr` adapter is registered (AI Models page).
+Plate reads also land in the operator UI's alerts inbox and the Vehicles page.
 
 ## Encoding modes
 
@@ -92,8 +93,10 @@ for it, and the `fast_plate_ocr` adapter is registered (AI Models page).
 * `auto` (default) — H.264 sources are stream-copied untouched; anything else
   (HEVC, VP9, …) is re-encoded to H.264.
 * `copy` — always stream-copy. Cheapest, and fails outright on non-H.264 input.
-* `transcode` — always re-encode. Use when a source's keyframe interval is so
-  long that streams take many seconds to start.
+* `transcode` — always re-encode. **Prefer this if detection isn't firing**:
+  stream-copy looping emits corrupt packets at each loop seam ("Invalid NAL
+  unit size", "Missing reference picture" in the logs), which can wedge the
+  consumer's motion detector. Transcoding rebuilds clean keyframes there.
 
 Transcodes get an explicit frame rate, taken from the source when it reports a
 plausible one and 15 fps otherwise (clips with irregular timestamps otherwise
@@ -112,10 +115,19 @@ recording and frees the disk their segments took.
 
 ## Gotchas
 
+* **Recording is always on.** Every camera records continuously and the
+  start/stop routes are deliberately disabled (`server/routers/recordings.py`),
+  so you cannot turn it off per camera. If your retention policy is unset
+  (`retention_days = 0`, `min_free_space_gb` empty — the default), fake cameras
+  will fill the disk indefinitely. Set **Settings → Recording →
+  `min_free_space_gb`** before running several of them.
 * **All fake cameras share one IP.** That is why the register script passes
   `?force=true` — the duplicate guard would otherwise reject everything after
   the first camera. Adding by hand in the UI hits the same "already added"
   prompt; confirm past it.
+* **Never delete `scripts/fakecams/entrypoint.sh` while the overlay exists.**
+  It is bind-mounted, and Docker silently creates an empty *directory* in place
+  of a missing bind source — the container then dies with exit 127.
 * **The static IP assumes the default subnet.** If you have overridden
   `OPENNVR_DOCKER_SUBNET`, set `FAKECAM_IP` to an address inside it.
 * **CPU.** Every fake camera costs a decode (and an encode, if transcoding) on
@@ -125,3 +137,36 @@ recording and frees the disk their segments took.
   `ffplay` a stream. On Windows an unbindable port aborts *every* publication
   for the container (#298) — if the rig's ports won't bind, delete that block
   in `docker-compose.fakecams.yml`.
+
+## If plates never appear
+
+Fake cameras get you working video in; they cannot fix a plate chain that is
+not wired up. Check in this order:
+
+1. **Is the rig publishing?** `docker logs opennvr_fakecams`
+2. **Is the camera's path live in the stack's MediaMTX?**
+   `docker exec opennvr_mediamtx sh -c 'curl -s http://127.0.0.1:9997/v3/paths/list'`
+3. **Is Tier-0 actually detecting?** The trap here is the motion gate — if
+   every frame is skipped, no tracks form and nothing downstream ever runs:
+   ```bash
+   docker exec opennvr_detect_pipeline python -c "import urllib.request;\
+   print([l for l in urllib.request.urlopen('http://127.0.0.1:9109/metrics').read().decode().splitlines()\
+   if 'skipped' in l or 'frames_total' in l])"
+   ```
+   If `tier0_detector_skipped_total{reason="calibrating"}` equals
+   `tier0_frames_total`, the detector has never run. Try `FAKECAM_MODE=transcode`
+   and a higher `DETECT_FPS`; the motion gate needs a comparatively quiet frame
+   (<5% of the frame moving) to finish calibrating, which continuous-motion or
+   corrupt-at-the-seam footage never provides.
+4. **Is the OCR adapter registered?**
+   ```bash
+   docker exec opennvr_core sh -c 'curl -s -H "X-Internal-Api-Key: $INTERNAL_API_KEY" \
+     http://127.0.0.1:8100/api/v1/adapters'
+   ```
+   If `fast_plate_ocr` is absent, plate reads 404 silently. KAI-C's registry is
+   in-memory, so it is lost on every `opennvr-core` restart — re-run the
+   registrar: `docker compose -f docker-compose.yml -f docker-compose.apps.yml \
+   --profile apps up fast-plate-ocr-register`
+5. **Is the skill assigned to a live camera?** A skill assignment left on a
+   *deleted* camera still counts as a restriction, which scopes the LPR app to
+   a camera that no longer exists and silently ignores every live one.
