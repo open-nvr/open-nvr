@@ -192,10 +192,16 @@ def set_operator_assignments(
 
 def skill_view(db: Session, skill: str) -> dict[str, Any]:
     """``GET /api/v1/skills/{id}/cameras``: the skill's union, with the
-    per-consumer claims visible so a release is never a surprise."""
+    per-consumer claims visible so a release is never a surprise.
+
+    Live cameras only (#372) — the operator view must show the same
+    union the consumers act on, or a binned camera's stale claim looks
+    like a working assignment."""
     rows = (
         db.query(SkillAssignment)
-        .filter(SkillAssignment.skill == (skill or "").strip())
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(SkillAssignment.skill == (skill or "").strip(),
+                Camera.deleted_at.is_(None))
         .order_by(SkillAssignment.camera_id, SkillAssignment.consumer)
         .all()
     )
@@ -215,11 +221,52 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
     }
 
 
+def release_camera_claims(db: Session, camera_id: int) -> int:
+    """Camera deletion cleanup (#372): drop every skill claim on the
+    camera, returning how many rows went. Called by BOTH delete paths —
+    soft delete (the bin) and hard delete (the purge; also prevents the
+    FK from failing the camera row delete). No commit here: the caller
+    owns the transaction, so the cleanup lands atomically with the
+    tombstone/purge it belongs to.
+
+    The query-side ``deleted_at`` filter above already makes stale rows
+    inert, so this is hygiene + belt: rows from installs deleted before
+    this fix are handled by the filter (and swept by migration
+    ff77bb88cc99) even if this cleanup never ran for them."""
+    removed = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.camera_id == camera_id)
+        .delete(synchronize_session=False)
+    )
+    if removed:
+        logger.info(
+            "released %d skill claim(s) for deleted camera %s",
+            removed, camera_id,
+        )
+    return removed
+
+
 def assignments_by_skill(db: Session) -> dict[str, list[int]]:
     """skill -> sorted union of camera ids. The registry's Phase 2
     source: an empty list never appears (no rows = no key), so
-    ``skill not in map`` IS 'dormant' for the status derivation."""
+    ``skill not in map`` IS 'dormant' for the status derivation.
+
+    Only LIVE cameras count (issue #372). Camera deletion is a soft
+    delete, and a stale assignment row pointing at a binned camera used
+    to keep the restriction ARMED while scoping consumers to a camera
+    that no longer exists — the LPR app would ignore every live camera
+    because one deleted one still 'claimed' the skill. The join also
+    drops orphan rows whose camera was hard-deleted. When the last live
+    assignment goes, the key disappears and the restriction correctly
+    lifts (CAMERA_ASSIGNMENTS.md: 'the assignment list for that skill
+    is the whole truth' — the truth must not include tombstones)."""
     out: dict[str, set[int]] = {}
-    for row in db.query(SkillAssignment).all():
+    rows = (
+        db.query(SkillAssignment)
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(Camera.deleted_at.is_(None))
+        .all()
+    )
+    for row in rows:
         out.setdefault(row.skill, set()).add(row.camera_id)
     return {k: sorted(v) for k, v in out.items()}

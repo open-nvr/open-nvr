@@ -235,3 +235,123 @@ def test_api_routes_exist_with_auth():
     paths = {r.path for r in _skills_router.routes}
     assert "/skills/{skill_id}/cameras" in paths
     assert "/skills/{skill_id}/cameras/{camera_id}" in paths
+
+
+# ── Issue #372: deleted cameras must not hold skill claims ─────────
+#
+# Camera deletion is a soft delete. A stale claim on a binned camera
+# used to keep the restriction ARMED while scoping consumers (the LPR
+# app) to a camera that no longer exists — every live camera ignored,
+# nothing warning anyone. "The assignment list for that skill is the
+# whole truth" must mean the truth about LIVE cameras.
+
+from datetime import UTC, datetime  # noqa: E402
+
+
+def _soft_delete(s, cam_id):
+    cam = s.query(models.Camera).get(cam_id)
+    cam.is_active = False
+    cam.deleted_at = datetime.now(UTC)
+    s.commit()
+
+
+def test_deleted_camera_drops_out_of_the_union(db):
+    """The QA scenario from #372: LPR assigned to a camera that later
+    lands in the bin. The union must shrink to the live cameras, and
+    when the LAST live claim goes the restriction must lift entirely
+    (empty map = dormant/no restriction), not stay armed pointing at a
+    tombstone."""
+    s, (gate, yard) = db
+    svc.declare(s, skill=LPR, camera_id=gate, consumer="operator")
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    assert svc.assignments_by_skill(s) == {LPR: [gate, yard]}
+
+    _soft_delete(s, yard)
+    assert svc.assignments_by_skill(s) == {LPR: [gate]}
+
+    _soft_delete(s, gate)
+    # No key at all — 'skill not in map' IS the dormant/unrestricted
+    # signal, so consumers fall back to every live camera.
+    assert svc.assignments_by_skill(s) == {}
+
+
+def test_deleted_camera_hidden_from_skill_view(db):
+    """The operator view must show the same union consumers act on."""
+    s, (gate, yard) = db
+    svc.declare(s, skill=LPR, camera_id=gate, consumer="operator")
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    _soft_delete(s, yard)
+    view = svc.skill_view(s, LPR)
+    assert view["union"] == [gate]
+    assert [c["camera_id"] for c in view["cameras"]] == [gate]
+
+
+def test_orphan_claim_for_missing_camera_is_ignored(db):
+    """A row whose camera was hard-deleted entirely (pre-fix installs)
+    must be invisible too — the join, not just the tombstone filter."""
+    s, (gate, _) = db
+    svc.declare(s, skill=LPR, camera_id=gate, consumer="operator")
+    s.commit()
+    s.add(models.SkillAssignment(skill=LPR, camera_id=99999,
+                                 consumer="operator"))
+    s.commit()
+    assert svc.assignments_by_skill(s) == {LPR: [gate]}
+    assert svc.skill_view(s, LPR)["union"] == [gate]
+
+
+def test_release_camera_claims_drops_only_that_camera(db):
+    s, (gate, yard) = db
+    svc.declare(s, skill=LPR, camera_id=gate, consumer="operator")
+    svc.declare(s, skill="object_detection", camera_id=gate,
+                consumer="app:x")
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    assert svc.release_camera_claims(s, gate) == 2
+    s.commit()
+    assert s.query(models.SkillAssignment).filter_by(
+        camera_id=gate).count() == 0
+    assert svc.assignments_by_skill(s) == {LPR: [yard]}
+    # Idempotent — a second release finds nothing.
+    assert svc.release_camera_claims(s, gate) == 0
+
+
+def test_both_delete_endpoints_release_claims():
+    """Lockstep: the cleanup must be wired into BOTH camera delete
+    paths (soft delete commits it with the tombstone; hard delete needs
+    it before the camera row for the FK). A helper nothing calls is the
+    bug back again."""
+    src = (Path(__file__).resolve().parents[1]
+           / "routers" / "cameras.py").read_text()
+    assert src.count("release_camera_claims(db, camera_id)") == 2
+
+
+def test_migration_sweep_matches_the_query_filter(db):
+    """The one-time migration sweep (ff77bb88cc99) must remove exactly
+    the rows the fixed query ignores: claims on soft-deleted cameras
+    and orphans. Executes the migration's own DELETE (extracted from
+    the file, so this stays lockstep with what actually ships) against
+    a DB seeded with all three row kinds."""
+    import re
+
+    from sqlalchemy import text
+
+    s, (gate, yard) = db
+    svc.declare(s, skill=LPR, camera_id=gate, consumer="operator")
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    _soft_delete(s, yard)                                  # tombstone claim
+    s.add(models.SkillAssignment(skill=LPR, camera_id=99999,
+                                 consumer="operator"))     # orphan claim
+    s.commit()
+
+    mig = (Path(__file__).resolve().parents[1] / "migrations" / "versions"
+           / "ff77bb88cc99_sweep_deleted_camera_skill_claims.py").read_text()
+    m = re.search(r'sa\.text\(\s*"""(.*?)"""', mig, re.S)
+    assert m, "migration DELETE statement not found"
+    s.execute(text(m.group(1)))
+    s.commit()
+
+    left = s.query(models.SkillAssignment).all()
+    assert [(r.skill, r.camera_id) for r in left] == [(LPR, gate)]
