@@ -56,6 +56,7 @@ from kai_c.contract_types import (
     Permissions,
 )
 from kai_c.metrics import MetricsRollup, parse_adapter_metrics, proxy_metrics
+from kai_c.persistence import RegistryStateStore
 from kai_c.sovereignty import (
     SovereigntyViolation,
     adapter_summary_for_audit,
@@ -221,6 +222,12 @@ class RegisteredAdapter:
     last_polled: float = 0.0
     consecutive_health_failures: int = 0
     granted_permissions: set[str] = field(default_factory=set)
+    #: "runtime" — registered via the API (an app overlay's registrar,
+    #: an operator) and therefore PERSISTED across restarts (#371);
+    #: "seed" — from ADAPTER_REGISTRY configuration, re-registered from
+    #: env on every boot and never persisted (a seed removed from
+    #: config must not resurrect from disk).
+    source: str = "runtime"
 
     def declared_keys(self) -> list[str]:
         """The permission keys this adapter declares in /capabilities."""
@@ -244,6 +251,31 @@ class RegisteredAdapter:
         """Fail-closed serving gate: only a fully-approved adapter may
         serve inference (§8 / §11)."""
         return self.approval_status == "approved"
+
+
+@dataclass
+class PendingRegistration:
+    """An adapter we KNOW should exist but could not (yet) register —
+    a seed whose container was still booting, or a persisted runtime
+    adapter that was unreachable during restore. The poll loop retries
+    these every cycle until they register or hit a policy violation
+    (#371 — before this, a failed registration was permanent silence).
+
+    ``grant_all_on_register`` carries the §8.5 config-as-consent
+    semantics for seeds: their declared keys are granted on successful
+    (re-)registration, exactly as the startup seed loop would have.
+    Restored runtime adapters instead re-apply ``granted_keys`` — the
+    operator's actual recorded decisions — through the normal grant
+    path, so capability drift while we were down still lands the
+    adapter in ``pending`` for any newly-declared key."""
+
+    name: str
+    url: str
+    source: str  # "seed" | "runtime"
+    grant_all_on_register: bool = False
+    granted_keys: tuple[str, ...] = ()
+    last_error: str = ""
+    attempts: int = 0
 
 
 # ── Async HTTP helpers ─────────────────────────────────────────────
@@ -303,11 +335,16 @@ class AdapterRegistry:
         poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
         http_client: httpx.AsyncClient | None = None,
         auth_token: str | None = None,
+        state_store: RegistryStateStore | None = None,
     ) -> None:
         self._sovereignty_mode = sovereignty_mode.lower()
         self._audit = audit
         self._poll_interval = poll_interval_seconds
         self._adapters: dict[str, RegisteredAdapter] = {}
+        # #371: durable receipts for runtime registrations + the retry
+        # queue for adapters that SHOULD register but couldn't yet.
+        self._state_store = state_store or RegistryStateStore(None)
+        self._pending: dict[str, PendingRegistration] = {}
         self._lock = threading.Lock()
         # §05 observability — bounded per-adapter rollups fed by the
         # /metrics scrape on the same 60s poll (see refresh()).
@@ -348,10 +385,16 @@ class AdapterRegistry:
 
     # ── Public API ─────────────────────────────────────────────────
 
-    async def register(self, name: str, url: str) -> RegisteredAdapter:
+    async def register(
+        self, name: str, url: str, *, source: str = "runtime"
+    ) -> RegisteredAdapter:
         """Register an adapter. Polls /capabilities, runs sovereignty,
         stores. Raises ``SovereigntyViolation`` on policy failure,
-        ``httpx.HTTPError`` on adapter unreachability."""
+        ``httpx.HTTPError`` on adapter unreachability.
+
+        ``source="runtime"`` registrations are persisted so they
+        survive a KAI-C restart (#371); ``source="seed"`` ones come
+        from ADAPTER_REGISTRY configuration and are not."""
         url = url.rstrip("/")
 
         # URL-only sovereignty check (no capabilities yet for the
@@ -376,6 +419,7 @@ class AdapterRegistry:
             url=url,
             capabilities=caps,
             fingerprint=caps.model.fingerprint,
+            source=source,
         )
         # §8 / §11 approval gate: do NOT auto-grant. An adapter that
         # declares any permission starts with an EMPTY granted set →
@@ -384,6 +428,10 @@ class AdapterRegistry:
         # declares no permission is trivially approved (∅ ⊆ ∅).
         with self._lock:
             self._adapters[name] = adapter
+            # A successful registration supersedes any queued retry for
+            # the same name (a restore raced a fresh runtime register).
+            self._pending.pop(name, None)
+            self._persist_locked()
 
         # §11.2 audit — adapter.registered
         self._audit.emit(
@@ -409,6 +457,11 @@ class AdapterRegistry:
     async def deregister(self, name: str, *, reason: str = "operator_action") -> None:
         with self._lock:
             adapter = self._adapters.pop(name, None)
+            # An explicit removal also cancels any queued retry and
+            # drops the persisted receipt — a deregistered adapter must
+            # not resurrect on the next restart.
+            self._pending.pop(name, None)
+            self._persist_locked()
         if adapter is None:
             return
         # Drop the metrics series so the rollup store stays bounded by
@@ -526,6 +579,7 @@ class AdapterRegistry:
                 }
                 adapter.capabilities = new_caps
                 status = adapter.approval_status
+                self._persist_locked()
             self._audit.emit(
                 AuditEventType.ADAPTER_CAPABILITY_DRIFT,
                 adapter=name,
@@ -560,6 +614,8 @@ class AdapterRegistry:
             )
             adapter.granted_permissions.difference_update(stale_grants)
             status_after = adapter.approval_status
+            if stale_grants:
+                self._persist_locked()
         if stale_grants:
             self._emit_grant_event(
                 AuditEventType.ADAPTER_PERMISSION_REVOKED,
@@ -616,6 +672,7 @@ class AdapterRegistry:
             granted_now = sorted(set(keys) & declared)
             adapter.granted_permissions.update(granted_now)
             status = adapter.approval_status
+            self._persist_locked()
         grant_id = self._emit_grant_event(
             AuditEventType.ADAPTER_PERMISSION_GRANTED,
             adapter=name,
@@ -647,6 +704,7 @@ class AdapterRegistry:
             revoked_now = sorted(set(keys) & adapter.granted_permissions)
             adapter.granted_permissions.difference_update(revoked_now)
             status = adapter.approval_status
+            self._persist_locked()
         grant_id = self._emit_grant_event(
             AuditEventType.ADAPTER_PERMISSION_REVOKED,
             adapter=name,
@@ -674,6 +732,7 @@ class AdapterRegistry:
             declared = adapter.declared_keys()
             adapter.granted_permissions.update(declared)
             status = adapter.approval_status
+            self._persist_locked()
         grant_id = self._emit_grant_event(
             AuditEventType.ADAPTER_PERMISSION_GRANTED,
             adapter=name,
@@ -686,6 +745,170 @@ class AdapterRegistry:
             name, len(declared), actor, status,
         )
         return adapter, grant_id
+
+    # ── #371: persistence + deferred-registration retry ─────────────
+
+    def _persist_locked(self) -> None:
+        """Write the runtime-adapter receipts. MUST be called with
+        ``self._lock`` held (every caller already is — this is the
+        one-liner they share). Best-effort: the store logs and swallows
+        I/O failures, so a full disk can't take down a grant call."""
+        if not self._state_store.enabled:
+            return
+        entries = [
+            {
+                "name": a.name,
+                "url": a.url,
+                "granted_permissions": sorted(a.granted_permissions),
+            }
+            for a in self._adapters.values()
+            if a.source == "runtime"
+        ]
+        # Runtime adapters queued for a restore retry keep their receipt
+        # too — a second restart while the adapter is still down must
+        # not forget it (that would re-open the exact hole this fixes).
+        for p in self._pending.values():
+            if p.source == "runtime" and p.name not in self._adapters:
+                entries.append({
+                    "name": p.name,
+                    "url": p.url,
+                    "granted_permissions": sorted(p.granted_keys),
+                })
+        entries.sort(key=lambda e: e["name"])
+        self._state_store.save(entries)
+
+    def defer(
+        self,
+        name: str,
+        url: str,
+        *,
+        source: str,
+        grant_all_on_register: bool = False,
+        granted_keys: list[str] | None = None,
+        error: str = "",
+    ) -> None:
+        """Queue an adapter the registry should keep trying to register
+        — a seed whose container is still booting, or a persisted
+        runtime adapter that was unreachable at restore. Retried every
+        poll cycle by ``retry_pending``."""
+        with self._lock:
+            if name in self._adapters:
+                return
+            self._pending[name] = PendingRegistration(
+                name=name,
+                url=url.rstrip("/"),
+                source=source,
+                grant_all_on_register=grant_all_on_register,
+                granted_keys=tuple(sorted(granted_keys or [])),
+                last_error=error,
+            )
+            if source == "runtime":
+                self._persist_locked()
+        logger.info(
+            "adapter %s @ %s queued for registration retry (%s)",
+            name, url, error or "unreachable",
+        )
+
+    def pending_registrations(self) -> list[dict[str, Any]]:
+        """The adapters we know about but could not register — surfaced
+        additively on GET /api/v1/adapters so a missing adapter is a
+        visible row, not silence (#371)."""
+        with self._lock:
+            return [
+                {
+                    "name": p.name,
+                    "url": p.url,
+                    "source": p.source,
+                    "attempts": p.attempts,
+                    "last_error": p.last_error,
+                }
+                for p in self._pending.values()
+            ]
+
+    def restore_persisted(self) -> list[PendingRegistration]:
+        """Load the receipt file and queue every persisted runtime
+        adapter for registration. Called once from the lifespan handler
+        AFTER config seeds (a name colliding with a seed defers to the
+        seed — configuration wins over history). Returns what was
+        queued, for the boot log. Actual registration happens on the
+        first ``retry_pending`` pass, so an unreachable adapter can
+        never slow down boot."""
+        queued: list[PendingRegistration] = []
+        for entry in self._state_store.load():
+            name = entry["name"]
+            with self._lock:
+                if name in self._adapters or name in self._pending:
+                    continue
+                pending = PendingRegistration(
+                    name=name,
+                    url=entry["url"],
+                    source="runtime",
+                    granted_keys=tuple(entry["granted_permissions"]),
+                    last_error="restore pending",
+                )
+                self._pending[name] = pending
+            queued.append(pending)
+        if queued:
+            logger.info(
+                "restoring %d persisted adapter registration(s): %s",
+                len(queued), ", ".join(p.name for p in queued),
+            )
+        return queued
+
+    async def retry_pending(self) -> None:
+        """Try to register everything in the pending queue. Runs on
+        every poll cycle (and once right after restore). Transient
+        failures stay queued; a sovereignty violation is audited and
+        dropped — policy won't fix itself by retrying."""
+        with self._lock:
+            batch = list(self._pending.values())
+        for p in batch:
+            try:
+                await self.register(p.name, p.url, source=p.source)
+            except SovereigntyViolation as exc:
+                self._audit.emit(
+                    AuditEventType.INFERENCE_REFUSED_SOVEREIGNTY,
+                    adapter=p.name,
+                    reason=str(exc),
+                    sovereignty_mode=self._sovereignty_mode,
+                    registration_url=p.url,
+                )
+                logger.warning(
+                    "dropping pending adapter %s: sovereignty refused (%s)",
+                    p.name, exc,
+                )
+                with self._lock:
+                    self._pending.pop(p.name, None)
+                    if p.source == "runtime":
+                        self._persist_locked()
+                continue
+            except Exception as exc:  # unreachable / bad capabilities
+                with self._lock:
+                    current = self._pending.get(p.name)
+                    if current is not None:
+                        current.attempts += 1
+                        current.last_error = str(exc)
+                logger.debug(
+                    "registration retry failed for %s @ %s: %s",
+                    p.name, p.url, exc,
+                )
+                continue
+            # Registered. Re-apply the recorded consent through the
+            # NORMAL grant paths (audited, drift-safe): seeds get the
+            # §8.5 config-as-consent approve-all; restored runtime
+            # adapters get exactly the keys the operator had granted —
+            # intersected against today's declared set, so new scope
+            # stays pending.
+            if p.grant_all_on_register:
+                self.approve_all(p.name, actor="system:startup-config")
+            elif p.granted_keys:
+                self.grant_permissions(
+                    p.name, list(p.granted_keys), actor="system:state-restore"
+                )
+            logger.info(
+                "pending adapter %s registered after %d retry attempt(s)",
+                p.name, p.attempts,
+            )
 
     def permissions_view(self, name: str) -> dict[str, Any] | None:
         """The §11 permission view for one adapter — declared keys with
@@ -867,6 +1090,14 @@ class AdapterRegistry:
                     await self.refresh(name)
                 except Exception as exc:
                     logger.exception("refresh failed for %s: %s", name, exc)
+            # #371: adapters that should exist but couldn't register yet
+            # (seed containers still booting, restored adapters whose
+            # container comes up after ours) get another try each cycle.
+            if not self._stop_flag.is_set():
+                try:
+                    await self.retry_pending()
+                except Exception as exc:
+                    logger.exception("pending-registration retry pass failed: %s", exc)
 
     # ── Helpers ────────────────────────────────────────────────────
 
