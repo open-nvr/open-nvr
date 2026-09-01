@@ -104,6 +104,10 @@ class Track:
     # BGR crop of the best frame, retained only when the tracker is fed pixels
     # (the Tier-1 gate dispatches THIS on escalation — see gate/dispatch, PR B #10).
     best_crop: object | None = field(default=None, repr=False, compare=False)
+    # Multi-frame OCR: top-K plate-readability-scored crops spread across
+    # the pass (vehicle labels on LPR cameras only — None everywhere else,
+    # so non-LPR deployments pay zero memory or scoring cost).
+    plate_ring: object | None = field(default=None, repr=False, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -182,6 +186,12 @@ class Tracker:
         # Spawns refused because the track cap or spawn-score floor was hit —
         # observability for the bounded-load guards (service exports it).
         self.spawns_dropped = 0
+        # Multi-frame OCR (opt-in per camera): retain top-K plate candidates
+        # on vehicle tracks. The worker enables this only when the camera's
+        # assignments include the LPR skill.
+        self.retain_plate_candidates: bool = False
+        self.plate_candidates_max: int = 4
+        self.plate_candidates_gap_s: float = 0.75
 
     @property
     def population(self) -> int:
@@ -317,3 +327,28 @@ class Tracker:
                 crop = _crop_bgr(bgr, det.box)
                 if crop is not None:
                     tr.best_crop = crop
+        self._update_plate_candidates(tr, det, bgr)
+
+    def _update_plate_candidates(self, tr: Track, det: Detection, bgr=None) -> None:
+        """Multi-frame OCR: offer this frame's crop to the track's
+        plate-candidate ring. Guarded to vehicles + opt-in + pixels
+        present, so every other code path is a two-comparison no-op."""
+        if not self.retain_plate_candidates or bgr is None:
+            return
+        from .platecands import (
+            VEHICLE_LABELS, CandidateRing, candidate_score,
+        )
+        if det.label not in VEHICLE_LABELS:
+            return
+        crop = _crop_bgr(bgr, det.box)
+        if crop is None:
+            return
+        if tr.plate_ring is None:
+            tr.plate_ring = CandidateRing(
+                max_candidates=self.plate_candidates_max,
+                min_gap_s=self.plate_candidates_gap_s,
+            )
+        from .regions import area as _area
+        tr.plate_ring.offer(
+            self._clock(), candidate_score(_area(det.box), crop), crop,
+        )

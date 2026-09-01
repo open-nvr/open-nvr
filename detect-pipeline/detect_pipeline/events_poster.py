@@ -50,6 +50,12 @@ class Visit:
     ended_at: datetime
     stationary: bool | None
     jpeg: bytes | None
+    # Multi-frame OCR: up to K plate-candidate crops (JPEG), most
+    # promising first. Core's enrichment sweeps these in order until a
+    # read clears the confidence floor — several diverse lottery
+    # tickets per car instead of one. Empty for non-vehicle visits and
+    # non-LPR cameras.
+    candidate_jpegs: tuple = ()
     # Core's numeric Camera.id — what the events endpoint keys on. The
     # pipeline-facing camera_id is the provider's string handle ("cam1"),
     # which is NOT the DB id; core sends the real one separately as
@@ -202,6 +208,10 @@ class VisitPoster:
         }
         if v.jpeg:
             body["evidence_jpeg_b64"] = base64.b64encode(v.jpeg).decode("ascii")
+        if v.candidate_jpegs:
+            body["candidate_jpegs_b64"] = [
+                base64.b64encode(j).decode("ascii") for j in v.candidate_jpegs
+            ]
         req = urllib.request.Request(
             f"{self.core_url}{EVENTS_PATH}",
             data=json.dumps(body).encode("utf-8"),
@@ -245,9 +255,13 @@ class VisitLifecycle:
                 v = self._live[tr.id] = {
                     "start": now_wall, "label": tr.label, "score": float(tr.score),
                     "stationary": False, "confirmed": False, "crop": None,
+                    "ring": None,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
+            ring = getattr(tr, "plate_ring", None)
+            if ring is not None:
+                v["ring"] = ring
             v["score"] = max(v["score"], float(tr.score))
             v["stationary"] = bool(getattr(tr, "stationary", False))
             v["confirmed"] = v["confirmed"] or bool(getattr(tr, "confirmed", False))
@@ -295,6 +309,21 @@ class VisitLifecycle:
                 jpeg = _encode_jpeg(crop)
             except Exception:
                 jpeg = None  # a visit without a photo still beats no history
+        candidate_jpegs: list[bytes] = []
+        ring = v.get("ring")
+        if ring is not None:
+            try:
+                from .bestframe import _encode_jpeg
+
+                for cand in ring.ranked():
+                    encoded = _encode_jpeg(cand.crop)
+                    if encoded:
+                        candidate_jpegs.append(encoded)
+            except Exception:
+                # Candidates are an enhancement; the visit itself (and its
+                # single-crop enrichment fallback) must never be lost to a
+                # bad encode.
+                candidate_jpegs = candidate_jpegs or []
         return Visit(
             camera_id=self.camera_id,
             nvr_camera_id=self.nvr_camera_id,
@@ -305,4 +334,5 @@ class VisitLifecycle:
             ended_at=datetime.fromtimestamp(end, tz=timezone.utc),
             stationary=v["stationary"],
             jpeg=jpeg,
+            candidate_jpegs=tuple(candidate_jpegs),
         )

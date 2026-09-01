@@ -418,6 +418,12 @@ services:
       - DETECT_MOTION_LIGHTNING_THRESHOLD=${DETECT_MOTION_LIGHTNING_THRESHOLD:-}
       - DETECT_MOTION_CALIBRATION_MAX_FRAMES=${DETECT_MOTION_CALIBRATION_MAX_FRAMES:-}
       - DETECT_MOTION_MAX_FORCED_EXITS=${DETECT_MOTION_MAX_FORCED_EXITS:-}
+      # Multi-frame plate OCR (LPR cameras only; see .env.example):
+      # several diverse OCR attempts per vehicle instead of one, with
+      # the first fired while the car is still in frame.
+      - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
+      - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
+      - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
       # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
       # cameras whose assignments are all detection-free. Empty = off.
       - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}

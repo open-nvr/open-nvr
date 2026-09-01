@@ -272,6 +272,9 @@ DETECT_MOTION_FRAME_ALPHA=0.01    # background adapt rate, steady state
 DETECT_MOTION_LIGHTNING_THRESHOLD=0.8  # frame fraction that re-triggers calibration (dawn/IR flash)
 DETECT_MOTION_CALIBRATION_MAX_FRAMES=150  # calibration deadline (#373): force the gate open after
                                   # N consecutive calibrating frames (0 = old wedge-able behavior)
+DETECT_PLATE_CANDIDATES=4         # multi-frame OCR: plate-scored crops kept per vehicle track (LPR cameras)
+DETECT_PLATE_EARLY_ATTEMPTS=2     # OCR attempts fired while the car is still in frame (0 = ingest sweep only)
+DETECT_PLATE_CANDIDATE_GAP_S=0.75 # min seconds between retained candidates (diversity across the pass)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
 DETECT_ONNX_BACKEND=auto          # auto (default: ort if installed, else cvdnn) | cvdnn | ort
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)

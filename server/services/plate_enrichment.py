@@ -193,17 +193,153 @@ def extract_plate(
     return text[:32] or None
 
 
-async def enrich_event_plate(event_id: int) -> None:
-    """Background task: OCR the visit's evidence crop, store plate_text.
+def extract_read(response: dict | None) -> dict | None:
+    """Full-fidelity parse of the adapter's InferResponse — plate,
+    overall confidence, per-character confidences, the accepted verdict
+    and the floor it was judged against. Returns None only when there
+    is no read at all (no/empty plate_text). Multi-frame OCR needs the
+    REJECTED reads too: two near-miss reads of the same plate can merge
+    into an accepted one (see ``merge_reads``)."""
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    text = result.get("plate_text")
+    if not isinstance(text, str):
+        return None
+    text = "".join(text.split()).upper()[:32]
+    if not text:
+        return None
+    confidence = result.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = 0.0
+    floor = result.get("min_confidence_applied")
+    if not isinstance(floor, (int, float)) or isinstance(floor, bool):
+        floor = None
+    chars = []
+    for i, entry in enumerate(result.get("characters") or []):
+        if isinstance(entry, dict) and i < len(text):
+            c = entry.get("confidence")
+            chars.append(float(c) if isinstance(c, (int, float))
+                         and not isinstance(c, bool) else 0.0)
+    return {
+        "plate": text,
+        "confidence": float(confidence),
+        "characters": chars if len(chars) == len(text) else None,
+        "accepted": result.get("accepted") is not False,
+        "floor": float(floor) if floor is not None else None,
+    }
 
-    Opens its own DB session (the request's session is gone by the time a
-    background task runs). Every failure path is a debug/warning log and a
-    clean return — never an exception escaping into the task runner.
-    """
+
+def merge_reads(a: dict | None, b: dict | None) -> dict | None:
+    """Character-level consensus between two imperfect reads.
+
+    Two attempts that read ``H644LX`` and ``H644LK`` disagree in one
+    position; taking each position's higher-confidence character often
+    reconstructs the true plate from two rejects. Conservative on
+    purpose: only same-length reads with per-character confidences
+    merge, the merged confidence is the MIN of the chosen characters
+    (same aggregation as the adapter), and the result counts as
+    accepted only if it clears the STRICTER of the two floors — a
+    merge must never be a way to sneak under the bar."""
+    if not a or not b:
+        return None
+    if a["plate"] == b["plate"]:
+        return None                      # agreement isn't a merge
+    if len(a["plate"]) != len(b["plate"]):
+        return None
+    if not a.get("characters") or not b.get("characters"):
+        return None
+    plate = []
+    confs = []
+    for ca, pa, cb, pb in zip(a["plate"], a["characters"],
+                              b["plate"], b["characters"]):
+        if pa >= pb:
+            plate.append(ca)
+            confs.append(pa)
+        else:
+            plate.append(cb)
+            confs.append(pb)
+    merged_conf = min(confs) if confs else 0.0
+    floors = [f for f in (a.get("floor"), b.get("floor")) if f is not None]
+    floor = max(floors) if floors else None
+    return {
+        "plate": "".join(plate),
+        "confidence": merged_conf,
+        "characters": confs,
+        "accepted": floor is not None and merged_conf >= floor,
+        "floor": floor,
+    }
+
+
+#: Hard cap on OCR attempts per visit at ingest — the compute budget.
+MAX_INGEST_ATTEMPTS: int = 4
+
+
+async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
+                    event_id: int | None = None) -> dict | None:
+    """One OCR attempt through KAI-C. Returns ``extract_read``'s dict,
+    or None on transport failure / non-200 / empty read. Factored out
+    of ``enrich_event_plate`` so the early-attempt endpoint and the
+    multi-candidate sweep share one client path (same auth, same
+    camera-handle convention, same missing-adapter warning)."""
     from core.config import settings
+    from services.adapter_contract import build_infer_payload
+
+    import httpx
+
+    params: dict = {"camera_id": camera_handle}
+    if event_id is not None:
+        params["event_id"] = int(event_id)
+    payload = build_infer_payload(task=PLATE_TASK, jpeg_bytes=jpeg,
+                                  params=params)
+    try:
+        async with _OCR_CONCURRENCY:
+            async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                resp = await client.post(
+                    f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-Internal-Api-Key": settings.internal_api_key or "",
+                    },
+                )
+    except httpx.HTTPError as e:
+        logger.debug("plate OCR: KAI-C unreachable (%s): %s", camera_handle, e)
+        return None
+    if resp.status_code != 200:
+        logger.debug("plate OCR: adapter answered %s (%s)",
+                     resp.status_code, camera_handle)
+        if resp.status_code in (403, 404):
+            _warn_adapter_missing(resp.status_code)
+        return None
+    try:
+        return extract_read(resp.json())
+    except ValueError:
+        return None
+
+
+async def enrich_event_plate(
+    event_id: int, candidate_jpegs: list[bytes] | None = None,
+) -> None:
+    """Background task: read the visit's plate, multi-frame style.
+
+    Multi-frame OCR: sweep the visit's plate CANDIDATES (best first,
+    shipped by Tier-0 alongside the visit) instead of betting everything
+    on the single vehicle-best frame. Early exit the moment a read is
+    accepted; near-miss rejects are character-merged pairwise (see
+    ``merge_reads``) so two imperfect looks can still produce one
+    correct plate. The evidence crop remains the fallback attempt when
+    no candidates rode the visit — exactly the old behaviour.
+
+    Opens its own DB session (the request's session is gone by the time
+    a background task runs). Every failure path is a debug/warning log
+    and a clean return — never an exception escaping the task runner.
+    """
     from core.database import SessionLocal
     from models import TimelineEvent
-    from services.adapter_contract import build_infer_payload
     from services.evidence_store import resolve_evidence
 
     db = SessionLocal()
@@ -211,69 +347,57 @@ async def enrich_event_plate(event_id: int) -> None:
         row = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
         if (
             row is None
-            or row.plate_text            # already enriched (retry raced)
+            or row.plate_text            # already enriched (early attempt won)
             or (row.label or "") not in VEHICLE_LABELS
-            or not row.evidence_path
         ):
             return
-        path = resolve_evidence(row.evidence_path)
-        if path is None:
-            return
-        jpeg = path.read_bytes()
 
-        import httpx
+        # Attempt list: candidates best-first; the evidence crop as the
+        # sole attempt when none were shipped (pre-multi-frame producers,
+        # non-LPR cameras).
+        attempts: list[bytes] = list(candidate_jpegs or [])[:MAX_INGEST_ATTEMPTS]
+        if not attempts:
+            if not row.evidence_path:
+                return
+            path = resolve_evidence(row.evidence_path)
+            if path is None:
+                return
+            attempts = [path.read_bytes()]
 
-        # camera_id threaded through so KAI-C's audit row and NATS subject
-        # attribute this OCR call to the right camera (same convention as
-        # process_inference's governed path).
-        # camera_id and event_id thread through KAI-C untouched: camera_id
-        # attributes the audit row + NATS subjects, event_id joins the
-        # resulting plate.recognized.v1 back to this timeline row (RFC-0002
-        # Phase 0 — this call is now the *fallback* producer; the write can
-        # arrive via the bus consumer or the synchronous path below,
-        # whichever lands first).
-        # camera_id is the platform HANDLE ("cam{N}"), not the bare numeric
-        # id: the internal /cameras endpoint, Tier-0, and Tier-1 dispatch
-        # all speak handles, so the plate.recognized.v1 this call produces
-        # must too — a consumer scoping to assigned cameras (the LPR app)
-        # compares against handles, and "3" != "cam3" would silently drop
-        # every enrichment-produced event.
-        payload = build_infer_payload(
-            task=PLATE_TASK, jpeg_bytes=jpeg,
-            params={"camera_id": f"cam{row.camera_id}", "event_id": int(row.id)},
-        )
-        try:
-            async with _OCR_CONCURRENCY:
-                async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
-                    resp = await client.post(
-                        f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
-                        json=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                            "X-Internal-Api-Key": settings.internal_api_key or "",
-                        },
-                    )
-        except httpx.HTTPError as e:
-            logger.debug("plate enrichment: KAI-C unreachable for event %s: %s",
-                         event_id, e)
-            return
-        if resp.status_code != 200:
-            logger.debug("plate enrichment: adapter answered %s for event %s "
-                         "(fast_plate_ocr not registered?)",
-                         resp.status_code, event_id)
-            if resp.status_code in (403, 404):
-                # 404 = adapter unknown to KAI-C (the #371 restart
-                # amnesia); 403 = registered but approval pending.
-                # Either way plate reads are dead until fixed — say so.
-                _warn_adapter_missing(resp.status_code)
-            return
-        plate = extract_plate(resp.json(), image_size=jpeg_dimensions(jpeg))
-        if not plate:
-            return
-        row.plate_text = plate
+        # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
+        # callers; "3" != "cam3" would silently drop consumer-side scoping.
+        camera_handle = f"cam{row.camera_id}"
+        rejects: list[dict] = []
+        winner: dict | None = None
+        for jpeg in attempts:
+            read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
+            if read is None:
+                continue
+            if read["accepted"]:
+                winner = read
+                break                    # early exit — budget saved
+            # Character-consensus with every earlier reject: two near
+            # misses of the same plate often reconstruct the truth.
+            for prev in rejects:
+                merged = merge_reads(prev, read)
+                if merged is not None and merged["accepted"]:
+                    winner = merged
+                    break
+            if winner is not None:
+                break
+            rejects.append(read)
+
+        if winner is None:
+            return                       # honest non-read beats a guess
+        row.plate_text = winner["plate"][:32]
         db.commit()
-        logger.info("plate enrichment: event %s -> %s", event_id, plate)
+        logger.info(
+            "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
+            event_id, row.plate_text, winner["confidence"],
+            len(rejects) + 1,
+            ", merged" if winner.get("characters") and rejects
+            and winner["plate"] not in [r["plate"] for r in rejects] else "",
+        )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
                        exc_info=True)

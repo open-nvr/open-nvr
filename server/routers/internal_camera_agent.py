@@ -57,6 +57,10 @@ class TrackEventIn(BaseModel):
     # Best-frame crop (JPEG, base64). Optional: a visit with no retained crop
     # is still history worth keeping.
     evidence_jpeg_b64: str | None = None
+    # Multi-frame OCR: up to a handful of plate-candidate crops (JPEG,
+    # base64), most promising first. Enrichment sweeps them in order —
+    # several diverse OCR attempts per vehicle instead of one.
+    candidate_jpegs_b64: list[str] | None = None
 
 
 @router.post("/events", status_code=201)
@@ -130,11 +134,158 @@ async def ingest_track_event(
     # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
     # frame (background — never on the ingest path). Best-effort: no adapter,
     # no plate, no problem.
-    from services.plate_enrichment import enrich_event_plate, wants_plate
+    from services.plate_enrichment import (
+        MAX_INGEST_ATTEMPTS, enrich_event_plate, wants_plate,
+    )
 
-    if wants_plate(row.label, evidence_rel, settings.events_plate_enrichment):
-        background.add_task(enrich_event_plate, row.id)
+    # Multi-frame OCR, latency half: an early attempt may already have
+    # read this vehicle's plate while it was still in frame — claim it
+    # (time-window checked; recycled track ids from a restarted worker
+    # fail the window and are ignored).
+    if (row.label or "") in {"car", "truck", "bus", "motorcycle"} \
+            and payload.track_id and not row.plate_text:
+        from services.plate_attempt_cache import cache as _attempt_cache
+
+        pending = _attempt_cache.claim(
+            payload.camera_id, payload.track_id,
+            started_ts=payload.started_at.timestamp(),
+            ended_ts=(payload.ended_at or payload.started_at).timestamp(),
+        )
+        if pending is not None:
+            row.plate_text = pending.plate[:32]
+            db.commit()
+            logger.info(
+                "plate ingest: event %s -> %s (early attempt, conf=%.2f)",
+                row.id, row.plate_text, pending.confidence,
+            )
+
+    # Multi-frame OCR, recall half: decode the candidate crops (bounded:
+    # same per-image cap as evidence, at most MAX_INGEST_ATTEMPTS) and
+    # hand them to the enrichment sweep. Bad candidates are dropped, not
+    # fatal — the visit itself is already persisted.
+    candidates: list[bytes] = []
+    if payload.candidate_jpegs_b64 and not row.plate_text:
+        import base64 as _b64
+
+        from services.evidence_store import MAX_EVIDENCE_BYTES as _MAX
+
+        for encoded in payload.candidate_jpegs_b64[:MAX_INGEST_ATTEMPTS]:
+            if not isinstance(encoded, str) \
+                    or len(encoded) > (_MAX * 4) // 3 + 8:
+                continue
+            try:
+                candidates.append(_b64.b64decode(encoded, validate=True))
+            except (ValueError, binascii.Error):
+                continue
+
+    if not row.plate_text and wants_plate(
+        row.label, evidence_rel or (candidates and "candidates"),
+        settings.events_plate_enrichment,
+    ):
+        background.add_task(enrich_event_plate, row.id, candidates or None)
     return {"id": row.id, "evidence_path": evidence_rel}
+
+
+class PlateAttemptIn(BaseModel):
+    """One early OCR attempt from Tier-0 — a plate candidate crop for a
+    vehicle whose track just confirmed (multi-frame OCR, latency half)."""
+
+    camera_id: int
+    track_id: str
+    ts: float                    # wall-clock seconds of the attempt
+    jpeg_b64: str
+
+
+async def run_early_plate_attempt(
+    camera_id: int, track_id: str, ts: float, jpeg: bytes,
+) -> None:
+    """Background: OCR the early candidate; park an accepted read for
+    the visit to claim at ingest. If the visit ALREADY landed (the
+    attempt raced ingest, or core was slow), write the plate straight
+    onto the row instead — the cache is a waiting room, not a detour.
+
+    Best-effort everywhere: a failed early attempt costs latency only;
+    the ingest-time candidate sweep is the safety net."""
+    from services.plate_attempt_cache import cache as _attempt_cache
+    from services.plate_enrichment import _ocr_jpeg
+
+    read = await _ocr_jpeg(jpeg, f"cam{camera_id}")
+    if read is None or not read.get("accepted"):
+        return
+    _attempt_cache.put(
+        camera_id, track_id,
+        plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,
+    )
+    # Race cover: visit already ingested and still unplated → apply now.
+    try:
+        from datetime import timedelta, timezone as _tz
+
+        from core.database import SessionLocal
+        from models import TimelineEvent
+
+        attempt_dt = datetime.fromtimestamp(ts, tz=_tz.utc)
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(TimelineEvent)
+                .filter(
+                    TimelineEvent.camera_id == int(camera_id),
+                    TimelineEvent.track_id == str(track_id)[:40],
+                    TimelineEvent.plate_text.is_(None),
+                    TimelineEvent.started_at
+                    <= attempt_dt + timedelta(seconds=10),
+                )
+                .order_by(TimelineEvent.started_at.desc())
+                .first()
+            )
+            if row is not None and (
+                row.ended_at is None
+                or row.ended_at >= attempt_dt - timedelta(seconds=10)
+            ):
+                row.plate_text = read["plate"][:32]
+                db.commit()
+                logger.info(
+                    "plate attempt: event %s -> %s (raced ingest, conf=%.2f)",
+                    row.id, row.plate_text, read["confidence"],
+                )
+        finally:
+            db.close()
+    except Exception:
+        logger.debug("early plate attempt row-apply failed", exc_info=True)
+
+
+@router.post("/plates/attempt", status_code=202)
+async def ingest_plate_attempt(
+    payload: PlateAttemptIn,
+    background: BackgroundTasks,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Accept one early plate attempt (multi-frame OCR). The OCR runs
+    in the background — this endpoint only validates and queues, so the
+    Tier-0 poster thread never waits on an inference."""
+    camera = db.query(Camera).filter(Camera.id == payload.camera_id).first()
+    if camera is None:
+        raise HTTPException(status_code=404, detail="unknown camera_id")
+    if not settings.events_plate_enrichment:
+        return {"status": "disabled"}
+
+    from services.evidence_store import MAX_EVIDENCE_BYTES
+
+    if len(payload.jpeg_b64) > (MAX_EVIDENCE_BYTES * 4) // 3 + 8:
+        raise HTTPException(status_code=422, detail="candidate too large")
+    try:
+        import base64 as _b64
+
+        jpeg = _b64.b64decode(payload.jpeg_b64, validate=True)
+    except (ValueError, binascii.Error) as e:
+        raise HTTPException(status_code=422, detail=f"bad candidate: {e}")
+
+    background.add_task(
+        run_early_plate_attempt,
+        payload.camera_id, payload.track_id, payload.ts, jpeg,
+    )
+    return {"status": "queued"}
 
 
 @router.get("/events")
