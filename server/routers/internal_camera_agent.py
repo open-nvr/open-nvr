@@ -10,6 +10,7 @@ passwords or requiring an operator login token.
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 import logging
 import secrets
@@ -246,7 +247,10 @@ async def run_early_plate_attempt(
     # the attempt itself is a vehicle crop.
     from services.plate_enrichment import store_plate_crop
 
-    plate_crop_rel = store_plate_crop(jpeg, read.get("box"))
+    # Threaded for the same reason as the ingest sweep: a cv2 decode plus
+    # a file write has no business on the event loop.
+    plate_crop_rel = await asyncio.to_thread(
+        store_plate_crop, jpeg, read.get("box"))
     _attempt_cache.put(
         camera_id, track_id,
         plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,

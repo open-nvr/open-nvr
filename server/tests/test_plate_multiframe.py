@@ -738,3 +738,17 @@ def test_crop_to_plate_box_narrows_the_frame_and_clamps_to_it():
     assert pe.crop_to_plate_box(jpeg, None) is None
     assert pe.crop_to_plate_box(b"", (1.0, 1.0, 9.0, 9.0)) is None
     assert pe.crop_to_plate_box(b"not-a-jpeg", (1.0, 1.0, 9.0, 9.0)) is None
+
+
+def test_the_crop_never_runs_on_the_event_loop():
+    """Lockstep: storing the crop decodes a full frame through cv2 (~15ms
+    on a 1080x720 attempt) and then writes a file. Both enrichment paths
+    are async, and core serves every other request on that same loop, so
+    the call has to go to a thread."""
+    sweep = (_HERE / "services" / "plate_enrichment.py").read_text()
+    assert "_asyncio.to_thread(\n            store_plate_crop" in sweep, (
+        "the ingest sweep stores its crop inline again — a cv2 decode per "
+        "vehicle back on the event loop")
+    early = (_HERE / "routers" / "internal_camera_agent.py").read_text()
+    assert "asyncio.to_thread(\n        store_plate_crop" in early, (
+        "the early-attempt path stores its crop inline again")

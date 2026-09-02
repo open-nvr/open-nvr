@@ -488,6 +488,10 @@ def store_plate_crop(
     Best-effort: any failure answers None and the caller simply keeps
     ``plate_evidence_path`` NULL, falling back to the vehicle frame.
     Evidence storage must never cost us a plate we successfully read.
+
+    SYNC on purpose (a JPEG decode plus a file write), so async callers
+    must hand it to a thread — ``await asyncio.to_thread(...)`` — rather
+    than blocking the event loop every other request shares.
     """
     crop = crop_to_plate_box(jpeg, box)
     if not crop:
@@ -756,8 +760,13 @@ async def enrich_event_plate(
             )
             return
         row.plate_text = plate
-        stamp_plate_evidence(row, store_plate_crop(winner_jpeg, winner_box),
-                             merged=was_merged)
+        # Off the event loop: the crop decodes a full frame through cv2
+        # (~15ms on a 1080x720 attempt, measured) and then writes a file.
+        # Small per read, but this task runs once per vehicle on a busy
+        # camera, and everything else core serves shares this loop.
+        crop_rel = await _asyncio.to_thread(
+            store_plate_crop, winner_jpeg, winner_box)
+        stamp_plate_evidence(row, crop_rel, merged=was_merged)
         note_sighting(row.camera_id, plate)
         db.commit()
         logger.info(
