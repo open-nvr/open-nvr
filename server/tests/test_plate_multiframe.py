@@ -389,3 +389,203 @@ def test_early_attempt_rejected_read_parks_nothing(db, monkeypatch):
     asyncio.run(ica.run_early_plate_attempt(1, "42", 1000.0, b"jpg"))
     assert len(fresh) == 0
     assert _plate_of(SessionLocal, row_id) is None
+
+
+# ── #382: the crop the plate was actually READ from ────────────────
+#
+# A visit stores ONE image — the vehicle-best frame, chosen for the
+# biggest/sharpest VEHICLE box. Multi-frame OCR does not read it; it
+# reads plate candidates, and the two are anti-correlated by
+# construction (a car is biggest when closest, which is when its plate
+# leaves the crop). Before this round the winning candidate's bytes were
+# dropped when the sweep returned, so the Vehicles page captioned a
+# correct plate with a photo that often did not contain it.
+
+
+@pytest.fixture()
+def stored_crops(monkeypatch):
+    """Capture what reaches the evidence store, keyed by its fake path.
+
+    ``store_plate_crop`` imports ``save_evidence_jpeg`` at call time, so
+    patching the module attribute is enough — and it keeps the test off
+    the real JPEG-magic validation and the recordings volume.
+    """
+    import services.evidence_store as es
+
+    seen: dict[str, bytes] = {}
+
+    def fake_save(data: bytes) -> str:
+        rel = f"xx/{data.decode()}.jpg"
+        seen[rel] = data
+        return rel
+
+    monkeypatch.setattr(es, "save_evidence_jpeg", fake_save)
+    return seen
+
+
+def _row(SessionLocal, row_id):
+    s = SessionLocal()
+    try:
+        return s.get(models.TimelineEvent, row_id)
+    finally:
+        s.close()
+
+
+def test_sweep_stores_the_crop_the_winning_read_came_from(
+    db, monkeypatch, stored_crops,
+):
+    """The THIRD candidate wins — so the third crop is the only image
+    that shows this plate, and it is the one that must be stored."""
+    SessionLocal, row_id = db
+    ocr = _ScriptedOcr([None, None, _accepted("WIN123")])
+    monkeypatch.setattr(pe, "_ocr_jpeg", ocr)
+    asyncio.run(pe.enrich_event_plate(row_id, [b"one", b"two", b"three"]))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "WIN123"
+    assert row.plate_evidence_path == "xx/three.jpg", (
+        "stored the wrong crop — the image shown would not be the image "
+        "the plate was read from (#382)")
+    assert stored_crops["xx/three.jpg"] == b"three"
+    # The vehicle-best frame is untouched: it is still the thumbnail.
+    assert row.evidence_path is None
+
+
+def test_merged_read_stores_the_clearer_contributor_and_marks_the_row(
+    db, monkeypatch, stored_crops,
+):
+    """A merged plate appears WHOLE in neither crop. Keep the more
+    confident contributor and say so, rather than passing it off as a
+    clean single-frame read."""
+    SessionLocal, row_id = db
+    # Same disagreement as the merge test above; `a` is the more
+    # confident contributor overall (0.60 vs 0.20 min-confidence).
+    a = _rejected("H644LX", [0.9, 0.9, 0.9, 0.9, 0.9, 0.60])
+    b = _rejected("H644LK", [0.95, 0.95, 0.95, 0.95, 0.95, 0.20])
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([a, b]))
+
+    # Pre-existing payload must survive the merge stamp.
+    s = SessionLocal()
+    s.get(models.TimelineEvent, row_id).payload = {"stationary": False}
+    s.commit()
+    s.close()
+
+    asyncio.run(pe.enrich_event_plate(row_id, [b"first", b"second"]))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "H644LX"
+    assert row.plate_evidence_path == "xx/first.jpg", (
+        "merged read kept the less confident contributor's crop")
+    assert row.payload["plate_merged"] is True
+    assert row.payload["stationary"] is False, (
+        "the merge stamp replaced payload instead of updating it — "
+        "stationary was collateral")
+
+
+def test_fallback_path_stores_the_evidence_crop_it_read(
+    db, monkeypatch, stored_crops,
+):
+    """With no candidates the sweep OCRs the evidence frame itself. One
+    rule for every path: store what was read. In production that is the
+    same bytes as evidence_path, so content-addressing makes it the same
+    file and the extra column costs nothing."""
+    SessionLocal, row_id = db
+    s = SessionLocal()
+    s.get(models.TimelineEvent, row_id).evidence_path = "ab/abc.jpg"
+    s.commit()
+    s.close()
+
+    # enrich_event_plate imports resolve_evidence at CALL time from
+    # services.evidence_store, so that is the module to patch.
+    import services.evidence_store as es
+
+    monkeypatch.setattr(
+        es, "resolve_evidence",
+        lambda rel: _types.SimpleNamespace(read_bytes=lambda: b"evidence"),
+    )
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([_accepted("FALL01")]))
+    asyncio.run(pe.enrich_event_plate(row_id, None))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "FALL01"
+    assert row.plate_evidence_path == "xx/evidence.jpg", (
+        "the fallback still read a real crop — storing it costs nothing "
+        "(content-addressed) and keeps one rule for every path")
+
+
+def test_a_failed_crop_store_never_costs_us_the_plate(db, monkeypatch):
+    """Evidence storage is best-effort. A full disk must lose the photo,
+    never the read."""
+    import services.evidence_store as es
+
+    SessionLocal, row_id = db
+
+    def boom(_data):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(es, "save_evidence_jpeg", boom)
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([_accepted("KEEP01")]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"x"]))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "KEEP01"
+    assert row.plate_evidence_path is None
+
+
+def test_early_attempt_carries_its_crop_through_to_the_row(
+    db, monkeypatch, stored_crops,
+):
+    """The early-attempt path discarded its winning crop too. It must
+    store it once and park the PATH, so both the race-cover write and a
+    later ingest claim can stamp the row."""
+    from routers import internal_camera_agent as ica
+    from services import plate_attempt_cache as pac
+
+    SessionLocal, row_id = db
+    fresh = pac.PlateAttemptCache()
+    monkeypatch.setattr(pac, "cache", fresh)
+
+    s = SessionLocal()
+    row = s.get(models.TimelineEvent, row_id)
+    row.track_id = "42"
+    started = row.started_at.replace(tzinfo=timezone.utc)
+    cam_id = row.camera_id
+    s.commit()
+    s.close()
+
+    async def fake_ocr(jpeg, camera_handle, event_id=None):
+        return _accepted("EARLY7")
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
+    asyncio.run(ica.run_early_plate_attempt(
+        cam_id, "42", started.timestamp() + 5.0, b"earlycrop"))
+
+    # Parked for a visit that has not landed yet...
+    parked = fresh.claim(cam_id, "42",
+                         started_ts=started.timestamp(),
+                         ended_ts=started.timestamp() + 30)
+    assert parked is not None
+    assert parked.plate_evidence_path == "xx/earlycrop.jpg"
+    # ...and stamped on the row the attempt raced.
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "EARLY7"
+    assert row.plate_evidence_path == "xx/earlycrop.jpg"
+
+
+
+def test_ingest_claim_stamps_the_parked_crop():
+    """Lockstep with the claim path: the parked crop must reach the row,
+    or an early-attempt read shows the vehicle frame again."""
+    src = (_HERE / "routers" / "internal_camera_agent.py").read_text()
+    assert "stamp_plate_evidence(row, pending.plate_evidence_path)" in src, (
+        "the ingest claim no longer stamps the early attempt's crop — "
+        "those rows fall back to the vehicle-best frame (#382)")
+
+
+def test_events_api_exposes_the_plate_crop():
+    src = (_HERE / "routers" / "timeline_events.py").read_text()
+    assert '"plate_evidence_url"' in src, (
+        "the events payload no longer offers the plate crop — the UI "
+        "cannot show it")
+    assert '@router.get("/events/{event_id}/plate-evidence")' in src, (
+        "the plate-evidence route is gone — the UI would 404")

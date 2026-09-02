@@ -56,6 +56,20 @@ def _serialize(e: TimelineEvent) -> dict:
         "plate_text": e.plate_text,
         "has_evidence": bool(e.evidence_path),
         "evidence_url": f"/api/v1/events/{e.id}/evidence" if e.evidence_path else None,
+        # The crop the plate was READ from (#382), when it differs from the
+        # vehicle-best frame above. Additive and often null — clients fall
+        # back to evidence_url. Deliberately false when the two paths are
+        # EQUAL: the fallback sweep OCRs the evidence frame itself, and
+        # content-addressing then makes them one file, so there is no
+        # second image to offer and the caller should just use evidence_url.
+        "has_plate_evidence": bool(
+            e.plate_evidence_path
+            and e.plate_evidence_path != e.evidence_path
+        ),
+        "plate_evidence_url": (
+            f"/api/v1/events/{e.id}/plate-evidence"
+            if e.plate_evidence_path else None
+        ),
         "payload": e.payload,
     }
 
@@ -110,6 +124,39 @@ async def get_event_evidence(
     from services.evidence_store import resolve_evidence
 
     path = resolve_evidence(e.evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence file missing")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "max-age=86400"})
+
+
+@router.get("/events/{event_id}/plate-evidence")
+async def get_event_plate_evidence(
+    event_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The crop this row's PLATE was read from (#382).
+
+    Distinct from the best-frame evidence above: multi-frame OCR reads
+    plate-candidate crops, and the vehicle-best frame is — by
+    construction — usually the one where the plate has left the crop.
+    404 when the read came from the evidence frame itself or predates
+    the column; callers fall back to ``/evidence``.
+    """
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.plate_evidence_path:
+        raise HTTPException(status_code=404,
+                            detail="no plate evidence for this event")
+    from services.timeline_service import can_access_event
+
+    if not can_access_event(db, e, user=current_user):
+        # 404, not 403: don't confirm the event exists on someone else's camera.
+        raise HTTPException(status_code=404,
+                            detail="no plate evidence for this event")
+    from services.evidence_store import resolve_evidence
+
+    path = resolve_evidence(e.plate_evidence_path)
     if path is None:
         raise HTTPException(status_code=404, detail="evidence file missing")
     return FileResponse(path, media_type="image/jpeg",

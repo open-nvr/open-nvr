@@ -68,4 +68,12 @@ export const vehiclesService = {
   // can't load them — fetch as a blob and objectURL it (AuthedImage).
   getEventEvidence: (eventId: number) =>
     api.get(`/api/v1/events/${eventId}/evidence`, { responseType: 'blob' }),
+
+  // The crop the PLATE was read from (#382). Multi-frame OCR reads
+  // candidate crops, not the vehicle-best frame, so this is the only
+  // image that actually shows the plate the row is captioned with.
+  // 404s when the read came from the evidence frame itself or predates
+  // the column — callers fall back to getEventEvidence.
+  getEventPlateEvidence: (eventId: number) =>
+    api.get(`/api/v1/events/${eventId}/plate-evidence`, { responseType: 'blob' }),
 }

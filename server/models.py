@@ -503,6 +503,15 @@ class TimelineEvent(Base):
     recording_ref = Column(String(500), nullable=True)
     evidence_path = Column(String(500), nullable=True)
     plate_text = Column(String(32), nullable=True)
+    # The crop the plate was actually READ from (#382). Multi-frame OCR
+    # reads plate-candidate crops, not the visit's vehicle-best frame —
+    # the two are anti-correlated by construction (a car is biggest when
+    # closest, which is when its plate leaves the crop), so showing
+    # evidence_path beside plate_text shows a photo that often does not
+    # contain the plate. NULL for rows read from the evidence crop
+    # itself, and for every row enriched before this column existed:
+    # readers fall back to evidence_path.
+    plate_evidence_path = Column(String(500), nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

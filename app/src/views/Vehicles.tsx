@@ -55,6 +55,23 @@ type PlateEvent = {
   ended_at?: string | null
   has_evidence?: boolean
   evidence_url?: string | null
+  // The crop the plate was READ from (#382); falls back to the
+  // vehicle-best frame above when absent.
+  has_plate_evidence?: boolean
+  plate_evidence_url?: string | null
+  payload?: { plate_merged?: boolean } | null
+}
+
+// Prefer the crop the plate was read from; the vehicle-best frame is the
+// fallback. They are different images by construction — multi-frame OCR
+// reads plate candidates, while the best frame is picked for the biggest
+// VEHICLE box, which at close range is exactly when the plate leaves the
+// crop. Showing the latter beside a plate number captions a photo that
+// often does not contain that plate (#382).
+function plateImage(e: PlateEvent) {
+  return e.has_plate_evidence
+    ? { key: 'plate-evidence', fetch: () => apiService.getEventPlateEvidence(e.id) }
+    : { key: 'evidence', fetch: () => apiService.getEventEvidence(e.id) }
 }
 
 type PlateStats = {
@@ -848,10 +865,10 @@ export function Vehicles() {
                   return (
                     <tr key={e.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
                       <td className="px-3 py-1.5">
-                        {e.has_evidence ? (
+                        {(e.has_plate_evidence || e.has_evidence) ? (
                           <AuthedImage
-                            queryKey={['evidence', e.id]}
-                            fetchBlob={() => apiService.getEventEvidence(e.id)}
+                            queryKey={[plateImage(e).key, e.id]}
+                            fetchBlob={plateImage(e).fetch}
                             alt={`evidence for ${p}`}
                             className="h-10 w-16 object-cover rounded cursor-zoom-in"
                             onClick={() => setPreview(e)}
@@ -1086,13 +1103,22 @@ export function Vehicles() {
       {preview && (
         <Modal open onClose={() => setPreview(null)} title={`${(preview.plate_text ?? '').toUpperCase()} — ${cameraName(preview.camera_id)}`}>
           <AuthedImage
-            queryKey={['evidence', preview.id]}
-            fetchBlob={() => apiService.getEventEvidence(preview.id)}
+            queryKey={[plateImage(preview).key, preview.id]}
+            fetchBlob={plateImage(preview).fetch}
             alt="evidence"
             className="max-h-[70vh] w-auto rounded"
           />
           <div className="text-xs text-[var(--text-dim)] mt-2">
             {preview.started_at ? new Date(preview.started_at).toLocaleString() : ''}
+            {preview.payload?.plate_merged && (
+              <span className="ml-2">
+                · read reconstructed from more than one frame — this is the
+                clearer of them
+              </span>
+            )}
+            {!preview.has_plate_evidence && preview.has_evidence && (
+              <span className="ml-2">· vehicle frame (no separate plate crop stored)</span>
+            )}
           </div>
         </Modal>
       )}

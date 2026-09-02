@@ -38,6 +38,13 @@ class PendingRead:
     confidence: float
     attempt_ts: float          # wall-clock, from the producer
     stored_monotonic: float    # for TTL sweeping
+    # Relative evidence path of the crop this read came from (#382), so
+    # the claiming visit can show the image its plate was READ from
+    # rather than the vehicle-best frame. A PATH, not the bytes: this
+    # cache is deliberately modest, and the JPEG is already on disk.
+    # None when the crop could not be stored — the visit then falls
+    # back to its vehicle frame, exactly as before.
+    plate_evidence_path: str | None = None
 
 
 class PlateAttemptCache:
@@ -56,7 +63,8 @@ class PlateAttemptCache:
             return len(self._entries)
 
     def put(self, camera_id: int, track_id: str, *, plate: str,
-            confidence: float, attempt_ts: float) -> None:
+            confidence: float, attempt_ts: float,
+            plate_evidence_path: str | None = None) -> None:
         """Park an accepted read. A later read for the same track only
         replaces a parked one when its confidence is higher — attempts
         keep the best, never the latest."""
@@ -75,6 +83,7 @@ class PlateAttemptCache:
                 plate=plate, confidence=float(confidence),
                 attempt_ts=float(attempt_ts),
                 stored_monotonic=self._clock(),
+                plate_evidence_path=plate_evidence_path,
             )
 
     def claim(self, camera_id: int, track_id: str, *,

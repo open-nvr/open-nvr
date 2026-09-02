@@ -155,6 +155,7 @@ async def ingest_track_event(
         from services.plate_attempt_cache import cache as _attempt_cache
         from services.plate_enrichment import (
             dedup_window_s, is_duplicate_sighting, note_sighting,
+            stamp_plate_evidence,
         )
 
         pending = _attempt_cache.claim(
@@ -174,6 +175,7 @@ async def ingest_track_event(
                 )
             else:
                 row.plate_text = plate
+                stamp_plate_evidence(row, pending.plate_evidence_path)
                 note_sighting(payload.camera_id, plate)
                 db.commit()
                 logger.info(
@@ -236,15 +238,25 @@ async def run_early_plate_attempt(
     read = await _ocr_jpeg(jpeg, f"cam{camera_id}")
     if read is None or not read.get("accepted"):
         return
+    # #382: this crop is the image the plate was READ from, and it is
+    # gone the moment this task returns. Store it ONCE here and carry
+    # the path — both the claim below and the ingest-time claim need it,
+    # and content-addressing makes a repeat store free anyway.
+    from services.plate_enrichment import store_plate_crop
+
+    plate_crop_rel = store_plate_crop(jpeg)
     _attempt_cache.put(
         camera_id, track_id,
         plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,
+        plate_evidence_path=plate_crop_rel,
     )
     # Duplicate sighting (fragmented track re-reading the car we just
     # read): still PARK the read — the ingest claim is what lets the
     # visit skip its whole OCR sweep — but skip the race-cover row
     # write; the claim path makes the fold decision with fresher state.
-    from services.plate_enrichment import is_duplicate_sighting, note_sighting
+    from services.plate_enrichment import (
+        is_duplicate_sighting, note_sighting, stamp_plate_evidence,
+    )
 
     if is_duplicate_sighting(camera_id, read["plate"]):
         note_sighting(camera_id, read["plate"])
@@ -276,6 +288,7 @@ async def run_early_plate_attempt(
                 or row.ended_at >= attempt_dt - timedelta(seconds=10)
             ):
                 row.plate_text = read["plate"][:32]
+                stamp_plate_evidence(row, plate_crop_rel)
                 note_sighting(camera_id, row.plate_text)
                 db.commit()
                 logger.info(

@@ -296,6 +296,54 @@ def merge_reads(a: dict | None, b: dict | None) -> dict | None:
 MAX_INGEST_ATTEMPTS: int = 4
 
 
+# ── Plate evidence: the crop the read actually came from (#382) ─────
+
+
+def store_plate_crop(jpeg: bytes | None) -> str | None:
+    """Persist the crop a plate was READ from; return its relative path.
+
+    Separate from the visit's ``evidence_path``, which is the
+    vehicle-best frame — chosen for thumbnail quality and, by
+    construction, usually the WRONG frame for the plate (a car is
+    biggest when closest, which is when its plate leaves the crop).
+    Multi-frame OCR reads candidate crops instead, so without this the
+    only image ever stored is one that often does not contain the plate
+    the row is captioned with.
+
+    Best-effort: any failure answers None and the caller simply keeps
+    ``plate_evidence_path`` NULL, falling back to the vehicle frame.
+    Evidence storage must never cost us a plate we successfully read.
+    """
+    if not jpeg:
+        return None
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        return save_evidence_jpeg(jpeg)
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not store crop", exc_info=True)
+        return None
+
+
+def stamp_plate_evidence(row, rel_path: str | None, *,
+                         merged: bool = False) -> None:
+    """Record which crop a row's plate was read from, and whether the
+    read was reconstructed from more than one of them.
+
+    ``merged`` rides in the existing ``payload`` JSON rather than a
+    column of its own — it is a display caveat, not queryable state.
+    The dict is UPDATED, never replaced: ``payload`` already carries
+    ``stationary`` for tier0 visits (see ``timeline_service``), and
+    dropping that to record a caption would be a poor trade.
+    """
+    if rel_path:
+        row.plate_evidence_path = rel_path
+    if merged:
+        payload = dict(row.payload or {})
+        payload["plate_merged"] = True
+        row.payload = payload
+
+
 # ── Duplicate-sighting dedup ────────────────────────────────────────
 # A broken track fragments one physical pass into several visits — a
 # moving camera, an occlusion, a starved re-verify — and multi-frame OCR
@@ -476,25 +524,41 @@ async def enrich_event_plate(
         # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
         # callers; "3" != "cam3" would silently drop consumer-side scoping.
         camera_handle = f"cam{row.camera_id}"
-        rejects: list[dict] = []
+        # Each read is kept WITH the crop it came from (#382): the
+        # winning crop is the only image that actually shows this plate,
+        # and it is discarded the moment this function returns unless we
+        # persist it here.
+        rejects: list[tuple[dict, bytes]] = []
         winner: dict | None = None
+        winner_jpeg: bytes | None = None
+        was_merged = False
         for jpeg in attempts:
             read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
             if read is None:
                 continue
             if read["accepted"]:
-                winner = read
+                winner, winner_jpeg = read, jpeg
                 break                    # early exit — budget saved
             # Character-consensus with every earlier reject: two near
             # misses of the same plate often reconstruct the truth.
-            for prev in rejects:
+            for prev, prev_jpeg in rejects:
                 merged = merge_reads(prev, read)
                 if merged is not None and merged["accepted"]:
-                    winner = merged
+                    winner, was_merged = merged, True
+                    # A merged plate appears WHOLE in neither crop. Keep
+                    # the more confident of the two contributors — the
+                    # closest thing to a photo of this read — and label
+                    # the row so the UI never passes it off as a clean
+                    # single-frame read.
+                    winner_jpeg = (
+                        prev_jpeg
+                        if prev["confidence"] >= read["confidence"]
+                        else jpeg
+                    )
                     break
             if winner is not None:
                 break
-            rejects.append(read)
+            rejects.append((read, jpeg))
 
         if winner is None:
             return                       # honest non-read beats a guess
@@ -513,14 +577,14 @@ async def enrich_event_plate(
             )
             return
         row.plate_text = plate
+        stamp_plate_evidence(row, store_plate_crop(winner_jpeg),
+                             merged=was_merged)
         note_sighting(row.camera_id, plate)
         db.commit()
         logger.info(
             "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
             event_id, row.plate_text, winner["confidence"],
-            len(rejects) + 1,
-            ", merged" if winner.get("characters") and rejects
-            and winner["plate"] not in [r["plate"] for r in rejects] else "",
+            len(rejects) + 1, ", merged" if was_merged else "",
         )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
