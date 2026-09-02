@@ -55,23 +55,49 @@ type PlateEvent = {
   ended_at?: string | null
   has_evidence?: boolean
   evidence_url?: string | null
-  // The crop the plate was READ from (#382); falls back to the
-  // vehicle-best frame above when absent.
+  // TRUE means there are two distinct images to show: the crop the plate
+  // was READ from (#382) as well as the vehicle-best frame above. The
+  // server sets it false when the two paths are equal, i.e. when there is
+  // no second image to offer (timeline_events.py). The flags are
+  // independent — a row can carry a crop and no frame.
   has_plate_evidence?: boolean
   plate_evidence_url?: string | null
   payload?: { plate_merged?: boolean } | null
 }
 
-// Prefer the crop the plate was read from; the vehicle-best frame is the
-// fallback. They are different images by construction — multi-frame OCR
+// The two images are different frames by construction — multi-frame OCR
 // reads plate candidates, while the best frame is picked for the biggest
 // VEHICLE box, which at close range is exactly when the plate leaves the
-// crop. Showing the latter beside a plate number captions a photo that
-// often does not contain that plate (#382).
+// crop. The preview dialog stacks BOTH, so it never has to choose (#387);
+// only the row thumbnail still does, having room for one.
+//
+// The queryKey shapes are shared with the thumbnail on purpose: opening
+// the dialog re-uses whichever blob the row already fetched, so it pays
+// for one request, not two.
+
+/** The vehicle-best frame — context: which car. */
+function vehicleFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['evidence', e.id],
+    fetchBlob: () => apiService.getEventEvidence(e.id),
+  }
+}
+
+/** The crop the plate was READ from. Only meaningful when
+ *  ``has_plate_evidence``: otherwise /plate-evidence 404s, or answers the
+ *  vehicle frame's own bytes. */
+function plateCropSource(e: PlateEvent) {
+  return {
+    queryKey: ['plate-evidence', e.id],
+    fetchBlob: () => apiService.getEventPlateEvidence(e.id),
+  }
+}
+
+// One image for a 64px row thumbnail. Prefer the crop: a vehicle frame
+// captioned with a plate number it may not even contain is the bug #382
+// was about.
 function plateImage(e: PlateEvent) {
-  return e.has_plate_evidence
-    ? { key: 'plate-evidence', fetch: () => apiService.getEventPlateEvidence(e.id) }
-    : { key: 'evidence', fetch: () => apiService.getEventEvidence(e.id) }
+  return e.has_plate_evidence ? plateCropSource(e) : vehicleFrameSource(e)
 }
 
 type PlateStats = {
@@ -867,8 +893,7 @@ export function Vehicles() {
                       <td className="px-3 py-1.5">
                         {(e.has_plate_evidence || e.has_evidence) ? (
                           <AuthedImage
-                            queryKey={[plateImage(e).key, e.id]}
-                            fetchBlob={plateImage(e).fetch}
+                            {...plateImage(e)}
                             alt={`evidence for ${p}`}
                             // A plate crop is ~3.5:1; object-cover in a 1.6:1
                             // cell would cut the ends off the number (#385).
@@ -1106,34 +1131,108 @@ export function Vehicles() {
       )}
 
       {/* ── Evidence preview ──────────────────────────────────────── */}
+      {/* Both images, stacked: the frame answers "which car", the crop is
+          the proof the number was read off it. Showing one forced a choice
+          between context and evidence (#382/#385); showing both needs no
+          choice, which leaves one real problem — fitting max-h-[85vh].
+
+          Height budget. The fixed cost is 185px (dialog border 2, header
+          41, body p-4 32, two caption strips 50, two tile borders 4, the
+          space-y-3 gap 12, the Seen line 44), so the slots get
+          calc(56vh - 190px) and 29vh:
+
+              (56vh - 190) + 29vh + 185 = 85vh - 5px
+
+          — true at EVERY viewport height, because the fixed cost is
+          subtracted once from one slot instead of being budgeted at a
+          single design size. So neither image ever needs scrolling to be
+          seen: 314+261 at 900px tall, 202+203 at 700px. Below ~520px the
+          min-h floors beat max-h (CSS: min wins) and the body scrolls,
+          which is the right degradation — a crop crushed to nothing would
+          defeat the point of the dialog. */}
       {preview && (
-        <Modal open onClose={() => setPreview(null)} title={`${(preview.plate_text ?? '').toUpperCase()} — ${cameraName(preview.camera_id)}`}>
-          <AuthedImage
-            queryKey={[plateImage(preview).key, preview.id]}
-            fetchBlob={plateImage(preview).fetch}
-            alt="evidence"
-            // A plate crop is a few hundred pixels of small text: scale it
-            // UP to the dialog. The vehicle frame is already large and only
-            // ever needs bounding (#385).
-            className={
-              preview.has_plate_evidence
-                ? 'w-full max-w-[560px] rounded'
-                : 'max-h-[70vh] w-auto rounded'
-            }
-          />
-          <div className="text-xs text-[var(--text-dim)] mt-2">
-            {preview.started_at ? new Date(preview.started_at).toLocaleString() : ''}
+        <Modal
+          open
+          onClose={() => setPreview(null)}
+          title={`${(preview.plate_text ?? '').toUpperCase()} — ${cameraName(preview.camera_id)}`}
+          // The default w-[720px] is a FIXED width that overflows a phone;
+          // same inset-fit pattern as AddCameraDialog.
+          widthClassName="w-full max-w-[720px] mx-4"
+        >
+          <div className="space-y-3">
+            {/* Each tile is guarded by its own flag: has_evidence and
+                has_plate_evidence are independent server-side, so a row
+                can legitimately carry a crop and no frame. */}
+            {preview.has_evidence && (
+              <figure className="rounded border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+                <figcaption className="px-2 py-1 text-[11px] leading-4 text-[var(--text-dim)] border-b border-[var(--border)]">
+                  Vehicle frame
+                </figcaption>
+                {/* Size the SLOT, never the <img>: AuthedImage puts its
+                    className on the loading pulse and the "no photo" tile
+                    too, so a height-less class collapses both to 0px and
+                    the dialog jumps when the blob lands. aspect + max-h
+                    (rather than a flat height) lets the natural aspect win
+                    whenever it is the smaller of the two. 3/2 is nominal —
+                    real frames are 1080x720 — and object-contain
+                    letterboxes a 16:9 camera instead of distorting it. */}
+                <div
+                  className={`w-full aspect-[3/2] ${
+                    preview.has_plate_evidence
+                      ? 'min-h-[120px] max-h-[calc(56vh_-_190px)]'
+                      : 'min-h-[140px] max-h-[calc(85vh_-_150px)]'
+                  }`}
+                >
+                  <AuthedImage
+                    {...vehicleFrameSource(preview)}
+                    alt={`vehicle frame for ${(preview.plate_text ?? '').toUpperCase()}`}
+                    className="h-full w-full object-contain"
+                  />
+                </div>
+              </figure>
+            )}
+
+            {preview.has_plate_evidence && (
+              <figure className="rounded border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+                <figcaption className="px-2 py-1 text-[11px] leading-4 text-[var(--text-dim)] border-b border-[var(--border)]">
+                  Plate crop
+                </figcaption>
+                {/* 26/10 is a typical single-row crop (246x94, 285x109), so
+                    at the 684px tile width the strip lands within 1% of its
+                    natural full-width size: a ~2.8x upscale of a few
+                    hundred pixels of small text, which is the whole point
+                    of opening the dialog. Deliberately NO image-rendering
+                    hint — this is a JPEG of a camera frame, so
+                    nearest-neighbour would turn its DCT ringing into hard
+                    blocks that read WORSE than the browser's smooth
+                    resample (pixelated is for pixel art, not photographs).
+                    A crop too mushy to read is a server-side fix: store a
+                    bigger pad. */}
+                <div className="w-full aspect-[26/10] min-h-[72px] max-h-[29vh]">
+                  <AuthedImage
+                    {...plateCropSource(preview)}
+                    alt={`plate crop for ${(preview.plate_text ?? '').toUpperCase()}`}
+                    className="h-full w-full object-contain"
+                  />
+                </div>
+              </figure>
+            )}
+          </div>
+
+          <div className="text-xs text-[var(--text-dim)] mt-3">
+            {preview.started_at
+              ? `Seen ${new Date(preview.started_at).toLocaleString()}`
+              : 'Read time not recorded'}
             {preview.payload?.plate_merged && (
               <span className="ml-2">
-                · read reconstructed from more than one frame — this is the
-                clearer of them
+                · read reconstructed from more than one frame — the crop
+                above is the clearer of them
               </span>
             )}
-            {preview.has_plate_evidence && (
-              <span className="ml-2">· plate crop</span>
-            )}
             {!preview.has_plate_evidence && preview.has_evidence && (
-              <span className="ml-2">· vehicle frame (no separate plate crop stored)</span>
+              <span className="ml-2">
+                · vehicle frame only (no separate plate crop stored)
+              </span>
             )}
           </div>
         </Modal>
