@@ -240,14 +240,20 @@ class _ScriptedOcr:
         return self.reads.pop(0) if self.reads else None
 
 
-def _accepted(plate="GOOD42", conf=0.9):
+#: Every scripted read carries a plate box, because a real adapter
+#: reports one whenever it localised a plate — and the stored evidence
+#: is cropped to it (#385).
+_BOX = (10.0, 20.0, 110.0, 50.0)
+
+
+def _accepted(plate="GOOD42", conf=0.9, box=_BOX):
     return {"plate": plate, "confidence": conf, "characters": [conf] * len(plate),
-            "accepted": True, "floor": 0.45}
+            "accepted": True, "floor": 0.45, "box": box}
 
 
-def _rejected(plate, chars, floor=0.45):
+def _rejected(plate, chars, floor=0.45, box=_BOX):
     return {"plate": plate, "confidence": min(chars), "characters": chars,
-            "accepted": False, "floor": floor}
+            "accepted": False, "floor": floor, "box": box}
 
 
 def test_sweep_early_exits_on_first_accepted(db, monkeypatch):
@@ -403,7 +409,22 @@ def test_early_attempt_rejected_read_parks_nothing(db, monkeypatch):
 
 
 @pytest.fixture()
-def stored_crops(monkeypatch):
+def identity_crop(monkeypatch):
+    """Make the plate crop the identity, so a test can still name the
+    bytes that were stored.
+
+    The real ``crop_to_plate_box`` decodes JPEGs through cv2, which is
+    not a test dependency; its geometry is pinned separately below. What
+    every path shares — and what this keeps — is "no box, no crop".
+    """
+    monkeypatch.setattr(
+        pe, "crop_to_plate_box",
+        lambda jpeg, box, **kw: jpeg if box else None,
+    )
+
+
+@pytest.fixture()
+def stored_crops(monkeypatch, identity_crop):
     """Capture what reaches the evidence store, keyed by its fake path.
 
     ``store_plate_crop`` imports ``save_evidence_jpeg`` at call time, so
@@ -486,9 +507,10 @@ def test_fallback_path_stores_the_evidence_crop_it_read(
     db, monkeypatch, stored_crops,
 ):
     """With no candidates the sweep OCRs the evidence frame itself. One
-    rule for every path: store what was read. In production that is the
-    same bytes as evidence_path, so content-addressing makes it the same
-    file and the extra column costs nothing."""
+    rule for every path: store the PLATE out of what was read. Before
+    #385 this path stored the evidence frame's own bytes, which
+    content-addressing collapsed onto evidence_path — the row then
+    claimed a plate crop it did not have."""
     SessionLocal, row_id = db
     s = SessionLocal()
     s.get(models.TimelineEvent, row_id).evidence_path = "ab/abc.jpg"
@@ -509,11 +531,13 @@ def test_fallback_path_stores_the_evidence_crop_it_read(
     row = _row(SessionLocal, row_id)
     assert row.plate_text == "FALL01"
     assert row.plate_evidence_path == "xx/evidence.jpg", (
-        "the fallback still read a real crop — storing it costs nothing "
-        "(content-addressed) and keeps one rule for every path")
+        "the fallback read a real frame and localised a plate in it — "
+        "that plate is what the row must show")
 
 
-def test_a_failed_crop_store_never_costs_us_the_plate(db, monkeypatch):
+def test_a_failed_crop_store_never_costs_us_the_plate(
+    db, monkeypatch, identity_crop,
+):
     """Evidence storage is best-effort. A full disk must lose the photo,
     never the read."""
     import services.evidence_store as es
@@ -589,3 +613,128 @@ def test_events_api_exposes_the_plate_crop():
         "cannot show it")
     assert '@router.get("/events/{event_id}/plate-evidence")' in src, (
         "the plate-evidence route is gone — the UI would 404")
+
+
+# ── #385: the stored evidence is the PLATE, not the car ─────────────
+#
+# The attempts we OCR are VEHICLE crops — Tier-0 tracks cars, not
+# plates — so #382's "store the frame the read came from" stored a car
+# photo, and the UI dropped its "vehicle frame" caveat while still
+# showing one. The adapter localises the plate in each attempt it
+# answers; the stored evidence is now narrowed to that rectangle.
+
+
+class _RecordingCrop:
+    """Identity crop that remembers the (bytes, box) pairs it was
+    handed — the box is the thing under test, and it must be the one
+    measured in the bytes beside it."""
+
+    def __init__(self):
+        self.calls: list[tuple[bytes, object]] = []
+
+    def __call__(self, jpeg, box, **kw):
+        self.calls.append((jpeg, box))
+        return jpeg if box else None
+
+
+def test_sweep_crops_the_stored_evidence_to_the_winning_reads_box(
+    db, monkeypatch, stored_crops,
+):
+    """The third candidate wins, so the third crop's OWN box is the
+    rectangle to cut — a box from an earlier attempt would carve a
+    different frame's coordinates out of these pixels."""
+    SessionLocal, row_id = db
+    losing, winning = (1.0, 2.0, 3.0, 4.0), (50.0, 60.0, 150.0, 90.0)
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([
+        None,
+        _rejected("NOPE12", [0.1] * 6, box=losing),
+        _accepted("WIN123", box=winning),
+    ]))
+    crop = _RecordingCrop()
+    monkeypatch.setattr(pe, "crop_to_plate_box", crop)
+
+    asyncio.run(pe.enrich_event_plate(row_id, [b"one", b"two", b"three"]))
+
+    assert _row(SessionLocal, row_id).plate_text == "WIN123"
+    assert crop.calls == [(b"three", winning)], (
+        "stored evidence was not cropped to the winning read's own plate "
+        "box — the image shown is a car, or the wrong rectangle (#385)")
+
+
+def test_merged_read_crops_with_the_kept_contributors_box(
+    db, monkeypatch, stored_crops,
+):
+    """A merge keeps the more confident contributor's crop; the box has
+    to come from the SAME attempt, since the two are different frames."""
+    SessionLocal, row_id = db
+    kept, dropped = (7.0, 8.0, 90.0, 30.0), (400.0, 300.0, 480.0, 322.0)
+    a = _rejected("H644LX", [0.9, 0.9, 0.9, 0.9, 0.9, 0.60], box=kept)
+    b = _rejected("H644LK", [0.95, 0.95, 0.95, 0.95, 0.95, 0.20], box=dropped)
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([a, b]))
+    crop = _RecordingCrop()
+    monkeypatch.setattr(pe, "crop_to_plate_box", crop)
+
+    asyncio.run(pe.enrich_event_plate(row_id, [b"first", b"second"]))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "H644LX"
+    assert crop.calls == [(b"first", kept)], (
+        "the merge crossed a box with another frame's pixels (#385)")
+
+
+def test_a_read_without_a_plate_box_stores_nothing(db, monkeypatch):
+    """No localisation, no crop: the row keeps plate_evidence_path NULL
+    so the UI shows the vehicle frame WITH its caveat. Storing the
+    uncropped attempt is what made the caption lie."""
+    SessionLocal, row_id = db
+    monkeypatch.setattr(pe, "_ocr_jpeg",
+                        _ScriptedOcr([_accepted("NOBOX1", box=None)]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"vehicle-crop"]))
+
+    row = _row(SessionLocal, row_id)
+    assert row.plate_text == "NOBOX1", "a missing box must not cost the read"
+    assert row.plate_evidence_path is None, (
+        "stored a vehicle crop as the plate crop — the UI would drop its "
+        "'vehicle frame' caveat and show a car (#385)")
+
+
+def test_extract_read_carries_the_plate_box_and_drops_junk_ones():
+    """The box rides the read, so the crop is always measured in the
+    bytes that produced it."""
+    resp = _resp()
+    resp["result"]["plate_detection"] = {"found": True,
+                                         "box": [121, 229, 233, 267]}
+    assert extract_read(resp)["box"] == (121.0, 229.0, 233.0, 267.0)
+    # No detection at all, and boxes that cannot bound anything.
+    assert extract_read(_resp())["box"] is None
+    for bad in ([1, 2, 3], "x", [0, 0, 0, 0], [10, 10, 5, 20], ["a", 1, 2, 3]):
+        resp["result"]["plate_detection"] = {"box": bad}
+        assert extract_read(resp)["box"] is None, f"accepted {bad!r}"
+
+
+def test_crop_to_plate_box_narrows_the_frame_and_clamps_to_it():
+    """Geometry, on real pixels: the crop is the padded box, and a plate
+    near the frame edge loses margin rather than going out of bounds."""
+    cv2 = pytest.importorskip("cv2", reason="crop needs opencv")
+    import numpy as np
+
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+    frame[:] = (30, 60, 90)
+    ok, buf = cv2.imencode(".jpg", frame)
+    assert ok
+    jpeg = bytes(buf.tobytes())
+
+    # pad = 0.08 * longer side (200) = 16, applied on every side.
+    out = pe.crop_to_plate_box(jpeg, (100.0, 200.0, 300.0, 260.0))
+    assert pe.jpeg_dimensions(out) == (233, 93)
+
+    # Flush against the right/bottom edges: clamped, never wider than
+    # the frame it came from.
+    out = pe.crop_to_plate_box(jpeg, (380.0, 290.0, 400.0, 300.0))
+    w, h = pe.jpeg_dimensions(out)
+    assert w <= 400 and h <= 300 and w >= 2 and h >= 2
+
+    # Nothing to crop, and nothing to crop it out of.
+    assert pe.crop_to_plate_box(jpeg, None) is None
+    assert pe.crop_to_plate_box(b"", (1.0, 1.0, 9.0, 9.0)) is None
+    assert pe.crop_to_plate_box(b"not-a-jpeg", (1.0, 1.0, 9.0, 9.0)) is None

@@ -870,7 +870,13 @@ export function Vehicles() {
                             queryKey={[plateImage(e).key, e.id]}
                             fetchBlob={plateImage(e).fetch}
                             alt={`evidence for ${p}`}
-                            className="h-10 w-16 object-cover rounded cursor-zoom-in"
+                            // A plate crop is ~3.5:1; object-cover in a 1.6:1
+                            // cell would cut the ends off the number (#385).
+                            className={`h-10 w-16 rounded cursor-zoom-in ${
+                              e.has_plate_evidence
+                                ? 'object-contain bg-[var(--bg-2)]'
+                                : 'object-cover'
+                            }`}
                             onClick={() => setPreview(e)}
                           />
                         ) : (
@@ -1106,7 +1112,14 @@ export function Vehicles() {
             queryKey={[plateImage(preview).key, preview.id]}
             fetchBlob={plateImage(preview).fetch}
             alt="evidence"
-            className="max-h-[70vh] w-auto rounded"
+            // A plate crop is a few hundred pixels of small text: scale it
+            // UP to the dialog. The vehicle frame is already large and only
+            // ever needs bounding (#385).
+            className={
+              preview.has_plate_evidence
+                ? 'w-full max-w-[560px] rounded'
+                : 'max-h-[70vh] w-auto rounded'
+            }
           />
           <div className="text-xs text-[var(--text-dim)] mt-2">
             {preview.started_at ? new Date(preview.started_at).toLocaleString() : ''}
@@ -1115,6 +1128,9 @@ export function Vehicles() {
                 · read reconstructed from more than one frame — this is the
                 clearer of them
               </span>
+            )}
+            {preview.has_plate_evidence && (
+              <span className="ml-2">· plate crop</span>
             )}
             {!preview.has_plate_evidence && preview.has_evidence && (
               <span className="ml-2">· vehicle frame (no separate plate crop stored)</span>

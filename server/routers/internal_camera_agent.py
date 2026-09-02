@@ -242,9 +242,11 @@ async def run_early_plate_attempt(
     # gone the moment this task returns. Store it ONCE here and carry
     # the path — both the claim below and the ingest-time claim need it,
     # and content-addressing makes a repeat store free anyway.
+    # #385: narrowed to the plate the adapter localised in THESE bytes;
+    # the attempt itself is a vehicle crop.
     from services.plate_enrichment import store_plate_crop
 
-    plate_crop_rel = store_plate_crop(jpeg)
+    plate_crop_rel = store_plate_crop(jpeg, read.get("box"))
     _attempt_cache.put(
         camera_id, track_id,
         plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,

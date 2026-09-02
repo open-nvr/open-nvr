@@ -158,6 +158,25 @@ def plate_box_is_clipped(
     )
 
 
+def plate_box_of(detection: object) -> tuple[float, float, float, float] | None:
+    """The adapter's plate box as a well-formed tuple, or None.
+
+    One parser for both consumers of the box: the clip guard above, and
+    the evidence crop below (#385). Degenerate boxes (non-numeric,
+    inverted, zero-area) answer None so neither caller has to re-check.
+    """
+    if not isinstance(detection, dict):
+        return None
+    box = detection.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
 def extract_plate(
     response: dict | None, *, image_size: tuple[int, int] | None = None
 ) -> str | None:
@@ -248,6 +267,11 @@ def extract_read(
         "characters": chars if len(chars) == len(text) else None,
         "accepted": result.get("accepted") is not False,
         "floor": float(floor) if floor is not None else None,
+        # The plate's own rectangle inside the crop we OCR'd (#385) —
+        # what the stored evidence is cropped to. In THIS attempt's
+        # pixel space, like the clip-guard box above, so it travels with
+        # the read and is never applied to another frame.
+        "box": plate_box_of(detection),
     }
 
 
@@ -299,27 +323,95 @@ MAX_INGEST_ATTEMPTS: int = 4
 # ── Plate evidence: the crop the read actually came from (#382) ─────
 
 
-def store_plate_crop(jpeg: bytes | None) -> str | None:
-    """Persist the crop a plate was READ from; return its relative path.
+#: Context kept around the plate box, as a fraction of the box's longer
+#: side. Enough to show the plate's border and that it is mounted on a
+#: vehicle; not enough to turn the picture back into a car photo.
+_PLATE_CROP_PAD_RATIO = 0.08
+
+#: The crop is a few hundred pixels of small text. Encode it well —
+#: quality is what makes the number readable to the operator who is
+#: double-checking the OCR, and the file is tiny either way.
+_PLATE_CROP_JPEG_QUALITY = 92
+
+
+def crop_to_plate_box(
+    jpeg: bytes | None, box: tuple[float, float, float, float] | None,
+    *, pad_ratio: float = _PLATE_CROP_PAD_RATIO,
+) -> bytes | None:
+    """Cut the plate (plus a little context) out of the frame it was
+    read from; None when that cannot be done.
+
+    The attempts we OCR are VEHICLE crops — Tier-0 tracks cars, not
+    plates — so the frame the read came from is a picture of a car, and
+    storing it whole captions a plate number with an image in which the
+    plate is a handful of pixels (or, at close range, absent: #386's
+    badge false-positive is exactly that failure). The adapter already
+    localises the plate; this narrows the stored evidence to what it
+    found.
+
+    Decoding costs one JPEG per successful read — a per-visit path, and
+    only after OCR has already succeeded. Any failure answers None,
+    which the caller turns into "store nothing".
+    """
+    if not jpeg or box is None:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = box
+        pad = max(2.0, pad_ratio * max(x2 - x1, y2 - y1))
+        # Clamp to the frame: a plate near the crop edge yields a
+        # smaller margin on that side, never an out-of-bounds slice.
+        left, top = max(0, int(x1 - pad)), max(0, int(y1 - pad))
+        right, bottom = min(w, int(x2 + pad) + 1), min(h, int(y2 + pad) + 1)
+        if right - left < 2 or bottom - top < 2:
+            return None
+        ok, buf = cv2.imencode(
+            ".jpg", frame[top:bottom, left:right],
+            [int(cv2.IMWRITE_JPEG_QUALITY), _PLATE_CROP_JPEG_QUALITY],
+        )
+        return bytes(buf.tobytes()) if ok else None
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not crop to the plate box",
+                     exc_info=True)
+        return None
+
+
+def store_plate_crop(
+    jpeg: bytes | None,
+    box: tuple[float, float, float, float] | None = None,
+) -> str | None:
+    """Persist the plate the read came from; return its relative path.
 
     Separate from the visit's ``evidence_path``, which is the
     vehicle-best frame — chosen for thumbnail quality and, by
     construction, usually the WRONG frame for the plate (a car is
     biggest when closest, which is when its plate leaves the crop).
-    Multi-frame OCR reads candidate crops instead, so without this the
-    only image ever stored is one that often does not contain the plate
-    the row is captioned with.
+
+    ``box`` is the plate's rectangle in ``jpeg``'s own pixel space, as
+    reported by the adapter for THIS attempt. Without a usable one we
+    store nothing (#385): the attempt is a vehicle crop, and saving it
+    here would make the UI drop its "vehicle frame (no separate plate
+    crop stored)" caveat while still showing a car — a caption that
+    lies is worse than one that admits what it has.
 
     Best-effort: any failure answers None and the caller simply keeps
     ``plate_evidence_path`` NULL, falling back to the vehicle frame.
     Evidence storage must never cost us a plate we successfully read.
     """
-    if not jpeg:
+    crop = crop_to_plate_box(jpeg, box)
+    if not crop:
         return None
     try:
         from services.evidence_store import save_evidence_jpeg
 
-        return save_evidence_jpeg(jpeg)
+        return save_evidence_jpeg(crop)
     except Exception:  # noqa: BLE001
         logger.debug("plate evidence: could not store crop", exc_info=True)
         return None
@@ -531,6 +623,7 @@ async def enrich_event_plate(
         rejects: list[tuple[dict, bytes]] = []
         winner: dict | None = None
         winner_jpeg: bytes | None = None
+        winner_box: tuple[float, float, float, float] | None = None
         was_merged = False
         for jpeg in attempts:
             read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
@@ -538,6 +631,7 @@ async def enrich_event_plate(
                 continue
             if read["accepted"]:
                 winner, winner_jpeg = read, jpeg
+                winner_box = read.get("box")
                 break                    # early exit — budget saved
             # Character-consensus with every earlier reject: two near
             # misses of the same plate often reconstruct the truth.
@@ -549,12 +643,13 @@ async def enrich_event_plate(
                     # the more confident of the two contributors — the
                     # closest thing to a photo of this read — and label
                     # the row so the UI never passes it off as a clean
-                    # single-frame read.
-                    winner_jpeg = (
-                        prev_jpeg
-                        if prev["confidence"] >= read["confidence"]
-                        else jpeg
-                    )
+                    # single-frame read. The box travels with the crop it
+                    # was measured in: the contributors are different
+                    # frames, so the loser's box would cut the wrong
+                    # rectangle out of the winner's pixels (#385).
+                    keep_prev = prev["confidence"] >= read["confidence"]
+                    winner_jpeg = prev_jpeg if keep_prev else jpeg
+                    winner_box = (prev if keep_prev else read).get("box")
                     break
             if winner is not None:
                 break
@@ -577,7 +672,7 @@ async def enrich_event_plate(
             )
             return
         row.plate_text = plate
-        stamp_plate_evidence(row, store_plate_crop(winner_jpeg),
+        stamp_plate_evidence(row, store_plate_crop(winner_jpeg, winner_box),
                              merged=was_merged)
         note_sighting(row.camera_id, plate)
         db.commit()
