@@ -115,6 +115,8 @@ def motion_config_from_env() -> "MotionConfig":
             "DETECT_MOTION_LIGHTNING_THRESHOLD", 0.8),
         calibration_max_frames=_env_int(
             "DETECT_MOTION_CALIBRATION_MAX_FRAMES", 150),
+        calibration_max_forced_exits=_env_int(
+            "DETECT_MOTION_MAX_FORCED_EXITS", 2),
     )
 
 

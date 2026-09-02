@@ -91,7 +91,8 @@ Beyond costing nothing (one detector, N subscribers — versus every app
 driving its own inference stream):
 
 * **`track_id`** — stable across frames, so "the same person" is free.
-* **`stationary`** — the object hasn't moved for ~10 s. Dwell and
+* **`stationary`** — the object has held still for 50 frames (~25 s at
+  the default `DETECT_FPS=2`; it counts frames, not seconds). Dwell and
   abandoned-object rules can read it instead of re-deriving it.
 * **`best: true`** — Tier-0 retained the sharpest crop for that track and
   serves it at `<pipeline>/best_frame?camera=&track=`. Run an expensive

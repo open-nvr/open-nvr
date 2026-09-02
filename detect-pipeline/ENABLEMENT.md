@@ -11,7 +11,7 @@ read your shadow data first.**
 
 ## The ladder: `off → shadow (default) → enforce → +dispatch`
 
-### 0. `off` (default) — Tier-0 only
+### 0. `off` — Tier-0 only
 ```
 DETECT_PIPELINE_ENABLED=true
 DETECT_GATE_MODE=off

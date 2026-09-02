@@ -91,6 +91,18 @@ def _normalise_fast_plate_ocr(
         "vehicle_label": None,
         "event_id": event_id,
     }
+    # Additive optional field (EVENT_CONTRACTS.md "additive-only"): the
+    # plate box the adapter localised, in the OCR'd crop's pixel space.
+    # Consumers use it to reject PARTIAL reads — a crop whose edge cuts
+    # through the plate still OCRs the surviving characters at high
+    # confidence, so only the geometry can tell "K884" (a fragment of
+    # "K884RS") from a whole plate. Forwarded, not judged: KAI-C does not
+    # have the crop, and the consumer that stores the plate does.
+    detection = result.get("plate_detection")
+    if isinstance(detection, dict):
+        box = detection.get("box")
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            payload["plate_box"] = list(box)
     subject = f"opennvr.events.plate.recognized.v1.{camera_id}"
     return subject, _envelope(
         "plate.recognized.v1",

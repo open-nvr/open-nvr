@@ -14,6 +14,8 @@ pipeline/gate core stays metric-free and unit-testable. Names follow
     tier0_frames_total{camera}                         counter
     tier0_detector_runs_total{camera}                  counter
     tier0_detector_skipped_total{camera,reason}        counter  reason=calibrating|no_motion
+    tier0_motion_forced_exits_total{camera}            counter
+    tier0_motion_latched_open{camera}                  gauge
     tier0_tracks_active{camera}                        gauge
     tier0_events_published_total{camera}               counter
     gate_escalations_total{camera,reason}              counter
@@ -222,6 +224,18 @@ def record_frame(
     # Bounded-load guards (#track-explosion) — never cap silently:
     if getattr(result, "regions_capped", False):
         metrics.inc("tier0_regions_capped_total", cam)
+    # Motion gate: the #373 deadline firing is the signal that the gate
+    # cannot model this scene. It used to be invisible — the repeat WARN
+    # is demoted to debug, so a gate feeding the detector 1.5% of frames
+    # looked exactly like a quiet camera. The counter is incremented on
+    # the per-frame EDGE; the gauge says the gate has latched open.
+    if getattr(result, "motion_forced_exit", False):
+        metrics.inc("tier0_motion_forced_exits_total", cam)
+    metrics.gauge(
+        "tier0_motion_latched_open",
+        1.0 if getattr(result, "motion_latched_open", False) else 0.0,
+        cam,
+    )
     skipped = int(getattr(result, "skipped_stationary", 0) or 0)
     if skipped:
         metrics.inc("tier0_stationary_skipped_total", cam, value=float(skipped))

@@ -191,8 +191,13 @@ def _ort_session_options(ort):
     each believed they owned every core. The detector pool caps how many
     sessions exist; this caps how wide each one is.
 
-    0/unset means "let ORT decide", matching what DETECT_CV_THREADS=0 means
-    for OpenCV.
+    An EXPLICIT 0 means "let ORT decide". Unset/empty pins 2 instead —
+    deliberately conservative, because this path has no equivalent of the
+    OpenCV governor: WorkerManager._tune_inference_threads only ever calls
+    cv2.setNumThreads, so an unset value here would leave every session
+    claiming the whole box. That asymmetry is a real gap (the ort/rfdetr
+    paths never widen on an idle host the way the cvdnn path does), but it
+    is a safe default rather than an accidental one.
     """
     import os as _os
 

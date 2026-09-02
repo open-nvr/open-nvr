@@ -145,3 +145,32 @@ async def test_publish_domain_event_failure_counts_never_raises():
     ) is False
     assert pub.failed_count == 1
     assert pub._client is None  # forced rebuild on next call
+
+
+def test_plate_box_is_forwarded_when_the_adapter_localised_the_plate():
+    """The consumer that stores the plate needs the geometry to reject
+    PARTIAL reads — a crop whose edge cuts the plate still OCRs the
+    surviving characters at high confidence. KAI-C forwards, never judges:
+    it does not hold the crop the box is measured against."""
+    result = dict(PLATE_RESULT, plate_detection={
+        "found": True, "confidence": 0.87, "box": [847, 463, 1076, 550],
+    })
+    out = normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                               correlation_id=None, event_id=7)
+    assert out is not None
+    _, env = out
+    assert env["payload"]["plate_box"] == [847, 463, 1076, 550]
+
+
+def test_plate_box_is_omitted_when_absent_or_malformed():
+    """Additive-only: the field simply does not appear, so a consumer on
+    the old contract sees exactly what it saw before."""
+    _, env = normalise_completion("fast_plate_ocr", PLATE_RESULT,
+                                  camera_id="cam1", correlation_id=None,
+                                  event_id=7)
+    assert "plate_box" not in env["payload"]
+    for bad in ({"found": False}, {"box": None}, {"box": [1, 2, 3]}, {"box": "x"}):
+        _, env = normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
+            camera_id="cam1", correlation_id=None, event_id=7)
+        assert "plate_box" not in env["payload"]
