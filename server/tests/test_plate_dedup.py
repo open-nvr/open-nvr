@@ -410,3 +410,106 @@ def test_extract_read_keeps_interior_and_unsized_reads():
     # never a rejection.
     unsized = extract_read(_adapter_resp(box=[300, 60, 399, 110]))
     assert unsized is not None
+
+
+# ── #386: a badge is not a plate (false localisations) ─────────────
+#
+# The reported case: an Audi's four-ring badge read as "C00D" at 0.51
+# against the adapter's 0.45 floor, and was written to the register as
+# a vehicle's plate. Nothing could catch it. Read confidence cannot —
+# the characters really are those shapes. The #378 geometry guard
+# cannot — a badge sits mid-crop, nowhere near an edge. What did know
+# was the localiser, which scored its own find 0.3756 where the same
+# camera's genuine plates score 0.853-0.936; that number was parsed and
+# discarded.
+
+
+def _badge_resp(plate="C00D", det_conf=0.3756):
+    """The reported response, verbatim in the fields that matter."""
+    result = {
+        "plate_text": plate, "confidence": 0.5143, "accepted": True,
+        "min_confidence_applied": 0.45,
+        "characters": [{"char": c, "confidence": 0.9} for c in plate],
+        "plate_detection": {
+            "attempted": True, "found": True, "confidence": det_conf,
+            # Mid-crop: 9px clear of the bottom edge, so #378 is silent.
+            "box": [121, 229, 233, 267], "image_size": [477, 276],
+        },
+    }
+    return {"result": result}
+
+
+def test_extract_read_rejects_a_weakly_localised_read():
+    """Dropped outright, not kept as a reject: a badge is not a near
+    miss at a plate, so character-merging it with anything would
+    manufacture a plate out of two non-plates."""
+    assert extract_read(_badge_resp(), image_size=(477, 276)) is None
+
+
+def test_extract_read_keeps_the_genuine_reads_from_the_same_camera():
+    """The weakest true localisation measured on the reporting install
+    (0.8529) must sail through — the gate exists to catch 0.38, and a
+    guard that also rejects real plates is worse than no guard."""
+    read = extract_read(_badge_resp("N894JV", det_conf=0.8529),
+                        image_size=(477, 276))
+    assert read is not None and read["plate"] == "N894JV"
+
+
+def test_the_detection_floor_is_operator_tunable(monkeypatch):
+    from services.plate_enrichment import plate_detection_floor
+
+    # A camera angle that yields habitually weak-but-correct finds can
+    # lower the bar...
+    monkeypatch.setenv("OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE", "0.2")
+    assert plate_detection_floor() == 0.2
+    assert extract_read(_badge_resp(), image_size=(477, 276)) is not None
+    # ...or switch the gate off entirely.
+    monkeypatch.setenv("OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE", "0")
+    assert plate_detection_floor() == 0.0
+    assert extract_read(_badge_resp(), image_size=(477, 276)) is not None
+    # Junk in the environment is not a licence to stop reading plates.
+    monkeypatch.setenv("OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE", "yes please")
+    assert plate_detection_floor() == 0.6
+
+
+def test_the_gate_has_no_opinion_without_a_localiser():
+    """An OCR-only adapter never localises. Gating on a field it does
+    not send would silently stop every plate it reads."""
+    from services.plate_enrichment import plate_detection_is_weak
+
+    assert plate_detection_is_weak({"attempted": False}) is False
+    assert plate_detection_is_weak({"found": True}) is False   # no number
+    assert plate_detection_is_weak({"confidence": "0.1"}) is False
+    assert plate_detection_is_weak(None) is False
+    # ...but a number below the bar is an opinion, and it is "no".
+    assert plate_detection_is_weak({"confidence": 0.3756}) is True
+
+
+def test_extract_plate_applies_the_same_gate():
+    """The two parsers are two doors into one column; #378's lesson
+    applies again — a guard on one of them is no guard at all."""
+    from services.plate_enrichment import extract_plate
+
+    assert extract_plate(_badge_resp(), image_size=(477, 276)) is None
+    assert extract_plate(_badge_resp("N894JV", det_conf=0.8529),
+                         image_size=(477, 276)) == "N894JV"
+
+
+def test_consumer_rejects_a_weakly_localised_read(db):
+    """The bus writer races the synchronous one for the same column, so
+    it enforces the same rule — a badge rejected by enrichment must not
+    simply land here instead."""
+    from services.plate_event_consumer import apply_plate_event
+
+    SessionLocal, cam_id, (first, second) = db
+    badge = _envelope(first, plate="C00D", plate_box=[121, 229, 233, 267],
+                      plate_box_image=[477, 276], plate_box_confidence=0.3756)
+    assert apply_plate_event(badge) == "weak-detection"
+    assert _plate_of(SessionLocal, first) is None
+
+    # A producer that predates the field carries no opinion, and an
+    # absent opinion must not become a rejection.
+    old = _envelope(second, plate="N894JV", plate_box=[100, 40, 300, 100],
+                    plate_box_image=[477, 276])
+    assert apply_plate_event(old) == "applied"
+    assert _plate_of(SessionLocal, second) == "N894JV"

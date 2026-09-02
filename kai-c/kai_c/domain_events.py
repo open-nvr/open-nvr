@@ -100,6 +100,15 @@ def _normalise_fast_plate_ocr(
     # have the crop, and the consumer that stores the plate does.
     detection = result.get("plate_detection")
     if isinstance(detection, dict):
+        # How sure the localiser was that this was a plate at all.
+        # Consumers reject FALSE localisations with it (#386): a
+        # manufacturer badge OCRs into plausible characters at plausible
+        # read confidence, from a box nowhere near a crop edge, so
+        # neither the read's own confidence nor the geometry above can
+        # tell it from a plate. The detector's doubt can.
+        conf = detection.get("confidence")
+        if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+            payload["plate_box_confidence"] = float(conf)
         box = detection.get("box")
         if isinstance(box, (list, tuple)) and len(box) == 4:
             payload["plate_box"] = list(box)

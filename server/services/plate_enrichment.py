@@ -158,6 +158,84 @@ def plate_box_is_clipped(
     )
 
 
+#: Default floor for the adapter's plate LOCALISATION confidence.
+#: Measured on the install that reported #386: 22 genuine reads scored
+#: 0.853-0.936, while the badge false-positive scored 0.3756. Anything
+#: in that gap separates them; 0.6 sits in the middle of it, closer to
+#: the false positive than to the weakest true read.
+_DETECTION_FLOOR_DEFAULT = 0.6
+
+
+def plate_detection_floor() -> float:
+    """Minimum confidence for the plate localisation behind a read.
+    0 disables the gate entirely.
+
+    Read from the environment on every call, like ``dedup_window_s``:
+    consulted once per OCR attempt, and reading live keeps tests and
+    operators out of import-order traps. An install whose camera angle
+    yields habitually weak-but-correct localisations can lower or
+    disable it without a rebuild.
+    """
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DETECTION_FLOOR_DEFAULT
+    return value if value > 0 else 0.0
+
+
+def detection_confidence_is_weak(
+    confidence: object, *, floor: float | None = None
+) -> bool:
+    """Is this plate localisation too weak to believe? Scalar half of
+    the guard, so the bus consumer can apply it to the forwarded number
+    without inventing a detection dict.
+
+    Unknown input answers False — the same "never invent a rejection"
+    rule the clip guard follows. A missing confidence means the adapter
+    did not say, not that it said something bad.
+    """
+    bar = plate_detection_floor() if floor is None else floor
+    if bar <= 0:
+        return False
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        return False
+    return float(confidence) < bar
+
+
+def plate_detection_is_weak(
+    detection: object, *, floor: float | None = None
+) -> bool:
+    """Did the adapter barely find the plate whose characters it just
+    reported? Then this is not a plate (#386).
+
+    A two-stage chain localises before it reads, and the reader is
+    happy to spell out whatever it is handed: the Audi four-ring badge
+    came back as "C00D" at 0.51 against a 0.45 floor, from a
+    localisation the detector itself scored 0.3756. Read confidence
+    cannot catch that — the characters really are those shapes — and
+    neither can the #378 geometry guard, because a badge sits in the
+    middle of the crop, nowhere near an edge. The detector's own doubt
+    is the signal, and it was being dropped on the floor.
+
+    Aspect ratio is NOT used, though it looks tempting: on the
+    reporting install the badge measured 2.95:1 and genuine plates
+    2.87-3.85:1, so it separates nothing.
+
+    ``attempted is False`` (an OCR-only adapter that never localises)
+    answers False: there is no opinion to judge, and gating on a field
+    such an adapter never sends would silently stop plates.
+    """
+    if not isinstance(detection, dict):
+        return False
+    if detection.get("attempted") is False:
+        return False
+    return detection_confidence_is_weak(detection.get("confidence"),
+                                        floor=floor)
+
+
 def plate_box_of(detection: object) -> tuple[float, float, float, float] | None:
     """The adapter's plate box as a well-formed tuple, or None.
 
@@ -205,6 +283,8 @@ def extract_plate(
         detection.get("box"), image_size
     ):
         return None
+    if plate_detection_is_weak(detection):
+        return None
     text = result.get("plate_text")
     if not isinstance(text, str):
         return None
@@ -242,6 +322,10 @@ def extract_read(
     if isinstance(detection, dict) and plate_box_is_clipped(
         detection.get("box"), image_size
     ):
+        return None
+    # A weak localisation is not a near miss to be merged, it is a
+    # different object (#386) — drop it outright, like a fragment.
+    if plate_detection_is_weak(detection):
         return None
     text = result.get("plate_text")
     if not isinstance(text, str):

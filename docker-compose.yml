@@ -537,6 +537,12 @@ services:
       # (camera, plate) within this rolling window is folded into one
       # sighting and costs at most ONE extra OCR call. 0 disables.
       - OPENNVR_PLATE_DEDUP_WINDOW_S=${OPENNVR_PLATE_DEDUP_WINDOW_S:-}
+      # Reject FALSE plate localisations (#386): a manufacturer badge
+      # reads as plausible characters mid-crop, so neither read
+      # confidence nor the partial-read geometry catches it — only the
+      # localiser's own score does (genuine plates 0.85+, the reported
+      # badge 0.38). 0 disables.
+      - OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state
