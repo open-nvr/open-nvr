@@ -37,20 +37,35 @@ SUBJECT = "opennvr.events.plate.recognized.v1.>"
 _RETRY_SECONDS = 60.0
 
 
-def _read_is_clipped(box, evidence_path: str | None) -> bool:
+def _read_is_clipped(box, evidence_path: str | None,
+                     box_image_size=None) -> bool:
     """Partial-read guard for the bus path — see plate_box_is_clipped.
 
-    Best-effort by construction: no box, no evidence, or an unreadable
-    crop all answer False, so a missing optional field can never start
-    silently dropping good plates.
+    ``box_image_size`` is the event's own statement of which image the
+    box is measured in (``plate_box_image``, [w, h]). When present it is
+    the ONLY correct denominator: multi-frame OCR reads plate CANDIDATE
+    crops whose size differs from the visit's evidence frame, so judging
+    such a box against the evidence file measures in the wrong image.
+    Only without it do we fall back to the evidence file's size —
+    correct for the single-evidence producers that predate the field.
+
+    Best-effort by construction: no box, no usable size, or an
+    unreadable crop all answer False, so a missing optional field can
+    never start silently dropping good plates.
     """
-    if box is None or not evidence_path:
+    if box is None:
         return False
     try:
-        from services.evidence_store import resolve_evidence
         from services.plate_enrichment import (
             jpeg_dimensions, plate_box_is_clipped,
         )
+
+        if (isinstance(box_image_size, (list, tuple))
+                and len(box_image_size) == 2):
+            return plate_box_is_clipped(box, tuple(box_image_size))
+        if not evidence_path:
+            return False
+        from services.evidence_store import resolve_evidence
 
         path = resolve_evidence(evidence_path)
         if path is None:
@@ -75,6 +90,11 @@ def apply_plate_event(envelope: object) -> str:
     * ``"no-plate"`` / ``"malformed"`` — nothing usable in the payload.
     * ``"not-found"``    — referenced row does not exist (deleted, or a
       foreign initiator's reference); nothing to do.
+    * ``"clipped"``      — the plate box abuts its crop's edge: a
+      partial read (#378); row left untouched.
+    * ``"duplicate"``    — same plate seen on this camera within the
+      dedup window (a fragmented track re-reading the car we just
+      read); sighting folded, row left untouched.
     """
     if not isinstance(envelope, dict):
         return "malformed"
@@ -108,9 +128,22 @@ def apply_plate_event(envelope: object) -> str:
         # would simply land here instead. KAI-C forwards the plate box
         # (optional, additive); the crop it was measured in is this row's
         # evidence, so the geometry is reproducible here.
-        if _read_is_clipped(payload.get("plate_box"), row.evidence_path):
+        if _read_is_clipped(payload.get("plate_box"), row.evidence_path,
+                            payload.get("plate_box_image")):
             return "clipped"
+        normalized = "".join(plate.split()).upper()[:32]
+        # Duplicate-sighting dedup — same rule as the synchronous
+        # writers (racing writers for one column need the same policy;
+        # see plate_enrichment). Folded, not an error.
+        from services.plate_enrichment import (
+            is_duplicate_sighting, note_sighting,
+        )
+
+        if is_duplicate_sighting(row.camera_id, normalized):
+            note_sighting(row.camera_id, normalized)
+            return "duplicate"
         row.plate_text = plate.strip()[:32]
+        note_sighting(row.camera_id, normalized)
         db.commit()
         logger.info(
             "plate event applied: event %s -> %s [correlation_id=%s]",

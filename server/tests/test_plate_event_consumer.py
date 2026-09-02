@@ -55,6 +55,21 @@ import models  # noqa: E402
 from services.plate_event_consumer import apply_plate_event  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clean_plate_sightings():
+    """The dedup sightings map is process-global on purpose (that IS the
+    feature) — which makes it cross-test state by accident. Every test
+    starts clean or the dedup round changes unrelated verdicts."""
+    import services.plate_enrichment as _pe
+
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+    yield
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+
+
+
 def _envelope(event_id, plate="ABC1234", **overrides):
     env = {
         "id": "evt_0123456789ab",
@@ -167,7 +182,7 @@ def test_enrichment_fallback_threads_event_id():
     # the source (the function does live HTTP; its request-building isn't
     # separable without refactoring it — deliberately out of scope here).
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert '"event_id": int(row.id)' in src, (
+    assert 'event_id=int(row.id)' in src, (
         "plate_enrichment no longer sends event_id with its OCR call — "
         "the plate.recognized.v1 it triggers can't be joined back to the "
         "visit row, so the bus consumer becomes a no-op for the fallback "
@@ -181,7 +196,7 @@ def test_enrichment_sends_the_camera_handle_not_the_numeric_id():
     # handles — "3" != "cam3" would silently drop every
     # enrichment-produced event.
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert '"camera_id": f"cam{row.camera_id}"' in src, (
+    assert 'camera_handle = f"cam{row.camera_id}"' in src, (
         "plate_enrichment no longer sends the camera handle — "
         "enrichment-produced plate.recognized.v1 events become "
         "invisible to camera-scoped consumers")

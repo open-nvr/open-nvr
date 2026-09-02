@@ -193,17 +193,262 @@ def extract_plate(
     return text[:32] or None
 
 
-async def enrich_event_plate(event_id: int) -> None:
-    """Background task: OCR the visit's evidence crop, store plate_text.
+def extract_read(
+    response: dict | None, *, image_size: tuple[int, int] | None = None
+) -> dict | None:
+    """Full-fidelity parse of the adapter's InferResponse — plate,
+    overall confidence, per-character confidences, the accepted verdict
+    and the floor it was judged against. Returns None only when there
+    is no read at all (no/empty plate_text). Multi-frame OCR needs the
+    REJECTED reads too: two near-miss reads of the same plate can merge
+    into an accepted one (see ``merge_reads``).
 
-    Opens its own DB session (the request's session is gone by the time a
-    background task runs). Every failure path is a debug/warning log and a
-    clean return — never an exception escaping into the task runner.
-    """
+    ``image_size`` is the OCR'd crop's own dimensions (issue #378): a
+    read whose plate box abuts that crop's boundary is a PARTIAL read —
+    the surviving characters are crisp, so neither confidence nor the
+    accepted flag can catch it; only the geometry can. Clipped reads
+    return None outright: a fragment must not be merged either (its
+    characters are real, but of the wrong plate positions — character
+    consensus with a fragment corrupts, not reconstructs). NOTE the box
+    is in the coordinates of the crop THIS call OCR'd — candidate crops
+    and early-attempt crops have their own sizes, so callers must pass
+    the size of the exact bytes they sent, never the visit's evidence
+    frame."""
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    detection = result.get("plate_detection")
+    if isinstance(detection, dict) and plate_box_is_clipped(
+        detection.get("box"), image_size
+    ):
+        return None
+    text = result.get("plate_text")
+    if not isinstance(text, str):
+        return None
+    text = "".join(text.split()).upper()[:32]
+    if not text:
+        return None
+    confidence = result.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = 0.0
+    floor = result.get("min_confidence_applied")
+    if not isinstance(floor, (int, float)) or isinstance(floor, bool):
+        floor = None
+    chars = []
+    for i, entry in enumerate(result.get("characters") or []):
+        if isinstance(entry, dict) and i < len(text):
+            c = entry.get("confidence")
+            chars.append(float(c) if isinstance(c, (int, float))
+                         and not isinstance(c, bool) else 0.0)
+    return {
+        "plate": text,
+        "confidence": float(confidence),
+        "characters": chars if len(chars) == len(text) else None,
+        "accepted": result.get("accepted") is not False,
+        "floor": float(floor) if floor is not None else None,
+    }
+
+
+def merge_reads(a: dict | None, b: dict | None) -> dict | None:
+    """Character-level consensus between two imperfect reads.
+
+    Two attempts that read ``H644LX`` and ``H644LK`` disagree in one
+    position; taking each position's higher-confidence character often
+    reconstructs the true plate from two rejects. Conservative on
+    purpose: only same-length reads with per-character confidences
+    merge, the merged confidence is the MIN of the chosen characters
+    (same aggregation as the adapter), and the result counts as
+    accepted only if it clears the STRICTER of the two floors — a
+    merge must never be a way to sneak under the bar."""
+    if not a or not b:
+        return None
+    if a["plate"] == b["plate"]:
+        return None                      # agreement isn't a merge
+    if len(a["plate"]) != len(b["plate"]):
+        return None
+    if not a.get("characters") or not b.get("characters"):
+        return None
+    plate = []
+    confs = []
+    for ca, pa, cb, pb in zip(a["plate"], a["characters"],
+                              b["plate"], b["characters"]):
+        if pa >= pb:
+            plate.append(ca)
+            confs.append(pa)
+        else:
+            plate.append(cb)
+            confs.append(pb)
+    merged_conf = min(confs) if confs else 0.0
+    floors = [f for f in (a.get("floor"), b.get("floor")) if f is not None]
+    floor = max(floors) if floors else None
+    return {
+        "plate": "".join(plate),
+        "confidence": merged_conf,
+        "characters": confs,
+        "accepted": floor is not None and merged_conf >= floor,
+        "floor": floor,
+    }
+
+
+#: Hard cap on OCR attempts per visit at ingest — the compute budget.
+MAX_INGEST_ATTEMPTS: int = 4
+
+
+# ── Duplicate-sighting dedup ────────────────────────────────────────
+# A broken track fragments one physical pass into several visits — a
+# moving camera, an occlusion, a starved re-verify — and multi-frame OCR
+# then reads every fragment successfully, so one car becomes N register
+# rows. The only cross-track identity a vehicle has IS its plate, and
+# the plate is only known AFTER the first OCR call, so that first call
+# per fragment is unavoidable. Everything past it is not: once a read
+# comes back matching a plate seen on the same camera within the window,
+# the sighting is FOLDED — no plate written (the row stays an ordinary
+# vehicle visit), no further OCR spent on that visit.
+#
+# The window is ROLLING: every sighting, written or folded, restarts it.
+# A chain of fragments seconds apart therefore collapses into one
+# sighting no matter how long the chain, while the same car genuinely
+# returning after a quiet gap makes a new row.
+#
+# In-memory by design: the map is tiny (plates seen in the last window),
+# and the one thing a restart costs is that a fragment chain straddling
+# it may produce one extra row — acceptable for a best-effort dedup, and
+# far simpler than reconciling wall-clock rows with a monotonic window.
+
+_DEDUP_WINDOW_DEFAULT_S = 30.0
+import threading as _threading
+
+_sightings_lock = _threading.Lock()
+_recent_sightings: dict[tuple[int, str], float] = {}
+#: Hard bound on the map — beyond it the oldest entries are evicted.
+#: Only reachable if a camera reads >_SIGHTINGS_MAX distinct plates
+#: inside one window, i.e. never in practice.
+_SIGHTINGS_MAX = 4096
+
+
+def dedup_window_s() -> float:
+    """The rolling dedup window (seconds). 0 disables dedup entirely.
+
+    Read from the environment on every call — it is consulted a handful
+    of times per vehicle, and reading live keeps tests and operators
+    free of import-order traps."""
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_DEDUP_WINDOW_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEDUP_WINDOW_DEFAULT_S
+    return value if value > 0 else 0.0
+
+
+def _dedup_key(camera_id: int, plate: str) -> tuple[int, str]:
+    # Same normalization as the stored column, so "h644 lx" and the
+    # written "H644LX" cannot slip past each other.
+    return int(camera_id), "".join(plate.split()).upper()[:32]
+
+
+def note_sighting(camera_id: int, plate: str, now: float | None = None) -> None:
+    """Record that ``plate`` was just seen on ``camera_id`` — called on
+    every decision, written AND folded, which is what makes the window
+    rolling."""
+    import time as _time
+
+    ts = _time.monotonic() if now is None else now
+    with _sightings_lock:
+        _recent_sightings[_dedup_key(camera_id, plate)] = ts
+        if len(_recent_sightings) > _SIGHTINGS_MAX:
+            for key in sorted(_recent_sightings,
+                              key=_recent_sightings.get)[:len(_recent_sightings)
+                                                         - _SIGHTINGS_MAX]:
+                del _recent_sightings[key]
+
+
+def is_duplicate_sighting(camera_id: int, plate: str,
+                          now: float | None = None) -> bool:
+    """Was this plate seen on this camera within the rolling window?
+
+    Pure lookup — recording the new sighting is the caller's job (via
+    ``note_sighting``), on whichever branch it takes."""
+    window = dedup_window_s()
+    if window <= 0:
+        return False
+    import time as _time
+
+    ts = _time.monotonic() if now is None else now
+    with _sightings_lock:
+        last = _recent_sightings.get(_dedup_key(camera_id, plate))
+    return last is not None and 0 <= ts - last <= window
+
+
+async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
+                    event_id: int | None = None) -> dict | None:
+    """One OCR attempt through KAI-C. Returns ``extract_read``'s dict,
+    or None on transport failure / non-200 / empty read. Factored out
+    of ``enrich_event_plate`` so the early-attempt endpoint and the
+    multi-candidate sweep share one client path (same auth, same
+    camera-handle convention, same missing-adapter warning)."""
     from core.config import settings
+    from services.adapter_contract import build_infer_payload
+
+    import httpx
+
+    params: dict = {"camera_id": camera_handle}
+    if event_id is not None:
+        params["event_id"] = int(event_id)
+    payload = build_infer_payload(task=PLATE_TASK, jpeg_bytes=jpeg,
+                                  params=params)
+    try:
+        async with _OCR_CONCURRENCY:
+            async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                resp = await client.post(
+                    f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-Internal-Api-Key": settings.internal_api_key or "",
+                    },
+                )
+    except httpx.HTTPError as e:
+        logger.debug("plate OCR: KAI-C unreachable (%s): %s", camera_handle, e)
+        return None
+    if resp.status_code != 200:
+        logger.debug("plate OCR: adapter answered %s (%s)",
+                     resp.status_code, camera_handle)
+        if resp.status_code in (403, 404):
+            _warn_adapter_missing(resp.status_code)
+        return None
+    try:
+        # image_size = THIS crop's dimensions — the clip guard (#378)
+        # must measure the plate box in the pixel space it was reported
+        # in, which is whatever bytes we just sent.
+        return extract_read(resp.json(), image_size=jpeg_dimensions(jpeg))
+    except ValueError:
+        return None
+
+
+async def enrich_event_plate(
+    event_id: int, candidate_jpegs: list[bytes] | None = None,
+) -> None:
+    """Background task: read the visit's plate, multi-frame style.
+
+    Multi-frame OCR: sweep the visit's plate CANDIDATES (best first,
+    shipped by Tier-0 alongside the visit) instead of betting everything
+    on the single vehicle-best frame. Early exit the moment a read is
+    accepted; near-miss rejects are character-merged pairwise (see
+    ``merge_reads``) so two imperfect looks can still produce one
+    correct plate. The evidence crop remains the fallback attempt when
+    no candidates rode the visit — exactly the old behaviour.
+
+    Opens its own DB session (the request's session is gone by the time
+    a background task runs). Every failure path is a debug/warning log
+    and a clean return — never an exception escaping the task runner.
+    """
     from core.database import SessionLocal
     from models import TimelineEvent
-    from services.adapter_contract import build_infer_payload
     from services.evidence_store import resolve_evidence
 
     db = SessionLocal()
@@ -211,69 +456,72 @@ async def enrich_event_plate(event_id: int) -> None:
         row = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
         if (
             row is None
-            or row.plate_text            # already enriched (retry raced)
+            or row.plate_text            # already enriched (early attempt won)
             or (row.label or "") not in VEHICLE_LABELS
-            or not row.evidence_path
         ):
             return
-        path = resolve_evidence(row.evidence_path)
-        if path is None:
-            return
-        jpeg = path.read_bytes()
 
-        import httpx
+        # Attempt list: candidates best-first; the evidence crop as the
+        # sole attempt when none were shipped (pre-multi-frame producers,
+        # non-LPR cameras).
+        attempts: list[bytes] = list(candidate_jpegs or [])[:MAX_INGEST_ATTEMPTS]
+        if not attempts:
+            if not row.evidence_path:
+                return
+            path = resolve_evidence(row.evidence_path)
+            if path is None:
+                return
+            attempts = [path.read_bytes()]
 
-        # camera_id threaded through so KAI-C's audit row and NATS subject
-        # attribute this OCR call to the right camera (same convention as
-        # process_inference's governed path).
-        # camera_id and event_id thread through KAI-C untouched: camera_id
-        # attributes the audit row + NATS subjects, event_id joins the
-        # resulting plate.recognized.v1 back to this timeline row (RFC-0002
-        # Phase 0 — this call is now the *fallback* producer; the write can
-        # arrive via the bus consumer or the synchronous path below,
-        # whichever lands first).
-        # camera_id is the platform HANDLE ("cam{N}"), not the bare numeric
-        # id: the internal /cameras endpoint, Tier-0, and Tier-1 dispatch
-        # all speak handles, so the plate.recognized.v1 this call produces
-        # must too — a consumer scoping to assigned cameras (the LPR app)
-        # compares against handles, and "3" != "cam3" would silently drop
-        # every enrichment-produced event.
-        payload = build_infer_payload(
-            task=PLATE_TASK, jpeg_bytes=jpeg,
-            params={"camera_id": f"cam{row.camera_id}", "event_id": int(row.id)},
-        )
-        try:
-            async with _OCR_CONCURRENCY:
-                async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
-                    resp = await client.post(
-                        f"{settings.kai_c_url}/api/v1/infer/{PLATE_MODEL}",
-                        json=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                            "X-Internal-Api-Key": settings.internal_api_key or "",
-                        },
-                    )
-        except httpx.HTTPError as e:
-            logger.debug("plate enrichment: KAI-C unreachable for event %s: %s",
-                         event_id, e)
-            return
-        if resp.status_code != 200:
-            logger.debug("plate enrichment: adapter answered %s for event %s "
-                         "(fast_plate_ocr not registered?)",
-                         resp.status_code, event_id)
-            if resp.status_code in (403, 404):
-                # 404 = adapter unknown to KAI-C (the #371 restart
-                # amnesia); 403 = registered but approval pending.
-                # Either way plate reads are dead until fixed — say so.
-                _warn_adapter_missing(resp.status_code)
-            return
-        plate = extract_plate(resp.json(), image_size=jpeg_dimensions(jpeg))
-        if not plate:
+        # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
+        # callers; "3" != "cam3" would silently drop consumer-side scoping.
+        camera_handle = f"cam{row.camera_id}"
+        rejects: list[dict] = []
+        winner: dict | None = None
+        for jpeg in attempts:
+            read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
+            if read is None:
+                continue
+            if read["accepted"]:
+                winner = read
+                break                    # early exit — budget saved
+            # Character-consensus with every earlier reject: two near
+            # misses of the same plate often reconstruct the truth.
+            for prev in rejects:
+                merged = merge_reads(prev, read)
+                if merged is not None and merged["accepted"]:
+                    winner = merged
+                    break
+            if winner is not None:
+                break
+            rejects.append(read)
+
+        if winner is None:
+            return                       # honest non-read beats a guess
+        plate = winner["plate"][:32]
+        if is_duplicate_sighting(row.camera_id, plate):
+            # Track fragmentation: this "new" vehicle is the car we just
+            # read. Fold the sighting — the visit row stays (it is a
+            # real detection), the plate is not repeated, and the sweep
+            # stops HERE: identity is established, so any remaining
+            # candidates would be pure waste.
+            note_sighting(row.camera_id, plate)
+            logger.info(
+                "plate dedup: event %s reads %s — seen on cam %s within "
+                "%.0fs, sighting folded (no plate written)",
+                event_id, plate, row.camera_id, dedup_window_s(),
+            )
             return
         row.plate_text = plate
+        note_sighting(row.camera_id, plate)
         db.commit()
-        logger.info("plate enrichment: event %s -> %s", event_id, plate)
+        logger.info(
+            "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
+            event_id, row.plate_text, winner["confidence"],
+            len(rejects) + 1,
+            ", merged" if winner.get("characters") and rejects
+            and winner["plate"] not in [r["plate"] for r in rejects] else "",
+        )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
                        exc_info=True)

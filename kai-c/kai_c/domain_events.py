@@ -103,6 +103,14 @@ def _normalise_fast_plate_ocr(
         box = detection.get("box")
         if isinstance(box, (list, tuple)) and len(box) == 4:
             payload["plate_box"] = list(box)
+            # The frame of reference travels WITH the box: multi-frame
+            # OCR reads plate CANDIDATE crops whose size differs from
+            # the visit's evidence frame, so a consumer judging the box
+            # against the evidence would measure in the wrong image.
+            # Optional + additive, like plate_box itself.
+            size = detection.get("image_size")
+            if isinstance(size, (list, tuple)) and len(size) == 2:
+                payload["plate_box_image"] = list(size)
     subject = f"opennvr.events.plate.recognized.v1.{camera_id}"
     return subject, _envelope(
         "plate.recognized.v1",

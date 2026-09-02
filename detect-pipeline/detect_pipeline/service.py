@@ -340,6 +340,7 @@ class CameraWorker:
         dispatcher=None,                         # Tier-1 dispatch (#10); shared, thread-safe
         router=None,                             # escalation → adapter routing
         visit_poster=None,                       # events store: post finished visits (RFC-0001 C1)
+        attempt_poster=None,                     # multi-frame OCR: early plate attempts (shared)
     ) -> None:
         self.spec = spec
         self.sink = sink
@@ -368,6 +369,7 @@ class CameraWorker:
         self.router = router_for_skills(spec.skills, base=router)
         self._dispatch_once = OncePerTrack()
         self.visit_poster = visit_poster
+        self.attempt_poster = attempt_poster
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # The live source, so request_stop() can unblock the reader.
@@ -553,6 +555,25 @@ class CameraWorker:
         lifecycle = VisitLifecycle(
             self.spec.camera_id, nvr_camera_id=self.spec.nvr_camera_id
         )
+        # Multi-frame OCR: candidates + early attempts, only on cameras
+        # whose assignments include the LPR skill (everyone else pays
+        # nothing). See platecands.py / plate_attempts.py.
+        lpr_camera = bool(
+            self.spec.skills and "license_plate_recognition" in self.spec.skills
+        )
+        early_attempts = None
+        if lpr_camera and self.attempt_poster is not None:
+            from .plate_attempts import EarlyPlateAttempts
+            early_attempts = EarlyPlateAttempts(
+                self.attempt_poster, self.spec.camera_id,
+                nvr_camera_id=self.spec.nvr_camera_id,
+                max_attempts=_env_int("DETECT_PLATE_EARLY_ATTEMPTS", 2),
+            )
+            log.info("tier0 %s: multi-frame plate OCR active "
+                     "(candidates=%d, early attempts=%d)",
+                     self.spec.camera_id,
+                     _env_int("DETECT_PLATE_CANDIDATES", 4),
+                     _env_int("DETECT_PLATE_EARLY_ATTEMPTS", 2))
         motion = MotionDetector(
             (h, w), motion_config_from_env(), label=self.spec.camera_id,
         )
@@ -562,6 +583,11 @@ class CameraWorker:
             coast_ttl_seconds=float(_env_int("DETECT_TRACK_TTL", 300)),
             min_spawn_score=_env_float("DETECT_MIN_SPAWN_SCORE", 0.5),
         ))
+        if lpr_camera:
+            tracker.retain_plate_candidates = True
+            tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
+            tracker.plate_candidates_gap_s = _env_float(
+                "DETECT_PLATE_CANDIDATE_GAP_S", 0.75)
         pipe = DetectPipeline(
             None, motion, self.detector, tracker,
             model_size=(self.model_size, self.model_size),
@@ -677,6 +703,11 @@ class CameraWorker:
                 # and its best frame is final — exactly the moment it becomes
                 # history in the canonical event store. Non-blocking: finished
                 # visits go to the poster's bounded queue.
+                # Multi-frame OCR: early attempts fire while the car is
+                # still in frame — the read no longer waits for the track
+                # to die (which, on a busy road, can take minutes).
+                if early_attempts is not None:
+                    early_attempts.observe(result.tracks)
                 if self.visit_poster is not None:
                     for visit in lifecycle.observe(result.tracks, time.time()):
                         self.visit_poster.submit(visit)
@@ -782,6 +813,7 @@ class WorkerManager:
         dispatcher=None,                                  # Tier-1 dispatch (#10), shared
         router=None,
         visit_poster=None,                                # events store (RFC-0001 C1), shared
+        attempt_poster=None,                              # multi-frame OCR early attempts, shared
     ) -> None:
         self.provider = provider
         self.sink = sink
@@ -827,6 +859,7 @@ class WorkerManager:
         self._dispatcher = dispatcher
         self._router = router
         self._visit_poster = visit_poster
+        self._attempt_poster = attempt_poster
         self._factory = worker_factory or self._default_factory
         self._workers: dict[str, Worker] = {}
         # The spec each running worker was built with — reconcile restarts
@@ -884,6 +917,7 @@ class WorkerManager:
             gate_sink=self._gate_sink,
             dispatcher=self._dispatcher, router=self._router,
             visit_poster=self._visit_poster,
+            attempt_poster=self._attempt_poster,
         )
 
     def running_ids(self) -> set[str]:
