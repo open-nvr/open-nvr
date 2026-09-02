@@ -40,7 +40,6 @@ Env:
   DETECT_DECODE_IDLE        adaptive decode while quiet (default nokey; none = off)
   DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
-  DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
 """
 from __future__ import annotations
