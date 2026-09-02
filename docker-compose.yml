@@ -532,6 +532,11 @@ services:
       # mediamtx service, losing it no longer breaks live WebRTC.
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
       - KAI_C_URL=http://127.0.0.1:8100
+      # Duplicate-sighting dedup for plate reads: a fragmented track
+      # (moving camera, occlusion) re-reads the car just read; the same
+      # (camera, plate) within this rolling window is folded into one
+      # sighting and costs at most ONE extra OCR call. 0 disables.
+      - OPENNVR_PLATE_DEDUP_WINDOW_S=${OPENNVR_PLATE_DEDUP_WINDOW_S:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state

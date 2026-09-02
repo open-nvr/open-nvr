@@ -60,6 +60,21 @@ from services.plate_attempt_cache import PlateAttemptCache  # noqa: E402
 from services.plate_enrichment import extract_read, merge_reads  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clean_plate_sightings():
+    """The dedup sightings map is process-global on purpose (that IS the
+    feature) — which makes it cross-test state by accident. Every test
+    starts clean or the dedup round changes unrelated verdicts."""
+    import services.plate_enrichment as _pe
+
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+    yield
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+
+
+
 # ── extract_read (the full-fidelity parse) ─────────────────────────
 
 

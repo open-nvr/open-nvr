@@ -55,6 +55,21 @@ import models  # noqa: E402
 from services.plate_event_consumer import apply_plate_event  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clean_plate_sightings():
+    """The dedup sightings map is process-global on purpose (that IS the
+    feature) — which makes it cross-test state by accident. Every test
+    starts clean or the dedup round changes unrelated verdicts."""
+    import services.plate_enrichment as _pe
+
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+    yield
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+
+
+
 def _envelope(event_id, plate="ABC1234", **overrides):
     env = {
         "id": "evt_0123456789ab",

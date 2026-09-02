@@ -144,9 +144,18 @@ async def ingest_track_event(
     # fail the window and are ignored).
     from services.plate_enrichment import VEHICLE_LABELS as _VEHICLES
 
+    # Duplicate-sighting dedup: a fragmented track re-reads the car we
+    # just read. When the claimed early read matches a plate seen on
+    # this camera within the rolling window, the sighting is FOLDED —
+    # no plate written AND no enrichment sweep queued (the identity is
+    # established; further OCR on this visit is pure waste).
+    plate_resolved_as_duplicate = False
     if (row.label or "") in _VEHICLES \
             and payload.track_id and not row.plate_text:
         from services.plate_attempt_cache import cache as _attempt_cache
+        from services.plate_enrichment import (
+            dedup_window_s, is_duplicate_sighting, note_sighting,
+        )
 
         pending = _attempt_cache.claim(
             payload.camera_id, payload.track_id,
@@ -154,19 +163,31 @@ async def ingest_track_event(
             ended_ts=(payload.ended_at or payload.started_at).timestamp(),
         )
         if pending is not None:
-            row.plate_text = pending.plate[:32]
-            db.commit()
-            logger.info(
-                "plate ingest: event %s -> %s (early attempt, conf=%.2f)",
-                row.id, row.plate_text, pending.confidence,
-            )
+            plate = pending.plate[:32]
+            if is_duplicate_sighting(payload.camera_id, plate):
+                note_sighting(payload.camera_id, plate)
+                plate_resolved_as_duplicate = True
+                logger.info(
+                    "plate ingest: event %s reads %s — seen on cam %s "
+                    "within %.0fs, sighting folded (no plate written)",
+                    row.id, plate, payload.camera_id, dedup_window_s(),
+                )
+            else:
+                row.plate_text = plate
+                note_sighting(payload.camera_id, plate)
+                db.commit()
+                logger.info(
+                    "plate ingest: event %s -> %s (early attempt, conf=%.2f)",
+                    row.id, row.plate_text, pending.confidence,
+                )
 
     # Multi-frame OCR, recall half: decode the candidate crops (bounded:
     # same per-image cap as evidence, at most MAX_INGEST_ATTEMPTS) and
     # hand them to the enrichment sweep. Bad candidates are dropped, not
     # fatal — the visit itself is already persisted.
     candidates: list[bytes] = []
-    if payload.candidate_jpegs_b64 and not row.plate_text:
+    if payload.candidate_jpegs_b64 and not row.plate_text \
+            and not plate_resolved_as_duplicate:
         import base64 as _b64
 
         from services.evidence_store import MAX_EVIDENCE_BYTES as _MAX
@@ -180,7 +201,8 @@ async def ingest_track_event(
             except (ValueError, binascii.Error):
                 continue
 
-    if not row.plate_text and wants_plate(
+    if not row.plate_text and not plate_resolved_as_duplicate \
+            and wants_plate(
         row.label, evidence_rel or (candidates and "candidates"),
         settings.events_plate_enrichment,
     ):
@@ -218,6 +240,15 @@ async def run_early_plate_attempt(
         camera_id, track_id,
         plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,
     )
+    # Duplicate sighting (fragmented track re-reading the car we just
+    # read): still PARK the read — the ingest claim is what lets the
+    # visit skip its whole OCR sweep — but skip the race-cover row
+    # write; the claim path makes the fold decision with fresher state.
+    from services.plate_enrichment import is_duplicate_sighting, note_sighting
+
+    if is_duplicate_sighting(camera_id, read["plate"]):
+        note_sighting(camera_id, read["plate"])
+        return
     # Race cover: visit already ingested and still unplated → apply now.
     try:
         from datetime import timedelta, timezone as _tz
@@ -245,6 +276,7 @@ async def run_early_plate_attempt(
                 or row.ended_at >= attempt_dt - timedelta(seconds=10)
             ):
                 row.plate_text = read["plate"][:32]
+                note_sighting(camera_id, row.plate_text)
                 db.commit()
                 logger.info(
                     "plate attempt: event %s -> %s (raced ingest, conf=%.2f)",

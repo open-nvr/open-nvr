@@ -42,6 +42,21 @@ from models import Camera, Role, User  # noqa: E402
 from services import evidence_store  # noqa: E402
 from services.timeline_service import query_events, record_track_visit  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _clean_plate_sightings():
+    """The dedup sightings map is process-global on purpose (that IS the
+    feature) — which makes it cross-test state by accident. Every test
+    starts clean or the dedup round changes unrelated verdicts."""
+    import services.plate_enrichment as _pe
+
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+    yield
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+
+
 UTC = timezone.utc
 T = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)  # "3pm"
 

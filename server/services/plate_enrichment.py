@@ -193,17 +193,36 @@ def extract_plate(
     return text[:32] or None
 
 
-def extract_read(response: dict | None) -> dict | None:
+def extract_read(
+    response: dict | None, *, image_size: tuple[int, int] | None = None
+) -> dict | None:
     """Full-fidelity parse of the adapter's InferResponse — plate,
     overall confidence, per-character confidences, the accepted verdict
     and the floor it was judged against. Returns None only when there
     is no read at all (no/empty plate_text). Multi-frame OCR needs the
     REJECTED reads too: two near-miss reads of the same plate can merge
-    into an accepted one (see ``merge_reads``)."""
+    into an accepted one (see ``merge_reads``).
+
+    ``image_size`` is the OCR'd crop's own dimensions (issue #378): a
+    read whose plate box abuts that crop's boundary is a PARTIAL read —
+    the surviving characters are crisp, so neither confidence nor the
+    accepted flag can catch it; only the geometry can. Clipped reads
+    return None outright: a fragment must not be merged either (its
+    characters are real, but of the wrong plate positions — character
+    consensus with a fragment corrupts, not reconstructs). NOTE the box
+    is in the coordinates of the crop THIS call OCR'd — candidate crops
+    and early-attempt crops have their own sizes, so callers must pass
+    the size of the exact bytes they sent, never the visit's evidence
+    frame."""
     if not isinstance(response, dict):
         return None
     result = response.get("result")
     if not isinstance(result, dict):
+        return None
+    detection = result.get("plate_detection")
+    if isinstance(detection, dict) and plate_box_is_clipped(
+        detection.get("box"), image_size
+    ):
         return None
     text = result.get("plate_text")
     if not isinstance(text, str):
@@ -277,6 +296,93 @@ def merge_reads(a: dict | None, b: dict | None) -> dict | None:
 MAX_INGEST_ATTEMPTS: int = 4
 
 
+# ── Duplicate-sighting dedup ────────────────────────────────────────
+# A broken track fragments one physical pass into several visits — a
+# moving camera, an occlusion, a starved re-verify — and multi-frame OCR
+# then reads every fragment successfully, so one car becomes N register
+# rows. The only cross-track identity a vehicle has IS its plate, and
+# the plate is only known AFTER the first OCR call, so that first call
+# per fragment is unavoidable. Everything past it is not: once a read
+# comes back matching a plate seen on the same camera within the window,
+# the sighting is FOLDED — no plate written (the row stays an ordinary
+# vehicle visit), no further OCR spent on that visit.
+#
+# The window is ROLLING: every sighting, written or folded, restarts it.
+# A chain of fragments seconds apart therefore collapses into one
+# sighting no matter how long the chain, while the same car genuinely
+# returning after a quiet gap makes a new row.
+#
+# In-memory by design: the map is tiny (plates seen in the last window),
+# and the one thing a restart costs is that a fragment chain straddling
+# it may produce one extra row — acceptable for a best-effort dedup, and
+# far simpler than reconciling wall-clock rows with a monotonic window.
+
+_DEDUP_WINDOW_DEFAULT_S = 30.0
+import threading as _threading
+
+_sightings_lock = _threading.Lock()
+_recent_sightings: dict[tuple[int, str], float] = {}
+#: Hard bound on the map — beyond it the oldest entries are evicted.
+#: Only reachable if a camera reads >_SIGHTINGS_MAX distinct plates
+#: inside one window, i.e. never in practice.
+_SIGHTINGS_MAX = 4096
+
+
+def dedup_window_s() -> float:
+    """The rolling dedup window (seconds). 0 disables dedup entirely.
+
+    Read from the environment on every call — it is consulted a handful
+    of times per vehicle, and reading live keeps tests and operators
+    free of import-order traps."""
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_DEDUP_WINDOW_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEDUP_WINDOW_DEFAULT_S
+    return value if value > 0 else 0.0
+
+
+def _dedup_key(camera_id: int, plate: str) -> tuple[int, str]:
+    # Same normalization as the stored column, so "h644 lx" and the
+    # written "H644LX" cannot slip past each other.
+    return int(camera_id), "".join(plate.split()).upper()[:32]
+
+
+def note_sighting(camera_id: int, plate: str, now: float | None = None) -> None:
+    """Record that ``plate`` was just seen on ``camera_id`` — called on
+    every decision, written AND folded, which is what makes the window
+    rolling."""
+    import time as _time
+
+    ts = _time.monotonic() if now is None else now
+    with _sightings_lock:
+        _recent_sightings[_dedup_key(camera_id, plate)] = ts
+        if len(_recent_sightings) > _SIGHTINGS_MAX:
+            for key in sorted(_recent_sightings,
+                              key=_recent_sightings.get)[:len(_recent_sightings)
+                                                         - _SIGHTINGS_MAX]:
+                del _recent_sightings[key]
+
+
+def is_duplicate_sighting(camera_id: int, plate: str,
+                          now: float | None = None) -> bool:
+    """Was this plate seen on this camera within the rolling window?
+
+    Pure lookup — recording the new sighting is the caller's job (via
+    ``note_sighting``), on whichever branch it takes."""
+    window = dedup_window_s()
+    if window <= 0:
+        return False
+    import time as _time
+
+    ts = _time.monotonic() if now is None else now
+    with _sightings_lock:
+        last = _recent_sightings.get(_dedup_key(camera_id, plate))
+    return last is not None and 0 <= ts - last <= window
+
+
 async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
                     event_id: int | None = None) -> dict | None:
     """One OCR attempt through KAI-C. Returns ``extract_read``'s dict,
@@ -316,7 +422,10 @@ async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
             _warn_adapter_missing(resp.status_code)
         return None
     try:
-        return extract_read(resp.json())
+        # image_size = THIS crop's dimensions — the clip guard (#378)
+        # must measure the plate box in the pixel space it was reported
+        # in, which is whatever bytes we just sent.
+        return extract_read(resp.json(), image_size=jpeg_dimensions(jpeg))
     except ValueError:
         return None
 
@@ -389,7 +498,22 @@ async def enrich_event_plate(
 
         if winner is None:
             return                       # honest non-read beats a guess
-        row.plate_text = winner["plate"][:32]
+        plate = winner["plate"][:32]
+        if is_duplicate_sighting(row.camera_id, plate):
+            # Track fragmentation: this "new" vehicle is the car we just
+            # read. Fold the sighting — the visit row stays (it is a
+            # real detection), the plate is not repeated, and the sweep
+            # stops HERE: identity is established, so any remaining
+            # candidates would be pure waste.
+            note_sighting(row.camera_id, plate)
+            logger.info(
+                "plate dedup: event %s reads %s — seen on cam %s within "
+                "%.0fs, sighting folded (no plate written)",
+                event_id, plate, row.camera_id, dedup_window_s(),
+            )
+            return
+        row.plate_text = plate
+        note_sighting(row.camera_id, plate)
         db.commit()
         logger.info(
             "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
