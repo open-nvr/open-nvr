@@ -34,6 +34,8 @@ import {
   RefreshCw, Search, ShieldAlert, ShieldCheck, Trash2, Upload,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { Link } from 'react-router-dom'
+import { alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 import { extractApiError } from '../lib/apiError'
 import { AuthedImage } from '../components/AuthedImage'
 import { Modal } from '../components/Modal'
@@ -458,7 +460,7 @@ export function Vehicles() {
   const [cameraId, setCameraId] = useState<number | ''>('')
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
   const [preview, setPreview] = useState<PlateEvent | null>(null)
-  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring'>('reads')
+  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring' | 'alarms'>('reads')
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
   const [reportOpen, setReportOpen] = useState(false)
   const [registerPrefill, setRegisterPrefill] = useState('')
@@ -729,6 +731,7 @@ export function Vehicles() {
           { key: 'reads', label: 'Plate reads' },
           { key: 'registry', label: `Vehicle register (${registry.length})` },
           { key: 'monitoring', label: `Monitoring (${monitors.length})` },
+          { key: 'alarms', label: 'Alarms' },
         ] as const).map((t) => (
           <button
             key={t.key}
@@ -747,7 +750,9 @@ export function Vehicles() {
         )}
       </div>
 
-      {tab === 'monitoring' ? (
+      {tab === 'alarms' ? (
+        <VehicleAlarmsTab />
+      ) : tab === 'monitoring' ? (
         <MonitoringTab
           monitors={monitors}
           canEdit={Boolean(lprApp)}
@@ -2255,5 +2260,134 @@ function ReportOverlay({
         )}
       </div>
     </div>
+  )
+}
+
+// ── Vehicle alarms — the LPR app's slice of the platform inbox ─────
+//
+// Vehicles is self-contained for the daily loop: arm alarms (register /
+// monitoring tabs), SEE them fire here, acknowledge here. The rows are
+// the same platform inbox the bell rings — an ack here silences every
+// open browser — filtered to this app's alarms. Sound, phone-call and
+// hooter configuration stay site-wide (one guard phone for every app's
+// alarms), linked below.
+
+const VEHICLE_ALARM_SEVERITY: Record<string, string> = {
+  critical: 'bg-red-600 text-white',
+  high: 'bg-orange-600 text-white',
+  medium: 'bg-yellow-600 text-black',
+  low: 'bg-neutral-600 text-white',
+}
+
+function VehicleAlarmsTab() {
+  const queryClient = useQueryClient()
+  const [onlyUnacked, setOnlyUnacked] = useState(false)
+  const list = useQuery({
+    queryKey: ['vehicle-alarms', onlyUnacked],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.listInboxAlerts({
+        source_name: 'license-plate-recognition',
+        unacked: onlyUnacked || undefined,
+        limit: 100,
+      })
+      return data as { alerts: InboxAlert[]; unacked_count: number }
+    },
+    refetchInterval: 10_000,
+  })
+  const ack = useMutation({
+    mutationFn: (ids?: number[]) => alertsInboxService.ackInboxAlerts(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['vehicle-alarms'] })
+      queryClient.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
+      queryClient.invalidateQueries({ queryKey: ['alarms-page'] })
+    },
+  })
+  const rows = (list.data?.alerts ?? []).filter(
+    (a) => a.source_name === 'license-plate-recognition')
+  const unackedHere = rows.filter((a) => !a.acknowledged_at)
+  return (
+    <Card>
+      <CardContent className="p-3 space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <button
+            className={`px-2 py-1 rounded border ${onlyUnacked ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+            onClick={() => setOnlyUnacked((s) => !s)}
+          >
+            Unacknowledged only
+          </button>
+          {unackedHere.length > 0 && (
+            <button
+              className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
+              onClick={() => ack.mutate(unackedHere.map((a) => a.id))}
+            >
+              Acknowledge all ({unackedHere.length})
+            </button>
+          )}
+          <Link
+            to="/alerts-incidents"
+            className="ml-auto text-[var(--text-dim)] hover:text-[var(--text)] underline"
+          >
+            Sound, phone-call &amp; hooter settings (site-wide) →
+          </Link>
+        </div>
+        <table className="w-full text-sm">
+          <thead className="text-left text-[var(--text-dim)]">
+            <tr>
+              <th className="px-2 py-1.5">Severity</th>
+              <th className="px-2 py-1.5">Alarm</th>
+              <th className="px-2 py-1.5">Camera</th>
+              <th className="px-2 py-1.5">Fired</th>
+              <th className="px-2 py-1.5">Status</th>
+              <th className="px-2 py-1.5" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-2 py-6 text-center text-[var(--text-dim)]">
+                  {list.isLoading
+                    ? 'Loading…'
+                    : 'No vehicle alarms yet — arm the unknown-vehicle alarm in the Vehicle register tab, or monitor a plate'}
+                </td>
+              </tr>
+            )}
+            {rows.map((a) => (
+              <tr key={a.id} className="border-t border-[var(--border)]">
+                <td className="px-2 py-1.5">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${VEHICLE_ALARM_SEVERITY[a.severity] ?? VEHICLE_ALARM_SEVERITY.low}`}>
+                    {a.severity}
+                  </span>
+                </td>
+                <td className="px-2 py-1.5">
+                  <div className="font-medium">{a.title}</div>
+                  {a.description && (
+                    <div className="text-[11px] text-[var(--text-dim)]">{a.description}</div>
+                  )}
+                </td>
+                <td className="px-2 py-1.5 text-[var(--text-dim)]">{a.camera_id || '—'}</td>
+                <td className="px-2 py-1.5 text-[var(--text-dim)]">
+                  {a.fired_at ? new Date(a.fired_at).toLocaleString() : '—'}
+                </td>
+                <td className="px-2 py-1.5">
+                  {a.acknowledged_at
+                    ? <span className="text-[var(--text-dim)]">acked</span>
+                    : <span className="text-red-400">unacked</span>}
+                </td>
+                <td className="px-2 py-1.5 text-right">
+                  {!a.acknowledged_at && (
+                    <button
+                      className="px-2 py-0.5 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
+                      onClick={() => ack.mutate([a.id])}
+                    >
+                      Ack
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   )
 }
