@@ -147,6 +147,20 @@ def apply_alert(envelope: object) -> str:
             severity.upper(), row.title, row.camera_id,
             source_name or "?", row.alert_id,
         )
+        # Beyond the browser: phone call / SMS / hooter relay per the
+        # configured alarm actions — fire-and-forget, the inbox write
+        # must never wait on a phone network (see alarm_actions).
+        try:
+            from services.alarm_actions import dispatch_in_background
+
+            dispatch_in_background({
+                "alert_id": row.alert_id, "severity": severity,
+                "title": row.title, "description": row.description,
+                "camera_id": row.camera_id, "fired_at": str(row.fired_at),
+            })
+        except Exception:  # noqa: BLE001
+            logger.debug("alarm action dispatch failed to start",
+                         exc_info=True)
         return "stored"
     finally:
         db.close()

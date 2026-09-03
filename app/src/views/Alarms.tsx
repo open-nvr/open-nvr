@@ -18,7 +18,7 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BellRing, CheckCheck, Volume2 } from 'lucide-react'
+import { BellRing, CheckCheck, PhoneCall, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { api } from '../lib/api'
@@ -206,6 +206,8 @@ export function Alarms() {
             sound policy above, they ring until acknowledged.
           </div>
         </div>
+
+        <AlarmActionsCard />
       </div>
 
       {/* Filters */}
@@ -321,6 +323,245 @@ export function Alarms() {
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+// ── Call & external alarm (hooter) configuration ───────────────────
+//
+// What happens when NOBODY has a browser open: at or above the chosen
+// severity, place a Twilio voice call / SMS to the configured numbers
+// and/or hit an external relay URL (a hooter or speaker behind a
+// Shelly/Tasmota/Node-RED style HTTP switch). The auth token is
+// write-only — stored encrypted server-side, never displayed again.
+// SIP trunk calling is planned; Twilio Voice covers "the phone rings"
+// today.
+
+type ActionsShape = {
+  min_severity: string
+  twilio: {
+    enabled: boolean
+    account_sid: string
+    auth_token_set?: boolean
+    from_number: string
+    to_numbers: string[]
+    mode: 'call' | 'sms' | 'both'
+  }
+  webhook: { enabled: boolean; url: string; method: 'POST' | 'GET' }
+}
+
+function AlarmActionsCard() {
+  const qc = useQueryClient()
+  const [draft, setDraft] = useState<ActionsShape | null>(null)
+  const [token, setToken] = useState('')
+  const [testOut, setTestOut] = useState<
+    { action: string; ok: boolean; detail: string }[] | string | null
+  >(null)
+
+  const cfg = useQuery({
+    queryKey: ['alarm-actions'],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.getAlarmActions()
+      return data as { actions: ActionsShape }
+    },
+    staleTime: 30_000,
+  })
+
+  const current = draft ?? cfg.data?.actions ?? null
+
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!current) return
+      const payload: Record<string, unknown> = {
+        min_severity: current.min_severity,
+        twilio: {
+          ...current.twilio,
+          ...(token.trim() ? { auth_token: token.trim() } : {}),
+        },
+        webhook: current.webhook,
+      }
+      await alertsInboxService.putAlarmActions(payload)
+    },
+    onSuccess: () => {
+      setToken('')
+      setDraft(null)
+      qc.invalidateQueries({ queryKey: ['alarm-actions'] })
+    },
+  })
+
+  const test = useMutation({
+    mutationFn: async () => {
+      const { data } = await alertsInboxService.testAlarmActions()
+      return data as {
+        results: { action: string; ok: boolean; detail: string }[]
+        note?: string
+      }
+    },
+    onSuccess: (d) => setTestOut(d.results.length ? d.results : d.note ?? ''),
+    onError: () => setTestOut('test request failed — backend up to date?'),
+  })
+
+  const patch = (p: Partial<ActionsShape>) =>
+    current && setDraft({ ...current, ...p })
+  const patchTw = (p: Partial<ActionsShape['twilio']>) =>
+    current && setDraft({ ...current, twilio: { ...current.twilio, ...p } })
+  const patchWh = (p: Partial<ActionsShape['webhook']>) =>
+    current && setDraft({ ...current, webhook: { ...current.webhook, ...p } })
+
+  if (!current) return null
+  return (
+    <div className="border border-[var(--border)] rounded p-3 space-y-3 md:col-span-2">
+      <div className="flex items-center gap-2 font-medium">
+        <PhoneCall size={14} /> Call &amp; external alarm (beyond the browser)
+      </div>
+      <div className="text-[12px] text-[var(--text-dim)]">
+        At or above the severity below, OpenNVR can phone/SMS the guard
+        (Twilio) and trigger an external hooter or speaker behind an HTTP
+        relay — even when no browser is open. SIP trunk calling is
+        planned; Twilio Voice covers calls today.
+      </div>
+
+      <label className="flex items-center gap-2 text-sm">
+        Act at or above
+        <select
+          className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5"
+          value={current.min_severity}
+          onChange={(e) => patch({ min_severity: e.target.value })}
+        >
+          {['medium', 'high', 'critical'].map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </label>
+
+      <div className="grid md:grid-cols-2 gap-3 text-sm">
+        <div className="space-y-1.5 border border-[var(--border)] rounded p-2">
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              checked={current.twilio.enabled}
+              onChange={(e) => patchTw({ enabled: e.target.checked })}
+            />
+            Phone call / SMS (Twilio)
+          </label>
+          <input
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+            placeholder="Account SID (ACxxxxxxxx…)"
+            value={current.twilio.account_sid}
+            onChange={(e) => patchTw({ account_sid: e.target.value })}
+          />
+          <input
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+            type="password"
+            placeholder={
+              current.twilio.auth_token_set
+                ? 'Auth token ✓ saved — enter to replace'
+                : 'Auth token'
+            }
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <input
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+            placeholder="From number (+1…)"
+            value={current.twilio.from_number}
+            onChange={(e) => patchTw({ from_number: e.target.value })}
+          />
+          <input
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+            placeholder="To numbers, comma-separated (+91…, +91…)"
+            value={current.twilio.to_numbers.join(', ')}
+            onChange={(e) =>
+              patchTw({
+                to_numbers: e.target.value.split(',').map((n) => n.trim())
+                  .filter(Boolean),
+              })
+            }
+          />
+          <label className="flex items-center gap-2">
+            Mode
+            <select
+              className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5"
+              value={current.twilio.mode}
+              onChange={(e) =>
+                patchTw({ mode: e.target.value as 'call' | 'sms' | 'both' })
+              }
+            >
+              <option value="call">call</option>
+              <option value="sms">sms</option>
+              <option value="both">call + sms</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="space-y-1.5 border border-[var(--border)] rounded p-2">
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              checked={current.webhook.enabled}
+              onChange={(e) => patchWh({ enabled: e.target.checked })}
+            />
+            External hooter / speaker (HTTP relay)
+          </label>
+          <input
+            className="w-full px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+            placeholder="Relay URL (http://192.168.1.50/relay/0?turn=on)"
+            value={current.webhook.url}
+            onChange={(e) => patchWh({ url: e.target.value })}
+          />
+          <label className="flex items-center gap-2">
+            Method
+            <select
+              className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5"
+              value={current.webhook.method}
+              onChange={(e) =>
+                patchWh({ method: e.target.value as 'POST' | 'GET' })
+              }
+            >
+              <option value="POST">POST (JSON alarm payload)</option>
+              <option value="GET">GET (dumb relay trigger)</option>
+            </select>
+          </label>
+          <div className="text-[11px] text-[var(--text-dim)]">
+            Works with Shelly, Tasmota, Node-RED, or any siren relay that
+            accepts an HTTP request.
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          className="px-3 py-1 rounded bg-blue-600 text-white text-sm disabled:opacity-50"
+          disabled={save.isPending || (!draft && !token.trim())}
+          onClick={() => save.mutate()}
+        >
+          {save.isPending ? 'Saving…' : 'Save actions'}
+        </button>
+        <button
+          className="px-3 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)] text-sm disabled:opacity-50"
+          disabled={test.isPending}
+          onClick={() => test.mutate()}
+          title="Runs every ENABLED action once with a synthetic alarm"
+        >
+          {test.isPending ? 'Testing…' : 'Send test action'}
+        </button>
+        {save.isError && (
+          <span className="text-[12px] text-red-400">save failed</span>
+        )}
+      </div>
+      {testOut !== null && (
+        <div className="text-[12px] space-y-0.5">
+          {typeof testOut === 'string' ? (
+            <div className="text-[var(--text-dim)]">{testOut || 'no actions enabled'}</div>
+          ) : (
+            testOut.map((r, i) => (
+              <div key={i} className={r.ok ? 'text-green-400' : 'text-red-400'}>
+                {r.ok ? '✓' : '✗'} {r.action}: {r.detail}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   )
 }

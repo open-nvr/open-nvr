@@ -286,3 +286,111 @@ def test_test_alarm_takes_the_real_path(client):
     # Unknown severity is a loud 422, not a silent default.
     assert tc.post("/alerts-inbox/test",
                    json={"severity": "fatal"}).status_code == 422
+
+
+# ── alarm actions (call / SMS / hooter) ────────────────────────────
+
+
+def _actions_cfg(**over):
+    base = {
+        "min_severity": "high",
+        "twilio": {"enabled": True, "account_sid": "ACxx",
+                   "auth_token": "secret-token",
+                   "from_number": "+1000", "to_numbers": ["+1911"],
+                   "mode": "both"},
+        "webhook": {"enabled": True, "url": "http://relay.local/on",
+                    "method": "POST"},
+    }
+    base.update(over)
+    return base
+
+
+def test_actions_config_masks_the_secret_and_keeps_it_on_blank(client):
+    tc, *_ = client
+    out = tc.put("/alerts-inbox/actions", json=_actions_cfg()).json()["actions"]
+    assert out["twilio"]["auth_token_set"] is True
+    assert "auth_token" not in out["twilio"]
+    assert "auth_token_enc" not in out["twilio"], (
+        "even the ciphertext must not leave the server")
+    # Update WITHOUT a token: the stored secret survives.
+    out = tc.put("/alerts-inbox/actions",
+                 json={"twilio": {"from_number": "+2000"}}).json()["actions"]
+    assert out["twilio"]["auth_token_set"] is True
+    assert out["twilio"]["from_number"] == "+2000"
+    assert out["twilio"]["to_numbers"] == ["+1911"]   # merge, not replace
+    assert tc.get("/alerts-inbox/actions").json()["actions"]["twilio"][
+        "auth_token_set"] is True
+    # Bad severity is loud.
+    assert tc.put("/alerts-inbox/actions",
+                  json={"min_severity": "fatal"}).status_code == 422
+
+
+def test_stored_alert_dispatches_actions_only_at_or_above_min_severity(
+        client, monkeypatch):
+    """The severity gate is the difference between 'the guard's phone
+    rings for an intruder' and 'the guard's phone rings for every parked
+    car'."""
+    import services.alarm_actions as aa
+
+    tc, *_ = client
+    tc.put("/alerts-inbox/actions", json=_actions_cfg(min_severity="high"))
+
+    calls: list[dict] = []
+    monkeypatch.setattr(aa, "_dispatch_twilio",
+                        lambda tw, alert: calls.append(
+                            {"kind": "twilio", "sev": alert["severity"]}) or [])
+    monkeypatch.setattr(aa, "_dispatch_webhook",
+                        lambda wh, alert: calls.append(
+                            {"kind": "webhook", "sev": alert["severity"]})
+                        or {"action": "webhook", "ok": True, "detail": ""})
+
+    aa.dispatch_alarm_actions({"severity": "low", "title": "quiet"})
+    assert calls == [], "below min_severity must dispatch NOTHING"
+    aa.dispatch_alarm_actions({"severity": "critical", "title": "loud"})
+    assert {c["kind"] for c in calls} == {"twilio", "webhook"}
+
+
+def test_twilio_dispatch_shapes_the_rest_calls(client, monkeypatch):
+    """Lockstep with Twilio's API: basic-auth (sid, token), Calls.json
+    with inline TwiML, Messages.json with a Body — and the DECRYPTED
+    token, proving the vault round-trip."""
+    import services.alarm_actions as aa
+
+    tc, *_ = client
+    tc.put("/alerts-inbox/actions", json=_actions_cfg())
+
+    posts: list[dict] = []
+
+    class _Resp:
+        status_code = 201
+
+        def json(self):
+            return {}
+
+    class _FakeHttpx:
+        @staticmethod
+        def post(url, data=None, auth=None, timeout=None):
+            posts.append({"url": url, "data": data, "auth": auth})
+            return _Resp()
+
+    # The REAL vault decrypts (the PUT above encrypted with it); only
+    # the network is faked.
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", _FakeHttpx)
+    results = aa.dispatch_alarm_actions(
+        {"severity": "critical", "title": "Unknown vehicle",
+         "camera_id": "cam1"}, force=True)
+
+    urls = [p["url"] for p in posts]
+    assert any(u.endswith("/Calls.json") for u in urls)
+    assert any(u.endswith("/Messages.json") for u in urls)
+    for p in posts:
+        assert p["auth"] == ("ACxx", "secret-token"), (
+            "dispatch must use the DECRYPTED stored token")
+        assert p["data"]["To"] == "+1911"
+    call = next(p for p in posts if p["url"].endswith("/Calls.json"))
+    assert "<Say" in call["data"]["Twiml"]
+    sms = next(p for p in posts if p["url"].endswith("/Messages.json"))
+    assert "Unknown vehicle" in sms["data"]["Body"]
+    assert all(r["ok"] for r in results if r["action"].startswith("twilio"))
+

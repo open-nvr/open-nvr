@@ -59,4 +59,10 @@ export const alertsInboxService = {
   getRingConfig: () => api.get('/api/v1/alerts-inbox/ring-config'),
   putRingConfig: (ring: RingConfig) =>
     api.put('/api/v1/alerts-inbox/ring-config', { ring }),
+
+  // Beyond the browser: phone call / SMS (Twilio) + hooter relay.
+  getAlarmActions: () => api.get('/api/v1/alerts-inbox/actions'),
+  putAlarmActions: (actions: Record<string, unknown>) =>
+    api.put('/api/v1/alerts-inbox/actions', actions),
+  testAlarmActions: () => api.post('/api/v1/alerts-inbox/actions/test', {}),
 }

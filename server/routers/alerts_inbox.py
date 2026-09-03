@@ -191,6 +191,78 @@ async def fire_test_alarm(
     return {"status": "fired", "severity": payload.severity}
 
 
+class ActionConfigIn(BaseModel):
+    """Partial update; twilio.auth_token (plaintext) is encrypted at
+    rest and NEVER returned — omit/blank keeps the stored one."""
+
+    min_severity: str | None = None
+    twilio: dict | None = None
+    webhook: dict | None = None
+
+
+@router.get("/actions")
+async def get_alarm_actions(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Call / SMS / hooter configuration, secret masked (set/unset)."""
+    from services.alarm_actions import load_action_config, masked_action_config
+
+    return {"actions": masked_action_config(load_action_config(db))}
+
+
+@router.put("/actions")
+async def put_alarm_actions(
+    payload: ActionConfigIn,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    from services.alarm_actions import (
+        _SEVERITY_RANK, masked_action_config, save_action_config,
+    )
+
+    if payload.min_severity is not None \
+            and payload.min_severity not in _SEVERITY_RANK:
+        raise HTTPException(status_code=422,
+                            detail=f"unknown severity: {payload.min_severity!r}")
+    incoming: dict = {}
+    if payload.min_severity is not None:
+        incoming["min_severity"] = payload.min_severity
+    if payload.twilio is not None:
+        incoming["twilio"] = payload.twilio
+    if payload.webhook is not None:
+        incoming["webhook"] = payload.webhook
+    merged = save_action_config(db, incoming)
+    logger.info("alarm actions config updated by %s", current_user.username)
+    return {"actions": masked_action_config(merged)}
+
+
+@router.post("/actions/test")
+async def test_alarm_actions(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Run every ENABLED action once with a synthetic alarm and return
+    each action's outcome — validates Twilio credentials and the relay
+    URL without waiting for a real alarm. Skips the severity gate on
+    purpose (the point is exercising the actions), but a disabled
+    action stays disabled."""
+    import asyncio as _asyncio
+
+    from services.alarm_actions import dispatch_alarm_actions
+
+    alert = {
+        "alert_id": "alrt_action_test", "severity": "critical",
+        "title": f"Test alarm action fired by {current_user.username}",
+        "description": "Configuration test from the Alarms page.",
+        "camera_id": None, "fired_at": "",
+    }
+    results = await _asyncio.to_thread(
+        dispatch_alarm_actions, alert, force=True)
+    if not results:
+        return {"results": [], "note": "no actions are enabled"}
+    return {"results": results}
+
+
 @router.get("/ring-config")
 async def get_ring_config(
     current_user: User = Depends(get_current_active_user),

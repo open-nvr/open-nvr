@@ -30,8 +30,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  BellRing, Car, Download, FileText, History, PhoneCall, Plus, RefreshCw,
-  Search, ShieldAlert, ShieldCheck, Trash2, Upload,
+  BellRing, BookUser, Car, Download, FileText, History, PhoneCall, Plus,
+  RefreshCw, Search, ShieldAlert, ShieldCheck, Trash2, Upload,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -977,6 +977,27 @@ export function Vehicles() {
                           : <Badge variant="neutral">{e.label || 'vehicle'}</Badge>}
                       </td>
                       <td className="px-3 py-1.5 text-right pr-4 whitespace-nowrap">
+                        {lprApp && !registered && (
+                          <button
+                            title="Register this vehicle — one click adds the plate to the Vehicle register; add owner details there any time"
+                            className="text-[var(--text-dim)] hover:text-[var(--text)] mr-2"
+                            onClick={() => {
+                              // One click = registered (the ask); details
+                              // are optional and live in the register tab,
+                              // pre-filtered to this plate via prefill.
+                              setRegisterPrefill(p)
+                              saveConfig.mutate(
+                                { registry: [...registry, { plate: p }] },
+                                {
+                                  onSuccess: () => showSuccess(
+                                    `${p} registered — add owner details in the Vehicle register tab`),
+                                },
+                              )
+                            }}
+                          >
+                            <BookUser size={15} />
+                          </button>
+                        )}
                         {lprApp && !inDeny && (
                           <button
                             title="Monitor this plate — alert whenever it is seen (configure in the Monitoring tab)"
