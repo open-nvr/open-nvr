@@ -154,8 +154,13 @@ export function AlertBell() {
 
   const ack = useMutation({
     mutationFn: (ids?: number[]) => alertsInboxService.ackInboxAlerts(ids),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
+      // The Alarms page and the Apps tab read the same table — an ack
+      // from the bell must not leave them showing 'unacked' for 10s.
+      qc.invalidateQueries({ queryKey: ['alarms-page'] })
+      qc.invalidateQueries({ queryKey: ['alerts-inbox-page'] })
+    },
   })
 
   const saveRing = useMutation({
@@ -172,7 +177,10 @@ export function AlertBell() {
   // not replay the whole night), tracked by the highest id yet seen.
   const maxSeenId = useRef<number | null>(null)
   useEffect(() => {
-    if (!inbox.data) return
+    // Wait for BOTH the inbox and the ring policy: baselining before the
+    // policy loads would swallow the ping for an alert arriving in that
+    // window.
+    if (!inbox.data || !ring) return
     const top = alerts.length ? Math.max(...alerts.map((a) => a.id)) : 0
     if (maxSeenId.current === null) {
       maxSeenId.current = top // baseline: what existed when we opened

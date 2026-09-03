@@ -19,6 +19,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellRing, CheckCheck, Volume2 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import {
   alertsInboxService,
@@ -172,6 +173,27 @@ export function Alarms() {
               Test alarm failed — is the backend up to date?
             </div>
           )}
+        </div>
+
+        <div className="border border-[var(--border)] rounded p-3 space-y-2 md:col-span-2">
+          <div className="font-medium">Arm vehicle alarms (LPR)</div>
+          <div className="text-[12px] text-[var(--text-dim)]">
+            Vehicle alarm policy lives in the License Plate Recognition
+            app:{' '}
+            <Link
+              to="/app-catalog/license-plate-recognition"
+              className="underline hover:text-[var(--text)]"
+            >
+              open the app
+            </Link>{' '}
+            → Configure. <span className="text-[var(--text)]">Unknown
+            vehicles</span>: enable <code>alarm_on_unknown</code> and add
+            your known plates to <code>registry</code> (type a plate,
+            press Enter). <span className="text-[var(--text)]">Monitored
+            vehicles</span>: add plates to <code>denylist</code> or{' '}
+            <code>monitors</code>. Both fire high severity — with the
+            sound policy above, they ring until acknowledged.
+          </div>
         </div>
       </div>
 
