@@ -83,7 +83,8 @@ type PlateEvent = {
 // reads plate candidates, while the best frame is picked for the biggest
 // VEHICLE box, which at close range is exactly when the plate leaves the
 // crop. The preview dialog stacks BOTH, so it never has to choose (#387);
-// only the row thumbnail still does, having room for one.
+// the row thumbnail still does, having room for one, and picks the
+// vehicle — the number is already spelled out in the next column.
 //
 // The queryKey shapes are shared with the thumbnail on purpose: opening
 // the dialog re-uses whichever blob the row already fetched, so it pays
@@ -124,11 +125,22 @@ function plateFrameSource(e: PlateEvent) {
   }
 }
 
-// One image for a 64px row thumbnail. Prefer the crop: a vehicle frame
-// captioned with a plate number it may not even contain is the bug #382
-// was about.
-function plateImage(e: PlateEvent) {
-  return e.has_plate_evidence ? plateCropSource(e) : vehicleFrameSource(e)
+// One image for a 64px row thumbnail: the vehicle, not the number. The
+// plate crop reads as a number the row already prints in text, so it
+// spent a whole column saying nothing new — the operator wants to see
+// WHICH car.
+//
+// Prefer the frame the plate was READ from. It is the only wide image
+// guaranteed to hold the car the number belongs to: /evidence and
+// /scene-evidence are the visit's best-thumbnail moment, and a merged
+// track puts one car's plate on another car's best frame. Falling back
+// to those is still right for rows stored before the column existed —
+// a possibly-wrong car beats an empty box, and the dialog shows the
+// plate crop alongside for anyone checking.
+function rowThumbImage(e: PlateEvent) {
+  if (e.has_plate_frame) return plateFrameSource(e)
+  if (e.has_scene_evidence) return sceneFrameSource(e)
+  return vehicleFrameSource(e)
 }
 
 type PlateStats = {
@@ -932,9 +944,7 @@ export function Vehicles() {
                     <tr key={e.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
                       <td className="px-3 py-1.5">
                         {(e.has_plate_evidence || e.has_evidence) ? (
-                          <ThumbWithScenePeek e={e} onOpen={() => setPreview(e)}>
-                            <RowThumb e={e} plate={p} onOpen={() => setPreview(e)} />
-                          </ThumbWithScenePeek>
+                          <RowThumb e={e} plate={p} onOpen={() => setPreview(e)} />
                         ) : (
                           <div className="h-10 w-16 grid place-items-center text-[10px] text-[var(--text-dim)] bg-[var(--bg-2)] rounded">—</div>
                         )}
@@ -1199,94 +1209,18 @@ function RowThumb({ e, plate, onOpen }: {
     <div ref={ref} className="h-10 w-16">
       {seen ? (
         <AuthedImage
-          {...plateImage(e)}
-          alt={`evidence for ${plate}`}
-          // A plate crop is ~3.5:1; object-cover in a 1.6:1 cell would cut
-          // the ends off the number (#385).
-          className={`h-10 w-16 rounded cursor-zoom-in ${
-            e.has_plate_evidence
-              ? 'object-contain bg-[var(--bg-2)]'
-              : 'object-cover'
-          }`}
+          {...rowThumbImage(e)}
+          alt={`vehicle for ${plate}`}
+          // A camera frame is 16:9 against a 1.6:1 cell — close enough
+          // that object-cover trims the sides rather than letterboxing a
+          // already-small picture. Nothing here has to stay legible the
+          // way the plate crop did (#385); it is a "which car" glance,
+          // and the dialog is one click away.
+          className="h-10 w-16 rounded cursor-zoom-in object-cover"
           onClick={onOpen}
         />
       ) : (
         <div className="h-10 w-16 rounded bg-[var(--bg-2)]" />
-      )}
-    </div>
-  )
-}
-
-// ── Row thumbnail, with the scene one hover away ────────────────────
-
-/** The cell keeps the plate crop — the only image guaranteed to show
- *  the number the row claims (#382), and the only one still legible at
- *  40px. The wide shot rides on hover instead of replacing it.
- *
- *  The fetch is deliberately LAZY: mounting an AuthedImage per row would
- *  fire ~100 auth-gated blob requests on every page load, and each one
- *  holds a DB connection out of core's pool of 30 while it serves. That
- *  is a measured outage, not a theory. Mounting only while hovered
- *  means one request per deliberate look, and react-query's 5-minute
- *  staleTime makes a second look free.
- */
-function ThumbWithScenePeek({
-  e, onOpen, children,
-}: {
-  e: PlateEvent
-  onOpen: () => void
-  children: React.ReactNode
-}) {
-  const [peek, setPeek] = useState(false)
-  // Hover INTENT, not hover: sweeping the cursor down the Photo column
-  // crosses every row, and without this each crossing fired a full-frame
-  // request that nobody wanted and nothing cancelled.
-  const timer = useRef<number | null>(null)
-  const cancel = () => {
-    if (timer.current !== null) {
-      window.clearTimeout(timer.current)
-      timer.current = null
-    }
-  }
-  useEffect(() => cancel, [])
-  // Nothing wider to show → stay exactly as the cell was before.
-  if (!e.has_scene_evidence && !e.has_plate_frame) return <>{children}</>
-
-  return (
-    <div
-      className="relative w-16"
-      onMouseEnter={() => {
-        cancel()
-        timer.current = window.setTimeout(() => setPeek(true), 200)
-      }}
-      onMouseLeave={() => {
-        cancel()
-        setPeek(false)
-      }}
-    >
-      {children}
-      {peek && (
-        // Left-aligned and clear of the row: the Photo column is the
-        // leftmost, so growing right and down never leaves the viewport.
-        // pointer-events-none so the panel cannot steal the hover that
-        // is keeping it open, or block the click that opens the dialog.
-        <div className="absolute left-0 top-full mt-1 z-30 w-[320px] pointer-events-none
-                        border border-white/20 bg-black/80 backdrop-blur-sm shadow-xl">
-          <div className="w-full aspect-[16/9]">
-            <AuthedImage
-              // Prefer the frame the plate was READ from: on a merged
-              // track the scene is a different car, and a peek that
-              // shows the wrong vehicle is worse than no peek.
-              {...(e.has_plate_frame ? plateFrameSource(e) : sceneFrameSource(e))}
-              alt={`scene for ${(e.plate_text ?? '').toUpperCase()}`}
-              className="h-full w-full object-contain"
-            />
-          </div>
-          <div className="px-2 py-1 text-[10px] leading-4 text-white/70">
-            {e.has_plate_frame ? 'the frame this plate was read from' : 'what the camera saw'}
-            {' · click for full size'}
-          </div>
-        </div>
       )}
     </div>
   )
