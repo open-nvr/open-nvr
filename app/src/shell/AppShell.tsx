@@ -30,6 +30,7 @@ import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
+import { AlertBell } from '../components/AlertBell'
 
 type NavItem = {
   to: string
@@ -242,6 +243,7 @@ export function AppShell() {
           <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
         </Link>
         <div className="ml-auto flex items-center gap-3">
+          <AlertBell />
           <button
             aria-label="Toggle Theme"
             className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"

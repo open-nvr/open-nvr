@@ -52,6 +52,7 @@ from routers import (
     ai_detection_results,
     ai_model_management,
     ai_models,
+    alerts_inbox,
     apps,
     audit_logs,
     auth,
@@ -554,6 +555,20 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(background_occupancy_event_consumer())
 
+    # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
+    # NatsAlertChannel) into app_alerts so the UI bell can ring and
+    # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
+    async def background_alerts_inbox_consumer():
+        try:
+            from services.alerts_inbox import run_consumer_loop
+
+            await run_consumer_loop()
+        except Exception as e:
+            main_logger.error(f"Alerts inbox consumer failed: {e}",
+                              exc_info=True)
+
+    asyncio.create_task(background_alerts_inbox_consumer())
+
     # Start camera connectivity reconciler — safety net for the MediaMTX
     # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
     # either process). The loop delays its first pass internally so startup
@@ -735,6 +750,7 @@ app.include_router(cameras.router, prefix=settings.api_prefix)
 app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 app.include_router(timeline_events.router, prefix=settings.api_prefix)
+app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)
