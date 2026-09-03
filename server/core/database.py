@@ -26,15 +26,54 @@ from sqlalchemy.orm import sessionmaker
 from core.config import settings
 from core.logging_config import main_logger
 
+def connect_args_for(database_url: str) -> dict:
+    """Driver-specific connect args for this URL. Pure, so it is testable
+    without standing up a database.
+
+    Postgres only: sqlite's connect() takes no `options`, and every test
+    suite imports this module with DATABASE_URL=sqlite:///... — an
+    unguarded connect_args would TypeError at IMPORT and take out every
+    suite that touches the database, not just its own.
+    """
+    if not database_url.startswith(("postgresql", "postgres")):
+        return {}
+    return {
+        # The backstop for the failure this pool actually hit: a connection
+        # left `idle in transaction` pins a Postgres backend AND a pool slot
+        # with nothing running on it. Thirty of those is the whole pool, and
+        # nothing reclaims them — connections were measured stuck for 20
+        # minutes after the browser tab that opened them had gone, so the API
+        # stayed wedged until core was recreated.
+        #
+        # This is a NET, not the fix: the fix is core.database.release() and
+        # the read/OCR/write split in plate_enrichment, both of which mean no
+        # code path should ever sit here for 60s. If this ever fires, it is
+        # telling you a new leak was introduced.
+        "options": "-c idle_in_transaction_session_timeout=60000",
+        # So pg_stat_activity names the culprit next time.
+        "application_name": "opennvr-core",
+    }
+
+
+_CONNECT_ARGS = connect_args_for(settings.database_url)
+# Deliberately NOT statement_timeout: run_alembic_migrations() and
+# _backfill_additive_columns() run on THIS engine and swallow exceptions with
+# a log line, so a killed ALTER TABLE would leave a silently half-migrated
+# schema. If it is ever wanted, scope it per-session with SET LOCAL, or give
+# the DDL paths their own engine.
+
 # Create SQLAlchemy engine
 engine = create_engine(
     settings.database_url,
     echo=False,  # Disable SQL echo in terminal
-    pool_pre_ping=True,  # Verify connections before use
+    pool_pre_ping=True,  # Verify connections before use — also what makes a
+    # server-terminated (idle-timeout) connection get discarded at checkout
+    # instead of blowing up the request that borrows it next.
     pool_recycle=300,  # Recycle connections every 5 minutes
     pool_size=20,  # Maximum number of connections to keep persistently
     max_overflow=10,  # Maximum number of connections to create beyond pool_size (total 30)
     pool_timeout=30,  # Seconds to wait for a connection before giving up
+    connect_args=_CONNECT_ARGS,
 )
 
 # Create session factory
@@ -51,6 +90,33 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def release(db) -> None:
+    """Return this request's connection to the pool NOW, before the body ships.
+
+    FastAPI tears a yield-dependency down on the REQUEST exit stack, which runs
+    only AFTER the response body has been streamed and after any BackgroundTask
+    has finished. Behind nginx with ``proxy_buffering off`` a FileResponse is
+    therefore paced by the client while one pooled connection stays checked out
+    — and, because a SQLAlchemy session holds its read transaction open until
+    close(), it sits in Postgres as ``idle in transaction``.
+
+    Measured before this existed: the Vehicles page mounts one image per row
+    (up to 200), so a single page view could pin the entire pool of 30; two
+    connections were still stuck 20 MINUTES after the tab that opened them had
+    gone, because nothing reclaims a response whose client walked away.
+
+    Call it the moment the last query is done. ``Session.close()`` is idempotent
+    and leaves the session usable, so get_db's own close() stays correct and a
+    caller that owns the session can keep using it afterwards.
+
+    CAUTION: close() also EXPUNGES every loaded instance. Read whatever you
+    still need off your ORM objects (ids included — a commit expires them)
+    BEFORE calling this, or the next attribute access re-queries a detached
+    instance.
+    """
+    db.close()
 
 
 def run_alembic_migrations():

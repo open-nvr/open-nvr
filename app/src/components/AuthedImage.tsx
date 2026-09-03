@@ -31,7 +31,8 @@ export function AuthedImage({
   className,
   onClick,
 }: {
-  fetchBlob: () => Promise<{ data: any }>
+  /** Receives react-query's AbortSignal — pass it to the api client. */
+  fetchBlob: (signal?: AbortSignal) => Promise<{ data: any }>
   queryKey: (string | number)[]
   alt: string
   className?: string
@@ -39,7 +40,11 @@ export function AuthedImage({
 }) {
   const blobQuery = useQuery({
     queryKey,
-    queryFn: async () => (await fetchBlob()).data as Blob,
+    // The signal is the point: unmounting a row or changing a filter must
+    // CANCEL the fetch, not just stop caring about it. Every evidence
+    // request holds a server-side connection while it runs, so an
+    // abandoned one costs exactly as much as a wanted one.
+    queryFn: async ({ signal }) => (await fetchBlob(signal)).data as Blob,
     retry: 0,
     staleTime: 5 * 60 * 1000, // evidence never changes once written
   })

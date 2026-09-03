@@ -505,7 +505,49 @@ def store_plate_crop(
         return None
 
 
+def store_plate_frame(jpeg: bytes | None) -> str | None:
+    """Persist the WHOLE attempt the plate was read from; path or None.
+
+    ``store_plate_crop`` cuts the plate rectangle out of these bytes and
+    throws the rest away. The rest is the point: it is a crop of the
+    vehicle whose plate this is, at the moment it was read, which is the
+    only image on the row guaranteed to show the right car.
+
+    The visit's own ``evidence_path`` cannot make that promise. A track
+    can span more than one vehicle (association merges a departing car
+    with the arriving one behind it), and the best-thumbnail frame is
+    then a DIFFERENT car from the one the plate came off — the row shows
+    a black Audi captioned with the number of the car before it.
+
+    Best-effort, like every other evidence write: a failure answers None
+    and the row simply falls back.
+    """
+    if not jpeg:
+        return None
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        return save_evidence_jpeg(jpeg)
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not store frame", exc_info=True)
+        return None
+
+
+def store_plate_images(
+    jpeg: bytes | None,
+    box: tuple[float, float, float, float] | None = None,
+) -> tuple[str | None, str | None]:
+    """``(plate crop, the frame it was cut from)``, both best-effort.
+
+    One call so the pair costs ONE thread hop: both halves decode or
+    write, and both callers want both. SYNC on purpose for the same
+    reason ``store_plate_crop`` is — hand it to a thread.
+    """
+    return store_plate_crop(jpeg, box), store_plate_frame(jpeg)
+
+
 def stamp_plate_evidence(row, rel_path: str | None, *,
+                         frame_path: str | None = None,
                          merged: bool = False) -> None:
     """Record which crop a row's plate was read from, and whether the
     read was reconstructed from more than one of them.
@@ -518,6 +560,8 @@ def stamp_plate_evidence(row, rel_path: str | None, *,
     """
     if rel_path:
         row.plate_evidence_path = rel_path
+    if frame_path:
+        row.plate_frame_path = frame_path
     if merged:
         payload = dict(row.payload or {})
         payload["plate_merged"] = True
@@ -671,39 +715,60 @@ async def enrich_event_plate(
     correct plate. The evidence crop remains the fallback attempt when
     no candidates rode the visit — exactly the old behaviour.
 
-    Opens its own DB session (the request's session is gone by the time
-    a background task runs). Every failure path is a debug/warning log
-    and a clean return — never an exception escaping the task runner.
+    Runs in three phases — READ, then OCR with NO session held, then
+    REOPEN and write. The middle phase can take a minute (up to
+    MAX_INGEST_ATTEMPTS attempts, each waiting on _OCR_CONCURRENCY and
+    then on a 15s HTTP timeout), and holding a connection through it is
+    what exhausted core's pool: at roughly one vehicle per second, tasks
+    merely QUEUED on the semaphore pinned every connection there was,
+    and plate reads stopped while events kept flowing.
+
+    The cost of letting go is a race — see phase 3, which re-reads the
+    row and lets the FIRST writer win. Every failure path is a
+    debug/warning log and a clean return; an exception must never escape
+    the task runner.
     """
     from core.database import SessionLocal
     from models import TimelineEvent
     from services.evidence_store import resolve_evidence
 
-    db = SessionLocal()
     try:
-        row = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
-        if (
-            row is None
-            or row.plate_text            # already enriched (early attempt won)
-            or (row.label or "") not in VEHICLE_LABELS
-        ):
-            return
+        # ── phase 1: read what the sweep needs, then LET GO ──────────
+        # Everything the OCR loop uses is copied out as a plain scalar:
+        # past the close the row is DETACHED, so touching it again would
+        # re-query rather than quietly read stale pixels.
+        db = SessionLocal()
+        try:
+            row = db.query(TimelineEvent).filter(
+                TimelineEvent.id == event_id).first()
+            if (
+                row is None
+                or row.plate_text        # already enriched (early attempt won)
+                or (row.label or "") not in VEHICLE_LABELS
+            ):
+                return
+            camera_id = int(row.camera_id)
+            evidence_path = row.evidence_path
+        finally:
+            db.close()
 
         # Attempt list: candidates best-first; the evidence crop as the
         # sole attempt when none were shipped (pre-multi-frame producers,
         # non-LPR cameras).
         attempts: list[bytes] = list(candidate_jpegs or [])[:MAX_INGEST_ATTEMPTS]
         if not attempts:
-            if not row.evidence_path:
+            if not evidence_path:
                 return
-            path = resolve_evidence(row.evidence_path)
+            path = resolve_evidence(evidence_path)
             if path is None:
                 return
-            attempts = [path.read_bytes()]
+            # Off the loop: a full-frame read is blocking file I/O on the
+            # same loop every other request is served from.
+            attempts = [await _asyncio.to_thread(path.read_bytes)]
 
         # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
         # callers; "3" != "cam3" would silently drop consumer-side scoping.
-        camera_handle = f"cam{row.camera_id}"
+        camera_handle = f"cam{camera_id}"
         # Each read is kept WITH the crop it came from (#382): the
         # winning crop is the only image that actually shows this plate,
         # and it is discarded the moment this function returns unless we
@@ -714,7 +779,7 @@ async def enrich_event_plate(
         winner_box: tuple[float, float, float, float] | None = None
         was_merged = False
         for jpeg in attempts:
-            read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
+            read = await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)
             if read is None:
                 continue
             if read["accepted"]:
@@ -746,39 +811,68 @@ async def enrich_event_plate(
         if winner is None:
             return                       # honest non-read beats a guess
         plate = winner["plate"][:32]
-        if is_duplicate_sighting(row.camera_id, plate):
+        if is_duplicate_sighting(camera_id, plate):
             # Track fragmentation: this "new" vehicle is the car we just
             # read. Fold the sighting — the visit row stays (it is a
             # real detection), the plate is not repeated, and the sweep
             # stops HERE: identity is established, so any remaining
             # candidates would be pure waste.
-            note_sighting(row.camera_id, plate)
+            note_sighting(camera_id, plate)
             logger.info(
                 "plate dedup: event %s reads %s — seen on cam %s within "
                 "%.0fs, sighting folded (no plate written)",
-                event_id, plate, row.camera_id, dedup_window_s(),
+                event_id, plate, camera_id, dedup_window_s(),
             )
             return
-        row.plate_text = plate
         # Off the event loop: the crop decodes a full frame through cv2
         # (~15ms on a 1080x720 attempt, measured) and then writes a file.
         # Small per read, but this task runs once per vehicle on a busy
         # camera, and everything else core serves shares this loop.
-        crop_rel = await _asyncio.to_thread(
-            store_plate_crop, winner_jpeg, winner_box)
-        stamp_plate_evidence(row, crop_rel, merged=was_merged)
-        note_sighting(row.camera_id, plate)
-        db.commit()
+        # Deliberately BEFORE the reopen, so no session is held across it.
+        crop_rel, frame_rel = await _asyncio.to_thread(
+            store_plate_images, winner_jpeg, winner_box)
+
+        # ── phase 3: reopen and write ───────────────────────────────
+        # The sweep was away from the DB for as long as the OCR took, so
+        # nothing learned in phase 1 can be trusted. Re-read.
+        db = SessionLocal()
+        try:
+            row = db.query(TimelineEvent).filter(
+                TimelineEvent.id == event_id).first()
+            if row is None:
+                return                   # retention swept it mid-sweep
+            if row.plate_text:
+                # An early attempt or the ingest claim won while we were
+                # in OCR. FIRST WRITER WINS: their read came off a frame
+                # we no longer hold, so we cannot prove ours is the same
+                # vehicle, and overwriting would trade a provable pairing
+                # for an unprovable one.
+                logger.info(
+                    "plate enrichment: event %s already read as %s while OCR "
+                    "was in flight — sweep result %s dropped",
+                    event_id, row.plate_text, plate,
+                )
+                return
+            if is_duplicate_sighting(camera_id, plate):
+                # Re-checked here too: another fragment of the same pass
+                # can have been written during the OCR window.
+                note_sighting(camera_id, plate)
+                return
+            row.plate_text = plate
+            stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
+                                 merged=was_merged)
+            note_sighting(camera_id, plate)
+            db.commit()
+        finally:
+            db.close()
         logger.info(
             "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
-            event_id, row.plate_text, winner["confidence"],
+            event_id, plate, winner["confidence"],
             len(rejects) + 1, ", merged" if was_merged else "",
         )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
                        exc_info=True)
-    finally:
-        db.close()
 
 
 def wants_plate(label: str | None, evidence_path: str | None,

@@ -512,6 +512,23 @@ class TimelineEvent(Base):
     # itself, and for every row enriched before this column existed:
     # readers fall back to evidence_path.
     plate_evidence_path = Column(String(500), nullable=True)
+    # The WHOLE camera frame the best crop was taken from. evidence_path is
+    # framed for the SUBJECT — detection box plus a quarter-box margin —
+    # which is precisely what stops it answering "where was this, what else
+    # was in shot, was the gate open". Widening that crop would ruin the one
+    # thing it is good at, so the scene is a second content-addressed JPEG
+    # instead. NULL for rows written before this column and for pipelines
+    # running with DETECT_SCENE_EVIDENCE off; readers fall back to
+    # evidence_path.
+    scene_evidence_path = Column(String(500), nullable=True)
+    # The UNCROPPED attempt plate_evidence_path was cut out of: a crop of
+    # the vehicle, at the moment its plate was read. Needed because a
+    # visit is not always one vehicle — track association merges a
+    # departing car with the one arriving behind it, and the visit's
+    # best-thumbnail frame is then a DIFFERENT car from the one the
+    # plate came off. This image is the only one on the row that is
+    # guaranteed to show the car the number belongs to.
+    plate_frame_path = Column(String(500), nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

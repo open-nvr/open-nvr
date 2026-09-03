@@ -45,6 +45,11 @@ class PendingRead:
     # None when the crop could not be stored — the visit then falls
     # back to its vehicle frame, exactly as before.
     plate_evidence_path: str | None = None
+    # The uncropped attempt those plate pixels were cut out of: a crop
+    # of the vehicle at the moment its plate was read. The visit's own
+    # best frame can be a DIFFERENT car when track association merges
+    # two vehicles, so this is the picture that matches the number.
+    plate_frame_path: str | None = None
 
 
 class PlateAttemptCache:
@@ -64,7 +69,8 @@ class PlateAttemptCache:
 
     def put(self, camera_id: int, track_id: str, *, plate: str,
             confidence: float, attempt_ts: float,
-            plate_evidence_path: str | None = None) -> None:
+            plate_evidence_path: str | None = None,
+            plate_frame_path: str | None = None) -> None:
         """Park an accepted read. A later read for the same track only
         replaces a parked one when its confidence is higher — attempts
         keep the best, never the latest."""
@@ -84,6 +90,7 @@ class PlateAttemptCache:
                 attempt_ts=float(attempt_ts),
                 stored_monotonic=self._clock(),
                 plate_evidence_path=plate_evidence_path,
+                plate_frame_path=plate_frame_path,
             )
 
     def claim(self, camera_id: int, track_id: str, *,

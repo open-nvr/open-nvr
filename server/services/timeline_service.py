@@ -43,6 +43,7 @@ def record_track_visit(
     track_id: str | None = None,
     stationary: bool | None = None,
     evidence_path: str | None = None,
+    scene_evidence_path: str | None = None,
 ) -> TimelineEvent:
     """Persist one finished visit (source=tier0, event_type=track)."""
     row = TimelineEvent(
@@ -55,6 +56,7 @@ def record_track_visit(
         started_at=started_at,
         ended_at=ended_at,
         evidence_path=evidence_path,
+        scene_evidence_path=scene_evidence_path,
         payload={"stationary": stationary} if stationary is not None else None,
     )
     db.add(row)

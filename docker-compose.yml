@@ -424,6 +424,12 @@ services:
       - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
       - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
       - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
+      # Scene evidence: a SECOND JPEG per visit — the whole frame the
+      # best crop was taken from, so the evidence dialog can show the
+      # car in its lane instead of a crop of the car.
+      - DETECT_SCENE_EVIDENCE=${DETECT_SCENE_EVIDENCE:-}
+      - DETECT_SCENE_MAX_PX=${DETECT_SCENE_MAX_PX:-}
+      - DETECT_SCENE_JPEG_QUALITY=${DETECT_SCENE_JPEG_QUALITY:-}
       # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
       # cameras whose assignments are all detection-free. Empty = off.
       - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}

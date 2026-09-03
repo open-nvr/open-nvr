@@ -601,9 +601,12 @@ def test_ingest_claim_stamps_the_parked_crop():
     """Lockstep with the claim path: the parked crop must reach the row,
     or an early-attempt read shows the vehicle frame again."""
     src = (_HERE / "routers" / "internal_camera_agent.py").read_text()
-    assert "stamp_plate_evidence(row, pending.plate_evidence_path)" in src, (
+    assert "stamp_plate_evidence(row, pending.plate_evidence_path," in src, (
         "the ingest claim no longer stamps the early attempt's crop — "
         "those rows fall back to the vehicle-best frame (#382)")
+    assert "frame_path=pending.plate_frame_path" in src, (
+        "the ingest claim drops the frame the plate was read from — the "
+        "row then has no image proving WHICH car the number came off")
 
 
 def test_events_api_exposes_the_plate_crop():
@@ -741,14 +744,104 @@ def test_crop_to_plate_box_narrows_the_frame_and_clamps_to_it():
 
 
 def test_the_crop_never_runs_on_the_event_loop():
-    """Lockstep: storing the crop decodes a full frame through cv2 (~15ms
-    on a 1080x720 attempt) and then writes a file. Both enrichment paths
-    are async, and core serves every other request on that same loop, so
-    the call has to go to a thread."""
+    """Lockstep: storing the images decodes a full frame through cv2
+    (~15ms on a 1080x720 attempt) and then writes files. Both enrichment
+    paths are async, and core serves every other request on that same
+    loop, so the call has to go to a thread — and both images go in ONE
+    hop, which is why store_plate_images exists."""
     sweep = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert "_asyncio.to_thread(\n            store_plate_crop" in sweep, (
-        "the ingest sweep stores its crop inline again — a cv2 decode per "
-        "vehicle back on the event loop")
+    assert "_asyncio.to_thread(\n            store_plate_images" in sweep, (
+        "the ingest sweep stores its images inline again — a cv2 decode "
+        "per vehicle back on the event loop")
     early = (_HERE / "routers" / "internal_camera_agent.py").read_text()
-    assert "asyncio.to_thread(\n        store_plate_crop" in early, (
-        "the early-attempt path stores its crop inline again")
+    assert "asyncio.to_thread(\n        store_plate_images" in early, (
+        "the early-attempt path stores its images inline again")
+
+
+# ── the sweep holds no session across OCR ───────────────────────────
+#
+# Holding one was what exhausted core's pool: the loop waits on
+# _OCR_CONCURRENCY and then on a 15s HTTP timeout, up to
+# MAX_INGEST_ATTEMPTS times, and at roughly one vehicle per second the
+# tasks merely QUEUED on that semaphore pinned every connection there
+# was. Letting go costs a race, so the tests below pin who wins it.
+
+
+def test_the_sweep_holds_no_session_while_ocr_runs(db, monkeypatch):
+    """The invariant. Counted from inside the OCR call, where the old code
+    was sitting on an open transaction."""
+    SessionLocal, row_id = db
+    live = {"n": 0, "peak_during_ocr": 0}
+
+    def _tracking():
+        sess = SessionLocal()
+        live["n"] += 1
+        _close = sess.close
+
+        def _counted_close():
+            live["n"] -= 1
+            _close()
+
+        sess.close = _counted_close
+        return sess
+
+    monkeypatch.setattr(cdb, "SessionLocal", _tracking)
+
+    class _Watching(_ScriptedOcr):
+        async def __call__(self, jpeg, camera_handle, event_id=None):
+            live["peak_during_ocr"] = max(live["peak_during_ocr"], live["n"])
+            return await super().__call__(jpeg, camera_handle, event_id)
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", _Watching([_accepted("CLEAR1")]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))
+    assert _plate_of(SessionLocal, row_id) == "CLEAR1"
+    assert live["peak_during_ocr"] == 0, (
+        "a DB session was open while the sweep was waiting on OCR — this is "
+        "the leak that pinned the pool")
+    assert live["n"] == 0, "the sweep leaked a session"
+
+
+def test_a_plate_written_during_ocr_is_not_overwritten(db, monkeypatch):
+    """First writer wins. The other writer (an early attempt, or the ingest
+    claim) read its plate off a frame we no longer hold, so we cannot prove
+    ours is even the same vehicle — trading a provable pairing for an
+    unprovable one is the wrong way round."""
+    SessionLocal, row_id = db
+
+    class _RacingOcr(_ScriptedOcr):
+        async def __call__(self, jpeg, camera_handle, event_id=None):
+            other = SessionLocal()
+            try:
+                other.get(models.TimelineEvent, row_id).plate_text = "EARLY1"
+                other.commit()
+            finally:
+                other.close()
+            return await super().__call__(jpeg, camera_handle, event_id)
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", _RacingOcr([_accepted("LATE99")]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))
+    assert _plate_of(SessionLocal, row_id) == "EARLY1"
+
+
+def test_a_row_deleted_during_ocr_does_not_raise(db, monkeypatch):
+    """Retention can sweep the visit while its OCR is in flight. Phase 3
+    re-reads, so it must cope with the row being gone."""
+    SessionLocal, row_id = db
+
+    class _DeletingOcr(_ScriptedOcr):
+        async def __call__(self, jpeg, camera_handle, event_id=None):
+            other = SessionLocal()
+            try:
+                other.delete(other.get(models.TimelineEvent, row_id))
+                other.commit()
+            finally:
+                other.close()
+            return await super().__call__(jpeg, camera_handle, event_id)
+
+    monkeypatch.setattr(pe, "_ocr_jpeg", _DeletingOcr([_accepted("GONE11")]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))   # must not raise
+    s = SessionLocal()
+    try:
+        assert s.get(models.TimelineEvent, row_id) is None
+    finally:
+        s.close()
