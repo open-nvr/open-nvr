@@ -38,6 +38,57 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
     return buf.tobytes()
 
 
+# Core refuses an evidence JPEG over 2 MiB. Budget below that: a scene the
+# server drops is a scene the operator never sees, and the pixel/quality
+# clamps alone do NOT bound this — a high-entropy frame (rain, foliage,
+# sensor noise at night) encodes to 2.4 MB at 1920px/q95, measured.
+MAX_SCENE_BYTES = 1_500_000
+_SCENE_FALLBACK_QUALITY = (60, 45)
+
+
+def encode_scene_jpeg(
+    bgr, *, max_px: int = 1280, quality: int = 78,
+    max_bytes: int = MAX_SCENE_BYTES,
+) -> bytes:
+    """The WHOLE frame as JPEG, downscaled to ``max_px`` on its long edge.
+
+    The visit's second evidence image. ``_crop_bgr`` is framed for the
+    SUBJECT — box plus a quarter-box margin — which is exactly what makes it
+    unable to answer the operator's other question: not "what was it" but
+    "where was it, what else was in shot, was the gate open". No margin
+    setting gives you both without ruining the first, so the scene is a
+    separate image rather than a wider crop.
+
+    Downscaled because it is context, not the record: 1280px is already 2x
+    the dialog it is shown in, and it keeps the file (~150 KB) an order of
+    magnitude under core's MAX_EVIDENCE_BYTES. Never UPSCALES — a 640x360
+    substream frame is stored as-is rather than interpolated into a bigger
+    lie about how much detail the camera gave us.
+
+    Degrades to fit ``max_bytes``: a noisy night frame at the operator's
+    chosen quality can land over core's cap, and a rejected scene helps
+    nobody. Quality is the thing to give up — the scene is looked at, not
+    read, so re-encoding softer beats not having it.
+    """
+    import cv2
+
+    h, w = bgr.shape[:2]
+    long_edge = max(int(h), int(w))
+    if max_px and long_edge > max_px:
+        scale = float(max_px) / float(long_edge)
+        bgr = cv2.resize(
+            bgr,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    jpeg = _encode_jpeg(bgr, quality)
+    for lower in _SCENE_FALLBACK_QUALITY:
+        if len(jpeg) <= max_bytes or lower >= quality:
+            break
+        jpeg = _encode_jpeg(bgr, lower)
+    return jpeg
+
+
 class BestFrameStore:
     """Thread-safe, bounded cache of each track's best-frame crop (encoded lazily)."""
 

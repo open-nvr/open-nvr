@@ -35,7 +35,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
-from core.database import get_db
+from core.database import get_db, release
 from models import TimelineEvent, User
 
 router = APIRouter(tags=["timeline"])
@@ -56,6 +56,47 @@ def _serialize(e: TimelineEvent) -> dict:
         "plate_text": e.plate_text,
         "has_evidence": bool(e.evidence_path),
         "evidence_url": f"/api/v1/events/{e.id}/evidence" if e.evidence_path else None,
+        # The crop the plate was READ from (#382), when it differs from the
+        # vehicle-best frame above. Additive and often null — clients fall
+        # back to evidence_url. Deliberately false when the two paths are
+        # EQUAL: the fallback sweep OCRs the evidence frame itself, and
+        # content-addressing then makes them one file, so there is no
+        # second image to offer and the caller should just use evidence_url.
+        "has_plate_evidence": bool(
+            e.plate_evidence_path
+            and e.plate_evidence_path != e.evidence_path
+        ),
+        "plate_evidence_url": (
+            f"/api/v1/events/{e.id}/plate-evidence"
+            if e.plate_evidence_path else None
+        ),
+        # The whole frame behind the best crop. Same flag-plus-url shape,
+        # and the same distinctness guard: a box that filled the frame crops
+        # to the frame itself, and content-addressing then collapses both to
+        # one file — showing that twice, once labelled "scene" and once
+        # "vehicle", is worse than showing it once.
+        "has_scene_evidence": bool(
+            e.scene_evidence_path
+            and e.scene_evidence_path != e.evidence_path
+        ),
+        "scene_evidence_url": (
+            f"/api/v1/events/{e.id}/scene-evidence"
+            if e.scene_evidence_path else None
+        ),
+        # The frame the plate crop was cut from — the one image on the
+        # row guaranteed to show the car the number belongs to, because
+        # a merged track can leave evidence_path and scene_evidence_path
+        # showing a different vehicle entirely. Same distinctness guard:
+        # when the OCR fallback reads the evidence crop itself, the two
+        # content-address to one file and there is nothing extra to show.
+        "has_plate_frame": bool(
+            e.plate_frame_path
+            and e.plate_frame_path != e.evidence_path
+        ),
+        "plate_frame_url": (
+            f"/api/v1/events/{e.id}/plate-frame"
+            if e.plate_frame_path else None
+        ),
         "payload": e.payload,
     }
 
@@ -112,6 +153,125 @@ async def get_event_evidence(
     path = resolve_evidence(e.evidence_path)
     if path is None:
         raise HTTPException(status_code=404, detail="evidence file missing")
+    # Everything the DB is needed for is done. Do NOT hold a pooled
+    # connection for the length of a client-paced JPEG transfer: FastAPI
+    # closes the session only after the body ships, and nginx runs this
+    # path with proxy_buffering off. See core.database.release.
+    release(db)
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "max-age=86400"})
+
+
+@router.get("/events/{event_id}/plate-evidence")
+async def get_event_plate_evidence(
+    event_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The crop this row's PLATE was read from (#382).
+
+    Distinct from the best-frame evidence above: multi-frame OCR reads
+    plate-candidate crops, and the vehicle-best frame is — by
+    construction — usually the one where the plate has left the crop.
+    404 when the read came from the evidence frame itself or predates
+    the column; callers fall back to ``/evidence``.
+    """
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.plate_evidence_path:
+        raise HTTPException(status_code=404,
+                            detail="no plate evidence for this event")
+    from services.timeline_service import can_access_event
+
+    if not can_access_event(db, e, user=current_user):
+        # 404, not 403: don't confirm the event exists on someone else's camera.
+        raise HTTPException(status_code=404,
+                            detail="no plate evidence for this event")
+    from services.evidence_store import resolve_evidence
+
+    path = resolve_evidence(e.plate_evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence file missing")
+    # Everything the DB is needed for is done. Do NOT hold a pooled
+    # connection for the length of a client-paced JPEG transfer: FastAPI
+    # closes the session only after the body ships, and nginx runs this
+    # path with proxy_buffering off. See core.database.release.
+    release(db)
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "max-age=86400"})
+
+
+@router.get("/events/{event_id}/scene-evidence")
+async def get_event_scene_evidence(
+    event_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The whole frame the best crop was taken from.
+
+    ``/evidence`` is framed for the subject and cannot show the lane, the
+    gate, or the car parked next to it; this is the same moment, uncropped.
+    404 when the pipeline sent no scene frame or the row predates the
+    column — callers fall back to ``/evidence``.
+    """
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.scene_evidence_path:
+        raise HTTPException(status_code=404,
+                            detail="no scene evidence for this event")
+    from services.timeline_service import can_access_event
+
+    if not can_access_event(db, e, user=current_user):
+        # 404, not 403: don't confirm the event exists on someone else's camera.
+        raise HTTPException(status_code=404,
+                            detail="no scene evidence for this event")
+    from services.evidence_store import resolve_evidence
+
+    path = resolve_evidence(e.scene_evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence file missing")
+    # Everything the DB is needed for is done. Do NOT hold a pooled
+    # connection for the length of a client-paced JPEG transfer: FastAPI
+    # closes the session only after the body ships, and nginx runs this
+    # path with proxy_buffering off. See core.database.release.
+    release(db)
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "max-age=86400"})
+
+
+@router.get("/events/{event_id}/plate-frame")
+async def get_event_plate_frame(
+    event_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The frame this row's plate crop was cut from.
+
+    ``/plate-evidence`` is the plate rectangle; this is everything around
+    it — the vehicle the number belongs to, at the moment it was read.
+    Distinct from ``/evidence`` and ``/scene-evidence``, which show the
+    visit's best-thumbnail moment and can be a different car when track
+    association merged two vehicles into one visit. 404 for rows read
+    before the column existed; callers fall back to ``/evidence``.
+    """
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.plate_frame_path:
+        raise HTTPException(status_code=404,
+                            detail="no plate frame for this event")
+    from services.timeline_service import can_access_event
+
+    if not can_access_event(db, e, user=current_user):
+        # 404, not 403: don't confirm the event exists on someone else's camera.
+        raise HTTPException(status_code=404,
+                            detail="no plate frame for this event")
+    from services.evidence_store import resolve_evidence
+
+    path = resolve_evidence(e.plate_frame_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence file missing")
+    # Everything the DB is needed for is done. Do NOT hold a pooled
+    # connection for the length of a client-paced JPEG transfer: FastAPI
+    # closes the session only after the body ships, and nginx runs this
+    # path with proxy_buffering off. See core.database.release.
+    release(db)
     return FileResponse(path, media_type="image/jpeg",
                         headers={"Cache-Control": "max-age=86400"})
 

@@ -588,6 +588,17 @@ class CameraWorker:
             tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
             tracker.plate_candidates_gap_s = _env_float(
                 "DETECT_PLATE_CANDIDATE_GAP_S", 0.75)
+        if _env_bool("DETECT_SCENE_EVIDENCE", True):
+            # A second JPEG per visit: the whole frame behind the best crop,
+            # so the evidence dialog can show the car in its lane instead of
+            # a crop of the car. Clamped, not merely parsed — the clamp is
+            # the only thing between a mistyped knob and a payload core
+            # rejects for size (2 MiB); 1920px at q95 is ~600 KB.
+            tracker.retain_scene = True
+            tracker.scene_max_px = max(
+                320, min(_env_int("DETECT_SCENE_MAX_PX", 1280), 1920))
+            tracker.scene_quality = max(
+                40, min(_env_int("DETECT_SCENE_JPEG_QUALITY", 78), 95))
         pipe = DetectPipeline(
             None, motion, self.detector, tracker,
             model_size=(self.model_size, self.model_size),

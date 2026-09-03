@@ -181,8 +181,12 @@ def test_enrichment_fallback_threads_event_id():
     # KAI-C's normaliser can put it in the domain event. String-level on
     # the source (the function does live HTTP; its request-building isn't
     # separable without refactoring it — deliberately out of scope here).
+    # (Was `event_id=int(row.id)`. The sweep now RELEASES its session before
+    # the OCR loop — holding one across up to 4x15s of HTTP exhausted the
+    # pool — so `row` is not in scope there any more; the function's own
+    # event_id parameter is the same value that row.id was.)
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert 'event_id=int(row.id)' in src, (
+    assert "await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)" in src, (
         "plate_enrichment no longer sends event_id with its OCR call — "
         "the plate.recognized.v1 it triggers can't be joined back to the "
         "visit row, so the bus consumer becomes a no-op for the fallback "
@@ -195,8 +199,15 @@ def test_enrichment_sends_the_camera_handle_not_the_numeric_id():
     # scoping to assigned cameras (the LPR app) compares against
     # handles — "3" != "cam3" would silently drop every
     # enrichment-produced event.
+    # (Was `f"cam{row.camera_id}"`. The sweep releases its session before
+    # OCR, so the numeric id is copied out in phase 1 — both halves of that
+    # chain are pinned here, since a handle built from the wrong value is
+    # exactly as invisible as no handle at all.)
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert 'camera_handle = f"cam{row.camera_id}"' in src, (
+    assert "camera_id = int(row.camera_id)" in src, (
+        "plate_enrichment no longer copies the numeric camera id out of the "
+        "row before releasing its session — the handle below is built from it")
+    assert 'camera_handle = f"cam{camera_id}"' in src, (
         "plate_enrichment no longer sends the camera handle — "
         "enrichment-produced plate.recognized.v1 events become "
         "invisible to camera-scoped consumers")

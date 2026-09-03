@@ -27,7 +27,7 @@
 // providing app's config endpoint — the same live-update path the
 // catalog form uses.
 
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BellRing, Car, Download, FileText, History, PhoneCall, Plus, RefreshCw,
@@ -38,6 +38,7 @@ import { extractApiError } from '../lib/apiError'
 import { AuthedImage } from '../components/AuthedImage'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
+import { useInView } from '../hooks/useInView'
 import {
   Badge, Button, Card, CardContent,
   EmptyState, ErrorCard, PageHeader, Skeleton,
@@ -55,6 +56,91 @@ type PlateEvent = {
   ended_at?: string | null
   has_evidence?: boolean
   evidence_url?: string | null
+  // TRUE means there are two distinct images to show: the crop the plate
+  // was READ from (#382) as well as the vehicle-best frame above. The
+  // server sets it false when the two paths are equal, i.e. when there is
+  // no second image to offer (timeline_events.py). The flags are
+  // independent — a row can carry a crop and no frame.
+  has_plate_evidence?: boolean
+  plate_evidence_url?: string | null
+  // The whole frame behind the vehicle crop. Independent of the two
+  // flags above — the server sets it false when the scene and the crop
+  // content-address to the same file, i.e. when there is nothing wider
+  // to show. NULL/false on every read stored before Tier-0 sent scenes.
+  has_scene_evidence?: boolean
+  scene_evidence_url?: string | null
+  // The frame the plate crop was cut from. The only image on the row
+  // guaranteed to show the car the number belongs to: a visit is not
+  // always one vehicle (track association merges a departing car with
+  // the one behind it), so the vehicle frame and the scene can both be
+  // a different car from the plate.
+  has_plate_frame?: boolean
+  plate_frame_url?: string | null
+  payload?: { plate_merged?: boolean } | null
+}
+
+// The two images are different frames by construction — multi-frame OCR
+// reads plate candidates, while the best frame is picked for the biggest
+// VEHICLE box, which at close range is exactly when the plate leaves the
+// crop. The preview dialog stacks BOTH, so it never has to choose (#387);
+// the row thumbnail still does, having room for one, and picks the
+// vehicle — the number is already spelled out in the next column.
+//
+// The queryKey shapes are shared with the thumbnail on purpose: opening
+// the dialog re-uses whichever blob the row already fetched, so it pays
+// for one request, not two.
+
+/** The vehicle-best frame — context: which car. */
+function vehicleFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['evidence', e.id],
+    fetchBlob: () => apiService.getEventEvidence(e.id),
+  }
+}
+
+/** The crop the plate was READ from. Only meaningful when
+ *  ``has_plate_evidence``: otherwise /plate-evidence 404s, or answers the
+ *  vehicle frame's own bytes. */
+function plateCropSource(e: PlateEvent) {
+  return {
+    queryKey: ['plate-evidence', e.id],
+    fetchBlob: () => apiService.getEventPlateEvidence(e.id),
+  }
+}
+
+/** The whole camera frame — context: what the camera actually saw. Only
+ *  meaningful when ``has_scene_evidence``. */
+function sceneFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['scene-evidence', e.id],
+    fetchBlob: () => apiService.getEventSceneEvidence(e.id),
+  }
+}
+
+/** The frame the plate crop came from — proof: WHICH car. */
+function plateFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['plate-frame', e.id],
+    fetchBlob: () => apiService.getEventPlateFrame(e.id),
+  }
+}
+
+// One image for a 64px row thumbnail: the vehicle, not the number. The
+// plate crop reads as a number the row already prints in text, so it
+// spent a whole column saying nothing new — the operator wants to see
+// WHICH car.
+//
+// Prefer the frame the plate was READ from. It is the only wide image
+// guaranteed to hold the car the number belongs to: /evidence and
+// /scene-evidence are the visit's best-thumbnail moment, and a merged
+// track puts one car's plate on another car's best frame. Falling back
+// to those is still right for rows stored before the column existed —
+// a possibly-wrong car beats an empty box, and the dialog shows the
+// plate crop alongside for anyone checking.
+function rowThumbImage(e: PlateEvent) {
+  if (e.has_plate_frame) return plateFrameSource(e)
+  if (e.has_scene_evidence) return sceneFrameSource(e)
+  return vehicleFrameSource(e)
 }
 
 type PlateStats = {
@@ -369,6 +455,15 @@ export function Vehicles() {
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
   const [plate, setPlate] = useState('')
+  // The input stays instant; the QUERY waits. Without this every keystroke
+  // swapped the events queryKey, and since there is no keepPreviousData the
+  // table blanked and re-rendered its rows — a six-character plate meant six
+  // rounds of image mounts. Same 250ms the camera search uses.
+  const [debouncedPlate, setDebouncedPlate] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedPlate(plate), 250)
+    return () => clearTimeout(t)
+  }, [plate])
   const [cameraId, setCameraId] = useState<number | ''>('')
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
   const [preview, setPreview] = useState<PlateEvent | null>(null)
@@ -403,10 +498,10 @@ export function Vehicles() {
   )
 
   const eventsQuery = useQuery({
-    queryKey: ['plate-events', plate, cameraId, range.key],
+    queryKey: ['plate-events', debouncedPlate, cameraId, range.key],
     queryFn: async () => {
       const { data } = await apiService.getPlateEvents({
-        plate: plate.trim() || undefined,
+        plate: debouncedPlate.trim() || undefined,
         camera_id: cameraId === '' ? undefined : cameraId,
         from: fromIso,
         limit: 200,
@@ -848,14 +943,8 @@ export function Vehicles() {
                   return (
                     <tr key={e.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
                       <td className="px-3 py-1.5">
-                        {e.has_evidence ? (
-                          <AuthedImage
-                            queryKey={['evidence', e.id]}
-                            fetchBlob={() => apiService.getEventEvidence(e.id)}
-                            alt={`evidence for ${p}`}
-                            className="h-10 w-16 object-cover rounded cursor-zoom-in"
-                            onClick={() => setPreview(e)}
-                          />
+                        {(e.has_plate_evidence || e.has_evidence) ? (
+                          <RowThumb e={e} plate={p} onOpen={() => setPreview(e)} />
                         ) : (
                           <div className="h-10 w-16 grid place-items-center text-[10px] text-[var(--text-dim)] bg-[var(--bg-2)] rounded">—</div>
                         )}
@@ -1082,21 +1171,230 @@ export function Vehicles() {
         </Modal>
       )}
 
-      {/* ── Evidence preview ──────────────────────────────────────── */}
+      {/* ── Evidence preview ─────────────────────── */}
+      {/* Keyed by id so the stage/zoom toggles reset with the row, and
+          extracted so that state lives with the dialog rather than in
+          this 600-line component. */}
       {preview && (
-        <Modal open onClose={() => setPreview(null)} title={`${(preview.plate_text ?? '').toUpperCase()} — ${cameraName(preview.camera_id)}`}>
-          <AuthedImage
-            queryKey={['evidence', preview.id]}
-            fetchBlob={() => apiService.getEventEvidence(preview.id)}
-            alt="evidence"
-            className="max-h-[70vh] w-auto rounded"
-          />
-          <div className="text-xs text-[var(--text-dim)] mt-2">
-            {preview.started_at ? new Date(preview.started_at).toLocaleString() : ''}
-          </div>
-        </Modal>
+        <EvidenceDialog
+          key={preview.id}
+          e={preview}
+          cameraLabel={cameraName(preview.camera_id)}
+          onClose={() => setPreview(null)}
+        />
       )}
     </section>
+  )
+}
+
+/** The Photo cell: reserves its box, fetches only once on screen.
+ *
+ *  An auth-gated image cannot use <img loading="lazy"> — it has to come
+ *  through the api client as a blob — so before this every rendered row
+ *  fired a request the instant the table painted. At 200 rows over HTTP/2
+ *  that is ~200 at once, each holding a server-side DB connection while it
+ *  runs, which is precisely what exhausted core's pool.
+ *
+ *  The placeholder is the SAME h-10 w-16 box as the image: anything else
+ *  and rows resize as they scroll in, which moves the very elements the
+ *  observer is measuring.
+ */
+function RowThumb({ e, plate, onOpen }: {
+  e: PlateEvent
+  plate: string
+  onOpen: () => void
+}) {
+  const [ref, seen] = useInView<HTMLDivElement>()
+  return (
+    <div ref={ref} className="h-10 w-16">
+      {seen ? (
+        <AuthedImage
+          {...rowThumbImage(e)}
+          alt={`vehicle for ${plate}`}
+          // A camera frame is 16:9 against a 1.6:1 cell — close enough
+          // that object-cover trims the sides rather than letterboxing a
+          // already-small picture. Nothing here has to stay legible the
+          // way the plate crop did (#385); it is a "which car" glance,
+          // and the dialog is one click away.
+          className="h-10 w-16 rounded cursor-zoom-in object-cover"
+          onClick={onOpen}
+        />
+      ) : (
+        <div className="h-10 w-16 rounded bg-[var(--bg-2)]" />
+      )}
+    </div>
+  )
+}
+
+// ── Evidence preview ───────────────────────────────────
+
+/** One read, shown the way an operator reads it: the scene first.
+ *
+ *  The stage is the WHOLE camera frame (#387 follow-up) — /evidence is a
+ *  crop of the detection box plus a quarter-box margin, which keeps the
+ *  subject dominant and is exactly why it cannot answer "what lane, whose
+ *  gate, next to what". The plate crop is the proof the number was read
+ *  off that moment, so it rides ON the scene as a card rather than
+ *  competing with it for the 85vh budget the stacked layout fought over.
+ *
+ *  Older reads carry no scene (the bytes were never stored, so there is
+ *  nothing to backfill): the stage falls back to the vehicle crop and the
+ *  Scene/Vehicle toggle is not offered.
+ */
+function EvidenceDialog({
+  e, cameraLabel, onClose,
+}: {
+  e: PlateEvent
+  cameraLabel: string
+  onClose: () => void
+}) {
+  const plate = (e.plate_text ?? '').toUpperCase()
+  const hasScene = !!e.has_scene_evidence
+  const hasRead = !!e.has_plate_frame
+  const hasFrame = hasRead || hasScene || !!e.has_evidence
+  // Default to the frame the plate was READ from, because it is the
+  // only one that cannot be a different car. Scene is the wide look;
+  // the vehicle crop is just a tighter cut of the same moment as the
+  // scene, so it earns no button of its own — it is only ever the
+  // fallback for rows that predate the other two.
+  const [stage, setStage] = useState<'read' | 'scene'>(hasRead ? 'read' : 'scene')
+  // Hover handles the mouse; this handles touch (where hover does not
+  // exist) and the keyboard, which is why the card is a real <button>.
+  const [zoomed, setZoomed] = useState(false)
+  const showRead = hasRead && stage === 'read'
+  const showScene = !showRead && hasScene
+  const seen = e.started_at ? new Date(e.started_at).toLocaleString() : null
+  const stageSource = showRead
+    ? plateFrameSource(e)
+    : showScene ? sceneFrameSource(e) : vehicleFrameSource(e)
+
+  const caveats = [
+    e.payload?.plate_merged &&
+      'read reconstructed from more than one frame — the crop shown is the clearer of them',
+    // The wide shot is the visit's best-thumbnail moment, which is not
+    // always the same vehicle the plate came off. Say so rather than
+    // letting the operator assume the big picture is the match.
+    showScene && hasRead &&
+      'the scene is the visit’s best frame — switch to Read frame for the car this number came off',
+    // Says WHY an old read looks different from a new one, which is
+    // otherwise indistinguishable from the feature being broken.
+    !hasRead && !hasScene && e.has_evidence &&
+      'no full frame stored for this read — showing the vehicle crop',
+    !e.has_plate_evidence && e.has_evidence &&
+      'no separate plate crop stored',
+  ].filter(Boolean) as string[]
+
+  // Anchored top-left so the card grows OVER the scene without moving:
+  // a centred transform would slide the plate out from under the cursor.
+  // 176px x 2.2 = ~390px, comfortably inside the stage, and the figure's
+  // overflow-hidden clips it rather than bursting the dialog on a short
+  // viewport.
+  const card = (
+    <button
+      type="button"
+      onClick={() => setZoomed((z) => !z)}
+      aria-pressed={zoomed}
+      aria-label={zoomed ? 'Shrink plate crop' : 'Enlarge plate crop'}
+      className={`absolute top-2 left-2 z-20 w-[176px] origin-top-left text-left
+        border border-white/20 bg-black/65 backdrop-blur-sm shadow-lg
+        transition-transform duration-200 ease-out ${
+          zoomed ? 'scale-[2.2]' : 'hover:scale-[2.2] focus-visible:scale-[2.2]'
+        }`}
+    >
+      {e.has_plate_evidence && (
+        // Size the SLOT, never the <img>: AuthedImage puts its className
+        // on the loading pulse and the "no photo" tile too, so a
+        // height-less class collapses both to 0px and the card jumps
+        // when the blob lands.
+        <div className="w-full aspect-[26/10] bg-black/40">
+          <AuthedImage
+            {...plateCropSource(e)}
+            alt={`plate crop for ${plate}`}
+            className="h-full w-full object-contain"
+          />
+        </div>
+      )}
+      <div className="px-2 py-1 border-t border-white/10">
+        <div className="text-[11px] font-semibold leading-4 tracking-wide text-white">
+          {plate || 'plate not read'}
+        </div>
+        {/* The read time lives here, on the image, not in a footnote: it
+            is the second thing anyone checks after the number itself. */}
+        <div className="text-[10px] leading-4 text-white/70">
+          {seen ? `Seen ${seen}` : 'Read time not recorded'}
+        </div>
+      </div>
+    </button>
+  )
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`${plate} — ${cameraLabel}`}
+      // The default w-[720px] is a FIXED width that overflows a phone;
+      // same inset-fit pattern as AddCameraDialog.
+      widthClassName="w-full max-w-[860px] mx-4"
+    >
+      {hasFrame ? (
+        <figure className="relative border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+          {/* 16/9 is nominal — object-contain letterboxes anything else
+              rather than distorting it — and max-h keeps the whole dialog
+              inside Modal's 85vh without the two-slot arithmetic the
+              stacked layout needed. */}
+          <div className="w-full aspect-[16/9] min-h-[180px] max-h-[calc(85vh_-_150px)]">
+            <AuthedImage
+              {...stageSource}
+              alt={
+                showRead
+                  ? `the frame ${plate} was read from`
+                  : showScene
+                    ? `camera frame for ${plate}`
+                    : `vehicle frame for ${plate}`
+              }
+              className="h-full w-full object-contain"
+            />
+          </div>
+          {card}
+          {/* Only when there are genuinely two pictures to choose
+              between. Proof vs context — not two crops of one moment. */}
+          {hasRead && hasScene && (
+            <div className="absolute top-2 right-2 z-20 flex border border-white/20 bg-black/65 backdrop-blur-sm text-[11px] leading-4">
+              {(['read', 'scene'] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStage(s)}
+                  className={`px-2 py-1 ${
+                    stage === s
+                      ? 'bg-white/20 text-white'
+                      : 'text-white/60 hover:text-white'
+                  }`}
+                >
+                  {s === 'read' ? 'Read frame' : 'Scene'}
+                </button>
+              ))}
+            </div>
+          )}
+        </figure>
+      ) : (
+        // No frame of any kind — a plate crop with nothing to pin it on.
+        // The card needs a positioned parent, so give it a plain one.
+        <div className="relative min-h-[120px] border border-[var(--border)] bg-[var(--bg-2)]">
+          {card}
+        </div>
+      )}
+
+      {/* Caveats only. The time moved onto the image, and an empty strip
+          below a full-bleed photo reads as a rendering bug. */}
+      {caveats.length > 0 && (
+        <div className="text-xs text-[var(--text-dim)] mt-3 space-y-0.5">
+          {caveats.map((c) => (
+            <div key={c}>· {c}</div>
+          ))}
+        </div>
+      )}
+    </Modal>
   )
 }
 

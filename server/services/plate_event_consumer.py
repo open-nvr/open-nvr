@@ -92,6 +92,9 @@ def apply_plate_event(envelope: object) -> str:
       foreign initiator's reference); nothing to do.
     * ``"clipped"``      — the plate box abuts its crop's edge: a
       partial read (#378); row left untouched.
+    * ``"weak-detection"`` — the adapter barely localised the plate it
+      read: a false localisation such as a manufacturer badge (#386);
+      row left untouched.
     * ``"duplicate"``    — same plate seen on this camera within the
       dedup window (a fragmented track re-reading the car we just
       read); sighting folded, row left untouched.
@@ -131,6 +134,14 @@ def apply_plate_event(envelope: object) -> str:
         if _read_is_clipped(payload.get("plate_box"), row.evidence_path,
                             payload.get("plate_box_image")):
             return "clipped"
+        # Same false-localisation rule as the synchronous producer, for
+        # the same reason the clip guard is duplicated here: two racing
+        # writers for one column, so a guard on one of them is no guard
+        # at all. Absent field = older producer = no opinion (#386).
+        from services.plate_enrichment import detection_confidence_is_weak
+
+        if detection_confidence_is_weak(payload.get("plate_box_confidence")):
+            return "weak-detection"
         normalized = "".join(plate.split()).upper()[:32]
         # Duplicate-sighting dedup — same rule as the synchronous
         # writers (racing writers for one column need the same policy;

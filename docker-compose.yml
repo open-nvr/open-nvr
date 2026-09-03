@@ -424,6 +424,12 @@ services:
       - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
       - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
       - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
+      # Scene evidence: a SECOND JPEG per visit — the whole frame the
+      # best crop was taken from, so the evidence dialog can show the
+      # car in its lane instead of a crop of the car.
+      - DETECT_SCENE_EVIDENCE=${DETECT_SCENE_EVIDENCE:-}
+      - DETECT_SCENE_MAX_PX=${DETECT_SCENE_MAX_PX:-}
+      - DETECT_SCENE_JPEG_QUALITY=${DETECT_SCENE_JPEG_QUALITY:-}
       # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
       # cameras whose assignments are all detection-free. Empty = off.
       - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}
@@ -537,6 +543,12 @@ services:
       # (camera, plate) within this rolling window is folded into one
       # sighting and costs at most ONE extra OCR call. 0 disables.
       - OPENNVR_PLATE_DEDUP_WINDOW_S=${OPENNVR_PLATE_DEDUP_WINDOW_S:-}
+      # Reject FALSE plate localisations (#386): a manufacturer badge
+      # reads as plausible characters mid-crop, so neither read
+      # confidence nor the partial-read geometry catches it — only the
+      # localiser's own score does (genuine plates 0.85+, the reported
+      # badge 0.38). 0 disables.
+      - OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state

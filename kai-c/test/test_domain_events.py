@@ -174,3 +174,35 @@ def test_plate_box_is_omitted_when_absent_or_malformed():
             "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
             camera_id="cam1", correlation_id=None, event_id=7)
         assert "plate_box" not in env["payload"]
+
+
+def test_plate_box_confidence_is_forwarded_for_false_localisations():
+    """#386: the localiser's own doubt is the only signal that separates
+    a plate from a manufacturer badge. The badge OCRs into plausible
+    characters, from a box nowhere near a crop edge, so the consumer
+    cannot reconstruct this from anything else we send."""
+    result = dict(PLATE_RESULT, plate_detection={
+        "attempted": True, "found": True, "confidence": 0.3756,
+        "box": [121, 229, 233, 267],
+    })
+    _, env = normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                                  correlation_id=None, event_id=7)
+    assert env["payload"]["plate_box_confidence"] == 0.3756
+    # Forwarded, never judged — KAI-C ships the read AND the doubt; the
+    # writer decides. (Same division of labour as plate_box.)
+    assert env["payload"]["plate_text"] == "ABC1234"
+
+
+def test_plate_box_confidence_is_omitted_when_absent_or_malformed():
+    """Additive-only, like plate_box: an OCR-only adapter that never
+    localises must not start looking like a low-confidence one."""
+    _, env = normalise_completion("fast_plate_ocr", PLATE_RESULT,
+                                  camera_id="cam1", correlation_id=None,
+                                  event_id=7)
+    assert "plate_box_confidence" not in env["payload"]
+    for bad in ({"found": False}, {"confidence": None},
+                {"confidence": "0.9"}, {"confidence": True}):
+        _, env = normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
+            camera_id="cam1", correlation_id=None, event_id=7)
+        assert "plate_box_confidence" not in env["payload"], bad

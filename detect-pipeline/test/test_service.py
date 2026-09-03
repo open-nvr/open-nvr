@@ -865,3 +865,76 @@ def test_decode_config_metric_reports_the_hwaccel_actually_used(monkeypatch):
         "the metric must report the EFFECTIVE backend after a downgrade — "
         "reporting the requested 'vaapi' hides the fallback it exists to show"
     )
+
+
+# ── scene evidence knobs ────────────────────────────────────────────
+
+
+def _tracker_from_a_worker_run(monkeypatch):
+    """Start a worker on fake frames and hand back the Tracker it built."""
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as svc
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+
+    built = []
+    real_tracker = svc.Tracker
+
+    def spy(*a, **kw):
+        tk = real_tracker(*a, **kw)
+        built.append(tk)
+        return tk
+
+    monkeypatch.setattr(svc, "Tracker", spy)
+
+    sink = _FakeSink()
+    worker = CameraWorker(
+        _spec("cam-front"), sink,
+        detector=_MotionAllDetector(), frame_source=_FramesSource(4),
+    )
+    worker.start()
+    for _ in range(50):
+        if built and len(sink.events) >= 4:
+            break
+        time.sleep(0.02)
+    worker.stop()
+    assert built, "the worker never built a Tracker"
+    return built[0]
+
+
+def test_scene_evidence_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("DETECT_SCENE_EVIDENCE", raising=False)
+    monkeypatch.delenv("DETECT_SCENE_MAX_PX", raising=False)
+    monkeypatch.delenv("DETECT_SCENE_JPEG_QUALITY", raising=False)
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert tk.retain_scene is True
+    assert (tk.scene_max_px, tk.scene_quality) == (1280, 78)
+
+
+def test_scene_evidence_can_be_switched_off(monkeypatch):
+    """A full rollback must be an env change on the pipeline, with no core
+    redeploy: the column simply stays NULL and the dialog falls back."""
+    monkeypatch.setenv("DETECT_SCENE_EVIDENCE", "false")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert tk.retain_scene is False
+
+
+def test_scene_knobs_are_clamped_not_merely_parsed(monkeypatch):
+    """The clamp is a guard, not tidiness: an absurd setting would otherwise
+    produce a payload core rejects for size, silently losing every scene."""
+    monkeypatch.setenv("DETECT_SCENE_MAX_PX", "99999")
+    monkeypatch.setenv("DETECT_SCENE_JPEG_QUALITY", "100")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert (tk.scene_max_px, tk.scene_quality) == (1920, 95)
+
+    monkeypatch.setenv("DETECT_SCENE_MAX_PX", "16")
+    monkeypatch.setenv("DETECT_SCENE_JPEG_QUALITY", "1")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert (tk.scene_max_px, tk.scene_quality) == (320, 40)

@@ -171,3 +171,48 @@ def test_explicit_global_cap_is_still_honoured():
             clk.t += 1
             s.put(f"cam{cam}", f"t{t}", [f"{cam}-{t}"])
     assert len(s) <= 10
+
+
+# ── scene encoding (needs cv2 + numpy; the store above does not) ─────
+
+
+def _noise(h, w):
+    import numpy as np
+    rng = np.random.default_rng(7)
+    return rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+
+
+def _decoded_shape(jpeg: bytes):
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    return img.shape[:2]
+
+
+def test_encode_scene_downscales_the_long_edge():
+    """The scene is context, not the record: 1280px is already 2x the dialog
+    it is shown in, and it keeps the file well under core's 2 MiB cap."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(1080, 1920), max_px=1280)
+    assert _decoded_shape(jpeg) == (720, 1280)
+
+
+def test_encode_scene_never_upscales():
+    """A 640x360 substream frame is stored as-is rather than interpolated
+    into a bigger lie about how much detail the camera gave us."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(360, 640), max_px=1280)
+    assert _decoded_shape(jpeg) == (360, 640)
+
+
+def test_encode_scene_stays_under_the_core_evidence_cap():
+    """The worker clamps the knobs to 1920px / q95, and that is NOT enough on
+    its own: noise at the ceiling measures 2.4 MB, over core's 2 MiB cap. The
+    encoder must degrade quality until it fits, because a rejected scene is
+    one the operator never sees."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(1080, 1920), max_px=1920, quality=95)
+    assert len(jpeg) < 2 * 1024 * 1024, f"{len(jpeg)} bytes at the clamp ceiling"

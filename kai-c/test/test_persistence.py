@@ -440,3 +440,42 @@ async def test_poll_loop_drives_the_retry(tmp_path: Path, audit):
             "poll loop never retried the deferred registration")
     finally:
         await reg.aclose()
+
+
+@pytest.mark.asyncio
+async def test_seed_registration_does_not_wipe_pending_receipts(
+    tmp_path: Path, audit,
+):
+    """The real boot order: ``main.py`` runs the ADAPTER_REGISTRY seed
+    loop BEFORE ``restore_persisted()``. A seed registration must not
+    truncate the receipt file on its way through — the runtime entries
+    are still on disk and nothing has read them yet.
+
+    Regression: ``_persist_locked`` serialises only in-memory
+    ``source == "runtime"`` adapters, of which there are none that
+    early, so the seed's persist wrote ``{"adapters": []}`` over the
+    receipts and ``restore_persisted`` then read the file it had just
+    emptied. ``ADAPTER_REGISTRY`` always holds at least ``default``, so
+    this fired on EVERY boot — silently unregistering fast_plate_ocr and
+    404-ing every plate read (the exact #371 symptom the receipt file
+    was added to fix).
+    """
+    stub = _StubAdapter(url="http://127.0.0.1:9100",
+                        capabilities=_base_caps())
+    store = _store(tmp_path)
+    store.save([{"name": "fast_plate_ocr", "url": stub.url,
+                 "granted_permissions": []}])
+
+    reg = _registry_for(stub, audit, store)
+    # Seed loop first, exactly as the lifespan handler orders it.
+    await reg.register("default", stub.url, source="seed")
+    assert [e["name"] for e in store.load()] == ["fast_plate_ocr"], (
+        "the seed registration truncated the receipt file"
+    )
+
+    # …and the restore that follows still finds it.
+    queued = reg.restore_persisted()
+    assert [p.name for p in queued] == ["fast_plate_ocr"]
+    await reg.retry_pending()
+    assert reg.get("fast_plate_ocr") is not None
+    await reg.aclose()

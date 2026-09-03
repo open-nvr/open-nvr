@@ -10,6 +10,7 @@ passwords or requiring an operator login token.
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 import logging
 import secrets
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.database import get_db
+from core.database import get_db, release
 from models import Camera, SecuritySetting
 from services.stream_service import _build_stream_name
 
@@ -61,6 +62,11 @@ class TrackEventIn(BaseModel):
     # base64), most promising first. Enrichment sweeps them in order —
     # several diverse OCR attempts per vehicle instead of one.
     candidate_jpegs_b64: list[str] | None = None
+    # The whole camera frame the best crop came from (JPEG, base64). The
+    # crop answers "what was it"; a 163x187 rectangle of knuckles cannot
+    # answer "where was it and what else was in shot". Optional, and DROPPED
+    # rather than 422'd when oversized or malformed — see the ingest below.
+    scene_jpeg_b64: str | None = None
 
 
 @router.post("/events", status_code=201)
@@ -99,6 +105,32 @@ async def ingest_track_event(
         except (ValueError, binascii.Error) as e:
             raise HTTPException(status_code=422, detail=f"bad evidence: {e}")
 
+    scene_rel = None
+    if payload.scene_jpeg_b64:
+        # Aliased import on purpose: the `import base64` above is INSIDE the
+        # evidence branch, so it binds a function-local that does not exist
+        # on a scene-without-crop payload. The candidate block below dodges
+        # the same trap the same way.
+        import base64 as _b64s
+
+        from services.evidence_store import MAX_EVIDENCE_BYTES as _MAXS
+        from services.evidence_store import save_evidence_jpeg as _save_scene
+
+        # Drop the image, never the visit. The evidence branch above 422s,
+        # which raises BEFORE record_track_visit — correct for the primary
+        # photo, catastrophic for a garnish: one oversized scene frame would
+        # cost the visit its place in history.
+        if len(payload.scene_jpeg_b64) <= (_MAXS * 4) // 3 + 8:
+            try:
+                scene_rel = _save_scene(
+                    _b64s.b64decode(payload.scene_jpeg_b64, validate=True)
+                )
+            except (ValueError, binascii.Error):
+                logger.debug(
+                    "scene evidence rejected for camera %s", payload.camera_id,
+                    exc_info=True,
+                )
+
     from sqlalchemy.exc import IntegrityError
 
     from services.timeline_service import record_track_visit
@@ -114,6 +146,7 @@ async def ingest_track_event(
             track_id=payload.track_id,
             stationary=payload.stationary,
             evidence_path=evidence_rel,
+            scene_evidence_path=scene_rel,
         )
     except IntegrityError:
         # Retry raced an earlier success — the visit already exists
@@ -130,7 +163,11 @@ async def ingest_track_event(
             )
             .first()
         )
-        return {"id": existing.id if existing else None, "duplicate": True}
+        duplicate_id = existing.id if existing else None
+        # Same reason as the release below: this early return still has a
+        # background task ahead of it in the exit stack.
+        release(db)
+        return {"id": duplicate_id, "duplicate": True}
     # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
     # frame (background — never on the ingest path). Best-effort: no adapter,
     # no plate, no problem.
@@ -155,6 +192,7 @@ async def ingest_track_event(
         from services.plate_attempt_cache import cache as _attempt_cache
         from services.plate_enrichment import (
             dedup_window_s, is_duplicate_sighting, note_sighting,
+            stamp_plate_evidence,
         )
 
         pending = _attempt_cache.claim(
@@ -174,6 +212,8 @@ async def ingest_track_event(
                 )
             else:
                 row.plate_text = plate
+                stamp_plate_evidence(row, pending.plate_evidence_path,
+                                     frame_path=pending.plate_frame_path)
                 note_sighting(payload.camera_id, plate)
                 db.commit()
                 logger.info(
@@ -207,7 +247,17 @@ async def ingest_track_event(
         settings.events_plate_enrichment,
     ):
         background.add_task(enrich_event_plate, row.id, candidates or None)
-    return {"id": row.id, "evidence_path": evidence_rel}
+    # Read the id BEFORE releasing: record_track_visit committed, which
+    # expires every attribute, so a post-close row.id would try to refresh a
+    # detached instance.
+    event_id = row.id
+    # Starlette runs BackgroundTasks inside Response.__call__ — still inside
+    # FastAPI's request exit stack — so without this the connection is pinned
+    # for the WHOLE OCR sweep queued above. At ~1 visit/sec that alone
+    # exhausted the pool, and plate reads stopped while events kept flowing.
+    release(db)
+    return {"id": event_id, "evidence_path": evidence_rel,
+            "scene_evidence_path": scene_rel}
 
 
 class PlateAttemptIn(BaseModel):
@@ -236,15 +286,34 @@ async def run_early_plate_attempt(
     read = await _ocr_jpeg(jpeg, f"cam{camera_id}")
     if read is None or not read.get("accepted"):
         return
+    # #382: this crop is the image the plate was READ from, and it is
+    # gone the moment this task returns. Store it ONCE here and carry
+    # the path — both the claim below and the ingest-time claim need it,
+    # and content-addressing makes a repeat store free anyway.
+    # #385: narrowed to the plate the adapter localised in THESE bytes;
+    # the attempt itself is a vehicle crop.
+    from services.plate_enrichment import store_plate_images
+
+    # Threaded for the same reason as the ingest sweep: a cv2 decode plus
+    # a file write has no business on the event loop. Both images in one
+    # hop — the uncropped attempt is the only picture guaranteed to show
+    # the car this plate came off, when a merged track makes the visit's
+    # own best frame a different vehicle.
+    plate_crop_rel, plate_frame_rel = await asyncio.to_thread(
+        store_plate_images, jpeg, read.get("box"))
     _attempt_cache.put(
         camera_id, track_id,
         plate=read["plate"], confidence=read["confidence"], attempt_ts=ts,
+        plate_evidence_path=plate_crop_rel,
+        plate_frame_path=plate_frame_rel,
     )
     # Duplicate sighting (fragmented track re-reading the car we just
     # read): still PARK the read — the ingest claim is what lets the
     # visit skip its whole OCR sweep — but skip the race-cover row
     # write; the claim path makes the fold decision with fresher state.
-    from services.plate_enrichment import is_duplicate_sighting, note_sighting
+    from services.plate_enrichment import (
+        is_duplicate_sighting, note_sighting, stamp_plate_evidence,
+    )
 
     if is_duplicate_sighting(camera_id, read["plate"]):
         note_sighting(camera_id, read["plate"])
@@ -276,6 +345,8 @@ async def run_early_plate_attempt(
                 or row.ended_at >= attempt_dt - timedelta(seconds=10)
             ):
                 row.plate_text = read["plate"][:32]
+                stamp_plate_evidence(row, plate_crop_rel,
+                                     frame_path=plate_frame_rel)
                 note_sighting(camera_id, row.plate_text)
                 db.commit()
                 logger.info(
@@ -355,6 +426,13 @@ async def internal_list_events(
                 "stationary": (e.payload or {}).get("stationary"),
                 "plate_text": e.plate_text,
                 "has_evidence": bool(e.evidence_path),
+                # False when the two paths are equal: a frame-filling box
+                # crops to the frame itself, and content-addressing then
+                # makes them ONE file — there is no second image to fetch.
+                "has_scene_evidence": bool(
+                    e.scene_evidence_path
+                    and e.scene_evidence_path != e.evidence_path
+                ),
             }
             for e in rows
         ]
@@ -377,6 +455,31 @@ async def internal_event_evidence(
     if e is None or not e.evidence_path:
         raise HTTPException(status_code=404, detail="no evidence")
     path = resolve_evidence(e.evidence_path)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence missing")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/events/{event_id}/scene-evidence")
+async def internal_event_scene_evidence(
+    event_id: int,
+    _: None = Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The whole frame behind the best crop — a wider look for the VLM path.
+
+    404 when the pipeline sent no scene frame (or the row predates the
+    column); callers fall back to ``/evidence``.
+    """
+    from fastapi.responses import FileResponse
+
+    from models import TimelineEvent
+    from services.evidence_store import resolve_evidence
+
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    if e is None or not e.scene_evidence_path:
+        raise HTTPException(status_code=404, detail="no scene evidence")
+    path = resolve_evidence(e.scene_evidence_path)
     if path is None:
         raise HTTPException(status_code=404, detail="evidence missing")
     return FileResponse(path, media_type="image/jpeg")

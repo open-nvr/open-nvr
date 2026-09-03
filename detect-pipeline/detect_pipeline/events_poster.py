@@ -63,6 +63,14 @@ class Visit:
     # that field followed) so existing POSITIONAL constructions keep
     # their meaning.
     candidate_jpegs: tuple = ()
+    # The WHOLE frame the best crop was taken from (JPEG). The visit's
+    # second evidence image: ``jpeg`` is the subject, this is the scene it
+    # was in. Already encoded by the tracker (eagerly, at best-frame update
+    # time — holding the pixels would be 6.2 MB per track), so there is
+    # nothing to do here but carry it. None when DETECT_SCENE_EVIDENCE is
+    # off or the tracker was never fed pixels. Appended LAST, same rule
+    # candidate_jpegs followed, so positional constructions keep meaning.
+    scene_jpeg: bytes | None = None
 
 
 def _core_camera_id(v: Visit) -> int:
@@ -210,6 +218,10 @@ class VisitPoster:
         }
         if v.jpeg:
             body["evidence_jpeg_b64"] = base64.b64encode(v.jpeg).decode("ascii")
+        # Omitted entirely when absent (not sent as null), so a core that
+        # predates the field never sees a key it has no opinion about.
+        if v.scene_jpeg:
+            body["scene_jpeg_b64"] = base64.b64encode(v.scene_jpeg).decode("ascii")
         if v.candidate_jpegs:
             body["candidate_jpegs_b64"] = [
                 base64.b64encode(j).decode("ascii") for j in v.candidate_jpegs
@@ -257,7 +269,7 @@ class VisitLifecycle:
                 v = self._live[tr.id] = {
                     "start": now_wall, "label": tr.label, "score": float(tr.score),
                     "stationary": False, "confirmed": False, "crop": None,
-                    "ring": None,
+                    "ring": None, "scene": None,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
@@ -270,6 +282,11 @@ class VisitLifecycle:
             crop = getattr(tr, "best_crop", None)
             if crop is not None:
                 v["crop"] = crop
+            # getattr with a default, like best_crop above: test doubles and
+            # any older tracker simply do not carry the field.
+            scene = getattr(tr, "best_scene_jpeg", None)
+            if scene is not None:
+                v["scene"] = scene
         finished = []
         for tid in [t for t in self._live if t not in current]:
             visit = self._finish(tid, self._live.pop(tid))
@@ -337,4 +354,7 @@ class VisitLifecycle:
             stationary=v["stationary"],
             jpeg=jpeg,
             candidate_jpegs=tuple(candidate_jpegs),
+            # Already bytes — deliberately NOT re-encoded here (unlike crop
+            # and the candidates, which arrive as pixels).
+            scene_jpeg=v.get("scene"),
         )

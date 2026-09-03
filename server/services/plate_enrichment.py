@@ -158,6 +158,103 @@ def plate_box_is_clipped(
     )
 
 
+#: Default floor for the adapter's plate LOCALISATION confidence.
+#: Measured on the install that reported #386: 22 genuine reads scored
+#: 0.853-0.936, while the badge false-positive scored 0.3756. Anything
+#: in that gap separates them; 0.6 sits in the middle of it, closer to
+#: the false positive than to the weakest true read.
+_DETECTION_FLOOR_DEFAULT = 0.6
+
+
+def plate_detection_floor() -> float:
+    """Minimum confidence for the plate localisation behind a read.
+    0 disables the gate entirely.
+
+    Read from the environment on every call, like ``dedup_window_s``:
+    consulted once per OCR attempt, and reading live keeps tests and
+    operators out of import-order traps. An install whose camera angle
+    yields habitually weak-but-correct localisations can lower or
+    disable it without a rebuild.
+    """
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DETECTION_FLOOR_DEFAULT
+    return value if value > 0 else 0.0
+
+
+def detection_confidence_is_weak(
+    confidence: object, *, floor: float | None = None
+) -> bool:
+    """Is this plate localisation too weak to believe? Scalar half of
+    the guard, so the bus consumer can apply it to the forwarded number
+    without inventing a detection dict.
+
+    Unknown input answers False — the same "never invent a rejection"
+    rule the clip guard follows. A missing confidence means the adapter
+    did not say, not that it said something bad.
+    """
+    bar = plate_detection_floor() if floor is None else floor
+    if bar <= 0:
+        return False
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        return False
+    return float(confidence) < bar
+
+
+def plate_detection_is_weak(
+    detection: object, *, floor: float | None = None
+) -> bool:
+    """Did the adapter barely find the plate whose characters it just
+    reported? Then this is not a plate (#386).
+
+    A two-stage chain localises before it reads, and the reader is
+    happy to spell out whatever it is handed: the Audi four-ring badge
+    came back as "C00D" at 0.51 against a 0.45 floor, from a
+    localisation the detector itself scored 0.3756. Read confidence
+    cannot catch that — the characters really are those shapes — and
+    neither can the #378 geometry guard, because a badge sits in the
+    middle of the crop, nowhere near an edge. The detector's own doubt
+    is the signal, and it was being dropped on the floor.
+
+    Aspect ratio is NOT used, though it looks tempting: on the
+    reporting install the badge measured 2.95:1 and genuine plates
+    2.87-3.85:1, so it separates nothing.
+
+    ``attempted is False`` (an OCR-only adapter that never localises)
+    answers False: there is no opinion to judge, and gating on a field
+    such an adapter never sends would silently stop plates.
+    """
+    if not isinstance(detection, dict):
+        return False
+    if detection.get("attempted") is False:
+        return False
+    return detection_confidence_is_weak(detection.get("confidence"),
+                                        floor=floor)
+
+
+def plate_box_of(detection: object) -> tuple[float, float, float, float] | None:
+    """The adapter's plate box as a well-formed tuple, or None.
+
+    One parser for both consumers of the box: the clip guard above, and
+    the evidence crop below (#385). Degenerate boxes (non-numeric,
+    inverted, zero-area) answer None so neither caller has to re-check.
+    """
+    if not isinstance(detection, dict):
+        return None
+    box = detection.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
 def extract_plate(
     response: dict | None, *, image_size: tuple[int, int] | None = None
 ) -> str | None:
@@ -185,6 +282,8 @@ def extract_plate(
     if isinstance(detection, dict) and plate_box_is_clipped(
         detection.get("box"), image_size
     ):
+        return None
+    if plate_detection_is_weak(detection):
         return None
     text = result.get("plate_text")
     if not isinstance(text, str):
@@ -224,6 +323,10 @@ def extract_read(
         detection.get("box"), image_size
     ):
         return None
+    # A weak localisation is not a near miss to be merged, it is a
+    # different object (#386) — drop it outright, like a fragment.
+    if plate_detection_is_weak(detection):
+        return None
     text = result.get("plate_text")
     if not isinstance(text, str):
         return None
@@ -248,6 +351,11 @@ def extract_read(
         "characters": chars if len(chars) == len(text) else None,
         "accepted": result.get("accepted") is not False,
         "floor": float(floor) if floor is not None else None,
+        # The plate's own rectangle inside the crop we OCR'd (#385) —
+        # what the stored evidence is cropped to. In THIS attempt's
+        # pixel space, like the clip-guard box above, so it travels with
+        # the read and is never applied to another frame.
+        "box": plate_box_of(detection),
     }
 
 
@@ -294,6 +402,170 @@ def merge_reads(a: dict | None, b: dict | None) -> dict | None:
 
 #: Hard cap on OCR attempts per visit at ingest — the compute budget.
 MAX_INGEST_ATTEMPTS: int = 4
+
+
+# ── Plate evidence: the crop the read actually came from (#382) ─────
+
+
+#: Context kept around the plate box, as a fraction of the box's longer
+#: side. Enough to show the plate's border and that it is mounted on a
+#: vehicle; not enough to turn the picture back into a car photo.
+_PLATE_CROP_PAD_RATIO = 0.08
+
+#: The crop is a few hundred pixels of small text. Encode it well —
+#: quality is what makes the number readable to the operator who is
+#: double-checking the OCR, and the file is tiny either way.
+_PLATE_CROP_JPEG_QUALITY = 92
+
+
+def crop_to_plate_box(
+    jpeg: bytes | None, box: tuple[float, float, float, float] | None,
+    *, pad_ratio: float = _PLATE_CROP_PAD_RATIO,
+) -> bytes | None:
+    """Cut the plate (plus a little context) out of the frame it was
+    read from; None when that cannot be done.
+
+    The attempts we OCR are VEHICLE crops — Tier-0 tracks cars, not
+    plates — so the frame the read came from is a picture of a car, and
+    storing it whole captions a plate number with an image in which the
+    plate is a handful of pixels (or, at close range, absent: #386's
+    badge false-positive is exactly that failure). The adapter already
+    localises the plate; this narrows the stored evidence to what it
+    found.
+
+    Decoding costs one JPEG per successful read — a per-visit path, and
+    only after OCR has already succeeded. Any failure answers None,
+    which the caller turns into "store nothing".
+    """
+    if not jpeg or box is None:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = box
+        pad = max(2.0, pad_ratio * max(x2 - x1, y2 - y1))
+        # Clamp to the frame: a plate near the crop edge yields a
+        # smaller margin on that side, never an out-of-bounds slice.
+        left, top = max(0, int(x1 - pad)), max(0, int(y1 - pad))
+        right, bottom = min(w, int(x2 + pad) + 1), min(h, int(y2 + pad) + 1)
+        if right - left < 2 or bottom - top < 2:
+            return None
+        ok, buf = cv2.imencode(
+            ".jpg", frame[top:bottom, left:right],
+            [int(cv2.IMWRITE_JPEG_QUALITY), _PLATE_CROP_JPEG_QUALITY],
+        )
+        return bytes(buf.tobytes()) if ok else None
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not crop to the plate box",
+                     exc_info=True)
+        return None
+
+
+def store_plate_crop(
+    jpeg: bytes | None,
+    box: tuple[float, float, float, float] | None = None,
+) -> str | None:
+    """Persist the plate the read came from; return its relative path.
+
+    Separate from the visit's ``evidence_path``, which is the
+    vehicle-best frame — chosen for thumbnail quality and, by
+    construction, usually the WRONG frame for the plate (a car is
+    biggest when closest, which is when its plate leaves the crop).
+
+    ``box`` is the plate's rectangle in ``jpeg``'s own pixel space, as
+    reported by the adapter for THIS attempt. Without a usable one we
+    store nothing (#385): the attempt is a vehicle crop, and saving it
+    here would make the UI drop its "vehicle frame (no separate plate
+    crop stored)" caveat while still showing a car — a caption that
+    lies is worse than one that admits what it has.
+
+    Best-effort: any failure answers None and the caller simply keeps
+    ``plate_evidence_path`` NULL, falling back to the vehicle frame.
+    Evidence storage must never cost us a plate we successfully read.
+
+    SYNC on purpose (a JPEG decode plus a file write), so async callers
+    must hand it to a thread — ``await asyncio.to_thread(...)`` — rather
+    than blocking the event loop every other request shares.
+    """
+    crop = crop_to_plate_box(jpeg, box)
+    if not crop:
+        return None
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        return save_evidence_jpeg(crop)
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not store crop", exc_info=True)
+        return None
+
+
+def store_plate_frame(jpeg: bytes | None) -> str | None:
+    """Persist the WHOLE attempt the plate was read from; path or None.
+
+    ``store_plate_crop`` cuts the plate rectangle out of these bytes and
+    throws the rest away. The rest is the point: it is a crop of the
+    vehicle whose plate this is, at the moment it was read, which is the
+    only image on the row guaranteed to show the right car.
+
+    The visit's own ``evidence_path`` cannot make that promise. A track
+    can span more than one vehicle (association merges a departing car
+    with the arriving one behind it), and the best-thumbnail frame is
+    then a DIFFERENT car from the one the plate came off — the row shows
+    a black Audi captioned with the number of the car before it.
+
+    Best-effort, like every other evidence write: a failure answers None
+    and the row simply falls back.
+    """
+    if not jpeg:
+        return None
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        return save_evidence_jpeg(jpeg)
+    except Exception:  # noqa: BLE001
+        logger.debug("plate evidence: could not store frame", exc_info=True)
+        return None
+
+
+def store_plate_images(
+    jpeg: bytes | None,
+    box: tuple[float, float, float, float] | None = None,
+) -> tuple[str | None, str | None]:
+    """``(plate crop, the frame it was cut from)``, both best-effort.
+
+    One call so the pair costs ONE thread hop: both halves decode or
+    write, and both callers want both. SYNC on purpose for the same
+    reason ``store_plate_crop`` is — hand it to a thread.
+    """
+    return store_plate_crop(jpeg, box), store_plate_frame(jpeg)
+
+
+def stamp_plate_evidence(row, rel_path: str | None, *,
+                         frame_path: str | None = None,
+                         merged: bool = False) -> None:
+    """Record which crop a row's plate was read from, and whether the
+    read was reconstructed from more than one of them.
+
+    ``merged`` rides in the existing ``payload`` JSON rather than a
+    column of its own — it is a display caveat, not queryable state.
+    The dict is UPDATED, never replaced: ``payload`` already carries
+    ``stationary`` for tier0 visits (see ``timeline_service``), and
+    dropping that to record a caption would be a poor trade.
+    """
+    if rel_path:
+        row.plate_evidence_path = rel_path
+    if frame_path:
+        row.plate_frame_path = frame_path
+    if merged:
+        payload = dict(row.payload or {})
+        payload["plate_merged"] = True
+        row.payload = payload
 
 
 # ── Duplicate-sighting dedup ────────────────────────────────────────
@@ -443,90 +715,164 @@ async def enrich_event_plate(
     correct plate. The evidence crop remains the fallback attempt when
     no candidates rode the visit — exactly the old behaviour.
 
-    Opens its own DB session (the request's session is gone by the time
-    a background task runs). Every failure path is a debug/warning log
-    and a clean return — never an exception escaping the task runner.
+    Runs in three phases — READ, then OCR with NO session held, then
+    REOPEN and write. The middle phase can take a minute (up to
+    MAX_INGEST_ATTEMPTS attempts, each waiting on _OCR_CONCURRENCY and
+    then on a 15s HTTP timeout), and holding a connection through it is
+    what exhausted core's pool: at roughly one vehicle per second, tasks
+    merely QUEUED on the semaphore pinned every connection there was,
+    and plate reads stopped while events kept flowing.
+
+    The cost of letting go is a race — see phase 3, which re-reads the
+    row and lets the FIRST writer win. Every failure path is a
+    debug/warning log and a clean return; an exception must never escape
+    the task runner.
     """
     from core.database import SessionLocal
     from models import TimelineEvent
     from services.evidence_store import resolve_evidence
 
-    db = SessionLocal()
     try:
-        row = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
-        if (
-            row is None
-            or row.plate_text            # already enriched (early attempt won)
-            or (row.label or "") not in VEHICLE_LABELS
-        ):
-            return
+        # ── phase 1: read what the sweep needs, then LET GO ──────────
+        # Everything the OCR loop uses is copied out as a plain scalar:
+        # past the close the row is DETACHED, so touching it again would
+        # re-query rather than quietly read stale pixels.
+        db = SessionLocal()
+        try:
+            row = db.query(TimelineEvent).filter(
+                TimelineEvent.id == event_id).first()
+            if (
+                row is None
+                or row.plate_text        # already enriched (early attempt won)
+                or (row.label or "") not in VEHICLE_LABELS
+            ):
+                return
+            camera_id = int(row.camera_id)
+            evidence_path = row.evidence_path
+        finally:
+            db.close()
 
         # Attempt list: candidates best-first; the evidence crop as the
         # sole attempt when none were shipped (pre-multi-frame producers,
         # non-LPR cameras).
         attempts: list[bytes] = list(candidate_jpegs or [])[:MAX_INGEST_ATTEMPTS]
         if not attempts:
-            if not row.evidence_path:
+            if not evidence_path:
                 return
-            path = resolve_evidence(row.evidence_path)
+            path = resolve_evidence(evidence_path)
             if path is None:
                 return
-            attempts = [path.read_bytes()]
+            # Off the loop: a full-frame read is blocking file I/O on the
+            # same loop every other request is served from.
+            attempts = [await _asyncio.to_thread(path.read_bytes)]
 
         # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
         # callers; "3" != "cam3" would silently drop consumer-side scoping.
-        camera_handle = f"cam{row.camera_id}"
-        rejects: list[dict] = []
+        camera_handle = f"cam{camera_id}"
+        # Each read is kept WITH the crop it came from (#382): the
+        # winning crop is the only image that actually shows this plate,
+        # and it is discarded the moment this function returns unless we
+        # persist it here.
+        rejects: list[tuple[dict, bytes]] = []
         winner: dict | None = None
+        winner_jpeg: bytes | None = None
+        winner_box: tuple[float, float, float, float] | None = None
+        was_merged = False
         for jpeg in attempts:
-            read = await _ocr_jpeg(jpeg, camera_handle, event_id=int(row.id))
+            read = await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)
             if read is None:
                 continue
             if read["accepted"]:
-                winner = read
+                winner, winner_jpeg = read, jpeg
+                winner_box = read.get("box")
                 break                    # early exit — budget saved
             # Character-consensus with every earlier reject: two near
             # misses of the same plate often reconstruct the truth.
-            for prev in rejects:
+            for prev, prev_jpeg in rejects:
                 merged = merge_reads(prev, read)
                 if merged is not None and merged["accepted"]:
-                    winner = merged
+                    winner, was_merged = merged, True
+                    # A merged plate appears WHOLE in neither crop. Keep
+                    # the more confident of the two contributors — the
+                    # closest thing to a photo of this read — and label
+                    # the row so the UI never passes it off as a clean
+                    # single-frame read. The box travels with the crop it
+                    # was measured in: the contributors are different
+                    # frames, so the loser's box would cut the wrong
+                    # rectangle out of the winner's pixels (#385).
+                    keep_prev = prev["confidence"] >= read["confidence"]
+                    winner_jpeg = prev_jpeg if keep_prev else jpeg
+                    winner_box = (prev if keep_prev else read).get("box")
                     break
             if winner is not None:
                 break
-            rejects.append(read)
+            rejects.append((read, jpeg))
 
         if winner is None:
             return                       # honest non-read beats a guess
         plate = winner["plate"][:32]
-        if is_duplicate_sighting(row.camera_id, plate):
+        if is_duplicate_sighting(camera_id, plate):
             # Track fragmentation: this "new" vehicle is the car we just
             # read. Fold the sighting — the visit row stays (it is a
             # real detection), the plate is not repeated, and the sweep
             # stops HERE: identity is established, so any remaining
             # candidates would be pure waste.
-            note_sighting(row.camera_id, plate)
+            note_sighting(camera_id, plate)
             logger.info(
                 "plate dedup: event %s reads %s — seen on cam %s within "
                 "%.0fs, sighting folded (no plate written)",
-                event_id, plate, row.camera_id, dedup_window_s(),
+                event_id, plate, camera_id, dedup_window_s(),
             )
             return
-        row.plate_text = plate
-        note_sighting(row.camera_id, plate)
-        db.commit()
+        # Off the event loop: the crop decodes a full frame through cv2
+        # (~15ms on a 1080x720 attempt, measured) and then writes a file.
+        # Small per read, but this task runs once per vehicle on a busy
+        # camera, and everything else core serves shares this loop.
+        # Deliberately BEFORE the reopen, so no session is held across it.
+        crop_rel, frame_rel = await _asyncio.to_thread(
+            store_plate_images, winner_jpeg, winner_box)
+
+        # ── phase 3: reopen and write ───────────────────────────────
+        # The sweep was away from the DB for as long as the OCR took, so
+        # nothing learned in phase 1 can be trusted. Re-read.
+        db = SessionLocal()
+        try:
+            row = db.query(TimelineEvent).filter(
+                TimelineEvent.id == event_id).first()
+            if row is None:
+                return                   # retention swept it mid-sweep
+            if row.plate_text:
+                # An early attempt or the ingest claim won while we were
+                # in OCR. FIRST WRITER WINS: their read came off a frame
+                # we no longer hold, so we cannot prove ours is the same
+                # vehicle, and overwriting would trade a provable pairing
+                # for an unprovable one.
+                logger.info(
+                    "plate enrichment: event %s already read as %s while OCR "
+                    "was in flight — sweep result %s dropped",
+                    event_id, row.plate_text, plate,
+                )
+                return
+            if is_duplicate_sighting(camera_id, plate):
+                # Re-checked here too: another fragment of the same pass
+                # can have been written during the OCR window.
+                note_sighting(camera_id, plate)
+                return
+            row.plate_text = plate
+            stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
+                                 merged=was_merged)
+            note_sighting(camera_id, plate)
+            db.commit()
+        finally:
+            db.close()
         logger.info(
             "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
-            event_id, row.plate_text, winner["confidence"],
-            len(rejects) + 1,
-            ", merged" if winner.get("characters") and rejects
-            and winner["plate"] not in [r["plate"] for r in rejects] else "",
+            event_id, plate, winner["confidence"],
+            len(rejects) + 1, ", merged" if was_merged else "",
         )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
                        exc_info=True)
-    finally:
-        db.close()
 
 
 def wants_plate(label: str | None, evidence_path: str | None,

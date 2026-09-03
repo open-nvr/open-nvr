@@ -152,3 +152,111 @@ def test_best_crop_of_a_full_frame_box_is_the_frame():
     frame = np.zeros((480, 640, 3), np.uint8)
     crop = _crop_bgr(frame, (0, 0, 640, 480))
     assert crop.shape[:2] == (480, 640)
+
+
+# ── scene evidence ──────────────────────────────────────────────────
+#
+# The scene is the WHOLE frame behind best_crop, encoded eagerly at
+# best-frame update time. "Eagerly" is the entire design: retaining the
+# BGR pixels instead would be 6.2 MB x DETECT_MAX_TRACKS per camera, so
+# these tests pin the memory and CPU invariants, not just the happy path.
+
+
+def _frame(h=480, w=640):
+    import numpy as np
+    return np.zeros((h, w, 3), np.uint8)
+
+
+def _scene_tracker(monkeypatch, encode=None, **kw):
+    """Tracker with scene retention on and a counting fake encoder."""
+    import detect_pipeline.bestframe as bf
+    calls = {"n": 0}
+
+    def enc(bgr, *, max_px=1280, quality=78):
+        calls["n"] += 1
+        if encode is not None:
+            return encode(bgr)
+        return b"SCENEJPEG"
+
+    monkeypatch.setattr(bf, "encode_scene_jpeg", enc)
+    tk = Tracker(FRAME, _cfg(**kw))
+    tk.retain_scene = True
+    return tk, calls
+
+
+def test_scene_is_encoded_once_per_frame_however_many_tracks_peak(monkeypatch):
+    """Fifty tracks peaking on one frame must cost ONE imencode, not fifty —
+    and must SHARE the bytes, not hold fifty copies of the same image."""
+    tk, calls = _scene_tracker(monkeypatch)
+    dets = [
+        Detection("person", (x, 100, x + 60, 300), 0.8)
+        for x in (100, 220, 340, 460, 580)
+    ]
+    tracks = tk.update(dets, _frame())
+    assert len(tracks) == 5
+    assert calls["n"] == 1, f"encoded {calls['n']} times for one frame"
+    first = tracks[0].best_scene_jpeg
+    assert first is not None
+    assert all(t.best_scene_jpeg is first for t in tracks), "bytes not shared"
+
+
+def test_scene_frame_is_not_retained_between_updates(monkeypatch):
+    """The memo holds a reference to a 6 MB array; if update() leaked it, a
+    24/7 camera would keep one frame alive forever for nothing."""
+    tk, _calls = _scene_tracker(monkeypatch)
+    tk.update([Detection("person", (100, 100, 160, 300), 0.8)], _frame())
+    assert tk._scene_bgr is None
+    assert tk._scene_jpeg is None and tk._scene_done is False
+
+
+def test_scene_only_moves_when_the_best_crop_does(monkeypatch):
+    """The two images must describe the SAME frame. A later frame that loses
+    is_better_thumbnail updates neither — and costs no encode."""
+    tk, calls = _scene_tracker(monkeypatch)
+    big = Detection("person", (100, 100, 300, 600), 0.9)
+    tk.update([big], _frame())
+    assert calls["n"] == 1
+    kept = tk.tracks[0].best_scene_jpeg
+    # Same track, smaller + lower score: not a better thumbnail.
+    tk.update([Detection("person", (105, 105, 200, 400), 0.6)], _frame())
+    assert tk.tracks[0].best_scene_jpeg is kept
+    assert calls["n"] == 1, "encoded for a frame that was not the best"
+
+
+def test_scene_retention_is_off_by_default():
+    """Every existing caller and test pays one boolean, never an encode."""
+    tk = Tracker(FRAME, _cfg())
+    tk.update([Detection("person", (100, 100, 160, 300), 0.8)], _frame())
+    tr = tk.tracks[0]
+    assert tr.best_crop is not None                 # crop still retained
+    assert tr.best_scene_jpeg is None
+
+
+def test_a_failed_scene_encode_costs_one_attempt_and_never_the_crop(monkeypatch):
+    """A bad frame must not cost the visit its evidence photo, and must not
+    be retried once per track — the failure itself is memoised."""
+    def boom(_bgr):
+        raise RuntimeError("cv2 said no")
+
+    tk, calls = _scene_tracker(monkeypatch, encode=boom)
+    dets = [
+        Detection("person", (x, 100, x + 60, 300), 0.8)
+        for x in (100, 220, 340)
+    ]
+    tracks = tk.update(dets, _frame())
+    assert all(t.best_crop is not None for t in tracks)
+    assert all(t.best_scene_jpeg is None for t in tracks)
+    assert calls["n"] == 1, "a failed encode was retried per track"
+
+
+def test_plate_candidates_stay_box_sized_with_scene_retention_on(monkeypatch):
+    """The scene must never reach the OCR ring: a whole-frame candidate is a
+    plate a few pixels tall, which would quietly wreck LPR recall."""
+    tk, _calls = _scene_tracker(monkeypatch)
+    tk.retain_plate_candidates = True
+    frame = _frame(1080, 1920)
+    tk.update([Detection("car", (800, 400, 1000, 700), 0.9)], frame)
+    ring = tk.tracks[0].plate_ring
+    assert ring is not None
+    for cand in ring.ranked():
+        assert cand.crop.shape[:2] != frame.shape[:2], "candidate is the whole frame"
