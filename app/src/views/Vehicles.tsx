@@ -63,10 +63,11 @@ type PlateEvent = {
   // independent — a row can carry a crop and no frame.
   has_plate_evidence?: boolean
   plate_evidence_url?: string | null
-  // The whole frame behind the vehicle crop. Independent of the two
-  // flags above — the server sets it false when the scene and the crop
-  // content-address to the same file, i.e. when there is nothing wider
-  // to show. NULL/false on every read stored before Tier-0 sent scenes.
+  // The whole frame behind the vehicle crop. Still served, and kept here
+  // so the response shape stays documented, but NOTHING on this page
+  // renders it: the scene is the visit's best-thumbnail moment, which on
+  // a merged track belongs to a different car than the plate. Use
+  // has_plate_frame for anything an operator will act on.
   has_scene_evidence?: boolean
   scene_evidence_url?: string | null
   // The frame the plate crop was cut from. The only image on the row
@@ -108,15 +109,6 @@ function plateCropSource(e: PlateEvent) {
   }
 }
 
-/** The whole camera frame — context: what the camera actually saw. Only
- *  meaningful when ``has_scene_evidence``. */
-function sceneFrameSource(e: PlateEvent) {
-  return {
-    queryKey: ['scene-evidence', e.id],
-    fetchBlob: () => apiService.getEventSceneEvidence(e.id),
-  }
-}
-
 /** The frame the plate crop came from — proof: WHICH car. */
 function plateFrameSource(e: PlateEvent) {
   return {
@@ -139,7 +131,6 @@ function plateFrameSource(e: PlateEvent) {
 // plate crop alongside for anyone checking.
 function rowThumbImage(e: PlateEvent) {
   if (e.has_plate_frame) return plateFrameSource(e)
-  if (e.has_scene_evidence) return sceneFrameSource(e)
   return vehicleFrameSource(e)
 }
 
@@ -1228,18 +1219,22 @@ function RowThumb({ e, plate, onOpen }: {
 
 // ── Evidence preview ───────────────────────────────────
 
-/** One read, shown the way an operator reads it: the scene first.
+/** One read, shown the way an operator reads it.
  *
- *  The stage is the WHOLE camera frame (#387 follow-up) — /evidence is a
- *  crop of the detection box plus a quarter-box margin, which keeps the
- *  subject dominant and is exactly why it cannot answer "what lane, whose
- *  gate, next to what". The plate crop is the proof the number was read
- *  off that moment, so it rides ON the scene as a card rather than
- *  competing with it for the 85vh budget the stacked layout fought over.
+ *  The stage is the frame the plate was READ from — the whole frame, so
+ *  it still answers "what lane, whose gate, next to what", but of the
+ *  car this number actually came off. The plate crop is the proof the
+ *  number was read off that moment, so it rides ON the stage as a card
+ *  rather than competing with it for the 85vh budget the stacked layout
+ *  fought over.
  *
- *  Older reads carry no scene (the bytes were never stored, so there is
- *  nothing to backfill): the stage falls back to the vehicle crop and the
- *  Scene/Vehicle toggle is not offered.
+ *  There is deliberately no second view. The scene (/scene-evidence) is
+ *  the visit's best-thumbnail moment, and track association merges a
+ *  departing car with the one behind it — so on a merged visit the scene
+ *  shows a different vehicle under this row's number. A caption saying
+ *  so was not enough: the picture is more convincing than the warning.
+ *  Older reads that predate plate_frame_path fall back to the vehicle
+ *  crop, and say so in the caveats.
  */
 function EvidenceDialog({
   e, cameraLabel, onClose,
@@ -1249,42 +1244,31 @@ function EvidenceDialog({
   onClose: () => void
 }) {
   const plate = (e.plate_text ?? '').toUpperCase()
-  const hasScene = !!e.has_scene_evidence
   const hasRead = !!e.has_plate_frame
-  const hasFrame = hasRead || hasScene || !!e.has_evidence
-  // Default to the frame the plate was READ from, because it is the
-  // only one that cannot be a different car. Scene is the wide look;
-  // the vehicle crop is just a tighter cut of the same moment as the
-  // scene, so it earns no button of its own — it is only ever the
-  // fallback for rows that predate the other two.
-  const [stage, setStage] = useState<'read' | 'scene'>(hasRead ? 'read' : 'scene')
+  const hasFrame = hasRead || !!e.has_evidence
   // Hover handles the mouse; this handles touch (where hover does not
   // exist) and the keyboard, which is why the card is a real <button>.
   const [zoomed, setZoomed] = useState(false)
-  const showRead = hasRead && stage === 'read'
-  const showScene = !showRead && hasScene
   const seen = e.started_at ? new Date(e.started_at).toLocaleString() : null
-  const stageSource = showRead
-    ? plateFrameSource(e)
-    : showScene ? sceneFrameSource(e) : vehicleFrameSource(e)
+  // One stage, no chooser: the frame the plate was READ from. The scene
+  // is the visit's best-thumbnail moment, which a merged track can take
+  // off a DIFFERENT car, so offering it just gave the operator a
+  // convincing picture of the wrong vehicle. The vehicle crop is the
+  // fallback for rows stored before plate_frame_path existed.
+  const stageSource = hasRead ? plateFrameSource(e) : vehicleFrameSource(e)
 
   const caveats = [
     e.payload?.plate_merged &&
       'read reconstructed from more than one frame — the crop shown is the clearer of them',
-    // The wide shot is the visit's best-thumbnail moment, which is not
-    // always the same vehicle the plate came off. Say so rather than
-    // letting the operator assume the big picture is the match.
-    showScene && hasRead &&
-      'the scene is the visit’s best frame — switch to Read frame for the car this number came off',
     // Says WHY an old read looks different from a new one, which is
     // otherwise indistinguishable from the feature being broken.
-    !hasRead && !hasScene && e.has_evidence &&
+    !hasRead && e.has_evidence &&
       'no full frame stored for this read — showing the vehicle crop',
     !e.has_plate_evidence && e.has_evidence &&
       'no separate plate crop stored',
   ].filter(Boolean) as string[]
 
-  // Anchored top-left so the card grows OVER the scene without moving:
+  // Anchored top-left so the card grows OVER the stage without moving:
   // a centred transform would slide the plate out from under the cursor.
   // 176px x 2.2 = ~390px, comfortably inside the stage, and the figure's
   // overflow-hidden clips it rather than bursting the dialog on a short
@@ -1346,36 +1330,14 @@ function EvidenceDialog({
             <AuthedImage
               {...stageSource}
               alt={
-                showRead
+                hasRead
                   ? `the frame ${plate} was read from`
-                  : showScene
-                    ? `camera frame for ${plate}`
-                    : `vehicle frame for ${plate}`
+                  : `vehicle frame for ${plate}`
               }
               className="h-full w-full object-contain"
             />
           </div>
           {card}
-          {/* Only when there are genuinely two pictures to choose
-              between. Proof vs context — not two crops of one moment. */}
-          {hasRead && hasScene && (
-            <div className="absolute top-2 right-2 z-20 flex border border-white/20 bg-black/65 backdrop-blur-sm text-[11px] leading-4">
-              {(['read', 'scene'] as const).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setStage(s)}
-                  className={`px-2 py-1 ${
-                    stage === s
-                      ? 'bg-white/20 text-white'
-                      : 'text-white/60 hover:text-white'
-                  }`}
-                >
-                  {s === 'read' ? 'Read frame' : 'Scene'}
-                </button>
-              ))}
-            </div>
-          )}
         </figure>
       ) : (
         // No frame of any kind — a plate crop with nothing to pin it on.
