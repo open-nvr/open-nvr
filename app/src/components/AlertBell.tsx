@@ -96,14 +96,27 @@ function playSiren() {
   tone(880, 0.4, 0.35, 0.1)
 }
 
-/** Resume the shared AudioContext on the first user gesture so a siren
- *  armed before any click becomes audible the moment one happens. */
+/** Direct, in-gesture sound check (exported for the Alarms page).
+ *  Runs inside the caller's click handler, so the browser cannot block
+ *  it — separating "is audio working at all" from the alert chain. */
+export function playTestSound() {
+  const c = audioCtx()
+  if (c) void c.resume()
+  playSiren()
+}
+
+/** Resume the shared AudioContext on user gestures until it is RUNNING.
+ *  Deliberately not one-shot: a first gesture that fails to unlock
+ *  (keyboard activation quirks, a still-suspended resume) must not burn
+ *  the only chance — every further gesture retries until audio works. */
 function useAudioUnlock() {
   useEffect(() => {
     const unlock = () => {
-      audioCtx()
-      window.removeEventListener('pointerdown', unlock)
-      window.removeEventListener('keydown', unlock)
+      const c = audioCtx()          // creates + resumes as needed
+      if (c && c.state === 'running') {
+        window.removeEventListener('pointerdown', unlock)
+        window.removeEventListener('keydown', unlock)
+      }
     }
     window.addEventListener('pointerdown', unlock)
     window.addEventListener('keydown', unlock)
@@ -112,6 +125,28 @@ function useAudioUnlock() {
       window.removeEventListener('keydown', unlock)
     }
   }, [])
+}
+
+/** Is the audio engine actually able to sound right now? Re-checked on
+ *  an interval while relevant, so the UI can SAY "sound blocked" instead
+ *  of failing silently — the failure mode that looks exactly like
+ *  'alarms don't work'. */
+function useAudioBlocked(active: boolean): boolean {
+  const [blocked, setBlocked] = useState(false)
+  useEffect(() => {
+    if (!active) {
+      setBlocked(false)
+      return
+    }
+    const check = () => {
+      const c = audioCtx()
+      setBlocked(!c || c.state !== 'running')
+    }
+    check()
+    const t = window.setInterval(check, 1000)
+    return () => window.clearInterval(t)
+  }, [active])
+  return blocked
 }
 
 function timeAgo(iso: string | null): string {
@@ -198,6 +233,13 @@ export function AlertBell() {
     () => !!ring && alerts.some((a) => ring[a.severity] === 'continuous'),
     [alerts, ring],
   )
+  const audioBlocked = useAudioBlocked(sirenActive || unackedCount > 0)
+  const enableSound = () => {
+    const c = audioCtx()
+    if (c) void c.resume()
+    if (sirenActive) playSiren()
+    else playPing()               // audible confirmation either way
+  }
   useEffect(() => {
     if (!sirenActive) return
     playSiren()
@@ -218,7 +260,9 @@ export function AlertBell() {
         title="Alerts"
       >
         <Bell size={14} />
-        <span className="hidden md:inline">Alerts</span>
+        <span className="hidden md:inline">
+          Alerts{audioBlocked ? ' 🔇' : ''}
+        </span>
         {unackedCount > 0 && (
           <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] leading-4 text-center normal-case">
             {unackedCount > 99 ? '99+' : unackedCount}
@@ -228,6 +272,15 @@ export function AlertBell() {
 
       {open && (
         <div className="absolute right-0 mt-1 w-96 max-w-[90vw] bg-[var(--panel)] border border-[var(--border)] text-sm z-50 normal-case tracking-normal shadow-lg">
+          {audioBlocked && (
+            <button
+              className="w-full text-left px-3 py-2 bg-yellow-600 text-black text-[12px] font-medium"
+              onClick={enableSound}
+            >
+              🔇 Alarm sound is blocked by the browser — click here to
+              enable it
+            </button>
+          )}
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
             <span className="font-semibold">
               Alerts{unackedCount ? ` (${unackedCount})` : ''}

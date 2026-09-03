@@ -20,6 +20,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellRing, CheckCheck, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { playTestSound } from '../components/AlertBell'
 import { api } from '../lib/api'
 import {
   alertsInboxService,
@@ -118,6 +119,16 @@ export function Alarms() {
           <div className="text-[12px] text-[var(--text-dim)]">
             none = badge only · ping = one chime on arrival · continuous =
             rings in every open browser until acknowledged
+          </div>
+          <button
+            className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)] text-sm"
+            onClick={playTestSound}
+          >
+            🔊 Play test sound
+          </button>
+          <div className="text-[11px] text-[var(--text-dim)]">
+            Hear nothing? Check the tab isn't muted and system volume is
+            up — this button bypasses every other layer.
           </div>
           {ring && (
             <div className="grid grid-cols-2 gap-2 text-sm">
