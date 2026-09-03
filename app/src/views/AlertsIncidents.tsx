@@ -21,8 +21,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { apiService } from '../lib/apiService'
 import { useSystemAlerts, type SystemAlertEvent } from '../hooks/useCameraStatus'
-import { useMutation, useQuery as useRQ, useQueryClient } from '@tanstack/react-query'
-import { alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
+import { Alarms } from './Alarms'
 
 type EveAlert = any
 
@@ -41,8 +40,11 @@ export function AlertsIncidents() {
   // 'network' (Suricata IDS, the original view — default so existing deep
   // links keep working) or 'system' (host/recording alerts).
   const raw = query.get('source')
-  const source: 'network' | 'system' | 'apps' =
-    raw === 'system' ? 'system' : raw === 'apps' ? 'apps' : 'network'
+  // Alarms is the default view — operational alarms are what most
+  // operators mean by "alerts"; the IDS and system streams keep their
+  // tabs.
+  const source: 'alarms' | 'network' | 'system' =
+    raw === 'system' ? 'system' : raw === 'network' ? 'network' : 'alarms'
   const onlyAlerts = query.get('only_alerts') === '1' || query.get('only_alerts') === 'true'
   const severity = query.get('severity') // Suricata: 1=high, 2=med, 3=low
   const category = query.get('category')
@@ -125,8 +127,14 @@ export function AlertsIncidents() {
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="text-[var(--text-dim)]">Source:</span>
         <button
-          className={`px-2 py-1 rounded border ${source === 'network' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1 rounded border ${source === 'alarms' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
           onClick={() => setParam('source', null)}
+        >
+          Alarms
+        </button>
+        <button
+          className={`px-2 py-1 rounded border ${source === 'network' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          onClick={() => setParam('source', 'network')}
         >
           Network (IDS)
         </button>
@@ -136,16 +144,10 @@ export function AlertsIncidents() {
         >
           System
         </button>
-        <button
-          className={`px-2 py-1 rounded border ${source === 'apps' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setParam('source', 'apps')}
-        >
-          Apps
-        </button>
       </div>
 
-      {source === 'apps' ? (
-        <AppAlertsView />
+      {source === 'alarms' ? (
+        <Alarms embedded />
       ) : source === 'system' ? (
         <SystemAlertsView />
       ) : (
@@ -366,125 +368,6 @@ function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAler
             })}
           </div>
         )}
-      </div>
-    </div>
-  )
-}
-
-// ── App alerts (the operator inbox) ────────────────────────────────
-//
-// §11.5 app-emitted alerts landed by the core's opennvr.alerts.>
-// consumer — the full history behind the top-bar bell (which shows only
-// unacknowledged rows). Same table the bell acknowledges into, so an
-// ack here silences every open browser too.
-
-const APP_SEVERITY_STYLE: Record<string, string> = {
-  critical: 'bg-red-600 text-white',
-  high: 'bg-orange-600 text-white',
-  medium: 'bg-yellow-600 text-black',
-  low: 'bg-neutral-600 text-white',
-}
-
-function AppAlertsView() {
-  const qc = useQueryClient()
-  const [onlyUnacked, setOnlyUnacked] = useState(false)
-  const list = useRQ({
-    queryKey: ['alerts-inbox-page', onlyUnacked],
-    queryFn: async () => {
-      const { data } = await alertsInboxService.listInboxAlerts({
-        unacked: onlyUnacked || undefined,
-        limit: 200,
-      })
-      return data as { alerts: InboxAlert[]; unacked_count: number }
-    },
-    refetchInterval: 15_000,
-  })
-  const ack = useMutation({
-    mutationFn: (ids?: number[]) => alertsInboxService.ackInboxAlerts(ids),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['alerts-inbox-page'] })
-      qc.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
-    },
-  })
-  const rows = list.data?.alerts ?? []
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 text-sm">
-        <button
-          className={`px-2 py-1 rounded border ${onlyUnacked ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setOnlyUnacked((s) => !s)}
-        >
-          Unacknowledged only
-        </button>
-        {(list.data?.unacked_count ?? 0) > 0 && (
-          <button
-            className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
-            onClick={() => ack.mutate(undefined)}
-          >
-            Acknowledge all ({list.data?.unacked_count})
-          </button>
-        )}
-      </div>
-      <div className="border border-[var(--border)] rounded overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-[var(--panel-2)] text-left">
-            <tr>
-              <th className="px-3 py-2">Severity</th>
-              <th className="px-3 py-2">Alert</th>
-              <th className="px-3 py-2">Source</th>
-              <th className="px-3 py-2">Camera</th>
-              <th className="px-3 py-2">Fired</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-[var(--text-dim)]">
-                  {list.isLoading ? 'Loading…' : 'No app alerts yet'}
-                </td>
-              </tr>
-            )}
-            {rows.map((a) => (
-              <tr key={a.id} className="border-t border-[var(--border)]">
-                <td className="px-3 py-2">
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${APP_SEVERITY_STYLE[a.severity] ?? APP_SEVERITY_STYLE.low}`}>
-                    {a.severity}
-                  </span>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="font-medium">{a.title}</div>
-                  {a.description && (
-                    <div className="text-[11px] text-[var(--text-dim)]">{a.description}</div>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">{a.source_name || '—'}</td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">{a.camera_id || '—'}</td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">
-                  {a.fired_at ? new Date(a.fired_at).toLocaleString() : '—'}
-                </td>
-                <td className="px-3 py-2">
-                  {a.acknowledged_at ? (
-                    <span className="text-[var(--text-dim)]">acked</span>
-                  ) : (
-                    <span className="text-red-400">unacked</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {!a.acknowledged_at && (
-                    <button
-                      className="px-2 py-0.5 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
-                      onClick={() => ack.mutate([a.id])}
-                    >
-                      Ack
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </div>
   )

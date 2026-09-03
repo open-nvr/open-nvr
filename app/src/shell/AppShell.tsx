@@ -89,7 +89,6 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/audit-logs', label: 'Audit Logs', icon: <Bell size={16} />, perm: '/audit-logs' },
       { to: '/compliance', label: 'Compliance & Reports', icon: <FileCheck size={16} />, perm: '/compliance' },
-      { to: '/alarms', label: 'Alarms', icon: <Bell size={16} />, perm: '/alarms' },
       { to: '/alerts-incidents', label: 'Alerts & Incidents', icon: <AlertTriangle size={16} />, perm: '/alerts-incidents' },
       { to: '/rbac', label: 'Access Control (RBAC)', icon: <Shield size={16} />, perm: '/rbac' },
       { to: '/byok', label: 'Customer Keys (BYOK)', icon: <KeyRound size={16} />, perm: '/byok' },

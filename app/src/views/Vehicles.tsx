@@ -756,6 +756,68 @@ export function Vehicles() {
           onSave={saveMonitors}
         />
       ) : tab === 'registry' ? (
+        <>
+        {allow.length > 0 && (
+          <Card className="mb-3">
+            <CardContent className="p-3 space-y-2">
+              <div className="flex items-center gap-2 font-medium text-sm">
+                <ShieldCheck size={14} /> Expected vehicles (legacy allowlist)
+              </div>
+              <div className="text-[12px] text-[var(--text-dim)]">
+                These plates were marked "expected" before the register
+                unified the two lists: they suppress nothing beyond
+                lowering their read severity. Move them into the register
+                (recommended — one list, suppresses the unknown-vehicle
+                alarm too) or remove them.
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {allow.map((plate) => (
+                  <span
+                    key={plate}
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                  >
+                    <span className="font-mono">{plate}</span>
+                    {!registryPlates.has(plate.toUpperCase()) && (
+                      <button
+                        title="Move to register"
+                        className="text-[var(--text-dim)] hover:text-[var(--text)]"
+                        onClick={() =>
+                          saveConfig.mutate(
+                            {
+                              registry: [...registry, { plate: normalizePlate(plate) }],
+                              allowlist: allow.filter((x) => x !== plate),
+                            },
+                            {
+                              onSuccess: () => showSuccess(
+                                `${plate} moved to the vehicle register`),
+                            },
+                          )
+                        }
+                      >
+                        <BookUser size={13} />
+                      </button>
+                    )}
+                    <button
+                      title="Remove from expected"
+                      className="text-[var(--text-dim)] hover:text-red-400"
+                      onClick={() =>
+                        saveConfig.mutate(
+                          { allowlist: allow.filter((x) => x !== plate) },
+                          {
+                            onSuccess: () => showSuccess(
+                              `${plate} removed from expected vehicles`),
+                          },
+                        )
+                      }
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
         <RegistryTab
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
@@ -802,6 +864,7 @@ export function Vehicles() {
             })
           }}
         />
+        </>
       ) : (
       <>
       {/* ── Needs review (bad format / low confidence reads) ──────── */}
@@ -1007,15 +1070,7 @@ export function Vehicles() {
                             <ShieldAlert size={15} />
                           </button>
                         )}
-                        {lprApp && !inAllow && (
-                          <button
-                            title="Mark as an expected vehicle (low-severity reads)"
-                            className="text-[var(--text-dim)] hover:text-[var(--text)]"
-                            onClick={() => watchlist.mutate({ plateText: p, list: 'allowlist' })}
-                          >
-                            <ShieldCheck size={15} />
-                          </button>
-                        )}
+
                       </td>
                     </tr>
                   )

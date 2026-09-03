@@ -46,7 +46,7 @@ const SEVERITY_STYLE: Record<string, string> = {
   low: 'bg-neutral-600 text-white',
 }
 
-export function Alarms() {
+export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
   const [onlyUnacked, setOnlyUnacked] = useState(false)
   const [severityFilter, setSeverityFilter] = useState<string | null>(null)
@@ -102,13 +102,15 @@ export function Alarms() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <BellRing size={18} />
-        <h1 className="text-xl font-semibold">Alarms</h1>
-        {list.isLoading && (
-          <span className="text-xs text-[var(--text-dim)]">Loading…</span>
-        )}
-      </div>
+      {!embedded && (
+        <div className="flex items-center gap-2">
+          <BellRing size={18} />
+          <h1 className="text-xl font-semibold">Alarms</h1>
+          {list.isLoading && (
+            <span className="text-xs text-[var(--text-dim)]">Loading…</span>
+          )}
+        </div>
+      )}
 
       {/* Sound policy + working-proof, side by side */}
       <div className="grid md:grid-cols-2 gap-3">
