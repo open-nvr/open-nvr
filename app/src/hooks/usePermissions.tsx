@@ -138,6 +138,7 @@ export const NAV_PERMISSIONS = {
   '/byom': 'byom.manage',
   '/compliance': 'compliance.view',
   '/alerts-incidents': 'alerts.view',
+  '/alarms': 'alerts.view',
   '/integrations': 'integrations.view',
   '/onvif-tools': 'onvif.discover',
   '/cloud': 'cloud.view',

@@ -144,6 +144,53 @@ async def acknowledge(
     return {"acknowledged": count}
 
 
+class TestAlarmIn(BaseModel):
+    severity: str = "high"
+
+
+@router.post("/test")
+async def fire_test_alarm(
+    payload: TestAlarmIn,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Fire a synthetic alarm through the REAL ingestion path.
+
+    'Is the alarm system working?' deserves a one-click answer that
+    exercises the same code a real alert takes — apply_alert, the same
+    table, the same poll, the same ring — not a UI-only sound test that
+    would pass while the consumer is broken. The alert is clearly
+    labelled as a test and acknowledges like any other.
+    """
+    if payload.severity not in DEFAULT_RING_CONFIG:
+        raise HTTPException(status_code=422,
+                            detail=f"unknown severity: {payload.severity!r}")
+    import uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    from services.alerts_inbox import apply_alert
+
+    envelope = {
+        "alert_id": f"alrt_test_{uuid.uuid4().hex[:12]}",
+        "fired_at": _dt.now(_tz.utc).replace(microsecond=0).isoformat(),
+        "title": f"Test alarm ({payload.severity})",
+        "description": (
+            f"Fired by {current_user.username} from the Alarms page to "
+            "verify the alarm chain end to end."),
+        "severity": payload.severity,
+        "source": {"kind": "operator", "name": "alarm-test",
+                   "version": "1.0.0"},
+        "camera_id": None,
+        "tags": ["test"],
+    }
+    status = apply_alert(envelope)
+    if status != "stored":
+        raise HTTPException(status_code=500,
+                            detail=f"test alarm not stored ({status})")
+    logger.info("alert inbox: test alarm (%s) fired by %s",
+                payload.severity, current_user.username)
+    return {"status": "fired", "severity": payload.severity}
+
+
 @router.get("/ring-config")
 async def get_ring_config(
     current_user: User = Depends(get_current_active_user),

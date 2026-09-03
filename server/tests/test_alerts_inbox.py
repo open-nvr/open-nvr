@@ -264,3 +264,25 @@ def test_corrupt_stored_ring_config_degrades_to_defaults():
     assert normalize_ring_config(
         {"critical": "nonsense", "low": "ping"}
     ) == {**DEFAULT_RING_CONFIG, "low": "ping"}
+
+
+def test_test_alarm_takes_the_real_path(client):
+    """The 'is it working?' button must exercise the same chain a real
+    alert takes — a row in the same table, ringing and acknowledging
+    like any other — and reject severities the ring policy doesn't
+    know."""
+    tc, SessionLocal, _ = client
+    r = tc.post("/alerts-inbox/test", json={"severity": "critical"})
+    assert r.status_code == 200 and r.json()["status"] == "fired"
+    rows = _rows(SessionLocal)
+    assert len(rows) == 1
+    assert rows[0].severity == "critical"
+    assert rows[0].source_name == "alarm-test"
+    assert rows[0].alert_id.startswith("alrt_test_")
+    # Counts as unacked (it must ring), acks like any other.
+    assert tc.get("/alerts-inbox",
+                  params={"unacked": True}).json()["unacked_count"] == 1
+    assert tc.post("/alerts-inbox/ack", json={}).json()["acknowledged"] == 1
+    # Unknown severity is a loud 422, not a silent default.
+    assert tc.post("/alerts-inbox/test",
+                   json={"severity": "fatal"}).status_code == 422
