@@ -54,7 +54,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from core.auth import get_current_active_user  # noqa: E402
+from core.auth import get_current_active_user, get_current_superuser  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
 from models import Camera, CameraPermission, Role, User  # noqa: E402
 from routers import onvif as onvif_router  # noqa: E402
@@ -206,9 +206,11 @@ def test_every_per_camera_onvif_route_is_authorized_structurally():
     that names a camera (``{ip}`` in its path, or /connect) either gates
     on superuser or calls the per-camera authorization — so a future
     route cannot regress to "logged in is enough" unnoticed."""
+    # No late imports here: an earlier test module may have swapped
+    # sys.modules entries, and importing core.* mid-suite re-instantiates
+    # Settings against the shipped MediaMTX hostnames (V-015 outside
+    # Docker). Everything this test needs is imported at module top.
     import inspect
-
-    from core.auth import get_current_superuser
 
     checked = 0
     for route in onvif_router.router.routes:
