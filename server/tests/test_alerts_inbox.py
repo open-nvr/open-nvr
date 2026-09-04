@@ -75,6 +75,17 @@ def db(monkeypatch):
     models.Base.metadata.create_all(eng)
     SessionLocal = sessionmaker(bind=eng)
     monkeypatch.setattr(cdb, "SessionLocal", SessionLocal)
+    # apply_alert fires alarm actions on a daemon thread that opens its
+    # own session. On this StaticPool — ONE sqlite connection shared by
+    # every session — that thread's close() is a ROLLBACK on the same
+    # connection, and when it lands while the next apply_alert holds an
+    # uncommitted INSERT, that insert vanishes: ObjectDeletedError on the
+    # post-commit refresh, seen as a CI-only flake. Production sessions
+    # have their own connections; the action tests below call
+    # dispatch_alarm_actions directly. Keep the thread out of here.
+    import services.alarm_actions as _aa
+
+    monkeypatch.setattr(_aa, "dispatch_in_background", lambda alert: None)
     s = SessionLocal()
     role = models.Role(name="admin")
     s.add(role)
