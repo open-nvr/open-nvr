@@ -272,6 +272,32 @@ Occupancy page paints over a still of the camera.
 | `period_seconds` | int | The producer's publish cadence, for readers estimating coverage. |
 | `labels` | list[string] | The watched labels binned (`person`, `car`, …). Additive. |
 
+### `occupancy.footfall.v1`
+
+Subject: `opennvr.events.occupancy.footfall.v1.<camera_id>`
+Producer: `app:occupancy-counting` (or any app tracking visitors —
+consumers must not branch on the producer).
+
+A DELTA of per-visitor facts since the previous publish, on the same
+cadence as the heatmap and only when non-empty: crossings of the
+camera's entry line (a→b is an entry, b→a an exit) and finished stays
+inside the zone (dwell — from the frame a track first sat inside the
+zone to the frame it left, or to its track expiring). Core sums deltas
+into one row per camera-hour (90-day retention) and serves
+`GET /api/v1/occupancy/footfall?hours=` — hourly buckets and totals —
+behind the Occupancy page's flow chart and stay figures.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `entries`, `exits` | int | Entry-line crossings in each direction this period. 0 when the camera has no entry line. |
+| `dwell_count` | int | Stays that FINISHED this period (stays under 1 s are edge flicker and not counted). |
+| `dwell_seconds` | number | Their summed duration — `dwell_seconds / dwell_count` is the period's average stay. |
+| `dwell_max_seconds` | number | The longest stay finished this period. |
+| `period_seconds` | int | The producer's publish cadence. |
+| `labels` | list[string] | The watched labels tracked. Additive. |
+
 ## Out of contract (deliberately)
 
 * `opennvr.inference.>` payload internals beyond what each adapter's

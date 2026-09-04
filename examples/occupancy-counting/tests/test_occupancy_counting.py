@@ -669,3 +669,122 @@ def test_heatmap_can_be_switched_off_live():
     app.handle_event(_event(2))
     assert app.flush_heatmaps() == 0
     assert app.state_snapshot()["heatmap_enabled"] is False
+
+
+# ── Footfall + dwell (occupancy.footfall.v1) ───────────────────────
+
+
+def _tracked(track_id, x, y, label="person"):
+    return {"label": label, "track_id": track_id,
+            "bbox": {"x": x, "y": y, "w": 0.04, "h": 0.04}}
+
+
+def _ev(dets, *, t: float, camera_id="cam-1"):
+    from datetime import datetime, timezone
+    return {"camera_id": camera_id, "correlation_id": "c",
+            "completed_at": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+            "result": {"detections": dets}}
+
+
+def _zone_camera():
+    # zone = left half of the frame (pixel space 1920x1080)
+    zone = oc.Zone.from_config(name="left-half",
+                               vertices=[[0, 0], [960, 0], [960, 1080], [0, 1080]])
+    return oc.CameraZone(camera_id="cam-1", zone=zone, frame_width=1920,
+                         frame_height=1080, max_occupancy=10, min_occupancy=None)
+
+
+def test_dwell_is_the_time_a_track_spends_inside_the_zone():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))        # enters
+    app.handle_event(_ev([_tracked("t1", 0.3, 0.5)], t=t0 + 4))    # still inside
+    live = app.state_snapshot()["cameras"]["cam-1"]
+    assert live["inside_now"] == 1
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 9))    # leaves
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert app._occupancy_publisher.calls[-1]["schema"] == "occupancy.footfall.v1"
+    assert payload["dwell_count"] == 1
+    assert payload["dwell_seconds"] == 9.0 and payload["dwell_max_seconds"] == 9.0
+    assert payload["entries"] == 0 and payload["exits"] == 0
+    assert app.state_snapshot()["cameras"]["cam-1"]["dwell_avg_s"] == 9.0
+    # nothing new → nothing published
+    assert app.flush_footfall() == 0
+
+
+def test_dwell_is_finalised_when_the_track_expires_inside():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 6))
+    # a different track, well past the TTL: t1 is gone
+    app.handle_event(_ev([_tracked("t2", 0.9, 0.5)], t=t0 + 6 + oc.TRACK_TTL_SECONDS_DEFAULT + 1))
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert payload["dwell_count"] == 1 and payload["dwell_seconds"] == 6.0
+
+
+def test_sub_second_flicker_is_not_a_visit():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 0.4))
+    assert app.flush_footfall() == 0
+
+
+def test_entry_line_counts_entries_and_exits():
+    cam = _zone_camera()
+    # a vertical line at x=960 (pixel space); a→b means crossing from the
+    # right (x>960) to the left (x<960)... orientation is the tripwire's
+    # convention, so assert both directions are distinguished.
+    cam.entry_line = oc.Tripwire.from_config(name="door", a=[960, 0], b=[960, 1080],
+                                             count_direction="both")
+    app = oc.OccupancyCounter(_config(cam), _NullDispatcher())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 1))   # crosses one way
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 2))   # and back
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert {payload["entries"], payload["exits"]} == {1}
+    assert payload["entries"] + payload["exits"] == 2
+    live = app.state_snapshot()["cameras"]["cam-1"]
+    assert live["has_entry_line"] is True
+    assert live["entries"] + live["exits"] == 2
+
+
+def test_untracked_detections_still_count_but_neither_dwell_nor_cross():
+    app = _counter(_zone_camera())
+    ev = _ev([{"label": "person", "bbox": {"x": 0.2, "y": 0.5, "w": 0.04, "h": 0.04}}],
+             t=1_000_000.0)
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 1
+    assert app.state_snapshot()["cameras"]["cam-1"]["inside_now"] == 0
+
+
+def test_dwell_alert_fires_once_per_track_when_configured():
+    app = _counter(_zone_camera())
+    app.on_config_update({"max_dwell_seconds": 5})
+    t0 = 1_000_000.0
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0)) == []
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 3)) == []
+    fired = app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 6))
+    assert len(fired) == 1 and fired[0].tags[1] == "dwell"
+    assert fired[0].evidence["track_id"] == "t1"
+    # not again for the same stay
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 9)) == []
+
+
+def test_entry_line_applies_live_from_the_catalog():
+    app = _counter(_zone_camera())
+    app.on_config_update({"entry_line": {"cam-1": {"a": [0.5, 0.0], "b": [0.5, 1.0],
+                                                    "count_direction": "both"}}})
+    cam = app._config.cameras["cam-1"]
+    assert cam.entry_line is not None
+    assert (cam.entry_line.a.x, cam.entry_line.b.y) == (960.0, 1080.0)
+    # erased → gone; and a redrawn zone keeps the line
+    app.on_config_update({"zones": {"cam-1": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]]}})
+    assert app._config.cameras["cam-1"].entry_line is not None
+    app.on_config_update({"entry_line": {}})
+    assert app._config.cameras["cam-1"].entry_line is None

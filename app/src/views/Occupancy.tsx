@@ -47,6 +47,34 @@ type OccupancyCameraState = {
   level?: string        // over | under | normal | …
   last_count?: number
   pending?: number
+  // Footfall + dwell (since the app started; the platform keeps history)
+  has_entry_line?: boolean
+  entries?: number
+  exits?: number
+  dwell_avg_s?: number | null
+  dwell_max_s?: number
+  inside_now?: number
+  longest_current_dwell_s?: number
+}
+
+type FootfallResp = {
+  hours: number
+  cameras: {
+    camera_id: number
+    entries: number
+    exits: number
+    dwell_count: number
+    dwell_avg_seconds: number | null
+    dwell_max_seconds: number
+    hours: { t: string; entries: number; exits: number; dwell_avg_seconds: number | null }[]
+  }[]
+  totals: {
+    entries: number
+    exits: number
+    dwell_count: number
+    dwell_avg_seconds: number | null
+    dwell_max_seconds: number
+  }
 }
 
 type HistoryResp = {
@@ -130,6 +158,21 @@ export function Occupancy() {
     refetchInterval: 60_000,
   })
   const history = historyQuery.data
+
+  // Footfall + dwell over the last 24 h (occupancy.footfall.v1 rows).
+  const footfallQuery = useQuery({
+    queryKey: ['occupancy-footfall'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/v1/occupancy/footfall', { params: { hours: 24 } })
+      return data as FootfallResp
+    },
+    enabled: Boolean(occApp),
+    retry: 0,
+    refetchInterval: 60_000,
+  })
+  const footfall = footfallQuery.data
+  const footfallFor = (key: string) =>
+    footfall?.cameras.find((c) => c.camera_id === cameraIdOf(key))
 
   const statusQuery = useQuery({
     queryKey: ['app-status', occApp?.id],
@@ -251,6 +294,26 @@ export function Occupancy() {
         ))}
       </div>
 
+      {/* ── Footfall + dwell, last 24 h ───────────────────────────── */}
+      {footfall && (footfall.totals.entries > 0 || footfall.totals.exits > 0
+        || footfall.totals.dwell_count > 0) && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[
+            { label: 'Entered (24 h)', value: footfall.totals.entries },
+            { label: 'Exited (24 h)', value: footfall.totals.exits },
+            { label: 'Average stay', value: fmtDuration(footfall.totals.dwell_avg_seconds) },
+            { label: 'Longest stay (24 h)', value: fmtDuration(footfall.totals.dwell_max_seconds) },
+          ].map((t) => (
+            <Card key={t.label}>
+              <CardContent className="py-3">
+                <div className="text-2xl font-semibold" style={{ fontVariantNumeric: 'tabular-nums' }}>{t.value ?? '—'}</div>
+                <div className="text-xs text-[var(--text-dim)]">{t.label}</div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* ── Thresholds (applied live) ─────────────────────────────── */}
       <Card>
         <CardContent className="py-3 flex flex-wrap items-end gap-3">
@@ -295,6 +358,19 @@ export function Occupancy() {
               Average head-count by hour of day, last 7 days — staff the peaks.
             </div>
             <BusiestHoursChart hours={history!.busiest_hours} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Flow: entries vs exits by hour (24 h) ─────────────────── */}
+      {footfall && footfall.cameras.some((c) => c.entries + c.exits > 0) && (
+        <Card>
+          <CardContent className="py-3">
+            <div className="text-sm font-medium mb-0.5">Flow, last 24 hours</div>
+            <div className="text-xs text-[var(--text-dim)] mb-2">
+              Entries and exits across every camera with an entry line, by hour.
+            </div>
+            <FlowChart cameras={footfall.cameras} />
           </CardContent>
         </Card>
       )}
@@ -361,6 +437,32 @@ export function Occupancy() {
                       />
                     </div>
                   )}
+                  {(z.has_entry_line || (z.dwell_avg_s ?? null) !== null || (z.inside_now ?? 0) > 0) && (
+                    <dl className="mt-3 grid grid-cols-3 gap-2 text-[11px]"
+                        style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {z.has_entry_line && (
+                        <div>
+                          <dt className="text-[var(--text-dim)]">In / out (24 h)</dt>
+                          <dd className="font-medium">
+                            {footfallFor(key)?.entries ?? z.entries ?? 0} / {footfallFor(key)?.exits ?? z.exits ?? 0}
+                          </dd>
+                        </div>
+                      )}
+                      <div>
+                        <dt className="text-[var(--text-dim)]">Avg stay (24 h)</dt>
+                        <dd className="font-medium">{fmtDuration(footfallFor(key)?.dwell_avg_seconds ?? z.dwell_avg_s)}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-[var(--text-dim)]">Inside now</dt>
+                        <dd className="font-medium">
+                          {z.inside_now ?? 0}
+                          {(z.longest_current_dwell_s ?? 0) >= 60 && (
+                            <span className="text-[var(--text-dim)]"> · longest {fmtDuration(z.longest_current_dwell_s)}</span>
+                          )}
+                        </dd>
+                      </div>
+                    </dl>
+                  )}
                   <OccupancySparkline
                     samples={seriesFor(key)}
                     ceiling={maxOccupancy}
@@ -381,6 +483,82 @@ export function Occupancy() {
         />
       )}
     </section>
+  )
+}
+
+/** "1m 20s" / "45s" / "2h 05m"; null → '—'. */
+function fmtDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '—'
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+/** Entries (up, accent) and exits (down, muted) per hour, summed
+ * across cameras — a mirrored bar pair per hour, one axis, the two
+ * series told apart by side AND legend, never colour alone. */
+function FlowChart({ cameras }: { cameras: FootfallResp['cameras'] }) {
+  const byHour = new Map<string, { entries: number; exits: number }>()
+  for (const c of cameras) {
+    for (const h of c.hours) {
+      const cur = byHour.get(h.t) ?? { entries: 0, exits: 0 }
+      cur.entries += h.entries
+      cur.exits += h.exits
+      byHour.set(h.t, cur)
+    }
+  }
+  const slots = Array.from(byHour.entries())
+    .map(([t, v]) => ({ t: new Date(t), ...v }))
+    .sort((a, b) => a.t.getTime() - b.t.getTime())
+  if (slots.length === 0) return null
+  const top = Math.max(1, ...slots.map((sl) => Math.max(sl.entries, sl.exits)))
+  const W = 720, H = 120, PAD = 4, LABEL_H = 14, MID = (H - LABEL_H) / 2
+  const bw = (W - 2 * PAD) / slots.length
+  const scale = (v: number) => (v / top) * (MID - PAD)
+  const fmt = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 480, height: H }}
+           role="img" aria-label="Entries above the line and exits below it, per hour">
+        <line x1={PAD} x2={W - PAD} y1={MID} y2={MID}
+              stroke="var(--border,#333)" strokeWidth="1" />
+        {slots.map((sl, i) => {
+          const x = PAD + i * bw + 1
+          const up = scale(sl.entries)
+          const down = scale(sl.exits)
+          return (
+            <g key={sl.t.toISOString()}>
+              {up > 0 && (
+                <rect x={x} y={MID - up} width={Math.max(1, bw - 2)} height={up} rx="3"
+                      fill="var(--accent,#3b82f6)" fillOpacity="0.85" />
+              )}
+              {down > 0 && (
+                <rect x={x} y={MID + 1} width={Math.max(1, bw - 2)} height={down} rx="3"
+                      fill="var(--text-dim,#6b7280)" fillOpacity="0.55" />
+              )}
+              <rect x={x} y={0} width={bw} height={H - LABEL_H} fill="transparent">
+                <title>{`${fmt(sl.t)} · in ${sl.entries} · out ${sl.exits}`}</title>
+              </rect>
+              {(i % Math.max(1, Math.round(slots.length / 6)) === 0) && (
+                <text x={x + bw / 2} y={H - 3} textAnchor="middle" fontSize="9"
+                      fill="var(--text-dim,#6b7280)">{fmt(sl.t)}</text>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+      <div className="flex gap-4 text-[10px] text-[var(--text-dim)] mt-1">
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block h-2 w-3 rounded-sm" style={{ background: 'var(--accent,#3b82f6)' }} /> entries (above)
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block h-2 w-3 rounded-sm" style={{ background: 'var(--text-dim,#6b7280)', opacity: 0.55 }} /> exits (below)
+        </span>
+      </div>
+    </div>
   )
 }
 

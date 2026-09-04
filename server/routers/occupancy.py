@@ -21,7 +21,9 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.auth import get_current_active_user
-from models import Camera, OccupancyHeatmap, OccupancySample, User
+from models import (
+    Camera, OccupancyFootfall, OccupancyHeatmap, OccupancySample, User,
+)
 
 router = APIRouter(tags=["occupancy"])
 
@@ -177,6 +179,88 @@ async def get_occupancy_heatmap(
     return occupancy_heatmap(
         db,
         camera_id=camera_id,
+        hours=hours,
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )
+
+
+def occupancy_footfall(
+    db: Session,
+    *,
+    hours: int = 24,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Entries, exits and dwell per camera over the window, as hourly
+    buckets plus totals — the read side of ``occupancy.footfall.v1``."""
+    now = now or datetime.now(timezone.utc)
+    hours = max(1, min(int(hours), 24 * 30))
+    start = (now - timedelta(hours=hours)).replace(minute=0, second=0,
+                                                   microsecond=0)
+    q = db.query(OccupancyFootfall).filter(OccupancyFootfall.hour_start >= start)
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == OccupancyFootfall.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    per_camera: dict[int, dict] = {}
+    for row in q.order_by(OccupancyFootfall.hour_start.asc()).all():
+        cam = per_camera.setdefault(row.camera_id, {
+            "camera_id": row.camera_id, "entries": 0, "exits": 0,
+            "dwell_count": 0, "dwell_seconds": 0.0, "dwell_max_seconds": 0.0,
+            "hours": [],
+        })
+        cam["entries"] += int(row.entries or 0)
+        cam["exits"] += int(row.exits or 0)
+        cam["dwell_count"] += int(row.dwell_count or 0)
+        cam["dwell_seconds"] += float(row.dwell_seconds or 0.0)
+        cam["dwell_max_seconds"] = max(cam["dwell_max_seconds"],
+                                       float(row.dwell_max_seconds or 0.0))
+        hs = row.hour_start if row.hour_start.tzinfo else \
+            row.hour_start.replace(tzinfo=timezone.utc)
+        cam["hours"].append({
+            "t": hs.isoformat(),
+            "entries": int(row.entries or 0),
+            "exits": int(row.exits or 0),
+            "dwell_avg_seconds": round(float(row.dwell_seconds or 0.0)
+                                       / row.dwell_count, 1)
+            if row.dwell_count else None,
+        })
+    cameras = []
+    for cam in per_camera.values():
+        cam["dwell_avg_seconds"] = (
+            round(cam["dwell_seconds"] / cam["dwell_count"], 1)
+            if cam["dwell_count"] else None)
+        cam["dwell_max_seconds"] = round(cam["dwell_max_seconds"], 1)
+        cam["dwell_seconds"] = round(cam["dwell_seconds"], 1)
+        cameras.append(cam)
+    cameras.sort(key=lambda c: c["camera_id"])
+    total_dwell_count = sum(c["dwell_count"] for c in cameras)
+    total_dwell_seconds = sum(c["dwell_seconds"] for c in cameras)
+    return {
+        "hours": hours,
+        "cameras": cameras,
+        "totals": {
+            "entries": sum(c["entries"] for c in cameras),
+            "exits": sum(c["exits"] for c in cameras),
+            "dwell_count": total_dwell_count,
+            "dwell_avg_seconds": (round(total_dwell_seconds / total_dwell_count, 1)
+                                  if total_dwell_count else None),
+            "dwell_max_seconds": round(max(
+                [c["dwell_max_seconds"] for c in cameras], default=0.0), 1),
+        },
+    }
+
+
+@router.get("/occupancy/footfall")
+async def get_occupancy_footfall(
+    hours: int = 24,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Entries / exits through each camera's entry line and dwell inside
+    its zone, hourly and in total, over the window."""
+    return occupancy_footfall(
+        db,
         hours=hours,
         owner_id=None if current_user.is_superuser else current_user.id,
     )

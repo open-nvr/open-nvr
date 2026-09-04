@@ -15,6 +15,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still of the camera. Zero extra inference — it rides the boxes the app
   already receives. `heatmap_enabled` / `heatmap_publish_seconds` in the
   app's config.
+- **Footfall and dwell.** Draw an entry line on a camera (catalog →
+  Configure) and the app counts entries and exits through it per tracked
+  visitor; every tracked stay inside the zone is timed. Shipped as
+  `occupancy.footfall.v1`, kept per camera-hour, and shown on the
+  Occupancy page as 24 h tiles (entered / exited / average / longest
+  stay), an hourly flow chart, and per-zone in/out, average stay and
+  "inside now". `max_dwell_seconds` raises a medium alert when one visitor
+  stays too long.
 
 ### Fixed
 

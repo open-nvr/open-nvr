@@ -1188,3 +1188,25 @@ class OccupancyHeatmap(Base):
     # so a busy hour and a quiet hour paint on the same scale.
     frames = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class OccupancyFootfall(Base):
+    """One camera-hour of footfall and dwell (``occupancy.footfall.v1``).
+
+    Entries/exits are crossings of the camera's entry line (a→b in,
+    b→a out); dwell is per finished stay inside the zone. Deltas are
+    summed into the row for that camera and hour, like the heatmap;
+    the page reads any window as sums and averages. Pruned with the
+    samples (90 days)."""
+
+    __tablename__ = "occupancy_footfall"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, nullable=False, index=True)
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    entries = Column(Integer, nullable=False, default=0)
+    exits = Column(Integer, nullable=False, default=0)
+    dwell_count = Column(Integer, nullable=False, default=0)
+    dwell_seconds = Column(Float, nullable=False, default=0.0)
+    dwell_max_seconds = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime(timezone=True), nullable=False)

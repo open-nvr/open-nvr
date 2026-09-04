@@ -248,3 +248,69 @@ def test_heatmap_retention_ages_with_the_samples(db):
     assert occ.prune_heatmaps(s, now=NOW) == 1
     s.commit()
     assert s.query(models.OccupancyHeatmap).count() == 1
+
+
+# ── occupancy.footfall.v1: entries, exits, dwell ──────────────────
+
+
+def _foot_envelope(*, camera="cam1", ts=None, entries=0, exits=0,
+                   dwell_count=0, dwell_seconds=0.0, dwell_max=0.0):
+    return {
+        "id": "evt_foot00000001",
+        "schema": "occupancy.footfall.v1",
+        "correlation_id": None,
+        "camera_id": camera,
+        "ts": (ts or NOW).isoformat(),
+        "producer": "app:occupancy-counting",
+        "payload": {"entries": entries, "exits": exits,
+                    "dwell_count": dwell_count, "dwell_seconds": dwell_seconds,
+                    "dwell_max_seconds": dwell_max, "period_seconds": 60,
+                    "labels": ["person"]},
+    }
+
+
+def test_footfall_deltas_sum_into_the_camera_hour(db):
+    from routers.occupancy import occupancy_footfall
+
+    s, users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, entries=3, exits=1, dwell_count=2, dwell_seconds=40.0,
+        dwell_max=30.0)) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, ts=NOW + timedelta(minutes=30), entries=1,
+        dwell_count=1, dwell_seconds=5.0, dwell_max=5.0)) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, ts=NOW + timedelta(hours=1), exits=2)) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(camera=cam)) == "empty"
+    assert occ.apply_footfall_event(_foot_envelope(camera="lot", entries=1)) == "bad-camera"
+    rows = s.query(models.OccupancyFootfall).order_by(
+        models.OccupancyFootfall.hour_start).all()
+    assert len(rows) == 2
+    assert (rows[0].entries, rows[0].exits, rows[0].dwell_count) == (4, 1, 3)
+    assert rows[0].dwell_seconds == 45.0 and rows[0].dwell_max_seconds == 30.0
+
+    out = occupancy_footfall(s, hours=24, owner_id=users["alice"].id,
+                             now=NOW + timedelta(hours=1, minutes=5))
+    assert out["totals"] == {"entries": 4, "exits": 3, "dwell_count": 3,
+                             "dwell_avg_seconds": 15.0, "dwell_max_seconds": 30.0}
+    assert len(out["cameras"]) == 1
+    cam_out = out["cameras"][0]
+    assert cam_out["camera_id"] == cams["hall"].id
+    assert [h["entries"] for h in cam_out["hours"]] == [4, 0]
+    assert cam_out["hours"][0]["dwell_avg_seconds"] == 15.0
+    assert cam_out["hours"][1]["dwell_avg_seconds"] is None
+    # bob owns no camera with footfall
+    assert occupancy_footfall(s, hours=24, owner_id=users["bob"].id,
+                              now=NOW + timedelta(hours=2))["cameras"] == []
+
+
+def test_footfall_retention_prunes_with_the_rest(db):
+    s, _users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    old = NOW - timedelta(days=occ.RETENTION_DAYS + 1)
+    assert occ.apply_footfall_event(_foot_envelope(camera=cam, ts=old, entries=1)) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(camera=cam, entries=1)) == "applied"
+    assert occ.prune_heatmaps(s, now=NOW) == 1
+    s.commit()
+    assert s.query(models.OccupancyFootfall).count() == 1
