@@ -551,3 +551,40 @@ def test_history_interval_suppresses_chatter(monkeypatch):
                    if c["payload"]["level"] == "normal"]
     assert len(normal_only) == 2
     assert app.state_snapshot()["history_events_published"] >= 2
+
+
+# ── Alert storm (field): a zone hovering AT the limit ──────────────
+
+
+def test_flicker_across_the_limit_alerts_once_per_cooldown(monkeypatch):
+    """Field report: 21 identical HIGH alerts in ~15 s from one zone.
+    With clear_alerts off, every upward flip 10→11 fired; the cooldown
+    turns a flickering breach into one alert per window while the
+    committed level (what the page shows) still tracks every flip."""
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "time", lambda: t["now"])
+    app = _counter(_camera(max_occ=2))
+    fired = []
+    for i in range(10):
+        fired += app.handle_event(_event(3))      # over
+        fired += app.handle_event(_event(2))      # back to normal (silent)
+        t["now"] += 1.0
+    assert len(fired) == 1
+    assert app.state_snapshot()["cameras"]["cam-1"]["alerts_suppressed"] == 9
+    # the live level still reflects the latest frame
+    assert app.state_snapshot()["cameras"]["cam-1"]["level"] == "normal"
+    # past the window it may alert again
+    t["now"] += oc.ALERT_COOLDOWN_SECONDS_DEFAULT
+    assert len(app.handle_event(_event(3))) == 1
+
+
+def test_cooldown_is_per_level_and_can_be_disabled(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "time", lambda: t["now"])
+    app = _counter(_camera(max_occ=2, min_occ=1))
+    assert len(app.handle_event(_event(3))) == 1     # over
+    assert len(app.handle_event(_event(0))) == 1     # under — a different alert
+    assert len(app.handle_event(_event(3))) == 0     # over again, in cooldown
+    app._config.alert_cooldown_seconds = 0
+    app.handle_event(_event(2))
+    assert len(app.handle_event(_event(3))) == 1     # disabled → legacy behaviour
