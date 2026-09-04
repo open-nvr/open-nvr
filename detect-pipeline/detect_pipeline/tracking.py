@@ -200,6 +200,14 @@ class Tracker:
         self.retain_plate_candidates: bool = False
         self.plate_candidates_max: int = 4
         self.plate_candidates_gap_s: float = 0.75
+        # Context kept around the detection box in every stored crop (the
+        # visit's evidence AND the plate candidates), as a fraction of
+        # the box per side. 0.25 keeps the subject dominant; a wider
+        # margin survives a detector box that trails a moving car (the
+        # read frame then shows the whole car, not a car with its tail
+        # cut off). Purely cosmetic for reading: the OCR localises the
+        # plate inside whatever it is given.
+        self.crop_margin: float = 0.25
         # Scene evidence: the whole frame behind best_crop, as JPEG. Off
         # here so every existing caller and test pays one boolean per
         # best-frame update; the worker opts in from env.
@@ -353,7 +361,7 @@ class Tracker:
         if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape):
             tr.best = cand
             if bgr is not None:                       # retain the best frame's pixels
-                crop = _crop_bgr(bgr, det.box)
+                crop = _crop_bgr(bgr, det.box, margin=self.crop_margin)
                 if crop is not None:
                     tr.best_crop = crop
                     # Gated on the crop, so the two evidence images always
@@ -405,7 +413,7 @@ class Tracker:
         )
         if det.label not in VEHICLE_LABELS:
             return
-        crop = _crop_bgr(bgr, det.box)
+        crop = _crop_bgr(bgr, det.box, margin=self.crop_margin)
         if crop is None:
             return
         if tr.plate_ring is None:

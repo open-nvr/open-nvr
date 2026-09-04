@@ -424,6 +424,10 @@ services:
       - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
       - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
       - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
+      # Context around the detection box in stored crops (fraction of
+      # the box per side). Cosmetic: a wider margin keeps the whole car
+      # in the read frame when the detector's box trails it.
+      - DETECT_CROP_MARGIN=${DETECT_CROP_MARGIN:-}
       # Scene evidence: a SECOND JPEG per visit — the whole frame the
       # best crop was taken from, so the evidence dialog can show the
       # car in its lane instead of a crop of the car.
