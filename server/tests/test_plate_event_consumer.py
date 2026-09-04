@@ -64,6 +64,10 @@ def _clean_plate_sightings():
 
     with _pe._sightings_lock:
         _pe._recent_sightings.clear()
+    # Same for the sweep registry: a sweep run by another test file
+    # keeps its row for the echo grace, and this consumer would defer.
+    with _pe._sweeps_lock:
+        _pe._sweeping.clear()
     yield
     with _pe._sightings_lock:
         _pe._recent_sightings.clear()

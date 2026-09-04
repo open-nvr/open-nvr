@@ -561,24 +561,80 @@ def choose_consensus(votes: list[dict], *, min_agreeing: int,
 import threading as _threading
 
 _sweeps_lock = _threading.Lock()
-_sweeping: set[int] = set()
+#: event_id -> None while the sweep is in flight, else the monotonic
+#: time it finished. A finished sweep keeps its claim for a grace
+#: period: KAI-C's echo of the sweep's LAST attempt can arrive after
+#: the sweep has already returned (found no agreement, wrote nothing),
+#: and applying that lone echo would put the very single read the
+#: sweep declined to write onto the row — with no evidence.
+_sweeping: dict[int, float | None] = {}
+_SWEEP_ECHO_GRACE_DEFAULT_S = 60.0
+#: Bound on remembered finished sweeps; the oldest are evicted first.
+_SWEEPING_MAX = 4096
+
+
+def sweep_echo_grace_s() -> float:
+    """How long after a sweep ends its row stays closed to forwarded
+    single reads. Should exceed the bus's worst-case delivery lag by a
+    wide margin; 0 disables the grace (in-flight sweeps still hold)."""
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_SWEEP_ECHO_GRACE_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _SWEEP_ECHO_GRACE_DEFAULT_S
+    return value if value > 0 else 0.0
+
+
+def _evict_stale_sweeps(now: float) -> None:
+    # Called under the lock. Drop finished entries past their grace and,
+    # if still over the bound, the oldest finished ones.
+    grace = sweep_echo_grace_s()
+    for key in [k for k, t in _sweeping.items()
+                if t is not None and now - t > grace]:
+        del _sweeping[key]
+    if len(_sweeping) > _SWEEPING_MAX:
+        finished = sorted((t, k) for k, t in _sweeping.items() if t is not None)
+        for _, key in finished[:len(_sweeping) - _SWEEPING_MAX]:
+            del _sweeping[key]
 
 
 def mark_sweep_pending(event_id: int) -> None:
     """Called at ingest, BEFORE the background task is queued, so the
     bus can never get there first."""
+    import time as _time
+
     with _sweeps_lock:
-        _sweeping.add(int(event_id))
+        _evict_stale_sweeps(_time.monotonic())
+        _sweeping[int(event_id)] = None
 
 
 def clear_sweep_pending(event_id: int) -> None:
+    """The sweep is done with the row; its claim now expires after the
+    echo grace (immediately when the grace is 0)."""
+    import time as _time
+
+    now = _time.monotonic()
     with _sweeps_lock:
-        _sweeping.discard(int(event_id))
+        if sweep_echo_grace_s() <= 0:
+            _sweeping.pop(int(event_id), None)
+        else:
+            _sweeping[int(event_id)] = now
+        _evict_stale_sweeps(now)
 
 
 def sweep_is_pending(event_id: int) -> bool:
+    """In flight, or finished within the echo grace."""
+    import time as _time
+
     with _sweeps_lock:
-        return int(event_id) in _sweeping
+        t = _sweeping.get(int(event_id), "absent")
+    if t == "absent":
+        return False
+    if t is None:
+        return True
+    return _time.monotonic() - t <= sweep_echo_grace_s()
 
 
 # ── Plate evidence: the crop the read actually came from (#382) ─────

@@ -387,7 +387,12 @@ def test_consumer_defers_to_a_pending_sweep(db):
     pe.mark_sweep_pending(row_id)
     assert apply_plate_event(_envelope(row_id)) == "deferred-to-sweep"
     assert _row(SessionLocal, row_id).plate_text is None
+    # Finished sweeps keep their claim for the echo grace...
     pe.clear_sweep_pending(row_id)
+    assert apply_plate_event(_envelope(row_id)) == "deferred-to-sweep"
+    # ...and past it the forwarded read is applied as before.
+    with pe._sweeps_lock:
+        pe._sweeping[row_id] -= pe.sweep_echo_grace_s() + 1
     assert apply_plate_event(_envelope(row_id)) == "applied"
     r = _row(SessionLocal, row_id)
     assert r.plate_text == "R197GB"
@@ -395,11 +400,38 @@ def test_consumer_defers_to_a_pending_sweep(db):
     assert r.payload["plate_reads"] == 1
 
 
-def test_sweep_clears_its_pending_mark_even_on_no_read(db, stored):
+def test_sweep_releases_its_row_after_the_echo_grace(db, stored, monkeypatch):
+    """The gap seen live as row 27280: the sweep found no agreement and
+    returned; KAI-C's echo of its LAST attempt arrived afterwards and the
+    consumer wrote that lone read (R187JF, no evidence). A finished sweep
+    keeps the row closed for the grace; with the grace off it releases
+    at once."""
     SessionLocal, row_id = db
     pe.mark_sweep_pending(row_id)
     _sweep(row_id, [None], [b"a"])
+    assert pe.sweep_is_pending(row_id)            # in grace
+    with pe._sweeps_lock:
+        assert isinstance(pe._sweeping[row_id], float)
+    monkeypatch.setenv("OPENNVR_PLATE_SWEEP_ECHO_GRACE_S", "0")
     assert not pe.sweep_is_pending(row_id)
+    pe.mark_sweep_pending(row_id)
+    _sweep(row_id, [None], [b"a"])
+    assert not pe.sweep_is_pending(row_id)
+    with pe._sweeps_lock:
+        assert row_id not in pe._sweeping
+
+
+def test_finished_sweeps_are_evicted_past_the_grace():
+    import time
+    for i in range(10):
+        pe.mark_sweep_pending(i)
+        pe.clear_sweep_pending(i)
+    with pe._sweeps_lock:
+        for i in range(10):
+            pe._sweeping[i] = time.monotonic() - pe.sweep_echo_grace_s() - 5
+    pe.mark_sweep_pending(99)                     # eviction runs here
+    with pe._sweeps_lock:
+        assert set(pe._sweeping) == {99}
 
 
 def test_sweep_attaches_evidence_when_the_same_plate_landed_meanwhile(
@@ -416,7 +448,7 @@ def test_sweep_attaches_evidence_when_the_same_plate_landed_meanwhile(
         # producer's event for the same row)
         if jpeg == b"b":
             with pe._sweeps_lock:
-                pe._sweeping.discard(row_id)
+                pe._sweeping.pop(row_id, None)
             assert apply_plate_event(_envelope(row_id)) == "applied"
         return _acc("R197GB", 0.8 if jpeg == b"a" else 0.9)
 

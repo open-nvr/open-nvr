@@ -68,6 +68,11 @@ def _first_read_wins(monkeypatch):
     (test_plate_consensus.py); here it is switched to the legacy
     first-accepted-read-wins so each mechanic can be asserted alone."""
     monkeypatch.setenv("OPENNVR_PLATE_MIN_AGREEING_READS", "1")
+    # The sweep registry is process-global too (finished sweeps keep
+    # their row for the echo grace) — start clean or a sweep run by
+    # another test defers this one's consumer.
+    with pe._sweeps_lock:
+        pe._sweeping.clear()
 
 
 @pytest.fixture(autouse=True)
