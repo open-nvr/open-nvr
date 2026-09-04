@@ -46,8 +46,12 @@ const SEVERITY_STYLE: Record<string, string> = {
 // site-wide ring-config:
 //   none       — badge only
 //   ping       — one chime when a NEW alert of that severity arrives
-//   continuous — a two-tone siren repeats until every alert of that
-//                severity is acknowledged
+//   continuous — repeats until every alert of that severity is
+//                acknowledged. The SOUND escalates with severity: a
+//                critical alert wails like a real siren (sweeping
+//                pitch); anything else rings the two-tone beep — an
+//                operator can tell "critical" from "high" across the
+//                room without looking.
 //
 // Browsers block audio before the first user gesture; the engine
 // resumes its AudioContext on the first click/keypress and the siren
@@ -91,18 +95,45 @@ function playPing() {
   tone(880, 0, 0.25)
 }
 
+/** Two-tone beep — the continuous ring for high/medium/low. */
 function playSiren() {
   tone(660, 0, 0.35, 0.1)
   tone(880, 0.4, 0.35, 0.1)
 }
 
+/** CRITICAL only: a proper siren wail — one sawtooth oscillator whose
+ *  pitch sweeps 600→1250→600 Hz over 1.4s. Looped every 1600ms this
+ *  sounds like an actual alarm siren, unmistakably more urgent than
+ *  the beep. Synthesized (no audio asset): nothing to load, works on
+ *  an air-gapped NVR. */
+function playWail() {
+  const ctx = audioCtx()
+  if (!ctx || ctx.state !== 'running') return
+  const osc = ctx.createOscillator()
+  const gain = ctx.createGain()
+  osc.type = 'sawtooth'
+  const t = ctx.currentTime
+  osc.frequency.setValueAtTime(600, t)
+  osc.frequency.linearRampToValueAtTime(1250, t + 0.7)
+  osc.frequency.linearRampToValueAtTime(600, t + 1.4)
+  gain.gain.setValueAtTime(0.1, t)
+  gain.gain.setValueAtTime(0.1, t + 1.3)
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.5)
+  osc.connect(gain).connect(ctx.destination)
+  osc.start(t)
+  osc.stop(t + 1.5)
+}
+
 /** Direct, in-gesture sound check (exported for the Alarms page).
  *  Runs inside the caller's click handler, so the browser cannot block
- *  it — separating "is audio working at all" from the alert chain. */
+ *  it — separating "is audio working at all" from the alert chain.
+ *  Plays the two-tone beep, then the critical wail, so the operator
+ *  hears BOTH alarm sounds they may need to recognize. */
 export function playTestSound() {
   const c = audioCtx()
   if (c) void c.resume()
   playSiren()
+  window.setTimeout(playWail, 1000)
 }
 
 /** Resume the shared AudioContext on user gestures until it is RUNNING.
@@ -221,24 +252,35 @@ export function AlertBell() {
     }
   }, [inbox.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Continuous: siren repeats while ANY unacked alert maps to it.
-  const sirenActive = useMemo(
-    () => !!ring && alerts.some((a) => ring[a.severity] === 'continuous'),
-    [alerts, ring],
-  )
+  // Continuous: repeats while ANY unacked alert maps to it. The sound
+  // is picked by the WORST offender — one unacked critical alert makes
+  // the wail override every beep (never both at once; layered sounds
+  // would be mud), and the beep only returns once all criticals are
+  // acknowledged.
+  const sirenMode = useMemo<'wail' | 'beep' | null>(() => {
+    if (!ring) return null
+    const continuous = alerts.filter((a) => ring[a.severity] === 'continuous')
+    if (continuous.length === 0) return null
+    return continuous.some((a) => a.severity === 'critical')
+      ? 'wail'
+      : 'beep'
+  }, [alerts, ring])
+  const sirenActive = sirenMode !== null
   const audioBlocked = useAudioBlocked(sirenActive || unackedCount > 0)
   const enableSound = () => {
     const c = audioCtx()
     if (c) void c.resume()
-    if (sirenActive) playSiren()
+    if (sirenMode === 'wail') playWail()
+    else if (sirenMode === 'beep') playSiren()
     else playPing()               // audible confirmation either way
   }
   useEffect(() => {
-    if (!sirenActive) return
-    playSiren()
-    const t = window.setInterval(playSiren, 1600)
+    if (!sirenMode) return
+    const play = sirenMode === 'wail' ? playWail : playSiren
+    play()
+    const t = window.setInterval(play, 1600)
     return () => window.clearInterval(t)
-  }, [sirenActive])
+  }, [sirenMode])
 
   return (
     <div className="relative" ref={panelRef}>

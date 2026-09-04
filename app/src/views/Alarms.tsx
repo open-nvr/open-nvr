@@ -120,7 +120,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
           </div>
           <div className="text-[12px] text-[var(--text-dim)]">
             none = badge only · ping = one chime on arrival · continuous =
-            rings in every open browser until acknowledged
+            rings in every open browser until acknowledged. Critical rings
+            a siren wail; other severities a two-tone beep — and an
+            unacknowledged critical always overrides the beep.
           </div>
           <button
             className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)] text-sm"
