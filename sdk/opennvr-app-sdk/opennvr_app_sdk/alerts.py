@@ -503,8 +503,18 @@ class NatsAlertChannel:
         kwargs: dict[str, Any] = {
             "servers": [self._url],
             "connect_timeout": self._connect_timeout,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": 5,
+            "reconnect_time_wait": 2.0,
+            # -1 = retry FOREVER. Field outage (2026-09-04): the broker
+            # restarted during a stack rebuild and was back in ~95s, but
+            # with max_reconnect_attempts=5 this client exhausted its
+            # retries in ~5s and closed for good — and because nats-py
+            # BUFFERS publishes silently while reconnecting, nothing
+            # errored until it was already dead. Every alarm for the
+            # next two days was published into a zombie channel. A bus
+            # channel owned by a long-lived daemon must never give up
+            # on the bus; the publish-failure heal below remains the
+            # backstop for the truly-closed case.
+            "max_reconnect_attempts": -1,
         }
         if self._token:
             kwargs["token"] = self._token

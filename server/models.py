@@ -777,6 +777,45 @@ class SecuritySetting(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class AppAlert(Base):
+    """Operator-facing alert inbox (§11.5 app-emitted alerts).
+
+    Apps publish alerts onto ``opennvr.alerts.>`` (the SDK's
+    NatsAlertChannel); until this table nothing consumed them — alerts
+    reached stdout and the bus and stopped there, so "alarm on unknown
+    vehicle" fired into a log nobody watches. One row per fired alert;
+    the UI polls unacknowledged rows, rings per severity, and writes the
+    acknowledgement back here so every open browser stops ringing at
+    once.
+
+    ``camera_id`` is the wire HANDLE (``cam3``) exactly as the producer
+    sent it — alerts must survive producers the core doesn't know
+    (adapters, future kai-c policy alerts), so no FK.
+    """
+
+    __tablename__ = "app_alerts"
+    __table_args__ = (
+        Index("ix_app_alerts_unacked", "acknowledged_at", "fired_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Producer-assigned id — the dedup key for at-least-once delivery.
+    alert_id = Column(String(64), unique=True, nullable=False, index=True)
+    fired_at = Column(DateTime(timezone=True), nullable=False)
+    severity = Column(String(16), nullable=False)   # low|medium|high|critical
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    source_kind = Column(String(30), nullable=True)     # app|adapter|kai-c
+    source_name = Column(String(100), nullable=True, index=True)
+    camera_id = Column(String(60), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True)
+    evidence = Column(Text, nullable=True)              # JSON, as received
+    tags = Column(Text, nullable=True)                  # JSON list
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class AuditLog(Base):
     """Audit log of significant user and system actions.
 

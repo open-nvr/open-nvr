@@ -207,25 +207,40 @@ async def run_consumer_loop() -> None:
     # documents the identical lesson).
     token = (getattr(settings, "internal_api_key", "") or "").strip() or None
 
+    # No awaiting ``finally`` on this path: it would run under
+    # GeneratorExit when the coroutine is closed (task GC'd) and blow up
+    # as "coroutine ignored GeneratorExit" — the failure that silently
+    # unsubscribed the alerts-inbox consumer in the field. Teardown is
+    # explicit on the exception paths instead (see alerts_inbox).
     while True:
+        client = sub = None
         try:
             client = await nats.connect(url, connect_timeout=5, token=token)
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
             logger.info("plate event consumer subscribed to %s", SUBJECT)
-            try:
-                # nats-py reconnects transparently; this just parks the
-                # task until cancellation (shutdown) unwinds us.
-                await asyncio.Event().wait()
-            finally:
-                try:
-                    await sub.unsubscribe()
-                    await client.drain()
-                except Exception:  # noqa: BLE001
-                    pass
+            # nats-py reconnects transparently; this just parks the
+            # task until cancellation (shutdown) unwinds us.
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
+            await _teardown(sub, client)
             raise
         except Exception as exc:  # noqa: BLE001
+            await _teardown(sub, client)
             logger.warning(
                 "plate event consumer: connect/subscribe failed (%s); "
                 "retrying in %.0fs", exc, _RETRY_SECONDS)
             await asyncio.sleep(_RETRY_SECONDS)
+
+
+async def _teardown(sub, client) -> None:
+    """Best-effort unsubscribe + drain; every failure swallowed."""
+    try:
+        if sub is not None:
+            await sub.unsubscribe()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if client is not None:
+            await client.drain()
+    except Exception:  # noqa: BLE001
+        pass

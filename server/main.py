@@ -52,6 +52,7 @@ from routers import (
     ai_detection_results,
     ai_model_management,
     ai_models,
+    alerts_inbox,
     apps,
     audit_logs,
     auth,
@@ -379,7 +380,16 @@ async def lifespan(app: FastAPI):
     # Start background provisioning task
     import asyncio
 
-    asyncio.create_task(background_mediamtx_provisioning())
+    # Fire-and-forget tasks MUST go through spawn_background: a bare
+    # asyncio.create_task() whose return value is dropped is only weakly
+    # referenced by the loop, and the GC really does destroy such tasks
+    # mid-flight (field incident: the alerts-inbox consumer was killed
+    # one second after subscribing — "coroutine ignored GeneratorExit" —
+    # and the site lost its alarm chain until the next restart).
+    from core.background_tasks import run_consumer_forever, spawn_background
+
+    spawn_background(background_mediamtx_provisioning(),
+                     name="mediamtx-provisioning")
 
     # Start retention cleanup scheduler
     async def background_retention_cleanup():
@@ -409,7 +419,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Retention cleanup scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_retention_cleanup())
+    spawn_background(background_retention_cleanup(),
+                     name="retention-cleanup")
 
     # Disk-pressure loop: a near-full disk cannot wait for the daily sweep —
     # MediaMTX simply fails to write once space runs out. Every 5 minutes:
@@ -453,7 +464,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Disk pressure scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_disk_pressure())
+    spawn_background(background_disk_pressure(), name="disk-pressure")
 
     # Host resource monitor: CPU/RAM/disk sampling + edge-triggered alerts
     # (system_events + live bus). 15s cadence; work runs in a worker thread.
@@ -477,7 +488,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"System monitor scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_system_monitor())
+    spawn_background(background_system_monitor(), name="system-monitor")
 
     # Recording-health watchdog: surfaces "camera silently stopped recording"
     # as a camera event within minutes instead of being discovered days later.
@@ -512,7 +523,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Recording watchdog scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_recording_watchdog())
+    spawn_background(background_recording_watchdog(),
+                     name="recording-watchdog")
 
     # Recordings-index reconciler: startup backfill of the recordings table
     # from the on-disk archive, then a periodic recent-window convergence
@@ -526,33 +538,50 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Recording reconciler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_recording_reconciler())
+    spawn_background(background_recording_reconciler(),
+                     name="recording-reconciler")
 
     # RFC-0002 Phase 0: consume plate.recognized.v1 from the bus and write
     # plate_text onto timeline rows — producer-independent (EVENT_CONTRACTS.md
     # convergence). No NATS_URL / no nats-py degrades to the enrichment
     # fallback's synchronous writes; the loop itself never raises.
     async def background_plate_event_consumer():
-        try:
+        async def _loop():
             from services.plate_event_consumer import run_consumer_loop
 
             await run_consumer_loop()
-        except Exception as e:
-            main_logger.error(f"Plate event consumer failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_plate_event_consumer())
+        await run_consumer_forever("Plate event consumer", _loop)
+
+    spawn_background(background_plate_event_consumer(),
+                     name="plate-event-consumer")
 
     # Occupancy history: consume occupancy.changed.v1 samples into the
     # history store (EVENT_CONTRACTS.md). Same best-effort posture.
     async def background_occupancy_event_consumer():
-        try:
+        async def _loop():
             from services.occupancy_event_consumer import run_consumer_loop
 
             await run_consumer_loop()
-        except Exception as e:
-            main_logger.error(f"Occupancy consumer failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_occupancy_event_consumer())
+        await run_consumer_forever("Occupancy consumer", _loop)
+
+    spawn_background(background_occupancy_event_consumer(),
+                     name="occupancy-event-consumer")
+
+    # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
+    # NatsAlertChannel) into app_alerts so the UI bell can ring and
+    # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
+    async def background_alerts_inbox_consumer():
+        async def _loop():
+            from services.alerts_inbox import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Alerts inbox consumer", _loop)
+
+    spawn_background(background_alerts_inbox_consumer(),
+                     name="alerts-inbox-consumer")
 
     # Start camera connectivity reconciler — safety net for the MediaMTX
     # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
@@ -735,6 +764,7 @@ app.include_router(cameras.router, prefix=settings.api_prefix)
 app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 app.include_router(timeline_events.router, prefix=settings.api_prefix)
+app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)

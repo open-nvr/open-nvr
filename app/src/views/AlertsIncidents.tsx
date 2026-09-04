@@ -21,6 +21,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { apiService } from '../lib/apiService'
 import { useSystemAlerts, type SystemAlertEvent } from '../hooks/useCameraStatus'
+import { Alarms } from './Alarms'
 
 type EveAlert = any
 
@@ -38,7 +39,12 @@ export function AlertsIncidents() {
 
   // 'network' (Suricata IDS, the original view — default so existing deep
   // links keep working) or 'system' (host/recording alerts).
-  const source = query.get('source') === 'system' ? 'system' : 'network'
+  const raw = query.get('source')
+  // Alarms is the default view — operational alarms are what most
+  // operators mean by "alerts"; the IDS and system streams keep their
+  // tabs.
+  const source: 'alarms' | 'network' | 'system' =
+    raw === 'system' ? 'system' : raw === 'network' ? 'network' : 'alarms'
   const onlyAlerts = query.get('only_alerts') === '1' || query.get('only_alerts') === 'true'
   const severity = query.get('severity') // Suricata: 1=high, 2=med, 3=low
   const category = query.get('category')
@@ -121,8 +127,14 @@ export function AlertsIncidents() {
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="text-[var(--text-dim)]">Source:</span>
         <button
-          className={`px-2 py-1 rounded border ${source === 'network' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1 rounded border ${source === 'alarms' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
           onClick={() => setParam('source', null)}
+        >
+          Alarms
+        </button>
+        <button
+          className={`px-2 py-1 rounded border ${source === 'network' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          onClick={() => setParam('source', 'network')}
         >
           Network (IDS)
         </button>
@@ -134,7 +146,9 @@ export function AlertsIncidents() {
         </button>
       </div>
 
-      {source === 'system' ? (
+      {source === 'alarms' ? (
+        <Alarms embedded />
+      ) : source === 'system' ? (
         <SystemAlertsView />
       ) : (
       <>

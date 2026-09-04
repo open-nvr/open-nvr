@@ -1,0 +1,389 @@
+/**
+ * Copyright (c) 2026 OpenNVR
+ * This file is part of OpenNVR.
+ *
+ * OpenNVR is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * OpenNVR is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Bell, BellOff, Check, CheckCheck } from 'lucide-react'
+import {
+  alertsInboxService,
+  type InboxAlert,
+  type RingConfig,
+  type RingMode,
+} from '../services/alertsInboxService'
+import { useClickOutside } from '../hooks/useClickOutside'
+
+const POLL_MS = 10_000
+
+const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
+const RING_MODES: RingMode[] = ['none', 'ping', 'continuous']
+
+const SEVERITY_STYLE: Record<string, string> = {
+  critical: 'bg-red-600 text-white',
+  high: 'bg-orange-600 text-white',
+  medium: 'bg-yellow-600 text-black',
+  low: 'bg-neutral-600 text-white',
+}
+
+// ── Web Audio ring engine ──────────────────────────────────────────
+//
+// Same annunciation model as the camera-agent's alarm UI, driven by the
+// site-wide ring-config:
+//   none       — badge only
+//   ping       — one chime when a NEW alert of that severity arrives
+//   continuous — repeats until every alert of that severity is
+//                acknowledged. The SOUND escalates with severity: a
+//                critical alert wails like a real siren (sweeping
+//                pitch); anything else rings the two-tone beep — an
+//                operator can tell "critical" from "high" across the
+//                room without looking.
+//
+// Browsers block audio before the first user gesture; the engine
+// resumes its AudioContext on the first click/keypress and the siren
+// loop simply starts sounding from that moment — the visual badge and
+// red banner are the fallback until then.
+
+let _ctx: AudioContext | null = null
+
+function audioCtx(): AudioContext | null {
+  try {
+    if (!_ctx) {
+      const Ctor =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext
+      if (!Ctor) return null
+      _ctx = new Ctor()
+    }
+    if (_ctx.state === 'suspended') void _ctx.resume()
+    return _ctx
+  } catch {
+    return null
+  }
+}
+
+function tone(freq: number, at: number, dur: number, gainValue = 0.08) {
+  const ctx = audioCtx()
+  if (!ctx || ctx.state !== 'running') return
+  const osc = ctx.createOscillator()
+  const gain = ctx.createGain()
+  osc.type = 'sine'
+  osc.frequency.value = freq
+  gain.gain.setValueAtTime(gainValue, ctx.currentTime + at)
+  gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + dur)
+  osc.connect(gain).connect(ctx.destination)
+  osc.start(ctx.currentTime + at)
+  osc.stop(ctx.currentTime + at + dur)
+}
+
+function playPing() {
+  tone(880, 0, 0.25)
+}
+
+/** Two-tone beep — the continuous ring for high/medium/low. */
+function playSiren() {
+  tone(660, 0, 0.35, 0.1)
+  tone(880, 0.4, 0.35, 0.1)
+}
+
+/** CRITICAL only: a proper siren wail — one sawtooth oscillator whose
+ *  pitch sweeps 600→1250→600 Hz over 1.4s. Looped every 1600ms this
+ *  sounds like an actual alarm siren, unmistakably more urgent than
+ *  the beep. Synthesized (no audio asset): nothing to load, works on
+ *  an air-gapped NVR. */
+function playWail() {
+  const ctx = audioCtx()
+  if (!ctx || ctx.state !== 'running') return
+  const osc = ctx.createOscillator()
+  const gain = ctx.createGain()
+  osc.type = 'sawtooth'
+  const t = ctx.currentTime
+  osc.frequency.setValueAtTime(600, t)
+  osc.frequency.linearRampToValueAtTime(1250, t + 0.7)
+  osc.frequency.linearRampToValueAtTime(600, t + 1.4)
+  gain.gain.setValueAtTime(0.1, t)
+  gain.gain.setValueAtTime(0.1, t + 1.3)
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.5)
+  osc.connect(gain).connect(ctx.destination)
+  osc.start(t)
+  osc.stop(t + 1.5)
+}
+
+/** Direct, in-gesture sound check (exported for the Alarms page).
+ *  Runs inside the caller's click handler, so the browser cannot block
+ *  it — separating "is audio working at all" from the alert chain.
+ *  Plays the two-tone beep, then the critical wail, so the operator
+ *  hears BOTH alarm sounds they may need to recognize. */
+export function playTestSound() {
+  const c = audioCtx()
+  if (c) void c.resume()
+  playSiren()
+  window.setTimeout(playWail, 1000)
+}
+
+/** Resume the shared AudioContext on user gestures until it is RUNNING.
+ *  Deliberately not one-shot: a first gesture that fails to unlock
+ *  (keyboard activation quirks, a still-suspended resume) must not burn
+ *  the only chance — every further gesture retries until audio works. */
+function useAudioUnlock() {
+  useEffect(() => {
+    const unlock = () => {
+      const c = audioCtx()          // creates + resumes as needed
+      if (c && c.state === 'running') {
+        window.removeEventListener('pointerdown', unlock)
+        window.removeEventListener('keydown', unlock)
+      }
+    }
+    window.addEventListener('pointerdown', unlock)
+    window.addEventListener('keydown', unlock)
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
+}
+
+/** Is the audio engine actually able to sound right now? Re-checked on
+ *  an interval while relevant, so the UI can SAY "sound blocked" instead
+ *  of failing silently — the failure mode that looks exactly like
+ *  'alarms don't work'. */
+function useAudioBlocked(active: boolean): boolean {
+  const [blocked, setBlocked] = useState(false)
+  useEffect(() => {
+    if (!active) {
+      setBlocked(false)
+      return
+    }
+    const check = () => {
+      const c = audioCtx()
+      setBlocked(!c || c.state !== 'running')
+    }
+    check()
+    const t = window.setInterval(check, 1000)
+    return () => window.clearInterval(t)
+  }, [active])
+  return blocked
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return ''
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 60) return `${Math.floor(s)}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
+export function AlertBell() {
+  const [open, setOpen] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
+  useClickOutside(panelRef, open, () => setOpen(false))
+  useAudioUnlock()
+  const qc = useQueryClient()
+
+  const inbox = useQuery({
+    queryKey: ['alerts-inbox-unacked'],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.listInboxAlerts({
+        unacked: true,
+        limit: 50,
+      })
+      return data as { alerts: InboxAlert[]; unacked_count: number }
+    },
+    refetchInterval: POLL_MS,
+  })
+
+  const ringCfg = useQuery({
+    queryKey: ['alerts-inbox-ring-config'],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.getRingConfig()
+      return data as { ring: RingConfig }
+    },
+    staleTime: 60_000,
+  })
+
+  const ack = useMutation({
+    mutationFn: (ids?: number[]) => alertsInboxService.ackInboxAlerts(ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
+      // The Alarms page and the Apps tab read the same table — an ack
+      // from the bell must not leave them showing 'unacked' for 10s.
+      qc.invalidateQueries({ queryKey: ['alarms-page'] })
+      qc.invalidateQueries({ queryKey: ['alerts-inbox-page'] })
+    },
+  })
+
+  const alerts = inbox.data?.alerts ?? []
+  const unackedCount = inbox.data?.unacked_count ?? 0
+  const ring = ringCfg.data?.ring
+
+  // Ping on NEW arrivals only — never on page load (a shift change must
+  // not replay the whole night), tracked by the highest id yet seen.
+  const maxSeenId = useRef<number | null>(null)
+  useEffect(() => {
+    // Wait for BOTH the inbox and the ring policy: baselining before the
+    // policy loads would swallow the ping for an alert arriving in that
+    // window.
+    if (!inbox.data || !ring) return
+    const top = alerts.length ? Math.max(...alerts.map((a) => a.id)) : 0
+    if (maxSeenId.current === null) {
+      maxSeenId.current = top // baseline: what existed when we opened
+      return
+    }
+    if (top > maxSeenId.current) {
+      const fresh = alerts.filter((a) => a.id > (maxSeenId.current as number))
+      maxSeenId.current = top
+      if (ring && fresh.some((a) => ring[a.severity] === 'ping')) playPing()
+    }
+  }, [inbox.data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Continuous: repeats while ANY unacked alert maps to it. The sound
+  // is picked by the WORST offender — one unacked critical alert makes
+  // the wail override every beep (never both at once; layered sounds
+  // would be mud), and the beep only returns once all criticals are
+  // acknowledged.
+  const sirenMode = useMemo<'wail' | 'beep' | null>(() => {
+    if (!ring) return null
+    const continuous = alerts.filter((a) => ring[a.severity] === 'continuous')
+    if (continuous.length === 0) return null
+    return continuous.some((a) => a.severity === 'critical')
+      ? 'wail'
+      : 'beep'
+  }, [alerts, ring])
+  const sirenActive = sirenMode !== null
+  const audioBlocked = useAudioBlocked(sirenActive || unackedCount > 0)
+  const enableSound = () => {
+    const c = audioCtx()
+    if (c) void c.resume()
+    if (sirenMode === 'wail') playWail()
+    else if (sirenMode === 'beep') playSiren()
+    else playPing()               // audible confirmation either way
+  }
+  useEffect(() => {
+    if (!sirenMode) return
+    const play = sirenMode === 'wail' ? playWail : playSiren
+    play()
+    const t = window.setInterval(play, 1600)
+    return () => window.clearInterval(t)
+  }, [sirenMode])
+
+  return (
+    <div className="relative" ref={panelRef}>
+      <button
+        aria-label="Alarms"
+        className={`relative inline-flex items-center gap-1 px-2 py-1 rounded ${
+          sirenActive
+            ? 'bg-red-600 text-white animate-pulse'
+            : 'bg-[var(--panel)] hover:bg-[var(--panel-2)]'
+        }`}
+        onClick={() => setOpen((s) => !s)}
+        title="Alarms"
+      >
+        <Bell size={14} />
+        <span className="hidden md:inline">
+          Alarms{audioBlocked ? ' 🔇' : ''}
+        </span>
+        {unackedCount > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] leading-4 text-center normal-case">
+            {unackedCount > 99 ? '99+' : unackedCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-1 w-96 max-w-[90vw] bg-[var(--panel)] border border-[var(--border)] text-sm z-50 normal-case tracking-normal shadow-lg">
+          {audioBlocked && (
+            <button
+              className="w-full text-left px-3 py-2 bg-yellow-600 text-black text-[12px] font-medium"
+              onClick={enableSound}
+            >
+              🔇 Alarm sound is blocked by the browser — click here to
+              enable it
+            </button>
+          )}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
+            <span className="font-semibold">
+              Alarms{unackedCount ? ` (${unackedCount})` : ''}
+            </span>
+            <div className="flex items-center gap-2">
+              {unackedCount > 0 && (
+                <button
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded hover:bg-[var(--panel-2)]"
+                  onClick={() => ack.mutate(undefined)}
+                  title="Acknowledge all"
+                >
+                  <CheckCheck size={13} /> Ack all
+                </button>
+              )}
+            </div>
+          </div>
+
+
+          <div className="max-h-96 overflow-y-auto">
+            {alerts.length === 0 ? (
+              <div className="px-3 py-6 text-center text-[var(--text-dim)]">
+                <BellOff size={18} className="mx-auto mb-1" />
+                No unacknowledged alerts
+              </div>
+            ) : (
+              alerts.map((a) => (
+                <div
+                  key={a.id}
+                  className="px-3 py-2 border-b border-[var(--border)] last:border-b-0 flex items-start gap-2"
+                >
+                  <span
+                    className={`mt-0.5 px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                      SEVERITY_STYLE[a.severity] ?? SEVERITY_STYLE.low
+                    }`}
+                  >
+                    {a.severity}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate font-medium">{a.title}</div>
+                    <div className="text-[11px] text-[var(--text-dim)] truncate">
+                      {[a.source_name, a.camera_id, timeAgo(a.fired_at)]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                  <button
+                    className="p-1 rounded hover:bg-[var(--panel-2)]"
+                    title="Acknowledge"
+                    onClick={() => ack.mutate([a.id])}
+                  >
+                    <Check size={14} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="p-2 border-t border-[var(--border)]">
+            <Link
+              to="/alerts-incidents"
+              className="block w-full text-center px-3 py-1.5 rounded bg-[var(--panel-2)] hover:bg-[var(--border)] font-medium"
+              onClick={() => setOpen(false)}
+            >
+              Open Alarms — history, sound &amp; call settings →
+            </Link>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

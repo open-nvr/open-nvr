@@ -329,6 +329,24 @@ def test_nats_channel_passes_token_through(monkeypatch):
         channel.close()
 
 
+def test_nats_channel_never_gives_up_reconnecting(monkeypatch):
+    """Field outage (2026-09-04): a 95-second broker restart killed the
+    alert channel FOREVER — max_reconnect_attempts=5 exhausted in ~5s,
+    and nats-py buffers publishes silently while reconnecting, so
+    nothing errored until the client was already closed. Two days of
+    alarms went into a zombie. A bus channel owned by a long-lived
+    daemon must retry forever (-1); this pins that so a future 'tidy'
+    finite value fails loudly."""
+    fake = _FakeNatsModule()
+    _install_fake_nats(monkeypatch, fake)
+    channel = NatsAlertChannel("nats://localhost:4222")
+    try:
+        channel.send(_alert())
+        assert fake.connect_calls[0]["max_reconnect_attempts"] == -1
+    finally:
+        channel.close()
+
+
 def test_nats_channel_omits_token_when_unset(monkeypatch):
     fake = _FakeNatsModule()
     _install_fake_nats(monkeypatch, fake)
