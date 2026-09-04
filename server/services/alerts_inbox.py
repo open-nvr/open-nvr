@@ -231,23 +231,39 @@ async def run_consumer_loop() -> None:
     # lesson as every other consumer in this stack.
     token = (getattr(settings, "internal_api_key", "") or "").strip() or None
 
+    # No ``finally`` with an await anywhere on this path. A finally that
+    # awaits runs during GeneratorExit if the coroutine is ever closed
+    # (task GC'd, coro.close()) — and an await under GeneratorExit is
+    # "coroutine ignored GeneratorExit": the exact error that killed this
+    # consumer in the field one second after it subscribed. Teardown is
+    # therefore explicit, on the two exception paths that can await.
     while True:
+        client = sub = None
         try:
             client = await nats.connect(url, connect_timeout=5, token=token)
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
             logger.info("alert inbox consumer subscribed to %s", SUBJECT)
-            try:
-                await asyncio.Event().wait()
-            finally:
-                try:
-                    await sub.unsubscribe()
-                    await client.drain()
-                except Exception:
-                    pass
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
+            await _teardown(sub, client)
             raise
         except Exception as exc:
+            await _teardown(sub, client)
             logger.warning(
                 "alert inbox consumer: connect/subscribe failed (%s); "
                 "retrying in %.0fs", exc, _RETRY_SECONDS)
             await asyncio.sleep(_RETRY_SECONDS)
+
+
+async def _teardown(sub, client) -> None:
+    """Best-effort unsubscribe + drain; every failure swallowed."""
+    try:
+        if sub is not None:
+            await sub.unsubscribe()
+    except Exception:
+        pass
+    try:
+        if client is not None:
+            await client.drain()
+    except Exception:
+        pass
