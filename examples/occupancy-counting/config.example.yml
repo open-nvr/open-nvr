@@ -59,8 +59,14 @@ min_occupancy: null
 # clear_alerts:    when true, also fire a low-severity CLEARED alert
 #                  when a zone returns to normal occupancy. Off by
 #                  default (most operators only want the breach).
-debounce_frames: 1
+# alert_cooldown_seconds: after an OVER (or UNDER) alert, the same alert
+#                  is not repeated for that zone within this window,
+#                  however often the count flickers across the limit —
+#                  a zone hovering AT the limit otherwise alerts every
+#                  frame it crosses upward. 0 disables.
+debounce_frames: 3
 clear_alerts: false
+alert_cooldown_seconds: 120
 
 # ── Webhook (optional) ────────────────────────────────────────────
 #

@@ -71,7 +71,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from opennvr_app_sdk import (
@@ -106,6 +106,13 @@ DISCOVERY_REFRESH_S: int = 300
 # to exactly those cameras; when none is, nothing is restricted and the
 # app watches every camera, exactly as before assignments existed.
 SKILL: str = "occupancy_counting"
+
+# A zone whose count hovers AT the limit flips over/normal on almost every
+# frame; with the return-to-normal silent (clear_alerts off) each upward
+# flip fired a fresh HIGH alert — one every second or two, in the field.
+# Edge-triggering stops a *steady* over-occupancy from repeating; only a
+# per-zone cooldown stops a *flickering* one. 0 disables (legacy).
+ALERT_COOLDOWN_SECONDS_DEFAULT: int = 120
 
 
 def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
@@ -155,6 +162,8 @@ MANIFEST = AppManifest(
               description="Consecutive frames a new band must persist before firing."),
         Param("clear_alerts", bool, default=False,
               description="Also fire a low-severity alert when a zone returns to normal."),
+        Param("alert_cooldown_seconds", int, default=ALERT_COOLDOWN_SECONDS_DEFAULT,
+              description="After an over/under alert, do not repeat the same alert for this zone within this many seconds, however often the count flickers across the limit."),
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
     ],
     # Store listing (the catalog's Details section).
@@ -244,6 +253,7 @@ class AppConfig:
     clear_alerts: bool
     cameras: dict[str, CameraZone]  # keyed by camera_id for O(1) lookup
     webhook_url: str | None
+    alert_cooldown_seconds: int = ALERT_COOLDOWN_SECONDS_DEFAULT
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
@@ -327,6 +337,11 @@ def load_config(path: str) -> AppConfig:
         raise ValueError("config: 'debounce_frames' must be >= 1")
 
     clear_alerts = bool(raw.get("clear_alerts", False))
+    try:
+        cooldown = max(0, int(raw.get("alert_cooldown_seconds",
+                                      ALERT_COOLDOWN_SECONDS_DEFAULT)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("config: 'alert_cooldown_seconds' must be an integer") from exc
 
     # App-level default thresholds; per-camera entries may override.
     default_max = raw.get("max_occupancy")
@@ -492,6 +507,7 @@ def load_config(path: str) -> AppConfig:
         debounce_frames=debounce,
         clear_alerts=clear_alerts,
         cameras=cameras,
+        alert_cooldown_seconds=cooldown,
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
@@ -529,6 +545,11 @@ class _ZoneState:
     pending: str | None = None
     pending_count: int = 0
     last_count: int = 0
+    # Wall-clock of the last alert fired per level ("over" / "under"):
+    # the cooldown ledger. Transitions still commit (the level shown on
+    # the page is always current); only the alert is withheld.
+    last_alert_at: dict[str, float] = field(default_factory=dict)
+    alerts_suppressed: int = 0
 
 
 # ── The rule ───────────────────────────────────────────────────────
@@ -735,6 +756,16 @@ class OccupancyCounter(Detector):
         if candidate == "normal" and not self._config.clear_alerts:
             return []
 
+        # Cooldown: the same over/under alert for this zone within the
+        # window is the count flickering across the limit, not news.
+        if candidate in ("over", "under") and self._config.alert_cooldown_seconds > 0:
+            now = time.time()
+            last = state.last_alert_at.get(candidate)
+            if last is not None and (now - last) < self._config.alert_cooldown_seconds:
+                state.alerts_suppressed += 1
+                return []
+            state.last_alert_at[candidate] = now
+
         return [self._build_alert(
             camera=camera, count=count, level=candidate,
             previous=previous, event=event,
@@ -780,6 +811,7 @@ class OccupancyCounter(Detector):
                     "level": state.level,
                     "last_count": state.last_count,
                     "pending": state.pending,
+                    "alerts_suppressed": state.alerts_suppressed,
                 }
                 for camera_id, state in self._states.items()
             },
