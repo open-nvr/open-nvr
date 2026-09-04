@@ -164,3 +164,87 @@ def test_history_fleet_view_and_fine_buckets(db):
     got = occupancy_history(s, hours=24, owner_id=None, now=NOW)
     assert got["bucket_minutes"] == 15
     assert [c["camera_id"] for c in got["cameras"]] == [cams["lot"].id]
+
+
+# ── occupancy.heatmap.v1: the spatial heat grid ────────────────────
+
+
+def _heat_envelope(cells, *, camera="cam1", ts=None, cols=48, rows=27,
+                   frames=10):
+    return {
+        "id": "evt_heat00000001",
+        "schema": "occupancy.heatmap.v1",
+        "correlation_id": None,
+        "camera_id": camera,
+        "ts": (ts or NOW).isoformat(),
+        "producer": "app:occupancy-counting",
+        "payload": {"cols": cols, "rows": rows, "cells": cells,
+                    "frames": frames, "period_seconds": 60,
+                    "labels": ["person"]},
+    }
+
+
+def test_heatmap_deltas_sum_into_the_camera_hour(db):
+    from routers.occupancy import occupancy_heatmap
+
+    s, users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    assert occ.apply_heatmap_event(_heat_envelope([[5, 3], [7, 1]], camera=cam)) == "applied"
+    assert occ.apply_heatmap_event(_heat_envelope([[5, 2]], camera=cam,
+                                                  ts=NOW + timedelta(minutes=20))) == "applied"
+    rows = s.query(models.OccupancyHeatmap).all()
+    assert len(rows) == 1                      # same hour → one row
+    assert rows[0].cells[5] == 5 and rows[0].cells[7] == 1
+    assert rows[0].frames == 20
+    # next hour → its own row
+    assert occ.apply_heatmap_event(_heat_envelope([[5, 1]], camera=cam,
+                                                  ts=NOW + timedelta(hours=1))) == "applied"
+    assert s.query(models.OccupancyHeatmap).count() == 2
+
+    out = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=24,
+                            owner_id=users["alice"].id,
+                            now=NOW + timedelta(hours=1, minutes=5))
+    assert (out["cols"], out["rows"]) == (48, 27)
+    assert len(out["cells"]) == 48 * 27
+    assert out["cells"][5] == 6 and out["cells"][7] == 1
+    assert out["max"] == 6 and out["frames"] == 30 and out["hours_covered"] == 2
+    # the window floors to hour boundaries (a partial current hour is
+    # always included): at 14:05 a one-hour window starts at 13:00
+    out1 = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=1,
+                             owner_id=users["alice"].id,
+                             now=NOW + timedelta(hours=2, minutes=5))
+    assert out1["cells"][5] == 1 and out1["hours_covered"] == 1
+    # owner scope: bob cannot read alice's camera
+    other = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=24,
+                              owner_id=users["bob"].id,
+                              now=NOW + timedelta(hours=2))
+    assert other["cols"] == 0 and other["cells"] == [] and other["max"] == 0
+
+
+def test_heatmap_rejects_junk_and_shape_changes(db):
+    s, _users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    assert occ.apply_heatmap_event({"payload": {}}) == "malformed"
+    assert occ.apply_heatmap_event(_heat_envelope([[5, 3]], camera="lot-1")) == "bad-camera"
+    assert occ.apply_heatmap_event(_heat_envelope([], camera=cam)) == "empty"
+    # out-of-range and malformed entries are skipped, not fatal
+    assert occ.apply_heatmap_event(_heat_envelope(
+        [[99999, 1], ["x", 1], [3, -2], [4, 2]], camera=cam)) == "applied"
+    assert s.query(models.OccupancyHeatmap).one().cells[4] == 2
+    # a different grid shape inside the same hour is dropped
+    assert occ.apply_heatmap_event(_heat_envelope(
+        [[1, 1]], camera=cam, cols=16, rows=9)) == "shape-mismatch"
+    # absurd grids are refused before any allocation
+    assert occ.apply_heatmap_event(_heat_envelope(
+        [[1, 1]], camera=cam, cols=10000, rows=10000)) == "malformed"
+
+
+def test_heatmap_retention_ages_with_the_samples(db):
+    s, _users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    old = NOW - timedelta(days=occ.RETENTION_DAYS + 1)
+    assert occ.apply_heatmap_event(_heat_envelope([[1, 1]], camera=cam, ts=old)) == "applied"
+    assert occ.apply_heatmap_event(_heat_envelope([[1, 1]], camera=cam)) == "applied"
+    assert occ.prune_heatmaps(s, now=NOW) == 1
+    s.commit()
+    assert s.query(models.OccupancyHeatmap).count() == 1

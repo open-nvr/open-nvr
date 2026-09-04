@@ -1160,3 +1160,31 @@ class OccupancySample(Base):
     # (additive — future producers may add bands).
     level = Column(String(16), nullable=False, default="normal")
     ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class OccupancyHeatmap(Base):
+    """One camera-hour of the spatial heatmap (``occupancy.heatmap.v1``).
+
+    The occupancy app bins every watched detection's FOOT point into a
+    fixed unit-space grid and ships sparse deltas every minute or so;
+    the consumer sums them into the row for that camera and hour. The
+    Occupancy page sums rows over any window (last hour, today, 7 days)
+    and paints the grid over a still of the camera. ``cells`` is a flat
+    ``cols * rows`` list of ints, row-major, top-left first — small
+    enough (48x27 = 1296 ints) that JSON beats a bytes column for
+    dialect portability. Retention: pruned with the samples (90 days).
+    """
+
+    __tablename__ = "occupancy_heatmaps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, nullable=False, index=True)
+    # The hour bucket the deltas fell in (UTC, minute/second zeroed).
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    cols = Column(Integer, nullable=False)
+    rows = Column(Integer, nullable=False)
+    cells = Column(JSON, nullable=False)
+    # Frames that contributed — lets the page normalise "hits per frame"
+    # so a busy hour and a quiet hour paint on the same scale.
+    frames = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False)

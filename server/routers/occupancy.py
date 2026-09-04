@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.auth import get_current_active_user
-from models import Camera, OccupancySample, User
+from models import Camera, OccupancyHeatmap, OccupancySample, User
 
 router = APIRouter(tags=["occupancy"])
 
@@ -99,6 +99,84 @@ async def get_occupancy_history(
     the window, and busiest hours of day over the last 7 days."""
     return occupancy_history(
         db,
+        hours=hours,
+        owner_id=None if current_user.is_superuser else current_user.id,
+    )
+
+
+def occupancy_heatmap(
+    db: Session,
+    *,
+    camera_id: int,
+    hours: int = 24,
+    owner_id: int | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """The camera's heat grid summed over the last ``hours`` — the read
+    side of ``occupancy.heatmap.v1``. Rows of a different grid shape (a
+    producer reconfigured mid-window) are skipped rather than mixed.
+
+    ``cells`` is the raw hit count per cell; ``max`` is the peak; the
+    page normalises against it. ``frames`` is how many detection frames
+    fed the window, so "hits per frame" is available to compare windows
+    of different length."""
+    now = now or datetime.now(timezone.utc)
+    hours = max(1, min(int(hours), 24 * 30))
+    start = (now - timedelta(hours=hours)).replace(minute=0, second=0,
+                                                   microsecond=0)
+    q = db.query(OccupancyHeatmap).filter(
+        OccupancyHeatmap.camera_id == camera_id,
+        OccupancyHeatmap.hour_start >= start,
+    )
+    if owner_id is not None:
+        q = q.join(Camera, Camera.id == OccupancyHeatmap.camera_id).filter(
+            Camera.owner_id == owner_id
+        )
+    cols = rows = 0
+    cells: list[int] = []
+    frames = 0
+    hours_covered = 0
+    latest: datetime | None = None
+    for row in q.order_by(OccupancyHeatmap.hour_start.asc()).all():
+        if not cols:
+            cols, rows = int(row.cols), int(row.rows)
+            cells = [0] * (cols * rows)
+        elif (row.cols, row.rows) != (cols, rows):
+            continue
+        src = row.cells if isinstance(row.cells, list) else []
+        for i, v in enumerate(src[:len(cells)]):
+            if isinstance(v, int) and v > 0:
+                cells[i] += v
+        frames += int(row.frames or 0)
+        hours_covered += 1
+        upd = row.updated_at
+        if upd is not None and (latest is None or upd > latest):
+            latest = upd
+    return {
+        "camera_id": camera_id,
+        "hours": hours,
+        "cols": cols,
+        "rows": rows,
+        "cells": cells,
+        "max": max(cells) if cells else 0,
+        "frames": frames,
+        "hours_covered": hours_covered,
+        "updated_at": latest.isoformat() if latest else None,
+    }
+
+
+@router.get("/occupancy/heatmap")
+async def get_occupancy_heatmap(
+    camera_id: int,
+    hours: int = 24,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Where watched entities stood on one camera over the window —
+    a unit-space grid the Occupancy page paints over a camera still."""
+    return occupancy_heatmap(
+        db,
+        camera_id=camera_id,
         hours=hours,
         owner_id=None if current_user.is_superuser else current_user.id,
     )

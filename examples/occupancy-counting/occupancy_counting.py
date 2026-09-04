@@ -91,7 +91,7 @@ from opennvr_app_sdk.cameras import (
     full_frame_polygon,
 )
 from opennvr_app_sdk.config import load_yaml
-from opennvr_app_sdk.geometry import Zone, bbox_center
+from opennvr_app_sdk.geometry import Zone, bbox_center, scale_vertices
 
 logger = logging.getLogger("occupancy-counting")
 
@@ -134,6 +134,21 @@ def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
 OCCUPANCY_SCHEMA = "occupancy.changed.v1"
 PUBLISH_MIN_INTERVAL_SECONDS = 10.0
 
+# ── Spatial heatmap (EVENT_CONTRACTS.md occupancy.heatmap.v1) ──────────
+# Every detection the app already receives carries a normalised box; the
+# box's FOOT point (bottom-centre — where the person stands, not where
+# their head is) is binned into a fixed unit-space grid per camera. The
+# grid is resolution-independent (the boxes are 0-1), so it lines up
+# with any still of the camera. Counts accrue between publishes and are
+# shipped as a SPARSE delta every ``heatmap_publish_seconds``; core sums
+# deltas into camera-hour rows and serves any window from them. The app
+# keeps nothing across restarts — history is core's job, as with the
+# head-count samples.
+HEATMAP_SCHEMA = "occupancy.heatmap.v1"
+HEATMAP_COLS: int = 48
+HEATMAP_ROWS: int = 27          # 16:9 cells; a 4:3 camera just gets squarer cells
+HEATMAP_PUBLISH_SECONDS_DEFAULT: int = 60
+
 
 MANIFEST = AppManifest(
     id="occupancy-counting",
@@ -155,6 +170,10 @@ MANIFEST = AppManifest(
               description="Consecutive frames a new band must persist before firing."),
         Param("clear_alerts", bool, default=False,
               description="Also fire a low-severity alert when a zone returns to normal."),
+        Param("heatmap_enabled", bool, default=True,
+              description="Accumulate WHERE watched entities stand (a per-camera heat grid), shown on the Occupancy page."),
+        Param("heatmap_publish_seconds", int, default=HEATMAP_PUBLISH_SECONDS_DEFAULT,
+              description="How often the accumulated heat grid is shipped to the platform's history."),
         Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
     ],
     # Store listing (the catalog's Details section).
@@ -177,6 +196,7 @@ MANIFEST = AppManifest(
         "Factory floor and warehouse zone limits (safety compliance)",
         "Live 'people now' board across every watched space",
         "Under-occupancy: know when a manned post is left empty",
+        "Footfall heatmap: where people actually stand, queue and linger — by hour, day or week",
     ],
     emits=[
         AlertType("occupancy_over", severity="high"),
@@ -244,6 +264,8 @@ class AppConfig:
     clear_alerts: bool
     cameras: dict[str, CameraZone]  # keyed by camera_id for O(1) lookup
     webhook_url: str | None
+    heatmap_enabled: bool = True
+    heatmap_publish_seconds: int = HEATMAP_PUBLISH_SECONDS_DEFAULT
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
@@ -492,6 +514,10 @@ def load_config(path: str) -> AppConfig:
         debounce_frames=debounce,
         clear_alerts=clear_alerts,
         cameras=cameras,
+        heatmap_enabled=bool(raw.get("heatmap_enabled", True)),
+        heatmap_publish_seconds=max(5, int(
+            raw.get("heatmap_publish_seconds", HEATMAP_PUBLISH_SECONDS_DEFAULT)
+            or HEATMAP_PUBLISH_SECONDS_DEFAULT)),
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
@@ -554,6 +580,12 @@ class OccupancyCounter(Detector):
             producer="app:occupancy-counting")
         self._last_published: dict[str, tuple[int, float]] = {}
         self._history_events_published: int = 0
+        # Heat grids: camera_id -> flat list[int] of HEATMAP_COLS*HEATMAP_ROWS
+        # cells, counts accrued SINCE THE LAST PUBLISH (a delta, not a
+        # total), plus the frames that contributed. Reset on publish.
+        self._heat: dict[str, list[int]] = {}
+        self._heat_frames: dict[str, int] = {}
+        self._heatmaps_published: int = 0
         # Only auto-derived camera sets are refreshed; an explicit list is
         # the operator's word and is never second-guessed.
         self._auto_cameras: bool = bool(
@@ -635,13 +667,248 @@ class OccupancyCounter(Detector):
 
     async def run(self, *, once: bool = False) -> None:
         refresher: asyncio.Task | None = None
+        flusher: asyncio.Task | None = None
         if not once and self._auto_cameras:
             refresher = asyncio.create_task(self._discovery_loop())
+        if not once and self._config.heatmap_enabled:
+            flusher = asyncio.create_task(self._heatmap_flush_loop())
         try:
             await super().run(once=once)
         finally:
             if refresher is not None:
                 refresher.cancel()
+            if flusher is not None:
+                flusher.cancel()
+
+    # ── Live config (registry poll, spec §05) ─────────────────────
+
+    DRAWN_ZONE_NAME = "drawn"
+
+    @staticmethod
+    def _camera_key(raw_key: object, known: dict[str, CameraZone]) -> str | None:
+        """Resolve a per-camera config key to this app's camera id.
+        The catalog's geometry editor keys by the numeric core id
+        (``"3"``); the app keys by the platform handle (``"cam3"``);
+        hand-written config may use either. Unknown → None."""
+        key = str(raw_key).strip()
+        if key in known:
+            return key
+        if key.isdigit() and f"cam{key}" in known:
+            return f"cam{key}"
+        return None
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Apply catalog / Occupancy-page edits LIVE.
+
+        Field bug this closes: the app never overrode this hook, so the
+        thresholds the Occupancy page saves ("applied live", it said),
+        the watch labels, and every zone drawn in the catalog were
+        silently ignored until the container restarted — and even then
+        drawn zones were never read. Idempotent (the poll re-delivers
+        the same config on its first fetch); every rebind is one
+        attribute swap, atomic enough under the GIL against the run
+        loop and ``/state``.
+        """
+        cfg = self._config
+        changed: list[str] = []
+
+        if "watch_labels" in config:
+            labels = [str(v).lower().strip() for v in (config.get("watch_labels") or [])
+                      if str(v).strip()]
+            if labels and labels != list(cfg.watch_labels):
+                cfg.watch_labels = labels
+                changed.append(f"watch_labels={labels}")
+
+        new_max = cfg.default_max
+        if "max_occupancy" in config:
+            try:
+                new_max = max(0, int(config.get("max_occupancy")))
+            except (TypeError, ValueError):
+                new_max = cfg.default_max
+        new_min: int | None = cfg.default_min
+        if "min_occupancy" in config:
+            raw_min = config.get("min_occupancy")
+            try:
+                new_min = int(raw_min) if raw_min not in (None, "", 0, "0") else None
+            except (TypeError, ValueError):
+                new_min = cfg.default_min
+            if new_min is not None and new_min < 0:
+                new_min = None
+        if new_min is not None and new_max and new_min > new_max:
+            new_min = None
+        if (new_max, new_min) != (cfg.default_max, cfg.default_min):
+            cfg.default_max, cfg.default_min = new_max, new_min
+            # App-level thresholds apply to every camera: the catalog
+            # form has no per-camera ceiling, so a differing per-camera
+            # value could only have come from hand-written YAML — and an
+            # operator saving on the page expects the page to win.
+            for cam in cfg.cameras.values():
+                cam.max_occupancy = new_max
+                cam.min_occupancy = new_min
+            changed.append(f"max={new_max} min={new_min}")
+
+        if "debounce_frames" in config:
+            try:
+                debounce = max(1, int(config.get("debounce_frames")))
+            except (TypeError, ValueError):
+                debounce = cfg.debounce_frames
+            if debounce != cfg.debounce_frames:
+                cfg.debounce_frames = debounce
+                changed.append(f"debounce={debounce}")
+        if "clear_alerts" in config:
+            clear = bool(config.get("clear_alerts"))
+            if clear != cfg.clear_alerts:
+                cfg.clear_alerts = clear
+                changed.append(f"clear_alerts={clear}")
+        if "heatmap_enabled" in config:
+            enabled = bool(config.get("heatmap_enabled"))
+            if enabled != cfg.heatmap_enabled:
+                cfg.heatmap_enabled = enabled
+                if not enabled:
+                    self._heat.clear()
+                    self._heat_frames.clear()
+                changed.append(f"heatmap={'on' if enabled else 'off'}")
+        if "heatmap_publish_seconds" in config:
+            try:
+                period = max(5, int(config.get("heatmap_publish_seconds")))
+            except (TypeError, ValueError):
+                period = cfg.heatmap_publish_seconds
+            if period != cfg.heatmap_publish_seconds:
+                cfg.heatmap_publish_seconds = period
+                changed.append(f"heatmap_period={period}s")
+
+        if "zones" in config:
+            drawn = config.get("zones")
+            drawn = drawn if isinstance(drawn, dict) else {}
+            resolved: dict[str, list] = {}
+            for raw_key, verts in drawn.items():
+                cam_id = self._camera_key(raw_key, cfg.cameras)
+                if cam_id is not None and isinstance(verts, list) and len(verts) >= 3:
+                    resolved[cam_id] = verts
+            rebuilt: dict[str, CameraZone] = {}
+            zone_changes: list[str] = []
+            for cam_id, cam in cfg.cameras.items():
+                verts = resolved.get(cam_id)
+                if verts is not None:
+                    try:
+                        zone = Zone.from_config(
+                            name=self.DRAWN_ZONE_NAME,
+                            vertices=scale_vertices(verts, cam.frame_width,
+                                                    cam.frame_height))
+                    except (TypeError, ValueError, KeyError) as exc:
+                        logger.warning("zone for %s ignored: %s", cam_id, exc)
+                        rebuilt[cam_id] = cam
+                        continue
+                    if cam.zone.name != self.DRAWN_ZONE_NAME \
+                            or list(cam.zone.polygon) != list(zone.polygon):
+                        zone_changes.append(f"{cam_id}:drawn({len(verts)} pts)")
+                    cam = CameraZone(camera_id=cam_id, zone=zone,
+                                     frame_width=cam.frame_width,
+                                     frame_height=cam.frame_height,
+                                     max_occupancy=cam.max_occupancy,
+                                     min_occupancy=cam.min_occupancy)
+                elif cam.zone.name == self.DRAWN_ZONE_NAME:
+                    # The operator erased the drawn zone → back to the
+                    # whole frame, exactly as if it had never been drawn.
+                    cam = _auto_camera_zone(cam_id, cam.max_occupancy,
+                                            cam.min_occupancy)
+                    zone_changes.append(f"{cam_id}:full-frame")
+                rebuilt[cam_id] = cam
+            if zone_changes:
+                cfg.cameras = rebuilt
+                changed.append("zones " + ", ".join(zone_changes))
+
+        if changed:
+            logger.info("config applied live: %s", "; ".join(changed))
+
+    # ── Spatial heatmap ───────────────────────────────────────────
+
+    @staticmethod
+    def heat_cell(bbox: dict[str, Any]) -> int | None:
+        """Grid index of a detection's FOOT point, or None for a box that
+        cannot be placed. Foot point = bottom-centre of the normalised
+        box: where the entity stands, which is what a floor heatmap
+        shows — heads drift with height and camera pitch, feet don't."""
+        try:
+            x = float(bbox.get("x", 0.0)) + float(bbox.get("w", 0.0)) / 2.0
+            y = float(bbox.get("y", 0.0)) + float(bbox.get("h", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 <= x <= 1.0) or not (0.0 <= y <= 1.0):
+            # Clamp a foot just past the frame edge (a box clipped at the
+            # bottom still has a foot) — but discard garbage far outside.
+            if x < -0.05 or x > 1.05 or y < -0.05 or y > 1.05:
+                return None
+            x, y = min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
+        col = min(HEATMAP_COLS - 1, int(x * HEATMAP_COLS))
+        row = min(HEATMAP_ROWS - 1, int(y * HEATMAP_ROWS))
+        return row * HEATMAP_COLS + col
+
+    def accumulate_heat(self, camera_id: str, detections: list[Any]) -> int:
+        """Bin this frame's watched detections into the camera's grid.
+        Whole frame, not just the zone — the heatmap answers "where do
+        they go", which the zone was drawn to ask. Returns cells hit."""
+        if not self._config.heatmap_enabled:
+            return 0
+        grid = self._heat.get(camera_id)
+        if grid is None:
+            grid = self._heat[camera_id] = [0] * (HEATMAP_COLS * HEATMAP_ROWS)
+        hits = 0
+        for det in detections:
+            if not isinstance(det, dict):
+                continue
+            if str(det.get("label", "")).lower() not in self._config.watch_labels:
+                continue
+            bbox = det.get("bbox")
+            if not isinstance(bbox, dict):
+                continue
+            idx = self.heat_cell(bbox)
+            if idx is None:
+                continue
+            grid[idx] += 1
+            hits += 1
+        self._heat_frames[camera_id] = self._heat_frames.get(camera_id, 0) + 1
+        return hits
+
+    def flush_heatmaps(self) -> int:
+        """Publish every camera's accrued grid as one sparse
+        ``occupancy.heatmap.v1`` delta and reset. Cameras whose grid
+        stayed empty publish nothing (an empty room costs no bytes).
+        Returns how many events were published."""
+        published = 0
+        for camera_id in list(self._heat):
+            grid = self._heat.get(camera_id) or []
+            frames = self._heat_frames.pop(camera_id, 0)
+            cells = [[i, n] for i, n in enumerate(grid) if n]
+            self._heat[camera_id] = [0] * (HEATMAP_COLS * HEATMAP_ROWS)
+            if not cells:
+                continue
+            ok = self._occupancy_publisher.publish(
+                HEATMAP_SCHEMA,
+                camera_id=camera_id,
+                payload={
+                    "cols": HEATMAP_COLS,
+                    "rows": HEATMAP_ROWS,
+                    "cells": cells,
+                    "frames": frames,
+                    "period_seconds": self._config.heatmap_publish_seconds,
+                    "labels": list(self._config.watch_labels),
+                },
+            )
+            if ok:
+                published += 1
+                self._heatmaps_published += 1
+        return published
+
+    async def _heatmap_flush_loop(self) -> None:
+        """Ship the accrued grids on a fixed cadence. Best-effort: a bus
+        hiccup drops one period's deltas, never the counter."""
+        while True:
+            await asyncio.sleep(self._config.heatmap_publish_seconds)
+            try:
+                self.flush_heatmaps()
+            except Exception:
+                logger.warning("heatmap flush failed", exc_info=True)
 
     # ── Pure helpers (testable without NATS) ──────────────────────
 
@@ -697,6 +964,7 @@ class OccupancyCounter(Detector):
                 )
             return []
 
+        self.accumulate_heat(camera_id, detections)
         count = self.count_in_zone(camera, detections)
         candidate = self._classify(camera, count)
         state = self._states.setdefault(camera_id, _ZoneState())
@@ -775,6 +1043,8 @@ class OccupancyCounter(Detector):
             "total_people": sum(s.last_count for s in self._states.values()),
             "zones_over": sum(1 for s in self._states.values() if s.level == "over"),
             "history_events_published": self._history_events_published,
+            "heatmaps_published": self._heatmaps_published,
+            "heatmap_enabled": self._config.heatmap_enabled,
             "cameras": {
                 camera_id: {
                     "level": state.level,

@@ -247,6 +247,31 @@ samples (90-day retention).
 | `max_occupancy` | int \| null | The zone's configured ceiling at publish time (charts scale against it). |
 | `min_occupancy` | int \| null | The configured floor, when set. |
 
+### `occupancy.heatmap.v1`
+
+Subject: `opennvr.events.occupancy.heatmap.v1.<camera_id>`
+Producer: `app:occupancy-counting` (or any app binning where watched
+entities stand — consumers must not branch on the producer).
+
+A sparse DELTA of a per-camera heat grid: every watched detection's
+foot point (bottom-centre of its normalised box) binned into a fixed
+`cols × rows` grid in unit space, accrued since the previous publish
+and shipped on a fixed cadence (the reference app: every 60 s, only
+for cameras whose grid is non-empty). Core sums deltas into one row
+per camera-hour (90-day retention) and serves any window from them
+(`GET /api/v1/occupancy/heatmap?camera_id=&hours=`), which the
+Occupancy page paints over a still of the camera.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cols`, `rows` | int | Grid shape. Unit space, row-major, top-left first; resolution-independent. A consumer keeps one shape per camera-hour and drops deltas of another shape. |
+| `cells` | `[[index, hits], …]` | Sparse: only cells hit since the last publish, `index = row * cols + col`. Hits are per detection per frame. |
+| `frames` | int | Detection frames that contributed to this delta — lets a reader normalise to hits-per-frame. |
+| `period_seconds` | int | The producer's publish cadence, for readers estimating coverage. |
+| `labels` | list[string] | The watched labels binned (`person`, `car`, …). Additive. |
+
 ## Out of contract (deliberately)
 
 * `opennvr.inference.>` payload internals beyond what each adapter's

@@ -6,8 +6,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Occupancy heatmap.** The occupancy app bins where watched entities
+  stand (foot point of every detection) into a per-camera grid and ships
+  sparse deltas as `occupancy.heatmap.v1`; core sums them per camera-hour
+  and the Occupancy page paints the last hour / today / 7 days over a
+  still of the camera. Zero extra inference — it rides the boxes the app
+  already receives. `heatmap_enabled` / `heatmap_publish_seconds` in the
+  app's config.
+
 ### Fixed
 
+- **The occupancy app now applies its configuration.** It never overrode
+  the SDK's live-config hook, so thresholds saved on the Occupancy page
+  ("applied live"), watch labels, and every zone drawn in the catalog were
+  ignored until a restart — and drawn zones were never read even then.
+  All of them apply live now; erasing a drawn zone returns the camera to
+  the whole frame. The page also shows why a board is empty (which labels
+  are watched; whether core can reach the app) instead of a blank grid.
 - **Plate reads are written by agreement, not by whoever read first.**
   The early track-confirm read (taken when the car is smallest) used to be
   final, and on blurry footage it put a hallucination into the register at

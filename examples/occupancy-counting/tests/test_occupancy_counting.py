@@ -551,3 +551,121 @@ def test_history_interval_suppresses_chatter(monkeypatch):
                    if c["payload"]["level"] == "normal"]
     assert len(normal_only) == 2
     assert app.state_snapshot()["history_events_published"] >= 2
+
+
+# ── Live config (on_config_update) ─────────────────────────────────
+#
+# The app never overrode the SDK hook, so thresholds saved on the
+# Occupancy page ("applied live"), watch labels, and every zone drawn in
+# the catalog were ignored until a restart — and drawn zones were never
+# read even then.
+
+
+def test_live_config_applies_thresholds_and_labels():
+    app = _counter(_camera(max_occ=2))
+    app.on_config_update({"max_occupancy": 5, "min_occupancy": 1,
+                          "watch_labels": ["person", "Car"],
+                          "debounce_frames": 3, "clear_alerts": True})
+    cam = app._config.cameras["cam-1"]
+    assert (cam.max_occupancy, cam.min_occupancy) == (5, 1)
+    assert app._config.watch_labels == ["person", "car"]
+    assert app._config.debounce_frames == 3 and app._config.clear_alerts is True
+    # idempotent: re-delivery of the same config changes nothing
+    app.on_config_update({"max_occupancy": 5, "min_occupancy": 1})
+    assert (cam.max_occupancy, cam.min_occupancy) == (5, 1)
+    # min 0 / "" clears the floor; a floor above the ceiling is dropped
+    app.on_config_update({"min_occupancy": 0})
+    assert cam.min_occupancy is None
+    app.on_config_update({"max_occupancy": 2, "min_occupancy": 9})
+    assert (cam.max_occupancy, cam.min_occupancy) == (2, None)
+
+
+def test_live_config_counts_the_new_label_immediately():
+    app = _counter(_camera(max_occ=10))
+    ev = {"camera_id": "cam-1", "correlation_id": "c",
+          "result": {"detections": [
+              {"label": "car", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}}]}}
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 0
+    app.on_config_update({"watch_labels": ["car"]})
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 1
+
+
+def test_live_config_applies_a_drawn_zone_by_numeric_or_handle_key():
+    cam = oc.CameraZone(camera_id="cam1",
+                        zone=oc.Zone.from_config(name="full-frame (auto)",
+                                                 vertices=oc.full_frame_polygon()),
+                        frame_width=oc.UNIT_FRAME, frame_height=oc.UNIT_FRAME,
+                        max_occupancy=5, min_occupancy=None)
+    app = oc.OccupancyCounter(_config(cam), _NullDispatcher())
+    inside = {"label": "person", "bbox": {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05}}
+    outside = {"label": "person", "bbox": {"x": 0.8, "y": 0.8, "w": 0.05, "h": 0.05}}
+    ev = {"camera_id": "cam1", "correlation_id": "c",
+          "result": {"detections": [inside, outside]}}
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 2
+    # The catalog keys zones by the numeric core id, in normalised coords.
+    app.on_config_update({"zones": {"1": [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]]}})
+    assert app._config.cameras["cam1"].zone.name == "drawn"
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 1
+    # Erasing the zone returns the camera to the whole frame.
+    app.on_config_update({"zones": {}})
+    assert app._config.cameras["cam1"].zone.name == "full-frame (auto)"
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 2
+    # A zone for a camera this app does not watch is ignored, not fatal.
+    app.on_config_update({"zones": {"cam9": [[0, 0], [1, 0], [1, 1]]}})
+    assert set(app._config.cameras) == {"cam1"}
+
+
+# ── Spatial heatmap (occupancy.heatmap.v1) ─────────────────────────
+
+
+def test_heat_cell_bins_the_foot_point():
+    cell = oc.OccupancyCounter.heat_cell
+    # foot = (x + w/2, y + h): a box at the top-left corner stands at
+    # (0.05, 0.1) → col 2 of 48, row 2 of 27
+    assert cell({"x": 0.0, "y": 0.0, "w": 0.1, "h": 0.1}) == 2 * oc.HEATMAP_COLS + 2
+    # bottom-right edge clamps into the last cell
+    assert cell({"x": 0.95, "y": 0.95, "w": 0.1, "h": 0.1}) == \
+        oc.HEATMAP_COLS * oc.HEATMAP_ROWS - 1
+    # garbage far outside the frame is discarded
+    assert cell({"x": 3.0, "y": 3.0, "w": 0.1, "h": 0.1}) is None
+    assert cell({"x": "nope"}) is None
+
+
+def test_heatmap_accumulates_watched_labels_and_publishes_a_sparse_delta():
+    app = _counter(_camera(max_occ=10))
+    dets = [
+        {"label": "person", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+        {"label": "person", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+        {"label": "dog", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+    ]
+    ev = {"camera_id": "cam-1", "correlation_id": "c",
+          "result": {"detections": dets}}
+    app.handle_event(ev)
+    app.handle_event(ev)
+    published = app.flush_heatmaps()
+    assert published == 1
+    call = app._occupancy_publisher.calls[-1]
+    assert call["schema"] == "occupancy.heatmap.v1"
+    assert call["camera_id"] == "cam-1"
+    payload = call["payload"]
+    assert (payload["cols"], payload["rows"]) == (oc.HEATMAP_COLS, oc.HEATMAP_ROWS)
+    assert payload["frames"] == 2
+    assert payload["labels"] == ["person"]
+    # one cell, hit by 2 people × 2 frames; the dog is not watched
+    assert payload["cells"] == [[oc.OccupancyCounter.heat_cell(dets[0]["bbox"]), 4]]
+    # the delta resets: an idle period publishes nothing
+    assert app.flush_heatmaps() == 0
+    assert app.state_snapshot()["heatmaps_published"] == 1
+
+
+def test_heatmap_can_be_switched_off_live():
+    app = _counter(_camera(max_occ=10))
+    app.on_config_update({"heatmap_enabled": False})
+    app.handle_event(_event(2))
+    assert app.flush_heatmaps() == 0
+    assert app.state_snapshot()["heatmap_enabled"] is False
