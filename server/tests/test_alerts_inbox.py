@@ -158,6 +158,26 @@ def test_unknown_severity_surfaces_as_high(db):
     assert _rows(SessionLocal)[0].severity == "high"
 
 
+def test_info_is_a_notice_not_an_escalation(db):
+    """Field bug: the LPR app fires routine "Plate X read" at "info", a
+    level the inbox lacks; the unknown-severity fallback promoted every
+    one to HIGH and rang the beep — while the operator's "alarm on
+    unknown vehicles" toggle (which governs a different alert entirely)
+    appeared to do nothing. Levels apps commonly use map onto ours;
+    only genuinely unknown values escalate."""
+    SessionLocal, _ = db
+    for i, (given, expected) in enumerate([
+        ("info", "low"), ("INFO", "low"), ("notice", "low"),
+        ("warning", "medium"), ("error", "high"), (" Low ", "low"),
+    ]):
+        assert apply_alert(_envelope(alert_id=f"alrt_sev{i}",
+                                     severity=given)) == "stored"
+    got = {r.alert_id: r.severity for r in _rows(SessionLocal)}
+    assert got == {"alrt_sev0": "low", "alrt_sev1": "low", "alrt_sev2": "low",
+                   "alrt_sev3": "medium", "alrt_sev4": "high",
+                   "alrt_sev5": "low"}
+
+
 def test_unparseable_fired_at_still_stores(db):
     SessionLocal, _ = db
     assert apply_alert(_envelope(fired_at="not-a-date")) == "stored"
