@@ -32,8 +32,15 @@ watch_labels:
   - "person"
 max_occupancy: 10
 min_occupancy: null
-debounce_frames: 1
+# A new band must hold for this many consecutive frames before it commits
+# (3 frames ≈ 1.5 s at Tier-0's 2 fps): a single noisy frame no longer
+# flips a zone over and back.
+debounce_frames: 3
 clear_alerts: false
+# Once a zone has alerted over (or under), the same alert is not repeated
+# for this zone within this window however often the count flickers
+# across the limit. The page still shows the live level. 0 disables.
+alert_cooldown_seconds: 120
 
 # ── Alert delivery ─────────────────────────────────────────────────
 # Alerts always go to stdout (``docker compose logs occupancy-counting``).

@@ -551,3 +551,275 @@ def test_history_interval_suppresses_chatter(monkeypatch):
                    if c["payload"]["level"] == "normal"]
     assert len(normal_only) == 2
     assert app.state_snapshot()["history_events_published"] >= 2
+
+
+# ── Live config (on_config_update) ─────────────────────────────────
+#
+# The app never overrode the SDK hook, so thresholds saved on the
+# Occupancy page ("applied live"), watch labels, and every zone drawn in
+# the catalog were ignored until a restart — and drawn zones were never
+# read even then.
+
+
+def test_live_config_applies_thresholds_and_labels():
+    app = _counter(_camera(max_occ=2))
+    app.on_config_update({"max_occupancy": 5, "min_occupancy": 1,
+                          "watch_labels": ["person", "Car"],
+                          "debounce_frames": 3, "clear_alerts": True})
+    cam = app._config.cameras["cam-1"]
+    assert (cam.max_occupancy, cam.min_occupancy) == (5, 1)
+    assert app._config.watch_labels == ["person", "car"]
+    assert app._config.debounce_frames == 3 and app._config.clear_alerts is True
+    # idempotent: re-delivery of the same config changes nothing
+    app.on_config_update({"max_occupancy": 5, "min_occupancy": 1})
+    assert (cam.max_occupancy, cam.min_occupancy) == (5, 1)
+    # min 0 / "" clears the floor; a floor above the ceiling is dropped
+    app.on_config_update({"min_occupancy": 0})
+    assert cam.min_occupancy is None
+    app.on_config_update({"max_occupancy": 2, "min_occupancy": 9})
+    assert (cam.max_occupancy, cam.min_occupancy) == (2, None)
+
+
+def test_live_config_counts_the_new_label_immediately():
+    app = _counter(_camera(max_occ=10))
+    ev = {"camera_id": "cam-1", "correlation_id": "c",
+          "result": {"detections": [
+              {"label": "car", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}}]}}
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 0
+    app.on_config_update({"watch_labels": ["car"]})
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 1
+
+
+def test_live_config_applies_a_drawn_zone_by_numeric_or_handle_key():
+    cam = oc.CameraZone(camera_id="cam1",
+                        zone=oc.Zone.from_config(name="full-frame (auto)",
+                                                 vertices=oc.full_frame_polygon()),
+                        frame_width=oc.UNIT_FRAME, frame_height=oc.UNIT_FRAME,
+                        max_occupancy=5, min_occupancy=None)
+    app = oc.OccupancyCounter(_config(cam), _NullDispatcher())
+    inside = {"label": "person", "bbox": {"x": 0.1, "y": 0.1, "w": 0.05, "h": 0.05}}
+    outside = {"label": "person", "bbox": {"x": 0.8, "y": 0.8, "w": 0.05, "h": 0.05}}
+    ev = {"camera_id": "cam1", "correlation_id": "c",
+          "result": {"detections": [inside, outside]}}
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 2
+    # The catalog keys zones by the numeric core id, in normalised coords.
+    app.on_config_update({"zones": {"1": [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]]}})
+    assert app._config.cameras["cam1"].zone.name == "drawn"
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 1
+    # Erasing the zone returns the camera to the whole frame.
+    app.on_config_update({"zones": {}})
+    assert app._config.cameras["cam1"].zone.name == "full-frame (auto)"
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam1"]["last_count"] == 2
+    # A zone for a camera this app does not watch is ignored, not fatal.
+    app.on_config_update({"zones": {"cam9": [[0, 0], [1, 0], [1, 1]]}})
+    assert set(app._config.cameras) == {"cam1"}
+
+
+# ── Spatial heatmap (occupancy.heatmap.v1) ─────────────────────────
+
+
+def test_heat_cell_bins_the_foot_point():
+    cell = oc.OccupancyCounter.heat_cell
+    # foot = (x + w/2, y + h): a box at the top-left corner stands at
+    # (0.05, 0.1) → col 2 of 48, row 2 of 27
+    assert cell({"x": 0.0, "y": 0.0, "w": 0.1, "h": 0.1}) == 2 * oc.HEATMAP_COLS + 2
+    # bottom-right edge clamps into the last cell
+    assert cell({"x": 0.95, "y": 0.95, "w": 0.1, "h": 0.1}) == \
+        oc.HEATMAP_COLS * oc.HEATMAP_ROWS - 1
+    # garbage far outside the frame is discarded
+    assert cell({"x": 3.0, "y": 3.0, "w": 0.1, "h": 0.1}) is None
+    assert cell({"x": "nope"}) is None
+
+
+def test_heatmap_accumulates_watched_labels_and_publishes_a_sparse_delta():
+    app = _counter(_camera(max_occ=10))
+    dets = [
+        {"label": "person", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+        {"label": "person", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+        {"label": "dog", "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1}},
+    ]
+    ev = {"camera_id": "cam-1", "correlation_id": "c",
+          "result": {"detections": dets}}
+    app.handle_event(ev)
+    app.handle_event(ev)
+    published = app.flush_heatmaps()
+    assert published == 1
+    call = app._occupancy_publisher.calls[-1]
+    assert call["schema"] == "occupancy.heatmap.v1"
+    assert call["camera_id"] == "cam-1"
+    payload = call["payload"]
+    assert (payload["cols"], payload["rows"]) == (oc.HEATMAP_COLS, oc.HEATMAP_ROWS)
+    assert payload["frames"] == 2
+    assert payload["labels"] == ["person"]
+    # one cell, hit by 2 people × 2 frames; the dog is not watched
+    assert payload["cells"] == [[oc.OccupancyCounter.heat_cell(dets[0]["bbox"]), 4]]
+    # the delta resets: an idle period publishes nothing
+    assert app.flush_heatmaps() == 0
+    assert app.state_snapshot()["heatmaps_published"] == 1
+
+
+def test_heatmap_can_be_switched_off_live():
+    app = _counter(_camera(max_occ=10))
+    app.on_config_update({"heatmap_enabled": False})
+    app.handle_event(_event(2))
+    assert app.flush_heatmaps() == 0
+    assert app.state_snapshot()["heatmap_enabled"] is False
+
+
+# ── Footfall + dwell (occupancy.footfall.v1) ───────────────────────
+
+
+def _tracked(track_id, x, y, label="person"):
+    return {"label": label, "track_id": track_id,
+            "bbox": {"x": x, "y": y, "w": 0.04, "h": 0.04}}
+
+
+def _ev(dets, *, t: float, camera_id="cam-1"):
+    from datetime import datetime, timezone
+    return {"camera_id": camera_id, "correlation_id": "c",
+            "completed_at": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+            "result": {"detections": dets}}
+
+
+def _zone_camera():
+    # zone = left half of the frame (pixel space 1920x1080)
+    zone = oc.Zone.from_config(name="left-half",
+                               vertices=[[0, 0], [960, 0], [960, 1080], [0, 1080]])
+    return oc.CameraZone(camera_id="cam-1", zone=zone, frame_width=1920,
+                         frame_height=1080, max_occupancy=10, min_occupancy=None)
+
+
+def test_dwell_is_the_time_a_track_spends_inside_the_zone():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))        # enters
+    app.handle_event(_ev([_tracked("t1", 0.3, 0.5)], t=t0 + 4))    # still inside
+    live = app.state_snapshot()["cameras"]["cam-1"]
+    assert live["inside_now"] == 1
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 9))    # leaves
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert app._occupancy_publisher.calls[-1]["schema"] == "occupancy.footfall.v1"
+    assert payload["dwell_count"] == 1
+    assert payload["dwell_seconds"] == 9.0 and payload["dwell_max_seconds"] == 9.0
+    assert payload["entries"] == 0 and payload["exits"] == 0
+    assert app.state_snapshot()["cameras"]["cam-1"]["dwell_avg_s"] == 9.0
+    # nothing new → nothing published
+    assert app.flush_footfall() == 0
+
+
+def test_dwell_is_finalised_when_the_track_expires_inside():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 6))
+    # a different track, well past the TTL: t1 is gone
+    app.handle_event(_ev([_tracked("t2", 0.9, 0.5)], t=t0 + 6 + oc.TRACK_TTL_SECONDS_DEFAULT + 1))
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert payload["dwell_count"] == 1 and payload["dwell_seconds"] == 6.0
+
+
+def test_sub_second_flicker_is_not_a_visit():
+    app = _counter(_zone_camera())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 0.4))
+    assert app.flush_footfall() == 0
+
+
+def test_entry_line_counts_entries_and_exits():
+    cam = _zone_camera()
+    # a vertical line at x=960 (pixel space); a→b means crossing from the
+    # right (x>960) to the left (x<960)... orientation is the tripwire's
+    # convention, so assert both directions are distinguished.
+    cam.entry_line = oc.Tripwire.from_config(name="door", a=[960, 0], b=[960, 1080],
+                                             count_direction="both")
+    app = oc.OccupancyCounter(_config(cam), _NullDispatcher())
+    t0 = 1_000_000.0
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0))
+    app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 1))   # crosses one way
+    app.handle_event(_ev([_tracked("t1", 0.8, 0.5)], t=t0 + 2))   # and back
+    assert app.flush_footfall() == 1
+    payload = app._occupancy_publisher.calls[-1]["payload"]
+    assert {payload["entries"], payload["exits"]} == {1}
+    assert payload["entries"] + payload["exits"] == 2
+    live = app.state_snapshot()["cameras"]["cam-1"]
+    assert live["has_entry_line"] is True
+    assert live["entries"] + live["exits"] == 2
+
+
+def test_untracked_detections_still_count_but_neither_dwell_nor_cross():
+    app = _counter(_zone_camera())
+    ev = _ev([{"label": "person", "bbox": {"x": 0.2, "y": 0.5, "w": 0.04, "h": 0.04}}],
+             t=1_000_000.0)
+    app.handle_event(ev)
+    assert app.state_snapshot()["cameras"]["cam-1"]["last_count"] == 1
+    assert app.state_snapshot()["cameras"]["cam-1"]["inside_now"] == 0
+
+
+def test_dwell_alert_fires_once_per_track_when_configured():
+    app = _counter(_zone_camera())
+    app.on_config_update({"max_dwell_seconds": 5})
+    t0 = 1_000_000.0
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0)) == []
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 3)) == []
+    fired = app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 6))
+    assert len(fired) == 1 and fired[0].tags[1] == "dwell"
+    assert fired[0].evidence["track_id"] == "t1"
+    # not again for the same stay
+    assert app.handle_event(_ev([_tracked("t1", 0.2, 0.5)], t=t0 + 9)) == []
+
+
+def test_entry_line_applies_live_from_the_catalog():
+    app = _counter(_zone_camera())
+    app.on_config_update({"entry_line": {"cam-1": {"a": [0.5, 0.0], "b": [0.5, 1.0],
+                                                    "count_direction": "both"}}})
+    cam = app._config.cameras["cam-1"]
+    assert cam.entry_line is not None
+    assert (cam.entry_line.a.x, cam.entry_line.b.y) == (960.0, 1080.0)
+    # erased → gone; and a redrawn zone keeps the line
+    app.on_config_update({"zones": {"cam-1": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]]}})
+    assert app._config.cameras["cam-1"].entry_line is not None
+    app.on_config_update({"entry_line": {}})
+    assert app._config.cameras["cam-1"].entry_line is None
+# ── Alert storm (field): a zone hovering AT the limit ──────────────
+
+
+def test_flicker_across_the_limit_alerts_once_per_cooldown(monkeypatch):
+    """Field report: 21 identical HIGH alerts in ~15 s from one zone.
+    With clear_alerts off, every upward flip 10→11 fired; the cooldown
+    turns a flickering breach into one alert per window while the
+    committed level (what the page shows) still tracks every flip."""
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "time", lambda: t["now"])
+    app = _counter(_camera(max_occ=2))
+    fired = []
+    for i in range(10):
+        fired += app.handle_event(_event(3))      # over
+        fired += app.handle_event(_event(2))      # back to normal (silent)
+        t["now"] += 1.0
+    assert len(fired) == 1
+    assert app.state_snapshot()["cameras"]["cam-1"]["alerts_suppressed"] == 9
+    # the live level still reflects the latest frame
+    assert app.state_snapshot()["cameras"]["cam-1"]["level"] == "normal"
+    # past the window it may alert again
+    t["now"] += oc.ALERT_COOLDOWN_SECONDS_DEFAULT
+    assert len(app.handle_event(_event(3))) == 1
+
+
+def test_cooldown_is_per_level_and_can_be_disabled(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr(oc.time, "time", lambda: t["now"])
+    app = _counter(_camera(max_occ=2, min_occ=1))
+    assert len(app.handle_event(_event(3))) == 1     # over
+    assert len(app.handle_event(_event(0))) == 1     # under — a different alert
+    assert len(app.handle_event(_event(3))) == 0     # over again, in cooldown
+    app._config.alert_cooldown_seconds = 0
+    app.handle_event(_event(2))
+    assert len(app.handle_event(_event(3))) == 1     # disabled → legacy behaviour
