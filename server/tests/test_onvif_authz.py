@@ -199,3 +199,29 @@ def test_a_deleted_camera_does_not_grant_or_block(harness):
     assert client.post(f"/camera/{CAM_IP}/ptz/move", params={**_CREDS, "x": 0.5}).status_code == 403
     _as(state, STRANGER)
     assert client.get(f"/camera/{CAM_IP}/profiles", params=_CREDS).status_code == 200
+
+
+def test_every_per_camera_onvif_route_is_authorized_structurally():
+    """Reporter's suggestion: walk the real router and prove every route
+    that names a camera (``{ip}`` in its path, or /connect) either gates
+    on superuser or calls the per-camera authorization — so a future
+    route cannot regress to "logged in is enough" unnoticed."""
+    import inspect
+
+    from core.auth import get_current_superuser
+
+    checked = 0
+    for route in onvif_router.router.routes:
+        path = getattr(route, "path", "")
+        if "{ip}" not in path and path != "/connect":
+            continue
+        checked += 1
+        endpoint = route.endpoint
+        deps = {d.call for d in getattr(route, "dependant", None).dependencies} \
+            if getattr(route, "dependant", None) else set()
+        src = inspect.getsource(endpoint)
+        assert (get_current_superuser in deps
+                or "_authorize_camera_ip(db, current_user, ip" in src), (
+            f"{path} is reachable by any authenticated user with no "
+            "per-camera authorization")
+    assert checked >= 8, f"expected the per-camera routes to be found, saw {checked}"
