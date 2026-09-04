@@ -28,7 +28,7 @@ import ipaddress
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
@@ -103,6 +103,67 @@ def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
                 f"IP {ip} is outside the configured Camera LAN subnet(s) "
                 f"({', '.join(configured)})."
             ),
+        )
+
+
+# ── Per-camera authorization for the IP-keyed routes ───────────────────
+#
+# Reported (CWE-862 / CWE-639): every /camera/{ip}/... route and /connect
+# checked only that the IP was inside the camera LAN. The sibling routes
+# in routers/cameras.py (/cameras/{id}/ptz/...) require ownership; these
+# IP-keyed twins let ANY authenticated user PTZ, read the stream URI of,
+# or relay credentials at any camera on the LAN. The ceiling (internal
+# address only) is a network-safety rule; this is the missing
+# authorization rule beside it.
+#
+# Two tiers, matching what the routes are for:
+#
+# * "view"  — connect / profiles / stream-uri / time. Used by the Add
+#   Camera wizard on devices that are NOT registered yet, so an
+#   unregistered IP is allowed (any active user may create cameras);
+#   a registered IP requires ownership, a can_view grant, or superuser.
+# * "manage" — PTZ move / stop / presets. Never part of onboarding: a
+#   registered IP requires ownership, a can_manage grant, or superuser;
+#   an unregistered IP is refused outright.
+
+
+def _authorize_camera_ip(db: Session, user, ip: str, *, action: str) -> None:
+    """Raise 403 unless ``user`` may perform ``action`` ("view" |
+    "manage") against the camera(s) registered at ``ip``. Superusers
+    pass; deleted cameras do not count as registered."""
+    if getattr(user, "is_superuser", False):
+        return
+    from models import Camera, CameraPermission
+
+    registered = (
+        db.query(Camera)
+        .filter(Camera.ip_address == ip, Camera.deleted_at.is_(None))
+        .all()
+    )
+    if not registered:
+        if action == "view":
+            return                       # onboarding a device nobody owns yet
+        raise HTTPException(
+            status_code=403,
+            detail=f"No registered camera at {ip}; add it first to control it.",
+        )
+    if any(c.owner_id == user.id for c in registered):
+        return
+    flag = CameraPermission.can_manage if action == "manage" \
+        else CameraPermission.can_view
+    granted = (
+        db.query(CameraPermission.id)
+        .filter(
+            CameraPermission.user_id == user.id,
+            CameraPermission.camera_id.in_([c.id for c in registered]),
+            flag == True,  # noqa: E712 — SQLAlchemy column comparison
+        )
+        .first()
+    )
+    if granted is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Not enough permissions to access this camera",
         )
 
 
@@ -313,6 +374,7 @@ async def connect_device(
     username: str = Query(...),
     password: str = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Connect to ONVIF device and get all profiles with stream URIs.
@@ -321,6 +383,7 @@ async def connect_device(
     Returns device info and all available profiles with their RTSP stream URIs.
     """
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         result = await connect_and_get_profiles(ip, username, password, port)
         return result
@@ -340,9 +403,11 @@ async def camera_profiles(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get media profiles from camera. Set use_digest=true for Hikvision devices."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         if use_digest:
             profiles = await fetch_profiles_digest(ip, username, password, port)
@@ -366,9 +431,11 @@ async def camera_stream_uri(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get stream URI for a profile. Set use_digest=true for Hikvision devices."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         if use_digest:
             uri = await get_stream_uri_digest(
@@ -394,8 +461,10 @@ async def camera_ptz_move(
     username: str = Query(...),
     password: str = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_continuous_move(
             ip, username, password, profile_token, x, y, z, port
@@ -415,8 +484,10 @@ async def camera_ptz_stop(
     username: str = Query(...),
     password: str = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
         return {"ip": ip, "profileToken": profile_token, "result": result}
@@ -431,9 +502,11 @@ async def camera_get_time(
     ip: str,
     port: int = Query(80, ge=1, le=65535),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Read the camera clock via GetSystemDateAndTime (no credentials needed)."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         result = await get_system_datetime(ip, port)
         return {"ip": ip, **result}
@@ -474,8 +547,10 @@ async def camera_ptz_preset(
     username: str = Query(...),
     password: str = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_presets(
             ip,
