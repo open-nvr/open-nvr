@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, BellOff, Check, CheckCheck, Settings2 } from 'lucide-react'
+import { Bell, BellOff, Check, CheckCheck } from 'lucide-react'
 import {
   alertsInboxService,
   type InboxAlert,
@@ -160,7 +160,6 @@ function timeAgo(iso: string | null): string {
 
 export function AlertBell() {
   const [open, setOpen] = useState(false)
-  const [showConfig, setShowConfig] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
   useClickOutside(panelRef, open, () => setOpen(false))
   useAudioUnlock()
@@ -196,12 +195,6 @@ export function AlertBell() {
       qc.invalidateQueries({ queryKey: ['alarms-page'] })
       qc.invalidateQueries({ queryKey: ['alerts-inbox-page'] })
     },
-  })
-
-  const saveRing = useMutation({
-    mutationFn: (ring: RingConfig) => alertsInboxService.putRingConfig(ring),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ['alerts-inbox-ring-config'] }),
   })
 
   const alerts = inbox.data?.alerts ?? []
@@ -250,18 +243,18 @@ export function AlertBell() {
   return (
     <div className="relative" ref={panelRef}>
       <button
-        aria-label="Alerts"
+        aria-label="Alarms"
         className={`relative inline-flex items-center gap-1 px-2 py-1 rounded ${
           sirenActive
             ? 'bg-red-600 text-white animate-pulse'
             : 'bg-[var(--panel)] hover:bg-[var(--panel-2)]'
         }`}
         onClick={() => setOpen((s) => !s)}
-        title="Alerts"
+        title="Alarms"
       >
         <Bell size={14} />
         <span className="hidden md:inline">
-          Alerts{audioBlocked ? ' 🔇' : ''}
+          Alarms{audioBlocked ? ' 🔇' : ''}
         </span>
         {unackedCount > 0 && (
           <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] leading-4 text-center normal-case">
@@ -283,16 +276,9 @@ export function AlertBell() {
           )}
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
             <span className="font-semibold">
-              Alerts{unackedCount ? ` (${unackedCount})` : ''}
+              Alarms{unackedCount ? ` (${unackedCount})` : ''}
             </span>
             <div className="flex items-center gap-2">
-              <button
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded hover:bg-[var(--panel-2)] text-[var(--text-dim)]"
-                title="Ring settings"
-                onClick={() => setShowConfig((s) => !s)}
-              >
-                <Settings2 size={13} />
-              </button>
               {unackedCount > 0 && (
                 <button
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded hover:bg-[var(--panel-2)]"
@@ -305,40 +291,6 @@ export function AlertBell() {
             </div>
           </div>
 
-          {showConfig && ring && (
-            <div className="px-3 py-2 border-b border-[var(--border)] bg-[var(--panel-2)]">
-              <div className="text-[var(--text-dim)] mb-1.5">
-                Alarm sound per severity (site-wide)
-              </div>
-              <div className="grid grid-cols-2 gap-1.5">
-                {SEVERITIES.map((sev) => (
-                  <label key={sev} className="flex items-center justify-between gap-2">
-                    <span className="capitalize">{sev}</span>
-                    <select
-                      className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5"
-                      value={ring[sev]}
-                      onChange={(e) =>
-                        saveRing.mutate({
-                          ...ring,
-                          [sev]: e.target.value as RingMode,
-                        })
-                      }
-                    >
-                      {RING_MODES.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
-              </div>
-              <div className="text-[11px] text-[var(--text-dim)] mt-1.5">
-                none = badge only · ping = one chime · continuous = rings
-                until acknowledged
-              </div>
-            </div>
-          )}
 
           <div className="max-h-96 overflow-y-auto">
             {alerts.length === 0 ? (
@@ -379,13 +331,13 @@ export function AlertBell() {
             )}
           </div>
 
-          <div className="px-3 py-2 border-t border-[var(--border)] text-right">
+          <div className="p-2 border-t border-[var(--border)]">
             <Link
               to="/alerts-incidents"
-              className="text-[var(--text-dim)] hover:text-[var(--text)]"
+              className="block w-full text-center px-3 py-1.5 rounded bg-[var(--panel-2)] hover:bg-[var(--border)] font-medium"
               onClick={() => setOpen(false)}
             >
-              View all in Alerts &amp; Incidents →
+              Open Alarms — history, sound &amp; call settings →
             </Link>
           </div>
         </div>
