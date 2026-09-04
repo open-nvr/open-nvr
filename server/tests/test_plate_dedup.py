@@ -72,6 +72,16 @@ from services.plate_enrichment import (  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _first_read_wins(monkeypatch):
+    """Legacy first-accepted-read-wins, so the dedup mechanics can be
+    asserted on their own; consensus lives in test_plate_consensus.py.
+    Fuzzy dedup is off here too — these tests pin the exact-match
+    window; the fuzzy layer has its own tests in that file."""
+    monkeypatch.setenv("OPENNVR_PLATE_MIN_AGREEING_READS", "1")
+    monkeypatch.setenv("OPENNVR_PLATE_DEDUP_DISTANCE", "0")
+
+
+@pytest.fixture(autouse=True)
 def _clean_sightings():
     """Every test starts with an empty sightings map — the map is
     process-global on purpose (that is the feature), which makes it

@@ -61,6 +61,16 @@ from services.plate_enrichment import extract_read, merge_reads  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _first_read_wins(monkeypatch):
+    """These tests pin the single-read mechanics (early exit, budget,
+    merge, evidence). The consensus policy that sits on top — a plate
+    is written when the looks AGREE — has its own file
+    (test_plate_consensus.py); here it is switched to the legacy
+    first-accepted-read-wins so each mechanic can be asserted alone."""
+    monkeypatch.setenv("OPENNVR_PLATE_MIN_AGREEING_READS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _clean_plate_sightings():
     """The dedup sightings map is process-global on purpose (that IS the
     feature) — which makes it cross-test state by accident. Every test

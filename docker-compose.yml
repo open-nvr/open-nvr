@@ -549,6 +549,20 @@ services:
       # localiser's own score does (genuine plates 0.85+, the reported
       # badge 0.38). 0 disables.
       - OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      # Fuzzy dedup: plates within this edit distance inside the window
+      # are one car read slightly differently. 0 = exact only.
+      - OPENNVR_PLATE_DEDUP_DISTANCE=${OPENNVR_PLATE_DEDUP_DISTANCE:-}
+      # Consensus: how many separate looks must agree before a plate
+      # is written (1 = first accepted read wins).
+      - OPENNVR_PLATE_MIN_AGREEING_READS=${OPENNVR_PLATE_MIN_AGREEING_READS:-}
+      # Reject reads whose localiser found no plate in the vehicle
+      # crop (the OCR then read the car body). 0 disables.
+      - OPENNVR_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
+      # KAI-C (same container) applies the clipped / weak / unlocalised
+      # gates BEFORE publishing plate.recognized.v1, so no subscriber
+      # ever alerts on a fragment or a badge. Same defaults as core's.
+      - KAI_C_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      - KAI_C_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state

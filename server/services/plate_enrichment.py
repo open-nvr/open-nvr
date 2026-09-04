@@ -236,6 +236,39 @@ def plate_detection_is_weak(
                                         floor=floor)
 
 
+def require_plate_localisation() -> bool:
+    """Must a read come from a plate the adapter actually LOCALISED?
+
+    Every image core sends the OCR adapter is a VEHICLE crop (Tier-0
+    tracks cars, not plates). When the localiser looks and finds no
+    plate, the adapter falls back to OCR-ing the whole car — and a
+    car's grille, badge and bumper text OCR into plausible characters
+    at plausible confidence. On the reporting install that is exactly
+    where the garbage reads came from: a row captioned with a number
+    and no plate anywhere in the picture. Default ON; an OCR-only
+    adapter (``attempted`` false) is never affected — there is no
+    opinion to require. ``OPENNVR_PLATE_REQUIRE_LOCALISATION=0`` turns
+    it off for installs that feed tight plate crops.
+    """
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_REQUIRE_LOCALISATION", "").strip()
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
+def plate_detection_is_missing(detection: object) -> bool:
+    """Did the localiser look and find NOTHING? Then whatever the OCR
+    read, it read off a car, not a plate. Absent/unknown detection
+    answers False (no opinion, never an invented rejection)."""
+    if not require_plate_localisation():
+        return False
+    if not isinstance(detection, dict):
+        return False
+    if detection.get("attempted") is not True:
+        return False
+    return detection.get("found") is not True
+
+
 def plate_box_of(detection: object) -> tuple[float, float, float, float] | None:
     """The adapter's plate box as a well-formed tuple, or None.
 
@@ -285,6 +318,8 @@ def extract_plate(
         return None
     if plate_detection_is_weak(detection):
         return None
+    if plate_detection_is_missing(detection):
+        return None
     text = result.get("plate_text")
     if not isinstance(text, str):
         return None
@@ -326,6 +361,10 @@ def extract_read(
     # A weak localisation is not a near miss to be merged, it is a
     # different object (#386) — drop it outright, like a fragment.
     if plate_detection_is_weak(detection):
+        return None
+    # No plate found at all → the characters came off the car body.
+    # Not a near miss either; nothing here is worth merging.
+    if plate_detection_is_missing(detection):
         return None
     text = result.get("plate_text")
     if not isinstance(text, str):
@@ -402,6 +441,144 @@ def merge_reads(a: dict | None, b: dict | None) -> dict | None:
 
 #: Hard cap on OCR attempts per visit at ingest — the compute budget.
 MAX_INGEST_ATTEMPTS: int = 4
+
+
+# ── Consensus: a plate is written when the looks AGREE ──────────────
+# One accepted read used to be final — the sweep early-exited on it and
+# the early attempt (fired at track-confirm, when the car is smallest
+# and farthest) wrote first and won. On a blurry 640x360 clip that put
+# R-197-GB into the register as R183JF, L656XH and L605HZ, each at
+# "conf=1.00": per-character probabilities saturate on blur, so the
+# confidence floor filters nothing. What DOES separate a true read from
+# a hallucination is that two different looks at the car read the same
+# thing — hallucinations differ from frame to frame, the plate does not.
+#
+# Policy: OCR every look (early read + candidates, bounded by the same
+# budget), cluster the accepted reads by edit distance, and write the
+# largest cluster's text only when it holds ≥ MIN_AGREEING reads. A
+# visit that only ever had ONE look (a single candidate, or just the
+# evidence frame) still writes that read — there is nothing to agree
+# with, and a lone honest read beats a NULL — but the row is marked
+# ``plate_reads=1`` so the UI can say so.
+
+_MIN_AGREEING_DEFAULT = 2
+
+
+def min_agreeing_reads() -> int:
+    """How many looks must agree before a plate is written. 1 restores
+    first-accepted-read-wins. Read live, like ``dedup_window_s``."""
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_MIN_AGREEING_READS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _MIN_AGREEING_DEFAULT
+    return max(1, value)
+
+
+def plate_distance(a: str, b: str, *, cap: int = 2) -> int:
+    """Bounded Levenshtein distance between two normalised plates.
+    Returns ``cap + 1`` as soon as the distance is known to exceed
+    ``cap`` — the plates are short and the callers only ask "within
+    N?", so the full matrix is never needed."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        best = i
+        for j, cb in enumerate(b, 1):
+            cost = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            cur.append(cost)
+            best = min(best, cost)
+        if best > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1] if prev[-1] <= cap else cap + 1
+
+
+def choose_consensus(votes: list[dict], *, min_agreeing: int,
+                     looks: int) -> tuple[dict | None, int]:
+    """Pick the plate the looks agree on.
+
+    ``votes`` are accepted reads (``extract_read`` dicts, plus any
+    early read reconstructed from the attempt cache) in the order they
+    were taken. Reads are clustered greedily by edit distance ≤ 1 —
+    ``H644LX`` and ``H644LK`` are one car, not two — and the cluster
+    with the most votes wins (ties: the higher best confidence). The
+    winner's TEXT is the most-voted exact spelling inside the cluster,
+    ties again to confidence; the winner's EVIDENCE (the read dict
+    returned) is the most confident vote carrying that spelling, so the
+    stored crop is the clearest picture of the number written.
+
+    Returns ``(read, agreeing)``: the read to write and how many looks
+    agreed with it, or ``(None, 0)`` when the looks do not agree. A
+    visit with fewer looks than ``min_agreeing`` cannot reach consensus
+    by construction, so its best single read is returned with
+    ``agreeing == 1`` — a lone honest read beats NULL.
+    """
+    if not votes:
+        return None, 0
+    clusters: list[list[dict]] = []
+    for v in votes:
+        for cluster in clusters:
+            if plate_distance(cluster[0]["plate"], v["plate"], cap=1) <= 1:
+                cluster.append(v)
+                break
+        else:
+            clusters.append([v])
+
+    def _best_conf(reads: list[dict]) -> float:
+        return max(float(r.get("confidence") or 0.0) for r in reads)
+
+    clusters.sort(key=lambda c: (len(c), _best_conf(c)), reverse=True)
+    winner = clusters[0]
+    if len(winner) < min_agreeing and looks >= min_agreeing:
+        return None, 0
+    spellings: dict[str, list[dict]] = {}
+    for v in winner:
+        spellings.setdefault(v["plate"], []).append(v)
+    text = max(spellings, key=lambda t: (len(spellings[t]),
+                                         _best_conf(spellings[t])))
+    read = max(spellings[text],
+               key=lambda r: float(r.get("confidence") or 0.0))
+    return read, len(winner)
+
+
+# ── Sweeps in flight ────────────────────────────────────────────────
+# KAI-C publishes plate.recognized.v1 for EVERY accepted read, including
+# the ones this module's own sweep initiates — so the bus consumer used
+# to race the sweep for the same row, win (it has no images to store),
+# and leave the sweep's crop and frame on the floor: a plate with no
+# proof, captioned by a vehicle-best frame that on a merged track shows
+# a different car. While a sweep owns a row, the consumer defers to it.
+# Not a producer check (consumers must not branch on producer — the
+# contract's whole point); a check on core's OWN state.
+
+import threading as _threading
+
+_sweeps_lock = _threading.Lock()
+_sweeping: set[int] = set()
+
+
+def mark_sweep_pending(event_id: int) -> None:
+    """Called at ingest, BEFORE the background task is queued, so the
+    bus can never get there first."""
+    with _sweeps_lock:
+        _sweeping.add(int(event_id))
+
+
+def clear_sweep_pending(event_id: int) -> None:
+    with _sweeps_lock:
+        _sweeping.discard(int(event_id))
+
+
+def sweep_is_pending(event_id: int) -> bool:
+    with _sweeps_lock:
+        return int(event_id) in _sweeping
 
 
 # ── Plate evidence: the crop the read actually came from (#382) ─────
@@ -548,24 +725,73 @@ def store_plate_images(
 
 def stamp_plate_evidence(row, rel_path: str | None, *,
                          frame_path: str | None = None,
-                         merged: bool = False) -> None:
-    """Record which crop a row's plate was read from, and whether the
-    read was reconstructed from more than one of them.
+                         merged: bool = False,
+                         reads: int | None = None,
+                         source: str | None = None,
+                         confidence: float | None = None) -> None:
+    """Record which crop a row's plate was read from, whether the read
+    was reconstructed from more than one of them, and how many looks
+    agreed on it.
 
-    ``merged`` rides in the existing ``payload`` JSON rather than a
-    column of its own — it is a display caveat, not queryable state.
-    The dict is UPDATED, never replaced: ``payload`` already carries
-    ``stationary`` for tier0 visits (see ``timeline_service``), and
-    dropping that to record a caption would be a poor trade.
+    ``merged`` / ``plate_reads`` / ``plate_source`` ride in the existing
+    ``payload`` JSON rather than columns of their own — display caveats
+    and a writer-policy hint, not queryable state. The dict is UPDATED,
+    never replaced: ``payload`` already carries ``stationary`` for tier0
+    visits (see ``timeline_service``), and dropping that to record a
+    caption would be a poor trade.
+
+    ``source`` names the writer (``early`` — a single track-confirm
+    read; ``sweep`` — the ingest sweep; ``bus`` — a forwarded event).
+    The sweep uses it to decide what it may overwrite: a consensus of
+    several looks outranks any single read, and nothing outranks an
+    earlier consensus.
     """
     if rel_path:
         row.plate_evidence_path = rel_path
     if frame_path:
         row.plate_frame_path = frame_path
-    if merged:
+    if merged or reads is not None or source is not None \
+            or confidence is not None:
         payload = dict(row.payload or {})
-        payload["plate_merged"] = True
+        if merged:
+            payload["plate_merged"] = True
+        else:
+            payload.pop("plate_merged", None)
+        if reads is not None:
+            payload["plate_reads"] = int(reads)
+        if source is not None:
+            payload["plate_source"] = source
+        if confidence is not None:
+            payload["plate_confidence"] = round(float(confidence), 4)
         row.payload = payload
+
+
+_PLATE_MARKS = ("plate_merged", "plate_reads", "plate_source",
+                "plate_confidence")
+
+
+def clear_plate(row) -> None:
+    """Take a plate OFF a row — text, images and the marks above — so
+    it is once more an ordinary vehicle visit. Used when a single read
+    is retracted (the looks agreed on a different, already-seen car)."""
+    row.plate_text = None
+    row.plate_evidence_path = None
+    row.plate_frame_path = None
+    payload = dict(row.payload or {})
+    for key in _PLATE_MARKS:
+        payload.pop(key, None)
+    row.payload = payload
+
+
+def plate_reads_of(row) -> int:
+    """How many looks agreed on the row's current plate. Rows written
+    before the field existed count as ONE look (a single read), which
+    is what they were."""
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    reads = payload.get("plate_reads")
+    if isinstance(reads, int) and not isinstance(reads, bool) and reads > 0:
+        return reads
+    return 1
 
 
 # ── Duplicate-sighting dedup ────────────────────────────────────────
@@ -590,7 +816,11 @@ def stamp_plate_evidence(row, rel_path: str | None, *,
 # far simpler than reconciling wall-clock rows with a monotonic window.
 
 _DEDUP_WINDOW_DEFAULT_S = 30.0
-import threading as _threading
+#: Edit distance within which two plates seen in one window are the
+#: SAME car. A fragmented pass reads the same plate imperfectly each
+#: time (R183JF / R187JF / R183JP …); exact-match dedup let every
+#: variant through as a new vehicle. 0 = exact match only.
+_DEDUP_DISTANCE_DEFAULT = 1
 
 _sightings_lock = _threading.Lock()
 _recent_sightings: dict[tuple[int, str], float] = {}
@@ -614,6 +844,18 @@ def dedup_window_s() -> float:
     except ValueError:
         return _DEDUP_WINDOW_DEFAULT_S
     return value if value > 0 else 0.0
+
+
+def dedup_distance() -> int:
+    """Max edit distance for two sightings to count as one car."""
+    import os
+
+    raw = os.environ.get("OPENNVR_PLATE_DEDUP_DISTANCE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEDUP_DISTANCE_DEFAULT
+    return max(0, value)
 
 
 def _dedup_key(camera_id: int, plate: str) -> tuple[int, str]:
@@ -650,8 +892,21 @@ def is_duplicate_sighting(camera_id: int, plate: str,
     import time as _time
 
     ts = _time.monotonic() if now is None else now
+    cam, text = _dedup_key(camera_id, plate)
+    distance = dedup_distance()
     with _sightings_lock:
-        last = _recent_sightings.get(_dedup_key(camera_id, plate))
+        last = _recent_sightings.get((cam, text))
+        if last is None and distance > 0:
+            # Near miss of a plate seen moments ago on the same camera:
+            # the same car, read slightly differently. Small map, short
+            # plates — the scan is cheap.
+            for (other_cam, other), seen in _recent_sightings.items():
+                if other_cam != cam or other == text:
+                    continue
+                if 0 <= ts - seen <= window and plate_distance(
+                        text, other, cap=distance) <= distance:
+                    last = seen
+                    break
     return last is not None and 0 <= ts - last <= window
 
 
@@ -702,6 +957,21 @@ async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
         return None
 
 
+def _row_already_reads(event_id: int, plate: str) -> bool:
+    """Does the row ALREADY carry this plate? A short read on its own
+    session — the sweep holds none between phases."""
+    from core.database import SessionLocal
+    from models import TimelineEvent
+
+    db = SessionLocal()
+    try:
+        row = db.query(TimelineEvent).filter(
+            TimelineEvent.id == event_id).first()
+        return row is not None and row.plate_text == plate
+    finally:
+        db.close()
+
+
 async def enrich_event_plate(
     event_id: int, candidate_jpegs: list[bytes] | None = None,
 ) -> None:
@@ -709,11 +979,16 @@ async def enrich_event_plate(
 
     Multi-frame OCR: sweep the visit's plate CANDIDATES (best first,
     shipped by Tier-0 alongside the visit) instead of betting everything
-    on the single vehicle-best frame. Early exit the moment a read is
-    accepted; near-miss rejects are character-merged pairwise (see
-    ``merge_reads``) so two imperfect looks can still produce one
-    correct plate. The evidence crop remains the fallback attempt when
-    no candidates rode the visit — exactly the old behaviour.
+    on the single vehicle-best frame. Every look is OCR'd (bounded by
+    MAX_INGEST_ATTEMPTS); near-miss rejects are character-merged
+    pairwise (see ``merge_reads``) so two imperfect looks can still
+    produce one read; and the plate is written only when the looks
+    AGREE (see ``choose_consensus``). An early read parked by the
+    track-confirm attempt counts as one look — so early + one agreeing
+    candidate is a consensus, and the sweep stops the moment it has
+    enough agreeing votes (the budget is still saved on clean reads).
+    The evidence crop remains the fallback attempt when no candidates
+    rode the visit — exactly the old behaviour.
 
     Runs in three phases — READ, then OCR with NO session held, then
     REOPEN and write. The middle phase can take a minute (up to
@@ -724,9 +999,12 @@ async def enrich_event_plate(
     and plate reads stopped while events kept flowing.
 
     The cost of letting go is a race — see phase 3, which re-reads the
-    row and lets the FIRST writer win. Every failure path is a
-    debug/warning log and a clean return; an exception must never escape
-    the task runner.
+    row. Precedence there is by EVIDENCE, not by arrival: a consensus of
+    several looks may replace any single read (early attempt or bus
+    event), the same plate written meanwhile gets the crop and frame it
+    was missing, and an earlier consensus is never overwritten. Every
+    failure path is a debug/warning log and a clean return; an
+    exception must never escape the task runner.
     """
     from core.database import SessionLocal
     from models import TimelineEvent
@@ -741,16 +1019,23 @@ async def enrich_event_plate(
         try:
             row = db.query(TimelineEvent).filter(
                 TimelineEvent.id == event_id).first()
-            if (
-                row is None
-                or row.plate_text        # already enriched (early attempt won)
-                or (row.label or "") not in VEHICLE_LABELS
-            ):
+            if row is None or (row.label or "") not in VEHICLE_LABELS:
                 return
             camera_id = int(row.camera_id)
             evidence_path = row.evidence_path
+            prior_plate = row.plate_text
+            prior_reads = plate_reads_of(row) if prior_plate else 0
+            prior_payload = dict(row.payload or {}) if prior_plate else {}
         finally:
             db.close()
+
+        min_agree = min_agreeing_reads()
+        if prior_plate and (prior_reads >= max(min_agree, 2)
+                            or min_agree <= 1):
+            # A consensus is already on the row (or the policy is
+            # first-read-wins, in which case any read is final). Zero
+            # OCR spent on a done row.
+            return
 
         # Attempt list: candidates best-first; the evidence crop as the
         # sole attempt when none were shipped (pre-multi-frame producers,
@@ -766,6 +1051,23 @@ async def enrich_event_plate(
             # same loop every other request is served from.
             attempts = [await _asyncio.to_thread(path.read_bytes)]
 
+        # The early read (a single track-confirm look, already on the
+        # row) is one vote. It brings its own stored images, so a
+        # consensus that lands on it re-uses them rather than re-storing.
+        votes: list[dict] = []
+        looks = len(attempts)
+        early_vote: dict | None = None
+        if prior_plate and prior_payload.get("plate_source") == "early":
+            early_vote = {
+                "plate": prior_plate, "accepted": True,
+                "confidence": float(prior_payload.get("plate_confidence")
+                                    or 0.0),
+                "characters": None, "floor": None, "box": None,
+                "_early": True,
+            }
+            votes.append(early_vote)
+            looks += 1
+
         # camera_id is the platform HANDLE ("cam{N}") — see _ocr_jpeg's
         # callers; "3" != "cam3" would silently drop consumer-side scoping.
         camera_handle = f"cam{camera_id}"
@@ -774,49 +1076,86 @@ async def enrich_event_plate(
         # and it is discarded the moment this function returns unless we
         # persist it here.
         rejects: list[tuple[dict, bytes]] = []
-        winner: dict | None = None
-        winner_jpeg: bytes | None = None
-        winner_box: tuple[float, float, float, float] | None = None
-        was_merged = False
+        jpeg_of: dict[int, bytes] = {}
+        merged_ids: set[int] = set()
         for jpeg in attempts:
             read = await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)
             if read is None:
                 continue
             if read["accepted"]:
-                winner, winner_jpeg = read, jpeg
-                winner_box = read.get("box")
-                break                    # early exit — budget saved
-            # Character-consensus with every earlier reject: two near
-            # misses of the same plate often reconstruct the truth.
-            for prev, prev_jpeg in rejects:
-                merged = merge_reads(prev, read)
-                if merged is not None and merged["accepted"]:
-                    winner, was_merged = merged, True
-                    # A merged plate appears WHOLE in neither crop. Keep
-                    # the more confident of the two contributors — the
-                    # closest thing to a photo of this read — and label
-                    # the row so the UI never passes it off as a clean
-                    # single-frame read. The box travels with the crop it
-                    # was measured in: the contributors are different
-                    # frames, so the loser's box would cut the wrong
-                    # rectangle out of the winner's pixels (#385).
-                    keep_prev = prev["confidence"] >= read["confidence"]
-                    winner_jpeg = prev_jpeg if keep_prev else jpeg
-                    winner_box = (prev if keep_prev else read).get("box")
+                votes.append(read)
+                jpeg_of[id(read)] = jpeg
+            else:
+                # Character-consensus with every earlier reject: two near
+                # misses of the same plate often reconstruct the truth.
+                # A merged plate appears WHOLE in neither crop. Keep the
+                # more confident of the two contributors — the closest
+                # thing to a photo of this read — and label the row so
+                # the UI never passes it off as a clean single-frame
+                # read. The box travels with the crop it was measured
+                # in: the contributors are different frames, so the
+                # loser's box would cut the wrong rectangle out of the
+                # winner's pixels (#385).
+                for prev, prev_jpeg in rejects:
+                    merged = merge_reads(prev, read)
+                    if merged is not None and merged["accepted"]:
+                        keep_prev = prev["confidence"] >= read["confidence"]
+                        merged["box"] = (prev if keep_prev else read).get("box")
+                        votes.append(merged)
+                        jpeg_of[id(merged)] = prev_jpeg if keep_prev else jpeg
+                        merged_ids.add(id(merged))
+                        break
+                rejects.append((read, jpeg))
+            # Enough agreeing looks already? Then the rest of the budget
+            # is pure waste — stop here.
+            if len(votes) >= min_agree:
+                agreed, count = choose_consensus(
+                    votes, min_agreeing=min_agree, looks=looks)
+                if agreed is not None and count >= min_agree:
                     break
-            if winner is not None:
-                break
-            rejects.append((read, jpeg))
 
+        winner, agreeing = choose_consensus(
+            votes, min_agreeing=min_agree, looks=looks)
         if winner is None:
+            if votes:
+                logger.info(
+                    "plate enrichment: event %s — %d look(s) read %s, no "
+                    "%d agree; nothing written",
+                    event_id, len(votes),
+                    "/".join(v["plate"] for v in votes), min_agree,
+                )
             return                       # honest non-read beats a guess
         plate = winner["plate"][:32]
-        if is_duplicate_sighting(camera_id, plate):
+        was_merged = id(winner) in merged_ids
+        if prior_plate and plate == prior_plate:
+            # The early read held up; the row just learns how many
+            # looks agree with it (and keeps the images it already has).
+            db = SessionLocal()
+            try:
+                row = db.query(TimelineEvent).filter(
+                    TimelineEvent.id == event_id).first()
+                if row is not None and row.plate_text == plate:
+                    stamp_plate_evidence(row, None, reads=agreeing,
+                                         source="sweep")
+                    db.commit()
+            finally:
+                db.close()
+            logger.info(
+                "plate enrichment: event %s confirms %s (%d of %d looks agree)",
+                event_id, plate, agreeing, looks,
+            )
+            return
+        if not prior_plate and is_duplicate_sighting(camera_id, plate) \
+                and not _row_already_reads(event_id, plate):
             # Track fragmentation: this "new" vehicle is the car we just
             # read. Fold the sighting — the visit row stays (it is a
             # real detection), the plate is not repeated, and the sweep
             # stops HERE: identity is established, so any remaining
-            # candidates would be pure waste.
+            # candidates would be pure waste. (Unless the sighting that
+            # armed the window is THIS row's — a forwarded event wrote
+            # the same plate here while we were in OCR; then the row is
+            # not a fragment, it is missing its evidence, and phase 3
+            # attaches it.)
             note_sighting(camera_id, plate)
             logger.info(
                 "plate dedup: event %s reads %s — seen on cam %s within "
@@ -829,8 +1168,11 @@ async def enrich_event_plate(
         # Small per read, but this task runs once per vehicle on a busy
         # camera, and everything else core serves shares this loop.
         # Deliberately BEFORE the reopen, so no session is held across it.
+        # (The early vote can only win with its own plate, which the
+        # confirm branch above already handled — so the winner here
+        # always has bytes of its own.)
         crop_rel, frame_rel = await _asyncio.to_thread(
-            store_plate_images, winner_jpeg, winner_box)
+            store_plate_images, jpeg_of.get(id(winner)), winner.get("box"))
 
         # ── phase 3: reopen and write ───────────────────────────────
         # The sweep was away from the DB for as long as the OCR took, so
@@ -842,37 +1184,86 @@ async def enrich_event_plate(
             if row is None:
                 return                   # retention swept it mid-sweep
             if row.plate_text:
-                # An early attempt or the ingest claim won while we were
-                # in OCR. FIRST WRITER WINS: their read came off a frame
-                # we no longer hold, so we cannot prove ours is the same
-                # vehicle, and overwriting would trade a provable pairing
-                # for an unprovable one.
+                current_reads = plate_reads_of(row)
+                if row.plate_text == plate:
+                    # The bus consumer (or the ingest claim) wrote the
+                    # SAME plate while we were in OCR — from the very
+                    # bytes we just stored. Give the row the proof it is
+                    # missing; never leave a plate without its picture.
+                    if not row.plate_frame_path or not row.plate_evidence_path:
+                        stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
+                                             merged=was_merged,
+                                             reads=max(agreeing, current_reads),
+                                             source="sweep")
+                    else:
+                        stamp_plate_evidence(row, None, reads=max(
+                            agreeing, current_reads), source="sweep")
+                    db.commit()
+                    logger.info(
+                        "plate enrichment: event %s already read as %s — "
+                        "evidence attached (%d looks agree)",
+                        event_id, plate, max(agreeing, current_reads),
+                    )
+                    return
+                if current_reads >= agreeing or agreeing < max(min_agree, 2):
+                    # Their read has at least as many looks behind it as
+                    # ours (or ours is a lone read): first writer wins.
+                    logger.info(
+                        "plate enrichment: event %s already read as %s "
+                        "(%d looks) while OCR was in flight — sweep result "
+                        "%s (%d looks) dropped",
+                        event_id, row.plate_text, current_reads, plate, agreeing,
+                    )
+                    return
+                # A consensus outranks a single read: the early attempt
+                # (or a lone bus event) put a hallucination on the row
+                # and several later looks disagree with it. Replace it,
+                # images and all — unless the plate the looks agree on
+                # is the car we read moments ago (a fragment), in which
+                # case the honest row is a visit with NO plate.
+                if is_duplicate_sighting(camera_id, plate):
+                    note_sighting(camera_id, plate)
+                    logger.info(
+                        "plate enrichment: event %s single read %s "
+                        "retracted — looks agree on %s, seen on cam %s "
+                        "within %.0fs (sighting folded)",
+                        event_id, row.plate_text, plate, camera_id,
+                        dedup_window_s(),
+                    )
+                    clear_plate(row)
+                    db.commit()
+                    return
                 logger.info(
-                    "plate enrichment: event %s already read as %s while OCR "
-                    "was in flight — sweep result %s dropped",
-                    event_id, row.plate_text, plate,
+                    "plate enrichment: event %s re-read %s -> %s "
+                    "(%d looks agree; previous was a single read)",
+                    event_id, row.plate_text, plate, agreeing,
                 )
-                return
-            if is_duplicate_sighting(camera_id, plate):
+                row.plate_evidence_path = None
+                row.plate_frame_path = None
+            elif is_duplicate_sighting(camera_id, plate):
                 # Re-checked here too: another fragment of the same pass
                 # can have been written during the OCR window.
                 note_sighting(camera_id, plate)
                 return
             row.plate_text = plate
             stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
-                                 merged=was_merged)
+                                 merged=was_merged, reads=agreeing,
+                                 source="sweep")
             note_sighting(camera_id, plate)
             db.commit()
         finally:
             db.close()
         logger.info(
-            "plate enrichment: event %s -> %s (conf=%.2f, attempts=%d%s)",
-            event_id, plate, winner["confidence"],
-            len(rejects) + 1, ", merged" if was_merged else "",
+            "plate enrichment: event %s -> %s (conf=%.2f, looks=%d, "
+            "agree=%d%s)",
+            event_id, plate, winner["confidence"], looks, agreeing,
+            ", merged" if was_merged else "",
         )
     except Exception:
         logger.warning("plate enrichment failed for event %s", event_id,
                        exc_info=True)
+    finally:
+        clear_sweep_pending(event_id)
 
 
 def wants_plate(label: str | None, evidence_path: str | None,
