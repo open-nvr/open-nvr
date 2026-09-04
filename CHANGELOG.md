@@ -38,6 +38,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   All of them apply live now; erasing a drawn zone returns the camera to
   the whole frame. The page also shows why a board is empty (which labels
   are watched; whether core can reach the app) instead of a blank grid.
+- **Occupancy alert storm.** A zone hovering at its limit flipped
+  over/normal on almost every frame, and with the return-to-normal silent
+  each upward flip fired a fresh HIGH alert — one every second or two. The
+  app now holds a per-zone `alert_cooldown_seconds` (default 120) between
+  repeats of the same over/under alert, and the shipped config debounces
+  a new band over 3 frames instead of 1. The live level on the page still
+  tracks every flip.
 - **Plate reads are written by agreement, not by whoever read first.**
   The early track-confirm read (taken when the car is smallest) used to be
   final, and on blurry footage it put a hallucination into the register at
