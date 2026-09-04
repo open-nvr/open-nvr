@@ -19,8 +19,38 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   onboarding an unregistered device (Add Camera wizard) still works, but
   PTZ against an unregistered IP is refused. Reported by Furkan Arslan.
 
+### Added
+
+- **Occupancy heatmap.** The occupancy app bins where watched entities
+  stand (foot point of every detection) into a per-camera grid and ships
+  sparse deltas as `occupancy.heatmap.v1`; core sums them per camera-hour
+  and the Occupancy page paints the last hour / today / 7 days over a
+  still of the camera. Zero extra inference — it rides the boxes the app
+  already receives. `heatmap_enabled` / `heatmap_publish_seconds` in the
+  app's config.
+- **Footfall and dwell.** Draw an entry line on a camera (catalog →
+  Configure) and the app counts entries and exits through it per tracked
+  visitor; every tracked stay inside the zone is timed. Shipped as
+  `occupancy.footfall.v1`, kept per camera-hour, and shown on the
+  Occupancy page as 24 h tiles (entered / exited / average / longest
+  stay), an hourly flow chart, and per-zone in/out, average stay and
+  "inside now". `max_dwell_seconds` raises a medium alert when one visitor
+  stays too long.
+- **Occupancy report.** A printable period report (7 / 14 / 30 days) from
+  the Occupancy page: peak occupancy and when, average occupancy, busiest
+  hour, limit exceedances, footfall by day and per camera, average and
+  longest stay — bucketed in the browser's local time. Print → PDF, like
+  the vehicle movement report.
+
 ### Fixed
 
+- **The occupancy app now applies its configuration.** It never overrode
+  the SDK's live-config hook, so thresholds saved on the Occupancy page
+  ("applied live"), watch labels, and every zone drawn in the catalog were
+  ignored until a restart — and drawn zones were never read even then.
+  All of them apply live now; erasing a drawn zone returns the camera to
+  the whole frame. The page also shows why a board is empty (which labels
+  are watched; whether core can reach the app) instead of a blank grid.
 - **Occupancy alert storm.** A zone hovering at its limit flipped
   over/normal on almost every frame, and with the return-to-normal silent
   each upward flip fired a fresh HIGH alert — one every second or two. The
