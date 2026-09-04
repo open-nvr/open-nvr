@@ -4,6 +4,50 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Plate reads are written by agreement, not by whoever read first.**
+  The early track-confirm read (taken when the car is smallest) used to be
+  final, and on blurry footage it put a hallucination into the register at
+  "conf=1.00" — per-character probabilities saturate on motion blur, so
+  the confidence floor filtered nothing. Core now OCRs every look at the
+  car (the early read plus the candidate crops) and writes a plate only
+  when `OPENNVR_PLATE_MIN_AGREEING_READS` (default 2) looks agree within
+  one character; a consensus outranks any single read, an earlier
+  consensus is never overwritten, and a visit that only ever had one look
+  still writes it, marked "single-frame read" in the Vehicles dialog.
+- **Every plate keeps the frame it was read from.** KAI-C republishes each
+  accepted read core's own sweep makes as `plate.recognized.v1`, and the
+  bus consumer — which holds no image bytes — won the write race, leaving
+  rows with a number but no plate crop and no read frame ("no full frame
+  stored for this read"). The consumer now defers to a sweep that owns the
+  row, and a sweep that finds the same plate already written attaches the
+  crop and frame instead of dropping them.
+- **No more photos of the wrong car.** A plated row without its read
+  frame no longer shows the visit's vehicle-best frame as if it were the
+  read — on a merged track that frame is the NEXT car. The row thumbnail
+  is a neutral tile and the dialog says the read frame was not stored,
+  offering the vehicle photo only on request and labelled.
+- **Junk reads never reach the bus.** Clipped fragments (`K884` of
+  `K884RS`), weak localisations (a badge), and reads where the localiser
+  found no plate at all were published and then filtered by one consumer
+  while the LPR app alerted "Unknown vehicle K884" on them. KAI-C now
+  applies those gates before publishing, and core rejects
+  not-localised reads (`OPENNVR_PLATE_REQUIRE_LOCALISATION`).
+- **Fuzzy duplicate-sighting dedup.** Plates within
+  `OPENNVR_PLATE_DEDUP_DISTANCE` (default 1) of a plate seen inside the
+  window on the same camera are the same car read slightly differently,
+  not a new vehicle.
+
+### Changed
+
+- The fast-plate-ocr adapter overlay now takes `OPENNVR_LPR_MODEL`
+  (default `cct-s-v2-global-model`), `OPENNVR_LPR_MIN_PLATE_PX`
+  (default 80 — a narrower plate is a guess, not a read) and
+  `OPENNVR_LPR_MIN_CONFIDENCE` from `.env`.
+
 ## [0.1.4] — 2026-08-26
 
 The Tier-0 detect pipeline gets a CPU budget it actually respects, the

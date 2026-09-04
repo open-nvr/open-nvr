@@ -176,21 +176,64 @@ def test_plate_box_is_omitted_when_absent_or_malformed():
         assert "plate_box" not in env["payload"]
 
 
-def test_plate_box_confidence_is_forwarded_for_false_localisations():
+def test_plate_box_confidence_is_forwarded_for_false_localisations(monkeypatch):
     """#386: the localiser's own doubt is the only signal that separates
     a plate from a manufacturer badge. The badge OCRs into plausible
     characters, from a box nowhere near a crop edge, so the consumer
-    cannot reconstruct this from anything else we send."""
+    cannot reconstruct this from anything else we send. With the
+    publish-side floor disabled the doubt is forwarded for the consumer
+    to judge; with it on (the default) the read is not published at all."""
     result = dict(PLATE_RESULT, plate_detection={
         "attempted": True, "found": True, "confidence": 0.3756,
         "box": [121, 229, 233, 267],
     })
+    monkeypatch.setenv("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE", "0")
     _, env = normalise_completion("fast_plate_ocr", result, camera_id="cam1",
                                   correlation_id=None, event_id=7)
     assert env["payload"]["plate_box_confidence"] == 0.3756
-    # Forwarded, never judged — KAI-C ships the read AND the doubt; the
-    # writer decides. (Same division of labour as plate_box.)
     assert env["payload"]["plate_text"] == "ABC1234"
+    monkeypatch.delenv("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE")
+    assert normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                                correlation_id=None, event_id=7) is None
+
+
+def test_junk_reads_are_never_published():
+    """A subscriber acting on plate.recognized.v1 (the LPR app's
+    "Unknown vehicle" alarm, a barrier) must never see a fragment, a
+    badge, or a read off the car body. Each was previously published and
+    filtered by ONE consumer while the others alerted on it."""
+    def _out(detection):
+        return normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=detection),
+            camera_id="cam1", correlation_id=None, event_id=7)
+
+    # clipped: box abuts the crop edge (x1 == 0)
+    assert _out({"attempted": True, "found": True, "confidence": 0.9,
+                 "box": [0, 40, 120, 70], "image_size": [400, 300]}) is None
+    # clipped on the far edge (x2 == width)
+    assert _out({"attempted": True, "found": True, "confidence": 0.9,
+                 "box": [300, 40, 400, 70], "image_size": [400, 300]}) is None
+    # weak localisation: a badge
+    assert _out({"attempted": True, "found": True, "confidence": 0.37,
+                 "box": [100, 100, 200, 130], "image_size": [400, 300]}) is None
+    # not localised: the localiser looked and found nothing
+    assert _out({"attempted": True, "found": False, "confidence": None,
+                 "box": None, "image_size": [400, 300]}) is None
+    # a whole, well-localised plate still flows
+    out = _out({"attempted": True, "found": True, "confidence": 0.9,
+                "box": [100, 100, 200, 130], "image_size": [400, 300]})
+    assert out is not None and out[1]["payload"]["plate_text"] == "ABC1234"
+    # no opinion at all (OCR-only adapter) still flows, exactly as before
+    assert _out({"attempted": False, "found": False}) is not None
+
+
+def test_require_localisation_is_operator_tunable(monkeypatch):
+    monkeypatch.setenv("KAI_C_PLATE_REQUIRE_LOCALISATION", "0")
+    out = normalise_completion(
+        "fast_plate_ocr", dict(PLATE_RESULT, plate_detection={
+            "attempted": True, "found": False}),
+        camera_id="cam1", correlation_id=None, event_id=7)
+    assert out is not None
 
 
 def test_plate_box_confidence_is_omitted_when_absent_or_malformed():

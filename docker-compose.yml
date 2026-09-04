@@ -424,6 +424,10 @@ services:
       - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
       - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
       - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
+      # Context around the detection box in stored crops (fraction of
+      # the box per side). Cosmetic: a wider margin keeps the whole car
+      # in the read frame when the detector's box trails it.
+      - DETECT_CROP_MARGIN=${DETECT_CROP_MARGIN:-}
       # Scene evidence: a SECOND JPEG per visit — the whole frame the
       # best crop was taken from, so the evidence dialog can show the
       # car in its lane instead of a crop of the car.
@@ -549,6 +553,23 @@ services:
       # localiser's own score does (genuine plates 0.85+, the reported
       # badge 0.38). 0 disables.
       - OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      # Fuzzy dedup: plates within this edit distance inside the window
+      # are one car read slightly differently. 0 = exact only.
+      - OPENNVR_PLATE_DEDUP_DISTANCE=${OPENNVR_PLATE_DEDUP_DISTANCE:-}
+      # Consensus: how many separate looks must agree before a plate
+      # is written (1 = first accepted read wins).
+      - OPENNVR_PLATE_MIN_AGREEING_READS=${OPENNVR_PLATE_MIN_AGREEING_READS:-}
+      # Reject reads whose localiser found no plate in the vehicle
+      # crop (the OCR then read the car body). 0 disables.
+      - OPENNVR_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
+      # A finished sweep keeps its row closed to forwarded single reads
+      # for this long (KAI-C's late echo of its own last attempt).
+      - OPENNVR_PLATE_SWEEP_ECHO_GRACE_S=${OPENNVR_PLATE_SWEEP_ECHO_GRACE_S:-}
+      # KAI-C (same container) applies the clipped / weak / unlocalised
+      # gates BEFORE publishing plate.recognized.v1, so no subscriber
+      # ever alerts on a fragment or a badge. Same defaults as core's.
+      - KAI_C_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      - KAI_C_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state

@@ -79,7 +79,14 @@ type PlateEvent = {
   // a different car from the plate.
   has_plate_frame?: boolean
   plate_frame_url?: string | null
-  payload?: { plate_merged?: boolean } | null
+  // plate_reads: how many looks agreed on the number (1 = a single
+  // read, nothing confirmed it); plate_source: which writer put it
+  // there. Both are display caveats — see EvidenceDialog.
+  payload?: {
+    plate_merged?: boolean
+    plate_reads?: number
+    plate_source?: string
+  } | null
 }
 
 // The two images are different frames by construction — multi-frame OCR
@@ -134,6 +141,15 @@ function plateFrameSource(e: PlateEvent) {
 function rowThumbImage(e: PlateEvent) {
   if (e.has_plate_frame) return plateFrameSource(e)
   return vehicleFrameSource(e)
+}
+
+/** Is the picture on this row guaranteed to show the car the number
+ *  belongs to? Only the read frame is. A row that carries a plate but
+ *  no read frame (written by a path that held no image bytes) can only
+ *  offer the visit's vehicle-best frame — which on a merged track is
+ *  the NEXT car. That picture must never be presented as the read. */
+function readFrameIsMissing(e: PlateEvent): boolean {
+  return !!e.plate_text && !e.has_plate_frame
 }
 
 type PlateStats = {
@@ -1281,6 +1297,22 @@ function RowThumb({ e, plate, onOpen }: {
   onOpen: () => void
 }) {
   const [ref, seen] = useInView<HTMLDivElement>()
+  if (readFrameIsMissing(e)) {
+    // No read frame: the only image available is from a different
+    // moment and possibly a different car. A neutral tile is honest;
+    // the dialog explains, and can still show that photo on request.
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        title="The frame this plate was read from was not stored"
+        className="h-10 w-16 rounded bg-[var(--bg-2)] grid place-items-center text-[9px] leading-tight text-[var(--text-dim)] cursor-zoom-in"
+      >
+        no read
+        <br />frame
+      </button>
+    )
+  }
   return (
     <div ref={ref} className="h-10 w-16">
       {seen ? (
@@ -1334,6 +1366,15 @@ function EvidenceDialog({
   // Hover handles the mouse; this handles touch (where hover does not
   // exist) and the keyboard, which is why the card is a real <button>.
   const [zoomed, setZoomed] = useState(false)
+  // A plated row without its read frame does NOT get the vehicle-best
+  // frame as its picture by default: that frame is the visit's
+  // best-thumbnail moment, which on a merged track is the next car —
+  // and a convincing photo of the wrong car under this number is worse
+  // than no photo. The operator can still ask for it, labelled.
+  const readMissing = readFrameIsMissing(e)
+  const [showVehicleAnyway, setShowVehicleAnyway] = useState(false)
+  const reads = e.payload?.plate_reads
+  const singleRead = !!plate && (reads === 1 || reads === undefined)
   const seen = e.started_at ? new Date(e.started_at).toLocaleString() : null
   // One stage, no chooser: the frame the plate was READ from. The scene
   // is the visit's best-thumbnail moment, which a merged track can take
@@ -1345,11 +1386,17 @@ function EvidenceDialog({
   const caveats = [
     e.payload?.plate_merged &&
       'read reconstructed from more than one frame — the crop shown is the clearer of them',
+    typeof reads === 'number' && reads >= 2 &&
+      `confirmed by ${reads} separate looks at the car`,
+    singleRead && hasRead &&
+      'single-frame read — no second look confirmed this number',
     // Says WHY an old read looks different from a new one, which is
     // otherwise indistinguishable from the feature being broken.
-    !hasRead && e.has_evidence &&
-      'no full frame stored for this read — showing the vehicle crop',
-    !e.has_plate_evidence && e.has_evidence &&
+    readMissing && e.has_evidence &&
+      'the frame this plate was read from was not stored — the vehicle photo is from a different moment of the visit and may show another car',
+    readMissing && !e.has_evidence &&
+      'the frame this plate was read from was not stored',
+    !e.has_plate_evidence && (hasRead || e.has_evidence) &&
       'no separate plate crop stored',
   ].filter(Boolean) as string[]
 
@@ -1405,8 +1452,32 @@ function EvidenceDialog({
       // same inset-fit pattern as AddCameraDialog.
       widthClassName="w-full max-w-[860px] mx-4"
     >
-      {hasFrame ? (
+      {readMissing && !showVehicleAnyway ? (
+        // The honest stage for a number with no read frame: say so,
+        // and offer the (unrelated-moment) vehicle photo on request.
+        <div className="relative border border-[var(--border)] bg-[var(--bg-2)] min-h-[220px] grid place-items-center text-center px-6 py-10">
+          <div className="max-w-md space-y-3">
+            <div className="text-sm font-medium">Read frame not stored</div>
+            <div className="text-xs text-[var(--text-dim)]">
+              This number was written without the frame it was read from,
+              so there is no photo that is guaranteed to show the car it
+              belongs to.
+            </div>
+            {e.has_evidence && (
+              <Button variant="outline" onClick={() => setShowVehicleAnyway(true)}>
+                Show the visit&apos;s vehicle photo anyway
+              </Button>
+            )}
+          </div>
+          {card}
+        </div>
+      ) : hasFrame ? (
         <figure className="relative border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+          {readMissing && (
+            <div className="absolute bottom-2 right-2 z-20 px-2 py-1 text-[11px] bg-black/70 text-white border border-white/20">
+              vehicle photo from another moment — may be a different car
+            </div>
+          )}
           {/* 16/9 is nominal — object-contain letterboxes anything else
               rather than distorting it — and max-h keeps the whole dialog
               inside Modal's 85vh without the two-slot arithmetic the

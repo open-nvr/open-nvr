@@ -187,6 +187,7 @@ async def ingest_track_event(
     # no plate written AND no enrichment sweep queued (the identity is
     # established; further OCR on this visit is pure waste).
     plate_resolved_as_duplicate = False
+    early_read = False
     if (row.label or "") in _VEHICLES \
             and payload.track_id and not row.plate_text:
         from services.plate_attempt_cache import cache as _attempt_cache
@@ -212,10 +213,16 @@ async def ingest_track_event(
                 )
             else:
                 row.plate_text = plate
+                # Marked as a SINGLE early look: the sweep below may
+                # confirm it (and say how many looks agree) or, when
+                # several later looks disagree, replace it.
                 stamp_plate_evidence(row, pending.plate_evidence_path,
-                                     frame_path=pending.plate_frame_path)
+                                     frame_path=pending.plate_frame_path,
+                                     reads=1, source="early",
+                                     confidence=pending.confidence)
                 note_sighting(payload.camera_id, plate)
                 db.commit()
+                early_read = True
                 logger.info(
                     "plate ingest: event %s -> %s (early attempt, conf=%.2f)",
                     row.id, row.plate_text, pending.confidence,
@@ -224,9 +231,11 @@ async def ingest_track_event(
     # Multi-frame OCR, recall half: decode the candidate crops (bounded:
     # same per-image cap as evidence, at most MAX_INGEST_ATTEMPTS) and
     # hand them to the enrichment sweep. Bad candidates are dropped, not
-    # fatal — the visit itself is already persisted.
+    # fatal — the visit itself is already persisted. An early read does
+    # NOT skip this any more: the candidates are the looks that confirm
+    # (or overturn) it — see plate_enrichment's consensus policy.
     candidates: list[bytes] = []
-    if payload.candidate_jpegs_b64 and not row.plate_text \
+    if payload.candidate_jpegs_b64 and (not row.plate_text or early_read) \
             and not plate_resolved_as_duplicate:
         import base64 as _b64
 
@@ -241,11 +250,20 @@ async def ingest_track_event(
             except (ValueError, binascii.Error):
                 continue
 
-    if not row.plate_text and not plate_resolved_as_duplicate \
+    # An early read is re-checked only against CANDIDATES (fresh looks);
+    # OCR-ing the evidence frame alone would be one more single look.
+    if ((not row.plate_text) or (early_read and candidates)) \
+            and not plate_resolved_as_duplicate \
             and wants_plate(
         row.label, evidence_rel or (candidates and "candidates"),
         settings.events_plate_enrichment,
     ):
+        # Registered BEFORE the task is queued: KAI-C republishes every
+        # accepted read this sweep makes as plate.recognized.v1, and the
+        # bus consumer must not race the sweep for its own row.
+        from services.plate_enrichment import mark_sweep_pending
+
+        mark_sweep_pending(row.id)
         background.add_task(enrich_event_plate, row.id, candidates or None)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a
@@ -346,7 +364,9 @@ async def run_early_plate_attempt(
             ):
                 row.plate_text = read["plate"][:32]
                 stamp_plate_evidence(row, plate_crop_rel,
-                                     frame_path=plate_frame_rel)
+                                     frame_path=plate_frame_rel,
+                                     reads=1, source="early",
+                                     confidence=read["confidence"])
                 note_sighting(camera_id, row.plate_text)
                 db.commit()
                 logger.info(

@@ -18,6 +18,7 @@ doc table first, then here.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -56,6 +57,81 @@ def _envelope(
     }
 
 
+#: A plate box within this many pixels of its crop's edge is CLIPPED —
+#: the same tolerance core's plate_enrichment applies (#378).
+_PLATE_EDGE_TOLERANCE_PX = 2
+#: Default floor for the localiser's confidence — same value as core's
+#: OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE (#386). 0 disables.
+_DETECTION_FLOOR_DEFAULT = 0.6
+
+
+def _detection_floor() -> float:
+    raw = os.environ.get("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DETECTION_FLOOR_DEFAULT
+    return value if value > 0 else 0.0
+
+
+def _require_localisation() -> bool:
+    raw = os.environ.get("KAI_C_PLATE_REQUIRE_LOCALISATION", "").strip()
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
+def _detection_disqualifies(detection: Any) -> bool:
+    """Is this read one the contract should never carry?
+
+    ``plate.recognized.v1`` promises a *recognised plate*, and every
+    subscriber — the LPR app raising "Unknown vehicle K884", the gate
+    controller opening a barrier — acts on it as one. Three kinds of
+    accepted OCR output are demonstrably not that, and each used to be
+    published and then filtered by ONE consumer (core's timeline) while
+    the others alerted on it:
+
+    * **clipped** — the plate box abuts the crop edge: a fragment
+      ("K884" of "K884RS") read at full confidence (#378);
+    * **weak localisation** — the detector barely believed it was a
+      plate: a badge OCR'd into characters (#386);
+    * **not localised** — the detector looked at a vehicle crop and
+      found no plate, and the OCR read the car body instead.
+
+    All three need the adapter's ``plate_detection`` block; without it
+    (an OCR-only adapter, or an older one) there is no opinion and the
+    read passes, exactly as before. The judgement is pure arithmetic on
+    fields the adapter already reports, so it belongs at the one place
+    every initiator's reads already meet.
+    """
+    if not isinstance(detection, dict):
+        return False
+    attempted = detection.get("attempted")
+    found = detection.get("found")
+    if attempted is True and found is not True:
+        return _require_localisation()
+    box = detection.get("box")
+    size = detection.get("image_size")
+    try:
+        if (isinstance(box, (list, tuple)) and len(box) == 4
+                and isinstance(size, (list, tuple)) and len(size) == 2):
+            x1, y1, x2, y2 = (float(v) for v in box)
+            w, h = (float(v) for v in size)
+            if w > 0 and h > 0 and (
+                x1 <= _PLATE_EDGE_TOLERANCE_PX
+                or y1 <= _PLATE_EDGE_TOLERANCE_PX
+                or x2 >= w - _PLATE_EDGE_TOLERANCE_PX
+                or y2 >= h - _PLATE_EDGE_TOLERANCE_PX
+            ):
+                return True
+    except (TypeError, ValueError):
+        pass
+    conf = detection.get("confidence")
+    floor = _detection_floor()
+    if (floor > 0 and isinstance(conf, (int, float))
+            and not isinstance(conf, bool) and float(conf) < floor):
+        return True
+    return False
+
+
 def _normalise_fast_plate_ocr(
     result: Dict[str, Any],
     *,
@@ -79,6 +155,9 @@ def _normalise_fast_plate_ocr(
     text = "".join(text.split()).upper()[:32]
     if not text:
         return None
+    detection = result.get("plate_detection")
+    if _detection_disqualifies(detection):
+        return None
     confidence = result.get("confidence")
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = None
@@ -96,9 +175,9 @@ def _normalise_fast_plate_ocr(
     # Consumers use it to reject PARTIAL reads — a crop whose edge cuts
     # through the plate still OCRs the surviving characters at high
     # confidence, so only the geometry can tell "K884" (a fragment of
-    # "K884RS") from a whole plate. Forwarded, not judged: KAI-C does not
-    # have the crop, and the consumer that stores the plate does.
-    detection = result.get("plate_detection")
+    # "K884RS") from a whole plate. Still forwarded for consumers with
+    # stricter policies; the obvious junk is no longer published at all
+    # (see _detection_disqualifies).
     if isinstance(detection, dict):
         # How sure the localiser was that this was a plate at all.
         # Consumers reject FALSE localisations with it (#386): a

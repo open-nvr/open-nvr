@@ -3,6 +3,8 @@
 """Unit tests for the lean size-aware tracker."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from detect_pipeline.tracking import (
     Detection,
     Track,
@@ -126,6 +128,25 @@ def test_best_crop_includes_context_around_the_box():
     assert w > 200 and h > 300, f"no context added: got {w}x{h}"
     assert w == 200 + 2 * 50 and h == 300 + 2 * 75, (
         f"expected a quarter-box margin per side, got {w}x{h}")
+
+
+def test_crop_margin_is_a_tracker_setting_applied_to_both_crops():
+    """DETECT_CROP_MARGIN: a wider margin keeps the whole car in the read
+    frame when the detector's box trails a moving one (the LPR dialog
+    showed an Audi with its left side cut off). One setting, both crops
+    — the visit's evidence and the plate candidates come from the same
+    helper, so they cannot drift apart."""
+    import numpy as np
+    from detect_pipeline.tracking import _crop_bgr
+
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    crop = _crop_bgr(frame, (800, 400, 1000, 700), margin=0.5)
+    h, w = crop.shape[:2]
+    assert (w, h) == (200 + 2 * 100, 300 + 2 * 150), f"got {w}x{h}"
+    src = (Path(__file__).resolve().parents[1] / "detect_pipeline"
+           / "tracking.py").read_text()
+    assert src.count("margin=self.crop_margin") == 2, (
+        "both _crop_bgr call sites must use the tracker's crop_margin")
 
 
 def test_best_crop_margin_clamps_at_the_frame_edge():

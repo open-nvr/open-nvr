@@ -98,6 +98,10 @@ def apply_plate_event(envelope: object) -> str:
     * ``"duplicate"``    — same plate seen on this camera within the
       dedup window (a fragmented track re-reading the car we just
       read); sighting folded, row left untouched.
+    * ``"deferred-to-sweep"`` — core's own enrichment sweep is still
+      working this row (this event is one of its attempts, echoed by
+      KAI-C); the sweep writes text AND evidence, so the row is left
+      to it.
     """
     if not isinstance(envelope, dict):
         return "malformed"
@@ -125,6 +129,19 @@ def apply_plate_event(envelope: object) -> str:
             return "not-found"
         if row.plate_text:
             return "already-set"
+        # The sweep that initiated this very read still owns the row.
+        # KAI-C republishes every accepted read core asks for, so this
+        # event IS the sweep's own attempt coming back round the bus —
+        # and the sweep holds the bytes (plate crop + read frame) that
+        # this consumer does not. Writing here won the race and left
+        # the row a number with no proof; defer, and the sweep writes
+        # text and evidence together (with consensus, when several
+        # looks are in play). A state check on core itself, not a
+        # producer check — consumers must not branch on producer.
+        from services.plate_enrichment import sweep_is_pending
+
+        if sweep_is_pending(event_id):
+            return "deferred-to-sweep"
         # Same partial-read rule as the synchronous producer. The two are
         # racing writers for one column, so a guard on only one of them is
         # no guard at all — a clipped read rejected by plate_enrichment
@@ -154,6 +171,15 @@ def apply_plate_event(envelope: object) -> str:
             note_sighting(row.camera_id, normalized)
             return "duplicate"
         row.plate_text = plate.strip()[:32]
+        # A single forwarded read: no images, one look. The sweep (if
+        # any) may attach evidence or, with several disagreeing looks,
+        # replace it — see plate_enrichment's precedence rules.
+        from services.plate_enrichment import stamp_plate_evidence
+
+        stamp_plate_evidence(row, None, reads=1, source="bus",
+                             confidence=payload.get("confidence")
+                             if isinstance(payload.get("confidence"), (int, float))
+                             else None)
         note_sighting(row.camera_id, normalized)
         db.commit()
         logger.info(

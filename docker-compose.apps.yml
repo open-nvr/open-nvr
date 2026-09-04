@@ -398,6 +398,15 @@ services:
     restart: unless-stopped
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # Read quality knobs (see .env.example "Plate OCR quality"):
+      # the OCR weights (cct-s-v2-global-model is the current best
+      # general model; european-plates-mobile-vit-v2-model for EU
+      # plates), and the smallest localised plate worth OCR-ing — a
+      # plate narrower than this has ~5px characters and the model
+      # guesses; a distant car should produce NO read, not a wrong one.
+      - OPENNVR_LPR_MODEL=${OPENNVR_LPR_MODEL:-cct-s-v2-global-model}
+      - OPENNVR_LPR_MIN_PLATE_PX=${OPENNVR_LPR_MIN_PLATE_PX:-80}
+      - OPENNVR_LPR_MIN_CONFIDENCE=${OPENNVR_LPR_MIN_CONFIDENCE:-0.45}
     volumes:
       - opennvr_fast_plate_ocr_cache:/root/.cache
     networks:

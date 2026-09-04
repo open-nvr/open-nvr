@@ -583,6 +583,10 @@ class CameraWorker:
             coast_ttl_seconds=float(_env_int("DETECT_TRACK_TTL", 300)),
             min_spawn_score=_env_float("DETECT_MIN_SPAWN_SCORE", 0.5),
         ))
+        # Evidence/candidate crop margin, clamped to something sane: 0
+        # is the bare box, 2 is a crop five times the box on each axis.
+        tracker.crop_margin = max(0.0, min(2.0, _env_float(
+            "DETECT_CROP_MARGIN", 0.25)))
         if lpr_camera:
             tracker.retain_plate_candidates = True
             tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
