@@ -6,6 +6,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Missing authorization on the IP-keyed ONVIF routes** (CWE-862 /
+  CWE-639). `/connect` and every `/camera/{ip}/...` route (profiles,
+  stream URI, PTZ move/stop/presets, clock) checked only that the IP lay
+  inside the camera LAN, so any authenticated user could PTZ, read the
+  stream URI of, or relay credentials at any camera on the LAN — the
+  sibling `/cameras/{id}/ptz/...` routes required ownership. They now
+  require ownership, a camera permission grant (`can_view` for reads,
+  `can_manage` for PTZ/presets) or superuser on a registered camera;
+  onboarding an unregistered device (Add Camera wizard) still works, but
+  PTZ against an unregistered IP is refused. Reported by Furkan Arslan.
+
 ### Fixed
 
 - **Plate reads are written by agreement, not by whoever read first.**
