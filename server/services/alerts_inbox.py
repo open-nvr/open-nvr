@@ -153,12 +153,20 @@ def apply_alert(envelope: object) -> str:
             evidence=_json_or_none(envelope.get("evidence")),
             tags=_json_or_none(envelope.get("tags")),
         )
+        # Snapshot BEFORE commit: commit expires the instance, and every
+        # attribute read after it is a fresh SELECT the write path has no
+        # reason to depend on.
+        stored = {
+            "alert_id": row.alert_id, "severity": severity,
+            "title": row.title, "description": row.description,
+            "camera_id": row.camera_id, "fired_at": str(row.fired_at),
+        }
         db.add(row)
         db.commit()
         logger.info(
             "alert inbox: [%s] %s (camera=%s source=%s alert_id=%s)",
-            severity.upper(), row.title, row.camera_id,
-            source_name or "?", row.alert_id,
+            severity.upper(), stored["title"], stored["camera_id"],
+            source_name or "?", stored["alert_id"],
         )
         # Beyond the browser: phone call / SMS / hooter relay per the
         # configured alarm actions — fire-and-forget, the inbox write
@@ -166,11 +174,7 @@ def apply_alert(envelope: object) -> str:
         try:
             from services.alarm_actions import dispatch_in_background
 
-            dispatch_in_background({
-                "alert_id": row.alert_id, "severity": severity,
-                "title": row.title, "description": row.description,
-                "camera_id": row.camera_id, "fired_at": str(row.fired_at),
-            })
+            dispatch_in_background(stored)
         except Exception:  # noqa: BLE001
             logger.debug("alarm action dispatch failed to start",
                          exc_info=True)
