@@ -27,7 +27,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Flame, RefreshCw, Settings2, Users } from 'lucide-react'
+import { FileText, Flame, RefreshCw, Settings2, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -55,6 +55,40 @@ type OccupancyCameraState = {
   dwell_max_s?: number
   inside_now?: number
   longest_current_dwell_s?: number
+}
+
+type OccupancyReport = {
+  days: number
+  start: string
+  end: string
+  generated_at: string
+  cameras: {
+    camera_id: number
+    samples: number
+    avg_occupancy: number | null
+    peak_occupancy: number
+    peak_at: string | null
+    over_transitions: number
+    busiest_hour: { hour: number; avg: number } | null
+    entries: number
+    exits: number
+    dwell_count: number
+    dwell_avg_seconds: number | null
+    dwell_max_seconds: number
+    daily: { day: string; entries: number; exits: number }[]
+  }[]
+  daily: { day: string; entries: number; exits: number }[]
+  totals: {
+    entries: number
+    exits: number
+    dwell_count: number
+    dwell_avg_seconds: number | null
+    dwell_max_seconds: number
+    peak_occupancy: number
+    peak_camera_id: number | null
+    peak_at: string | null
+    over_transitions: number
+  }
 }
 
 type FootfallResp = {
@@ -197,6 +231,7 @@ export function Occupancy() {
     return camerasQuery.data?.find((c) => c.id === id)?.name ?? key
   }
   const [heatmapFor, setHeatmapFor] = useState<string | null>(null)
+  const [reportOpen, setReportOpen] = useState(false)
   const watchLabels: string[] = Array.isArray((occApp?.config as any)?.watch_labels)
     ? (occApp!.config as any).watch_labels.map(String)
     : ['person']
@@ -269,6 +304,11 @@ export function Occupancy() {
                   <Settings2 size={14} /> Configure zones
                 </Button>
               </Link>
+            )}
+            {occApp && (
+              <Button variant="outline" onClick={() => setReportOpen(true)}>
+                <FileText size={14} /> Report
+              </Button>
             )}
             <Button onClick={() => statusQuery.refetch()} disabled={statusQuery.isFetching}>
               <RefreshCw size={14} className={statusQuery.isFetching ? 'animate-spin' : ''} /> Refresh
@@ -474,6 +514,14 @@ export function Occupancy() {
         </div>
       )}
 
+      {reportOpen && (
+        <OccupancyReportOverlay
+          cameraName={(id) => cameraName(`cam${id}`)}
+          maxOccupancy={maxOccupancy}
+          onClose={() => setReportOpen(false)}
+        />
+      )}
+
       {heatmapFor !== null && (
         <HeatmapDialog
           cameraId={cameraIdOf(heatmapFor)}
@@ -557,6 +605,200 @@ function FlowChart({ cameras }: { cameras: FootfallResp['cameras'] }) {
         <span className="inline-flex items-center gap-1">
           <span className="inline-block h-2 w-3 rounded-sm" style={{ background: 'var(--text-dim,#6b7280)', opacity: 0.55 }} /> exits (below)
         </span>
+      </div>
+    </div>
+  )
+}
+
+// ── The period report (printable) ───────────────────────────────────
+// Same shape as the vehicle movement report: a white sheet in an
+// overlay, a period picker and a print button on screen only, and a
+// print stylesheet that hides everything else. The browser's print
+// dialog is the PDF exporter — no server-side renderer to maintain.
+
+const REPORT_PERIODS: { label: string; days: number }[] = [
+  { label: 'Last 7 days', days: 7 },
+  { label: 'Last 14 days', days: 14 },
+  { label: 'Last 30 days', days: 30 },
+]
+
+function OccupancyReportOverlay({
+  cameraName, maxOccupancy, onClose,
+}: {
+  cameraName: (id: number) => string
+  maxOccupancy: number
+  onClose: () => void
+}) {
+  const [days, setDays] = useState(7)
+  const reportQuery = useQuery({
+    queryKey: ['occupancy-report', days],
+    queryFn: async () => {
+      // JS reports minutes WEST of UTC; the API wants east.
+      const tz_offset_minutes = -new Date().getTimezoneOffset()
+      const { data } = await api.get('/api/v1/occupancy/report', { params: { days, tz_offset_minutes } })
+      return data as OccupancyReport
+    },
+    retry: 0,
+    staleTime: 60_000,
+  })
+  const report = reportQuery.data
+  const dt = (v: string | null | undefined) =>
+    v ? new Date(v).toLocaleString(undefined, {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    }) : '—'
+  const dateOnly = (v: string) => new Date(v).toLocaleDateString(undefined, {
+    day: '2-digit', month: 'short',
+  })
+  const hourLabel = (h: number) => `${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`
+  const num = { fontVariantNumeric: 'tabular-nums' } as const
+  const dailyTop = Math.max(1, ...(report?.daily ?? []).map((d) => Math.max(d.entries, d.exits)))
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 overflow-y-auto print:overflow-visible">
+      <style>{`
+        @media print {
+          body * { visibility: hidden !important; }
+          .print-report, .print-report * { visibility: visible !important; }
+          .print-report { position: absolute !important; inset: 0 !important;
+            margin: 0 !important; box-shadow: none !important;
+            border-radius: 0 !important; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="print-report bg-white text-neutral-900 max-w-3xl mx-auto my-6 rounded-lg shadow-xl p-8 print:p-0">
+        <div className="no-print flex items-center gap-2 mb-6 pb-4 border-b border-neutral-200">
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="py-1.5 px-2 rounded border border-neutral-300 bg-white text-sm"
+          >
+            {REPORT_PERIODS.map((p) => (
+              <option key={p.days} value={p.days}>{p.label}</option>
+            ))}
+          </select>
+          <Button onClick={() => window.print()} disabled={!report}>
+            <FileText size={14} /> Print / Save as PDF
+          </Button>
+          <button
+            className="ml-auto text-neutral-500 hover:text-neutral-900 text-sm"
+            onClick={onClose}
+          >
+            ✕ Close
+          </button>
+        </div>
+
+        {reportQuery.isPending ? (
+          <Skeleton className="h-64" />
+        ) : reportQuery.isError ? (
+          <div className="text-sm text-neutral-500">
+            {extractApiError(reportQuery.error, 'Could not build the report.')}
+          </div>
+        ) : report && (
+          <div className="text-sm leading-relaxed">
+            <div className="mb-6">
+              <div className="text-2xl font-semibold">Occupancy Report</div>
+              <div className="text-neutral-500">
+                {dateOnly(report.start)} – {dateOnly(report.end)} ({report.days} days) · generated {new Date(report.generated_at).toLocaleDateString()} · OpenNVR
+              </div>
+            </div>
+
+            {report.cameras.length === 0 ? (
+              <div className="text-neutral-500">No occupancy history in this period.</div>
+            ) : (
+              <>
+                <div className="grid grid-cols-4 gap-3 mb-6">
+                  {[
+                    ['Peak occupancy', report.totals.peak_occupancy,
+                      report.totals.peak_camera_id != null
+                        ? `${cameraName(report.totals.peak_camera_id)} · ${dt(report.totals.peak_at)}` : ''],
+                    ['Entries', report.totals.entries, `${report.totals.exits} exits`],
+                    ['Average stay', fmtDuration(report.totals.dwell_avg_seconds),
+                      `${report.totals.dwell_count} stays`],
+                    ['Longest stay', fmtDuration(report.totals.dwell_max_seconds), ''],
+                  ].map(([label, value, note]) => (
+                    <div key={String(label)} className="border border-neutral-200 rounded p-3">
+                      <div className="text-xl font-semibold" style={num}>{value}</div>
+                      <div className="text-xs text-neutral-500">{label}</div>
+                      {note ? <div className="text-[11px] text-neutral-400 mt-0.5">{note}</div> : null}
+                    </div>
+                  ))}
+                </div>
+                {maxOccupancy > 0 && (
+                  <div className="mb-6 text-neutral-600">
+                    Configured limit {maxOccupancy}; the limit was exceeded {report.totals.over_transitions} time{report.totals.over_transitions === 1 ? '' : 's'} in the period.
+                  </div>
+                )}
+
+                {report.daily.length > 0 && (
+                  <div className="mb-6">
+                    <div className="font-medium mb-1">Footfall by day</div>
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="text-left text-neutral-500 border-b border-neutral-200">
+                          <th className="py-1 pr-2">Day</th>
+                          <th className="py-1 pr-2 text-right">Entries</th>
+                          <th className="py-1 pr-2 text-right">Exits</th>
+                          <th className="py-1 w-1/2"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {report.daily.map((d) => (
+                          <tr key={d.day} className="border-b border-neutral-100">
+                            <td className="py-1 pr-2">{new Date(d.day + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })}</td>
+                            <td className="py-1 pr-2 text-right" style={num}>{d.entries}</td>
+                            <td className="py-1 pr-2 text-right" style={num}>{d.exits}</td>
+                            <td className="py-1">
+                              <div className="h-2 bg-neutral-100 rounded overflow-hidden">
+                                <div className="h-full bg-neutral-700 rounded" style={{ width: `${(d.entries / dailyTop) * 100}%` }} />
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div className="font-medium mb-1">Per camera</div>
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="text-left text-neutral-500 border-b border-neutral-200">
+                      <th className="py-1 pr-2">Camera</th>
+                      <th className="py-1 pr-2 text-right">Avg</th>
+                      <th className="py-1 pr-2 text-right">Peak</th>
+                      <th className="py-1 pr-2">Peak at</th>
+                      <th className="py-1 pr-2">Busiest hour</th>
+                      <th className="py-1 pr-2 text-right">In</th>
+                      <th className="py-1 pr-2 text-right">Out</th>
+                      <th className="py-1 pr-2 text-right">Avg stay</th>
+                      <th className="py-1 text-right">Longest</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.cameras.map((c) => (
+                      <tr key={c.camera_id} className="border-b border-neutral-100">
+                        <td className="py-1 pr-2">{cameraName(c.camera_id)}</td>
+                        <td className="py-1 pr-2 text-right" style={num}>{c.avg_occupancy ?? '—'}</td>
+                        <td className="py-1 pr-2 text-right" style={num}>{c.peak_occupancy}</td>
+                        <td className="py-1 pr-2">{dt(c.peak_at)}</td>
+                        <td className="py-1 pr-2">
+                          {c.busiest_hour ? `${hourLabel(c.busiest_hour.hour)} (avg ${c.busiest_hour.avg})` : '—'}
+                        </td>
+                        <td className="py-1 pr-2 text-right" style={num}>{c.entries}</td>
+                        <td className="py-1 pr-2 text-right" style={num}>{c.exits}</td>
+                        <td className="py-1 pr-2 text-right" style={num}>{fmtDuration(c.dwell_avg_seconds)}</td>
+                        <td className="py-1 text-right" style={num}>{fmtDuration(c.dwell_max_seconds)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="mt-6 text-[11px] text-neutral-400">
+                  Occupancy is sampled on change from the app's zone counts; footfall counts crossings of each camera's entry line (in = a→b); stays are timed per tracked visitor inside the zone. Busiest hour and days are in this browser's local time.
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

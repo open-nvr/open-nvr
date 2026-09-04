@@ -314,3 +314,50 @@ def test_footfall_retention_prunes_with_the_rest(db):
     assert occ.prune_heatmaps(s, now=NOW) == 1
     s.commit()
     assert s.query(models.OccupancyFootfall).count() == 1
+
+
+# ── the period report ──────────────────────────────────────────────
+
+
+def test_report_rolls_up_all_three_histories(db):
+    from routers.occupancy import occupancy_report
+
+    s, users, cams = db
+    cam = f"cam{cams['hall'].id}"
+    day1 = NOW - timedelta(days=1)
+    for i, (count, level) in enumerate([(2, "normal"), (9, "over"), (4, "normal")]):
+        assert occ.apply_occupancy_event(_envelope(
+            count, camera=cam, level=level,
+            ts=day1 + timedelta(hours=i))) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, ts=day1, entries=5, exits=4, dwell_count=2,
+        dwell_seconds=100.0, dwell_max=70.0)) == "applied"
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, ts=NOW - timedelta(hours=3), entries=2, exits=1)) == "applied"
+    # an old row outside the window is ignored
+    assert occ.apply_footfall_event(_foot_envelope(
+        camera=cam, ts=NOW - timedelta(days=10), entries=99)) == "applied"
+
+    out = occupancy_report(s, days=7, owner_id=users["alice"].id, now=NOW)
+    assert out["days"] == 7 and len(out["cameras"]) == 1
+    c = out["cameras"][0]
+    assert c["peak_occupancy"] == 9
+    assert c["peak_at"] == (day1 + timedelta(hours=1)).isoformat()
+    assert c["avg_occupancy"] == 5.0
+    assert c["over_transitions"] == 1
+    assert c["busiest_hour"] == {"hour": (day1 + timedelta(hours=1)).hour, "avg": 9.0}
+    # local-time bucketing: +5:30 shifts the busiest hour and can move a
+    # late-evening row into the next local day
+    ist = occupancy_report(s, days=7, owner_id=users["alice"].id, now=NOW,
+                           tz_offset_minutes=330)
+    assert ist["cameras"][0]["busiest_hour"]["hour"] == \
+        ((day1 + timedelta(hours=1, minutes=330)).hour)
+    assert ist["tz_offset_minutes"] == 330
+    assert (c["entries"], c["exits"]) == (7, 5)
+    assert c["dwell_avg_seconds"] == 50.0 and c["dwell_max_seconds"] == 70.0
+    assert [d["entries"] for d in c["daily"]] == [5, 2]
+    assert out["totals"]["entries"] == 7
+    assert out["totals"]["peak_camera_id"] == cams["hall"].id
+    assert [d["entries"] for d in out["daily"]] == [5, 2]
+    # bob sees nothing of alice's camera
+    assert occupancy_report(s, days=7, owner_id=users["bob"].id, now=NOW)["cameras"] == []

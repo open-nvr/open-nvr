@@ -23,6 +23,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stay), an hourly flow chart, and per-zone in/out, average stay and
   "inside now". `max_dwell_seconds` raises a medium alert when one visitor
   stays too long.
+- **Occupancy report.** A printable period report (7 / 14 / 30 days) from
+  the Occupancy page: peak occupancy and when, average occupancy, busiest
+  hour, limit exceedances, footfall by day and per camera, average and
+  longest stay — bucketed in the browser's local time. Print → PDF, like
+  the vehicle movement report.
 
 ### Fixed
 
