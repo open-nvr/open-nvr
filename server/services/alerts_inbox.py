@@ -50,6 +50,10 @@ SUBJECT = "opennvr.alerts.>"
 _RETRY_SECONDS = 60.0
 
 _SEVERITIES = ("low", "medium", "high", "critical")
+#: Levels apps use that map onto ours. Anything not listed here or in
+#: _SEVERITIES is an unknown value and surfaces as "high" (see below).
+_SEVERITY_ALIASES = {"info": "low", "notice": "low", "debug": "low",
+                     "warning": "medium", "warn": "medium", "error": "high"}
 
 #: Ring configuration lives in SecuritySetting under this key. The UI
 #: reads it to decide what each severity does in the browser:
@@ -100,6 +104,15 @@ def apply_alert(envelope: object) -> str:
         return "malformed"
 
     severity = envelope.get("severity")
+    if isinstance(severity, str):
+        severity = severity.strip().lower()
+    # Apps (the LPR example among them) fire routine notices at "info",
+    # a level below "low" that the inbox does not have. Field bug: every
+    # plain "Plate X read" was promoted to HIGH by the fallback below and
+    # rang the beep — and turning off the unknown-vehicle alarm changed
+    # nothing, because those were never unknown-vehicle alerts. Notices
+    # are the lowest tier we have, never the second-highest.
+    severity = _SEVERITY_ALIASES.get(severity, severity)
     if severity not in _SEVERITIES:
         # Unknown severity must still SURFACE — an app bug in one field
         # cannot be allowed to hide a fired alert. High, not critical:
