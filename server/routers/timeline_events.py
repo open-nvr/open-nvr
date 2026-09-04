@@ -86,13 +86,14 @@ def _serialize(e: TimelineEvent) -> dict:
         # The frame the plate crop was cut from — the one image on the
         # row guaranteed to show the car the number belongs to, because
         # a merged track can leave evidence_path and scene_evidence_path
-        # showing a different vehicle entirely. Same distinctness guard:
-        # when the OCR fallback reads the evidence crop itself, the two
-        # content-address to one file and there is nothing extra to show.
-        "has_plate_frame": bool(
-            e.plate_frame_path
-            and e.plate_frame_path != e.evidence_path
-        ),
+        # showing a different vehicle entirely. NO distinctness guard
+        # here, unlike the two flags above: when the winning look is the
+        # very crop Tier-0 picked as the visit's best frame, the two
+        # content-address to ONE file — and that file is still the read
+        # frame. The old guard made such rows look like they had no read
+        # frame at all, and the UI (which no longer shows the vehicle
+        # frame as a stand-in) then hid a perfectly good picture.
+        "has_plate_frame": bool(e.plate_frame_path),
         "plate_frame_url": (
             f"/api/v1/events/{e.id}/plate-frame"
             if e.plate_frame_path else None

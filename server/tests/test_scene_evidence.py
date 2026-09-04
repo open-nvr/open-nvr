@@ -450,15 +450,19 @@ def test_serializer_offers_a_distinct_read_frame():
     assert out["plate_frame_url"] == "/api/v1/events/1/plate-frame"
 
 
-def test_serializer_hides_a_read_frame_identical_to_the_vehicle_crop():
-    """When no candidates rode the visit, enrichment OCRs the evidence
-    crop itself — the attempt IS the vehicle frame, content-addresses to
-    the same file, and there is no second picture to offer."""
+def test_serializer_keeps_a_read_frame_identical_to_the_vehicle_crop():
+    """When the winning look IS the crop Tier-0 picked as the visit's
+    best frame, both paths content-address to one file. That file is
+    still the frame the plate was read from — the flag must say so, or
+    the UI (which no longer shows the vehicle frame as a stand-in)
+    reports "no read frame" for a row that has one. Seen live: rows
+    27726 and 27783 on the reporting install."""
     from routers.timeline_events import _serialize
 
     out = _serialize(_row(evidence_path="ab/same.jpg",
                           plate_frame_path="ab/same.jpg"))
-    assert out["has_plate_frame"] is False
+    assert out["has_plate_frame"] is True
+    assert out["plate_frame_url"] == "/api/v1/events/1/plate-frame"
 
 
 def test_plate_frame_route_404s_on_null_and_on_a_foreign_camera(db):
