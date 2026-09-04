@@ -505,10 +505,14 @@ export function Vehicles() {
     refetchInterval: 30_000,
   })
 
+  // The tiles follow the SAME range selector as the reads list — a 7d
+  // number over a 24h list read as a bug in the field ("figures always
+  // keep showing the 7d"). 24h maps to days=1, the API's floor.
+  const rangeDays = Math.max(1, Math.round(range.hours / 24))
   const statsQuery = useQuery({
-    queryKey: ['plate-stats'],
+    queryKey: ['plate-stats', range.key],
     queryFn: async () => {
-      const { data } = await apiService.getPlateStats(7)
+      const { data } = await apiService.getPlateStats(rangeDays)
       return data as PlateStats
     },
     retry: 0,
@@ -704,14 +708,14 @@ export function Vehicles() {
         }
       />
 
-      {/* ── Stat tiles (7-day window) ─────────────────────────────── */}
+      {/* ── Stat tiles (follow the selected range) ────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
-          { label: 'Reads (7d)', value: stats?.total_reads },
-          { label: 'Unique plates (7d)', value: stats?.unique_plates },
+          { label: `Reads (${range.label})`, value: stats?.total_reads },
+          { label: `Unique plates (${range.label})`, value: stats?.unique_plates },
           gatesConfigured
             ? { label: 'Inside now', value: occupancyQuery.data?.inside }
-            : { label: 'Busiest camera (7d)', value: stats?.per_camera?.length
+            : { label: `Busiest camera (${range.label})`, value: stats?.per_camera?.length
                 ? cameraName([...stats.per_camera].sort((a, b) => b.reads - a.reads)[0].camera_id)
                 : '—' },
           { label: 'Registered vehicles', value: lprApp ? registry.length : '—' },
