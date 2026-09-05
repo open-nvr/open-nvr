@@ -35,6 +35,10 @@
                                    #   (ContractMixin.verify_license) and refuses to enable the
                                    #   app until it says yes. Mirror these three in AppManifest.
   author: ""                       # Shown as "by <author>" on the listing.
+  # verified: true                 # REVIEWERS ONLY — the maintainers vouch for the author
+                                   #   (identity confirmed, image reproducible from the linked
+                                   #   source). Leave out of a submission; a reviewer adds it.
+  # featured: true                 # REVIEWERS ONLY — shown in the Featured row.
 
   image: ghcr.io/<you>/my-app:latest   # REQUIRED. Well-formed ref — ghcr.io/... or
                                        #   opennvr/... . This is the canonical pull ref

@@ -129,6 +129,12 @@ class IndexEntry(BaseModel):
     price_note: str = ""
     entitlement: str = "none"
     author: str = ""
+    # Catalog curation (reviewer-set, never by the submitter's manifest):
+    # ``verified`` = the maintainers vouch for the author (identity
+    # confirmed, image reproducible from the linked source); ``featured``
+    # = shown in the Featured row at the top of the catalog.
+    verified: bool = False
+    featured: bool = False
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
@@ -676,6 +682,8 @@ async def get_apps_index(
                 "price_note": entry.price_note,
                 "entitlement": entry.entitlement,
                 "author": entry.author,
+                "verified": entry.verified,
+                "featured": entry.featured,
                 "requires_tasks": entry.requires_tasks,
                 "emits": entry.emits,
                 "docs_url": entry.docs_url,

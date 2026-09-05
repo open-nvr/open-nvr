@@ -244,6 +244,13 @@ index entry plus your app under `examples/<id>/` — one topic per PR.
   `subscription` app that gates features declares `entitlement:
   license_key` and implements `verify_license` — a reviewer will try
   enabling it without a key and expect a 402.
+- **Curation flags are the reviewer's, not the submitter's.** Leave
+  `verified` and `featured` out of your entry. A reviewer sets
+  `verified: true` once the author's identity is confirmed (a
+  maintained public repository or organisation behind the `author`
+  name) and the image is reproducible from the linked source;
+  `featured: true` is editorial and rotates. Submissions that carry
+  either flag are asked to remove it.
 - **External listings link somewhere real.** `kind: external` needs an
   https `external_url` under your control and an `author`; the
   validator rejects an install block on an external entry.

@@ -275,6 +275,8 @@ def test_index_response_shape_matches_contract(client):
         "price_note",
         "entitlement",
         "author",
+        "verified",
+        "featured",
         "version",
         "image",
         "requires_tasks",

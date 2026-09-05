@@ -54,7 +54,7 @@ wheel.
 | 3 | `DomainEventSubscriber` handed you no dispatcher: unlike `Detector`, an event-driven app had to `set_default_source` + `build_dispatcher` itself. | **Fixed (SDK 0.5.0):** `self.dispatcher` from the standard config keys, `self.fire(alert)` scoped to the app's identity, counted on `/health`. |
 | 4 | Every app re-declared the same ten config fields (`nats_*`, `contract_*`, `opennvr_url/token`, `webhook_url`, `nats_alerts_*`) and their YAML parsing. | **Fixed (SDK 0.5.0):** `BaseAppConfig` + `load_app_config(path, cls)`; the template's config block went from ~70 lines to 12, Plate VIP from 241 to 210. |
 | 5 | The generator needed a clone of this repository to run at all. | **Fixed (SDK 0.5.0):** `opennvr-app new <id>` ships in the wheel with the template; `scripts/create_opennvr_app.py` is a wrapper for in-tree use. |
-| 6 | Nothing shows an operator *why* an external app is greyed until they enter a key: the 402 text is right, the card could say "licence required" up front. | Open (frontend polish). |
+| 6 | Nothing told an operator *before* install that a licensed app will not enable until a key is entered: the 402 text was right, the card said nothing. | **Fixed:** available cards carry a "licence key required" badge and a one-line explanation; the catalog also gained reviewer-set `verified` / `featured` flags. |
 
 Nothing in the list is a contract problem: the registry, entitlement
 and platform routes behaved exactly as documented, and `min_sdk_version`

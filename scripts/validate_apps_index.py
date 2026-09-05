@@ -358,6 +358,13 @@ def validate_entry(
         errors.append(f"{label}: entitlement must be none | license_key")
     if pricing != "free" and not entry.get("price_note"):
         warnings.append(f"{label}: pricing is '{pricing}' but price_note is empty")
+    # Curation flags are booleans a REVIEWER sets; a verified listing
+    # names its author (the badge reads "verified · <author>").
+    for flag in ("verified", "featured"):
+        if flag in entry and not isinstance(entry[flag], bool):
+            errors.append(f"{label}: {flag} must be true or false")
+    if entry.get("verified") is True and not str(entry.get("author") or "").strip():
+        errors.append(f"{label}: a verified listing must name its author")
 
     # Required fields present + non-empty.
     required = tuple(f for f in REQUIRED_FIELDS
