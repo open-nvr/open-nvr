@@ -214,9 +214,17 @@ def test_index_yaml_entries_are_well_formed():
     non-empty)."""
     for e in _load_apps_index():
         assert e.name and e.summary and e.category and e.version
+        # https only — repo-relative paths 404ed in the SPA and were an
+        # unconstrained href sink (review M5).
+        assert e.docs_url.startswith("https://")
+        if e.kind == "external":
+            # A link-out listing: distributed by its author, nothing to
+            # install, so no image and no compose block by design.
+            assert e.external_url.startswith("https://")
+            assert e.image is None and e.install is None
+            continue
+        # First-party installables come from our registry and our docs.
         assert e.image.startswith("ghcr.io/open-nvr/")
-        # https GitHub URLs — repo-relative paths 404ed in the SPA and
-        # were an unconstrained href sink (review M5).
         assert e.docs_url.startswith("https://github.com/open-nvr/")
         assert e.install.compose.strip()
         assert e.install.command.strip().startswith("docker compose")
@@ -227,6 +235,8 @@ def test_index_yaml_has_no_secrets():
     reference ${INTERNAL_API_KEY} from the operator's .env, never a
     baked value."""
     for e in _load_apps_index():
+        if e.install is None:          # external listing — nothing to install
+            continue
         assert "${INTERNAL_API_KEY}" in e.install.compose
         # The effective test-env secret must not have leaked into the file.
         assert os.environ["INTERNAL_API_KEY"] not in e.install.compose

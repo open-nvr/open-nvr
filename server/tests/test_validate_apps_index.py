@@ -242,6 +242,8 @@ def test_real_overlay_has_every_shipped_service():
     assert _REAL_OVERLAY_SERVICES, "could not read docker-compose.apps.yml"
     shipped = yaml.safe_load(_SHIPPED_INDEX.read_text())
     for entry in shipped:
+        if entry.get("kind") == "external":
+            continue                   # link-out listing: no service by design
         assert entry["id"] in _REAL_OVERLAY_SERVICES, (
             f"shipped entry '{entry['id']}' has no compose service"
         )

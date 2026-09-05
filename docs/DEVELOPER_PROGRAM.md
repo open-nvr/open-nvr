@@ -53,8 +53,10 @@ This page is the deal. The technical on-ramp starts at
 
 0. **Install the SDK** — `pip install opennvr-app-sdk` (Apache-2.0, on
    PyPI; the repository's examples use it as an editable path).
-1. **Scaffold** — `python3 scripts/create_opennvr_app.py my-app --task object_detection`
-   gives you a compiling app with a test; fill in one method.
+1. **Scaffold** — `python3 scripts/create_opennvr_app.py my-app --task object_detection --dest ~/your/repos`
+   gives you a compiling app with a test, pinned to the PyPI SDK; fill in
+   one method. ([EXTERNAL_APP_WALKTHROUGH.md](EXTERNAL_APP_WALKTHROUGH.md)
+   is the whole path, paid app included.)
 2. **Run it against a stack** — `OPENNVR_URL` + the site key to
    bootstrap; the app is issued its own key on first registration and
    uses it from then on.

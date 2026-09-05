@@ -23,6 +23,13 @@ like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 
 ## 1. Generate the app (1 min)
 
+> Building in your **own repository**? Pass `--dest ~/where/you/work`:
+> the generator then pins the published `opennvr-app-sdk` from PyPI and
+> writes a Dockerfile that builds without this checkout (`--sdk pypi`
+> forces it; `--sdk path` keeps the in-tree editable dependency).
+> [EXTERNAL_APP_WALKTHROUGH.md](EXTERNAL_APP_WALKTHROUGH.md) is that path
+> walked end to end, licence gate included.
+
 From the repo root:
 
 ```bash
