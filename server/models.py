@@ -1090,6 +1090,14 @@ class InstalledApp(Base):
     # registered | ok | unreachable
     status = Column(String(20), nullable=False, default="registered")
     last_seen = Column(DateTime(timezone=True), nullable=True)
+    # The app's OWN credential (services/app_keys.py): SHA-256 of the
+    # ``oak_…`` key minted at registration and handed back exactly once.
+    # NULL = no key issued (a pre-credential registration, or revoked).
+    # With it the app reads only its own config/status and its own
+    # camera roster; the deployment's INTERNAL_API_KEY stays for
+    # platform components (detect-pipeline, KAI-C, the agent).
+    api_key_hash = Column(String(64), nullable=True, index=True)
+    api_key_issued_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

@@ -53,6 +53,13 @@ from .manifest import Action, AlertType, AppManifest, Param, StateView
 from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
 from .events import EventsClient, StoredEvent
+from .cameras import (
+    cameras_for_skill,
+    discover_cameras,
+    filter_cameras_for_skill,
+    full_frame_polygon,
+)
+from .credentials import AppCredentials, auth_headers
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -63,7 +70,7 @@ from .tier0 import (
     snapshot_from_event,
 )
 
-__version__ = "0.2.0"
+from ._version import __version__  # noqa: E402
 
 __all__ = [
     # Domain events (producing side of docs/EVENT_CONTRACTS.md)
@@ -108,6 +115,13 @@ __all__ = [
     # Config helpers
     "load_yaml",
     "require",
+    # Cameras (roster + per-camera assignment) and the app's credential
+    "discover_cameras",
+    "cameras_for_skill",
+    "filter_cameras_for_skill",
+    "full_frame_polygon",
+    "AppCredentials",
+    "auth_headers",
     # Frame-app plumbing
     "FrameSource",
     "KaiCClient",

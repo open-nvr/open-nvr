@@ -208,6 +208,10 @@ def test_registration_posts_url_manifest_and_auth_headers(monkeypatch):
     assert call["json"] == {
         "url": "http://loitering:9200",
         "manifest": MANIFEST.to_dict(),
+        # Negotiation + credential bootstrap (credentials.py): the SDK
+        # states its version and, holding no app key yet, asks for one.
+        "sdk_version": contract_mod._sdk_version,
+        "wants_key": True,
     }
     # One token, both header shapes: the registry's register route
     # accepts a user JWT (bearer) or the deployment's INTERNAL_API_KEY

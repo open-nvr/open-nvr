@@ -24,6 +24,9 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from core.database import get_db, release
 from models import Camera, SecuritySetting
+from services.app_keys import (
+    AppPrincipal, app_camera_ids, looks_like_app_key, resolve_app_key,
+)
 from services.stream_service import _build_stream_name
 
 logger = logging.getLogger(__name__)
@@ -34,8 +37,25 @@ router = APIRouter(prefix="/internal/camera-agent", tags=["internal-camera-agent
 def _require_internal_key(
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     x_internal_api_key_alt: str | None = Header(default=None, alias="X-Internal-API-Key"),
-) -> None:
+    db: Session = Depends(get_db),
+):
+    """Authenticate an internal-door call.
+
+    Returns ``None`` for the deployment's ``INTERNAL_API_KEY`` (a platform
+    component — unscoped), or an :class:`services.app_keys.AppPrincipal`
+    for an app presenting its own key (``oak_…`` — scoped to the app's
+    camera roster on the read routes below, refused on the pipeline's
+    write routes). 401 otherwise.
+    """
     supplied = x_internal_api_key or x_internal_api_key_alt
+    if looks_like_app_key(supplied):
+        row = resolve_app_key(db, supplied)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or revoked app key",
+            )
+        return AppPrincipal(app_id=row.id)
     expected = settings.internal_api_key
     # Constant-time compare to avoid leaking the key via response timing.
     if not expected or not supplied or not secrets.compare_digest(str(supplied), str(expected)):
@@ -43,6 +63,28 @@ def _require_internal_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal api key",
         )
+    return None
+
+
+def _platform_only(principal) -> None:
+    """The pipeline's write routes and platform config: site key only."""
+    if isinstance(principal, AppPrincipal):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="this route is for platform components, not apps",
+        )
+
+
+def _app_roster(db: Session, principal) -> set[int] | None:
+    """Camera ids an app principal may read (None = unrestricted)."""
+    if not isinstance(principal, AppPrincipal):
+        return None
+    from models import InstalledApp
+
+    row = db.query(InstalledApp).filter(InstalledApp.id == principal.app_id).first()
+    if row is None:
+        return set()
+    return app_camera_ids(db, row)
 
 
 class TrackEventIn(BaseModel):
@@ -73,7 +115,7 @@ class TrackEventIn(BaseModel):
 async def ingest_track_event(
     payload: TrackEventIn,
     background: BackgroundTasks,
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """Canonical-store ingest (RFC-0001 C1): persist a visit + its evidence.
@@ -83,6 +125,7 @@ async def ingest_track_event(
     content-addresses to the same file; duplicate rows are tolerated and
     cheap to de-dup at query time via (camera_id, track_id, started_at).
     """
+    _platform_only(principal)
     camera = db.query(Camera).filter(Camera.id == payload.camera_id).first()
     if camera is None:
         raise HTTPException(status_code=404, detail="unknown camera_id")
@@ -383,12 +426,13 @@ async def run_early_plate_attempt(
 async def ingest_plate_attempt(
     payload: PlateAttemptIn,
     background: BackgroundTasks,
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """Accept one early plate attempt (multi-frame OCR). The OCR runs
     in the background — this endpoint only validates and queues, so the
     Tier-0 poster thread never waits on an inference."""
+    _platform_only(principal)
     camera = db.query(Camera).filter(Camera.id == payload.camera_id).first()
     if camera is None:
         raise HTTPException(status_code=404, detail="unknown camera_id")
@@ -421,7 +465,7 @@ async def internal_list_events(
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = 100,
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """Event-store read for trusted internal components (the camera agents).
@@ -432,8 +476,10 @@ async def internal_list_events(
     """
     from services.timeline_service import query_events
 
+    # An app key sees its own roster's visits only (site key: the fleet).
     rows = query_events(db, camera_id=camera_id, label=label, plate=plate,
-                        from_=from_, to=to, limit=limit)
+                        from_=from_, to=to, limit=limit,
+                        scope=_app_roster(db, principal))
     return {
         "events": [
             {
@@ -462,7 +508,7 @@ async def internal_list_events(
 @router.get("/events/{event_id}/evidence")
 async def internal_event_evidence(
     event_id: int,
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """The visit's best-frame JPEG, for agent-side face match / VLM looks."""
@@ -472,6 +518,9 @@ async def internal_event_evidence(
     from services.evidence_store import resolve_evidence
 
     e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    roster = _app_roster(db, principal)
+    if e is not None and roster is not None and int(e.camera_id) not in roster:
+        e = None   # 404, not 403: another app's camera is not confirmed to exist
     if e is None or not e.evidence_path:
         raise HTTPException(status_code=404, detail="no evidence")
     path = resolve_evidence(e.evidence_path)
@@ -483,7 +532,7 @@ async def internal_event_evidence(
 @router.get("/events/{event_id}/scene-evidence")
 async def internal_event_scene_evidence(
     event_id: int,
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """The whole frame behind the best crop — a wider look for the VLM path.
@@ -497,6 +546,9 @@ async def internal_event_scene_evidence(
     from services.evidence_store import resolve_evidence
 
     e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    roster = _app_roster(db, principal)
+    if e is not None and roster is not None and int(e.camera_id) not in roster:
+        e = None   # 404, not 403: another app's camera is not confirmed to exist
     if e is None or not e.scene_evidence_path:
         raise HTTPException(status_code=404, detail="no scene evidence")
     path = resolve_evidence(e.scene_evidence_path)
@@ -512,7 +564,7 @@ _VALID_GATE_MODES = ("off", "shadow", "enforce")
 
 @router.get("/detect-config")
 async def get_detect_config(
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """Effective Tier-0 gate override for the detect-pipeline.
@@ -521,6 +573,7 @@ async def get_detect_config(
     flips shadow->enforce in the UI; the pipeline applies it live, no
     redeploy). ``gate_mode: null`` means "no override — follow your env".
     """
+    _platform_only(principal)
     row = (
         db.query(SecuritySetting)
         .filter(SecuritySetting.key == GATE_MODE_KEY)
@@ -563,8 +616,9 @@ def _mint_mediamtx_jwt() -> str | None:
         return None
 
 
-@router.get("/cameras", dependencies=[Depends(_require_internal_key)])
+@router.get("/cameras")
 def list_camera_agent_sources(
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
     x_detect_hwaccel: str | None = Header(default=None, alias="X-Detect-Hwaccel"),
 ) -> dict[str, object]:
@@ -602,6 +656,13 @@ def list_camera_agent_sources(
         .order_by(Camera.id.asc())
         .all()
     )
+    # An app key gets the cameras the operator assigned to it (every
+    # camera when none is assigned — the additive rule); the site key
+    # gets the fleet. Same rule the SDK's cameras_for_skill applies
+    # client-side, now enforced where the frames are handed out.
+    roster = _app_roster(db, principal)
+    if roster is not None:
+        cameras = [c for c in cameras if int(c.id) in roster]
     out: list[dict[str, object]] = []
     for cam in cameras:
         stream_name = _build_stream_name(
@@ -699,7 +760,7 @@ def list_camera_agent_sources(
 async def internal_recording_frame(
     camera_id: int = Query(..., description="Camera ID"),
     at: str = Query(..., description="Wall-clock instant (ISO 8601)"),
-    _: None = Depends(_require_internal_key),
+    principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
     """One JPEG from recorded footage at a past instant, for the agent's
@@ -719,6 +780,9 @@ async def internal_recording_frame(
     if at_dt.tzinfo is None:
         at_dt = at_dt.replace(tzinfo=UTC)
 
+    roster = _app_roster(db, principal)
+    if roster is not None and int(camera_id) not in roster:
+        raise HTTPException(status_code=404, detail="no recording at that time")
     job = _resolve_frame_job(db, camera_id, at_dt)
     if job is None:
         raise HTTPException(status_code=404, detail="no recording at that time")
