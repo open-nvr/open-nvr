@@ -8,7 +8,7 @@ walkthroughs live in [FIRST_DETECTOR.md](FIRST_DETECTOR.md),
 [APP_PLATFORM.md](APP_PLATFORM.md), [APP_SURFACES.md](APP_SURFACES.md)
 and [APP_CREDENTIALS.md](APP_CREDENTIALS.md).
 
-Version: `opennvr_app_sdk.__version__` (`0.4.0`). Licence: Apache-2.0.
+Version: `opennvr_app_sdk.__version__` (`0.5.0`, unreleased — PyPI has 0.4.0). Licence: Apache-2.0.
 
 ```bash
 pip install opennvr-app-sdk            # or: uv add opennvr-app-sdk
@@ -21,7 +21,7 @@ pip install "opennvr-app-sdk[nats]"    # + NATS client for the subscribe loops
 |---|---|---|---|---|
 | **Detector** | `Detector` | `on_detections(camera_id, detections, event) -> Iterable[Alert]` | `app(MyDetector).run()` | Tier-0 / adapter inference events on NATS — no model of your own |
 | **FrameApp** | `FrameApp` | `on_frame(camera_id, jpeg) -> Iterable[Alert]` | `app(MyApp).run()` | Frames you pull; you call inference via `KaiCClient` or `nvr.ai` |
-| **DomainEventSubscriber** | `DomainEventSubscriber` | `subscriptions = [...]`, `on_event(DomainEvent)` | `domain_event_app(MyApp).run()` | Domain events (`plate.recognized.v1`, …) other apps publish |
+| **DomainEventSubscriber** | `DomainEventSubscriber` | `subscriptions = [...]`, `on_event(DomainEvent)`; `self.fire(alert)` dispatches as the app | `domain_event_app(MyApp).run()` | Domain events (`plate.recognized.v1`, …) other apps publish |
 | **AlertSubscriber** | `AlertSubscriber` | `on_alert(alert, subject)` | `alert_app(MySub).run()` | `opennvr.alerts.*` — relays, SIEM bridges |
 
 All four mix in `ContractMixin`, which gives every app the registry
@@ -133,8 +133,19 @@ container) unless you need full frame rate.
 
 ## Config
 
-`load_yaml(path)`, `require(cfg, key)` — the two helpers the runners
-use; pass your own `load_config` to `app()` for anything richer.
+| Name | Purpose |
+|---|---|
+| `BaseAppConfig` | The dataclass of everything the SDK reads from `cfg`: `nats_url` (required), `nats_token`, `subject_pattern`, `webhook_url`, `nats_alerts_*`, `contract_*`, `opennvr_url` / `opennvr_token`, `config_poll_seconds`. Subclass it and add your own fields |
+| `load_app_config(path, cls=BaseAppConfig)` | One YAML file → your subclass: base keys validated (operator-readable errors), extra fields taken by name or defaulted, a field with no default required; put app checks in `__post_init__` |
+| `load_yaml(path)`, `require(cfg, key)` | The lower-level helpers, for anything richer |
+
+## Scaffolding
+
+`opennvr-app new <app-id> [--task T] [--dest DIR] [--sdk auto|pypi|path]`
+— the generator ships in the wheel (`opennvr_app_sdk.scaffold`). Out of
+a checkout it pins the published SDK and writes a self-contained
+Dockerfile; inside the OpenNVR repository (`scripts/create_opennvr_app.py`)
+it keeps the editable path so examples track the SDK on main.
 
 ## Releasing
 

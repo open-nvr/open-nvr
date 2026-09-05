@@ -3,7 +3,7 @@
 
 [project]
 name = "opennvr-app-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "Shared SDK for OpenNVR monitoring apps: §11.5 alert dispatch, zone geometry, keyed TTL state, app manifests, and the Detector / FrameApp base loops."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,6 +41,9 @@ Documentation = "https://github.com/open-nvr/open-nvr/blob/main/docs/SDK_REFEREN
 Source = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk"
 Changelog = "https://github.com/open-nvr/open-nvr/blob/main/CHANGELOG.md"
 Issues = "https://github.com/open-nvr/open-nvr/issues?q=label%3Asdk"
+
+[project.scripts]
+opennvr-app = "opennvr_app_sdk.scaffold:main"
 
 [dependency-groups]
 dev = [

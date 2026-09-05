@@ -63,7 +63,7 @@ live status dot and an auto-generated config form.
 
 > **New to the SDK? Start with the on-ramp.**
 > [`docs/FIRST_DETECTOR.md`](FIRST_DETECTOR.md) — "Your first OpenNVR detector
-> in 15 minutes" — scaffolds a runnable app with `scripts/create_opennvr_app.py`,
+> in 15 minutes" — scaffolds a runnable app with `opennvr-app new` (or `scripts/create_opennvr_app.py` in-tree),
 > walks you through filling in the rule and getting its tests green, and lands
 > you right back here at step 3 to publish. Come back once you have a working
 > app under `examples/<id>/`.
