@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **App Catalog: licence hint, verified badge, Featured row.** A
+  listing with `entitlement: license_key` now says so *before* install
+  ("licence key required" badge + one line on what happens next), so
+  the 402 on enable is never a surprise. Two reviewer-set index flags,
+  `verified` (identity confirmed, image reproducible from source —
+  must name an `author`) and `featured` (a row at the top of the
+  catalog), with validator rules and the review policy in
+  CONTRIBUTING_APPS.md. `GET /apps/index` returns both.
 - **SDK 0.5.0 (unreleased): less boilerplate for every app.** The three
   on-ramp gaps the outside-the-repo walk left open, closed:
   `BaseAppConfig` + `load_app_config(path, cls)` replace the config

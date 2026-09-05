@@ -25,7 +25,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, ArrowRight, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
@@ -126,6 +126,35 @@ function PricingBadge({ pricing, note }: { pricing?: string; note?: string }) {
   )
 }
 
+/** "Licence key required" — shown BEFORE install so an operator knows a
+ * licensed app will not enable until an administrator enters a key the
+ * app accepts (the installed card then carries the LicensePanel). */
+function LicenceRequiredBadge({ entitlement }: { entitlement?: string }) {
+  if (entitlement !== 'license_key') return null
+  return (
+    <Badge
+      variant="warning"
+      title="Installs normally, but cannot be enabled until an administrator enters a licence key the app verifies"
+    >
+      <KeyRound size={12} /> licence key required
+    </Badge>
+  )
+}
+
+/** The maintainers vouch for this author — identity confirmed, image
+ * reproducible from the linked source. Set by reviewers in the index. */
+function VerifiedBadge({ verified, author }: { verified?: boolean; author?: string }) {
+  if (!verified) return null
+  return (
+    <Badge
+      variant="success"
+      title={`Verified developer${author ? `: ${author}` : ''} — identity confirmed and image reproducible from source, per OpenNVR's app review`}
+    >
+      <BadgeCheck size={12} /> verified
+    </Badge>
+  )
+}
+
 /** Resolve an external ui_url for THIS browser: apps rarely know their
  * deployment hostname at build time, so "{host}" is substituted with
  * wherever the operator is browsing from. */
@@ -176,6 +205,9 @@ type IndexApp = {
   price_note?: string
   entitlement?: 'none' | 'license_key'
   author?: string
+  // Reviewer-set curation flags (never from the submitter's manifest).
+  verified?: boolean
+  featured?: boolean
   image?: string | null
   requires_tasks?: string[]
   emits?: string[]
@@ -1512,11 +1544,23 @@ function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <PricingBadge pricing={app.pricing} note={app.price_note} />
+        <LicenceRequiredBadge entitlement={app.entitlement} />
         {app.kind === 'external' && <Badge variant="neutral">third-party</Badge>}
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <div className="text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</div>
-        {app.author && <div className="text-xs text-[var(--text-dim)]">by {app.author}</div>}
+        {(app.author || app.verified) && (
+          <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
+            {app.author && <span>by {app.author}</span>}
+            <VerifiedBadge verified={app.verified} author={app.author} />
+          </div>
+        )}
+        {app.entitlement === 'license_key' && (
+          <div className="text-xs text-[var(--text-dim)]">
+            Licensed app: after install, an administrator enters the vendor's key in the
+            catalog; the app cannot be enabled until it accepts one.
+          </div>
+        )}
 
         {requires.length > 0 && (
           <div>
@@ -1608,6 +1652,10 @@ export function AppCatalog() {
     () => (indexQuery.data ?? []).filter((a) => !a.installed),
     [indexQuery.data]
   )
+  // Featured = reviewer-flagged listings not yet installed; they render in
+  // their own row above the full list (and stay in the list too, so a
+  // category scan still finds them).
+  const featured = useMemo(() => available.filter((a) => a.featured), [available])
 
   const refresh = () => {
     appsQuery.refetch()
@@ -1655,6 +1703,17 @@ export function AppCatalog() {
       {/* ---------------------- Available to install --------------------- */}
       {/* Best-effort: if the index endpoint errors, we simply omit this group
           rather than blanking the page above. */}
+      {!indexQuery.isError && featured.length > 0 && (
+        <div className="space-y-3">
+          <GroupHeader title="Featured" count={featured.length} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+            {featured.map((app) => (
+              <AvailableAppCard key={`featured-${app.id}`} app={app} tasks={tasks} onInstall={() => setInstallApp(app)} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {!indexQuery.isError && (
         <div className="space-y-3">
           <GroupHeader title="Available to install" count={available.length} />

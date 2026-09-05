@@ -273,10 +273,10 @@ to a release window. Pull requests and design discussions are welcome.
   variants beyond the ONNX-only adapters that ship in v0.1.
 - **Native Kubernetes operator** for Helm-chart deployments at scale.
 - **App Catalog for developers** (see `docs/DEVELOPER_PROGRAM.md`):
-  a verified-developer badge on listings, a featured row, install
-  counts (opt-in, aggregate) and a community showcase. The index
-  fields these need — `author`, `kind`, `pricing` — already ship;
-  the catalog UI and the review policy behind the badge do not yet.
+  the verified-developer badge and the Featured row ship (reviewer-set
+  `verified` / `featured` index flags; policy in CONTRIBUTING_APPS.md).
+  Still open: install counts (opt-in, aggregate — needs a telemetry
+  design first) and a community showcase page.
 
 ## How to influence the roadmap
 

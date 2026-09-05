@@ -401,3 +401,19 @@ def test_unparseable_snippet_fails(tmp_path):
     entry["install"] = dict(_GOOD_ENTRY["install"], compose="{ not: [valid")
     errors, _ = validator.validate_index(_write(tmp_path, [entry]))
     assert any("not valid YAML" in e for e in errors), errors
+
+
+# ─── Curation flags (verified / featured) ────────────────────────────────
+
+
+def test_curation_flags_are_booleans_and_verified_needs_an_author(tmp_path, monkeypatch):
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    ok = dict(_GOOD_ENTRY, author="Sample Co.", verified=True, featured=True)
+    errors, _ = validator.validate_index(_write(tmp_path, [ok]))
+    assert errors == []
+    bad_type = dict(_GOOD_ENTRY, verified="yes")
+    errors, _ = validator.validate_index(_write(tmp_path, [bad_type]))
+    assert any("verified must be true or false" in e for e in errors), errors
+    no_author = dict(_GOOD_ENTRY, verified=True, author="")
+    errors, _ = validator.validate_index(_write(tmp_path, [no_author]))
+    assert any("verified listing must name its author" in e for e in errors), errors

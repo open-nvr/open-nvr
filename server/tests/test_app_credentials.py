@@ -604,6 +604,7 @@ def test_index_external_listing_is_not_installable(monkeypatch, env):
     tc.app.dependency_overrides[auth_mod.get_current_active_user] = lambda: admin
     listing = tc.get("/apps/index", headers=_site()).json()["apps"][0]
     assert listing["kind"] == "external" and listing["install"] is None
+    assert listing["verified"] is False and listing["featured"] is False   # defaults
     assert listing["pricing"] == "paid" and listing["external_url"].startswith("https://acme")
     r = tc.post("/apps/index/acme-lpr/install")
     assert r.status_code == 400 and "external listing" in r.json()["detail"]

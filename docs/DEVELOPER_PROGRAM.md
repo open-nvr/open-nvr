@@ -115,9 +115,11 @@ Apps are an investment; the platform must not spend it.
   shows the pricing badge and author.
 * Community apps are showcased in the project README and release
   notes — open your listing PR and say a line about it.
-* Verified-developer badges, featured rows and install counts are on
-  the roadmap ([ROADMAP.md](ROADMAP.md)); the index fields they need
-  (`author`, `kind`) already exist.
+* A **verified** badge (identity confirmed, image reproducible from
+  source — set by reviewers, see
+  [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md)) and a **Featured** row at
+  the top of every catalog. Install counts are on the roadmap
+  ([ROADMAP.md](ROADMAP.md)).
 
 ## Getting help
 
