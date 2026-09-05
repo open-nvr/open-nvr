@@ -27,12 +27,75 @@ import json
 import logging
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 from frame_sources import FrameSource, FrameSourceError
 
 logger = logging.getLogger(__name__)
+
+
+# ── Per-request camera scope (RBAC) ────────────────────────────────
+#
+# In ``auth_mode: opennvr`` every request is made by an OpenNVR user who
+# may see only SOME of the cameras this agent serves (the server's
+# per-camera assignments: ownership + CameraPermission grants). The auth
+# middleware resolves that user's visible set and stores it here for the
+# duration of the request; every roster read below — the tools' camera
+# resolver, the frame cache, the event/plate rings, the system-prompt
+# roster — filters through it, so "what's on the yard camera?" from a
+# guard who was never assigned the yard is answered "no such camera",
+# exactly as the main UI would. ``None`` = unrestricted: a superuser, a
+# background loop (alarms/monitors run for the whole fleet), or
+# ``auth_mode: none``. ContextVars follow the request into every task
+# and thread it spawns, so tools running under ``to_thread`` see it.
+CAMERA_SCOPE: ContextVar[frozenset[str] | None] = ContextVar(
+    "camera_scope", default=None)
+
+
+def set_camera_scope(scope: Iterable[str] | None):
+    """Bind the caller's visible agent-camera ids (``None`` = all).
+    Returns the token for ``reset_camera_scope``."""
+    return CAMERA_SCOPE.set(None if scope is None else frozenset(scope))
+
+
+def reset_camera_scope(token) -> None:
+    CAMERA_SCOPE.reset(token)
+
+
+def camera_scope() -> frozenset[str] | None:
+    return CAMERA_SCOPE.get()
+
+
+def camera_in_scope(camera_id: str) -> bool:
+    scope = CAMERA_SCOPE.get()
+    return scope is None or camera_id in scope
+
+
+def spawn_unscoped(coro, *, name: str | None = None) -> asyncio.Task:
+    """``asyncio.create_task`` for the agent's own BACKGROUND work.
+
+    A task inherits the context it is created in, so a monitor or alarm
+    loop started from inside a scoped request would carry that caller's
+    camera scope for its whole life — an alarm the site admin later
+    widened would keep looking at one guard's cameras. Background loops
+    watch the fleet: this clears the scope in the new task before the
+    coroutine runs (the reset touches only the new task's own context).
+    """
+    async def _run():
+        CAMERA_SCOPE.set(None)
+        return await coro
+
+    return asyncio.create_task(_run(), name=name)
+
+
+def scoped_cameras(cameras: Iterable["CameraSpec"]) -> list["CameraSpec"]:
+    """``cameras`` narrowed to the current scope (identity when unset)."""
+    scope = CAMERA_SCOPE.get()
+    if scope is None:
+        return list(cameras)
+    return [c for c in cameras if c.camera_id in scope]
 
 
 @dataclass
@@ -182,6 +245,14 @@ class CameraContext:
 
     @property
     def cameras(self) -> list[CameraSpec]:
+        """The roster as the CURRENT CALLER may see it (see CAMERA_SCOPE);
+        the full fleet outside a scoped request."""
+        return scoped_cameras(self._cameras.values())
+
+    @property
+    def all_cameras(self) -> list[CameraSpec]:
+        """The whole fleet regardless of the caller — for the agent's own
+        background work (alarms, monitors, roster reconciliation)."""
         return list(self._cameras.values())
 
     def add_camera(self, spec: CameraSpec) -> None:
@@ -190,7 +261,10 @@ class CameraContext:
         self._cameras[spec.camera_id] = spec
 
     def known_camera(self, camera_id: str) -> bool:
-        return camera_id in self._cameras
+        """Configured AND visible to the current caller. Out of scope reads
+        as unknown on purpose — a camera you were not assigned must not be
+        confirmed to exist by the error message."""
+        return camera_id in self._cameras and camera_in_scope(camera_id)
 
     def remove_camera(self, camera_id: str) -> bool:
         """Forget a camera: its spec, frame source, and cached/pinned frames.
@@ -211,6 +285,8 @@ class CameraContext:
         return True
 
     def get_camera(self, camera_id: str) -> CameraSpec | None:
+        if not camera_in_scope(camera_id):
+            return None
         return self._cameras.get(camera_id)
 
     def register_frame_source(self, camera_id: str, source: FrameSource) -> None:
@@ -231,7 +307,7 @@ class CameraContext:
         always see the real current frame — an operator pinning a
         historical frame for a question must never ring an alarm or
         freeze a monitor on it."""
-        if camera_id not in self._cameras:
+        if camera_id not in self._cameras or not camera_in_scope(camera_id):
             raise LookupError(
                 f"camera_id {camera_id!r} is not configured; "
                 f"available: {sorted(self._cameras.keys())}"
@@ -376,9 +452,10 @@ class CameraContext:
         cutoff = time.time() - max(0.0, float(window_seconds))
         rings: list[deque[EventRecord]]
         if camera_id is None:
-            rings = list(self._events.values())
+            rings = [ring for cid, ring in self._events.items()
+                     if camera_in_scope(cid)]
         else:
-            ring = self._events.get(camera_id)
+            ring = self._events.get(camera_id) if camera_in_scope(camera_id) else None
             rings = [ring] if ring else []
         out: list[EventRecord] = []
         for ring in rings:
@@ -399,7 +476,7 @@ class CameraContext:
         Used by ``camera_snapshot`` to answer count/presence questions from the
         always-on Tier-0 stream with **no new inference** — the detection already
         ran; we just read its latest result off the ring."""
-        ring = self._events.get(camera_id)
+        ring = self._events.get(camera_id) if camera_in_scope(camera_id) else None
         if not ring:
             return None
         for ev in reversed(ring):            # newest-first
@@ -430,6 +507,7 @@ class CameraContext:
             r for r in self._plates
             if r.received_at >= cutoff
             and (camera_id is None or r.camera_id == camera_id)
+            and camera_in_scope(r.camera_id)
             and (needle is None or needle in r.plate_text)
         ]
         out.sort(key=lambda r: (r.received_at, r.seq), reverse=True)
@@ -477,10 +555,18 @@ class CameraContext:
         out: list[AlertRecord] = []
         for ring in rings:
             for al in ring:
-                if al.received_at >= cutoff:
+                if al.received_at >= cutoff and _alert_in_scope(al):
                     out.append(al)
         out.sort(key=lambda a: (a.received_at, a.seq), reverse=True)
         return out
+
+
+def _alert_in_scope(alert: "AlertRecord") -> bool:
+    """An app alert about a camera is visible only to callers who may see
+    that camera; an alert about nothing in particular (empty camera_id —
+    a site-wide notice) reaches everyone. Mirrors the server's inbox."""
+    cam = (getattr(alert, "camera_id", "") or "").strip()
+    return not cam or camera_in_scope(cam)
 
 
 # ── NATS subscriber ────────────────────────────────────────────────

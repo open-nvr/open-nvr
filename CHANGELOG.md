@@ -18,6 +18,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `can_manage` for PTZ/presets) or superuser on a registered camera;
   onboarding an unregistered device (Add Camera wizard) still works, but
   PTZ against an unregistered IP is refused. Reported by Furkan Arslan.
+- **Per-camera RBAC now covers every surface, not just the camera list.**
+  Camera assignments (ownership + `CameraPermission` grants) scoped the
+  camera routes, streams and recordings, but the newer read surfaces
+  either copied the owner-only rule (timeline, plates, occupancy history
+  — a user *granted* a camera saw its stream but none of its history) or
+  scoped nothing (the alerts inbox rang every alarm on the site for every
+  user; app `/status` state and per-camera config were fleet-wide). One
+  `services/camera_scope` rule (owned + `can_view` to see, owned +
+  `can_manage` to control, superuser everything, owner-less cameras
+  superuser-only) now applies to: timeline/plate/vehicle-report queries
+  and evidence photos; occupancy history/heatmap/footfall/report; the
+  alerts inbox (list, unacked count, ack — camera-less alerts reach
+  everyone; ring policy, alarm actions and test alarms are superuser
+  only); app `/status` state and per-camera config entries (a
+  non-superuser may edit only the per-camera geometry of cameras they
+  manage, site-wide app settings and enable/disable are superuser only;
+  camera-targeted actions need `can_manage`); and the camera-agent
+  example in `auth_mode: opennvr` (roster, frames, rings, prompt roster,
+  tool camera resolver, alarms/monitors/events feed follow the caller's
+  server-side assignment). The UI hides the site-wide controls from
+  non-superusers; enforcement is server-side.
 
 ### Added
 

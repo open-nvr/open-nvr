@@ -325,15 +325,19 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
 def _can_view_camera(user: User, camera: Camera, db: Session) -> bool:
     """Camera-level view permission for recordings/playback.
 
-    Mirrors the ownership rule the camera routes enforce (superuser bypass,
-    else owner), extended with CameraPermission.can_view grants. Cameras with
-    no owner (legacy rows) stay visible to any authenticated user — matching
-    their pre-existing behaviour instead of suddenly locking them away.
+    The camera_scope rule (superuser bypass, else owner or a
+    CameraPermission.can_view grant), evaluated on the row rather than
+    through ``services.camera_scope`` because recordings outlive their
+    camera: a binned (soft-deleted) camera's history stays browsable by
+    the people who could see it, and the scope service excludes deleted
+    rows. Cameras with no owner (legacy rows) are superuser-only until an
+    owner or a grant is assigned — an unassigned camera must never be the
+    one everybody can see.
     """
     if getattr(user, "is_superuser", False):
         return True
     owner_id = getattr(camera, "owner_id", None)
-    if owner_id is None or owner_id == user.id:
+    if owner_id is not None and owner_id == user.id:
         return True
     from models import CameraPermission
 

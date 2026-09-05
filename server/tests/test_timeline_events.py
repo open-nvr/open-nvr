@@ -192,11 +192,11 @@ def test_query_scoped_to_owners_cameras(db):
     _visit(db, start_min=1)                       # mine
     _visit(db, start_min=2, cam=other_cam.id)     # theirs
 
-    owner_id = db.query(Camera).filter(Camera.id == db.cam_id).first().owner_id
-    mine = query_events(db, owner_id=owner_id)
+    mine = query_events(db, scope={db.cam_id})
     assert [r.camera_id for r in mine] == [db.cam_id]
     fleet = query_events(db)                      # superuser path (no scope)
     assert len(fleet) == 2
+    assert query_events(db, scope=set()) == []    # granted nothing → nothing
 
 
 def test_can_access_event_mirrors_ownership(db):

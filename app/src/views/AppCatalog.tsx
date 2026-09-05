@@ -27,6 +27,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, ArrowRight, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
@@ -351,6 +352,12 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
   const params = app.manifest?.params ?? []
+  // Site-wide params are superuser-only on the server; anyone else may
+  // draw/edit only the per-camera entries of cameras they manage (the
+  // server merges those into the stored config and refuses the rest).
+  const { user: me } = useAuth()
+  const isAdmin = !!me?.is_superuser
+  const canEditParam = (p: ManifestParam) => isAdmin || p.per_camera === true
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
     Object.fromEntries(params.map((p) => [p.name, initialFormValue(p, app.config)]))
   )
@@ -370,6 +377,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
     setError(null)
     const config: Record<string, any> = {}
     for (const p of params) {
+      if (!canEditParam(p)) continue   // untouched site-wide keys stay as stored
       const raw = values[p.name]
       const t = (p.type || '').toLowerCase()
       if (isJsonParam(p)) {
@@ -445,7 +453,15 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
                   </span>
                 </label>
                 {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                {!canEditParam(p) ? (
+                  <div
+                    className="w-full px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
+                    title="Site-wide setting — only an administrator can change it"
+                  >
+                    {String(value ?? '') || '—'}
+                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
+                  </div>
+                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
                   <GeometryEditor
                     kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
                     value={String(value ?? '')}
@@ -1052,6 +1068,11 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
+  // Enable/disable is a site decision (superuser-only on the server;
+  // uninstall keeps its own apps.install permission); everyone can open
+  // Configure for their cameras' zones.
+  const { user: me } = useAuth()
+  const isAdmin = !!me?.is_superuser
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
   // Manifest-declared operator action currently open in its form modal.
@@ -1160,6 +1181,7 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
         )}
 
         <div className="flex items-center gap-2 pt-1">
+          {isAdmin && (
           <Button
             variant={app.enabled ? 'default' : 'primary'}
             onClick={() => toggleMutation.mutate()}
@@ -1168,6 +1190,7 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
           >
             {toggleMutation.isPending ? 'Working…' : app.enabled ? 'Disable' : 'Enable'}
           </Button>
+          )}
           <Button variant="outline" onClick={onConfigure}>
             <Settings2 size={14} /> Configure
           </Button>

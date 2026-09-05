@@ -51,7 +51,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user, verify_token
+from core.auth import get_current_active_user, get_current_superuser, verify_token
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import AppInstallIntent, InstalledApp, User
@@ -232,6 +232,74 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
             errors.append(f"param '{name}' must be of type {type_name}")
 
     return errors
+
+
+def _per_camera_param_names(manifest: dict) -> set[str]:
+    return {
+        p["name"]
+        for p in (manifest.get("params") or [])
+        if isinstance(p, dict) and "name" in p and p.get("per_camera")
+    }
+
+
+def _scope_per_camera_config(manifest: dict, config: dict,
+                             scope: set[int] | None) -> dict:
+    """``config`` with every ``per_camera`` param trimmed to the camera
+    keys inside ``scope`` (None = unrestricted)."""
+    if scope is None:
+        return config
+    from services.camera_scope import in_scope
+
+    out = dict(config)
+    for name in _per_camera_param_names(manifest):
+        value = out.get(name)
+        if isinstance(value, dict):
+            out[name] = {k: v for k, v in value.items() if in_scope(scope, k)}
+    return out
+
+
+def _merge_scoped_config(manifest: dict, stored: dict, incoming: dict,
+                         manage_scope: set[int] | None) -> tuple[dict, list[str]]:
+    """Apply a NON-superuser's ``incoming`` config on top of ``stored``.
+
+    Returns ``(merged, denied)``. ``denied`` names what they may not
+    change — a site-wide (non per-camera) key whose value differs, or
+    a per-camera entry for a camera outside ``manage_scope`` that
+    differs — and a non-empty list means the write is refused whole.
+
+    Absence is NOT a change here: a per-camera key left out of the
+    payload is untouched, and within a key the caller read a config
+    trimmed to their cameras (``_scope_per_camera_config``), so a
+    camera missing from their payload is one they never saw and its
+    stored entry is kept. Only a camera they can manage is removed by
+    omission from a key they DID send — that is them erasing their own
+    zone.
+    """
+    from services.camera_scope import in_scope
+
+    per_camera = _per_camera_param_names(manifest)
+    merged = dict(stored)
+    denied: list[str] = []
+    for key in sorted(set(stored) | set(incoming)):
+        if key not in per_camera:
+            if key in incoming and incoming[key] != stored.get(key):
+                denied.append(f"'{key}' (site-wide setting)")
+            continue
+        if key not in incoming:
+            continue            # untouched: the stored entries stand
+        before = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        after = incoming.get(key) if isinstance(incoming.get(key), dict) else {}
+        result = dict(before)
+        for cam in sorted(set(before) | set(after), key=str):
+            if in_scope(manage_scope, cam):
+                if cam in after:
+                    result[cam] = after[cam]
+                else:
+                    result.pop(cam, None)
+            elif cam in after and after[cam] != before.get(cam):
+                denied.append(f"'{key}' for camera '{cam}'")
+        merged[key] = result
+    return merged, denied
 
 
 # ── App URL sovereignty guard (SSRF) ───────────────────────────────
@@ -650,13 +718,13 @@ async def register_app(
 @router.post("/{app_id}/enable")
 async def enable_app(
     app_id: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """
     Enable an app. 404 if the app was never registered.
 
-    Requires authenticated user.
+    Superuser only — turning a site-wide app on is a site decision.
     """
     row = _get_app_or_404(db, app_id)
     row.enabled = True
@@ -676,13 +744,14 @@ async def enable_app(
 @router.post("/{app_id}/disable")
 async def disable_app(
     app_id: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """
     Disable an app. 404 if the app was never registered.
 
-    Requires authenticated user.
+    Superuser only — turning a site-wide app off silences it for
+    every operator's cameras, not just the caller's.
     """
     row = _get_app_or_404(db, app_id)
     row.enabled = False
@@ -719,9 +788,19 @@ async def get_app_config(
     caller. Writes stay user-JWT-only (``PUT`` below).
     """
     row = _get_app_or_404(db, app_id)
+    config = row.config_json or {}
+    if principal is not None and not principal.is_superuser:
+        # A user sees the site-wide settings (read-only for them) but
+        # only THEIR cameras' per-camera entries — a zone drawn on a
+        # camera they were never assigned is not theirs to look at.
+        from services.camera_scope import visible_camera_ids
+
+        config = _scope_per_camera_config(
+            row.manifest_json or {}, config,
+            visible_camera_ids(db, principal))
     return {
         "id": row.id,
-        "config": row.config_json or {},
+        "config": config,
         "updated_at": row.updated_at,
     }
 
@@ -745,10 +824,28 @@ async def update_app_config(
     overwritten), so ``config_json`` is the effective config and the
     registry stays the single source of truth (spec §05).
 
-    Requires authenticated user.
+    Authorization: a superuser may change anything. Any other user may
+    change ONLY the ``per_camera`` entries (zones, tripwires, per-camera
+    limits) of cameras they can manage; a site-wide key or another
+    camera's entry arriving CHANGED is a 403, and entries for cameras
+    they cannot see (trimmed from their read) are preserved. The global
+    settings of an app (its watchlists, thresholds, alarm policy) are a
+    site decision, not a per-operator one.
     """
     row = _get_app_or_404(db, app_id)
     manifest = row.manifest_json or {}
+    if not current_user.is_superuser:
+        from services.camera_scope import manageable_camera_ids
+
+        config, denied = _merge_scoped_config(
+            manifest, row.config_json or {}, config,
+            manageable_camera_ids(db, current_user))
+        if denied:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=("Only a superuser can change "
+                        + ", ".join(denied)),
+            )
     errors = validate_app_config(manifest, config)
     if errors:
         raise HTTPException(
@@ -835,6 +932,28 @@ async def invoke_app_action(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid action params: {'; '.join(errors)}",
         )
+    # An action aimed at a camera (``camera_id`` / ``camera`` param —
+    # open THIS gate, clear THIS zone) is a control on that camera:
+    # the caller must be allowed to manage it. Actions with no camera
+    # target (enroll a face, search footage) stay open to any user.
+    if not current_user.is_superuser:
+        from services.camera_scope import (
+            camera_id_from_handle, manageable_camera_ids,
+        )
+
+        scope = None
+        for key in ("camera_id", "camera"):
+            target = params.get(key)
+            if target is None:
+                continue
+            cam_id = camera_id_from_handle(target)
+            if scope is None:
+                scope = manageable_camera_ids(db, current_user)
+            if cam_id is None or cam_id not in scope:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not permitted to control this camera",
+                )
 
     base_url = row.url.rstrip("/")
     if validate_app_url(base_url) is not None:
@@ -958,6 +1077,15 @@ async def get_app_status(
     if reachable:
         row.last_seen = datetime.now(UTC)
     db.commit()
+
+    if principal is not None and not principal.is_superuser:
+        # Live state is per-camera data (occupancy per zone, the LPR
+        # review queue, each camera's last read): a user gets their
+        # cameras' slice. The service-key path (the agent) is scoped
+        # by its own roster, and a superuser sees the site.
+        from services.camera_scope import filter_app_state, visible_camera_ids
+
+        state = filter_app_state(state, visible_camera_ids(db, principal))
 
     return {"health": health, "state": state}
 

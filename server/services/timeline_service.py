@@ -29,7 +29,8 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from models import Camera, TimelineEvent
+from models import TimelineEvent
+from services.camera_scope import can_view_camera, scope_query
 
 
 def record_track_visit(
@@ -74,21 +75,19 @@ def query_events(
     from_: datetime | None = None,
     to: datetime | None = None,
     limit: int = 100,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     plate: str | None = None,
     has_plate: bool = False,
 ) -> list[TimelineEvent]:
     """Newest-first visits/alarms/alerts intersecting [from, to).
 
-    ``owner_id`` scopes results to that user's cameras — the same ownership
-    rule every camera route enforces. Pass None ONLY for superusers.
+    ``scope`` is the caller's visible camera set from
+    ``camera_scope.visible_camera_ids`` — own cameras plus can_view
+    grants. Pass None ONLY for superusers (unrestricted).
     """
     limit = max(1, min(500, limit))
     q = db.query(TimelineEvent)
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, TimelineEvent.camera_id, scope)
     if camera_id is not None:
         q = q.filter(TimelineEvent.camera_id == camera_id)
     if label:
@@ -117,18 +116,16 @@ def query_events(
 
 
 def can_access_event(db: Session, event: TimelineEvent, *, user) -> bool:
-    """Ownership check for a single event — mirrors get_camera_or_403."""
-    if getattr(user, "is_superuser", False):
-        return True
-    cam = db.query(Camera).filter(Camera.id == event.camera_id).first()
-    return bool(cam and cam.owner_id == user.id)
+    """Visibility check for a single event — the camera_scope rule
+    (owner or can_view grant; superusers see everything)."""
+    return can_view_camera(db, user, event.camera_id)
 
 
 def plate_stats(
     db: Session,
     *,
     days: int = 7,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Aggregates for the Vehicles page: plate reads over the last
@@ -147,10 +144,7 @@ def plate_stats(
         .filter(TimelineEvent.plate_text.isnot(None))
         .filter(TimelineEvent.started_at >= cutoff)
     )
-    if owner_id is not None:
-        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    base = scope_query(base, TimelineEvent.camera_id, scope)
 
     total = base.count()
     unique_plates = (
@@ -192,23 +186,20 @@ def plate_summary(
     db: Session,
     *,
     plate: str,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
 ) -> dict:
     """Everything the platform knows about ONE plate — the Vehicles
     page's history drill-down ("when did this car last come in?").
 
     ``plate`` is normalised the same way the producers do (upper, no
-    separators) and matched exactly; owner-scoped like ``query_events``.
+    separators) and matched exactly; scoped like ``query_events``.
     All-time on purpose: first_seen is the point of the question.
     """
     from sqlalchemy import func
 
     normalized = "".join(str(plate).split()).upper()
     base = db.query(TimelineEvent).filter(TimelineEvent.plate_text == normalized)
-    if owner_id is not None:
-        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    base = scope_query(base, TimelineEvent.camera_id, scope)
 
     total = base.count()
     first_seen, last_seen = (
@@ -243,7 +234,7 @@ def plate_sessions(
     plate: str,
     in_cameras: list[int],
     out_cameras: list[int],
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     limit: int = 50,
 ) -> dict:
     """Entry/exit pairing for ONE plate — gate in / gate out history.
@@ -268,10 +259,7 @@ def plate_sessions(
         .filter(TimelineEvent.plate_text == normalized)
         .filter(TimelineEvent.camera_id.in_(gates))
     )
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, TimelineEvent.camera_id, scope)
     reads = q.order_by(TimelineEvent.started_at.asc()).all()
 
     def _row(entry, exit_) -> dict:
@@ -316,7 +304,7 @@ def gate_occupancy(
     in_cameras: list[int],
     out_cameras: list[int],
     hours: int = 24,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Who is inside right now: plates whose LAST gate read within the
@@ -338,10 +326,7 @@ def gate_occupancy(
         .filter(TimelineEvent.camera_id.in_(gates))
         .filter(TimelineEvent.started_at >= cutoff)
     )
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, TimelineEvent.camera_id, scope)
     last_by_plate: dict[str, TimelineEvent] = {}
     for r in q.order_by(TimelineEvent.started_at.asc()).all():
         last_by_plate[r.plate_text] = r
@@ -356,7 +341,7 @@ def vehicle_report(
     *,
     year: int,
     month: int,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     per_plate_limit: int = 1000,
 ) -> dict:
     """One calendar month of vehicle movement, aggregated for the
@@ -382,10 +367,7 @@ def vehicle_report(
         .filter(TimelineEvent.started_at >= start)
         .filter(TimelineEvent.started_at < end)
     )
-    if owner_id is not None:
-        base = base.join(Camera, Camera.id == TimelineEvent.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    base = scope_query(base, TimelineEvent.camera_id, scope)
 
     total = base.count()
     per_camera = [
