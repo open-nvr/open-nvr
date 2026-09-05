@@ -7,7 +7,7 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index sdk-docs
 
 help:
 	@echo "OpenNVR Makefile targets:"
@@ -21,6 +21,8 @@ help:
 	@echo "                           camera-agent bundle (keeps the parity test green)."
 	@echo "  make validate-apps-index Validate server/config/apps_index.yml (App"
 	@echo "                           Store submission gate — run before opening a PR)."
+	@echo "  make sdk-docs            Render the App SDK's public API (docstrings) to"
+	@echo "                           sdk/opennvr-app-sdk/docs/api/ with pdoc."
 
 # --------------------------------------------------------------------------
 # make sync-agent-tasks
@@ -103,3 +105,14 @@ sys.exit('server/.env still contains placeholder values:') if errs else print('s
 # See docs/CONTRIBUTING_APPS.md.
 validate-apps-index:
 	@$(PY) scripts/validate_apps_index.py
+
+# --------------------------------------------------------------------------
+# make sdk-docs
+# --------------------------------------------------------------------------
+# Generated HTML is not committed; docs/SDK_REFERENCE.md is the hand-written
+# index and the docstrings are the reference. Needs uv (uses a throwaway
+# pdoc install).
+sdk-docs:
+	@cd sdk/opennvr-app-sdk && uv run --with pdoc --python 3.12 \
+		pdoc opennvr_app_sdk -o docs/api --docformat restructuredtext
+	@echo "→ sdk/opennvr-app-sdk/docs/api/index.html"
