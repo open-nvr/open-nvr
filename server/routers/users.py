@@ -34,14 +34,30 @@ from utils.mfa_guard import require_mfa_code
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+def _active_superusers(db: Session, *, excluding: int | None = None) -> int:
+    q = db.query(User).filter(User.is_superuser == True,  # noqa: E712
+                              User.is_active == True)  # noqa: E712
+    if excluding is not None:
+        q = q.filter(User.id != excluding)
+    return q.count()
+
+
 @router.post("/", response_model=UserResponse)
 def create_user(
     user_create: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superuser),
     request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
 ):
-    """Create a new user (superuser only)."""
+    """Create a new user (superuser only).
+
+    ``is_superuser: true`` creates another superuser — the API's most
+    privileged write (every permission, every camera), so it takes the
+    caller's current TOTP code in ``X-MFA-Code`` like delete does.
+    """
+    if user_create.is_superuser:
+        _require_mfa_code(current_user, mfa_code)
     user = UserService.create_user(db=db, user_create=user_create)
     try:
         write_audit_log(
@@ -54,6 +70,7 @@ def create_user(
                 "username": user.username,
                 "email": user.email,
                 "role_id": user.role_id,
+                "is_superuser": bool(user.is_superuser),
             },
             ip=request.client.host if request and request.client else None,
             user_agent=request.headers.get("user-agent") if request else None,
@@ -108,6 +125,55 @@ def get_current_user_permissions(
     return {"permissions": [], "is_superuser": False}
 
 
+# NOTE: registered BEFORE the ``/{user_id}`` routes on purpose. Starlette
+# matches in declaration order, and ``PUT /users/me`` declared after
+# ``PUT /users/{user_id}`` was captured by the latter — its superuser
+# dependency ran first, so every non-superuser's own profile edit was
+# a 403 (and a superuser's became a 422 on ``user_id="me"``).
+@router.put("/me", response_model=UserResponse)
+def update_current_user(
+    user_update: UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    request: Request = None,
+):
+    """Update current user information (profile fields only)."""
+    # Drop the fields only an administrator may set — role, active flag,
+    # superuser — rather than nulling them: a nulled field is still "set"
+    # to Pydantic, so the old ``x = None`` dance wrote NULL into the row
+    # (``{"is_active": false}`` locked the caller out of their own
+    # account, ``{"role_id": 1}`` hit the NOT NULL constraint).
+    user_update = UserUpdate(**user_update.model_dump(
+        exclude_unset=True, exclude={"role_id", "is_active", "is_superuser"}))
+
+    user = UserService.update_user(
+        db=db, user_id=current_user.id, user_update=user_update
+    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    try:
+        write_audit_log(
+            db,
+            action="user.update",
+            user_id=current_user.id,
+            entity_type="user",
+            entity_id=current_user.id,
+            details={
+                "self_update": True,
+                "updated_fields": [
+                    k for k in user_update.dict(exclude_unset=True).keys()
+                ],
+            },
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        main_logger.warning(f"Failed to write audit log (self user.update): {e}")
+    return user
+
+
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(
     user_id: int,
@@ -130,14 +196,43 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_superuser),
     request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
 ):
-    """Update user information (superuser only)."""
+    """Update user information (superuser only).
+
+    Changing ``is_superuser`` (promote or demote) requires the caller's
+    current TOTP code in ``X-MFA-Code``; you cannot demote yourself, and
+    the last active superuser cannot be demoted or deactivated.
+    """
     # Deactivating yourself is the same lockout as self-deletion (issue #176).
     if user_id == current_user.id and user_update.is_active is False:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You cannot deactivate your own account.",
         )
+    if user_update.is_superuser is not None:
+        target = db.query(User).filter(User.id == user_id).first()
+        if target is not None and bool(target.is_superuser) != user_update.is_superuser:
+            _require_mfa_code(current_user, mfa_code)
+            if not user_update.is_superuser:
+                if user_id == current_user.id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="You cannot remove your own superuser status.",
+                    )
+                if _active_superusers(db, excluding=user_id) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cannot demote the last active superuser.",
+                    )
+    if user_update.is_active is False:
+        target = db.query(User).filter(User.id == user_id).first()
+        if target is not None and target.is_superuser \
+                and _active_superusers(db, excluding=user_id) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot deactivate the last active superuser.",
+            )
     # Reactivation is MFA-gated via /users/{id}/activate; without this guard
     # the plain update would be a bypass around that check.
     if user_update.is_active is True:
@@ -199,6 +294,14 @@ def delete_user(
 
     _require_mfa_code(current_user, mfa_code)
 
+    target = db.query(User).filter(User.id == user_id).first()
+    if target is not None and target.is_superuser and target.is_active \
+            and _active_superusers(db, excluding=user_id) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the last active superuser.",
+        )
+
     success = UserService.delete_user(db=db, user_id=user_id)
     if not success:
         raise HTTPException(
@@ -256,48 +359,4 @@ def activate_user(
         )
     except Exception as e:
         main_logger.warning(f"Failed to write audit log (user.activate): {e}")
-    return user
-
-
-@router.put("/me", response_model=UserResponse)
-def update_current_user(
-    user_update: UserUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-    request: Request = None,
-):
-    """Update current user information."""
-    # Remove fields that regular users shouldn't be able to update
-    if user_update.role_id is not None:
-        user_update.role_id = None
-    if user_update.is_active is not None:
-        user_update.is_active = None
-    if user_update.is_superuser is not None:
-        user_update.is_superuser = None
-
-    user = UserService.update_user(
-        db=db, user_id=current_user.id, user_update=user_update
-    )
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
-    try:
-        write_audit_log(
-            db,
-            action="user.update",
-            user_id=current_user.id,
-            entity_type="user",
-            entity_id=current_user.id,
-            details={
-                "self_update": True,
-                "updated_fields": [
-                    k for k in user_update.dict(exclude_unset=True).keys()
-                ],
-            },
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        )
-    except Exception as e:
-        main_logger.warning(f"Failed to write audit log (self user.update): {e}")
     return user

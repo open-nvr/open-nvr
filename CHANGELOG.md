@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Writes that any signed-in user could make now require the seeded
+  permission.** Creating/editing/deleting AI models and starting or
+  stopping their inference (`/ai-model-management`) need `byom.manage`;
+  granting, revoking or approving an adapter's permission keys
+  (`/ai-models/adapters/{name}/permissions/*`) need `ai.manage`; editing
+  or deleting a camera needs `cameras.manage` on top of ownership. The
+  admin role holds all of these (`scripts/init_db.py`); superusers
+  implicitly.
 - **Self-service ways into the camera scope closed.** With per-camera
   RBAC as the boundary, two routes let a user widen it themselves:
   `POST /cameras/` made any active user the OWNER of the camera it
@@ -54,6 +62,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Superusers can be created and managed through the API.**
+  `POST /users` and `PUT /users/{id}` accept `is_superuser`; creating,
+  promoting or demoting a superuser requires the caller's TOTP code in
+  `X-MFA-Code` (like delete). You cannot demote yourself, and the last
+  active superuser cannot be demoted, deactivated or deleted. Until now
+  the first-time-setup admin was the only superuser a deployment could
+  have without a database edit. The Users page gains the checkbox.
+
 - **Occupancy heatmap.** The occupancy app bins where watched entities
   stand (foot point of every detection) into a per-camera grid and ships
   sparse deltas as `occupancy.heatmap.v1`; core sums them per camera-hour
@@ -76,6 +92,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the vehicle movement report.
 
 ### Fixed
+
+- `PUT /users/me` was unreachable for non-superusers (declared after
+  `PUT /users/{user_id}`, which captured it and demanded superuser), and
+  its "strip admin-only fields" logic wrote NULL into `is_active` /
+  `role_id` instead of dropping them — `{"is_active": false}` locked the
+  caller out of their own account.
 
 - **The occupancy app now applies its configuration.** It never overrode
   the SDK's live-config hook, so thresholds saved on the Occupancy page
