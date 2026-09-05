@@ -22,8 +22,12 @@ export const userService = {
   // Users
   getUsers: (params: Record<string, any> = {}) => api.get('/api/v1/users/', { params }),
   getUser: (userId: number) => api.get(`/api/v1/users/${userId}`),
-  updateUser: (userId: number, payload: any) => api.put(`/api/v1/users/${userId}`, payload),
-  createUser: (payload: any) => api.post('/api/v1/users/', payload),
+  // Changing is_superuser (or creating a superuser) is MFA-gated like
+  // delete: pass the caller's current TOTP code and it rides X-MFA-Code.
+  updateUser: (userId: number, payload: any, mfaCode?: string) =>
+    api.put(`/api/v1/users/${userId}`, payload, mfaCode ? { headers: { 'X-MFA-Code': mfaCode } } : undefined),
+  createUser: (payload: any, mfaCode?: string) =>
+    api.post('/api/v1/users/', payload, mfaCode ? { headers: { 'X-MFA-Code': mfaCode } } : undefined),
   // Deleting or reactivating a user requires the caller's current TOTP code (X-MFA-Code).
   deleteUser: (userId: number, mfaCode: string) => api.delete(`/api/v1/users/${userId}`, { headers: { 'X-MFA-Code': mfaCode } }),
   activateUser: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/activate`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
+from core.permissions import RequirePermission
 from core.database import get_db
 from core.logging_config import main_logger
 from models import AIDetectionResult, User
@@ -44,6 +45,11 @@ from services.audit_service import write_audit_log
 from services.kai_c_service import get_kai_c_service
 
 router = APIRouter(prefix="/ai-models", tags=["ai-models"])
+
+#: Granting / revoking an adapter's permission keys is governance over
+#: what the AI layer may touch (§8 / §11) — the seeded ``ai.manage``
+#: permission (admin role), not any signed-in user.
+require_ai_manage = RequirePermission("ai.manage")
 
 
 # Request/Response schemas
@@ -562,7 +568,7 @@ async def get_adapter_permissions(
 async def grant_adapter_permissions(
     adapter_name: str,
     request: PermissionKeysRequest,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ai_manage),
     db: Session = Depends(get_db),
 ):
     """Grant permission keys for an adapter (§8 / §11). Governance
@@ -597,7 +603,7 @@ async def grant_adapter_permissions(
 async def revoke_adapter_permissions(
     adapter_name: str,
     request: PermissionKeysRequest,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ai_manage),
     db: Session = Depends(get_db),
 ):
     """Revoke permission keys for an adapter (§8 / §11). Revoking any
@@ -631,7 +637,7 @@ async def revoke_adapter_permissions(
 @router.post("/adapters/{adapter_name}/permissions/approve-all")
 async def approve_all_adapter_permissions(
     adapter_name: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ai_manage),
     db: Session = Depends(get_db),
 ):
     """Grant every declared permission key for an adapter — the operator

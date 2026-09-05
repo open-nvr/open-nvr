@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
+from core.permissions import RequirePermission
 from core.database import get_db
 from models import AIModel, Camera, CameraConfig, User
 from services.audit_service import write_audit_log
@@ -33,6 +34,13 @@ from services.inference_manager import get_inference_manager
 from services.storage_service import storage_service
 
 router = APIRouter(prefix="/ai-model-management", tags=["ai-model-management"])
+
+#: Creating, editing, deleting a model and starting/stopping its
+#: inference are site-wide changes to what the NVR runs — the seeded
+#: ``byom.manage`` ("Manage custom AI models") permission, which the
+#: admin role holds and operator/viewer do not. Reads stay open to any
+#: active user.
+require_byom_manage = RequirePermission("byom.manage")
 
 
 # Pydantic schemas
@@ -82,7 +90,7 @@ class AIModelResponse(BaseModel):
 @router.post("", response_model=AIModelResponse)
 async def create_ai_model(
     model_data: AIModelCreate,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_byom_manage),
     db: Session = Depends(get_db),
 ):
     """Create a new AI model configuration."""
@@ -295,7 +303,7 @@ async def get_ai_model(
 async def update_ai_model(
     model_id: int,
     model_data: AIModelUpdate,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_byom_manage),
     db: Session = Depends(get_db),
 ):
     """Update an AI model configuration."""
@@ -359,7 +367,7 @@ async def update_ai_model(
 @router.delete("/{model_id}")
 async def delete_ai_model(
     model_id: int,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_byom_manage),
     db: Session = Depends(get_db),
 ):
     """Delete an AI model configuration."""
@@ -420,7 +428,7 @@ RETIRED_LIVE_INFERENCE_DETAIL = (
 @router.post("/{model_id}/start-inference")
 async def start_inference(
     model_id: int,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_byom_manage),
     db: Session = Depends(get_db),
 ):
     """RETIRED: returns 410 Gone with the migration pointer.
@@ -443,7 +451,7 @@ async def start_inference(
 @router.post("/{model_id}/stop-inference")
 async def stop_inference(
     model_id: int,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_byom_manage),
     db: Session = Depends(get_db),
 ):
     """Stop background inference for a model."""

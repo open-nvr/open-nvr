@@ -68,6 +68,7 @@ class UserService:
                     password_set=True,  # Normal user creation has password set
                     mfa_enabled=False,  # User enrolls TOTP at first login (MFA wall)
                     role_id=user_create.role_id,
+                    is_superuser=bool(getattr(user_create, "is_superuser", False)),
                 )
                 db.add(db_user)
                 db.flush()

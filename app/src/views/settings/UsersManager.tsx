@@ -41,6 +41,7 @@ type UserForm = {
   password?: string
   role_id: number
   is_active?: boolean
+  is_superuser?: boolean
 }
 
 type Role = {
@@ -67,7 +68,10 @@ export function UsersManager() {
   const [confirmAction, setConfirmAction] = useState<{ kind: 'delete' | 'activate'; user: User } | null>(null)
   const [mfaCode, setMfaCode] = useState('')
 
-  const [form, setForm] = useState<UserForm>({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '' })
+  const [form, setForm] = useState<UserForm>({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '', is_superuser: false })
+  // TOTP code for the MFA-gated writes inside the create/edit dialogs
+  // (creating a superuser, promoting or demoting one).
+  const [formMfaCode, setFormMfaCode] = useState('')
   const [roles, setRoles] = useState<Role[]>([])
 
   const canAdmin = !!me?.is_superuser
@@ -94,7 +98,7 @@ export function UsersManager() {
     })()
   }, [canAdmin, skip, limit, activeOnly])
 
-  const resetForm = () => setForm({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '' })
+  const resetForm = () => { setForm({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '', is_superuser: false }); setFormMfaCode('') }
 
   const onCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -109,8 +113,9 @@ export function UsersManager() {
         first_name: form.first_name || null,
         last_name: form.last_name || null,
         is_active: true,
+        is_superuser: !!form.is_superuser,
       }
-      await apiService.createUser(payload)
+      await apiService.createUser(payload, form.is_superuser ? formMfaCode.trim() : undefined)
       setShowCreateDialog(false)
       resetForm()
       // refresh
@@ -138,9 +143,11 @@ export function UsersManager() {
         role_id: Number(form.role_id),
         is_active: form.is_active,
       }
+      const superuserChanged = !!form.is_superuser !== !!editing.is_superuser
+      if (superuserChanged) payload.is_superuser = !!form.is_superuser
       // Remove undefined fields
       Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k])
-      await apiService.updateUser(editing.id, payload)
+      await apiService.updateUser(editing.id, payload, superuserChanged ? formMfaCode.trim() : undefined)
       setShowEditDialog(false)
       setEditing(null)
       resetForm()
@@ -188,7 +195,9 @@ export function UsersManager() {
       last_name: u.last_name || '',
       role_id: u.role_id,
       is_active: u.is_active,
+      is_superuser: u.is_superuser,
     })
+    setFormMfaCode('')
     setShowEditDialog(true)
   }
 
@@ -262,11 +271,20 @@ export function UsersManager() {
                       {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </label>
+                  <label className="flex items-center gap-2 mt-5 text-sm" title="A superuser holds every permission and sees every camera, regardless of role">
+                    <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_superuser} onChange={(e) => setForm({ ...form, is_superuser: e.target.checked })} /> Superuser
+                  </label>
+                  {form.is_superuser && (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs text-[var(--text-dim)]">Your MFA code * (required to create a superuser)</span>
+                      <input className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono" inputMode="numeric" maxLength={6} value={formMfaCode} onChange={(e) => setFormMfaCode(e.target.value.replace(/\D/g, ''))} required />
+                    </label>
+                  )}
                 </div>
               </div>
               <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
                 <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Creating...' : 'Create User'}</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || (!!form.is_superuser && formMfaCode.length !== 6)}>{loading ? 'Creating...' : 'Create User'}</button>
               </div>
             </form>
           </div>
@@ -317,11 +335,20 @@ export function UsersManager() {
                   <label className="flex items-center gap-2 mt-5 text-sm" title={me?.id === editing.id ? 'You cannot deactivate your own account' : !editing.is_active ? 'Use the Activate button to reactivate (requires MFA code)' : undefined}>
                     <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} disabled={me?.id === editing.id || !editing.is_active} /> Active
                   </label>
+                  <label className="flex items-center gap-2 mt-5 text-sm" title={me?.id === editing.id ? 'You cannot change your own superuser status' : 'A superuser holds every permission and sees every camera, regardless of role'}>
+                    <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_superuser} onChange={(e) => setForm({ ...form, is_superuser: e.target.checked })} disabled={me?.id === editing.id} /> Superuser
+                  </label>
+                  {!!form.is_superuser !== !!editing.is_superuser && (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs text-[var(--text-dim)]">Your MFA code * (required to {form.is_superuser ? 'promote' : 'demote'})</span>
+                      <input className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono" inputMode="numeric" maxLength={6} value={formMfaCode} onChange={(e) => setFormMfaCode(e.target.value.replace(/\D/g, ''))} required />
+                    </label>
+                  )}
                 </div>
               </div>
               <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
                 <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Updating...' : 'Update User'}</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading || (!!form.is_superuser !== !!editing.is_superuser && formMfaCode.length !== 6)}>{loading ? 'Updating...' : 'Update User'}</button>
               </div>
             </form>
           </div>

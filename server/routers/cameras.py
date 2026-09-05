@@ -997,7 +997,7 @@ async def update_camera(
     camera_update: CameraUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
     """Update camera information (owner or superuser).
@@ -1443,7 +1443,7 @@ async def delete_camera(
     camera_id: int,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
     """Delete a camera (irreversible soft delete).
