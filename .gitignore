@@ -271,3 +271,6 @@ data/net-hints/
 # KAI-C runtime adapter-registration receipts (#371) — machine state,
 # never source. In Docker this lives on the opennvr_kai_c_state volume.
 kai-c-state/
+
+# make sdk-docs output (generated, see docs/SDK_REFERENCE.md)
+sdk/opennvr-app-sdk/docs/api/

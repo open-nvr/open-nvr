@@ -112,6 +112,14 @@ truly a hot knob (thresholds, watchlists, labels); topology changes
 (cameras, adapters) may honestly need a restart — the SDK's default
 hook logs exactly that, so doing nothing is also correct.
 
+Who may edit what: site-wide params (a watchlist, a threshold) are an
+**administrator's** — `PUT /apps/{id}/config` is superuser-only for
+them. A `per_camera` param (zones, tripwires) may also be edited by a
+non-superuser for the cameras they *manage* (owner or `can_manage`
+grant); the catalog form shows each user only those cameras, and a
+non-superuser's `GET /config` returns only their cameras' entries.
+Your `on_config_update` sees the merged whole either way.
+
 ## 4. State views — "detailed reports" without a frontend
 
 Expose live state via `state_snapshot()` (you likely already do), then
@@ -140,6 +148,14 @@ clicks **Check**. Live exemplars:
 [occupancy-counting](../examples/occupancy-counting/) (table),
 [license-plate-recognition](../examples/license-plate-recognition/)
 (metrics that move as live config applies).
+
+State is **scoped per viewer**: `GET /apps/{id}/status` hands a
+non-superuser only the slice of your `/state` for cameras they may
+see. That works automatically when your per-camera state is keyed by
+the `camN` handle (a dict under `cameras`, or rows carrying
+`camera_id`); a metric you compute across all cameras is shown to
+everyone, so keep anything camera-identifying out of site-wide
+values.
 
 ## 5. Actions — your app's feature set as operator forms
 
