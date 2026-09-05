@@ -152,7 +152,7 @@ export function DeviceFirewall() {
           </p>
         </div>
         <Button
-          variant={active ? 'secondary' : 'primary'}
+          variant={active ? 'outline' : 'primary'}
           disabled={busy === 'toggle'}
           onClick={() => toggle(!active)}
         >
