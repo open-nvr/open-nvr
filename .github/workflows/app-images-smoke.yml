@@ -72,6 +72,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        id: buildx1
+        uses: docker/setup-buildx-action@v3
+        # Setup pulls moby/buildkit from Docker Hub, which has 502'd
+        # PR runs unrelated to the change under test (there is no
+        # non-Hub mirror to pin). One retry absorbs the transient.
+        continue-on-error: true
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx1.outcome == 'failure'
         uses: docker/setup-buildx-action@v3
 
       # Build only (no push, load into the local daemon so the smoke
@@ -199,6 +207,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        id: buildx2
+        uses: docker/setup-buildx-action@v3
+        # Setup pulls moby/buildkit from Docker Hub, which has 502'd
+        # PR runs unrelated to the change under test (there is no
+        # non-Hub mirror to pin). One retry absorbs the transient.
+        continue-on-error: true
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx2.outcome == 'failure'
         uses: docker/setup-buildx-action@v3
 
       - name: Build ${{ matrix.app }} image

@@ -5259,7 +5259,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _health() -> dict[str, Any]:
         return {
             "status": "ok",
-            "cameras": [cam.camera_id for cam in runtime.cfg.cameras],
+            # A count, not the handles: /health is an OPEN path on a port
+            # the demo UI publishes, and the roster is what /cameras
+            # (authenticated, per-user) is for. /state — the contract
+            # door the App Catalog proxies and scopes per viewer — still
+            # carries the handle list, like every SDK app's does.
+            "camera_count": len(runtime.cfg.cameras),
             # The tools actually ADVERTISED to the LLM (honours enabled_tools),
             # not every registered handler (test-report #4).
             "tools": [t["function"]["name"] for t in runtime.tool_definitions],
