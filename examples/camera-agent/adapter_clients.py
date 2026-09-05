@@ -218,7 +218,8 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         ttl_seconds: float = 60.0,
         timeout_seconds: float = 5.0,
     ) -> None:
-        self._url = f"{kaic_url.rstrip('/')}/api/v1/ai/capabilities"
+        self._kaic_url = kaic_url.rstrip("/")
+        self._url = f"{self._kaic_url}/api/v1/ai/capabilities"
         self._api_key = api_key
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
@@ -252,12 +253,15 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         # to one attempt per TTL (negative caching).
         self._fetched_at = now
         try:
-            headers = {}
-            if self._api_key:
-                headers["X-Internal-Api-Key"] = self._api_key
-            resp = await self._client().get(self._url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+            # The fetch itself is the SDK's (opennvr_app_sdk.aio) — same
+            # route, header and degrade rule every async app gets; this
+            # class keeps only the agent-side TTL cache and the parse.
+            from opennvr_app_sdk.aio import AsyncAIAPI
+
+            data = await AsyncAIAPI(self._kaic_url, self._api_key or None,
+                                    self._timeout, client=self._client()).capabilities()
+            if data is None:
+                raise RuntimeError("capabilities unavailable")
             tasks: set[str] = set()
             gpu: dict[str, bool] = {}
             adapters = data.get("adapters") or {}

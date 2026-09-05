@@ -52,6 +52,8 @@ class _StubCaps:
 
 
 class _FakeResponse:
+    status_code = 200
+
     def __init__(self, payload: dict) -> None:
         self._payload = payload
 

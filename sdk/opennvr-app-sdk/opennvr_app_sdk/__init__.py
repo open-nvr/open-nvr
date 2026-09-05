@@ -64,6 +64,7 @@ from .cameras import (
 from .credentials import AppCredentials, auth_headers
 from .usercontext import UserContext, current_user
 from .client import OpenNVR, Camera, Recording, PlatformError
+from .aio import AsyncOpenNVR
 from .infer_stream import InferStream
 from .domain_subscriber import (
     DomainEvent, DomainEventSubscriber, domain_event_app, parse_domain_event,
@@ -138,6 +139,7 @@ __all__ = [
     "current_user",
     # The platform client (everything an app reads from core / KAI-C)
     "OpenNVR",
+    "AsyncOpenNVR",
     "Camera",
     "Recording",
     "PlatformError",

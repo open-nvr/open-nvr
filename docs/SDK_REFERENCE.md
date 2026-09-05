@@ -8,7 +8,7 @@ walkthroughs live in [FIRST_DETECTOR.md](FIRST_DETECTOR.md),
 [APP_PLATFORM.md](APP_PLATFORM.md), [APP_SURFACES.md](APP_SURFACES.md)
 and [APP_CREDENTIALS.md](APP_CREDENTIALS.md).
 
-Version: `opennvr_app_sdk.__version__` (`0.3.0`). Licence: Apache-2.0.
+Version: `opennvr_app_sdk.__version__` (`0.4.0`). Licence: Apache-2.0.
 
 ```bash
 pip install opennvr-app-sdk            # or: uv add opennvr-app-sdk
@@ -72,6 +72,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | `Recording` | `start`, `duration` |
 | `PlatformError` | Raised by writes; reads degrade to `None` / `[]` and log |
 | `InferStream` | The WebSocket inference session behind `nvr.ai.stream()`; `open()`, `infer(jpeg)`, `close()`, context-manager |
+| `AsyncOpenNVR` (`opennvr_app_sdk.aio`) | The same client `await`-ed, for FastAPI/agent loops: `await nvr.cameras()`, `await nvr.state.set(...)`, `async with`; `http_client=` shares a pool; no `ai.stream()` yet |
 
 Lower-level helpers that predate the client and remain public:
 `discover_cameras(url)`, `cameras_for_skill(...)`,

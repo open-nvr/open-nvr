@@ -57,6 +57,33 @@ class KaiCError(Exception):
     via the correlation_id we sent)."""
 
 
+def build_infer_request(
+    base_url: str, adapter_name: str, frame_bytes: bytes, *, task: str,
+    api_key: str | None = None, camera_id: str | None = None,
+    params: dict[str, Any] | None = None, correlation_id: str | None = None,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """``(url, headers, json body)`` for one KAI-C inference call — the
+    one wire shape both the sync :class:`KaiCClient` and the async
+    client (``aio.py``) send, so they cannot drift."""
+    url = f"{base_url.rstrip('/')}/api/v1/infer/{adapter_name}"
+    headers = {
+        "X-Correlation-Id": correlation_id or f"app-{uuid.uuid4().hex[:12]}",
+    }
+    if api_key:
+        headers["X-Internal-Api-Key"] = api_key
+    # Body shape matches the server's build_infer_payload:
+    # {"frame_b64", "task", "camera_id", **params} — adapters read
+    # task + params, KAI-C reads camera_id for NATS subject + audit.
+    body: dict[str, Any] = {
+        "task": task,
+        "frame_b64": base64.b64encode(frame_bytes).decode("ascii"),
+        **(params or {}),
+    }
+    if camera_id is not None:
+        body["camera_id"] = str(camera_id)
+    return url, headers, body
+
+
 class KaiCClient:
     """Tiny client for KAI-C's ``POST /api/v1/infer/{adapter}``.
 
@@ -106,22 +133,10 @@ class KaiCClient:
         probe. Raises :class:`KaiCError` on transport failure or
         non-200; the frame loop catches and decides whether to alert /
         skip / abort."""
-        url = f"{self._base_url}/api/v1/infer/{self._adapter_name}"
-        headers = {
-            "X-Correlation-Id": correlation_id or f"app-{uuid.uuid4().hex[:12]}",
-        }
-        if self._api_key:
-            headers["X-Internal-Api-Key"] = self._api_key
-        # Body shape matches the server's build_infer_payload:
-        # {"frame_b64", "task", "camera_id", **params} — adapters read
-        # task + params, KAI-C reads camera_id for NATS subject + audit.
-        body = {
-            "task": task,
-            "frame_b64": base64.b64encode(frame_bytes).decode("ascii"),
-            **(params or {}),
-        }
-        if camera_id is not None:
-            body["camera_id"] = str(camera_id)
+        url, headers, body = build_infer_request(
+            self._base_url, self._adapter_name, frame_bytes, task=task,
+            api_key=self._api_key, camera_id=camera_id, params=params,
+            correlation_id=correlation_id)
         try:
             response = self._client.post(url, json=body, headers=headers)
         except Exception as exc:

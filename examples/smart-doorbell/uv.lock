@@ -99,7 +99,7 @@ wheels = [
 
 [[package]]
 name = "opennvr-app-sdk"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "../../sdk/opennvr-app-sdk" }
 dependencies = [
     { name = "httpx" },

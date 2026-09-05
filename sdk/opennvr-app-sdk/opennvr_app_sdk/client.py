@@ -92,6 +92,44 @@ class Recording:
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
+# ── Response parsers shared with the async client (aio.py) ──────────
+
+
+def parse_cameras(body: Any) -> list[Camera]:
+    """``GET /internal/camera-agent/cameras`` → roster."""
+    out: list[Camera] = []
+    for row in (body or {}).get("cameras") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            cid = int(row.get("open_nvr_camera_id") or _camera_id(row.get("camera_id")))
+        except (TypeError, ValueError):
+            continue
+        out.append(Camera(
+            id=cid, handle=str(row.get("camera_id") or f"cam{cid}"),
+            name=str(row.get("name") or f"Camera {cid}"),
+            role=str(row.get("role") or ""),
+            frame_url=str(row.get("frame_url") or ""),
+            assignments=list(row.get("assignments") or []), raw=row))
+    return out
+
+
+def parse_recordings(body: Any) -> list[Recording]:
+    rows = (body or {}).get("recordings") or []
+    return [Recording(start=str(r.get("start", "")),
+                      duration=float(r.get("duration", 0) or 0), raw=r)
+            for r in rows if isinstance(r, dict)]
+
+
+def parse_state_items(body: Any) -> dict[str, Any]:
+    return {r["key"]: r["value"] for r in (body or {}).get("items") or []}
+
+
+def query_string(params: dict[str, Any]) -> str:
+    clean = {k: v for k, v in params.items() if v is not None}
+    return f"?{urlencode(clean)}" if clean else ""
+
+
 class _Http:
     """The client's one HTTP session: base URL + the app's headers,
     re-read per request so a key issued after start-up is honoured."""
@@ -106,9 +144,8 @@ class _Http:
         return self.creds.headers()
 
     def get(self, path: str, **params) -> httpx.Response:
-        clean = {k: v for k, v in params.items() if v is not None}
-        url = f"{self.base}{path}" + (f"?{urlencode(clean)}" if clean else "")
-        return self._client.get(url, headers=self.headers())
+        return self._client.get(f"{self.base}{path}{query_string(params)}",
+                                headers=self.headers())
 
     def get_json(self, path: str, **params) -> Any | None:
         try:
@@ -133,8 +170,7 @@ class _Http:
         return r.content if r.status_code == 200 else None
 
     def put_json(self, path: str, body: Any, **params) -> Any:
-        clean = {k: v for k, v in params.items() if v is not None}
-        url = f"{self.base}{path}" + (f"?{urlencode(clean)}" if clean else "")
+        url = f"{self.base}{path}{query_string(params)}"
         try:
             r = self._client.put(url, json=body, headers=self.headers())
         except Exception as exc:  # noqa: BLE001
@@ -144,8 +180,7 @@ class _Http:
         return r.json()
 
     def delete(self, path: str, **params) -> Any:
-        clean = {k: v for k, v in params.items() if v is not None}
-        url = f"{self.base}{path}" + (f"?{urlencode(clean)}" if clean else "")
+        url = f"{self.base}{path}{query_string(params)}"
         try:
             r = self._client.delete(url, headers=self.headers())
         except Exception as exc:  # noqa: BLE001
@@ -171,10 +206,7 @@ class RecordingsAPI:
         body = self._http.get_json(
             f"/api/v1/internal/app/recordings/{self._cam}",
             start=_iso(start), end=_iso(end))
-        rows = (body or {}).get("recordings") or []
-        return [Recording(start=str(r.get("start", "")),
-                          duration=float(r.get("duration", 0) or 0), raw=r)
-                for r in rows if isinstance(r, dict)]
+        return parse_recordings(body)
 
     def url(self, start: datetime | str, duration: float) -> str | None:
         body = self._http.get_json(
@@ -259,7 +291,7 @@ class StateAPI:
 
     def items(self, prefix: str = "") -> dict[str, Any]:
         body = self._http.get_json("/api/v1/internal/app/state", prefix=prefix or None)
-        return {r["key"]: r["value"] for r in (body or {}).get("items") or []}
+        return parse_state_items(body)
 
 
 class AIAPI:
@@ -356,22 +388,7 @@ class OpenNVR:
         """The roster core assigned to this app (every active camera
         when the operator assigned none). ``[]`` when core can't be
         reached — log it; never guess."""
-        body = self._http.get_json("/api/v1/internal/camera-agent/cameras")
-        out: list[Camera] = []
-        for row in (body or {}).get("cameras") or []:
-            if not isinstance(row, dict):
-                continue
-            try:
-                cid = int(row.get("open_nvr_camera_id") or _camera_id(row.get("camera_id")))
-            except (TypeError, ValueError):
-                continue
-            out.append(Camera(
-                id=cid, handle=str(row.get("camera_id") or f"cam{cid}"),
-                name=str(row.get("name") or f"Camera {cid}"),
-                role=str(row.get("role") or ""),
-                frame_url=str(row.get("frame_url") or ""),
-                assignments=list(row.get("assignments") or []), raw=row))
-        return out
+        return parse_cameras(self._http.get_json("/api/v1/internal/camera-agent/cameras"))
 
     def camera(self, camera) -> Camera | None:
         want = _camera_id(camera)
