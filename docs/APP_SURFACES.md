@@ -196,6 +196,47 @@ terms stay out of the log). The agent can *read* your state and *relay*
 your alerts; it can never *act* on your app. Design your actions
 assuming an authenticated human is on the other end — because one is.
 
+### Who is asking: `current_user()`
+
+The proxy tells you **which** human. Core signs the caller's identity
+for your app (`X-OpenNVR-User`, a 60-second JWT over the SHA-256 of
+your app key — see [APP_CREDENTIALS.md](APP_CREDENTIALS.md)) on every
+`/ui` view and every action, and the SDK verifies it before your code
+runs. Inside `ui_html()` and `on_action()`:
+
+```python
+from opennvr_app_sdk import current_user
+
+def on_action(self, name, params):
+    user = current_user()            # or self.current_user
+    if user is None:                 # older core / no app key yet
+        raise ValueError("no operator identity")
+    if not user.can_manage(params["camera_id"]):
+        raise ValueError("not permitted on that camera")   # → 400
+    ...
+
+def ui_html(self):
+    user = self.current_user
+    cams = user.visible(self.cameras) if user else []
+    ...
+```
+
+`UserContext` carries `user_id`, `username`, `is_superuser`, `cameras`
+(ids the user may *view*, `None` = every camera), `manage` (ids they may
+*control*), and `purpose` (`"ui"` / `"action"`). Per-camera RBAC is
+enforced by core on its own routes; this is how your app applies the
+same assignment to what *it* shows and does. A token that fails any
+check is treated as absent — never trusted partially.
+
+Two things also changed on the proxies since this section was first
+written: enabling/disabling an app is **superuser-only**, and
+`PUT /apps/{id}/config` accepts only per-camera entries (zones,
+tripwires) from a non-superuser, for cameras they manage — the
+site-wide params of your manifest are an administrator's to change.
+`GET /apps/{id}/status` returns a non-superuser only their cameras'
+slice of your `/state`, keyed by the `camN` handles the SDK already
+uses.
+
 ## 6. "What if I really need custom UI?"
 
 You don't ship one — that's the platform bet that keeps a community

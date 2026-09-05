@@ -78,6 +78,11 @@ import httpx
 
 from ._version import __version__ as _sdk_version
 from .credentials import AppCredentials
+from .usercontext import (
+    USER_CONTEXT_HEADER, bind_user, signing_secret, unbind_user,
+    verify_user_context,
+)
+from .usercontext import current_user as _current_user
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +131,15 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         # HTML route — core proxies /api/v1/apps/{id}/ui here. Optional
         # (apps opt in via a ui callable); everything else stays JSON.
         if path == "/ui" and getattr(self.server, "ui", None) is not None:
+            bound = bind_user(self._user_context())
             try:
                 html = self.server.ui()
             except Exception:
                 logger.exception("contract /ui failed")
                 self._send_json(500, {"error": "internal error"})
                 return
+            finally:
+                unbind_user(bound)
             payload = str(html).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -200,6 +208,7 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             # same "bad body" class, and it must not kill the handler.
             self._send_json(400, {"error": f"bad action body: {exc}"})
             return
+        bound = bind_user(self._user_context())
         try:
             result = action(name, params)
         except KeyError:
@@ -212,7 +221,18 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             logger.exception("action %s failed", name)
             self._send_json(500, {"error": "internal error"})
             return
+        finally:
+            unbind_user(bound)
         self._send_json(200, result if result is not None else {})
+
+    def _user_context(self):
+        """The operator core says is behind this request (verified
+        against this app's key), or None — see usercontext.py."""
+        secret_for = getattr(self.server, "user_secret", None)
+        secret = secret_for() if callable(secret_for) else None
+        return verify_user_context(
+            self.headers.get(USER_CONTEXT_HEADER), secret,
+            audience=getattr(self.server, "app_id", None))
 
     def _send_json(self, status: int, body: Any) -> None:
         payload = json.dumps(body).encode("utf-8")
@@ -237,6 +257,10 @@ class _ContractHTTPServer(ThreadingHTTPServer):
     action_token: "str | None"
     # Optional GET /ui HTML renderer (RFC-0002 Phase 4). None = no UI.
     ui: "Callable[[], str] | None"
+    # Verifies X-OpenNVR-User: () -> the signing secret (sha256 of the
+    # app key) or None, plus the manifest id the token must be for.
+    user_secret: "Callable[[], str | None] | None"
+    app_id: "str | None"
 
 
 class ContractServer:
@@ -257,6 +281,8 @@ class ContractServer:
         action: "Callable[[str, dict[str, Any]], Any] | None" = None,
         action_token: "str | None" = None,
         ui: "Callable[[], str] | None" = None,
+        user_secret: "Callable[[], str | None] | None" = None,
+        app_id: "str | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
@@ -266,6 +292,8 @@ class ContractServer:
         self._action = action
         self._action_token = action_token
         self._ui = ui
+        self._user_secret = user_secret
+        self._app_id = app_id
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -286,6 +314,8 @@ class ContractServer:
         server.action = self._action
         server.action_token = self._action_token
         server.ui = self._ui
+        server.user_secret = self._user_secret
+        server.app_id = self._app_id
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -387,6 +417,14 @@ class ContractMixin:
         in the catalog."""
         raise KeyError(name)
 
+    @property
+    def current_user(self):
+        """The operator behind the ``/ui`` view or action being served
+        (:class:`opennvr_app_sdk.UserContext`), or ``None`` when core
+        forwarded no identity. Valid only inside ``ui_html()`` /
+        ``on_action()``; ``None`` elsewhere."""
+        return _current_user()
+
     def _dispatch_action(self, name: str, params: dict[str, Any]) -> Any:
         """Gate + dispatch: only manifest-DECLARED actions reach
         on_action — an undeclared name 404s even if a handler would
@@ -426,6 +464,11 @@ class ContractMixin:
             action_token=action_token,
             # Apps opt into the /ui surface by defining ui_html() -> str.
             ui=getattr(self, "ui_html", None),
+            # X-OpenNVR-User (who is viewing / acting) is signed with the
+            # sha256 of our app key; resolved per request so a key
+            # issued after start-up is honoured.
+            user_secret=lambda: signing_secret(self.credentials.app_key),
+            app_id=getattr(self.manifest, "id", None) if self.manifest else None,
             host=bind_host,
             port=int(port),
         )

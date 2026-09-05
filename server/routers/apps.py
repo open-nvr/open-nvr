@@ -1050,6 +1050,12 @@ async def invoke_app_action(
         if settings.internal_api_key
         else {}
     )
+    # Who is invoking, and which cameras they may see/manage — signed
+    # for this app (services/app_user_context.py) so it can render or
+    # refuse per user without a login of its own.
+    from services.app_user_context import user_context_headers
+
+    headers.update(user_context_headers(db, row, current_user, purpose="action"))
     async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
         try:
             resp = await client.post(
@@ -1477,9 +1483,14 @@ async def get_app_ui(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="App URL is blocked by policy.",
         )
+    # The viewer's identity and camera scope travel with the request
+    # (signed for this app) so the page can be per-user.
+    from services.app_user_context import user_context_headers
+
+    headers = user_context_headers(db, row, current_user, purpose="ui")
     try:
         async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
-            resp = await client.get(f"{base_url}/ui")
+            resp = await client.get(f"{base_url}/ui", headers=headers)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
