@@ -220,6 +220,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Frontend typecheck in CI.** `vite build` strips types without
+  checking them, so `DeviceFirewall` shipped a `variant="secondary"`
+  that no `Button` variant accepts (now `outline`). `npm run
+  typecheck` (`tsc --noEmit`) runs before the build in `ci.yml`.
+
 - **Test suites no longer leak swapped `core.*` modules into each
   other.** `server/tests/conftest.py` snapshots the `core` namespace of
   `sys.modules` per test module and restores it, so a suite that purges
