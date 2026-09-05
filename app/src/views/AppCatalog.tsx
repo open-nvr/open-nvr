@@ -95,6 +95,35 @@ export type AppManifest = {
   // Vertical capabilities this app provides ("vehicles", "occupancy")
   // — first-class pages in the main nav light up per capability.
   provides?: string[]
+  // Commerce: free | paid | subscription | contact, a human price line,
+  // and whether enabling needs a licence key the app verifies.
+  pricing?: 'free' | 'paid' | 'subscription' | 'contact'
+  price_note?: string
+  entitlement?: 'none' | 'license_key'
+}
+
+// The platform's record of a licensed app's key (never the key itself)
+// and the app's own verdict on it — GET /apps and the config poll.
+export type Entitlement = {
+  mode: 'none' | 'license_key'
+  status: 'none' | 'unverified' | 'valid' | 'invalid'
+  plan?: string | null
+  expires_at?: string | null
+  message?: string
+  limits?: Record<string, any>
+  checked_at?: string | null
+  has_license_key: boolean
+}
+
+/** A small pricing badge for cards and listings; nothing for free apps. */
+function PricingBadge({ pricing, note }: { pricing?: string; note?: string }) {
+  if (!pricing || pricing === 'free') return null
+  const label = pricing === 'contact' ? 'contact for pricing' : pricing
+  return (
+    <Badge variant="neutral" title={note || undefined}>
+      {label}{note ? ` · ${note}` : ''}
+    </Badge>
+  )
 }
 
 /** Resolve an external ui_url for THIS browser: apps rarely know their
@@ -123,6 +152,7 @@ export type RegisteredApp = {
   last_seen?: string | null
   manifest?: AppManifest | null
   config?: Record<string, any> | null
+  entitlement?: Entitlement | null
 }
 
 export type AppStatusResp = {
@@ -138,11 +168,19 @@ type IndexApp = {
   summary?: string
   category: string
   version: string
-  image?: string
+  // "installable" (image + compose service) or "external" (a listing
+  // that links out — no Install button, a "Learn more" link instead).
+  kind?: 'installable' | 'external'
+  external_url?: string | null
+  pricing?: 'free' | 'paid' | 'subscription' | 'contact'
+  price_note?: string
+  entitlement?: 'none' | 'license_key'
+  author?: string
+  image?: string | null
   requires_tasks?: string[]
   emits?: string[]
   docs_url?: string
-  install?: { compose?: string; command?: string }
+  install?: { compose?: string; command?: string } | null
   installed: boolean
   enabled: boolean | null
 }
@@ -1064,6 +1102,84 @@ function skillStatusVariant(status: SkillEntry['status']): BadgeVariant {
   }
 }
 
+/** The licence line on a licensed app's card: status, plan, expiry, the
+ * app's own message; and, for administrators, the key entry itself. The
+ * key is sent once and never read back. */
+function LicensePanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const [key, setKey] = useState('')
+  const ent = app.entitlement
+  const status = ent?.status ?? 'none'
+  const variant: BadgeVariant =
+    status === 'valid' ? 'success' : status === 'invalid' ? 'destructive' : 'warning'
+  const label =
+    status === 'valid'
+      ? `licensed${ent?.plan ? ` · ${ent.plan}` : ''}${ent?.expires_at ? ` · until ${ent.expires_at.slice(0, 10)}` : ''}`
+      : status === 'invalid'
+        ? 'licence rejected'
+        : status === 'unverified'
+          ? 'licence not yet verified'
+          : 'licence required'
+  const set = useMutation({
+    mutationFn: () => apiService.setAppLicense(app.id, key.trim()),
+    onSuccess: (res: any) => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      setKey('')
+      const e = res?.data?.entitlement
+      if (e?.status === 'valid') showSuccess(`${app.name}: licence accepted`)
+      else showError(`${app.name}: ${e?.message || 'licence not accepted'}`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not store the licence key.')),
+  })
+  const verify = useMutation({
+    mutationFn: () => apiService.verifyAppLicense(app.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
+    onError: (e) => showError(extractApiError(e, 'Could not re-verify the licence.')),
+  })
+  const clear = useMutation({
+    mutationFn: () => apiService.clearAppLicense(app.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
+    onError: (e) => showError(extractApiError(e, 'Could not clear the licence key.')),
+  })
+  return (
+    <div className="rounded border border-[var(--border)] p-2 space-y-2">
+      <div className="flex items-center gap-2 flex-wrap text-xs">
+        <Badge variant={variant}>{label}</Badge>
+        {ent?.message && status !== 'valid' && (
+          <span className="text-[var(--text-dim)]">{ent.message}</span>
+        )}
+        {ent?.limits && Object.keys(ent.limits).length > 0 && (
+          <span className="text-[var(--text-dim)]">
+            {Object.entries(ent.limits).map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}
+          </span>
+        )}
+      </div>
+      {isAdmin && (
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 px-2 py-1 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+            placeholder={ent?.has_license_key ? 'replace licence key…' : 'licence key'}
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button variant="outline" onClick={() => set.mutate()} disabled={!key.trim() || set.isPending}>
+            {set.isPending ? 'Verifying…' : 'Save & verify'}
+          </Button>
+          {ent?.has_license_key && (
+            <>
+              <Button variant="ghost" onClick={() => verify.mutate()} disabled={verify.isPending}>Re-check</Button>
+              <Button variant="ghost" onClick={() => clear.mutate()} disabled={clear.isPending}>Forget</Button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks: Set<string>; skill?: SkillEntry; onConfigure: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -1096,6 +1212,9 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
   })
 
   const uninstallStatus = useInstallStatusPoll(app.id, uninstallPollActive)
+  // A licensed app cannot be enabled until the app has accepted a key.
+  const needsLicense =
+    app.manifest?.entitlement === 'license_key' && app.entitlement?.status !== 'valid'
 
   // Same opt-in + RBAC gating as install: a 403 degrades to an inline note
   // (fail-closed) rather than an error toast, since the operator may have
@@ -1142,12 +1261,17 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
         </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+        <PricingBadge pricing={app.manifest?.pricing} note={app.manifest?.price_note} />
         <div className="ml-auto">
           <AppStatusChip appId={app.id} />
         </div>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <div className="text-[var(--text-dim)]">{app.manifest?.summary || 'No summary provided.'}</div>
+
+        {app.manifest?.entitlement === 'license_key' && (
+          <LicensePanel app={app} isAdmin={isAdmin} />
+        )}
 
         {/* RFC-0002 Phase 1: the skill this app provides, as the platform
             registry sees it — same derivation the agent's panel renders,
@@ -1185,7 +1309,8 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
           <Button
             variant={app.enabled ? 'default' : 'primary'}
             onClick={() => toggleMutation.mutate()}
-            disabled={toggleMutation.isPending}
+            disabled={toggleMutation.isPending || (!app.enabled && needsLicense)}
+            title={!app.enabled && needsLicense ? 'Enter a licence key the app accepts first' : undefined}
             aria-pressed={app.enabled}
           >
             {toggleMutation.isPending ? 'Working…' : app.enabled ? 'Disable' : 'Enable'}
@@ -1386,9 +1511,12 @@ function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set
         <CardTitle>{app.name}</CardTitle>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+        <PricingBadge pricing={app.pricing} note={app.price_note} />
+        {app.kind === 'external' && <Badge variant="neutral">third-party</Badge>}
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <div className="text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</div>
+        {app.author && <div className="text-xs text-[var(--text-dim)]">by {app.author}</div>}
 
         {requires.length > 0 && (
           <div>
@@ -1401,9 +1529,17 @@ function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set
         )}
 
         <div className="flex items-center gap-2 pt-1">
-          <Button variant="primary" onClick={onInstall}>
-            <Download size={14} /> Install
-          </Button>
+          {app.kind === 'external' && app.external_url ? (
+            <a href={app.external_url} target="_blank" rel="noreferrer">
+              <Button variant="primary">
+                <ExternalLink size={14} /> Learn more
+              </Button>
+            </a>
+          ) : (
+            <Button variant="primary" onClick={onInstall}>
+              <Download size={14} /> Install
+            </Button>
+          )}
           {app.docs_url && (
             <a
               href={app.docs_url}

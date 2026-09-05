@@ -1098,6 +1098,18 @@ class InstalledApp(Base):
     # platform components (detect-pipeline, KAI-C, the agent).
     api_key_hash = Column(String(64), nullable=True, index=True)
     api_key_issued_at = Column(DateTime(timezone=True), nullable=True)
+    # Licensed apps (manifest ``entitlement: license_key``): the key the
+    # administrator entered, Fernet-encrypted at rest and never returned;
+    # and the app's own verdict on it (services/app_entitlements.py).
+    # status: none | unverified | valid | invalid.
+    license_key_encrypted = Column(Text, nullable=True)
+    entitlement_status = Column(String(16), nullable=False, default="none",
+                                server_default="none")
+    entitlement_plan = Column(String(100), nullable=True)
+    entitlement_expires_at = Column(DateTime(timezone=True), nullable=True)
+    entitlement_message = Column(String(500), nullable=True)
+    entitlement_limits = Column(JSON, nullable=True)
+    entitlement_checked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

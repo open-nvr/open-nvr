@@ -237,6 +237,54 @@ site-wide params of your manifest are an administrator's to change.
 slice of your `/state`, keyed by the `camN` handles the SDK already
 uses.
 
+## 5b. Selling your app: pricing and licences
+
+Three manifest fields turn a listing into a product:
+
+```python
+AppManifest(
+    ...,
+    pricing="subscription",           # free | paid | subscription | contact
+    price_note="$29 / camera / year", # the human line under the badge
+    entitlement="license_key",        # none | license_key
+)
+```
+
+`pricing` and `price_note` are display only — the catalog shows the
+badge on your card and on your App Store listing (the index entry
+mirrors them; a listing can also be `kind: external` and link out to
+where you distribute the app). `entitlement: license_key` is the gate:
+an administrator enters a key in the catalog, core stores it encrypted
+and asks **your app** whether it is valid, and refuses to enable the
+app until you say yes. You decide what a key means:
+
+```python
+from opennvr_app_sdk import Entitlement
+
+class MyApp(Detector):
+    manifest = AppManifest(..., entitlement="license_key")
+
+    def verify_license(self, license_key: str) -> Entitlement:
+        claims = my_signature_check(license_key)          # or call your licence server
+        if claims is None:
+            return Entitlement(valid=False, message="unknown or tampered key")
+        return Entitlement(valid=True, plan=claims.plan,
+                           expires_at=claims.expires, limits={"cameras": claims.cameras})
+
+    def on_entitlement_update(self, entitlement):        # optional
+        self.max_cameras = entitlement.get("limits", {}).get("cameras")
+```
+
+Core calls `POST /entitlement/verify` on your contract port (site-key
+gated like actions), records the verdict — status, plan, expiry,
+message, limits — shows it to the administrator, and re-delivers it on
+your live config poll as `self.entitlement` so you can feature-gate
+yourself. Re-verification runs on every key change and on demand
+(`POST /apps/{id}/license/verify`); an app that is unreachable when
+asked keeps its previous verdict, so a restart never silently
+un-licenses a site. Core never sees your licence logic and never
+returns the key to anyone.
+
 ## 6. "What if I really need custom UI?"
 
 You don't ship one — that's the platform bet that keeps a community

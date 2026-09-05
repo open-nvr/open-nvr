@@ -23,6 +23,7 @@ import os
 import secrets
 import sys
 import types as _types
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -475,3 +476,141 @@ def test_app_state_is_per_app_and_bounded(platform):
                   json="x" * (256 * 1024 + 1)).status_code == 413
     assert tc.delete("/internal/app/state/cooldown", headers=_app(key)).json()["deleted"] is True
     assert tc.delete("/internal/app/state/cooldown", headers=_app(key)).json()["deleted"] is False
+
+
+# ── licensed apps (services/app_entitlements.py) ───────────────────────
+
+
+def _licensed_manifest():
+    m = _manifest("paid-app", provides=("paid",))
+    m.update({"pricing": "subscription", "price_note": "$29 / camera / year",
+              "entitlement": "license_key"})
+    return m
+
+
+@pytest.fixture
+def licensed(env, monkeypatch):
+    """A registered licensed app whose /entitlement/verify is a fake:
+    GOOD-KEY → valid (plan pro, expires 2099), anything else → invalid,
+    and the app can be made unreachable."""
+    tc, ids, SessionLocal = env
+    tc.post("/apps/register", headers=_site(),
+            json={"url": "http://paid:9200", "manifest": _licensed_manifest()})
+    calls: list[dict] = []
+    state = {"reachable": True}
+
+    class _Resp:
+        def __init__(self, body, code=200):
+            self._b, self.status_code, self.text = body, code, ""
+
+        def json(self):
+            return self._b
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None, **kw):
+            if not state["reachable"]:
+                raise ConnectionError("down")
+            calls.append({"url": url, "json": json, "headers": headers})
+            key = (json or {}).get("license_key")
+            if key == "GOOD-KEY":
+                return _Resp({"valid": True, "plan": "pro", "expires_at": "2099-01-01T00:00:00Z",
+                              "message": "", "limits": {"cameras": 8}})
+            return _Resp({"valid": False, "message": "unknown key"})
+
+        async def get(self, url, **kw):
+            return _Resp({"status": "ok", "ready": True})
+
+    import services.app_entitlements as ent
+    monkeypatch.setattr(ent.httpx, "AsyncClient", _Client)
+    return tc, SessionLocal, calls, state
+
+
+def test_licensed_app_cannot_be_enabled_without_an_accepted_key(licensed):
+    tc, SessionLocal, calls, state = licensed
+    r = tc.post("/apps/paid-app/enable")
+    assert r.status_code == 402 and "licence key" in r.json()["detail"]
+    view = tc.get("/apps", headers=_site()).json()
+    rows = view["apps"] if isinstance(view, dict) else view
+    row = next(a for a in rows if a["id"] == "paid-app")
+    assert row["entitlement"]["mode"] == "license_key"
+    assert row["entitlement"]["status"] == "none" and not row["entitlement"]["has_license_key"]
+
+    # A rejected key: stored, verdict invalid, still cannot enable.
+    r = tc.put("/apps/paid-app/license", json={"license_key": "BAD"})
+    assert r.status_code == 200 and r.json()["entitlement"]["status"] == "invalid"
+    assert r.json()["entitlement"]["message"] == "unknown key"
+    assert tc.post("/apps/paid-app/enable").status_code == 402
+    # The key went to the app over the site-key-gated verify route, and
+    # is never readable back.
+    assert calls[-1]["url"] == "http://paid:9200/entitlement/verify"
+    assert calls[-1]["json"] == {"license_key": "BAD"}
+    assert "X-Internal-Api-Key" in calls[-1]["headers"]
+    assert "BAD" not in tc.get("/apps", headers=_site()).text
+
+    # The right key: valid, and enabling works.
+    r = tc.put("/apps/paid-app/license", json={"license_key": "GOOD-KEY"})
+    ent = r.json()["entitlement"]
+    assert ent["status"] == "valid" and ent["plan"] == "pro"
+    assert ent["limits"] == {"cameras": 8} and ent["expires_at"].startswith("2099")
+    assert tc.post("/apps/paid-app/enable").json()["enabled"] is True
+    # Stored encrypted, not in the clear.
+    s = SessionLocal()
+    row = s.get(InstalledApp, "paid-app")
+    assert row.license_key_encrypted and "GOOD-KEY" not in row.license_key_encrypted
+    s.close()
+
+
+def test_unreachable_app_keeps_its_last_verdict(licensed):
+    tc, SessionLocal, calls, state = licensed
+    tc.put("/apps/paid-app/license", json={"license_key": "GOOD-KEY"})
+    state["reachable"] = False
+    r = tc.post("/apps/paid-app/license/verify")
+    ent = r.json()["entitlement"]
+    assert ent["status"] == "valid" and "could not reach" in ent["message"]
+    assert tc.post("/apps/paid-app/enable").status_code == 200
+    # Clearing the key resets everything.
+    assert tc.delete("/apps/paid-app/license").json()["entitlement"]["status"] == "none"
+
+
+def test_free_apps_are_never_asked(licensed):
+    tc, SessionLocal, calls, state = licensed
+    key = _register(tc, _site()).json()["api_key"]          # loitering (free)
+    assert tc.post("/apps/loitering-detection/enable").status_code == 200
+    assert calls == []
+    # The verdict rides the app's config poll.
+    body = tc.get("/apps/loitering-detection/config", headers=_app(key)).json()
+    assert body["entitlement"]["mode"] == "none" and body["entitlement"]["status"] == "none"
+
+
+def test_index_external_listing_is_not_installable(monkeypatch, env):
+    tc, *_ = env
+    entry = apps_router.IndexEntry(
+        id="acme-lpr", name="Acme LPR", summary="s", category="vehicles", version="2.0",
+        kind="external", external_url="https://acme.example/opennvr", docs_url="https://d",
+        pricing="paid", price_note="$99", entitlement="license_key", author="Acme")
+    monkeypatch.setattr(apps_router, "_load_apps_index", lambda: [entry])
+    monkeypatch.setattr(apps_router, "_require_install_enabled", lambda: None)
+    admin = SimpleNamespace(id=1, username="admin", is_superuser=True)
+    tc.app.dependency_overrides[apps_router.require_apps_install] = lambda: admin
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = lambda: admin
+    listing = tc.get("/apps/index", headers=_site()).json()["apps"][0]
+    assert listing["kind"] == "external" and listing["install"] is None
+    assert listing["pricing"] == "paid" and listing["external_url"].startswith("https://acme")
+    r = tc.post("/apps/index/acme-lpr/install")
+    assert r.status_code == 400 and "external listing" in r.json()["detail"]
+    with pytest.raises(ValueError):
+        apps_router.IndexEntry(id="x", name="x", summary="s", category="c", version="1",
+                               kind="external", external_url="http://insecure", docs_url="d")
+    with pytest.raises(ValueError):
+        apps_router.IndexEntry(id="x", name="x", summary="s", category="c", version="1",
+                               docs_url="d")          # installable without image/install
+

@@ -21,6 +21,21 @@
                                    #   forensics | integration. Reuse an existing one.
   version: "1.0.0"                 # REQUIRED. Matches AppManifest.version. QUOTE IT — a bare 1.0 parses as a YAML float and the validator rejects it.
 
+  # ── Kind & commerce (all OPTIONAL; defaults shown) ──────────────────
+  kind: installable                # installable (image + compose service below) or
+                                   #   external: a listing that links out — your app is
+                                   #   distributed elsewhere; the catalog shows "Learn more"
+                                   #   and never offers Install. External entries carry
+                                   #   external_url (https://) and NO image / install block.
+  # external_url: https://example.com/my-app
+  pricing: free                    # free | paid | subscription | contact — the badge on the card.
+  price_note: ""                   # The human line under it: "$29 / camera / year".
+  entitlement: none                # none | license_key. license_key = an administrator enters
+                                   #   a key in the catalog, core asks YOUR app to verify it
+                                   #   (ContractMixin.verify_license) and refuses to enable the
+                                   #   app until it says yes. Mirror these three in AppManifest.
+  author: ""                       # Shown as "by <author>" on the listing.
+
   image: ghcr.io/<you>/my-app:latest   # REQUIRED. Well-formed ref — ghcr.io/... or
                                        #   opennvr/... . This is the canonical pull ref
                                        #   the one-click installer deploys.
