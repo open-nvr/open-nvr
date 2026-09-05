@@ -30,6 +30,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileText, Flame, RefreshCw, Settings2, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
+import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
 import {
@@ -240,6 +241,10 @@ export function Occupancy() {
   const minOccupancy = Number((occApp?.config as any)?.min_occupancy ?? 0) || 0
   const [draftMax, setDraftMax] = useState<string | null>(null)
   const [draftMin, setDraftMin] = useState<string | null>(null)
+  // Thresholds are the app's SITE-WIDE config — superuser-only on the
+  // server; other users see them, and their own cameras' occupancy.
+  const { user: me } = useAuth()
+  const canConfigure = !!me?.is_superuser
 
   const saveThresholds = useMutation({
     mutationFn: async () => {
@@ -355,6 +360,7 @@ export function Occupancy() {
       )}
 
       {/* ── Thresholds (applied live) ─────────────────────────────── */}
+      {canConfigure && (
       <Card>
         <CardContent className="py-3 flex flex-wrap items-end gap-3">
           <label className="text-xs text-[var(--text-dim)]">
@@ -388,6 +394,7 @@ export function Occupancy() {
           </span>
         </CardContent>
       </Card>
+      )}
 
       {/* ── Busiest hours (7 days of occupancy.changed.v1 samples) ── */}
       {(history?.busiest_hours?.length ?? 0) > 0 && (

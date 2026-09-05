@@ -100,6 +100,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from context import spawn_unscoped
 from opennvr_app_sdk.alerts import Alert, AlertDispatcher
 from opennvr_app_sdk.geometry import Tripwire, Zone
 
@@ -363,7 +364,7 @@ class MonitorHost:
 
         mon.detector = detector
         self._monitors[mid] = mon
-        mon.task = asyncio.create_task(self._loop(mon), name=f"sdk-monitor-{mid}")
+        mon.task = spawn_unscoped(self._loop(mon), name=f"sdk-monitor-{mid}")
         logger.info(
             "hosted monitor #%d started: %s %r on %s (interval %.1fs, alerts %s)",
             mid, rule, target, cams, interval_s,

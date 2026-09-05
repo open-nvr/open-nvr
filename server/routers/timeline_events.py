@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_active_user
 from core.database import get_db, release
 from models import TimelineEvent, User
+from services.camera_scope import visible_camera_ids
 
 router = APIRouter(tags=["timeline"])
 
@@ -126,10 +127,11 @@ async def list_events(
     rows = query_events(
         db, camera_id=camera_id, label=label, source=source, plate=plate,
         has_plate=has_plate, from_=from_, to=to, limit=limit,
-        # Camera data is owner-scoped everywhere in OpenNVR; history and
-        # evidence photos are the MOST sensitive camera data, so the same
-        # rule applies here. Superusers see the fleet.
-        owner_id=None if current_user.is_superuser else current_user.id,
+        # Camera data is scoped to the caller's cameras (owned + can_view
+        # grants) everywhere in OpenNVR; history and evidence photos are
+        # the MOST sensitive camera data, so the same rule applies here.
+        # Superusers see the fleet.
+        scope=visible_camera_ids(db, current_user),
     )
     return {"events": [_serialize(e) for e in rows], "count": len(rows)}
 
@@ -291,7 +293,7 @@ async def get_plate_stats(
     return plate_stats(
         db,
         days=max(1, min(int(days), 90)),
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -311,7 +313,7 @@ async def get_plate_summary(
     return plate_summary(
         db,
         plate=plate,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -350,7 +352,7 @@ async def get_plate_sessions(
         plate=plate,
         in_cameras=_parse_camera_ids(in_cameras),
         out_cameras=_parse_camera_ids(out_cameras),
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
         limit=max(1, min(int(limit), 200)),
     )
 
@@ -372,7 +374,7 @@ async def get_gate_occupancy(
         in_cameras=_parse_camera_ids(in_cameras),
         out_cameras=_parse_camera_ids(out_cameras),
         hours=max(1, min(int(hours), 24 * 7)),
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -393,5 +395,5 @@ async def get_vehicle_report(
         db,
         year=year,
         month=month,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )

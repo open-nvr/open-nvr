@@ -9,8 +9,8 @@
 
 The consumer writes samples; this router serves the Occupancy page's
 charts: a bucketed series per camera over the requested window plus
-busiest-hours-of-day over the last 7 days. Owner-scoped through the
-cameras table like every other read surface."""
+busiest-hours-of-day over the last 7 days. Scoped to the caller's
+visible cameras (owned + can_view grants) like every other read surface."""
 
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.auth import get_current_active_user
 from models import (
-    Camera, OccupancyFootfall, OccupancyHeatmap, OccupancySample, User,
+    OccupancyFootfall, OccupancyHeatmap, OccupancySample, User,
 )
+from services.camera_scope import scope_query, visible_camera_ids
 
 router = APIRouter(tags=["occupancy"])
 
@@ -32,7 +33,7 @@ def occupancy_history(
     db: Session,
     *,
     hours: int = 24,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Bucketed occupancy series + busiest hours. Bucketing happens in
@@ -45,10 +46,7 @@ def occupancy_history(
     week_start = now - timedelta(days=7)
 
     q = db.query(OccupancySample).filter(OccupancySample.ts >= week_start)
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == OccupancySample.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, OccupancySample.camera_id, scope)
 
     series: dict[int, dict[datetime, list[int]]] = {}
     hour_of_day: dict[int, list[int]] = {}
@@ -102,7 +100,7 @@ async def get_occupancy_history(
     return occupancy_history(
         db,
         hours=hours,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -111,7 +109,7 @@ def occupancy_heatmap(
     *,
     camera_id: int,
     hours: int = 24,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """The camera's heat grid summed over the last ``hours`` — the read
@@ -130,10 +128,7 @@ def occupancy_heatmap(
         OccupancyHeatmap.camera_id == camera_id,
         OccupancyHeatmap.hour_start >= start,
     )
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == OccupancyHeatmap.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, OccupancyHeatmap.camera_id, scope)
     cols = rows = 0
     cells: list[int] = []
     frames = 0
@@ -180,7 +175,7 @@ async def get_occupancy_heatmap(
         db,
         camera_id=camera_id,
         hours=hours,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -188,7 +183,7 @@ def occupancy_footfall(
     db: Session,
     *,
     hours: int = 24,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Entries, exits and dwell per camera over the window, as hourly
@@ -198,10 +193,7 @@ def occupancy_footfall(
     start = (now - timedelta(hours=hours)).replace(minute=0, second=0,
                                                    microsecond=0)
     q = db.query(OccupancyFootfall).filter(OccupancyFootfall.hour_start >= start)
-    if owner_id is not None:
-        q = q.join(Camera, Camera.id == OccupancyFootfall.camera_id).filter(
-            Camera.owner_id == owner_id
-        )
+    q = scope_query(q, OccupancyFootfall.camera_id, scope)
     per_camera: dict[int, dict] = {}
     for row in q.order_by(OccupancyFootfall.hour_start.asc()).all():
         cam = per_camera.setdefault(row.camera_id, {
@@ -262,7 +254,7 @@ async def get_occupancy_footfall(
     return occupancy_footfall(
         db,
         hours=hours,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
     )
 
 
@@ -270,7 +262,7 @@ def occupancy_report(
     db: Session,
     *,
     days: int = 7,
-    owner_id: int | None = None,
+    scope: set[int] | None = None,
     now: datetime | None = None,
     tz_offset_minutes: int = 0,
 ) -> dict:
@@ -292,9 +284,7 @@ def occupancy_report(
     # ── occupancy samples → peak / average / busiest hour ──────────
     sq = db.query(OccupancySample).filter(OccupancySample.ts >= start,
                                           OccupancySample.ts < end)
-    if owner_id is not None:
-        sq = sq.join(Camera, Camera.id == OccupancySample.camera_id).filter(
-            Camera.owner_id == owner_id)
+    sq = scope_query(sq, OccupancySample.camera_id, scope)
     per: dict[int, dict] = {}
 
     def _cam(camera_id: int) -> dict:
@@ -322,9 +312,7 @@ def occupancy_report(
     # ── footfall rows → entries / exits / dwell, per day ──────────
     fq = db.query(OccupancyFootfall).filter(OccupancyFootfall.hour_start >= start,
                                             OccupancyFootfall.hour_start < end)
-    if owner_id is not None:
-        fq = fq.join(Camera, Camera.id == OccupancyFootfall.camera_id).filter(
-            Camera.owner_id == owner_id)
+    fq = scope_query(fq, OccupancyFootfall.camera_id, scope)
     for row in fq.all():
         hs = row.hour_start if row.hour_start.tzinfo else \
             row.hour_start.replace(tzinfo=timezone.utc)
@@ -409,6 +397,6 @@ async def get_occupancy_report(
     return occupancy_report(
         db,
         days=days,
-        owner_id=None if current_user.is_superuser else current_user.id,
+        scope=visible_camera_ids(db, current_user),
         tz_offset_minutes=tz_offset_minutes,
     )

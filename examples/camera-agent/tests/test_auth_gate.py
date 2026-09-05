@@ -32,6 +32,9 @@ class _FakeAuth:
         self.me_calls += 1
         return USERS.get(token)
 
+    async def visible_cameras(self, token, user=None):
+        return None   # unrestricted — per-camera scope has its own tests
+
     async def device_allowed(self, device_token):
         self.device_calls += 1
         return self.device_ok

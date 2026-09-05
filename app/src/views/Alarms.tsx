@@ -21,6 +21,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellRing, CheckCheck, PhoneCall, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
+import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import {
   alertsInboxService,
@@ -48,6 +49,11 @@ const SEVERITY_STYLE: Record<string, string> = {
 
 export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
+  // The alarm POLICY (ring modes, actions, test alarms) is a site
+  // decision — superuser-only on the server; everyone else gets their
+  // cameras' alarms and a read-only view of how the site rings.
+  const { user } = useAuth()
+  const isAdmin = !!user?.is_superuser
   const [onlyUnacked, setOnlyUnacked] = useState(false)
   const [severityFilter, setSeverityFilter] = useState<string | null>(null)
 
@@ -143,8 +149,10 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
                 >
                   <span className="capitalize">{sev}</span>
                   <select
-                    className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5"
+                    className="bg-[var(--panel)] border border-[var(--border)] rounded px-1 py-0.5 disabled:opacity-60"
                     value={ring[sev]}
+                    disabled={!isAdmin}
+                    title={isAdmin ? undefined : 'Only an administrator can change the site alarm policy'}
                     onChange={(e) =>
                       saveRing.mutate({
                         ...ring,
@@ -164,6 +172,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
           )}
         </div>
 
+        {isAdmin && (
         <div className="border border-[var(--border)] rounded p-3 space-y-2">
           <div className="font-medium">Verify the alarm chain</div>
           <div className="text-[12px] text-[var(--text-dim)]">
@@ -189,7 +198,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
             </div>
           )}
         </div>
+        )}
 
+        {isAdmin && (
         <div className="border border-[var(--border)] rounded p-3 space-y-2 md:col-span-2">
           <div className="font-medium">Arm vehicle alarms (LPR)</div>
           <div className="text-[12px] text-[var(--text-dim)]">
@@ -210,8 +221,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
             sound policy above, they ring until acknowledged.
           </div>
         </div>
+        )}
 
-        <AlarmActionsCard />
+        {isAdmin && <AlarmActionsCard />}
       </div>
 
       {/* Filters */}

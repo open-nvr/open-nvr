@@ -40,6 +40,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 import models  # noqa: E402
 from services.timeline_service import plate_stats  # noqa: E402
+from services.camera_scope import visible_camera_ids  # noqa: E402
 
 NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -86,7 +87,7 @@ def db():
 
 def test_counts_window_and_uniques(db):
     s, users, cams = db
-    stats = plate_stats(s, days=7, owner_id=None, now=NOW)
+    stats = plate_stats(s, days=7, scope=None, now=NOW)
     assert stats["total_reads"] == 4            # OLD999 + plateless excluded
     assert stats["unique_plates"] == 3
     per_cam = {e["camera_id"]: e["reads"] for e in stats["per_camera"]}
@@ -97,14 +98,14 @@ def test_counts_window_and_uniques(db):
 
 def test_owner_scoping(db):
     s, users, cams = db
-    stats = plate_stats(s, days=7, owner_id=users["alice"].id, now=NOW)
+    stats = plate_stats(s, days=7, scope=visible_camera_ids(s, users["alice"]), now=NOW)
     assert stats["total_reads"] == 3            # bob's lot excluded
     assert all(e["camera_id"] != cams["lot"].id for e in stats["per_camera"])
 
 
 def test_window_days(db):
     s, users, _ = db
-    wide = plate_stats(s, days=90, owner_id=None, now=NOW)
+    wide = plate_stats(s, days=90, scope=None, now=NOW)
     assert wide["total_reads"] == 5             # OLD999 now inside
 
 
@@ -115,14 +116,14 @@ def test_plate_summary_all_time_counts_and_range(db):
     from services.timeline_service import plate_summary
 
     s, users, cams = db
-    got = plate_summary(s, plate="aaa 111", owner_id=users["alice"].id)
+    got = plate_summary(s, plate="aaa 111", scope=visible_camera_ids(s, users["alice"]))
     assert got["plate"] == "AAA111"
     assert got["total_reads"] == 2
     assert got["per_camera"] == [{"camera_id": cams["gate"].id, "reads": 2}]
     # first/last seen span the two visits (2h ago .. 1h ago)
     assert got["first_seen"] < got["last_seen"]
     # ALL-time: the 30-day-old read of another plate is still visible
-    old = plate_summary(s, plate="OLD999", owner_id=users["alice"].id)
+    old = plate_summary(s, plate="OLD999", scope=visible_camera_ids(s, users["alice"]))
     assert old["total_reads"] == 1
 
 
@@ -132,11 +133,11 @@ def test_plate_summary_owner_scoped_and_unknown_plate(db):
     s, users, _cams = db
     # bob's camera read is invisible to alice…
     assert plate_summary(s, plate="CCC333",
-                         owner_id=users["alice"].id)["total_reads"] == 0
-    # …and visible fleet-wide (owner_id=None = superuser)
-    assert plate_summary(s, plate="CCC333", owner_id=None)["total_reads"] == 1
+                         scope=visible_camera_ids(s, users["alice"]))["total_reads"] == 0
+    # …and visible fleet-wide (scope=None = superuser)
+    assert plate_summary(s, plate="CCC333", scope=None)["total_reads"] == 1
     # A plate never seen: zeroes, not an error.
-    none = plate_summary(s, plate="ZZ00XX", owner_id=None)
+    none = plate_summary(s, plate="ZZ00XX", scope=None)
     assert none == {"plate": "ZZ00XX", "total_reads": 0,
                     "first_seen": None, "last_seen": None, "per_camera": []}
 
@@ -158,7 +159,7 @@ def test_plate_sessions_pairs_in_and_out(db):
     got = plate_sessions(
         s, plate="AAA111",
         in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
-        owner_id=users["alice"].id)
+        scope=visible_camera_ids(s, users["alice"]))
     assert got["inside_now"] is False
     assert len(got["sessions"]) == 2  # newest first
     closed = got["sessions"][0]
@@ -178,7 +179,7 @@ def test_plate_sessions_open_session_means_inside(db):
     got = plate_sessions(
         s, plate="AAA111",
         in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
-        owner_id=users["alice"].id)
+        scope=visible_camera_ids(s, users["alice"]))
     # No OUT reads in the base fixture: latest entry is still open.
     assert got["inside_now"] is True
     assert got["sessions"][0]["exited_at"] is None
@@ -201,7 +202,7 @@ def test_gate_occupancy_counts_last_direction(db):
     s.commit()
     got = gate_occupancy(
         s, in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
-        hours=24, owner_id=users["alice"].id, now=NOW)
+        hours=24, scope=visible_camera_ids(s, users["alice"]), now=NOW)
     assert got == {"inside": 1, "plates": ["AAA111"]}
 
 
@@ -210,7 +211,7 @@ def test_gate_occupancy_needs_both_directions(db):
 
     s, users, cams = db
     assert gate_occupancy(s, in_cameras=[cams["gate"].id], out_cameras=[],
-                          owner_id=users["alice"].id) == {"inside": 0, "plates": []}
+                          scope=visible_camera_ids(s, users["alice"])) == {"inside": 0, "plates": []}
 
 
 # ── vehicle_report (the printable monthly report) ───────────────────
@@ -223,7 +224,7 @@ def test_vehicle_report_month_window_and_rollups(db):
     # Fixture reads are around NOW (2026-08-29): AAA111 ×2 on gate,
     # BBB222 on yard, CCC333 on bob's lot, OLD999 ~30 days back
     # (2026-07-30 — the PREVIOUS month), plus a plateless row.
-    got = vehicle_report(s, year=2026, month=8, owner_id=None)
+    got = vehicle_report(s, year=2026, month=8, scope=None)
     assert got["total_reads"] == 4          # OLD999 + plateless excluded
     assert got["unique_plates"] == 3
     plates = {p["plate"]: p for p in got["per_plate"]}
@@ -233,7 +234,7 @@ def test_vehicle_report_month_window_and_rollups(db):
     assert plates["AAA111"]["first_seen"] < plates["AAA111"]["last_seen"]
     assert sum(d["reads"] for d in got["per_day"]) == 4
     # July catches the old read.
-    july = vehicle_report(s, year=2026, month=7, owner_id=None)
+    july = vehicle_report(s, year=2026, month=7, scope=None)
     assert {p["plate"] for p in july["per_plate"]} == {"OLD999"}
 
 
@@ -241,6 +242,6 @@ def test_vehicle_report_owner_scoped(db):
     from services.timeline_service import vehicle_report
 
     s, users, _cams = db
-    got = vehicle_report(s, year=2026, month=8, owner_id=users["alice"].id)
+    got = vehicle_report(s, year=2026, month=8, scope=visible_camera_ids(s, users["alice"]))
     assert {p["plate"] for p in got["per_plate"]} == {"AAA111", "BBB222"}
     assert got["total_reads"] == 3

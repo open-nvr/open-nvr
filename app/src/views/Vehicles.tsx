@@ -34,6 +34,7 @@ import {
   RefreshCw, Search, ShieldAlert, ShieldCheck, Trash2, Upload,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { useAuth } from '../auth/AuthContext'
 import { Link } from 'react-router-dom'
 import { alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 import { extractApiError } from '../lib/apiError'
@@ -477,6 +478,11 @@ export function Vehicles() {
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
   const [preview, setPreview] = useState<PlateEvent | null>(null)
   const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring' | 'alarms'>('reads')
+  // The register, monitors, barrier and alarm mode are the LPR app's
+  // SITE-WIDE config — superuser-only on the server. Everyone else
+  // gets the reads and alarms for their own cameras.
+  const { user: me } = useAuth()
+  const canConfigure = !!me?.is_superuser
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
   const [reportOpen, setReportOpen] = useState(false)
   const [registerPrefill, setRegisterPrefill] = useState('')
@@ -752,7 +758,7 @@ export function Vehicles() {
           { key: 'registry', label: `Vehicle register (${registry.length})` },
           { key: 'monitoring', label: `Monitoring (${monitors.length})` },
           { key: 'alarms', label: 'Alarms' },
-        ] as const).map((t) => (
+        ] as const).filter((t) => canConfigure || t.key === 'reads' || t.key === 'alarms').map((t) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
@@ -775,7 +781,7 @@ export function Vehicles() {
       ) : tab === 'monitoring' ? (
         <MonitoringTab
           monitors={monitors}
-          canEdit={Boolean(lprApp)}
+          canEdit={Boolean(lprApp) && canConfigure}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
           onSave={saveMonitors}
@@ -862,7 +868,7 @@ export function Vehicles() {
                    : 'Automatic barrier off'),
             })
           }}
-          canEdit={Boolean(lprApp)}
+          canEdit={Boolean(lprApp) && canConfigure}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
           cameraRoles={cameraRoles}
@@ -922,6 +928,7 @@ export function Vehicles() {
                         {new Date(r.time * 1000).toLocaleTimeString()}
                       </td>
                       <td className="py-1 text-right">
+                        {canConfigure && (
                         <Button
                           variant="outline"
                           onClick={() => {
@@ -931,6 +938,7 @@ export function Vehicles() {
                         >
                           <Plus size={13} /> Register
                         </Button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1065,7 +1073,7 @@ export function Vehicles() {
                           : <Badge variant="neutral">{e.label || 'vehicle'}</Badge>}
                       </td>
                       <td className="px-3 py-1.5 text-right pr-4 whitespace-nowrap">
-                        {lprApp && !registered && (
+                        {lprApp && canConfigure && !registered && (
                           <button
                             title="Register this vehicle — one click adds the plate to the Vehicle register; add owner details there any time"
                             className="text-[var(--text-dim)] hover:text-[var(--text)] mr-2"
@@ -1086,7 +1094,7 @@ export function Vehicles() {
                             <BookUser size={15} />
                           </button>
                         )}
-                        {lprApp && !inDeny && (
+                        {lprApp && canConfigure && !inDeny && (
                           <button
                             title="Monitor this plate — alert whenever it is seen (configure in the Monitoring tab)"
                             className="text-[var(--text-dim)] hover:text-[var(--text)] mr-2"

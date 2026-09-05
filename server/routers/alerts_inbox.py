@@ -22,6 +22,12 @@ The read side of ``services/alerts_inbox.py``: the UI's alert bell polls
 every open browser goes quiet together. Acknowledge is idempotent and
 recorded with the acknowledging user — an alarm silenced at 3am should
 say by whom.
+
+Scope: an operator sees, counts and acknowledges only the alerts raised
+on cameras they may view (``services.camera_scope``); alerts with no
+camera (a site-wide notice, a test alarm) reach everyone. The alarm
+POLICY — ring modes, call/SMS/hooter actions, test alarms — is a site
+decision and superuser-only.
 """
 
 from __future__ import annotations
@@ -32,9 +38,10 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user
+from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from models import AppAlert, SecuritySetting, User
 from services.alerts_inbox import (
@@ -49,6 +56,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/alerts-inbox", tags=["alerts-inbox"])
 
 _MAX_LIMIT = 200
+
+
+def _scope_alerts(q, scope: set[int] | None):
+    """Restrict an AppAlert query to ``scope`` (the caller's visible
+    camera ids from ``camera_scope.visible_camera_ids``).
+
+    ``AppAlert.camera_id`` is the wire handle (``cam3``) — or NULL /
+    blank for an alert about nothing in particular, which every operator
+    gets. Superusers (scope None) see the lot; a user granted no cameras
+    sees only the camera-less rows.
+    """
+    if scope is None:
+        return q
+    handles: list[str] = []
+    for cam_id in sorted(scope):
+        handles += [f"cam{cam_id}", f"cam-{cam_id}", str(cam_id)]
+    camera_less = or_(AppAlert.camera_id.is_(None), AppAlert.camera_id == "")
+    if not handles:
+        return q.filter(camera_less)
+    return q.filter(or_(camera_less,
+                        func.lower(AppAlert.camera_id).in_(handles)))
 
 
 def _row_out(a: AppAlert) -> dict:
@@ -93,7 +121,10 @@ async def list_alerts(
 ):
     """Inbox listing, newest first. ``unacked=true`` is what the bell
     polls; the full list backs the Alerts & Incidents page."""
-    q = db.query(AppAlert)
+    from services.camera_scope import visible_camera_ids
+
+    scope = visible_camera_ids(db, current_user)
+    q = _scope_alerts(db.query(AppAlert), scope)
     if unacked:
         q = q.filter(AppAlert.acknowledged_at.is_(None))
     if severity:
@@ -104,7 +135,7 @@ async def list_alerts(
         q = q.filter(AppAlert.id > after_id)
     rows = q.order_by(AppAlert.id.desc()).limit(limit).all()
     unacked_count = (
-        db.query(AppAlert.id)
+        _scope_alerts(db.query(AppAlert.id), scope)
         .filter(AppAlert.acknowledged_at.is_(None))
         .count()
     )
@@ -125,8 +156,14 @@ async def acknowledge(
     db: Session = Depends(get_db),
 ):
     """Silence alerts. Idempotent — an already-acked id is left with its
-    ORIGINAL acknowledgement (first silencer wins the audit trail)."""
-    q = db.query(AppAlert).filter(AppAlert.acknowledged_at.is_(None))
+    ORIGINAL acknowledgement (first silencer wins the audit trail).
+    Only alerts the caller can see are touched: "ack all" silences MY
+    inbox, and an id on someone else's camera is simply not found."""
+    from services.camera_scope import visible_camera_ids
+
+    q = _scope_alerts(db.query(AppAlert),
+                      visible_camera_ids(db, current_user)).filter(
+        AppAlert.acknowledged_at.is_(None))
     if payload.ids is not None:
         if not payload.ids:
             return {"acknowledged": 0}
@@ -151,7 +188,7 @@ class TestAlarmIn(BaseModel):
 @router.post("/test")
 async def fire_test_alarm(
     payload: TestAlarmIn,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
 ):
     """Fire a synthetic alarm through the REAL ingestion path.
 
@@ -202,7 +239,7 @@ class ActionConfigIn(BaseModel):
 
 @router.get("/actions")
 async def get_alarm_actions(
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """Call / SMS / hooter configuration, secret masked (set/unset)."""
@@ -214,7 +251,7 @@ async def get_alarm_actions(
 @router.put("/actions")
 async def put_alarm_actions(
     payload: ActionConfigIn,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     from services.alarm_actions import (
@@ -239,7 +276,7 @@ async def put_alarm_actions(
 
 @router.post("/actions/test")
 async def test_alarm_actions(
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
 ):
     """Run every ENABLED action once with a synthetic alarm and return
     each action's outcome — validates Twilio credentials and the relay
@@ -292,7 +329,7 @@ class RingConfigIn(BaseModel):
 @router.put("/ring-config")
 async def put_ring_config(
     payload: RingConfigIn,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """Replace the ring policy. Unknown severities/modes are rejected

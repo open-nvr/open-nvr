@@ -104,7 +104,9 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from core.auth import create_access_token, get_current_active_user  # noqa: E402
+from core.auth import (  # noqa: E402
+    create_access_token, get_current_active_user, get_current_superuser,
+)
 from core.database import Base, get_db  # noqa: E402
 from models import AuditLog, InstalledApp, Role, User  # noqa: E402
 from routers import apps as apps_router  # noqa: E402
@@ -116,10 +118,12 @@ from routers.apps import (  # noqa: E402
 
 
 class _StubUser:
-    """Just enough of a User for the router + audit log."""
+    """Just enough of a User for the router + audit log. A superuser:
+    camera scoping has its own module (test_apps_camera_scope)."""
 
     id = 1
     username = "tester"
+    is_superuser = True
 
 
 def _make_app():
@@ -166,6 +170,7 @@ def client():
     re-proven per route."""
     app, _session_factory, engine = _make_app()
     app.dependency_overrides[get_current_active_user] = lambda: _StubUser()
+    app.dependency_overrides[get_current_superuser] = lambda: _StubUser()
     app.dependency_overrides[get_register_principal] = lambda: _StubUser()
     app.dependency_overrides[get_read_principal] = lambda: _StubUser()
 
@@ -199,6 +204,7 @@ def auth_client(monkeypatch):
     app, session_factory, engine = _make_app()
     # Operator routes stay overridden — only registration auth is real.
     app.dependency_overrides[get_current_active_user] = lambda: _StubUser()
+    app.dependency_overrides[get_current_superuser] = lambda: _StubUser()
 
     session = session_factory()
     role = Role(name="admin")

@@ -43,6 +43,7 @@ import core.database as cdb  # noqa: E402
 import models  # noqa: E402
 import services.occupancy_event_consumer as occ  # noqa: E402
 from routers.occupancy import occupancy_history  # noqa: E402
+from services.camera_scope import visible_camera_ids  # noqa: E402
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
 
@@ -145,7 +146,7 @@ def test_history_buckets_and_owner_scope(db):
     _sample(s, cams["lot"], 30, hours_ago=1.0)   # bob's camera
     _sample(s, cams["hall"], 9, hours_ago=30.0)  # outside 24h window
 
-    got = occupancy_history(s, hours=48, owner_id=users["alice"].id, now=NOW)
+    got = occupancy_history(s, hours=48, scope=visible_camera_ids(s, users["alice"]), now=NOW)
     assert got["bucket_minutes"] == 60
     assert [c["camera_id"] for c in got["cameras"]] == [cams["hall"].id]
     samples = got["cameras"][0]["samples"]
@@ -161,7 +162,7 @@ def test_history_buckets_and_owner_scope(db):
 def test_history_fleet_view_and_fine_buckets(db):
     s, _users, cams = db
     _sample(s, cams["lot"], 30, hours_ago=0.1)
-    got = occupancy_history(s, hours=24, owner_id=None, now=NOW)
+    got = occupancy_history(s, hours=24, scope=None, now=NOW)
     assert got["bucket_minutes"] == 15
     assert [c["camera_id"] for c in got["cameras"]] == [cams["lot"].id]
 
@@ -202,7 +203,7 @@ def test_heatmap_deltas_sum_into_the_camera_hour(db):
     assert s.query(models.OccupancyHeatmap).count() == 2
 
     out = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=24,
-                            owner_id=users["alice"].id,
+                            scope=visible_camera_ids(s, users["alice"]),
                             now=NOW + timedelta(hours=1, minutes=5))
     assert (out["cols"], out["rows"]) == (48, 27)
     assert len(out["cells"]) == 48 * 27
@@ -211,12 +212,12 @@ def test_heatmap_deltas_sum_into_the_camera_hour(db):
     # the window floors to hour boundaries (a partial current hour is
     # always included): at 14:05 a one-hour window starts at 13:00
     out1 = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=1,
-                             owner_id=users["alice"].id,
+                             scope=visible_camera_ids(s, users["alice"]),
                              now=NOW + timedelta(hours=2, minutes=5))
     assert out1["cells"][5] == 1 and out1["hours_covered"] == 1
     # owner scope: bob cannot read alice's camera
     other = occupancy_heatmap(s, camera_id=cams["hall"].id, hours=24,
-                              owner_id=users["bob"].id,
+                              scope=visible_camera_ids(s, users["bob"]),
                               now=NOW + timedelta(hours=2))
     assert other["cols"] == 0 and other["cells"] == [] and other["max"] == 0
 
@@ -290,7 +291,7 @@ def test_footfall_deltas_sum_into_the_camera_hour(db):
     assert (rows[0].entries, rows[0].exits, rows[0].dwell_count) == (4, 1, 3)
     assert rows[0].dwell_seconds == 45.0 and rows[0].dwell_max_seconds == 30.0
 
-    out = occupancy_footfall(s, hours=24, owner_id=users["alice"].id,
+    out = occupancy_footfall(s, hours=24, scope=visible_camera_ids(s, users["alice"]),
                              now=NOW + timedelta(hours=1, minutes=5))
     assert out["totals"] == {"entries": 4, "exits": 3, "dwell_count": 3,
                              "dwell_avg_seconds": 15.0, "dwell_max_seconds": 30.0}
@@ -301,7 +302,7 @@ def test_footfall_deltas_sum_into_the_camera_hour(db):
     assert cam_out["hours"][0]["dwell_avg_seconds"] == 15.0
     assert cam_out["hours"][1]["dwell_avg_seconds"] is None
     # bob owns no camera with footfall
-    assert occupancy_footfall(s, hours=24, owner_id=users["bob"].id,
+    assert occupancy_footfall(s, hours=24, scope=visible_camera_ids(s, users["bob"]),
                               now=NOW + timedelta(hours=2))["cameras"] == []
 
 
@@ -338,7 +339,7 @@ def test_report_rolls_up_all_three_histories(db):
     assert occ.apply_footfall_event(_foot_envelope(
         camera=cam, ts=NOW - timedelta(days=10), entries=99)) == "applied"
 
-    out = occupancy_report(s, days=7, owner_id=users["alice"].id, now=NOW)
+    out = occupancy_report(s, days=7, scope=visible_camera_ids(s, users["alice"]), now=NOW)
     assert out["days"] == 7 and len(out["cameras"]) == 1
     c = out["cameras"][0]
     assert c["peak_occupancy"] == 9
@@ -348,7 +349,7 @@ def test_report_rolls_up_all_three_histories(db):
     assert c["busiest_hour"] == {"hour": (day1 + timedelta(hours=1)).hour, "avg": 9.0}
     # local-time bucketing: +5:30 shifts the busiest hour and can move a
     # late-evening row into the next local day
-    ist = occupancy_report(s, days=7, owner_id=users["alice"].id, now=NOW,
+    ist = occupancy_report(s, days=7, scope=visible_camera_ids(s, users["alice"]), now=NOW,
                            tz_offset_minutes=330)
     assert ist["cameras"][0]["busiest_hour"]["hour"] == \
         ((day1 + timedelta(hours=1, minutes=330)).hour)
@@ -360,4 +361,4 @@ def test_report_rolls_up_all_three_histories(db):
     assert out["totals"]["peak_camera_id"] == cams["hall"].id
     assert [d["entries"] for d in out["daily"]] == [5, 2]
     # bob sees nothing of alice's camera
-    assert occupancy_report(s, days=7, owner_id=users["bob"].id, now=NOW)["cameras"] == []
+    assert occupancy_report(s, days=7, scope=visible_camera_ids(s, users["bob"]), now=NOW)["cameras"] == []

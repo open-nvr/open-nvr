@@ -67,8 +67,14 @@ from adapter_clients import (
 from context import (
     CameraContext,
     CameraSpec,
+    camera_in_scope,
+    camera_scope,
+    reset_camera_scope,
     run_app_alert_subscriber,
     run_event_subscriber,
+    scoped_cameras,
+    set_camera_scope,
+    spawn_unscoped,
 )
 from frame_sources import build_frame_source, discover_local_cameras
 from monitor_host import MonitorHost
@@ -890,7 +896,7 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
     so the UI can SHOW what the agent saw in the chat. Reads the per-turn frame
     cache (populated by the vision tools) for the cameras in last_cameras_used —
     no extra fetch. Capped in count and size to keep the response small."""
-    roles = {c.camera_id: c.role for c in runtime.cfg.cameras}
+    roles = {c.camera_id: c.role for c in runtime.visible_cameras()}
     out: list[dict] = []
     seen: set[str] = set()
     for cid in getattr(runtime.tools, "last_cameras_used", []) or []:
@@ -986,7 +992,7 @@ class TaskManager:
         while len(self._order) > self._max:
             old = self._order.pop(0)
             self._tasks.pop(old, None)
-        asyncio.create_task(self._run(task), name=f"agent-task-{task.id}")
+        spawn_unscoped(self._run(task), name=f"agent-task-{task.id}")
         logger.info("task #%d queued: %r", task.id, task.query)
         return task
 
@@ -1214,7 +1220,7 @@ class MonitorManager:
             self._monitors.pop(old, None)
         if kind not in self._CONVERGED:
             # Legacy poll loop — only kind="notify" lands here now.
-            self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
+            self._tasks[mon.id] = spawn_unscoped(self._loop(mon), name=f"monitor-{mon.id}")
         logger.info("monitor #%d (%s %r on %s) started", mon.id, kind, target, camera_ids)
         return mon
 
@@ -1704,7 +1710,7 @@ class AlarmManager:
             old = self._order.pop(0)
             self.stop(old)
             self._alarms.pop(old, None)
-        self._tasks[alarm.id] = asyncio.create_task(self._loop(alarm), name=f"alarm-{alarm.id}")
+        self._tasks[alarm.id] = spawn_unscoped(self._loop(alarm), name=f"alarm-{alarm.id}")
         logger.info("alarm #%d %r (%s on %s, %s) armed", alarm.id, alarm.name,
                     alarm.target, camera_ids, alarm.window_label())
         return alarm
@@ -2407,7 +2413,7 @@ class ReportScheduler:
 
     def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self._loop(), name="report-scheduler")
+            self._task = spawn_unscoped(self._loop(), name="report-scheduler")
 
     def stop_all(self) -> None:
         if self._task:
@@ -3386,6 +3392,12 @@ class CameraAgentRuntime:
         self.persist()
         return self.ring_defaults()
 
+    def visible_cameras(self) -> list[CameraSpec]:
+        """The roster as the CURRENT CALLER may see it — the full fleet
+        outside a scoped request (background loops, auth_mode none). Every
+        request-serving read of ``cfg.cameras`` goes through here."""
+        return scoped_cameras(self.cfg.cameras)
+
     def events_feed(self, limit: int = 50) -> list[dict[str, Any]]:
         """ONE feed of what happened — alarm rings, watch hits, and app
         alerts relayed off the bus — newest first. The demo's Events card
@@ -3407,7 +3419,10 @@ class CameraAgentRuntime:
                         "detail": str(al.summary or ""),
                         "severity": str(al.severity or "info"),
                         "kind": "app", "source": al.app_id})
-        out = [e for e in out if e.get("ts")]
+        # A caller sees the alarms/watches/alerts of THEIR cameras; an
+        # entry about no camera in particular reaches everyone.
+        out = [e for e in out if e.get("ts")
+               and (not e["camera_id"] or camera_in_scope(e["camera_id"]))]
         out.sort(key=lambda e: e["ts"], reverse=True)
         return out[:limit]
 
@@ -3780,7 +3795,7 @@ class CameraAgentRuntime:
         # "all cameras" reads wrong on a single-camera install (the one
         # camera IS the fleet, but the operator armed it on THAT camera
         # and expects to hear its name back).
-        _fleet = {c.camera_id for c in self.cfg.cameras}
+        _fleet = {c.camera_id for c in self.visible_cameras()}
         where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
                  else ", ".join(cams))
         window = alarm.window_label()
@@ -3848,7 +3863,7 @@ class CameraAgentRuntime:
             return "What's the person's name?"
         cam = str(args.get("camera_id") or "").strip()
         if not self.context.known_camera(cam):
-            cams = [c.camera_id for c in self.cfg.cameras]
+            cams = [c.camera_id for c in self.visible_cameras()]
             return f"Which camera should I capture from? Available: {cams}."
         try:
             frame = await self.context.get_frame(cam)
@@ -4017,7 +4032,7 @@ class CameraAgentRuntime:
         # "all cameras" reads wrong on a single-camera install (the one
         # camera IS the fleet, but the operator armed it on THAT camera
         # and expects to hear its name back).
-        _fleet = {c.camera_id for c in self.cfg.cameras}
+        _fleet = {c.camera_id for c in self.visible_cameras()}
         where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
                  else ", ".join(cams))
         if kind == "notify":
@@ -4865,7 +4880,7 @@ class CameraAgentRuntime:
         """Compose the system prompt the LLM sees: the agent's identity + the
         operator's base prompt + a per-camera roster + task guidance."""
         roster = "\n".join(
-            f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
+            f"- {cam.camera_id}: {cam.role}" for cam in self.visible_cameras()
         )
         # Per-turn wall clock, in the container's local timezone (TZ is passed
         # through by the compose files). Without this the model cannot turn
@@ -5123,6 +5138,22 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return "operator"       # arm/create/ack/remove verbs
         return "viewer"             # look + chat (/ask, /converse, /say, GETs)
 
+    def _scoped_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Monitors/alarms the caller may see: every camera the rule
+        watches must be in their scope (a rule armed on the yard is not a
+        guard-of-the-gate's business, even if it also covers the gate)."""
+        return [r for r in rules
+                if all(camera_in_scope(str(c)) for c in (r.get("camera_ids") or []))]
+
+    def _rule_visible(rules: list[dict[str, Any]], rule_id: int) -> bool:
+        return any(int(r.get("id", -1)) == int(rule_id) for r in _scoped_rules(rules))
+
+    def _scoped_notes(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Alarm events / watch notifications for the caller's cameras
+        (an entry naming no camera reaches everyone)."""
+        return [n for n in notes
+                if not n.get("camera") or camera_in_scope(str(n.get("camera")))]
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         if runtime.cfg.auth_mode != "opennvr":
@@ -5153,7 +5184,23 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 status_code=403)
         request.state.agent_user = user
         request.state.agent_tier = tier
-        return await call_next(request)
+        # Per-camera RBAC: bind the caller's visible cameras for the rest
+        # of this request (tools, rings, roster — see context.CAMERA_SCOPE).
+        # Agent cameras not linked to a server camera are superuser-only,
+        # like the server's own owner-less cameras.
+        scope_token = set_camera_scope(await _scope_for(token, user))
+        try:
+            return await call_next(request)
+        finally:
+            reset_camera_scope(scope_token)
+
+    async def _scope_for(token: str, user: dict[str, Any]) -> set[str] | None:
+        server_ids = await runtime.auth.visible_cameras(token, user)
+        if server_ids is None:
+            return None
+        return {c.camera_id for c in runtime.cfg.cameras
+                if c.opennvr_camera_id is not None
+                and int(c.opennvr_camera_id) in server_ids}
 
     # ── Interactive priority ───────────────────────────────────────
     # Bracket a discrete voice/chat turn so background detection loops
@@ -5402,11 +5449,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return {"available": True, "ok": False, "events": []}
         # Map server-side camera ids back to this agent's ids/roles so the
         # card can say "the front door", not "camera 7".
-        by_srv = {int(c.opennvr_camera_id): c for c in runtime.cfg.cameras
+        by_srv = {int(c.opennvr_camera_id): c for c in runtime.visible_cameras()
                   if c.opennvr_camera_id is not None}
         rows = []
         for e in events:
             spec = by_srv.get(int(e.camera_id))
+            if spec is None and camera_scope() is not None:
+                # The store is fleet-wide (internal key); a scoped caller
+                # gets only the visits on cameras they may see.
+                continue
             rows.append({
                 "id": e.id, "label": e.label,
                 "camera_id": spec.camera_id if spec else str(e.camera_id),
@@ -5514,7 +5565,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "cameras": [
                 {"camera_id": cam.camera_id, "role": cam.role}
-                for cam in runtime.cfg.cameras
+                for cam in runtime.visible_cameras()
             ]
         }
 
@@ -5537,7 +5588,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "added": [{"camera_id": c.camera_id, "frame_url": c.frame_url} for c in added],
             "cameras": [
-                {"camera_id": c.camera_id, "role": c.role} for c in runtime.cfg.cameras
+                {"camera_id": c.camera_id, "role": c.role} for c in runtime.visible_cameras()
             ],
         }
 
@@ -5720,8 +5771,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _monitors() -> dict[str, Any]:
         """Standing monitors + any new notifications (UI polls this)."""
         return {
-            "monitors": runtime.monitors.list(),
-            "notifications": runtime.monitors.notifications(),
+            "monitors": _scoped_rules(runtime.monitors.list()),
+            "notifications": _scoped_notes(runtime.monitors.notifications()),
         }
 
     @app.post("/monitors")
@@ -5734,12 +5785,16 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         msg = await runtime._handle_create_monitor(body or {})
         if msg.startswith("ERROR:") or msg.endswith("?"):
             return JSONResponse({"error": msg}, status_code=400)
-        return JSONResponse({"message": msg, "monitors": runtime.monitors.list()}, status_code=202)
+        return JSONResponse({"message": msg,
+                             "monitors": _scoped_rules(runtime.monitors.list())},
+                            status_code=202)
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
         """The UI's ✕: stop AND forget — idempotent, same contract as
         DELETE /alarms/{id} (already-gone is success)."""
+        if not _rule_visible(runtime.monitors.list(), monitor_id):
+            return JSONResponse({"stopped": False, "already_gone": True})
         ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
         return JSONResponse({"stopped": ok, "already_gone": not ok})
@@ -5748,10 +5803,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _alarms() -> dict[str, Any]:
         """Armed alarms + recent trigger events (UI polls; rings while any
         alarm is triggered)."""
-        alarms = runtime.alarms.list()
+        alarms = _scoped_rules(runtime.alarms.list())
         return {
             "alarms": alarms,
-            "events": runtime.alarms.events(),
+            "events": _scoped_notes(runtime.alarms.events()),
             # Ring only for ACTIVE, triggered alarms. list() also returns
             # disarmed ones; without the active check a stale triggered flag on a
             # disarmed alarm left the siren banner up while the panel showed
@@ -5801,7 +5856,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         msg = await runtime._handle_create_alarm(body or {})
         if msg.startswith("ERROR:") or msg.endswith("?"):
             return JSONResponse({"error": msg}, status_code=400)
-        return JSONResponse({"message": msg, "alarms": runtime.alarms.list()}, status_code=202)
+        return JSONResponse({"message": msg,
+                             "alarms": _scoped_rules(runtime.alarms.list())},
+                            status_code=202)
 
     @app.post("/alarms/ack")
     async def _ack_alarms(request: Request) -> JSONResponse:
@@ -5811,7 +5868,14 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         except Exception:
             body = {}
         aid = body.get("alarm_id")
-        n = runtime.alarms.acknowledge(int(aid) if aid is not None else None)
+        if aid is not None:
+            if not _rule_visible(runtime.alarms.list(), int(aid)):
+                return JSONResponse({"silenced": 0})
+            return JSONResponse({"silenced": runtime.alarms.acknowledge(int(aid))})
+        # "Silence everything" silences MY alarms — the ones on cameras I
+        # can see; someone else's yard alarm keeps ringing for them.
+        n = sum(runtime.alarms.acknowledge(int(a["id"]))
+                for a in _scoped_rules(runtime.alarms.list()))
         return JSONResponse({"silenced": n})
 
     @app.delete("/alarms/{alarm_id}")
@@ -5824,6 +5888,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         'couldn't remove' six times for an alarm that WAS removed —
         alarming (sic) and wrong. Deletion's contract is 'make it not
         exist', and it already doesn't."""
+        if not _rule_visible(runtime.alarms.list(), alarm_id):
+            return JSONResponse({"stopped": False, "already_gone": True})
         ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
         return JSONResponse({"stopped": ok, "already_gone": not ok})
@@ -5916,7 +5982,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if not text:
             return JSONResponse({"error": "text is required"}, status_code=400)
 
-        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        configured = {cam.camera_id for cam in runtime.visible_cameras()}
         camera_hint = None
         for part in str((body or {}).get("camera") or "").split(","):
             part = part.strip()
@@ -6036,7 +6102,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         # UI-selected camera hint: one id, a comma list, or "all". Use the
         # first concrete configured camera as the grounding default; "all"
         # or empty leaves it to the agent.
-        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        configured = {cam.camera_id for cam in runtime.visible_cameras()}
         raw_hint = request.query_params.get("camera") or ""
         camera_hint = None
         for part in raw_hint.split(","):
@@ -6238,6 +6304,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             if _user is None:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
+            # Same per-camera scope as the HTTP gate, for the life of the
+            # voice session (the pipeline's tool calls run in this task).
+            set_camera_scope(await _scope_for(_tok, _user))
         await websocket.accept()
         last: str | None = None
         try:
@@ -6778,13 +6847,13 @@ async def _run_conversation_turn(
     # are instant: previously they ran the full tool loop (tens of seconds on a
     # CPU model) only to have the roster answer override the result at the end.
     if _is_config_question(user_text):
-        return _roster_answer(runtime.cfg.cameras)
+        return _roster_answer(runtime.visible_cameras())
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": runtime.build_system_prompt()}
     ]
     tools = tool_definitions if tool_definitions is not None else runtime.tool_definitions
-    cameras = [cam.camera_id for cam in runtime.cfg.cameras]
+    cameras = [cam.camera_id for cam in runtime.visible_cameras()]
     # UI-selected camera: when the user doesn't name one, bias the model
     # toward the camera the operator picked in the dropdown.
     if preferred_camera and preferred_camera in cameras:
@@ -6908,18 +6977,18 @@ async def _run_conversation_turn(
     # reasoning) but a tool ran, surface that result. For camera-roster/config
     # questions, answer deterministically — small models often just deflect
     # ("I'll check…") and there's no tool to ground them.
-    cleaned = _clean_for_speech(final, runtime.cfg.cameras)
+    cleaned = _clean_for_speech(final, runtime.visible_cameras())
     if _is_config_question(user_text):
         # Roster/config questions ("how many cameras are configured?") are
         # answered deterministically and FIRST — the model can't reliably count
         # the configured cameras and often narrates a tool it never called
         # ("…calling detect_objects to check…"). The roster is authoritative, so
         # don't let that narration through as the answer.
-        reply, source = _roster_answer(runtime.cfg.cameras), "roster"
+        reply, source = _roster_answer(runtime.visible_cameras()), "roster"
     elif cleaned and not _is_deflection(cleaned):
         reply, source = cleaned, "llm"
     elif last_tool_result:
-        reply, source = _humanize_for_speech(last_tool_result, runtime.cfg.cameras), "tool_fallback"
+        reply, source = _humanize_for_speech(last_tool_result, runtime.visible_cameras()), "tool_fallback"
     else:
         reply, source = (cleaned or "Sorry, I'm having trouble answering that right now."), "none"
 

@@ -90,8 +90,10 @@ def db(monkeypatch):
     role = models.Role(name="admin")
     s.add(role)
     s.commit()
+    # A superuser: these tests exercise the inbox MECHANICS (ack, poll,
+    # ring policy). Camera scoping has its own tests further down.
     user = models.User(username="op", email="op@x", hashed_password="x",
-                       role_id=role.id)
+                       role_id=role.id, is_superuser=True)
     s.add(user)
     s.commit()
     user_id = user.id
@@ -225,6 +227,7 @@ def client(db, monkeypatch):
 
     app.dependency_overrides[get_db] = _fake_db
     app.dependency_overrides[auth_mod.get_current_active_user] = lambda: user
+    app.dependency_overrides[auth_mod.get_current_superuser] = lambda: user
     return TestClient(app), SessionLocal, user_id
 
 
@@ -425,3 +428,125 @@ def test_twilio_dispatch_shapes_the_rest_calls(client, monkeypatch):
     assert "Unknown vehicle" in sms["data"]["Body"]
     assert all(r["ok"] for r in results if r["action"].startswith("twilio"))
 
+
+
+# ── camera scope (RBAC): you get the alarms for YOUR cameras ───────
+
+
+@pytest.fixture()
+def scoped_client(db, monkeypatch):
+    """Two cameras (owner: someone else), one operator granted can_view
+    on the first only, plus a superuser — the same app, two callers."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import core.auth as auth_mod
+    from core.database import get_db
+    from routers.alerts_inbox import router
+
+    SessionLocal, admin_id = db
+    s = SessionLocal()
+    role = s.query(models.Role).first()
+    op = models.User(username="guard", email="g@x", hashed_password="x",
+                     role_id=role.id)
+    s.add(op)
+    s.commit()
+    gate = models.Camera(name="Gate", ip_address="10.0.0.1", owner_id=admin_id)
+    yard = models.Camera(name="Yard", ip_address="10.0.0.2", owner_id=admin_id)
+    s.add_all([gate, yard])
+    s.commit()
+    s.add(models.CameraPermission(user_id=op.id, camera_id=gate.id,
+                                  can_view=True, can_manage=False))
+    s.commit()
+    gate_id, yard_id = gate.id, yard.id
+    admin = s.get(models.User, admin_id)
+    s.refresh(admin)
+    s.refresh(op)
+    s.expunge(admin)
+    s.expunge(op)
+    s.close()
+
+    app = FastAPI()
+    app.include_router(router)
+
+    def _fake_db():
+        sess = SessionLocal()
+        try:
+            yield sess
+        finally:
+            sess.close()
+
+    app.dependency_overrides[get_db] = _fake_db
+    current = {"user": op}
+    app.dependency_overrides[auth_mod.get_current_active_user] = \
+        lambda: current["user"]
+
+    def _as_superuser():
+        from fastapi import HTTPException
+        if not current["user"].is_superuser:
+            raise HTTPException(status_code=403, detail="Not enough permissions")
+        return current["user"]
+
+    app.dependency_overrides[auth_mod.get_current_superuser] = _as_superuser
+    return TestClient(app), current, op, admin, gate_id, yard_id
+
+
+def test_inbox_lists_counts_and_acks_only_visible_cameras(scoped_client):
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    apply_alert(_envelope("on-gate", camera_id=f"cam{gate_id}"))
+    apply_alert(_envelope("on-yard", camera_id=f"cam{yard_id}"))
+    apply_alert(_envelope("site-wide", camera_id=None))
+
+    # The guard: the gate alarm and the camera-less notice, never the yard.
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert sorted(a["alert_id"] for a in out["alerts"]) == ["on-gate", "site-wide"]
+    assert out["unacked_count"] == 2
+
+    # Ack-all silences MY inbox only; the yard alarm keeps ringing for
+    # whoever can see the yard.
+    assert tc.post("/alerts-inbox/ack", json={}).json() == {"acknowledged": 2}
+    current["user"] = admin
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert [a["alert_id"] for a in out["alerts"]] == ["on-yard"]
+    assert out["unacked_count"] == 1
+
+    # An explicit id on someone else's camera is not acked (not found).
+    yard_row = out["alerts"][0]["id"]
+    current["user"] = op
+    assert tc.post("/alerts-inbox/ack",
+                   json={"ids": [yard_row]}).json() == {"acknowledged": 0}
+    assert tc.get("/alerts-inbox").json()["alerts"] and all(
+        a["alert_id"] != "on-yard" for a in tc.get("/alerts-inbox").json()["alerts"])
+
+
+def test_user_granted_nothing_sees_only_camera_less_alerts(scoped_client, db):
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    SessionLocal, _ = db
+    s = SessionLocal()
+    s.query(models.CameraPermission).delete()
+    s.commit()
+    s.close()
+    apply_alert(_envelope("on-gate", camera_id=f"cam{gate_id}"))
+    apply_alert(_envelope("notice", camera_id=""))
+    out = tc.get("/alerts-inbox").json()
+    assert [a["alert_id"] for a in out["alerts"]] == ["notice"]
+    assert out["unacked_count"] == 1
+
+
+def test_alarm_policy_is_superuser_only(scoped_client):
+    tc, current, op, admin, *_ = scoped_client
+    # The bell needs the ring policy to know HOW to ring: readable by all.
+    assert tc.get("/alerts-inbox/ring-config").status_code == 200
+    # Changing the site's alarm policy, its actions, or firing test
+    # alarms into everyone's inbox is not.
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"low": "ping"}}).status_code == 403
+    assert tc.get("/alerts-inbox/actions").status_code == 403
+    assert tc.put("/alerts-inbox/actions",
+                  json={"min_severity": "high"}).status_code == 403
+    assert tc.post("/alerts-inbox/actions/test").status_code == 403
+    assert tc.post("/alerts-inbox/test", json={"severity": "high"}).status_code == 403
+    current["user"] = admin
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"low": "ping"}}).status_code == 200
+    assert tc.get("/alerts-inbox/actions").status_code == 200

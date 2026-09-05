@@ -828,6 +828,8 @@ class OpennvrAuthClient(_ReusableClientMixin):
         # device_token -> (checked_at_monotonic, allowed, negative_ttl_used)
         self._device_cache: dict[str, tuple[float, bool, float]] = {}
         self._device_fail_ttl = 10.0   # short: enforcement resumes fast after a blip
+        # token -> (checked_at_monotonic, visible server camera ids, ttl)
+        self._scope_cache: dict[str, tuple[float, frozenset[int], float]] = {}
 
     async def login(self, username: str, password: str,
                     totp_code: str | None = None, *,
@@ -900,6 +902,49 @@ class OpennvrAuthClient(_ReusableClientMixin):
             self._cache.clear()   # crude but bounded; refills within a TTL
         self._cache[token] = (now, user)
         return user
+
+    async def visible_cameras(self, token: str,
+                              user: dict | None = None) -> set[int] | None:
+        """The server-side camera ids this bearer's user may SEE — the
+        server's own ``GET /api/v1/cameras`` (owned + granted; paused
+        cameras included since their history stays theirs) — or ``None``
+        for a superuser, who sees the fleet.
+
+        FAIL-CLOSED: an unreachable server or a non-200 yields the EMPTY
+        set, never "everything" — a hiccup must not widen what a guard can
+        watch. Cached per token for the TTL like ``me()``; the negative
+        result is cached only briefly so recovery is quick."""
+        if user is not None and user.get("is_superuser"):
+            return None
+        now = time.monotonic()
+        hit = self._scope_cache.get(token)
+        if hit is not None and now - hit[0] < hit[2]:
+            return set(hit[1])
+        ids: set[int] = set()
+        ttl = self._ttl
+        try:
+            resp = await self._client().get(
+                f"{self._root}/api/v1/cameras/",
+                params={"limit": 1000, "active_only": "false"},
+                headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code == 200:
+                data = resp.json()
+                rows = data.get("cameras") if isinstance(data, dict) else data
+                for row in rows or []:
+                    try:
+                        ids.add(int(row["id"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            else:
+                ttl = self._device_fail_ttl
+        except Exception as exc:
+            logger.warning("auth: camera-scope lookup failed (failing closed): %s",
+                           exc)
+            ttl = self._device_fail_ttl
+        if len(self._scope_cache) >= self._cache_max:
+            self._scope_cache.clear()
+        self._scope_cache[token] = (now, frozenset(ids), ttl)
+        return ids
 
     async def device_allowed(self, device_token: str | None) -> bool:
         """True iff the server's device firewall permits this browser.
