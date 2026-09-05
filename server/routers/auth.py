@@ -81,7 +81,9 @@ async def check_first_time_setup(db: Session = Depends(get_db)):
             setup_required=True, username=admin_user.username
         )
 
-    return FirstTimeSetupCheckResponse(setup_required=False)
+    return FirstTimeSetupCheckResponse(
+        setup_required=False,
+        registration_open=bool(settings.public_registration_enabled))
 
 
 @router.post("/first-time-setup", response_model=FirstTimeSetupResponse)
@@ -165,7 +167,14 @@ async def first_time_setup(
 async def register_user(
     payload: UserRegister, db: Session = Depends(get_db), request: Request = None
 ):
-    """Public registration for viewer role by default."""
+    """Self-service registration (viewer role). Off unless the operator
+    opted in with ``PUBLIC_REGISTRATION_ENABLED`` — accounts on an NVR
+    are otherwise the administrator's to create (``POST /users``)."""
+    if not settings.public_registration_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Self-service registration is disabled on this server; "
+                   "ask an administrator for an account")
     viewer = db.query(Role).filter(Role.name == "viewer").first()
     if not viewer:
         raise HTTPException(status_code=400, detail="Viewer role is not set up")

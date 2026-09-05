@@ -60,7 +60,7 @@ import core.auth as core_auth  # noqa: E402
 import services.camera_identity as camera_identity  # noqa: E402
 from core.auth import create_access_token, get_password_hash  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, Role, User  # noqa: E402
+from models import Camera, Permission, Role, RolePermission, User  # noqa: E402
 from routers import cameras as cameras_router  # noqa: E402
 from services.mediamtx_admin_service import MediaMtxAdminService  # noqa: E402
 from services.mediamtx_startup_service import MediaMtxStartupService  # noqa: E402
@@ -133,6 +133,12 @@ def env(monkeypatch):
     role = Role(name="admin", description="test role")
     db.add(role)
     db.flush()
+    # Adding a camera is gated on cameras.manage (the seeded operator/admin
+    # permission) — the owner here is a plain user, so give the role that.
+    manage = Permission(name="cameras.manage", description="")
+    db.add(manage)
+    db.flush()
+    db.add(RolePermission(role_id=role.id, permission_id=manage.id))
     owner = User(
         username="owner",
         email="owner@example.com",

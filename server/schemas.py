@@ -548,6 +548,17 @@ class RolePermissionsSet(BaseModel):
     permission_ids: list[int]
 
 
+class CameraPermissionEntry(BaseModel):
+    """One row of ``GET /cameras/{id}/permissions``: a grant, or the
+    owner (who holds every right implicitly)."""
+
+    user_id: int
+    username: str | None = None
+    can_view: bool
+    can_manage: bool
+    is_owner: bool = False
+
+
 class CameraPermissionResponse(BaseModel):
     """Schema for camera permission response."""
 
@@ -653,6 +664,9 @@ class FirstTimeSetupResponse(BaseModel):
 class FirstTimeSetupCheckResponse(BaseModel):
     setup_required: bool
     username: str | None = None
+    # Whether ``POST /auth/register`` (self-service viewer accounts) is
+    # open on this deployment — the login page shows the link only then.
+    registration_open: bool = False
 
 
 class CameraResponse(CameraBase):
