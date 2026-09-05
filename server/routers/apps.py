@@ -47,7 +47,7 @@ import httpx
 import yaml
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -60,6 +60,9 @@ from services.app_keys import (
     resolve_app_key, revoke_key,
 )
 from services.audit_service import write_audit_log
+from services.app_entitlements import (
+    entitlement_view, may_enable, store_license_key, verify_with_app,
+)
 
 # The one-click install/uninstall endpoints require this RBAC permission
 # (in addition to the APPS_INSTALL_ENABLED opt-in). Reused as a FastAPI
@@ -113,20 +116,46 @@ class IndexEntry(BaseModel):
     summary: str
     category: str
     version: str
-    image: str
+    # "installable" (default): a shipped image + compose service the
+    # one-click installer applies. "external": a listing that links out
+    # — a third-party app distributed elsewhere; the catalog shows
+    # "Learn more" and never offers Install.
+    kind: str = "installable"
+    image: str | None = None
+    external_url: str | None = None
+    # Commerce, mirroring the manifest: free | paid | subscription |
+    # contact, a human price line, and whether enabling needs a licence.
+    pricing: str = "free"
+    price_note: str = ""
+    entitlement: str = "none"
+    author: str = ""
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
     requires_adapters: list[str] = []
     emits: list[str] = []
     docs_url: str
-    install: InstallSpec
+    install: InstallSpec | None = None
     build_context: str | None = None
     # Optional sha256 digest the reconciler pins the image to. When
     # present, the one-click installer deploys ``image@sha256:...`` for
     # supply-chain integrity; when absent, the reconciler logs a loud
     # "UNPINNED — dev only" warning. Not for production without a digest.
     image_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _shape_by_kind(self) -> "IndexEntry":
+        if self.kind not in ("installable", "external"):
+            raise ValueError("kind must be 'installable' or 'external'")
+        if self.kind == "installable" and (not self.image or self.install is None):
+            raise ValueError("installable entries need image + install")
+        if self.kind == "external" and not (self.external_url or "").startswith("https://"):
+            raise ValueError("external entries need an https:// external_url")
+        if self.pricing not in ("free", "paid", "subscription", "contact"):
+            raise ValueError("pricing must be free | paid | subscription | contact")
+        if self.entitlement not in ("none", "license_key"):
+            raise ValueError("entitlement must be none | license_key")
+        return self
 
 
 @lru_cache(maxsize=1)
@@ -559,6 +588,8 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # Credential state only — the key itself is returned once, at issue.
         "has_api_key": bool(row.api_key_hash),
         "api_key_issued_at": row.api_key_issued_at,
+        # Licence verdict (never the key) — services/app_entitlements.py.
+        "entitlement": entitlement_view(row),
     }
 
 
@@ -638,14 +669,20 @@ async def get_apps_index(
                 "summary": entry.summary,
                 "category": entry.category,
                 "version": entry.version,
+                "kind": entry.kind,
                 "image": entry.image,
+                "external_url": entry.external_url,
+                "pricing": entry.pricing,
+                "price_note": entry.price_note,
+                "entitlement": entry.entitlement,
+                "author": entry.author,
                 "requires_tasks": entry.requires_tasks,
                 "emits": entry.emits,
                 "docs_url": entry.docs_url,
                 "install": {
                     "compose": entry.install.compose,
                     "command": entry.install.command,
-                },
+                } if entry.install is not None else None,
                 "installed": row is not None,
                 "enabled": bool(row.enabled) if row is not None else None,
             }
@@ -786,8 +823,14 @@ async def enable_app(
     Enable an app. 404 if the app was never registered.
 
     Superuser only — turning a site-wide app on is a site decision.
+    A licensed app (manifest ``entitlement: license_key``) also needs
+    a key the app has accepted — 402 otherwise, with the reason.
     """
     row = _get_app_or_404(db, app_id)
+    allowed, reason = may_enable(row)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                            detail=f"Cannot enable '{app_id}': {reason}")
     row.enabled = True
     db.commit()
     db.refresh(row)
@@ -864,6 +907,9 @@ async def get_app_config(
         "id": row.id,
         "config": config,
         "updated_at": row.updated_at,
+        # The licence verdict rides the live config poll so the app can
+        # feature-gate itself (ContractMixin.entitlement).
+        "entitlement": entitlement_view(row),
     }
 
 
@@ -1087,6 +1133,65 @@ async def invoke_app_action(
         )
 
 
+class LicenseIn(BaseModel):
+    license_key: str
+
+
+@router.put("/{app_id}/license")
+async def put_app_license(
+    app_id: str,
+    payload: LicenseIn,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Store a licence key (encrypted, never returned) and ask the app
+    to verify it. Superuser only. Returns the verdict; enabling the app
+    is refused until it is ``valid``."""
+    row = _get_app_or_404(db, app_id)
+    key = payload.license_key.strip()
+    if not key or len(key) > 2000:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="license_key must be 1..2000 characters")
+    store_license_key(row, key)
+    db.commit()
+    view = await verify_with_app(row)
+    db.commit()
+    write_audit_log(db, action="app.license.set", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id,
+                    details={"status": view["status"], "plan": view["plan"]})
+    return {"id": app_id, "entitlement": view}
+
+
+@router.post("/{app_id}/license/verify")
+async def verify_app_license(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Re-ask the app about the stored key (after a renewal, or when the
+    app was down when the key was entered)."""
+    row = _get_app_or_404(db, app_id)
+    view = await verify_with_app(row)
+    db.commit()
+    return {"id": app_id, "entitlement": view}
+
+
+@router.delete("/{app_id}/license")
+async def delete_app_license(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Forget the key. A licensed app that is enabled stays enabled
+    until it is next toggled — revoking a key is not an outage."""
+    row = _get_app_or_404(db, app_id)
+    store_license_key(row, None)
+    db.commit()
+    write_audit_log(db, action="app.license.clear", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "entitlement": entitlement_view(row)}
+
+
 @router.post("/{app_id}/key/rotate")
 async def rotate_app_key(
     app_id: str,
@@ -1250,6 +1355,14 @@ def _index_entry_or_404(app_id: str) -> IndexEntry:
         )
     for entry in entries:
         if entry.id == app_id:
+            if entry.kind != "installable":
+                # A link-out listing has no image and no compose service:
+                # nothing for the reconciler to apply.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"App '{app_id}' is an external listing — install it "
+                           f"from {entry.external_url}",
+                )
             return entry
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

@@ -71,6 +71,7 @@ import os
 import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -104,6 +105,33 @@ CONFIG_POLL_TIMEOUT_SECONDS = 5.0
 # Content-Length from forcing an arbitrary-size read into memory on this
 # (internal-network) surface.
 ACTION_BODY_MAX_BYTES = 8 * 1024 * 1024
+
+@dataclass(frozen=True)
+class Entitlement:
+    """A licence verdict from :meth:`ContractMixin.verify_license`."""
+
+    valid: bool
+    plan: str = ""
+    expires_at: str | None = None      # ISO 8601, or None = no expiry
+    message: str = ""                  # shown to the administrator
+    #: Optional limits the app wants the catalog to display ("2 cameras").
+    limits: dict[str, Any] = field(default_factory=dict)
+
+
+def _entitlement_dict(verdict: Any) -> dict[str, Any]:
+    if isinstance(verdict, Entitlement):
+        return {"valid": bool(verdict.valid), "plan": verdict.plan,
+                "expires_at": verdict.expires_at, "message": verdict.message,
+                "limits": dict(verdict.limits)}
+    if isinstance(verdict, dict):
+        return {"valid": bool(verdict.get("valid")),
+                "plan": str(verdict.get("plan") or ""),
+                "expires_at": verdict.get("expires_at"),
+                "message": str(verdict.get("message") or ""),
+                "limits": dict(verdict.get("limits") or {})}
+    return {"valid": bool(verdict), "plan": "", "expires_at": None,
+            "message": "", "limits": {}}
+
 
 # Captured at import so the contract counters keep reading the REAL
 # clock even when an app's tests monkeypatch ``time.monotonic`` to
@@ -173,6 +201,9 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         bad params its ValueError → 400, anything else a 500. The
         server itself never interprets action semantics."""
         path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/entitlement/verify":
+            self._verify_entitlement()
+            return
         action = getattr(self.server, "action", None)
         if action is None or not path.startswith("/actions/"):
             self._send_json(404, {"error": f"unknown path {path!r}"})
@@ -225,6 +256,38 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             unbind_user(bound)
         self._send_json(200, result if result is not None else {})
 
+    def _verify_entitlement(self) -> None:
+        """``POST /entitlement/verify`` — core asks whether a licence key
+        the administrator entered is valid for this app. Key-gated like
+        actions; the verdict comes from ``ContractMixin.verify_license``."""
+        verifier = getattr(self.server, "license_verifier", None)
+        if verifier is None:
+            self._send_json(404, {"error": "this app has no licence verifier"})
+            return
+        expected_token = getattr(self.server, "action_token", None)
+        if expected_token:
+            import hmac
+
+            presented = self.headers.get("X-Internal-Api-Key") or ""
+            if not hmac.compare_digest(str(presented), str(expected_token)):
+                self._send_json(401, {"error": "requires X-Internal-Api-Key"})
+                return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
+            body = json.loads(raw.decode("utf-8") or "{}")
+            key = str((body or {}).get("license_key") or "")
+        except (ValueError, RecursionError) as exc:
+            self._send_json(400, {"error": f"bad body: {exc}"})
+            return
+        try:
+            verdict = verifier(key)
+        except Exception:
+            logger.exception("verify_license raised")
+            self._send_json(500, {"error": "internal error"})
+            return
+        self._send_json(200, _entitlement_dict(verdict))
+
     def _user_context(self):
         """The operator core says is behind this request (verified
         against this app's key), or None — see usercontext.py."""
@@ -261,6 +324,8 @@ class _ContractHTTPServer(ThreadingHTTPServer):
     # app key) or None, plus the manifest id the token must be for.
     user_secret: "Callable[[], str | None] | None"
     app_id: "str | None"
+    # POST /entitlement/verify: (license_key) -> Entitlement | dict.
+    license_verifier: "Callable[[str], Any] | None"
 
 
 class ContractServer:
@@ -283,6 +348,7 @@ class ContractServer:
         ui: "Callable[[], str] | None" = None,
         user_secret: "Callable[[], str | None] | None" = None,
         app_id: "str | None" = None,
+        license_verifier: "Callable[[str], Any] | None" = None,
         host: str = "0.0.0.0",
         port: int = 0,
     ) -> None:
@@ -294,6 +360,7 @@ class ContractServer:
         self._ui = ui
         self._user_secret = user_secret
         self._app_id = app_id
+        self._license_verifier = license_verifier
         self._server: _ContractHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -316,6 +383,7 @@ class ContractServer:
         server.ui = self._ui
         server.user_secret = self._user_secret
         server.app_id = self._app_id
+        server.license_verifier = self._license_verifier
         self._server = server
         self._thread = threading.Thread(
             target=server.serve_forever,
@@ -417,6 +485,38 @@ class ContractMixin:
         in the catalog."""
         raise KeyError(name)
 
+    # ── Entitlement (licensed apps) ─────────────────────────────────
+
+    #: What core last told us about our licence (the live config poll
+    #: delivers it): ``{"status", "plan", "expires_at", "message"}`` or
+    #: ``None`` before the first poll. Status is "none" (the manifest
+    #: declares no entitlement), "unverified", "valid" or "invalid".
+    entitlement: dict[str, Any] | None = None
+
+    def verify_license(self, license_key: str) -> "Entitlement | dict[str, Any]":
+        """Override in a licensed app (``manifest.entitlement ==
+        "license_key"``): decide whether ``license_key`` is valid for
+        THIS deployment — check a signature, call your licence server,
+        compare a hash — and return an :class:`Entitlement`. Core calls
+        this through ``POST /entitlement/verify`` when an administrator
+        enters the key and on every re-check; it never sees your
+        logic, only the verdict. The default answers "valid" for apps
+        that declare no entitlement and "invalid" otherwise, so a
+        licensed app that forgets to override cannot be enabled by
+        accident."""
+        mode = getattr(self.manifest, "entitlement", "none") if self.manifest else "none"
+        if mode == "none":
+            return Entitlement(valid=True, plan="free")
+        return Entitlement(
+            valid=False,
+            message="this app declares license_key entitlement but does not "
+                    "implement verify_license()")
+
+    def on_entitlement_update(self, entitlement: dict[str, Any]) -> None:
+        """Optional hook — called from the config poll whenever core's
+        view of the licence changes (a key entered, a verdict flipping,
+        an expiry). Feature-gate on ``self.entitlement`` here."""
+
     @property
     def current_user(self):
         """The operator behind the ``/ui`` view or action being served
@@ -469,6 +569,7 @@ class ContractMixin:
             # issued after start-up is honoured.
             user_secret=lambda: signing_secret(self.credentials.app_key),
             app_id=getattr(self.manifest, "id", None) if self.manifest else None,
+            license_verifier=self.verify_license,
             host=bind_host,
             port=int(port),
         )
@@ -656,6 +757,17 @@ class ContractMixin:
             return
         if not isinstance(config, dict):
             return
+        # The licence verdict rides the same poll (registry stores it).
+        try:
+            ent = response.json().get("entitlement")
+        except Exception:  # noqa: BLE001
+            ent = None
+        if isinstance(ent, dict) and ent != self.entitlement:
+            self.entitlement = ent
+            try:
+                self.on_entitlement_update(dict(ent))
+            except Exception:
+                logger.exception("on_entitlement_update raised")
         if config == self._applied_config:
             return
         self._applied_config = config

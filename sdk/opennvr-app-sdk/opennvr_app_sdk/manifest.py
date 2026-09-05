@@ -33,6 +33,11 @@ def _type_name(t: Any) -> str:
     return str(t)
 
 
+#: Manifest ``pricing`` values the catalog understands.
+PRICING_MODELS = frozenset({"free", "paid", "subscription", "contact"})
+#: Manifest ``entitlement`` values: how enabling is gated.
+ENTITLEMENT_MODES = frozenset({"none", "license_key"})
+
 @dataclass
 class Param:
     """One typed, declarative config knob.
@@ -251,7 +256,28 @@ class AppManifest:
     # as a "contact" action. Empty = no contact surface shown.
     contact: str = ""
 
+    # ── Commerce (the catalog's pricing badge and the licence gate) ─
+    # ``pricing``: "free" (default) | "paid" | "subscription" | "contact".
+    # ``price_note``: the human line under the badge — "$29 / camera /
+    # year", "free for 2 cameras". ``entitlement``: how the platform
+    # decides the app may be enabled — "none" (default: always) or
+    # "license_key": an administrator enters a key in the catalog, core
+    # asks the app to verify it (``ContractMixin.verify_license``) and
+    # refuses to enable the app until the app says the key is valid.
+    # The verdict is the app's — core stores the key (encrypted) and
+    # the verdict, and re-delivers both on the live config poll.
+    pricing: str = "free"
+    price_note: str = ""
+    entitlement: str = "none"
+
     def __post_init__(self) -> None:
+        if self.pricing not in PRICING_MODELS:
+            raise ValueError(
+                f"pricing must be one of {sorted(PRICING_MODELS)}, got {self.pricing!r}")
+        if self.entitlement not in ENTITLEMENT_MODES:
+            raise ValueError(
+                f"entitlement must be one of {sorted(ENTITLEMENT_MODES)}, "
+                f"got {self.entitlement!r}")
         if self.ui_mode not in ("internal", "external"):
             raise ValueError(
                 f"ui_mode must be 'internal' or 'external', got {self.ui_mode!r}"
@@ -289,4 +315,7 @@ class AppManifest:
             "license": self.license,
             "use_cases": list(self.use_cases),
             "contact": self.contact,
+            "pricing": self.pricing,
+            "price_note": self.price_note,
+            "entitlement": self.entitlement,
         }

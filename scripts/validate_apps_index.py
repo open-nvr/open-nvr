@@ -334,8 +334,35 @@ def validate_entry(
     if not isinstance(entry, dict):
         return [f"{label}: not a mapping (got {type(entry).__name__})"], warnings
 
+    # kind: "installable" (default — image + compose service) or
+    # "external" (a link-out listing: no image, no install, an https
+    # external_url). Commerce fields mirror the manifest.
+    kind = entry.get("kind", "installable")
+    if kind not in ("installable", "external"):
+        errors.append(f"{label}: kind must be 'installable' or 'external' (got {kind!r})")
+        kind = "installable"
+    external = kind == "external"
+    if external:
+        ext = entry.get("external_url")
+        if not isinstance(ext, str) or not ext.startswith("https://"):
+            errors.append(f"{label}: external entries need an https:// external_url")
+        for forbidden in ("install", "image", "build_context", "image_digest"):
+            if entry.get(forbidden):
+                errors.append(
+                    f"{label}: external entries must not carry '{forbidden}' — "
+                    "a listing that links out is never installed by the reconciler")
+    pricing = entry.get("pricing", "free")
+    if pricing not in ("free", "paid", "subscription", "contact"):
+        errors.append(f"{label}: pricing must be free | paid | subscription | contact")
+    if entry.get("entitlement", "none") not in ("none", "license_key"):
+        errors.append(f"{label}: entitlement must be none | license_key")
+    if pricing != "free" and not entry.get("price_note"):
+        warnings.append(f"{label}: pricing is '{pricing}' but price_note is empty")
+
     # Required fields present + non-empty.
-    for field in REQUIRED_FIELDS:
+    required = tuple(f for f in REQUIRED_FIELDS
+                     if not (external and f in ("image", "install")))
+    for field in required:
         if field not in entry:
             errors.append(f"{label}: missing required field '{field}'")
         elif field != "requires_tasks" and not entry[field]:
@@ -377,7 +404,9 @@ def validate_entry(
         # docker-compose.apps.yml — an entry without a service block
         # there fails on install for EVERY user (review finding: 8 of 10
         # original entries were uninstallable exactly this way).
-        if overlay_services is not None and app_id not in overlay_services:
+        if external:
+            pass   # nothing to install; the service-block contract does not apply
+        elif overlay_services is not None and app_id not in overlay_services:
             errors.append(
                 f"{label}: id '{app_id}' has no service block in "
                 "docker-compose.apps.yml — the entry is uninstallable. "
@@ -465,7 +494,9 @@ def validate_entry(
 
     # install: compose + command both present, non-empty, and SAFE.
     install = entry.get("install")
-    if not isinstance(install, dict):
+    if external:
+        pass   # no install block by construction (checked above)
+    elif not isinstance(install, dict):
         errors.append(f"{label}: install must be a mapping with compose + command")
     else:
         compose = install.get("compose")

@@ -89,6 +89,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Apps can be sold.** The manifest and the App Store index carry
+  `pricing` (free | paid | subscription | contact), `price_note` and
+  `entitlement` (none | license_key); the catalog shows the badge on
+  cards and listings. A licensed app cannot be enabled until an
+  administrator enters a key (`PUT /apps/{id}/license`, encrypted at
+  rest, never returned) **and the app itself accepts it** — core calls
+  the app's `POST /entitlement/verify` (SDK: override
+  `ContractMixin.verify_license` → `Entitlement`) and records the
+  verdict (status, plan, expiry, message, limits), re-delivered on the
+  app's config poll as `self.entitlement`. Re-check and forget routes;
+  402 on enable with the reason. Index entries may also be
+  `kind: external` — a third-party listing that links out
+  (`external_url`) with "Learn more" instead of Install; the validator
+  understands both kinds. `docs/APP_SURFACES.md` §5b.
 - **One platform client for apps.** `opennvr_app_sdk.OpenNVR` wraps
   everything an app reads from core and KAI-C — the camera roster,
   current snapshots, recordings (list / playback URL / frame at an

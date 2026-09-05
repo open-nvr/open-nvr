@@ -36,7 +36,7 @@ from .alerts import (
 )
 from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import load_yaml, require
-from .contract import ContractServer
+from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
@@ -49,7 +49,9 @@ from .frame_sources import (
     dict_frame_source,
 )
 from .geometry import Point, Tripwire, Zone, bbox_center
-from .manifest import Action, AlertType, AppManifest, Param, StateView
+from .manifest import (
+    ENTITLEMENT_MODES, PRICING_MODELS, Action, AlertType, AppManifest, Param, StateView,
+)
 from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
 from .events import EventsClient, StoredEvent
@@ -105,6 +107,9 @@ __all__ = [
     "DEFAULT_ALERT_SUBJECT_PREFIX",
     # Manifest
     "AppManifest",
+    "PRICING_MODELS",
+    "ENTITLEMENT_MODES",
+    "Entitlement",
     "Param",
     "AlertType",
     "StateView",
