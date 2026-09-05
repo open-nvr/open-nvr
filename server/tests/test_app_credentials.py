@@ -60,6 +60,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 import core.auth as auth_mod  # noqa: E402
 from core.config import settings  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
+from models import AppAlert as AppAlertRow  # noqa: E402
 from models import Camera, InstalledApp, Role, TimelineEvent, User  # noqa: E402
 from routers import apps as apps_router  # noqa: E402
 from routers import internal_camera_agent as internal_router  # noqa: E402
@@ -378,3 +379,99 @@ def test_no_app_key_means_no_user_context(env, monkeypatch):
     tc.app.dependency_overrides[auth_mod.get_current_active_user] = lambda: admin
     assert tc.get("/apps/loitering-detection/ui").status_code == 200
     assert "X-OpenNVR-User" not in seen["ui"]
+
+
+# ── the app platform door (routers/app_platform.py) ────────────────────
+
+
+@pytest.fixture
+def platform(env, monkeypatch):
+    """The credentials env plus the platform router and fakes for the
+    two services it fronts (KAI-C capture, MediaMTX segment index)."""
+    from routers import app_platform as plat_router
+
+    tc, ids, SessionLocal = env
+    tc.app.include_router(plat_router.router)
+
+    class _Kai:
+        async def capture_frame_bytes(self, rtsp_url, camera_id):
+            return b"\xff\xd8snap" if camera_id == ids["gate"] else None
+
+    import services.kai_c_service as kcs
+    monkeypatch.setattr(kcs, "get_kai_c_service", lambda: _Kai())
+
+    async def _segments(path, start=None, end=None, timeout=10.0):
+        return [{"start": "2026-09-05T10:00:00Z", "duration": 60.0, "path": path}]
+
+    from services import mediamtx_client
+    monkeypatch.setattr(mediamtx_client, "list_segments", _segments)
+    monkeypatch.setattr(settings, "mediamtx_playback_url", "http://mediamtx:9996", raising=False)
+    key = _register(tc, _site()).json()["api_key"]
+    return tc, ids, SessionLocal, key
+
+
+def test_snapshot_and_recordings_follow_the_roster(platform):
+    tc, ids, _, key = platform
+    r = tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot", headers=_app(key))
+    assert r.status_code == 200 and r.content == b"\xff\xd8snap"
+    # Not in this app's roster → 404 (never 403); site key → allowed but offline → 503.
+    assert tc.get(f"/internal/app/cameras/{ids['yard']}/snapshot", headers=_app(key)).status_code == 404
+    assert tc.get(f"/internal/app/cameras/{ids['yard']}/snapshot", headers=_site()).status_code == 503
+    body = tc.get(f"/internal/app/recordings/{ids['gate']}", headers=_app(key)).json()
+    assert body["count"] == 1 and body["recordings"][0]["duration"] == 60.0
+    assert tc.get(f"/internal/app/recordings/{ids['lobby']}", headers=_app(key)).status_code == 404
+    url = tc.get(f"/internal/app/recordings/{ids['gate']}/url", headers=_app(key),
+                 params={"start": "2026-09-05T10:00:00Z", "duration": 60}).json()["url"]
+    assert url.startswith("http://mediamtx:9996/get?") and "duration=60" in url
+
+
+def test_plates_and_alerts_are_scoped_to_the_app(platform):
+    tc, ids, SessionLocal, key = platform
+    s = SessionLocal()
+    from datetime import datetime, timezone
+    for cam, plate in ((ids["gate"], "GATE111"), (ids["yard"], "YARD222")):
+        s.add(TimelineEvent(camera_id=cam, source="tier0", event_type="track",
+                            label="car", plate_text=plate,
+                            started_at=datetime.now(timezone.utc)))
+    s.add_all([
+        AppAlertRow(alert_id="a-mine", fired_at=datetime.now(timezone.utc), severity="high",
+                    title="mine", source_kind="app", source_name="loitering-detection"),
+        AppAlertRow(alert_id="a-theirs", fired_at=datetime.now(timezone.utc), severity="high",
+                    title="theirs", source_kind="app", source_name="other-app"),
+    ])
+    s.commit()
+    s.close()
+    stats = tc.get("/internal/app/plates/stats", headers=_app(key)).json()
+    assert stats["total_reads"] == 1          # the gate's read only
+    assert tc.get("/internal/app/plates/stats", headers=_site()).json()["total_reads"] == 2
+    assert tc.get("/internal/app/plates/summary", headers=_app(key),
+                  params={"plate": "YARD222"}).json()["total_reads"] == 0
+    mine = tc.get("/internal/app/alerts", headers=_app(key)).json()["alerts"]
+    assert [a["title"] for a in mine] == ["mine"]
+    both = tc.get("/internal/app/alerts", headers=_site()).json()["alerts"]
+    assert {a["title"] for a in both} == {"mine", "theirs"}
+
+
+def test_app_state_is_per_app_and_bounded(platform):
+    tc, ids, _, key = platform
+    other = {"url": "http://lpr:9200", "manifest": _manifest("license-plate-recognition")}
+    other_key = tc.post("/apps/register", json=other, headers=_site()).json()["api_key"]
+
+    assert tc.get("/internal/app/state/cooldown", headers=_app(key)).status_code == 404
+    r = tc.put("/internal/app/state/cooldown", headers=_app(key), json={"cam1": 12.5})
+    assert r.status_code == 200 and r.json()["value"] == {"cam1": 12.5}
+    assert tc.get("/internal/app/state/cooldown", headers=_app(key)).json()["value"] == {"cam1": 12.5}
+    # Another app's key does not see it; the site key must name the app.
+    assert tc.get("/internal/app/state/cooldown", headers=_app(other_key)).status_code == 404
+    assert tc.get("/internal/app/state/cooldown", headers=_site()).status_code == 400
+    assert tc.get("/internal/app/state/cooldown", headers=_site(),
+                  params={"app_id": "loitering-detection"}).json()["value"] == {"cam1": 12.5}
+    items = tc.get("/internal/app/state", headers=_app(key), params={"prefix": "cool"}).json()
+    assert [i["key"] for i in items["items"]] == ["cooldown"]
+    # Bounds: key shape, value size.
+    assert tc.put("/internal/app/state/bad/key", headers=_app(key), json=1).status_code == 404
+    assert tc.put("/internal/app/state/" + "k" * 201, headers=_app(key), json=1).status_code == 400
+    assert tc.put("/internal/app/state/big", headers=_app(key),
+                  json="x" * (256 * 1024 + 1)).status_code == 413
+    assert tc.delete("/internal/app/state/cooldown", headers=_app(key)).json()["deleted"] is True
+    assert tc.delete("/internal/app/state/cooldown", headers=_app(key)).json()["deleted"] is False

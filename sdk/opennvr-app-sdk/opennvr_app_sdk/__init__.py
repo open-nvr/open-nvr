@@ -61,6 +61,11 @@ from .cameras import (
 )
 from .credentials import AppCredentials, auth_headers
 from .usercontext import UserContext, current_user
+from .client import OpenNVR, Camera, Recording, PlatformError
+from .infer_stream import InferStream
+from .domain_subscriber import (
+    DomainEvent, DomainEventSubscriber, domain_event_app, parse_domain_event,
+)
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -126,6 +131,17 @@ __all__ = [
     # The operator behind a /ui view or an action (X-OpenNVR-User)
     "UserContext",
     "current_user",
+    # The platform client (everything an app reads from core / KAI-C)
+    "OpenNVR",
+    "Camera",
+    "Recording",
+    "PlatformError",
+    "InferStream",
+    # Consuming contracted domain events
+    "DomainEvent",
+    "DomainEventSubscriber",
+    "domain_event_app",
+    "parse_domain_event",
     # Frame-app plumbing
     "FrameSource",
     "KaiCClient",

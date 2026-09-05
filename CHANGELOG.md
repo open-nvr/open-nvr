@@ -77,6 +77,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One platform client for apps.** `opennvr_app_sdk.OpenNVR` wraps
+  everything an app reads from core and KAI-C — the camera roster,
+  current snapshots, recordings (list / playback URL / frame at an
+  instant), the events store and evidence photos, plate statistics,
+  the app's own inbox rows, and inference (HTTP `infer` and a
+  persistent WebSocket `stream`, contract §6) — plus durable per-app
+  key/value **state** in core (`app_state` table; 200-char keys,
+  256 KB values, 2000 keys per app) so apps stop inventing SQLite.
+  Server: new `/api/v1/internal/app/*` router (snapshot, recordings,
+  plates, alerts, state), app-key scoped like the rest of the internal
+  door. `DomainEventSubscriber` / `domain_event_app` consume contracted
+  domain events (`plate.recognized.v1`, …) with the same isolation as
+  `AlertSubscriber`; the shared NATS loop subscribes to several
+  subjects. `websockets` becomes an SDK dependency. `docs/APP_PLATFORM.md`.
 - **Apps know who is asking.** Core now attaches `X-OpenNVR-User` — a
   60-second JWT naming the operator (id, username, superuser flag, the
   camera ids they may view and manage), signed with the SHA-256 of the

@@ -539,7 +539,7 @@ class AppRegisterRequest(BaseModel):
 #: change to the register/config/state/actions shapes; bump
 #: MIN_SDK_VERSION only when an old SDK would misbehave, not merely
 #: miss a feature.
-API_VERSION = "1.1"
+API_VERSION = "1.2"
 MIN_SDK_VERSION = "0.2.0"
 
 
