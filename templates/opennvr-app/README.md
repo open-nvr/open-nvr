@@ -45,6 +45,19 @@ dwell timer (`opennvr_app_sdk.state.keyed_state`), a confidence gate, a
 time-of-day window. The [`loitering-detection`](../../examples/loitering-detection)
 example is a full worked state machine to copy from.
 
+When the rule needs more than the event in hand — the cameras assigned
+to this app, a snapshot, past events, state that survives a restart —
+use the platform client instead of talking to core yourself:
+
+```python
+from opennvr_app_sdk import OpenNVR
+nvr = OpenNVR()                       # OPENNVR_URL + the app's own key
+nvr.cameras(); nvr.snapshot(camera_id); nvr.state.get("last_seen")
+```
+
+See [`docs/APP_PLATFORM.md`](../../docs/APP_PLATFORM.md) and the index in
+[`docs/SDK_REFERENCE.md`](../../docs/SDK_REFERENCE.md).
+
 ## Layout
 
 ```

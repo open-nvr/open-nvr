@@ -13,12 +13,15 @@ Start here. Pick the row that matches what you're doing.
 
 ## Contribute
 - **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — PR flow, conventions, running tests.
+- **[DEVELOPER_PROGRAM.md](DEVELOPER_PROGRAM.md)** — **start here if you are building an app**: what the platform gives you, paid apps, the compatibility promise.
 - **[FIRST_DETECTOR.md](FIRST_DETECTOR.md)** — write your first detector app in ~15 minutes.
 - **[CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md)** — publish an app to the catalog.
 - **[APP_SURFACES.md](APP_SURFACES.md)** — the surfaces (config, state, actions) an app exposes.
 - **[APPS_INSTALL.md](APPS_INSTALL.md)** — one-click install design (desired-state + reconciler).
 - **[APP_CREDENTIALS.md](APP_CREDENTIALS.md)** — per-app keys: the register handshake, roster scoping, rotate/revoke.
 - **[APP_PLATFORM.md](APP_PLATFORM.md)** — the `OpenNVR` client: cameras, snapshots, recordings, timeline, AI, alerts, durable state, domain-event consumption.
+- **[SDK_REFERENCE.md](SDK_REFERENCE.md)** — index of every public `opennvr_app_sdk` name, by task.
+- **[PLATFORM_API.md](PLATFORM_API.md)** — the operator API: users (incl. superusers + MFA), roles and the permission catalogue, cameras, assignments, per-camera access, apps and licences.
 
 ## Build on the AI layer
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.

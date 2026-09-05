@@ -272,6 +272,11 @@ to a release window. Pull requests and design discussions are welcome.
 - **Edge co-processor integration.** Coral / TensorRT / Hailo adapter
   variants beyond the ONNX-only adapters that ship in v0.1.
 - **Native Kubernetes operator** for Helm-chart deployments at scale.
+- **App Catalog for developers** (see `docs/DEVELOPER_PROGRAM.md`):
+  a verified-developer badge on listings, a featured row, install
+  counts (opt-in, aggregate) and a community showcase. The index
+  fields these need — `author`, `kind`, `pricing` — already ship;
+  the catalog UI and the review policy behind the badge do not yet.
 
 ## How to influence the roadmap
 
@@ -298,6 +303,12 @@ Discussion and a migration path will ship alongside.
    events. The federated-AI roadmap item (v0.3) is opt-in by design and
    will land with the same posture.
 4. **Honest CHANGELOG.** Breaking changes get a major-version bump.
+5. **The app-registry contract is versioned and tested.** What an SDK
+   app reads from `POST /apps/register`, `/config` and `/status` does
+   not change shape without an `api_version` bump, and `min_sdk_version`
+   only moves when an old SDK would misbehave —
+   `docs/DEVELOPER_PROGRAM.md` § *The compatibility promise*, pinned by
+   `server/tests/test_registry_contract.py`.
    We're 0.x — bumps are cheaper here than at 1.x — but the policy
    stays the same when we cross 1.0.
 

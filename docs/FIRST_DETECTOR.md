@@ -157,6 +157,27 @@ Uncomment the `contract_port` / `opennvr_url` block in `config.yml` (the
 generator ships it commented) to turn the contract surface + catalog
 self-registration on.
 
+On first registration core issues the app **its own key** (`oak_…`),
+which the SDK stores and uses from then on — the site key in
+`config.yml` is only for bootstrap ([APP_CREDENTIALS.md](APP_CREDENTIALS.md)).
+With that key, `OpenNVR()` gives the rule everything else it might
+want from the platform — the cameras assigned to it, a snapshot, past
+events, a place to keep state across restarts — without touching NATS
+or HTTP yourself:
+
+```python
+from opennvr_app_sdk import OpenNVR
+
+nvr = OpenNVR()                       # OPENNVR_URL + the app's key
+for cam in nvr.cameras():             # only cameras assigned to this app
+    last = nvr.state.get(f"seen:{cam.handle}")
+    jpeg = nvr.snapshot(cam)
+```
+
+The full client is in [APP_PLATFORM.md](APP_PLATFORM.md); inside `/ui`
+and actions, `current_user()` tells you who is asking and which cameras
+they may see ([APP_SURFACES.md §5](APP_SURFACES.md)).
+
 ## 5. Publish to the App Store (2 min to start)
 
 An operator installs apps from the **App Catalog**. Getting yours there
@@ -194,6 +215,13 @@ either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 
 ## Related reading
 
+- [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md) — the deal: what
+  the platform gives you, selling apps and models, the compatibility
+  promise.
+- [`docs/SDK_REFERENCE.md`](SDK_REFERENCE.md) — every public SDK name,
+  by task; [`docs/APP_PLATFORM.md`](APP_PLATFORM.md) — the `OpenNVR`
+  client; [`docs/APP_CREDENTIALS.md`](APP_CREDENTIALS.md) — the app's
+  own key.
 - [`docs/APP_SURFACES.md`](APP_SURFACES.md) — **the next step after this
   guide**: make your app a full citizen — agent skill, live config,
   state views, and action forms, all declared, no frontend.

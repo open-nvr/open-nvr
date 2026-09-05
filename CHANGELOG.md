@@ -89,6 +89,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The developer program is written down.** `docs/DEVELOPER_PROGRAM.md`
+  is the deal for third-party developers — no fee, your licence, the
+  platform surface in one table, and a **compatibility promise** for the
+  app-registry contract (versioned `api_version`, `min_sdk_version` moves
+  only for misbehaviour, additive event schemas, deprecations announced a
+  minor release ahead) now pinned by `server/tests/test_registry_contract.py`.
+  New references: `docs/SDK_REFERENCE.md` (every public
+  `opennvr_app_sdk` name, by task) and `docs/PLATFORM_API.md` (the
+  operator API: users incl. superusers + MFA, roles and the permission
+  catalogue, cameras, assignments, per-camera access, apps and licences).
+  `make sdk-docs` renders the SDK docstrings with pdoc.
+  `FIRST_DETECTOR.md` and `CONTRIBUTING_APPS.md` cover the app key, the
+  `OpenNVR()` client, and paid / external listings.
 - **Apps can be sold.** The manifest and the App Store index carry
   `pricing` (free | paid | subscription | contact), `price_note` and
   `entitlement` (none | license_key); the catalog shows the badge on

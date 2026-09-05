@@ -39,6 +39,17 @@ So your entry earns trust by being reviewable: the image is pinned, the
 declared tasks are real, the manifest matches, and there are no secrets in
 the file. The rest of this guide is how to satisfy that.
 
+**Paid and external listings are welcome.** OpenNVR takes no fee and
+processes no payments; a paid app is your product, and its licence is
+checked by *your* code. Two extra fields cover it — `pricing` /
+`price_note` for the badge the catalog shows, `entitlement: license_key`
+if the administrator must enter a key before the app can be enabled. An
+app you distribute yourself lists as `kind: external` with an
+`external_url`: the catalog shows the card and a **Learn more** link
+and never installs it. The rules and the reasoning are in
+[`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md); the licence hook
+in [`docs/APP_SURFACES.md` §5b](APP_SURFACES.md).
+
 ---
 
 ## 1. Build your app on the App SDK
@@ -224,18 +235,31 @@ index entry plus your app under `examples/<id>/` — one topic per PR.
 - **No secrets.** The compose block uses `${VAR}` placeholders only; no
   literal key ever lands in the file.
 - **The app self-registers.** On boot your app calls `POST /apps/register`
-  with the deployment's `INTERNAL_API_KEY` and appears in the catalog — so
-  "installed" actually means "running and registered".
+  with the deployment's `INTERNAL_API_KEY`, is issued its own key, and
+  appears in the catalog — so "installed" actually means "running and
+  registered".
+- **Pricing is honest.** `pricing` is one of `free` / `paid` /
+  `subscription` / `contact`; `price_note` is short and factual ("$49
+  one-time", "per camera, monthly") and names no third party. A `paid` or
+  `subscription` app that gates features declares `entitlement:
+  license_key` and implements `verify_license` — a reviewer will try
+  enabling it without a key and expect a 402.
+- **External listings link somewhere real.** `kind: external` needs an
+  https `external_url` under your control and an `author`; the
+  validator rejects an install block on an external entry.
 
 Once merged, your app is browsable in every OpenNVR deployment's App Catalog
 and installable via the copy-paste command (always) or one click (where the
-operator has opted in). If yours is a first-party example, your name goes
-on it.
+operator has opted in). Community apps are showcased in the project README
+and the release notes — say a line about yours in the PR. If yours is a
+first-party example, your name goes on it.
 
 ---
 
 ## Related reading
 
+- [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md) — the deal for
+  third-party developers: no fee, your licence, the compatibility promise.
 - [`docs/FIRST_DETECTOR.md`](FIRST_DETECTOR.md) — the on-ramp: scaffold a
   runnable app with the generator, fill in the rule, get its tests green, run
   it against the stack — then land here to publish it.
