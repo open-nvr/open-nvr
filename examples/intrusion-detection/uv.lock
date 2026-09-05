@@ -99,12 +99,13 @@ wheels = [
 
 [[package]]
 name = "opennvr-app-sdk"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "../../sdk/opennvr-app-sdk" }
 dependencies = [
     { name = "httpx" },
     { name = "nats-py" },
     { name = "pyyaml" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -112,6 +113,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "nats-py", specifier = ">=2.6" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -126,7 +128,6 @@ version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "opennvr-app-sdk" },
-    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -146,7 +147,6 @@ requires-dist = [
     { name = "opennvr-app-sdk", editable = "../../sdk/opennvr-app-sdk" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "websockets", specifier = ">=13.0" },
 ]
 provides-extras = ["dev"]
 

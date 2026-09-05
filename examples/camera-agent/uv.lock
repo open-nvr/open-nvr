@@ -942,12 +942,13 @@ wheels = [
 
 [[package]]
 name = "opennvr-app-sdk"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "../../sdk/opennvr-app-sdk" }
 dependencies = [
     { name = "httpx" },
     { name = "nats-py" },
     { name = "pyyaml" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -955,6 +956,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "nats-py", specifier = ">=2.6" },
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [package.metadata.requires-dev]

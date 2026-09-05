@@ -299,13 +299,17 @@ class AIAPI:
             return None
         return r.json() if r.status_code == 200 else None
 
-    def infer(self, adapter: str, jpeg: bytes, *, task: str, camera_id: str,
-              params: dict | None = None, correlation_id: str | None = None) -> dict:
+    def infer(self, adapter: str, jpeg: bytes, *, task: str,
+              camera_id: str | None = None, params: dict | None = None,
+              correlation_id: str | None = None) -> dict:
         """One HTTP inference call (§5.1 ``InferResponse``); raises
-        ``KaiCError`` on transport failure or a non-200."""
+        ``KaiCError`` on transport failure or a non-200. Pass
+        ``camera_id`` (a ``camN`` handle) whenever the frame belongs to
+        a camera — it drives KAI-C's audit, budgets and bus subject."""
         return self._client_for(adapter).infer(
-            jpeg, task=task, camera_id=str(camera_id), params=params,
-            correlation_id=correlation_id)
+            jpeg, task=task,
+            camera_id=None if camera_id is None else str(camera_id),
+            params=params, correlation_id=correlation_id)
 
     def stream(self, adapter: str, *, camera_id: str, timeout: float | None = None):
         """A persistent WebSocket session for a camera (§6.1 handshake,

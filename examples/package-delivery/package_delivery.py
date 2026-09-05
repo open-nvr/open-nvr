@@ -25,9 +25,8 @@ were evaluated and NOT forced onto it:
   IoU tracker's own ``_TrackState``), not TTL-driven; and the dedup
   ledger must stay a plain ``{(camera, track, kind): monotonic_ts}``
   dict (its exact shape is part of this app's pinned test surface).
-* the SDK ``KaiCClient`` — this app's detector call predates the
-  contract-v1 ``task``/``camera_id`` body fields; ``KaicDetectorClient``
-  keeps the historical wire shape so deployed adapters see no change.
+The detector call itself is the SDK's ``KaiCClient``
+(``KaicDetectorClient`` only keeps this app's ``detect`` spelling).
 
 Run:
     python package_delivery.py --config config.yml
@@ -48,7 +47,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-import httpx
 import yaml
 
 from alerts import (
@@ -59,7 +57,7 @@ from alerts import (
     build_dispatcher,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import AlertType, AppManifest, FrameApp, Param, StateView
+from opennvr_app_sdk import AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView
 from opennvr_app_sdk.frame_sources import DictFrameSource
 from package_pipeline import (
     DEFAULT_DETECTION_CONFIDENCE,
@@ -308,23 +306,12 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
 
-# ── KAI-C detector client ──────────────────────────────────────────
+# ── KAI-C detector client (SDK-backed) ─────────────────────────────
 
 
-class KaicDetectorClient:
-    """JSON+base64 HTTP client for the YOLOv8 detector via KAI-C.
-
-    KAI-C's ``/api/v1/infer/{adapter_name}`` proxy only accepts
-    application/json (multipart proxying is a planned follow-up), so
-    the frame ships base64-encoded inside the JSON body. The SDK's
-    body parser unwraps ``frame_b64`` into the binary payload before
-    the adapter's service sees it.
-
-    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
-    preserve this app's historical wire body — a bare
-    ``{"frame_b64": ...}`` without the contract-v1 ``task`` /
-    ``camera_id`` fields.
-    """
+class KaicDetectorClient(KaiCClient):
+    """The SDK's KAI-C client behind this app's ``detect`` spelling
+    (``task="object_detection"`` on the contract-v1 body)."""
 
     def __init__(
         self,
@@ -333,25 +320,14 @@ class KaicDetectorClient:
         adapter_name: str,
         timeout_seconds: float,
     ) -> None:
-        self._url = f"{kaic_url.rstrip('/')}/api/v1/infer/{adapter_name}"
-        self._api_key = api_key
-        self._timeout = timeout_seconds
+        super().__init__(kaic_url, adapter_name, api_key=api_key,
+                         timeout_seconds=timeout_seconds)
 
     def detect(
         self, frame_jpeg: bytes, *, correlation_id: str | None = None
     ) -> dict[str, Any]:
-        headers = {
-            "X-Internal-Api-Key": self._api_key,
-            "Content-Type": "application/json",
-        }
-        if correlation_id:
-            headers[CORRELATION_ID_HEADER] = correlation_id
-        body = {"frame_b64": base64.b64encode(frame_jpeg).decode("ascii")}
-        resp = httpx.post(
-            self._url, json=body, headers=headers, timeout=self._timeout
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self.infer(frame_jpeg, task="object_detection",
+                          correlation_id=correlation_id)
 
 
 # ── Per-camera bookkeeping ─────────────────────────────────────────

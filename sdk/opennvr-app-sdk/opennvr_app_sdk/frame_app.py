@@ -94,14 +94,18 @@ class KaiCClient:
         frame_bytes: bytes,
         *,
         task: str,
-        camera_id: str,
+        camera_id: str | None = None,
         params: dict[str, Any] | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         """Send one frame; return the raw §5.1 ``InferResponse`` body.
 
-        Raises :class:`KaiCError` on transport failure or non-200; the
-        frame loop catches and decides whether to alert / skip / abort."""
+        ``camera_id`` is optional, as it is for KAI-C itself: with it
+        the call is attributed to the camera (audit, skill budgets, the
+        NATS subject); without it KAI-C treats the call as a one-off
+        probe. Raises :class:`KaiCError` on transport failure or
+        non-200; the frame loop catches and decides whether to alert /
+        skip / abort."""
         url = f"{self._base_url}/api/v1/infer/{self._adapter_name}"
         headers = {
             "X-Correlation-Id": correlation_id or f"app-{uuid.uuid4().hex[:12]}",
@@ -113,10 +117,11 @@ class KaiCClient:
         # task + params, KAI-C reads camera_id for NATS subject + audit.
         body = {
             "task": task,
-            "camera_id": camera_id,
             "frame_b64": base64.b64encode(frame_bytes).decode("ascii"),
             **(params or {}),
         }
+        if camera_id is not None:
+            body["camera_id"] = str(camera_id)
         try:
             response = self._client.post(url, json=body, headers=headers)
         except Exception as exc:

@@ -2922,31 +2922,26 @@ _OPENNVR_CAMERA_RECONCILE_SLOW = 30.0
 
 
 def _load_opennvr_cameras(*, url: str, api_key: str) -> list[CameraSpec]:
-    """Load frame sources from OpenNVR's internal camera-agent endpoint."""
-    import httpx
+    """Load frame sources from OpenNVR through the SDK's camera discovery.
 
-    headers = {"X-Internal-Api-Key": api_key}
-    try:
-        response = httpx.get(url, headers=headers, timeout=15.0, trust_env=False)
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
-        logger.warning(
-            "config: could not load cameras from OpenNVR (%s): %s",
-            url,
-            exc,
-        )
-        return []
+    ``url`` is the configured ``opennvr_cameras_url`` (historically the
+    full internal-endpoint URL); the SDK takes the server base, so the
+    endpoint path is stripped when present. Never raises — an
+    unreachable core at boot is an empty roster and a warning, and the
+    reconcile loop keeps trying."""
+    from opennvr_app_sdk import discover_cameras
+    from opennvr_app_sdk.cameras import CAMERAS_PATH
 
-    raw_cameras = payload.get("cameras") if isinstance(payload, dict) else None
-    if not isinstance(raw_cameras, list):
-        logger.warning("config: OpenNVR cameras response had no 'cameras' list")
+    base = url.rstrip("/")
+    if base.endswith(CAMERAS_PATH):
+        base = base[: -len(CAMERAS_PATH)]
+    raw_cameras = discover_cameras(base, api_key=api_key or None, timeout=15.0)
+    if not raw_cameras:
+        logger.warning("config: no cameras loaded from OpenNVR (%s)", url)
         return []
 
     cameras: list[CameraSpec] = []
     for entry in raw_cameras:
-        if not isinstance(entry, dict):
-            continue
         cam_id = entry.get("camera_id")
         frame_url = entry.get("frame_url")
         if not cam_id or not frame_url:
