@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The App SDK is released to PyPI.** `pip install opennvr-app-sdk`
+  is now the on-ramp: `.github/workflows/publish-sdk.yml` tests the
+  package on 3.11–3.13, builds and `twine check`s the sdist + wheel,
+  installs the wheel in a clean venv, and on a `sdk-v<version>` tag
+  publishes through PyPI trusted publishing (the tag must match
+  `_version.py` and `pyproject.toml`). The package gains a README (the
+  PyPI page), its own Apache-2.0 `LICENSE` file, classifiers and project
+  URLs. `ci.yml` now runs the SDK's own suite, which it never did.
 - **SDK 0.4.0: an async platform client.** `opennvr_app_sdk.aio.AsyncOpenNVR`
   is `OpenNVR` `await`-ed — same methods, arguments, return types and
   degrade/raise rules — for apps that serve a `/ui`, run on

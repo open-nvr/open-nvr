@@ -57,6 +57,24 @@ jobs:
         working-directory: server
         run: uv run pytest tests/ -q
 
+  # ── App SDK ──────────────────────────────────────────────────────
+  # The examples exercise the SDK indirectly; this runs its own suite
+  # (the platform client, credentials, user context, contract server,
+  # the sync/async parity check). publish-sdk.yml runs the same across
+  # 3.11–3.13 plus the build on sdk/** changes.
+  sdk:
+    name: sdk (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/opennvr-app-sdk/uv.lock"
+      - name: Run pytest
+        working-directory: sdk/opennvr-app-sdk
+        run: uv run --frozen --group dev pytest -q
+
   # ── KAI-C middleware ─────────────────────────────────────────────
   # kai-c/ uses [dependency-groups] for dev deps (pytest + pytest-
   # asyncio); pyproject sets testpaths = ["test"] (singular) so a

@@ -136,6 +136,23 @@ container) unless you need full frame rate.
 `load_yaml(path)`, `require(cfg, key)` — the two helpers the runners
 use; pass your own `load_config` to `app()` for anything richer.
 
+## Releasing
+
+The package is published to PyPI as
+[`opennvr-app-sdk`](https://pypi.org/project/opennvr-app-sdk/) by
+`.github/workflows/publish-sdk.yml` through PyPI trusted publishing —
+no token lives in the repository. A release is:
+
+1. Bump `opennvr_app_sdk/_version.py` **and** `pyproject.toml` to the
+   same version, add the CHANGELOG entry, merge.
+2. `git tag sdk-v<version> && git push origin sdk-v<version>`.
+
+The workflow refuses a tag that does not match both files, runs the
+suite on 3.11–3.13, builds the sdist and wheel, `twine check`s them,
+installs the wheel in a clean venv and imports it, then publishes
+(the `pypi` environment may require a maintainer's approval). Every
+PR touching `sdk/**` runs the same pipeline minus the publish.
+
 ## Stability
 
 Every name above is covered by the

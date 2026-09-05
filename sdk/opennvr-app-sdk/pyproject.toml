@@ -5,8 +5,23 @@
 name = "opennvr-app-sdk"
 version = "0.4.0"
 description = "Shared SDK for OpenNVR monitoring apps: §11.5 alert dispatch, zone geometry, keyed TTL state, app manifests, and the Detector / FrameApp base loops."
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+authors = [{ name = "OpenNVR contributors" }]
+keywords = ["opennvr", "nvr", "video", "computer-vision", "surveillance", "sdk"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development :: Libraries",
+]
 
 # The SDK owns the dependencies every app used to re-declare:
 # nats-py for the inference-subscribe loop + alert fan-out, httpx for
@@ -18,6 +33,14 @@ dependencies = [
     # Streaming inference sessions (InferStream) — KAI-C contract §6.
     "websockets>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://opennvr.org"
+Documentation = "https://github.com/open-nvr/open-nvr/blob/main/docs/SDK_REFERENCE.md"
+"Developer program" = "https://github.com/open-nvr/open-nvr/blob/main/docs/DEVELOPER_PROGRAM.md"
+Source = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk"
+Changelog = "https://github.com/open-nvr/open-nvr/blob/main/CHANGELOG.md"
+Issues = "https://github.com/open-nvr/open-nvr/issues?q=label%3Asdk"
 
 [dependency-groups]
 dev = [
