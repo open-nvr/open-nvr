@@ -1,6 +1,6 @@
 # The app platform client — `opennvr_app_sdk.OpenNVR`
 
-**Status:** shipped (SDK ≥ 0.3.0, server `api_version` 1.2).
+**Status:** shipped (SDK ≥ 0.3.0, server `api_version` 1.2; async client SDK ≥ 0.4.0).
 
 Everything a vision app needs from the platform, behind one object that
 already holds the app's credential ([APP_CREDENTIALS.md](APP_CREDENTIALS.md))
@@ -53,6 +53,33 @@ Cameras are accepted as a `Camera`, an int id, or a `camN` / `cam-N`
 handle everywhere. Reads return `None` / `[]` and log when the platform
 is unreachable (an app must not die to a blip); writes raise
 `PlatformError` so a lost state write is never silent.
+
+## On an event loop: `opennvr_app_sdk.aio.AsyncOpenNVR`
+
+The sync client is right for a detector loop. An app that serves a
+`/ui` page, a FastAPI/Starlette service, or an agent loop that must
+never block gets the same surface `await`-ed — same method names,
+arguments, return types and degrade/raise rules, sharing the route
+paths, request builders and parsers with the sync client (a parity test
+in the SDK keeps the two identical):
+
+```python
+from opennvr_app_sdk.aio import AsyncOpenNVR
+
+async with AsyncOpenNVR() as nvr:                 # or AsyncOpenNVR(http_client=pool)
+    for cam in await nvr.cameras():
+        jpeg = await nvr.snapshot(cam)
+        result = await nvr.ai.infer("yolov8", jpeg, task="object_detection",
+                                    camera_id=cam.handle)
+    await nvr.state.set("last_seen", {"cam1": 12.5})
+    recent = await nvr.timeline.search(camera="cam1", limit=5)
+```
+
+Pass `http_client=` to share one `httpx.AsyncClient` (a FastAPI
+lifespan pool, a test transport); the client then leaves it open. The
+one gap: `ai.stream()` (a blocking WebSocket session) has no async form
+yet — call `ai.infer()` per frame from async code. The OpenNVR Agent's
+capabilities probe is the first consumer.
 
 ## Durable state
 

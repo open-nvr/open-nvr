@@ -6,6 +6,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SDK 0.4.0: an async platform client.** `opennvr_app_sdk.aio.AsyncOpenNVR`
+  is `OpenNVR` `await`-ed — same methods, arguments, return types and
+  degrade/raise rules — for apps that serve a `/ui`, run on
+  FastAPI/Starlette, or drive an agent loop that must never block. It
+  shares the route paths, KAI-C request builder and response parsers
+  with the sync client and a parity test pins the two surfaces
+  together; `http_client=` shares an existing `httpx.AsyncClient`.
+  `ai.stream()` has no async form yet. The OpenNVR Agent's KAI-C
+  capabilities probe now rides it. See `docs/APP_PLATFORM.md`.
+
 ### Security
 
 - **Every app gets its own credential.** SDK apps used to boot with the
