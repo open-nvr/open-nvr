@@ -51,9 +51,9 @@ wheel.
 |---|---|---|
 | 1 | `scripts/create_opennvr_app.py --dest <outside>` still wrote an **editable path** to this checkout's SDK and a Dockerfile that only builds from the repo root — an outsider's first `uv sync` fails. | **Fixed:** `--sdk auto\|path\|pypi`; out-of-tree defaults to PyPI (`opennvr-app-sdk>=<version>,<1.0`, no `[tool.uv.sources]`, a self-contained Dockerfile). `server/tests/test_create_app_scaffold.py`. |
 | 2 | Five server tests assumed **every index entry is installable** (`image`, `install`, a compose service) — the first real external listing would have broken CI. | **Fixed:** kind-aware (`test_apps_index.py`, `test_validate_apps_index.py`). |
-| 3 | `DomainEventSubscriber` and `AlertSubscriber` hand you no dispatcher: unlike `Detector`, an event-driven app must `set_default_source` + `build_dispatcher` itself and call `.fire()`. | Open — a `self.dispatcher` built from the standard config keys would make the archetypes symmetric. |
-| 4 | Every app re-declares the same ten config fields (`nats_*`, `contract_*`, `opennvr_url/token`, `webhook_url`, `nats_alerts_*`) and their YAML parsing. | Open — an SDK `BaseAppConfig` + `load_base_config()` that apps extend. |
-| 5 | The generator needs a clone of this repository to run at all. | Open — ship it as `opennvr-app-sdk`'s console script (`opennvr-app new <id>`), templates inside the wheel. |
+| 3 | `DomainEventSubscriber` handed you no dispatcher: unlike `Detector`, an event-driven app had to `set_default_source` + `build_dispatcher` itself. | **Fixed (SDK 0.5.0):** `self.dispatcher` from the standard config keys, `self.fire(alert)` scoped to the app's identity, counted on `/health`. |
+| 4 | Every app re-declared the same ten config fields (`nats_*`, `contract_*`, `opennvr_url/token`, `webhook_url`, `nats_alerts_*`) and their YAML parsing. | **Fixed (SDK 0.5.0):** `BaseAppConfig` + `load_app_config(path, cls)`; the template's config block went from ~70 lines to 12, Plate VIP from 241 to 210. |
+| 5 | The generator needed a clone of this repository to run at all. | **Fixed (SDK 0.5.0):** `opennvr-app new <id>` ships in the wheel with the template; `scripts/create_opennvr_app.py` is a wrapper for in-tree use. |
 | 6 | Nothing shows an operator *why* an external app is greyed until they enter a key: the 402 text is right, the card could say "licence required" up front. | Open (frontend polish). |
 
 Nothing in the list is a contract problem: the registry, entitlement
@@ -65,8 +65,8 @@ first outsider to hit.
 ## Repeating the walk
 
 ```bash
-python3 scripts/create_opennvr_app.py my-app --task object_detection --dest ~/somewhere-else
-cd ~/somewhere-else/my-app && uv sync && uv run pytest -q     # from PyPI, no checkout
+pip install opennvr-app-sdk && opennvr-app new my-app --task object_detection
+cd my-app && uv sync && uv run pytest -q                       # from PyPI, no checkout
 ```
 
 Then make it paid (`pricing`, `entitlement`, `verify_license`), point a

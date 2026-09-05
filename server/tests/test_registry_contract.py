@@ -162,15 +162,23 @@ def test_min_sdk_never_moves_past_what_the_examples_pin():
     import tomllib
 
     pins = []
-    for pyproject in [*REPO_ROOT.glob("examples/*/pyproject.toml"),
-                      REPO_ROOT / "templates" / "opennvr-app" / "pyproject.toml"]:
-        if not pyproject.exists():
-            continue
-        data = tomllib.loads(pyproject.read_text())
+    # The template carries tokens; what a developer gets is the RENDERED
+    # pyproject — scaffold one (PyPI mode) and check that pin too.
+    import tempfile
+
+    from opennvr_app_sdk import scaffold
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rendered = scaffold.generate("pin-probe", "object_detection", Path(tmp)) / "pyproject.toml"
+        candidates = [*REPO_ROOT.glob("examples/*/pyproject.toml"), rendered]
+        texts = [(p.parent.name, p.read_text()) for p in candidates if p.exists()]
+    for name, text in texts:
+        data = tomllib.loads(text)
         for dep in data.get("project", {}).get("dependencies", []):
             m = re.match(r"opennvr[-_]app[-_]sdk\s*>=\s*(\d+\.\d+\.\d+)", dep)
             if m:
-                pins.append((pyproject.parent.name, m.group(1)))
+                pins.append((name, m.group(1)))
+    assert any(name == "pin-probe" for name, _ in pins), "scaffold no longer pins the SDK"
     for name, pin in pins:
         assert _vt(pin) >= _vt(apps_router.MIN_SDK_VERSION), (
             f"{name} pins opennvr-app-sdk>={pin}, below MIN_SDK_VERSION")

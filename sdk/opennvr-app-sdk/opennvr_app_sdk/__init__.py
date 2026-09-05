@@ -35,7 +35,7 @@ from .alerts import (
     set_default_source,
 )
 from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
-from .config import load_yaml, require
+from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
@@ -139,6 +139,8 @@ __all__ = [
     "current_user",
     # The platform client (everything an app reads from core / KAI-C)
     "OpenNVR",
+    "BaseAppConfig",
+    "load_app_config",
     "AsyncOpenNVR",
     "Camera",
     "Recording",

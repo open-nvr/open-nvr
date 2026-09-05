@@ -317,7 +317,7 @@ Adapters are *capabilities*; applications are *solutions*. And every camera can 
 
 Eleven of the thirteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**Build an app.** Don't want to fork an example? A generator scaffolds a minimal, runnable app and you fill in **one method** — the rule. Start with **[Your first OpenNVR detector in 15 minutes](docs/FIRST_DETECTOR.md)**: `python3 scripts/create_opennvr_app.py my-app` → edit `on_detections` → `uv run pytest` green → run it against the stack → publish to the App Store.
+**Build an app.** Don't want to fork an example? A generator scaffolds a minimal, runnable app and you fill in **one method** — the rule. Start with **[Your first OpenNVR detector in 15 minutes](docs/FIRST_DETECTOR.md)**: `pip install opennvr-app-sdk && opennvr-app new my-app` (or `python3 scripts/create_opennvr_app.py my-app` in this checkout) → edit `on_detections` → `uv run pytest` green → run it against the stack → publish to the App Store.
 
 ## Community
 

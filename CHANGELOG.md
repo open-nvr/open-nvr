@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **SDK 0.5.0 (unreleased): less boilerplate for every app.** The three
+  on-ramp gaps the outside-the-repo walk left open, closed:
+  `BaseAppConfig` + `load_app_config(path, cls)` replace the config
+  block every app re-typed (the template's went from ~70 lines to 12);
+  `DomainEventSubscriber` gets `self.dispatcher` / `self.fire(alert)`
+  with the app's identity, like `Detector`; and the generator ships in
+  the wheel as `opennvr-app new <id>` — no checkout needed, PyPI-pinned
+  by default, template moved to `opennvr_app_sdk/templates/app`
+  (`scripts/create_opennvr_app.py` is now a wrapper that keeps in-tree
+  examples on the editable SDK). Additive; server `api_version` stays
+  1.2. Tag `sdk-v0.5.0` to release.
 - **The out-of-tree developer path works end to end.** A paid,
   `license_key` app was built in its own repository on nothing but the
   PyPI wheel (`docs/EXTERNAL_APP_WALKTHROUGH.md`); the platform surface

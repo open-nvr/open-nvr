@@ -33,6 +33,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .alert_subscriber import AlertSubscriberRunner
+from .alerts import (
+    DEFAULT_ALERT_SUBJECT_PREFIX, Alert, AlertDispatcher, build_dispatcher,
+    reset_default_source, scoped_default_source,
+)
 from .contract import ContractMixin
 from .manifest import AppManifest
 from .nats_loop import NatsSubscriberMixin
@@ -96,15 +100,43 @@ class DomainEventSubscriber(ContractMixin, NatsSubscriberMixin):
     manifest: AppManifest | None = None
     subscriptions: list[str] = []
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, dispatcher: AlertDispatcher | None = None) -> None:
         self.cfg = config
         self._stop_event = asyncio.Event()
         self._nc: Any = None
+        self._dispatcher = dispatcher
+        # Alerts fired from on_event carry this app's identity, scoped
+        # per call exactly as Detector does it.
+        self._source_block: dict[str, str] | None = (
+            {"kind": "app", "name": self.manifest.id, "version": self.manifest.version}
+            if self.manifest is not None else None)
         self._contract_init()
         self.setup()
 
     def setup(self) -> None:
         """Optional: allocate state after ``cfg`` is set."""
+
+    # ── Alerts: the same fan-out a Detector gets for free ──────────
+
+    @property
+    def dispatcher(self) -> AlertDispatcher:
+        """stdout + the ``webhook_url`` / ``nats_alerts_*`` channels from
+        ``cfg`` (:class:`~.config.BaseAppConfig`), built on first use.
+        Pass ``dispatcher=`` to the constructor to substitute one."""
+        if self._dispatcher is None:
+            self._dispatcher = build_dispatcher(
+                webhook_url=getattr(self.cfg, "webhook_url", None),
+                nats_alerts_url=getattr(self.cfg, "nats_alerts_url", None),
+                nats_alerts_token=getattr(self.cfg, "nats_alerts_token", None),
+                nats_alerts_subject_prefix=getattr(
+                    self.cfg, "nats_alerts_subject_prefix", DEFAULT_ALERT_SUBJECT_PREFIX))
+        return self._dispatcher
+
+    def fire(self, alert: Alert) -> dict[str, bool]:
+        """Dispatch one alert as this app and count it for ``/health``."""
+        report = self.dispatcher.fire(alert)
+        self._contract_note_alerts(1)
+        return report
 
     def on_event(self, event: DomainEvent) -> None:
         raise NotImplementedError
@@ -129,11 +161,15 @@ class DomainEventSubscriber(ContractMixin, NatsSubscriberMixin):
             logger.warning("skipping off-contract message on %r", subject)
             return False
         self._contract_note_event()
+        token = scoped_default_source(self._source_block) if self._source_block else None
         try:
             self.on_event(event)
         except Exception:
             logger.exception("on_event failed for %s on %s", event.schema, subject)
             return False
+        finally:
+            if token is not None:
+                reset_default_source(token)
         return True
 
     async def run(self, *, once: bool = False) -> None:
@@ -145,6 +181,8 @@ class DomainEventSubscriber(ContractMixin, NatsSubscriberMixin):
         finally:
             self.stop_config_poll()
             self.stop_contract_server()
+            if self._dispatcher is not None:
+                self._dispatcher.close()
 
 
 def domain_event_app(app_cls, *, load_config=None) -> AlertSubscriberRunner:
