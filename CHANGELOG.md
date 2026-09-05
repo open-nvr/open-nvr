@@ -171,6 +171,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Test suites no longer leak swapped `core.*` modules into each
+  other.** `server/tests/conftest.py` snapshots the `core` namespace of
+  `sys.modules` per test module and restores it, so a suite that purges
+  `core.config` to re-validate `Settings` (`test_m1b`, `test_m1c`) no
+  longer leaves later modules monkeypatching a stale `settings` object
+  — the pass-alone / fail-in-suite 401s.
+- **App-images CI retries the Buildx setup once.** Docker Hub 502s while
+  pulling `moby/buildkit` failed PR runs unrelated to the change; there
+  is no non-Hub mirror to pin, so the setup step is `continue-on-error`
+  with a single retry.
+- **camera-agent `/health` no longer lists camera handles.** The open
+  health probe now reports `camera_count`; the roster stays behind the
+  authenticated `/cameras` route and the contract `/state` door the App
+  Catalog scopes per viewer.
+
 - `PUT /users/me` was unreachable for non-superusers (declared after
   `PUT /users/{user_id}`, which captured it and demanded superuser), and
   its "strip admin-only fields" logic wrote NULL into `is_active` /
