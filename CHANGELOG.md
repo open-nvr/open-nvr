@@ -75,6 +75,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server-side assignment). The UI hides the site-wide controls from
   non-superusers; enforcement is server-side.
 
+### Changed
+
+- **The example apps ride the SDK's KAI-C clients.** intrusion-detection
+  (HTTP and the §6 WebSocket session), package-delivery and
+  smart-doorbell each carried a hand-written KAI-C client "to preserve a
+  historical wire body"; they are now thin spellings over
+  `opennvr_app_sdk.KaiCClient` / `InferStream` and send the contract-v1
+  body (`task`, and `camera_id` where the frame belongs to a camera —
+  `KaiCClient.infer` now takes `camera_id` optionally, as KAI-C does).
+  The camera-agent loads its OpenNVR roster through the SDK's
+  `discover_cameras`. `websockets` is no longer an app-level dependency.
+
 ### Added
 
 - **One platform client for apps.** `opennvr_app_sdk.OpenNVR` wraps

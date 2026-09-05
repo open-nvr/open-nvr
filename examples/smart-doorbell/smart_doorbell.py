@@ -19,10 +19,9 @@ What stays here — deliberately:
   ahead of time via the ``enroll`` CLI subcommand below, which talks
   directly to the InsightFace adapter's ``/faces/register`` route
   (KAI-C does not proxy that surface, so neither does the SDK);
-* ``KaicRecognitionClient`` — this app's recognition call carries its
-  own body shape (``task`` + ``threshold``, no ``camera_id``); the SDK
-  ``KaiCClient`` would add ``camera_id``, changing the wire body
-  deployed adapters see;
+* ``KaicRecognitionClient`` — the SDK's ``KaiCClient`` behind this
+  app's ``recognize`` spelling (``task="face_recognition"`` with the
+  match ``threshold`` as a contract param);
 * the recognised/unknown severity routing, the snapshot-for-strangers
   policy, and the dedup ledger (a plain dict keyed by
   ``(camera, person-or-unknown-bucket)`` — its shape is pinned by this
@@ -78,7 +77,9 @@ from face_recognition_pipeline import (
     RecognitionClient,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import Action, AlertType, AppManifest, FrameApp, Param, StateView
+from opennvr_app_sdk import (
+    Action, AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView,
+)
 from opennvr_app_sdk.frame_sources import DictFrameSource
 
 logger = logging.getLogger("smart-doorbell")
@@ -298,21 +299,10 @@ def load_config(path: str | Path) -> AppConfig:
 # ── KAI-C recognition client ───────────────────────────────────────
 
 
-class KaicRecognitionClient:
-    """JSON POST to KAI-C's /api/v1/infer/{adapter} → InsightFace
-    /infer. KAI-C audits the call and threads the correlation_id
-    through to the adapter.
-
-    KAI-C only proxies application/json (multipart proxying is a
-    planned follow-up), so the frame ships base64-encoded inside the
-    JSON body. The SDK's body parser unwraps ``frame_b64`` into the
-    binary payload and lifts the remaining keys (``task``,
-    ``threshold``) into the top-level payload the service sees.
-
-    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
-    preserve this app's historical wire body — ``task`` + ``threshold``
-    with no ``camera_id`` field.
-    """
+class KaicRecognitionClient(KaiCClient):
+    """The SDK's KAI-C client behind this app's ``recognize`` spelling:
+    ``task="face_recognition"`` with the match ``threshold`` as a
+    contract-v1 param the adapter reads."""
 
     def __init__(
         self,
@@ -321,9 +311,8 @@ class KaicRecognitionClient:
         adapter_name: str,
         timeout_seconds: float,
     ) -> None:
-        self._url = f"{kaic_url.rstrip('/')}/api/v1/infer/{adapter_name}"
-        self._api_key = api_key
-        self._timeout = timeout_seconds
+        super().__init__(kaic_url, adapter_name, api_key=api_key,
+                         timeout_seconds=timeout_seconds)
 
     def recognize(
         self,
@@ -332,25 +321,9 @@ class KaicRecognitionClient:
         threshold: float,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        headers = {
-            "X-Internal-Api-Key": self._api_key,
-            "Content-Type": "application/json",
-        }
-        if correlation_id:
-            headers[CORRELATION_ID_HEADER] = correlation_id
-        body: dict[str, Any] = {
-            "frame_b64": base64.b64encode(frame_jpeg).decode("ascii"),
-            "task": "face_recognition",
-            "threshold": threshold,
-        }
-        resp = httpx.post(
-            self._url,
-            json=body,
-            headers=headers,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self.infer(frame_jpeg, task="face_recognition",
+                          params={"threshold": threshold},
+                          correlation_id=correlation_id)
 
 
 # ── The orchestrator ───────────────────────────────────────────────

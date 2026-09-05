@@ -5,15 +5,11 @@ description = "OpenNVR intrusion-detection example app"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# The SDK owns the runtime stack (httpx KAI-C calls + webhooks, PyYAML
-# config, nats-py alert fan-out, the FrameApp poll loop, frame sources,
-# zone geometry) — see docs/design/app-sdk-spec.html. websockets stays
-# local: the §6 streaming-mode path through KAI-C's
-# /api/v1/infer/{adapter}/stream proxy (opt-in via
-# ``kaic_transport: ws`` in config) is unique to this example.
+# The SDK owns the whole runtime stack (KAI-C HTTP + WebSocket clients,
+# webhooks, PyYAML config, nats-py alert fan-out, the FrameApp poll
+# loop, frame sources, zone geometry) — see docs/APP_PLATFORM.md.
 dependencies = [
     "opennvr-app-sdk",
-    "websockets>=13.0",
 ]
 
 [tool.uv.sources]
