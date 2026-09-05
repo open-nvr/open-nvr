@@ -31,7 +31,7 @@ from core.auth import get_current_active_user, get_current_superuser
 from core.config import settings
 from core.database import get_db
 from core.logging_config import camera_logger
-from core.permissions import get_camera_or_403
+from core.permissions import RequirePermission, get_camera_or_403
 from models import (
     Camera,
     CameraConfig,
@@ -46,6 +46,7 @@ from schemas import (
     CameraHardDeleteRequest,
     CameraList,
     CameraPermissionAssign,
+    CameraPermissionEntry,
     CameraPermissionResponse,
     CameraResponse,
     CameraUpdate,
@@ -275,6 +276,15 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
         )
 
 
+#: Adding a camera makes the caller its OWNER — and an owner sees that
+#: camera everywhere (timeline, alerts, apps). Left open to any active
+#: user, "add a camera" was a self-service way to widen one's own scope.
+#: ``cameras.manage`` is the seeded permission the operator role holds
+#: and the viewer role does not (scripts/init_db.py), and the one the
+#: UI already keys its Add Camera button on.
+require_cameras_manage = RequirePermission("cameras.manage")
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -283,10 +293,11 @@ async def create_camera(
         description="Add the camera even when its IP or RTSP URL matches an existing one.",
     ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
-    """Create a new camera.
+    """Create a new camera. Requires the ``cameras.manage`` permission
+    (superusers hold it implicitly).
 
     When no RTSP URL is supplied but credentials are, the server derives it
     from the IP + credentials (ONVIF direct-connect, then vendor RTSP
@@ -1705,6 +1716,39 @@ def assign_camera_permission(
     except Exception:
         pass
     return perm
+
+
+@router.get("/{camera_id}/permissions", response_model=list[CameraPermissionEntry])
+def list_camera_permissions(
+    camera_id: int,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Every grant on a camera — who may view it, who may manage it —
+    with the owner listed first. Owner or superuser (the same gate as
+    assigning); the assignment API was write-only before this, so an
+    admin could grant but never audit."""
+    rows = (
+        db.query(CameraPermission, User.username)
+        .join(User, User.id == CameraPermission.user_id)
+        .filter(CameraPermission.camera_id == camera.id)
+        .order_by(User.username.asc())
+        .all()
+    )
+    out: list[CameraPermissionEntry] = []
+    if camera.owner_id is not None:
+        owner = db.query(User).filter(User.id == camera.owner_id).first()
+        out.append(CameraPermissionEntry(
+            user_id=camera.owner_id, username=owner.username if owner else None,
+            can_view=True, can_manage=True, is_owner=True))
+    for perm, username in rows:
+        if perm.user_id == camera.owner_id:
+            continue
+        out.append(CameraPermissionEntry(
+            user_id=perm.user_id, username=username,
+            can_view=bool(perm.can_view), can_manage=bool(perm.can_manage),
+            is_owner=False))
+    return out
 
 
 @router.delete("/{camera_id}/permissions/{user_id}")

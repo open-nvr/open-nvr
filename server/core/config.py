@@ -315,6 +315,12 @@ class Settings(BaseSettings):
     # a separate reconciler applies it. See docs/APPS_INSTALL.md.
     apps_install_enabled: bool = False
 
+    # Self-service sign-up (``POST /auth/register`` → a viewer account).
+    # Off by default: an NVR's users are created by its administrator
+    # (``POST /users``), and an open sign-up door on a LAN-exposed box is
+    # an account for anyone who can reach it. Opt in for kiosk/demo use.
+    public_registration_enabled: bool = False
+
     # Logging settings
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     log_file_enabled: bool = True

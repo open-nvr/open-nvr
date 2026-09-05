@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Self-service ways into the camera scope closed.** With per-camera
+  RBAC as the boundary, two routes let a user widen it themselves:
+  `POST /cameras/` made any active user the OWNER of the camera it
+  added (and an owner sees that camera everywhere), and
+  `POST /auth/register` minted a viewer account for anyone who could
+  reach the box. Adding a camera now requires the seeded
+  `cameras.manage` permission (operator/admin roles hold it, viewers do
+  not; superusers implicitly), and self-registration is off unless
+  `PUBLIC_REGISTRATION_ENABLED=true` (`/auth/check-setup` reports
+  `registration_open`). New `GET /cameras/{id}/permissions` lists a
+  camera's grants (owner first) so assignments can be audited, not only
+  written.
 - **Missing authorization on the IP-keyed ONVIF routes** (CWE-862 /
   CWE-639). `/connect` and every `/camera/{ip}/...` route (profiles,
   stream URI, PTZ move/stop/presets, clock) checked only that the IP lay
