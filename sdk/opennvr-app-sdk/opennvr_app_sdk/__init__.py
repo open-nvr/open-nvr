@@ -60,6 +60,7 @@ from .cameras import (
     full_frame_polygon,
 )
 from .credentials import AppCredentials, auth_headers
+from .usercontext import UserContext, current_user
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -122,6 +123,9 @@ __all__ = [
     "full_frame_polygon",
     "AppCredentials",
     "auth_headers",
+    # The operator behind a /ui view or an action (X-OpenNVR-User)
+    "UserContext",
+    "current_user",
     # Frame-app plumbing
     "FrameSource",
     "KaiCClient",

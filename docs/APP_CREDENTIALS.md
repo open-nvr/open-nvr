@@ -67,3 +67,13 @@ The register response's `registry.min_sdk_version` is the oldest SDK the
 server still speaks to; the SDK logs a warning (never fails) when it is
 older. `api_version` is bumped on any change to the register / config /
 state / actions shapes.
+
+## User identity for your app
+
+The same key hash is the shared secret behind `X-OpenNVR-User`: on every
+proxied `/ui` view and action, core attaches a 60-second HS256 token
+naming the operator (id, username, superuser flag, the camera ids they
+may view and manage). The SDK verifies it against `sha256(app key)` and
+exposes it as `current_user()` — see
+[APP_SURFACES.md](APP_SURFACES.md#who-is-asking-current_user). No key
+issued → no identity forwarded.

@@ -77,6 +77,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Apps know who is asking.** Core now attaches `X-OpenNVR-User` — a
+  60-second JWT naming the operator (id, username, superuser flag, the
+  camera ids they may view and manage), signed with the SHA-256 of the
+  app's own key — to every proxied `GET /apps/{id}/ui` and
+  `POST /apps/{id}/actions/{name}`. The SDK verifies it (stdlib only)
+  and exposes `current_user()` / `self.current_user` inside `ui_html()`
+  and `on_action()`, with `can_see()` / `can_manage()` / `visible()`
+  helpers, so an app renders per user and refuses actions on cameras
+  the caller may not control without a login of its own. Absent or
+  invalid → `None`, never partial trust. `docs/APP_SURFACES.md` §5.
 - **Superusers can be created and managed through the API.**
   `POST /users` and `PUT /users/{id}` accept `is_superuser`; creating,
   promoting or demoting a superuser requires the caller's TOTP code in

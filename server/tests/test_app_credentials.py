@@ -261,3 +261,120 @@ def test_app_roster_resolution_unit():
     plain, digest = app_keys.mint_key("x-app")
     assert plain.startswith("oak_x-app_") and digest == app_keys.hash_key(plain)
     assert app_keys.looks_like_app_key(plain) and not app_keys.looks_like_app_key(SITE_KEY)
+
+
+# ── user identity forwarded to the app (X-OpenNVR-User) ────────────────
+
+
+def test_ui_and_action_proxies_forward_a_signed_user_context(env, monkeypatch):
+    """Core signs the caller's identity + camera scope with the app's
+    key hash; the SDK verifies with sha256(app key). Both halves here."""
+    import sys
+
+    tc, ids, SessionLocal = env
+    key = _register(tc, _site()).json()["api_key"]
+    s = SessionLocal()
+    row = s.get(InstalledApp, "loitering-detection")
+    row.manifest_json = {**row.manifest_json, "has_ui": True,
+                         "actions": [{"name": "reset", "label": "Reset", "params": []}]}
+    row.enabled = True
+    s.commit()
+    s.close()
+
+    seen: dict[str, dict] = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"<p>ok</p>"
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kw):
+            seen["ui"] = dict(headers or {})
+            return _Resp()
+
+        async def post(self, url, json=None, headers=None, **kw):
+            seen["action"] = dict(headers or {})
+            return _Resp()
+
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _Client)
+    # A plain (non-superuser) operator granted the gate camera only.
+    s = SessionLocal()
+    from models import CameraPermission
+    guard = User(username="guard", email="g@x", hashed_password="x",
+                 role_id=s.query(Role).first().id, is_active=True)
+    s.add(guard)
+    s.flush()
+    s.add(CameraPermission(user_id=guard.id, camera_id=ids["gate"], can_view=True))
+    s.commit()
+    s.refresh(guard)
+    s.expunge(guard)
+    s.close()
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = lambda: guard
+
+    assert tc.get("/apps/loitering-detection/ui").status_code == 200
+    assert tc.post("/apps/loitering-detection/actions/reset", json={}).status_code == 200
+
+    # Verify exactly as the SDK does (stdlib HS256 over sha256(app key)).
+    sdk_path = str(REPO_ROOT / "sdk" / "opennvr-app-sdk")
+    if sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+    from opennvr_app_sdk.usercontext import signing_secret, verify_user_context
+
+    ui = verify_user_context(seen["ui"]["X-OpenNVR-User"], signing_secret(key),
+                             audience="loitering-detection")
+    assert ui is not None and ui.username == "guard" and ui.purpose == "ui"
+    assert ui.cameras == frozenset({ids["gate"]}) and ui.manage == frozenset()
+    act = verify_user_context(seen["action"]["X-OpenNVR-User"], signing_secret(key),
+                              audience="loitering-detection")
+    assert act is not None and act.purpose == "action" and act.user_id == guard.id
+    # Signed for THIS app: another app's secret does not verify it.
+    assert verify_user_context(seen["ui"]["X-OpenNVR-User"],
+                               signing_secret("oak_other_" + "0" * 32)) is None
+
+
+def test_no_app_key_means_no_user_context(env, monkeypatch):
+    tc, ids, SessionLocal = env
+    _register(tc, _site())
+    s = SessionLocal()
+    row = s.get(InstalledApp, "loitering-detection")
+    row.manifest_json = {**row.manifest_json, "has_ui": True}
+    app_keys.revoke_key(row)
+    s.commit()
+    s.close()
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"<p>ok</p>"
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kw):
+            seen["ui"] = dict(headers or {})
+            return _Resp()
+
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _Client)
+    admin = SessionLocal().query(User).filter_by(username="admin").one()
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = lambda: admin
+    assert tc.get("/apps/loitering-detection/ui").status_code == 200
+    assert "X-OpenNVR-User" not in seen["ui"]
