@@ -16,6 +16,7 @@ Start here. Pick the row that matches what you're doing.
 - **[DEVELOPER_PROGRAM.md](DEVELOPER_PROGRAM.md)** — **start here if you are building an app**: what the platform gives you, paid apps, the compatibility promise.
 - **[FIRST_DETECTOR.md](FIRST_DETECTOR.md)** — write your first detector app in ~15 minutes.
 - **[CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md)** — publish an app to the catalog.
+- **[EXTERNAL_APP_WALKTHROUGH.md](EXTERNAL_APP_WALKTHROUGH.md)** — a paid, out-of-tree app built on the PyPI SDK, and what the walk found.
 - **[APP_SURFACES.md](APP_SURFACES.md)** — the surfaces (config, state, actions) an app exposes.
 - **[APPS_INSTALL.md](APPS_INSTALL.md)** — one-click install design (desired-state + reconciler).
 - **[APP_CREDENTIALS.md](APP_CREDENTIALS.md)** — per-app keys: the register handshake, roster scoping, rotate/revoke.

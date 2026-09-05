@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The out-of-tree developer path works end to end.** A paid,
+  `license_key` app was built in its own repository on nothing but the
+  PyPI wheel (`docs/EXTERNAL_APP_WALKTHROUGH.md`); the platform surface
+  held, the on-ramp did not: `scripts/create_opennvr_app.py` now takes
+  `--sdk auto|path|pypi` and, for a `--dest` outside this repository,
+  pins `opennvr-app-sdk>=<version>,<1.0` with a Dockerfile that builds
+  without a checkout (before, it wrote an editable path into a tree the
+  developer does not have). Server tests no longer assume every index
+  entry is installable, so the first real `kind: external` listing will
+  not break CI. Remaining findings are listed in the walkthrough.
 - **The App SDK is released to PyPI.** `pip install opennvr-app-sdk`
   is now the on-ramp: `.github/workflows/publish-sdk.yml` tests the
   package on 3.11–3.13, builds and `twine check`s the sdist + wheel,

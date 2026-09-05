@@ -78,6 +78,72 @@ def sdk_path_for(app_dir: Path) -> str:
         return _SDK_DIR.as_posix()
 
 
+def sdk_version() -> str:
+    """The SDK version in this checkout — the floor a PyPI-mode app pins."""
+    try:
+        text = (_SDK_DIR / "opennvr_app_sdk" / "_version.py").read_text(encoding="utf-8")
+    except OSError:
+        return "0.4.0"          # the first PyPI release — a safe floor
+    match = re.search(r'__version__ = "([^"]+)"', text)
+    return match.group(1) if match else "0.4.0"
+
+
+def is_in_tree(app_dir: Path) -> bool:
+    try:
+        app_dir.resolve().relative_to(_REPO_ROOT.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def apply_pypi_mode(app_dir: Path, app_id: str, version: str) -> None:
+    """Rewrite the rendered pyproject + Dockerfile for an app that lives
+    OUTSIDE this repository and gets the SDK from PyPI — no editable
+    path, no ``COPY sdk/...`` from a checkout the developer does not
+    have. This is what a third-party developer needs; the in-tree form
+    stays for the examples, which must track the SDK on main."""
+    pyproject = app_dir / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    text = text.replace(
+        '    "opennvr-app-sdk",\n',
+        f'    "opennvr-app-sdk>={version},<1.0",\n')
+    start = text.find("# Editable path dep on the in-repo SDK.")
+    end = text.find("[project.optional-dependencies]")
+    if start != -1 and end != -1:
+        text = text[:start] + text[end:]
+    pyproject.write_text(text, encoding="utf-8")
+
+    module = kebab_to_snake(app_id)
+    (app_dir / "Dockerfile").write_text(f"""# syntax=docker/dockerfile:1.7
+# {kebab_to_title(app_id)} — OpenNVR Detector app, built on the published SDK.
+#
+# Build (from this directory — no OpenNVR checkout needed):
+#   docker build -t {app_id}:0.1.0 .
+#
+# Run (on the stack's compose network):
+#   docker run --rm --network opennvr_internal \\
+#     -v $(pwd)/config.yml:/app/config.yml:ro {app_id}:0.1.0
+
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \\
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# The SDK owns the runtime stack (NATS loop, alert fan-out, the platform
+# client). Pin the same floor as pyproject.toml.
+RUN pip install --no-cache-dir "opennvr-app-sdk>={version},<1.0"
+
+COPY {module}.py config.example.yml ./
+
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "{module}.py"]
+CMD ["--config", "config.yml"]
+""", encoding="utf-8")
+
+
 def build_tokens(app_id: str, task: str, app_dir: Path) -> dict[str, str]:
     """The token → replacement map applied to file contents and names."""
     return {
@@ -102,9 +168,16 @@ def rename_path_part(part: str, tokens: dict[str, str]) -> str:
     return substitute(part, tokens)
 
 
-def generate(app_id: str, task: str, dest_dir: Path) -> Path:
+def generate(app_id: str, task: str, dest_dir: Path, *, sdk: str = "auto") -> Path:
     """Render the template into ``dest_dir/<app-id>/``. Returns the path
-    to the created app directory. Raises on validation failures."""
+    to the created app directory. Raises on validation failures.
+
+    ``sdk``: ``"path"`` keeps the editable dependency on this checkout's
+    SDK (the examples); ``"pypi"`` pins the published package instead
+    (a third-party app in its own repository); ``"auto"`` picks by where
+    the app lands — in-tree → path, anywhere else → pypi."""
+    if sdk not in ("auto", "path", "pypi"):
+        raise ValueError(f"sdk must be auto, path or pypi (got {sdk!r})")
     if not _KEBAB_RE.match(app_id):
         raise ValueError(
             f"app-id {app_id!r} is not kebab-case — use lowercase letters, "
@@ -137,10 +210,13 @@ def generate(app_id: str, task: str, dest_dir: Path) -> Path:
         content = src.read_text(encoding="utf-8")
         dst.write_text(substitute(content, tokens), encoding="utf-8")
 
+    mode = sdk if sdk != "auto" else ("path" if is_in_tree(app_dir) else "pypi")
+    if mode == "pypi":
+        apply_pypi_mode(app_dir, app_id, sdk_version())
     return app_dir
 
 
-def _print_next_steps(app_id: str, app_dir: Path) -> None:
+def _print_next_steps(app_id: str, app_dir: Path, *, pypi: bool = False) -> None:
     module = kebab_to_snake(app_id)
     try:
         rel = app_dir.relative_to(Path.cwd())
@@ -149,14 +225,18 @@ def _print_next_steps(app_id: str, app_dir: Path) -> None:
     print(f"\nScaffolded {app_id!r} at {app_dir}\n")
     print("Next steps:")
     print(f"  cd {rel}")
-    print("  uv sync                 # install the SDK (editable) + pytest")
+    if pypi:
+        print("  uv sync                 # install opennvr-app-sdk from PyPI + pytest")
+    else:
+        print("  uv sync                 # install the SDK (editable) + pytest")
     print("  uv run pytest -q        # the smoke test — should be GREEN")
     print(f"  # open {module}.py and fill in on_detections — that's the rule")
     print(f"  cp config.example.yml config.yml   # then edit it")
     print(f"  uv run python {module}.py --config config.yml --once")
+    docs = ("https://github.com/open-nvr/open-nvr/blob/main/docs/" if pypi else "docs/")
     print("\nRun it against the stack + publish to the App Store:")
-    print("  docs/FIRST_DETECTOR.md      # the 15-minute walkthrough")
-    print("  docs/CONTRIBUTING_APPS.md   # add it to the curated app index")
+    print(f"  {docs}FIRST_DETECTOR.md      # the 15-minute walkthrough")
+    print(f"  {docs}CONTRIBUTING_APPS.md   # list it in the catalog (installable or external)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,16 +259,26 @@ def main(argv: list[str] | None = None) -> int:
         default=str(_REPO_ROOT / "examples"),
         help="parent directory to create <app-id>/ under. Default: examples/.",
     )
+    parser.add_argument(
+        "--sdk",
+        choices=("auto", "path", "pypi"),
+        default="auto",
+        help="where the app gets opennvr-app-sdk: 'path' = editable dep on "
+             "this checkout (for examples/), 'pypi' = the published package "
+             "(for an app in its own repository). Default: auto — pypi when "
+             "--dest is outside this repository.",
+    )
     args = parser.parse_args(argv)
 
     dest_dir = Path(args.dest).expanduser().resolve()
     try:
-        app_dir = generate(args.app_id, args.task, dest_dir)
+        app_dir = generate(args.app_id, args.task, dest_dir, sdk=args.sdk)
     except (ValueError, FileExistsError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    _print_next_steps(args.app_id, app_dir)
+    pypi = args.sdk == "pypi" or (args.sdk == "auto" and not is_in_tree(app_dir))
+    _print_next_steps(args.app_id, app_dir, pypi=pypi)
     return 0
 
 
