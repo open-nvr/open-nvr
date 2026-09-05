@@ -76,6 +76,9 @@ from typing import Any, Callable
 
 import httpx
 
+from ._version import __version__ as _sdk_version
+from .credentials import AppCredentials
+
 logger = logging.getLogger(__name__)
 
 # Budget for the one-shot registration POST at boot. Tight on purpose:
@@ -465,21 +468,18 @@ class ContractMixin:
             return False
 
         host = getattr(self.cfg, "contract_host", None) or socket.gethostname()
+        creds = self.credentials
         payload = {
             "url": f"http://{host}:{int(port)}",
             "manifest": self.manifest_snapshot(),
+            "sdk_version": _sdk_version,
+            # No key of our own yet: register with the site key and ask
+            # core to mint one (returned once, then persisted).
+            "wants_key": not creds.has_app_key,
         }
-        headers: dict[str, str] = {}
-        token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
-            "OPENNVR_INTERNAL_API_KEY"
-        )
-        if token:
-            # Both header shapes: the registry's register route accepts
-            # a user JWT (Authorization: Bearer) or the deployment's
-            # INTERNAL_API_KEY (X-Internal-Api-Key) — sending both lets
-            # one config key work against either credential kind.
-            headers["Authorization"] = f"Bearer {token}"
-            headers["X-Internal-Api-Key"] = str(token)
+        # Both header shapes: one value works as an app key, the site's
+        # INTERNAL_API_KEY, or a user JWT — see credentials.py.
+        headers: dict[str, str] = creds.headers()
         endpoint = f"{str(opennvr_url).rstrip('/')}/api/v1/apps/register"
         try:
             response = httpx.post(
@@ -504,13 +504,48 @@ class ContractMixin:
                 response.status_code,
                 response.text[:200],
             )
+            if response.status_code == 401 and creds.has_app_key:
+                # Our key was rotated or revoked: drop it so the next
+                # attempt bootstraps with the site key and asks anew.
+                creds.invalidate()
             return False
         logger.info(
             "registered with OpenNVR app registry: %s as %s",
             endpoint,
             payload["url"],
         )
+        self._absorb_registration(response)
         return True
+
+    @property
+    def credentials(self) -> AppCredentials:
+        """The app's credential (app key, else site key) — shared by the
+        register call, the config poll and any client built from it."""
+        creds = getattr(self, "_credentials", None)
+        if creds is None:
+            creds = AppCredentials(getattr(self.cfg, "opennvr_token", None))
+            self._credentials = creds
+        return creds
+
+    def _absorb_registration(self, response) -> None:
+        """Take what the registry hands back: an issued app key (once)
+        and the compatibility line."""
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(body, dict):
+            return
+        key = body.get("api_key")
+        if isinstance(key, str) and key:
+            self.credentials.adopt(key)
+        registry = body.get("registry") or {}
+        min_sdk = registry.get("min_sdk_version") if isinstance(registry, dict) else None
+        if min_sdk and _version_tuple(_sdk_version) < _version_tuple(str(min_sdk)):
+            logger.warning(
+                "OpenNVR %s requires opennvr-app-sdk >= %s (this app runs %s) — "
+                "upgrade the SDK; some registry features will not work",
+                registry.get("server_version", "?"), min_sdk, _sdk_version)
 
     # ── Live config delivery (registry poll, spec §05) ─────────────
 
@@ -545,17 +580,12 @@ class ContractMixin:
         app_id = getattr(self.manifest, "id", None) if self.manifest else None
         if not opennvr_url or not app_id:
             return None
-        headers: dict[str, str] = {}
-        token = getattr(self.cfg, "opennvr_token", None) or os.environ.get(
-            "OPENNVR_INTERNAL_API_KEY"
-        )
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-            headers["X-Internal-Api-Key"] = str(token)
         url = (
             f"{str(opennvr_url).rstrip('/')}/api/v1/apps/{app_id}/config"
         )
-        return url, headers
+        # Headers are re-read on every tick (see _config_poll_once) so a
+        # key issued after the poll started is picked up.
+        return url, self.credentials.headers()
 
     def _config_poll_once(self, url: str, headers: dict[str, str]) -> None:
         """One poll tick. Never raises — every failure is a debug log
@@ -563,7 +593,7 @@ class ContractMixin:
         try:
             response = httpx.get(
                 url,
-                headers=headers,
+                headers=self.credentials.headers() or headers,
                 timeout=CONFIG_POLL_TIMEOUT_SECONDS,
                 trust_env=False,
             )
@@ -643,3 +673,19 @@ __all__ = [
     "REGISTER_TIMEOUT_SECONDS",
     "CONFIG_POLL_DEFAULT_SECONDS",
 ]
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    """``"0.2.0"`` → ``(0, 2, 0)``; non-numeric tails are ignored."""
+    out: list[int] = []
+    for part in str(text).split("."):
+        digits = ""
+        for ch in part:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        out.append(int(digits))
+    return tuple(out)

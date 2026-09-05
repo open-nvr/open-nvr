@@ -30,7 +30,6 @@ regardless of its real resolution.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 logger = logging.getLogger("opennvr_app_sdk.cameras")
@@ -44,12 +43,14 @@ CAMERAS_PATH = "/api/v1/internal/camera-agent/cameras"
 
 
 def internal_api_key(explicit: str | None = None) -> str | None:
-    """The stack's internal key: an explicit value wins, else the
-    ``OPENNVR_INTERNAL_API_KEY`` env var the app overlays already set."""
-    if explicit:
-        return explicit
-    key = (os.getenv("OPENNVR_INTERNAL_API_KEY") or "").strip()
-    return key or None
+    """The credential to present: the app's OWN key when it has one
+    (issued at registration — see ``credentials.py``), else an explicit
+    value, else the ``OPENNVR_INTERNAL_API_KEY`` env var the app
+    overlays set. With an app key core returns only the cameras the
+    operator assigned to this app."""
+    from .credentials import AppCredentials
+
+    return AppCredentials(explicit).token()
 
 
 def discover_cameras(

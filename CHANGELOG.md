@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Every app gets its own credential.** SDK apps used to boot with the
+  deployment's `INTERNAL_API_KEY` and could read every camera and every
+  other app's config and live state. `POST /apps/register` now mints an
+  app-scoped key (`oak_<app-id>_…`), returned once and persisted by the
+  SDK (`OPENNVR_APP_KEY_FILE` / `OPENNVR_APP_KEY`); with it an app reads
+  only its own config/status and only the cameras the operator assigned
+  to it (its manifest `provides` in `Camera.assignments`; every camera
+  when none is assigned). The pipeline's write routes refuse app keys.
+  Superusers rotate (`POST /apps/{id}/key/rotate`) or revoke
+  (`DELETE /apps/{id}/key`) without touching the site key. The register
+  exchange also carries `sdk_version` and returns
+  `registry.{server_version, api_version, min_sdk_version}`; the SDK
+  warns when it is older than the server supports. See
+  `docs/APP_CREDENTIALS.md`. SDK: `discover_cameras`, `cameras_for_skill`,
+  `AppCredentials` are now top-level exports.
 - **Writes that any signed-in user could make now require the seeded
   permission.** Creating/editing/deleting AI models and starting or
   stopping their inference (`/ai-model-management`) need `byom.manage`;

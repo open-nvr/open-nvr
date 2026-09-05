@@ -55,6 +55,10 @@ from core.auth import get_current_active_user, get_current_superuser, verify_tok
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import AppInstallIntent, InstalledApp, User
+from services.app_keys import (
+    AppPrincipal, issue_key, looks_like_app_key,
+    resolve_app_key, revoke_key,
+)
 from services.audit_service import write_audit_log
 
 # The one-click install/uninstall endpoints require this RBAC permission
@@ -405,13 +409,42 @@ def get_register_principal(
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
-) -> User | None:
+) -> User | AppPrincipal | None:
     """Authenticate a registration call.
 
     Returns the ``User`` for the JWT path, or ``None`` for the
     service-key path (audit-logged as the ``app-sdk`` service
     identity). Raises 401 when neither credential is valid.
     """
+    return _service_or_user_principal(x_internal_api_key, credentials, db)
+
+
+def _service_or_user_principal(
+    x_internal_api_key: str | None,
+    credentials: HTTPAuthorizationCredentials | None,
+    db: Session,
+) -> User | AppPrincipal | None:
+    """Shared body of the two service-capable principals.
+
+    Three credential kinds, checked in this order:
+
+    * an **app key** (``oak_…``, in either header) → :class:`AppPrincipal`
+      for that app — it may read its own registry rows and re-register;
+    * the deployment's ``INTERNAL_API_KEY`` → ``None`` (platform
+      service identity, unscoped);
+    * a user JWT → the ``User``.
+    """
+    bearer = credentials.credentials if credentials is not None else None
+    for candidate in (x_internal_api_key, bearer):
+        if looks_like_app_key(candidate):
+            row = resolve_app_key(db, candidate)
+            if row is not None:
+                return AppPrincipal(app_id=row.id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or revoked app key",
+            )
+
     if x_internal_api_key is not None:
         expected = _internal_api_key()
         if expected and secrets.compare_digest(x_internal_api_key, expected):
@@ -443,16 +476,25 @@ def get_register_principal(
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Provide a bearer token or X-Internal-Api-Key",
+        detail="Provide a bearer token, an app key, or X-Internal-Api-Key",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def _own_app_only(principal, app_id: str) -> None:
+    """An app key reads ITS OWN registry rows and nothing else."""
+    if isinstance(principal, AppPrincipal) and principal.app_id != app_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An app key may only access its own app",
+        )
 
 
 def get_read_principal(
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
-) -> User | None:
+) -> User | AppPrincipal | None:
     """Authenticate a READ-ONLY registry call (``GET /apps`` and
     ``GET /apps/{id}/status``).
 
@@ -470,40 +512,8 @@ def get_read_principal(
     stay strictly ``get_current_active_user`` (register additionally
     accepts the key via :func:`get_register_principal`).
     """
-    if x_internal_api_key is not None:
-        expected = _internal_api_key()
-        if expected and secrets.compare_digest(x_internal_api_key, expected):
-            return None  # service identity
-        # A service sends its one token as BOTH headers (it can't know
-        # which kind the operator provisioned) — a non-matching key
-        # only fails the request when there's no bearer to fall back to.
-        if credentials is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid internal API key",
-            )
+    return _service_or_user_principal(x_internal_api_key, credentials, db)
 
-    if credentials is not None:
-        token_data = verify_token(credentials.credentials)
-        if token_data is not None:
-            user = (
-                db.query(User)
-                .filter(User.username == token_data.username)
-                .first()
-            )
-            if user is not None and user.is_active:
-                return user
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Provide a bearer token or X-Internal-Api-Key",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
 
 # ── Request schemas / serialization ────────────────────────────────
@@ -514,6 +524,23 @@ class AppRegisterRequest(BaseModel):
 
     url: str
     manifest: dict[str, Any]
+    # The SDK's own version, for the compatibility line in the response
+    # and the audit row. Optional: older SDKs send nothing.
+    sdk_version: str | None = None
+    # "I hold no app key" — an app booting without a persisted key (no
+    # volume, first run) registers with the site key and asks for one;
+    # the registry (re)issues it. An app registering WITH its own key
+    # never gets a new one back.
+    wants_key: bool = False
+
+
+#: The app-registry contract version the SDK negotiates against, and
+#: the oldest SDK this server still speaks to. Bump API_VERSION on any
+#: change to the register/config/state/actions shapes; bump
+#: MIN_SDK_VERSION only when an old SDK would misbehave, not merely
+#: miss a feature.
+API_VERSION = "1.1"
+MIN_SDK_VERSION = "0.2.0"
 
 
 def _serialize_app(row: InstalledApp) -> dict[str, Any]:
@@ -529,6 +556,9 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         "last_seen": row.last_seen,
         "manifest": row.manifest_json,
         "config": row.config_json or {},
+        # Credential state only — the key itself is returned once, at issue.
+        "has_api_key": bool(row.api_key_hash),
+        "api_key_issued_at": row.api_key_issued_at,
     }
 
 
@@ -650,6 +680,8 @@ async def register_app(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Manifest is missing required fields: {', '.join(missing)}",
         )
+    # An app key registers only the app it was minted for.
+    _own_app_only(principal, str(manifest["id"]))
 
     url_error = validate_app_url(request.url)
     if url_error is not None:
@@ -672,26 +704,38 @@ async def register_app(
     row.manifest_json = manifest
     row.status = "registered"
     row.last_seen = datetime.now(UTC)
+    # Per-app credential: issued on first registration, and re-issued
+    # whenever the app registers with the SITE key (or a user) and says
+    # it holds no key of its own (a fresh container with no persisted
+    # key). An app presenting its own key keeps it. Audited below.
+    issued_key: str | None = None
+    if not isinstance(principal, AppPrincipal) and (
+            created or not row.api_key_hash or request.wants_key):
+        issued_key = issue_key(db, row)
     db.commit()
     db.refresh(row)
 
+    actor_user = principal if isinstance(principal, User) else None
+    registered_by = (
+        f"user:{principal.username}" if isinstance(principal, User)
+        else f"app:{principal.app_id}" if isinstance(principal, AppPrincipal)
+        else "service:internal-api-key"
+    )
     write_audit_log(
         db,
         action="app.register",
         # Service-key registrations have no user row; the actor is
         # recorded in details instead so the audit trail stays whole.
-        user_id=principal.id if principal is not None else None,
+        user_id=actor_user.id if actor_user is not None else None,
         entity_type="app",
         entity_id=app_id,
         details={
             "created": created,
             "url": row.url,
             "version": row.version,
-            "registered_by": (
-                f"user:{principal.username}"
-                if principal is not None
-                else "service:internal-api-key"
-            ),
+            "sdk_version": request.sdk_version,
+            "registered_by": registered_by,
+            "key_issued": issued_key is not None,
         },
     )
     # RFC-0002 Phase 5: event-scope grants. v1 policy is grant-on-
@@ -707,12 +751,29 @@ async def register_app(
             write_audit_log(
                 db,
                 action="app.scope_granted",
-                user_id=principal.id if principal is not None else None,
+                user_id=actor_user.id if actor_user is not None else None,
                 entity_type="app",
                 entity_id=app_id,
                 details={"scope": scope.strip(), "policy": "grant-on-registration"},
             )
-    return _serialize_app(row)
+    out = _serialize_app(row)
+    out["registry"] = _registry_info()
+    if issued_key is not None:
+        # The only time the key exists in the clear. The SDK persists it.
+        out["api_key"] = issued_key
+    return out
+
+
+def _registry_info() -> dict[str, Any]:
+    try:
+        from main import __version__ as server_version  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — tests import the router alone
+        server_version = "unknown"
+    return {
+        "server_version": server_version,
+        "api_version": API_VERSION,
+        "min_sdk_version": MIN_SDK_VERSION,
+    }
 
 
 @router.post("/{app_id}/enable")
@@ -787,9 +848,10 @@ async def get_app_config(
     ``X-Internal-Api-Key``): the app itself is the intended service
     caller. Writes stay user-JWT-only (``PUT`` below).
     """
+    _own_app_only(principal, app_id)
     row = _get_app_or_404(db, app_id)
     config = row.config_json or {}
-    if principal is not None and not principal.is_superuser:
+    if isinstance(principal, User) and not principal.is_superuser:
         # A user sees the site-wide settings (read-only for them) but
         # only THEIR cameras' per-camera entries — a zone drawn on a
         # camera they were never assigned is not theirs to look at.
@@ -1019,6 +1081,41 @@ async def invoke_app_action(
         )
 
 
+@router.post("/{app_id}/key/rotate")
+async def rotate_app_key(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Mint a NEW app key and return it once; the old one stops working
+    immediately. Superuser only. Hand the value to the app's operator
+    (``OPENNVR_APP_KEY``), or restart the app with the site key and it
+    asks for one itself (``wants_key``)."""
+    row = _get_app_or_404(db, app_id)
+    plain = issue_key(db, row)
+    db.commit()
+    write_audit_log(db, action="app.key.rotate", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "api_key": plain,
+            "api_key_issued_at": row.api_key_issued_at}
+
+
+@router.delete("/{app_id}/key")
+async def revoke_app_key(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Revoke the app's key: it can no longer read its config, its
+    roster, or re-register with that key. Superuser only."""
+    row = _get_app_or_404(db, app_id)
+    revoke_key(row)
+    db.commit()
+    write_audit_log(db, action="app.key.revoke", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "has_api_key": False}
+
+
 @router.get("/{app_id}/status")
 async def get_app_status(
     app_id: str,
@@ -1042,6 +1139,7 @@ async def get_app_status(
     (``X-Internal-Api-Key``) — a service reads live app state to relay
     it; see :func:`get_read_principal`. Read only.
     """
+    _own_app_only(principal, app_id)
     row = _get_app_or_404(db, app_id)
     base_url = row.url.rstrip("/")
 
@@ -1078,7 +1176,7 @@ async def get_app_status(
         row.last_seen = datetime.now(UTC)
     db.commit()
 
-    if principal is not None and not principal.is_superuser:
+    if isinstance(principal, User) and not principal.is_superuser:
         # Live state is per-camera data (occupancy per zone, the LPR
         # review queue, each camera's last read): a user gets their
         # cameras' slice. The service-key path (the agent) is scoped

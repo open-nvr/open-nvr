@@ -64,10 +64,15 @@ class StoredEvent:
 class EventsClient:
     """Query visits and fetch their evidence photos from core."""
 
-    def __init__(self, core_url: str, api_key: str | None, *,
+    def __init__(self, core_url: str, api_key: str | None = None, *,
                  http_get: HttpGetH | None = None) -> None:
         self._base = core_url.rstrip("/")
-        self._headers = {"X-Internal-Api-Key": api_key} if api_key else {}
+        # The app's own key when it has one (scoped to its cameras), else
+        # the explicit/site key — see credentials.py.
+        from .credentials import AppCredentials
+
+        key = AppCredentials(api_key).token()
+        self._headers = {"X-Internal-Api-Key": key} if key else {}
         self._get = http_get or _default_http_get
 
     async def search(
