@@ -1102,6 +1102,26 @@ class InstalledApp(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class AppState(Base):
+    """Durable per-app key/value state (the SDK's ``client.state``).
+
+    Apps kept everything in memory (``KeyedState``) or invented a SQLite
+    file each; a restart forgot the register, the cooldowns, the last
+    seen plate. One small table, namespaced by app id, readable and
+    writable only with that app's key (or the site key naming the app):
+    a JSON value per key, last-write-wins.
+    """
+
+    __tablename__ = "app_state"
+
+    app_id = Column(String(100), ForeignKey("installed_apps.id", ondelete="CASCADE"),
+                    primary_key=True)
+    key = Column(String(200), primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(),
+                        onupdate=func.now())
+
+
 class AppInstallIntent(Base):
     """Desired-state record for the opt-in one-click app installer.
 

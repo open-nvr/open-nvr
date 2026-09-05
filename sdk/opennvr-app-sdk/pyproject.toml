@@ -3,7 +3,7 @@
 
 [project]
 name = "opennvr-app-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Shared SDK for OpenNVR monitoring apps: §11.5 alert dispatch, zone geometry, keyed TTL state, app manifests, and the Detector / FrameApp base loops."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -15,6 +15,8 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
     "nats-py>=2.6",
     "httpx>=0.27,<1.0",
+    # Streaming inference sessions (InferStream) — KAI-C contract §6.
+    "websockets>=13.0",
 ]
 
 [dependency-groups]

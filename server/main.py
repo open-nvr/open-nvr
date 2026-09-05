@@ -59,6 +59,7 @@ from routers import (
     camera_config,
     camera_settings,
     cameras,
+    app_platform,
     internal_camera_agent,
     timeline_events,
     cloud as cloud_router,
@@ -763,6 +764,9 @@ app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
 app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
+# The app platform door (snapshot, recordings, plates, alerts, state) —
+# app-key scoped; see routers/app_platform.py and docs/APP_PLATFORM.md.
+app.include_router(app_platform.router, prefix=settings.api_prefix)
 app.include_router(timeline_events.router, prefix=settings.api_prefix)
 app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)

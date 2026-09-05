@@ -18,6 +18,7 @@ Start here. Pick the row that matches what you're doing.
 - **[APP_SURFACES.md](APP_SURFACES.md)** — the surfaces (config, state, actions) an app exposes.
 - **[APPS_INSTALL.md](APPS_INSTALL.md)** — one-click install design (desired-state + reconciler).
 - **[APP_CREDENTIALS.md](APP_CREDENTIALS.md)** — per-app keys: the register handshake, roster scoping, rotate/revoke.
+- **[APP_PLATFORM.md](APP_PLATFORM.md)** — the `OpenNVR` client: cameras, snapshots, recordings, timeline, AI, alerts, durable state, domain-event consumption.
 
 ## Build on the AI layer
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.
