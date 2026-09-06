@@ -477,3 +477,16 @@ def test_images_outside_the_org_must_declare_their_signer(tmp_path, monkeypatch)
     assert any("not a valid regexp" in x for x in errs(signing={"identity": "("}))
     assert any("signing.issuer" in x for x in errs(signing={"identity": "^x$", "issuer": "http://x"}))
     assert any("unknown keys" in x for x in errs(signing={"identity": "^x$", "key": "abc"}))
+
+
+def test_compose_snippet_may_default_the_pin_slot_to_the_published_image(tmp_path, monkeypatch):
+    """An app from its own repository (opennvr-app new --repo) has no
+    local build: its snippet's pin slot defaults to the published image."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def with_image(img):
+        e = dict(_GOOD_ENTRY, install=dict(_GOOD_ENTRY["install"],
+                 compose=_GOOD_ENTRY["install"]["compose"].replace("ghcr.io/open-nvr/sample-app:latest", img)))
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    assert with_image("${SAMPLE_APP_IMAGE:-ghcr.io/open-nvr/sample-app:latest}") == []
+    assert with_image("${SAMPLE_APP_IMAGE:-opennvr/sample-app:local-build}") == []
+    assert any("does not match" in x for x in with_image("${SAMPLE_APP_IMAGE:-ghcr.io/evil/sample-app:latest}"))

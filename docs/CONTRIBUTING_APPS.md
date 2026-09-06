@@ -129,35 +129,63 @@ live status dot and an auto-generated config form.
   spellings (`ocr`, `object_tracking`) won't match adapters advertising
   the canonical ones.
 
-## 2. Publish your image and get its digest
+## 2. Get a repository under the org — CI builds, signs and publishes
 
-Publish to GHCR (recommended) or any registry the operator's host can pull
-from. Then capture the **immutable digest** your tag resolved to — that is
-what pins the install.
+Catalog images are not pushed by their authors. They are **built from
+source by the org's CI**, signed, and pushed to `ghcr.io/open-nvr/<id>`
+— that is the property the whole catalog rests on (an operator can read
+the source that produced the bytes they run). The pieces:
 
-```bash
-# Build + push (GitHub Container Registry example)
-docker build -t ghcr.io/<you>/my-app:1.0.0 -t ghcr.io/<you>/my-app:latest examples/my-app
-docker push ghcr.io/<you>/my-app:1.0.0
-docker push ghcr.io/<you>/my-app:latest
+1. **Scaffold the repository files.** `opennvr-app new my-app --repo`
+   (or add them to an existing app) lays down
+   `.github/workflows/ci.yml` (pytest on every push and PR),
+   `.github/workflows/publish.yml`, and `apps-index-entry.yml` — your
+   listing, reviewed with your code. `publish.yml` is four lines: it
+   calls the org's reusable workflow,
 
-# Read back the sha256 digest the tag now points at
-docker buildx imagetools inspect ghcr.io/<you>/my-app:latest --format '{{.Manifest.Digest}}'
-# -> sha256:3f8c...e91   (this is your image_digest)
-```
+   ```yaml
+   jobs:
+     publish:
+       uses: open-nvr/open-nvr/.github/workflows/build-catalog-app.yml@main
+       with: { app_id: my-app }
+       permissions: { contents: read, packages: write, id-token: write }
+   ```
 
-Make the package **public** so an operator can pull it without a login.
+   which checks out *your* repository at the pushed ref, builds your
+   `Dockerfile` for amd64 + arm64, pushes `ghcr.io/open-nvr/my-app`
+   (`:latest`, `:<version>`, `:sha-…`) and signs the digest with
+   Sigstore keyless signing. It refuses to run for a repository outside
+   the org — which is the point.
+2. **Ask for the repository.** Open an issue titled *App: my-app* in
+   `open-nvr/open-nvr` with a link to your code. A maintainer creates
+   `open-nvr/app-my-app` and transfers or seeds it from yours (history
+   preserved); you are its maintainer, with write access. Add a
+   `LICENSE` (AGPL-3.0 or Apache-2.0, your copyright) before the first
+   tag.
+3. **Tag a release.** `git tag v1.0.0 && git push --tags`. The publish
+   job's summary prints the two lines the listing needs:
+
+   ```yaml
+     image: ghcr.io/open-nvr/my-app:latest
+     image_digest: sha256:3f8c…e91
+   ```
+
+   Put the digest into `apps-index-entry.yml`. (Maintainers re-pin the
+   whole index at each platform release with `make pin-apps-index`,
+   which reads the current digests from GHCR and cosign-verifies each
+   one before writing it.)
 
 > Don't have a published image yet? An app that ships only as a local
-> `build:` overlay (like the first-party detectors today) may omit
-> `image_digest` and set `build_context` instead — but it will install
-> **unpinned (dev only)**. Publish + pin before you expect production
-> operators to install it.
+> `build:` overlay (like the first-party detectors in `examples/`) may
+> omit `image_digest` and set `build_context` instead — but it installs
+> **unpinned (dev only)** and is never signature-checked. Publish + pin
+> before you expect production operators to install it.
 
 ## 3. Add one entry to `apps_index.yml`
 
 Append **one** entry to
-[`server/config/apps_index.yml`](../server/config/apps_index.yml). Copy the
+[`server/config/apps_index.yml`](../server/config/apps_index.yml) — the
+`apps-index-entry.yml` from your repository, or copy the
 annotated template —
 [`docs/apps-index-entry.template.yml`](apps-index-entry.template.yml) — and
 fill every field. Here it is inline for reference:

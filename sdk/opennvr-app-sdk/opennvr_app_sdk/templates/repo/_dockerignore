@@ -1,0 +1,9 @@
+.git
+.venv
+.github
+tests
+__pycache__
+*.pyc
+config.yml
+app.key
+app.key.bus

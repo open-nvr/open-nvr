@@ -18,10 +18,11 @@ in fifteen minutes.
    under **AGPL-3.0 or Apache-2.0 — your choice**. You keep the copyright.
    Your name and contact are on the listing, in the README and in the
    source headers. We never rewrite history: the first commit is yours.
-2. **We build it, host it and ship it.** CI builds your image from your
-   tagged source, pins the digest into the index, and every OpenNVR install
-   can install it with one click. You don't run a registry, a CDN or a
-   download page.
+2. **We build it, host it and ship it.** The org's `build-catalog-app`
+   workflow builds your image from your tagged source, signs it, pushes
+   it to `ghcr.io/open-nvr/<id>`, and the digest pins it in the index;
+   every OpenNVR install can install it with one click. You don't run a
+   registry, a CDN or a download page.
 3. **You can charge for it.** OpenNVR takes **no fee**. Sell a fine-tuned
    model, a data service, a hosted notifier, support — the platform gives
    you the licence hook (`entitlement: license_key`, verified by *your*
@@ -91,12 +92,18 @@ they are allowed to add.
 3. **Make it a product.** Manifest `params` (config form), `state_schema`
    (live views), `actions` (operator verbs), `has_ui` (a page), and
    `pricing` / `entitlement` if you sell something.
-4. **Ask for a repository.** Open an issue titled *App: my-app* with a
-   link to your code. We create `open-nvr/app-my-app`, transfer or seed it
-   from your repository, and you are its maintainer.
-5. **List it.** One PR adding an entry to `server/config/apps_index.yml`
-   — [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md). CI builds and pins the
-   image; a reviewer merges; every install sees it.
+4. **Ask for a repository.** `opennvr-app new my-app --repo` lays down
+   the repository files (CI, the publish workflow, the listing entry).
+   Open an issue titled *App: my-app* with a link to your code. We
+   create `open-nvr/app-my-app`, transfer or seed it from your
+   repository, and you are its maintainer. From then on every push to
+   `main` and every `v*` tag builds your image **from that source**,
+   signs it, and pushes `ghcr.io/open-nvr/my-app` — through the org's
+   `build-catalog-app` workflow, the same one that builds ours.
+5. **List it.** One PR adding your `apps-index-entry.yml` to
+   `server/config/apps_index.yml` — [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md).
+   The digest from your tag's build pins it; a reviewer merges; every
+   install sees it.
 
 Reviews get a first response within **five working days**; issues tagged
 `sdk` within **two**. Security reports go through a

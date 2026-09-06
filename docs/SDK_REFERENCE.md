@@ -142,11 +142,15 @@ container) unless you need full frame rate.
 
 ## Scaffolding
 
-`opennvr-app new <app-id> [--task T] [--dest DIR] [--sdk auto|pypi|path]`
+`opennvr-app new <app-id> [--task T] [--dest DIR] [--sdk auto|pypi|path] [--repo]`
 — the generator ships in the wheel (`opennvr_app_sdk.scaffold`). Out of
 a checkout it pins the published SDK and writes a self-contained
 Dockerfile; inside the OpenNVR repository (`scripts/create_opennvr_app.py`)
-it keeps the editable path so examples track the SDK on main.
+it keeps the editable path so examples track the SDK on main. `--repo`
+adds what a repository under the `open-nvr` organisation needs: CI, a
+`publish.yml` that builds and signs the image through the org's
+`build-catalog-app` workflow, and the App Catalog listing entry
+(`apps-index-entry.yml`) — [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md) §2.
 
 ## Releasing
 

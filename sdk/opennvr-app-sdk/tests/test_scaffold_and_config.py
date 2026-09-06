@@ -203,3 +203,44 @@ def test_param_suggestions_ride_the_manifest():
     assert ps["watch_labels"]["suggestions"] == ["person", "car"]
     assert "suggestions" not in ps["dwell_s"]          # absent when empty (wire unchanged)
     assert "person" in DETECTION_LABELS and "car" in DETECTION_LABELS
+
+
+def test_repo_mode_lays_down_the_repository_files(tmp_path):
+    """``--repo``: the app folder becomes a repository for open-nvr/app-<id>
+    — CI, the publish workflow that builds + signs through the org's
+    build-catalog-app, the listing entry — and pins the published SDK."""
+    import yaml
+
+    app_dir = scaffold.generate("gate-watch", "object_detection", tmp_path, repo=True)
+    f = _files(app_dir)
+    assert {".github/workflows/ci.yml", ".github/workflows/publish.yml", "apps-index-entry.yml",
+            ".gitignore", ".dockerignore"} <= set(f)
+    pub = yaml.safe_load(f[".github/workflows/publish.yml"])
+    job = pub["jobs"]["publish"]
+    assert job["uses"] == "open-nvr/open-nvr/.github/workflows/build-catalog-app.yml@main"
+    assert job["with"] == {"app_id": "gate-watch", "title": "Gate Watch"}
+    assert job["permissions"] == {"contents": "read", "packages": "write", "id-token": "write"}
+    assert pub[True]["push"]["tags"] == ["v*"]
+    entry = yaml.safe_load(f["apps-index-entry.yml"])[0]
+    assert entry["id"] == "gate-watch" and entry["image"] == "ghcr.io/open-nvr/gate-watch:latest"
+    assert entry["source"] == "https://github.com/open-nvr/app-gate-watch"
+    assert entry["network_egress"] == [] and entry["requires_tasks"] == ["object_detection"]
+    assert "${GATE_WATCH_IMAGE:-ghcr.io/open-nvr/gate-watch:latest}" in entry["install"]["compose"]
+    assert "opennvr_apps" in entry["install"]["compose"]
+    assert "image_digest" not in entry                      # comes from the publish summary
+    assert "## This repository" in f["README.md"] and "open-nvr/app-gate-watch" in f["README.md"]
+    assert f'"opennvr-app-sdk>={__version__},<1.0"' in f["pyproject.toml"]   # pypi pin
+    assert "tool.uv.sources" not in f["pyproject.toml"]
+    assert "app.key" in f[".gitignore"] and "config.yml" in f[".gitignore"]
+    # Without --repo none of that appears, and the README has no repo section.
+    plain = _files(scaffold.generate("gate-two", "object_detection", tmp_path))
+    assert not any(k.startswith(".github") or k == "apps-index-entry.yml" for k in plain)
+    assert "## This repository" not in plain["README.md"] and not plain["README.md"].endswith("\n\n")
+    with pytest.raises(ValueError, match="standalone"):
+        scaffold.generate("gate-three", "object_detection", tmp_path, sdk="path", repo=True, repo_root=tmp_path)
+
+
+def test_cli_new_repo(tmp_path, capsys):
+    assert scaffold.main(["new", "gate-watch", "--dest", str(tmp_path), "--repo"]) == 0
+    assert (tmp_path / "gate-watch" / ".github" / "workflows" / "publish.yml").exists()
+    assert "open-nvr/app-gate-watch" in capsys.readouterr().out

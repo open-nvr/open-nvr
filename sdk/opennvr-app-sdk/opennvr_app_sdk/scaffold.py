@@ -37,6 +37,12 @@ except ImportError:                      # loaded by file path, no package
         Path(__file__).with_name("_version.py").read_text(encoding="utf-8")).group(1)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "app"
+#: ``--repo``: the files that turn the app folder into a repository under
+#: the org — CI, the publish workflow that builds + signs through
+#: open-nvr/open-nvr's build-catalog-app.yml, the listing entry.
+REPO_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "repo"
+#: Dotfiles ship in the wheel under safe names and are renamed on output.
+_RENAME = {"_github": ".github", "_gitignore": ".gitignore", "_dockerignore": ".dockerignore"}
 DOCS_URL = "https://github.com/open-nvr/open-nvr/blob/main/docs/"
 _KEBAB_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 _SKIP = {"__pycache__", ".venv", ".pytest_cache", "uv.lock"}
@@ -133,6 +139,7 @@ def build_tokens(app_id: str, task: str, app_dir: Path, *, mode: str,
     tokens = {
         "__APP_ID__": app_id,
         "__APP_MODULE__": kebab_to_snake(app_id),
+        "__APP_ENV__": kebab_to_snake(app_id).upper(),
         "__APP_CLASS__": kebab_to_pascal(app_id),
         "__APP_NAME__": kebab_to_title(app_id),
         "__TASK__": task,
@@ -149,12 +156,19 @@ def substitute(text: str, tokens: dict[str, str]) -> str:
 
 
 def generate(app_id: str, task: str, dest_dir: Path, *, sdk: str = "auto",
-             repo_root: Path | None = None, template_dir: Path = TEMPLATE_DIR) -> Path:
+             repo_root: Path | None = None, template_dir: Path = TEMPLATE_DIR,
+             repo: bool = False) -> Path:
     """Render the template into ``dest_dir/<app-id>/``; return that path.
     ``sdk``: ``auto`` (pypi unless the app lands inside ``repo_root``),
-    ``pypi`` or ``path`` (requires ``repo_root``)."""
+    ``pypi`` or ``path`` (requires ``repo_root``). ``repo``: also lay
+    down the repository files (CI, the publish workflow, the listing
+    entry) — an app destined for ``open-nvr/app-<id>``; implies pypi."""
     if sdk not in ("auto", "path", "pypi"):
         raise ValueError(f"sdk must be auto, path or pypi (got {sdk!r})")
+    if repo and sdk == "path":
+        raise ValueError("--repo scaffolds a standalone repository; it pins the published SDK (--sdk pypi)")
+    if repo:
+        sdk = "pypi"
     if not _KEBAB_RE.match(app_id):
         raise ValueError(
             f"app-id {app_id!r} is not kebab-case — lowercase letters, digits "
@@ -169,18 +183,44 @@ def generate(app_id: str, task: str, dest_dir: Path, *, sdk: str = "auto",
         raise ValueError("sdk='path' needs repo_root (an OpenNVR checkout)")
 
     tokens = build_tokens(app_id, task, app_dir, mode=mode, repo_root=repo_root)
-    for src in sorted(template_dir.rglob("*")):
-        rel_parts = src.relative_to(template_dir).parts
-        if any(p in _SKIP for p in rel_parts):
-            continue
-        dst = app_dir.joinpath(*(substitute(p, tokens) for p in rel_parts))
-        if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(substitute(src.read_text(encoding="utf-8"), tokens),
-                       encoding="utf-8")
+    tokens["__REPO_SECTION__"] = _REPO_README_SECTION if repo else ""
+    sources = [template_dir] + ([REPO_TEMPLATE_DIR] if repo else [])
+    for source_dir in sources:
+        for src in sorted(source_dir.rglob("*")):
+            rel_parts = src.relative_to(source_dir).parts
+            if any(p in _SKIP for p in rel_parts):
+                continue
+            dst = app_dir.joinpath(*(substitute(_RENAME.get(p, p), tokens) for p in rel_parts))
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(substitute(src.read_text(encoding="utf-8"), tokens),
+                           encoding="utf-8")
     return app_dir
+
+
+_REPO_README_SECTION = """
+## This repository
+
+Scaffolded with `opennvr-app new --repo` for a home under the `open-nvr`
+organisation (`open-nvr/app-__APP_ID__`):
+
+* `.github/workflows/ci.yml` runs the tests on every push and PR.
+* `.github/workflows/publish.yml` builds the image **from this source**,
+  for amd64 + arm64, pushes `ghcr.io/open-nvr/__APP_ID__` and signs it
+  (Sigstore keyless) through OpenNVR's `build-catalog-app` workflow on
+  every push to `main` and every `v*` tag. The job summary prints the
+  `image_digest:` for the listing.
+* `apps-index-entry.yml` is the App Catalog listing, reviewed with the
+  code; the listing PR copies it into `server/config/apps_index.yml`.
+
+Pick a licence (AGPL-3.0 or Apache-2.0, your copyright) and add the
+`LICENSE` file before the first tag. Then: open an issue titled
+*App: __APP_ID__* in `open-nvr/open-nvr` with a link here, and a
+maintainer creates the repository under the org and transfers or seeds
+it from yours — you stay its maintainer.
+"""
 
 
 def print_next_steps(app_id: str, app_dir: Path, *, mode: str) -> None:
@@ -219,16 +259,26 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
     new.add_argument("--sdk", choices=("auto", "path", "pypi"), default="auto",
                      help="pypi = pin the published opennvr-app-sdk (default outside an "
                           "OpenNVR checkout); path = editable dep on a checkout's SDK.")
+    new.add_argument("--repo", action="store_true",
+                     help="also lay down the repository files for open-nvr/app-<id>: CI, the "
+                          "publish workflow (build + sign through the org's build-catalog-app), "
+                          "the App Catalog listing entry. Implies --sdk pypi.")
     args = parser.parse_args(argv)
 
     dest_dir = Path(args.dest).expanduser().resolve()
     try:
-        app_dir = generate(args.app_id, args.task, dest_dir, sdk=args.sdk, repo_root=repo_root)
+        app_dir = generate(args.app_id, args.task, dest_dir, sdk=args.sdk, repo_root=repo_root,
+                           repo=args.repo)
     except (ValueError, FileExistsError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    mode = args.sdk if args.sdk != "auto" else ("path" if _in_tree(app_dir, repo_root) else "pypi")
+    mode = "pypi" if args.repo else (
+        args.sdk if args.sdk != "auto" else ("path" if _in_tree(app_dir, repo_root) else "pypi"))
     print_next_steps(args.app_id, app_dir, mode=mode)
+    if args.repo:
+        print("\nRepository files: .github/workflows/{ci,publish}.yml, apps-index-entry.yml")
+        print("  git init && git add -A && git commit -m 'scaffold' — then ask for open-nvr/app-"
+              f"{args.app_id} (issue 'App: {args.app_id}')")
     return 0
 
 

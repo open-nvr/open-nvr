@@ -7,7 +7,7 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index sdk-docs
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index pin-apps-index sdk-docs
 
 help:
 	@echo "OpenNVR Makefile targets:"
@@ -21,6 +21,8 @@ help:
 	@echo "                           camera-agent bundle (keeps the parity test green)."
 	@echo "  make validate-apps-index Validate server/config/apps_index.yml (App"
 	@echo "                           Store submission gate — run before opening a PR)."
+	@echo "  make pin-apps-index      Release step: write every catalog app's current"
+	@echo "                           image digest into apps_index.yml (cosign-verified)."
 	@echo "  make sdk-docs            Render the App SDK's public API (docstrings) to"
 	@echo "                           sdk/opennvr-app-sdk/docs/api/ with pdoc."
 
@@ -104,6 +106,17 @@ sys.exit('server/.env still contains placeholder values:') if errs else print('s
 # malformed community submission is caught before merge.
 # See docs/CONTRIBUTING_APPS.md.
 validate-apps-index:
+	@$(PY) scripts/validate_apps_index.py
+
+# --------------------------------------------------------------------------
+# make pin-apps-index
+# --------------------------------------------------------------------------
+# The release step that makes one-click installs deploy exact, signed
+# bytes: asks GHCR what each catalog image's tag resolves to, verifies the
+# signature with cosign, and writes image_digest into apps_index.yml
+# (textually — the comments survive). Then validate, commit, tag.
+pin-apps-index:
+	@$(PY) scripts/pin_apps_index.py --verify
 	@$(PY) scripts/validate_apps_index.py
 
 # --------------------------------------------------------------------------

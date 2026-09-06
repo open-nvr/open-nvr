@@ -304,7 +304,11 @@ def _check_compose_snippet(
         # what the copy-paste actually runs diverge.
         svc_image = svc.get("image")
         if isinstance(svc_image, str) and app_id and image:
-            allowed = {image, _pin_slot_for(app_id)}
+            # Two pin-slot shapes: the in-tree examples default to their
+            # local build; an app from its own repository (opennvr-app new
+            # --repo) defaults to its published image — no local build.
+            env_key = app_id.upper().replace("-", "_") + "_IMAGE"
+            allowed = {image, _pin_slot_for(app_id), "${" + env_key + ":-" + image + "}"}
             if svc_image not in allowed:
                 errors.append(
                     f"{label}: install.compose service '{svc_name}' image "
