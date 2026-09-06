@@ -295,7 +295,9 @@ to a release window. Pull requests and design discussions are welcome.
   v1 domain events as typed classes, `opennvr-app validate`, async
   `ai.stream()`.
 - **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
-  enterprise deployments with support and compliance packs first;
+  enterprise deployments with support and compliance packs first
+  (shipped: `docs/ENTERPRISE.md`, `docs/REFERENCE_APPLIANCE.md`,
+  `scripts/evidence_pack.py`);
   OpenNVR Models (per-site fine-tuning, delivered as licensed adapters
   through the catalog) second; a paid partner tier (certification,
   hosted licence service, lead routing — paid by the vendor, never a
