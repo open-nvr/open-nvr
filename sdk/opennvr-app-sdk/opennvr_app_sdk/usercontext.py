@@ -102,10 +102,10 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
-def verify_user_context(token: str | None, secret: str | None, *,
-                        audience: str | None = None,
-                        now: float | None = None) -> UserContext | None:
-    """Verify an ``X-OpenNVR-User`` value. Any failure → ``None``."""
+def _verified_claims(token: str | None, secret: str | None, *,
+                     audience: str | None, now: float | None) -> dict | None:
+    """HS256-verify a core-issued token against this app's secret and
+    check issuer / audience / expiry. Any failure → ``None``."""
     if not token or not secret:
         return None
     try:
@@ -121,13 +121,42 @@ def verify_user_context(token: str | None, secret: str | None, *,
         claims = json.loads(_b64url_decode(payload_b64))
     except Exception:  # noqa: BLE001 — malformed = absent
         return None
-    if claims.get("iss") != "opennvr":
+    if not isinstance(claims, dict) or claims.get("iss") != "opennvr":
         return None
     if audience is not None and claims.get("aud") != audience:
         return None
     clock = time.time() if now is None else now
     exp = claims.get("exp")
     if not isinstance(exp, (int, float)) or clock > float(exp) + _LEEWAY_SECONDS:
+        return None
+    return claims
+
+
+CALL_TOKEN_HEADER = "X-OpenNVR-Call"
+
+
+def verify_call_token(token: str | None, secret: str | None, *,
+                      audience: str | None = None, purpose: str | None = None,
+                      now: float | None = None) -> dict | None:
+    """Verify an ``X-OpenNVR-Call`` value — core proving a request to
+    this app's write surfaces (``/actions/*``, ``/entitlement/verify``)
+    is its own, signed with the sha256 of the app's key so no site-wide
+    credential ever reaches the app. ``purpose`` must match when given.
+    Returns the claims, or ``None``."""
+    claims = _verified_claims(token, secret, audience=audience, now=now)
+    if claims is None:
+        return None
+    if purpose is not None and claims.get("purpose") != purpose:
+        return None
+    return claims
+
+
+def verify_user_context(token: str | None, secret: str | None, *,
+                        audience: str | None = None,
+                        now: float | None = None) -> UserContext | None:
+    """Verify an ``X-OpenNVR-User`` value. Any failure → ``None``."""
+    claims = _verified_claims(token, secret, audience=audience, now=now)
+    if claims is None:
         return None
     try:
         user_id = int(claims["sub"])

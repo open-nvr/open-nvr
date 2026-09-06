@@ -61,6 +61,32 @@ their own clients take headers from `opennvr_app_sdk.AppCredentials`
 * Audit rows: `app.register` carries `key_issued` and `sdk_version`;
   `app.key.rotate` / `app.key.revoke` name the administrator.
 
+## Core calling your app, without the site key
+
+Two things core does *to* your app are writes: invoking an action and
+asking whether a licence key is valid. Until SDK 0.6 those were gated
+on the deployment's `INTERNAL_API_KEY`, which meant every app was
+handed the site-wide credential on every call. Now core proves itself
+per app instead:
+
+* Core sends **`X-OpenNVR-Call`** — an HS256 token signed with the
+  sha256 of *your* app key (the same secret as `X-OpenNVR-User`), bound
+  to your app id, to a purpose (`action` or `entitlement`) and to a
+  60-second window.
+* The SDK's contract server verifies it (`verify_call_token`) before
+  `on_action` or `verify_license` runs. A token for another app, another
+  purpose, or a stale one is a 401.
+* Your app **never receives the site key**. The `opennvr_token` in your
+  config is used once, to bootstrap registration; after that you hold
+  only your own key.
+
+Compatibility: an app registered with an SDK older than 0.6 cannot
+verify the token, so core still sends `X-Internal-Api-Key` to it
+(decided from the `sdk_version` it registered with) until it upgrades.
+An SDK ≥ 0.6 app talking to a core older than `api_version` 1.3 accepts
+the legacy site-key gate and logs one warning asking for the upgrade.
+Forwarding the site key to old apps is removed at `api_version` 2.0.
+
 ## Version negotiation
 
 The register response's `registry.min_sdk_version` is the oldest SDK the

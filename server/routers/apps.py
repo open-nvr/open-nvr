@@ -604,7 +604,7 @@ class AppRegisterRequest(BaseModel):
 #: change to the register/config/state/actions shapes; bump
 #: MIN_SDK_VERSION only when an old SDK would misbehave, not merely
 #: miss a feature.
-API_VERSION = "1.2"
+API_VERSION = "1.3"
 MIN_SDK_VERSION = "0.2.0"
 
 
@@ -777,6 +777,8 @@ async def register_app(
 
     row.name = str(manifest["name"])
     row.version = str(manifest["version"])
+    if request.sdk_version:
+        row.sdk_version = str(request.sdk_version)[:32]
     row.category = manifest.get("category")
     row.url = request.url.rstrip("/")
     row.manifest_json = manifest
@@ -1126,22 +1128,16 @@ async def invoke_app_action(
         },
     )
 
-    # The app's action surface is key-gated (the SDK requires the
-    # deployment token on its only write endpoint) — forward it. The
-    # JWT gate above remains the operator check; this key is transport
-    # auth between server and app.
-    from core.config import settings
+    # Transport auth between core and the app: a per-app signed call
+    # token (SDK ≥ 0.6), and the site key only for apps too old to verify
+    # one (services/app_user_context.call_headers). The JWT gate above
+    # remains the operator check.
+    from services.app_user_context import call_headers, user_context_headers
 
-    headers = (
-        {"X-Internal-Api-Key": settings.internal_api_key}
-        if settings.internal_api_key
-        else {}
-    )
+    headers = call_headers(row, purpose="action")
     # Who is invoking, and which cameras they may see/manage — signed
     # for this app (services/app_user_context.py) so it can render or
     # refuse per user without a login of its own.
-    from services.app_user_context import user_context_headers
-
     headers.update(user_context_headers(db, row, current_user, purpose="action"))
     async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
         try:

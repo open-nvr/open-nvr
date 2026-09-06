@@ -121,16 +121,54 @@ def served(monkeypatch, tmp_path):
         app.stop_contract_server()
 
 
+def _call(purpose="action", secret=SECRET, **over):
+    now = int(time.time())
+    base = {"iss": "opennvr", "aud": "my-app", "purpose": purpose, "jti": "j1",
+            "iat": now, "exp": now + 60}
+    base.update(over)
+    return mint(base, secret=secret)
+
+
 def test_ui_and_actions_see_the_forwarded_user(served):
     tok = mint(_claims(purpose="ui"))
     assert httpx.get(f"{served}/ui", headers={"X-OpenNVR-User": tok}).text == "<p>guard</p>"
     assert httpx.get(f"{served}/ui").text == "<p>anonymous</p>"
     r = httpx.post(f"{served}/actions/reset", json={},
-                   headers={"X-OpenNVR-User": mint(_claims())})
+                   headers={"X-OpenNVR-User": mint(_claims()), "X-OpenNVR-Call": _call()})
     assert r.json() == {"by": "guard", "sees_cam2": False}
-    # A forged token (wrong secret) is simply "no user".
+    # A forged user token (wrong secret) is simply "no user".
     r = httpx.post(f"{served}/actions/reset", json={},
-                   headers={"X-OpenNVR-User": mint(_claims(), secret="x")})
+                   headers={"X-OpenNVR-User": mint(_claims(), secret="x"),
+                            "X-OpenNVR-Call": _call()})
     assert r.json() == {"by": None, "sees_cam2": False}
     # Nothing leaks between requests.
     assert current_user() is None
+
+
+def test_write_surfaces_need_a_call_token_from_core(served):
+    """An app that holds its own key is only written to by ITS core:
+    X-OpenNVR-Call signed with sha256(app key), purpose-bound. No site
+    key is involved anywhere."""
+    assert httpx.post(f"{served}/actions/reset", json={}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-Internal-Api-Key": "any-site-key"}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-OpenNVR-Call": _call(secret="x")}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-OpenNVR-Call": _call(purpose="entitlement")}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-OpenNVR-Call": _call(aud="other-app")}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-OpenNVR-Call": _call(exp=int(time.time()) - 120)}).status_code == 401
+    assert httpx.post(f"{served}/actions/reset", json={},
+                      headers={"X-OpenNVR-Call": _call()}).status_code == 200
+    # Reads stay open.
+    assert httpx.get(f"{served}/health").status_code == 200
+
+
+def test_verify_call_token_unit():
+    assert uc.verify_call_token(_call(), SECRET, audience="my-app", purpose="action")["jti"] == "j1"
+    assert uc.verify_call_token(_call(), SECRET, audience="my-app", purpose="entitlement") is None
+    assert uc.verify_call_token(_call(), "nope", audience="my-app") is None
+    assert uc.verify_call_token(None, SECRET) is None
+    assert uc.verify_call_token("a.b", SECRET) is None
