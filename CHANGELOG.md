@@ -234,6 +234,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Occupancy heatmap rendered as speckle, not heat.** Every grid cell
+  with a single stray detection was painted as a visible square (an
+  alpha floor of 18% plus square-root scaling), and the only smoothing
+  was a bilinear upscale, so a day of foot points over a road scene
+  looked like blue confetti. The canvas now blurs the 48×27 grid
+  (separable 5-tap Gaussian) into a density field before colouring,
+  scales against the blurred peak, and ramps alpha from zero — isolated
+  hits fade into the still, dwell areas reinforce.
 - **Occupancy entry lines could not be saved.** The catalog editor
   writes a tripwire as `{a, b, count_direction}`, but config validation
   demanded a list for every `geometry.*` type, so every entry line ever

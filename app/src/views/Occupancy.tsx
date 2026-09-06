@@ -946,7 +946,9 @@ const WINDOWS: { label: string; short: string; hours: number }[] = [
   { label: '7 days', short: '7 d', hours: 24 * 7 },
 ]
 
-/** One hue (the app accent, blue) from light+transparent to dark+opaque. */
+/** One hue (the app accent, blue) from light+transparent to dark+opaque.
+ *  Alpha starts at ZERO: a cell that saw one stray detection in a day
+ *  must fade into the still, not sit on it as a square. */
 function heatColor(t: number): [number, number, number, number] {
   const lo = [147, 197, 253]   // light blue
   const hi = [30, 64, 175]     // deep blue
@@ -955,8 +957,44 @@ function heatColor(t: number): [number, number, number, number] {
     Math.round(lo[0] + (hi[0] - lo[0]) * k),
     Math.round(lo[1] + (hi[1] - lo[1]) * k),
     Math.round(lo[2] + (hi[2] - lo[2]) * k),
-    Math.round(255 * (0.18 + 0.72 * k)),
+    Math.round(255 * 0.85 * k),
   ]
+}
+
+/** Separable 5-tap Gaussian over the grid, edge-clamped. Turns a bin
+ *  count field into a density field: neighbouring hits reinforce into
+ *  a warm area, an isolated hit spreads thin and disappears. Cheap —
+ *  the grid is 48×27 — and independent of canvas ``filter`` support. */
+export function blurGrid(cells: number[], cols: number, rows: number, passes = 1): number[] {
+  const k = [1, 4, 6, 4, 1]
+  const norm = 16
+  let src = cells.map((v) => (v > 0 ? v : 0))
+  for (let p = 0; p < passes; p++) {
+    const tmp = new Array<number>(cols * rows).fill(0)
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        let acc = 0
+        for (let d = -2; d <= 2; d++) {
+          const xx = Math.min(cols - 1, Math.max(0, x + d))
+          acc += src[y * cols + xx] * k[d + 2]
+        }
+        tmp[y * cols + x] = acc / norm
+      }
+    }
+    const out = new Array<number>(cols * rows).fill(0)
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        let acc = 0
+        for (let d = -2; d <= 2; d++) {
+          const yy = Math.min(rows - 1, Math.max(0, y + d))
+          acc += tmp[yy * cols + x] * k[d + 2]
+        }
+        out[y * cols + x] = acc / norm
+      }
+    }
+    src = out
+  }
+  return src
 }
 
 function useCameraStill(cameraId: number) {
@@ -981,19 +1019,26 @@ function HeatmapCanvas({ heat }: { heat: HeatmapResp }) {
   useEffect(() => {
     const canvas = ref.current
     if (!canvas || !heat.cols || !heat.rows) return
-    const { cols, rows, cells } = heat
-    // Square-root scaling: a hot corner (a queue, a doorway) would
-    // otherwise crush every walkway into the lightest step.
-    const top = Math.sqrt(Math.max(heat.max, 1))
+    const { cols, rows } = heat
+    // Density, not raw bins: blur first so a stray single detection
+    // (a false positive on the grass, one pedestrian walking through)
+    // spreads thin and fades, while real dwell areas reinforce.
+    const field = blurGrid(heat.cells ?? [], cols, rows)
+    // Square-root scaling against the BLURRED peak: a hot corner (a
+    // queue, a doorway) would otherwise crush every walkway into the
+    // lightest step.
+    const peak = field.reduce((m, v) => (v > m ? v : m), 0)
+    const top = Math.sqrt(Math.max(peak, 1e-6))
     const small = document.createElement('canvas')
     small.width = cols
     small.height = rows
     const sctx = small.getContext('2d')!
     const img = sctx.createImageData(cols, rows)
     for (let i = 0; i < cols * rows; i++) {
-      const v = cells[i] ?? 0
+      const v = field[i] ?? 0
       if (v <= 0) continue
       const [r, g, b, a] = heatColor(Math.sqrt(v) / top)
+      if (a < 8) continue                    // below what the eye reads
       img.data[i * 4] = r
       img.data[i * 4 + 1] = g
       img.data[i * 4 + 2] = b
