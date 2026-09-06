@@ -41,7 +41,7 @@ import { AppConfigModal, type RegisteredApp } from './AppCatalog'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
 
-type CameraRow = { id: number; name: string }
+type CameraRow = { id: number; name: string; assignments?: { skill?: string }[] | null }
 
 type OccupancyCameraState = {
   level?: string        // over | under | normal | …
@@ -49,6 +49,7 @@ type OccupancyCameraState = {
   pending?: number
   // Footfall + dwell (since the app started; the platform keeps history)
   has_entry_line?: boolean
+  entry_direction?: 'both' | 'a_to_b' | 'b_to_a' | null
   entries?: number
   exits?: number
   dwell_avg_s?: number | null
@@ -180,11 +181,19 @@ export function Occupancy() {
 
   const occApp = findOccupancyApp(appsQuery.data)
 
+  // ONE time window for the page: the tiles, the flow chart, the
+  // per-zone sparklines and the heatmap's default all read the same
+  // range, so "Today" means the same thing everywhere (the pattern
+  // every occupancy product settles on — a page-level range, not one
+  // per widget).
+  const [windowHours, setWindowHours] = useState<number>(24)
+  const windowLabel = WINDOWS.find((w) => w.hours === windowHours)?.short ?? `${windowHours} h`
+
   // History charts (occupancy.changed.v1 samples persisted by core).
   const historyQuery = useQuery({
-    queryKey: ['occupancy-history'],
+    queryKey: ['occupancy-history', windowHours],
     queryFn: async () => {
-      const { data } = await api.get('/api/v1/occupancy/history', { params: { hours: 24 } })
+      const { data } = await api.get('/api/v1/occupancy/history', { params: { hours: windowHours } })
       return data as HistoryResp
     },
     enabled: Boolean(occApp),
@@ -195,9 +204,9 @@ export function Occupancy() {
 
   // Footfall + dwell over the last 24 h (occupancy.footfall.v1 rows).
   const footfallQuery = useQuery({
-    queryKey: ['occupancy-footfall'],
+    queryKey: ['occupancy-footfall', windowHours],
     queryFn: async () => {
-      const { data } = await api.get('/api/v1/occupancy/footfall', { params: { hours: 24 } })
+      const { data } = await api.get('/api/v1/occupancy/footfall', { params: { hours: windowHours } })
       return data as FootfallResp
     },
     enabled: Boolean(occApp),
@@ -284,6 +293,33 @@ export function Occupancy() {
     [state]
   )
 
+  // Headline numbers. "Peak" is the highest single-zone count seen in
+  // the window (what a fire-code or capacity conversation asks for);
+  // capacity is now/limit against the site-wide max, per zone.
+  const peakInWindow = useMemo(() => {
+    let peak = 0
+    for (const c of history?.cameras ?? []) for (const smp of c.samples) if (smp.max > peak) peak = smp.max
+    return peak
+  }, [history])
+  const nowCount = typeof state?.total_people === 'number' ? state.total_people : null
+  const zonesOver = typeof state?.zones_over === 'number' ? state.zones_over : null
+  const worstPct = useMemo(() => {
+    if (maxOccupancy <= 0) return null
+    let worst = 0
+    for (const [, z] of zones) worst = Math.max(worst, Math.round((Number(z.last_count ?? 0) / maxOccupancy) * 100))
+    return worst
+  }, [zones, maxOccupancy])
+  const capacityState: 'over' | 'near' | 'ok' | null =
+    worstPct === null ? null : worstPct > 100 ? 'over' : worstPct >= 80 ? 'near' : 'ok'
+
+  // Setup hint: the app watches `person`; if the operator's cameras are
+  // assigned a vehicle skill and no vehicle label is watched, the page
+  // would count nothing and the heatmap would be noise — say so up front.
+  const vehicleCams = (camerasQuery.data ?? []).filter((c) =>
+    (c.assignments ?? []).some((a) => /plate|vehicle|car/i.test(String(a?.skill ?? ''))))
+  const watchesVehicles = watchLabels.some((l) => /^(car|truck|bus|motorcycle|vehicle)$/i.test(l))
+  const vehicleHint = vehicleCams.length > 0 && !watchesVehicles
+
   if (!appsQuery.isPending && !occApp) {
     return (
       <section className="space-y-4">
@@ -307,6 +343,21 @@ export function Occupancy() {
         description="Live head-counts per watched zone — riding the platform's detection stream, zero extra inference. Thresholds apply live."
         actions={
           <div className="flex items-center gap-2">
+            <div className="flex rounded border border-[var(--border)] overflow-hidden" role="group" aria-label="Time window">
+              {WINDOWS.map((w) => (
+                <button
+                  key={w.hours}
+                  type="button"
+                  onClick={() => setWindowHours(w.hours)}
+                  className={`px-3 py-1.5 text-sm ${windowHours === w.hours
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+                  aria-pressed={windowHours === w.hours}
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
             {occApp && canConfigure && (
               <Button variant="outline" onClick={() => setConfigOpen(true)}>
                 <Settings2 size={14} /> Configure
@@ -325,20 +376,76 @@ export function Occupancy() {
       />
 
       {/* ── Live tiles ────────────────────────────────────────────── */}
+      {vehicleHint && canConfigure && (
+        <Card>
+          <CardContent className="py-3 text-sm flex flex-wrap items-center gap-2">
+            <span>
+              {vehicleCams.map((c) => c.name).join(', ')} {vehicleCams.length === 1 ? 'is' : 'are'} assigned a
+              vehicle skill, but Occupancy only watches <code>{watchLabels.join(', ')}</code> — it will count
+              nothing there.
+            </span>
+            <Button variant="outline" onClick={() => setConfigOpen(true)}>
+              Add car / truck to watch labels
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+      {!canConfigure && (
+        <div className="text-xs text-[var(--text-dim)]">Showing the cameras you have access to.</div>
+      )}
+
+      {/* Headline: capacity first — the number an operator acts on. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[
-          { label: 'People counted now', value: state?.total_people },
-          { label: 'Zones over limit', value: state?.zones_over },
-          { label: 'Zones watched', value: zones.length || undefined },
-          { label: 'Max per zone', value: maxOccupancy || '—' },
-        ].map((t) => (
-          <Card key={t.label}>
-            <CardContent className="py-3">
-              <div className="text-2xl font-semibold">{t.value ?? '…'}</div>
-              <div className="text-xs text-[var(--text-dim)]">{t.label}</div>
-            </CardContent>
-          </Card>
-        ))}
+        <Card>
+          <CardContent className="py-3">
+            <div className="flex items-baseline gap-2">
+              <div className="text-2xl font-semibold" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {nowCount ?? '—'}
+              </div>
+              {capacityState && (
+                <Badge variant={capacityState === 'over' ? 'destructive' : capacityState === 'near' ? 'warning' : 'success'}>
+                  {capacityState === 'over' ? 'over limit' : capacityState === 'near' ? `${worstPct}% of limit` : 'within limit'}
+                </Badge>
+              )}
+            </div>
+            <div className="text-xs text-[var(--text-dim)]">
+              {nowCount === null
+                ? (statusQuery.isError ? 'People now — app unreachable' : 'People now — waiting for the app')
+                : maxOccupancy > 0 ? `People now · limit ${maxOccupancy} per zone` : 'People now · no limit set'}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="py-3">
+            <div className="text-2xl font-semibold" style={{ fontVariantNumeric: 'tabular-nums' }}>
+              {history ? peakInWindow : '—'}
+            </div>
+            <div className="text-xs text-[var(--text-dim)]">
+              {history ? `Peak in a zone (${windowLabel})` : 'Peak — loading'}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="py-3">
+            <div className="text-2xl font-semibold" style={{ fontVariantNumeric: 'tabular-nums' }}>
+              {zonesOver ?? '—'}
+            </div>
+            <div className="text-xs text-[var(--text-dim)]">
+              {zonesOver === null ? 'Zones over limit — waiting for the app'
+                : maxOccupancy > 0 ? 'Zones over limit' : 'Zones over limit — no limit set'}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="py-3">
+            <div className="text-2xl font-semibold" style={{ fontVariantNumeric: 'tabular-nums' }}>
+              {zones.length}
+            </div>
+            <div className="text-xs text-[var(--text-dim)]">
+              {zones.length === 0 ? 'Zones watched — assign the occupancy skill to a camera' : 'Zones watched'}
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* ── Footfall + dwell, last 24 h ───────────────────────────── */}
@@ -346,10 +453,10 @@ export function Occupancy() {
         || footfall.totals.dwell_count > 0) && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[
-            { label: 'Entered (24 h)', value: footfall.totals.entries },
-            { label: 'Exited (24 h)', value: footfall.totals.exits },
-            { label: 'Average stay', value: fmtDuration(footfall.totals.dwell_avg_seconds) },
-            { label: 'Longest stay (24 h)', value: fmtDuration(footfall.totals.dwell_max_seconds) },
+            { label: `Entered (${windowLabel})`, value: footfall.totals.entries },
+            { label: `Exited (${windowLabel})`, value: footfall.totals.exits },
+            { label: `Average stay (${windowLabel})`, value: fmtDuration(footfall.totals.dwell_avg_seconds) },
+            { label: `Longest stay (${windowLabel})`, value: fmtDuration(footfall.totals.dwell_max_seconds) },
           ].map((t) => (
             <Card key={t.label}>
               <CardContent className="py-3">
@@ -415,7 +522,7 @@ export function Occupancy() {
       {footfall && footfall.cameras.some((c) => c.entries + c.exits > 0) && (
         <Card>
           <CardContent className="py-3">
-            <div className="text-sm font-medium mb-0.5">Flow, last 24 hours</div>
+            <div className="text-sm font-medium mb-0.5">Flow, {WINDOWS.find((w) => w.hours === windowHours)?.label.toLowerCase() ?? windowLabel}</div>
             <div className="text-xs text-[var(--text-dim)] mb-2">
               Entries and exits across every camera with an entry line, by hour.
             </div>
@@ -440,7 +547,7 @@ export function Occupancy() {
         <EmptyState
           icon={<Users size={28} />}
           title="No zones counting yet"
-          description={`The app is watching for: ${watchLabels.join(', ')}. It counts every camera assigned the occupancy skill (whole frame until you draw a zone) — if your cameras show vehicles rather than people, add "car" to the watch labels in Configure zones.`}
+          description={`The app is watching for: ${watchLabels.join(', ')}. It counts every camera assigned the occupancy skill (whole frame until you draw a zone) — if your cameras show vehicles rather than people, add "car" to the watch labels in Configure.`}
         />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -491,14 +598,19 @@ export function Occupancy() {
                         style={{ fontVariantNumeric: 'tabular-nums' }}>
                       {z.has_entry_line && (
                         <div>
-                          <dt className="text-[var(--text-dim)]">In / out (24 h)</dt>
+                          <dt className="text-[var(--text-dim)]">
+                            In / out ({windowLabel})
+                            {z.entry_direction && z.entry_direction !== 'both' && (
+                              <span title="Which crossings count as entries — change it in Configure"> · entries {z.entry_direction === 'a_to_b' ? 'A→B' : 'B→A'}</span>
+                            )}
+                          </dt>
                           <dd className="font-medium">
                             {footfallFor(key)?.entries ?? z.entries ?? 0} / {footfallFor(key)?.exits ?? z.exits ?? 0}
                           </dd>
                         </div>
                       )}
                       <div>
-                        <dt className="text-[var(--text-dim)]">Avg stay (24 h)</dt>
+                        <dt className="text-[var(--text-dim)]">Avg stay ({windowLabel})</dt>
                         <dd className="font-medium">{fmtDuration(footfallFor(key)?.dwell_avg_seconds ?? z.dwell_avg_s)}</dd>
                       </div>
                       <div>
@@ -536,6 +648,7 @@ export function Occupancy() {
           cameraId={cameraIdOf(heatmapFor)}
           cameraLabel={cameraName(heatmapFor)}
           watchLabels={watchLabels}
+          initialHours={windowHours}
           onClose={() => setHeatmapFor(null)}
         />
       )}
@@ -826,6 +939,13 @@ const HEAT_RANGES: { label: string; hours: number }[] = [
   { label: '7 days', hours: 24 * 7 },
 ]
 
+/** The page's time windows (history is capped at 7 days server-side). */
+const WINDOWS: { label: string; short: string; hours: number }[] = [
+  { label: 'Last hour', short: '1 h', hours: 1 },
+  { label: 'Today', short: '24 h', hours: 24 },
+  { label: '7 days', short: '7 d', hours: 24 * 7 },
+]
+
 /** One hue (the app accent, blue) from light+transparent to dark+opaque. */
 function heatColor(t: number): [number, number, number, number] {
   const lo = [147, 197, 253]   // light blue
@@ -905,14 +1025,15 @@ function HeatmapCanvas({ heat }: { heat: HeatmapResp }) {
 }
 
 function HeatmapDialog({
-  cameraId, cameraLabel, watchLabels, onClose,
+  cameraId, cameraLabel, watchLabels, initialHours = 24, onClose,
 }: {
   cameraId: number
   cameraLabel: string
   watchLabels: string[]
+  initialHours?: number
   onClose: () => void
 }) {
-  const [hours, setHours] = useState(24)
+  const [hours, setHours] = useState(initialHours)
   const heatQuery = useQuery({
     queryKey: ['occupancy-heatmap', cameraId, hours],
     queryFn: async () => {

@@ -751,6 +751,7 @@ def test_entry_line_counts_entries_and_exits():
     assert payload["entries"] + payload["exits"] == 2
     live = app.state_snapshot()["cameras"]["cam-1"]
     assert live["has_entry_line"] is True
+    assert live["entry_direction"] == "both"
     assert live["entries"] + live["exits"] == 2
 
 

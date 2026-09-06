@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Occupancy page, reworked around how occupancy products are read.**
+  One time window (Last hour / Today / 7 days) drives the tiles, the
+  flow chart, the zone cards and the heatmap's default, instead of a
+  fixed 24 h here and a per-dialog range there. The headline is
+  capacity: people now with an over / near / within-limit badge, the
+  peak seen in a zone over the window, zones over limit, zones watched
+  — and every empty tile says why ("app unreachable", "no limit set",
+  "assign the occupancy skill"). Zone cards show which way an entry
+  line counts (entries A→B / B→A; the app now reports
+  `entry_direction`). A setup hint appears when cameras carry a vehicle
+  skill but Occupancy watches only `person`, with a one-click path to
+  the config form; non-superusers see a "showing the cameras you have
+  access to" note.
+
 - **App Catalog: licence hint, verified badge, Featured row.** A
   listing with `entitlement: license_key` now says so *before* install
   ("licence key required" badge + one line on what happens next), so

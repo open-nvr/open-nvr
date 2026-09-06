@@ -1334,6 +1334,13 @@ class OccupancyCounter(Detector):
                     "has_entry_line": (
                         camera_id in self._config.cameras
                         and self._config.cameras[camera_id].entry_line is not None),
+                    # Which crossings count as entries — shown on the
+                    # zone card so a miswired line is visible at a glance.
+                    "entry_direction": (
+                        self._config.cameras[camera_id].entry_line.count_direction
+                        if camera_id in self._config.cameras
+                        and self._config.cameras[camera_id].entry_line is not None
+                        else None),
                     # Since app start; the platform keeps the history.
                     "entries": int(self._footfall_total.get(camera_id, {}).get("entries", 0)),
                     "exits": int(self._footfall_total.get(camera_id, {}).get("exits", 0)),
