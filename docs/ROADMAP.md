@@ -279,13 +279,14 @@ to a release window. Pull requests and design discussions are welcome.
   external; paid = open code that gates a licensed model or service.
   Shipped: maintainer-verified badge, Featured row, provenance line,
   validator rules. Next: build-from-source CI for third-party
-  repositories, an app-repository template, egress enforcement by the
-  reconciler (internal-only network by default, declared hosts allowed,
-  attempts logged). Shipped: per-app NATS credentials (the `nats-apps`
+  repositories, an app-repository template, image signing on top of
+  digest pinning. Shipped: per-app NATS credentials (the `nats-apps`
   leaf bus; user = app id, permissions from the manifest;
-  `requires_scopes` enforced on the bus) and per-app call tokens (no site
-  key reaches an app). Still open: install counts (opt-in, aggregate)
-  and a showcase page.
+  `requires_scopes` enforced on the bus), per-app call tokens (no site
+  key reaches an app), and enforced egress (apps on an internal
+  network; the egress proxy allows declared + operator-allowed hosts,
+  refusals in the inbox — `docs/APP_NETWORK.md`). Still open: install
+  counts (opt-in, aggregate) and a showcase page.
 - **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
   enterprise deployments with support and compliance packs first;
   OpenNVR Models (per-site fine-tuning, delivered as licensed adapters

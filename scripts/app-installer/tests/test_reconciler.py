@@ -220,7 +220,7 @@ def test_pending_installed_calls_compose_up_and_applies():
     argv = runner.calls[0]
     assert argv[:2] == ["docker", "compose"]
     assert "-f" in argv and "docker-compose.apps.yml" in argv
-    assert argv[-3:] == ["up", "-d", "loitering-detection"]
+    assert argv[-4:] == ["up", "-d", "egress-proxy", "loitering-detection"]
     assert argv == build_up_argv(intent)
     # A digest-bearing index entry → the runner is handed the pinned
     # image override env so compose actually deploys the pinned ref.
@@ -427,7 +427,7 @@ def test_install_ups_required_adapters_ahead_of_the_app():
     # The adapter service is upped in the same command, BEFORE the app —
     # an already-running adapter is a compose no-op (reuse), a missing
     # service block fails the whole install loudly.
-    assert services == ["fast-plate-ocr-adapter", "license-plate-recognition"]
+    assert services == ["egress-proxy", "fast-plate-ocr-adapter", "license-plate-recognition"]
 
 
 def test_uninstall_releases_the_last_holders_adapter():

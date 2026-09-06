@@ -194,7 +194,9 @@ REGISTER_KEYS = {
     "last_seen": (str, type(None)), "manifest": (dict,), "config": (dict,),
     "has_api_key": (bool,), "api_key_issued_at": (str, type(None)),
     "entitlement": (dict,), "registry": (dict,),
+    "egress": (dict,),                       # 1.4: declared / allow / enforced / denied
 }
+EGRESS_KEYS = {"declared": (list,), "allow": (list,), "enforced": (list,), "denied": (list,)}
 REGISTRY_KEYS = {"server_version": (str,), "api_version": (str,),
                  "min_sdk_version": (str,)}
 ENTITLEMENT_KEYS = {
@@ -224,6 +226,7 @@ def test_register_response_shape(env):
     _assert_shape(body, REGISTER_KEYS, "register")
     _assert_shape(body["registry"], REGISTRY_KEYS, "register.registry")
     _assert_shape(body["entitlement"], ENTITLEMENT_KEYS, "register.entitlement")
+    _assert_shape(body["egress"], EGRESS_KEYS, "register.egress")
     assert body["registry"]["api_version"] == apps_router.API_VERSION
     assert body["registry"]["min_sdk_version"] == apps_router.MIN_SDK_VERSION
     # The key is returned exactly once, in the clear, under this name.

@@ -43,6 +43,38 @@ x-default-logging: &svc-logs
 
 services:
   # ──────────────────────────────────────────────────────────────
+  # Egress proxy — the only door out of the apps network. Apps live on
+  # ``opennvr_apps`` (internal: no LAN, no internet); this service sits
+  # on that network AND the platform network, and every app gets it as
+  # HTTP_PROXY / HTTPS_PROXY. Per destination it asks core whether the
+  # calling app may open the host — core answers from the listing's
+  # declared ``network_egress`` plus the operator's allow list, and
+  # raises a refusal in the inbox. Holds no policy of its own; stdlib
+  # only. See docs/APP_NETWORK.md.
+  # ──────────────────────────────────────────────────────────────
+  egress-proxy:
+    profiles: [apps, default-apps]
+    build:
+      context: .
+      dockerfile: scripts/egress-proxy/Dockerfile
+    image: ${EGRESS_PROXY_IMAGE:-opennvr/egress-proxy:local-build}
+    container_name: opennvr_egress_proxy
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - LOG_LEVEL=${EGRESS_PROXY_LOG_LEVEL:-INFO}
+    expose:
+      - "3128"
+    networks:
+      - opennvr_apps
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Loitering detection — dwell-time alerts for watched labels in
   # operator-defined zones. Contract surface on :9200.
   # ──────────────────────────────────────────────────────────────
@@ -93,6 +125,8 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       # The SDK's registration call reads the token from this env var
       # (cfg opennvr_token wins when set; the template leaves it unset).
@@ -101,6 +135,15 @@ services:
       # config.yml (see the config-init container above).
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only; the
     # registry polls it over the compose network. Add a
     # ``127.0.0.1:9200:9200`` port mapping to poke it from the host.
@@ -112,7 +155,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Occupancy counting — over/under-occupancy alerts per camera ×
@@ -172,10 +215,21 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     expose:
       - "9201"
     volumes:
@@ -184,7 +238,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Line crossing — tripwire alerts when a tracked object crosses
@@ -233,11 +287,22 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       # The SDK's registration/config-poll token rides this env var.
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9202"
@@ -247,7 +312,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Abandoned object — unattended-item alerts when a watched object
@@ -293,11 +358,22 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       # The SDK's registration/config-poll token rides this env var.
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9203"
@@ -307,7 +383,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Intrusion detection — restricted-zone + restricted-hours alerts
@@ -357,6 +433,8 @@ services:
         # the same service_healthy gate covers both the registry and
         # the inference proxy. There is no separate kai-c service.
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       # The SDK's registration call reads the token from this env var
       # (cfg opennvr_token wins when set; the template leaves it unset).
@@ -365,6 +443,15 @@ services:
       # config.yml (see the config-init container above).
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only; the
     # registry polls it over the compose network. Add a
     # ``127.0.0.1:9204:9204`` port mapping to poke it from the host.
@@ -376,7 +463,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
@@ -518,6 +605,8 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
       # RFC-0002 decision 7: the app starts only once its required OCR
       # adapter is up and its (best-effort) registration has run.
       fast-plate-ocr-adapter:
@@ -528,6 +617,15 @@ services:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9205"
@@ -537,7 +635,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Alert notifier — the guard's phone: pushes contracted
@@ -584,10 +682,21 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9211"
@@ -597,7 +706,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Gate controller — barrier actuation for access.decided.v1: pulses
@@ -645,10 +754,21 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Contract surface (/health /manifest /state) — internal-only.
     expose:
       - "9210"
@@ -658,7 +778,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Smart doorbell — face recognition at the door via InsightFace
@@ -708,10 +828,21 @@ services:
         # opennvr-core also hosts KAI-C on :8100 — the same
         # service_healthy gate covers the inference proxy too.
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     expose:
       - "9206"
     volumes:
@@ -725,7 +856,7 @@ services:
       - /app/config/config.yml
       - daemon
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Package delivery — porch ROI package arrivals / lingering /
@@ -772,10 +903,21 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     expose:
       - "9207"
     volumes:
@@ -784,7 +926,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Footage search — indexes inference events (labels + captions)
@@ -841,12 +983,23 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       # Informational — this app reads everything from the generated
       # config.yml (no contract/registration keys in its config surface).
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     # Reserved catalog port — the app serves nothing today.
     expose:
       - "9208"
@@ -860,7 +1013,7 @@ services:
       - /app/config/config.yml
       - index
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
   # Home Assistant relay — bridges the opennvr.alerts.* fan-out
@@ -922,10 +1075,21 @@ services:
         condition: service_healthy
       opennvr-core:
         condition: service_healthy
+      egress-proxy:
+        condition: service_started
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Egress: apps sit on the internal opennvr_apps network; the only
+      # way out is the egress proxy, which asks core whether THIS app may
+      # reach the host (declared in its listing, or allowed by the
+      # operator from the catalog). HTTP libraries honour these
+      # automatically; NO_PROXY keeps the stack's own services direct.
+      # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     expose:
       - "9209"
     volumes:
@@ -934,7 +1098,7 @@ services:
       - --config
       - /app/config/config.yml
     networks:
-      - opennvr_internal
+      - opennvr_apps
 
 volumes:
   # Generated config.yml files (mounted read-only by each app).

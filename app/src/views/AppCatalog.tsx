@@ -216,6 +216,17 @@ export type RegisteredApp = {
   manifest?: AppManifest | null
   config?: Record<string, any> | null
   entitlement?: Entitlement | null
+  egress?: AppEgress | null
+}
+
+// GET /apps/{id}/egress — apps live on an internal network and leave it
+// only through the egress proxy, which allows what the listing declared
+// plus what the operator allowed here; the rest is refused and listed.
+export type AppEgress = {
+  declared: string[]
+  allow: string[]
+  enforced: string[]
+  denied: { host: string; port: number | null; count: number; first_seen: string; last_seen: string }[]
 }
 
 export type AppStatusResp = {
@@ -1305,6 +1316,105 @@ function LicensePanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
   )
 }
 
+function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const [draft, setDraft] = useState('')
+  const eg = app.egress
+  const save = useMutation({
+    mutationFn: (allow: string[]) => apiService.setAppEgress(app.id, allow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      setDraft('')
+      showSuccess(`${app.name}: allowed hosts updated`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not update the allowed hosts.')),
+  })
+  if (!eg) return null
+  const allow = eg.allow ?? []
+  const denied = eg.denied ?? []
+  const notes = (eg.declared ?? []).filter((d) => !eg.enforced.includes(d.trim().toLowerCase()))
+  const listingHosts = eg.enforced.filter((h) => !allow.includes(h))
+  const addHost = (host: string) => {
+    const h = host.trim().toLowerCase()
+    if (!h || allow.includes(h)) return
+    save.mutate([...allow, h])
+  }
+  return (
+    <div className="rounded border border-[var(--border)] p-2 space-y-2 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-medium text-[var(--text)]">Network</span>
+        {eg.enforced.length === 0 && denied.length === 0 ? (
+          <span className="text-[var(--text-dim)]">no connections outside the stack</span>
+        ) : null}
+        {listingHosts.map((h) => (
+          <Badge key={`l-${h}`} variant="neutral" title="Declared in the catalog listing">{h}</Badge>
+        ))}
+        {allow.map((h) => (
+          <span key={`a-${h}`} className="inline-flex items-center gap-1">
+            <Badge variant="success" title="Allowed by an administrator for this install">{h}</Badge>
+            {isAdmin && (
+              <button
+                type="button"
+                className="text-[var(--text-dim)] hover:text-[var(--text)]"
+                title="Stop allowing this host"
+                onClick={() => save.mutate(allow.filter((x) => x !== h))}
+                disabled={save.isPending}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {notes.length > 0 && (
+          <span className="text-[var(--text-dim)]" title="From the listing — a note, not a rule">
+            also: {notes.join('; ')}
+          </span>
+        )}
+      </div>
+      {denied.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[var(--text-dim)]">
+            Refused by the egress proxy — the app tried to reach these and they are neither declared nor allowed:
+          </div>
+          {denied.map((d) => {
+            const dest = d.port ? `${d.host}:${d.port}` : d.host
+            return (
+              <div key={dest} className="flex items-center gap-2 flex-wrap">
+                <Badge variant="destructive">{dest}</Badge>
+                <span className="text-[var(--text-dim)]">
+                  {d.count}× · last {fmtWhen(d.last_seen)}
+                </span>
+                {isAdmin && (
+                  <Button variant="outline" onClick={() => addHost(dest)} disabled={save.isPending}>
+                    Allow
+                  </Button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {isAdmin && (
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 px-2 py-1 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+            placeholder="allow a host: ha.local:8123, *.ntfy.sh, 192.168.1.0/24"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addHost(draft) } }}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button variant="outline" onClick={() => addHost(draft)} disabled={!draft.trim() || save.isPending}>
+            Allow
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry; onConfigure: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -1396,6 +1506,8 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
         {app.manifest?.entitlement === 'license_key' && (
           <LicensePanel app={app} isAdmin={isAdmin} />
         )}
+
+        <NetworkPanel app={app} isAdmin={isAdmin} />
 
         {/* RFC-0002 Phase 1: the skill this app provides, as the platform
             registry sees it — same derivation the agent's panel renders,

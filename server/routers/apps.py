@@ -63,6 +63,8 @@ from services.audit_service import write_audit_log
 from services.app_entitlements import (
     entitlement_view, may_enable, store_license_key, verify_with_app,
 )
+from services import app_egress
+from services.app_egress import egress_view
 
 # The one-click install/uninstall endpoints require this RBAC permission
 # (in addition to the APPS_INSTALL_ENABLED opt-in). Reused as a FastAPI
@@ -604,7 +606,7 @@ class AppRegisterRequest(BaseModel):
 #: change to the register/config/state/actions shapes; bump
 #: MIN_SDK_VERSION only when an old SDK would misbehave, not merely
 #: miss a feature.
-API_VERSION = "1.3"
+API_VERSION = "1.4"
 MIN_SDK_VERSION = "0.2.0"
 
 
@@ -626,6 +628,9 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         "api_key_issued_at": row.api_key_issued_at,
         # Licence verdict (never the key) — services/app_entitlements.py.
         "entitlement": entitlement_view(row),
+        # Network: what the listing declared, what the operator allowed,
+        # what the proxy refused — services/app_egress.py.
+        "egress": egress_view(row),
     }
 
 
@@ -1619,6 +1624,79 @@ async def get_install_status(
 # Cap on proxied app-UI documents. An app dashboard is a small
 # self-contained page; anything bigger is a bug or an abuse vector.
 UI_PROXY_MAX_BYTES = 1_000_000
+
+
+# ── Network egress ────────────────────────────────────────────────
+# Apps live on an internal network; the egress proxy asks core, per
+# connection, whether the calling app may open a host. Policy and the
+# denial memory live in services/app_egress.py.
+
+
+class EgressCheckIn(BaseModel):
+    client_ip: str
+    host: str
+    port: int = 443
+
+
+class EgressAllowIn(BaseModel):
+    allow: list[str] = []
+
+
+@router.post("/egress/check")
+async def egress_check(
+    payload: EgressCheckIn,
+    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+    db: Session = Depends(get_db),
+):
+    """The egress proxy's question — site key only. Answers
+    ``{allowed, app_id, reason}``; a denial is logged, counted and, once
+    per app and destination per hour, raised in the inbox."""
+    expected = _internal_api_key()
+    if not expected or not x_internal_api_key or not secrets.compare_digest(
+        x_internal_api_key, expected
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="invalid internal api key")
+    return app_egress.check(db, payload.client_ip, payload.host, payload.port)
+
+
+@router.get("/{app_id}/egress")
+async def get_app_egress(
+    app_id: str,
+    principal: User | None = Depends(get_read_principal),
+    db: Session = Depends(get_db),
+):
+    """Declared, allowed and enforced hosts, plus recent denials. Any
+    authenticated user, or the site key (the catalog reads it)."""
+    return egress_view(_get_app_or_404(db, app_id))
+
+
+@router.put("/{app_id}/egress")
+async def put_app_egress(
+    app_id: str,
+    payload: EgressAllowIn,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Replace the operator's allow list for this install (superuser).
+    Host rules only: ``host``, ``*.domain``, an IPv4 address or CIDR,
+    optionally ``:port``."""
+    row = _get_app_or_404(db, app_id)
+    try:
+        allow = app_egress.validate_operator_rules(payload.allow)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=str(exc)) from exc
+    before = list(row.egress_allow or [])
+    row.egress_allow = allow
+    db.commit()
+    app_egress.clear_denials(app_id)
+    write_audit_log(
+        db, action="app.egress.allow", user_id=current_user.id,
+        entity_type="app", entity_id=app_id,
+        details={"before": before, "after": allow},
+    )
+    return egress_view(row)
 
 
 @router.get("/{app_id}/ui")

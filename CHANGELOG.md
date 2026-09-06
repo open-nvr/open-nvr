@@ -8,6 +8,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Enforced app egress.** Apps now run on `opennvr_apps`, an internal
+  compose network with no route to the LAN or the internet, and leave
+  it only through the new `egress-proxy` service (`scripts/egress-proxy`,
+  standard library), which every app container receives as
+  `HTTP_PROXY` / `HTTPS_PROXY`. Per connection the proxy asks core
+  (`POST /apps/egress/check`) whether the calling app — identified by
+  the address its contract URL resolves to, never by a secret it
+  carries — may open the host; core answers from the listing's declared
+  `network_egress` plus an operator allow list per install
+  (`installed_apps.egress_allow`, `GET`/`PUT /apps/{id}/egress`,
+  superuser, audit-logged). A refusal is logged, counted on the app,
+  and raised once per app and destination per hour as an inbox alert
+  naming the host; the catalog card's new **Network** line shows
+  declared, allowed and refused hosts with an **Allow** button. Core,
+  `nats` and `nats-apps` join the apps network; the one-click installer
+  ups the proxy with every app; `ollama` joins it for footage-search.
+  Plain-TCP clients tunnel through the proxy with the SDK's new
+  `opennvr_app_sdk.egress` (`connect_via_proxy`, `proxy_address`) — the
+  Home Assistant relay does so for MQTT (paho + PySocks).
+  `APPS_EGRESS_ENFORCED=false` / `APPS_EGRESS_PROXY_URL=` switch it off
+  (stack down first). `api_version` 1.4 (additive: `egress` on the app
+  record). `docs/APP_NETWORK.md` is the whole story.
+
 - **Catalog policy: open source under the org, built from source,
   author on the card.** Installable apps must be open source (AGPL-3.0
   or Apache-2.0, author's copyright) in a repository under the `open-nvr`

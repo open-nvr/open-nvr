@@ -52,9 +52,13 @@ class _FakeMqttClient:
         self.loop_started = False
         self.loop_stopped = False
         self.disconnected = False
+        self.proxy: dict | None = None
 
     def username_pw_set(self, user, pw):  # noqa: D401
         self.username = (user, pw)
+
+    def proxy_set(self, **kwargs):  # noqa: D401 — paho + PySocks
+        self.proxy = kwargs
 
     def connect(self, host, port, keepalive):  # noqa: D401
         self.connected = True
@@ -96,6 +100,33 @@ def fake_paho(monkeypatch):
     monkeypatch.setitem(sys.modules, "paho", fake_paho_module)
     monkeypatch.setitem(sys.modules, "paho.mqtt", fake_paho_mqtt_module)
     monkeypatch.setitem(sys.modules, "paho.mqtt.client", fake_client_module)
+    # A developer shell may carry its own proxy variables; the broker
+    # path under test is the direct one unless a test says otherwise.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    fake_socks = types.ModuleType("socks")
+    fake_socks.HTTP = "HTTP"
+    monkeypatch.setitem(sys.modules, "socks", fake_socks)
+
+
+@pytest.mark.asyncio
+async def test_mqtt_goes_through_the_egress_proxy_when_the_platform_sets_one(fake_paho, monkeypatch):
+    """On the internal apps network the broker is reachable only via the
+    egress proxy: paho is pointed at it as an HTTP CONNECT tunnel."""
+    pub = MqttPublisher(MqttConfig(host="192.168.1.20", port=1883))
+    assert await pub.publish_state(_entity()) is True
+    assert pub._client.proxy is None                                  # no proxy set → direct
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://egress-proxy:3128")
+    monkeypatch.setenv("NO_PROXY", "opennvr-core,nats,nats-apps,egress-proxy")
+    pub = MqttPublisher(MqttConfig(host="192.168.1.20", port=1883))
+    assert await pub.publish_state(_entity()) is True
+    assert pub._client.proxy == {"proxy_type": "HTTP", "proxy_addr": "egress-proxy", "proxy_port": 3128}
+    assert pub._client.connected
+
+    pub = MqttPublisher(MqttConfig(host="nats", port=1883))          # NO_PROXY host: direct
+    assert await pub.publish_state(_entity()) is True
+    assert pub._client.proxy is None
 
 
 @pytest.mark.asyncio

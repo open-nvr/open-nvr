@@ -212,6 +212,7 @@ services:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
     networks:
       - opennvr_internal
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
       interval: 30s
@@ -241,6 +242,7 @@ services:
         condition: service_healthy
     networks:
       - opennvr_internal
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
       interval: 30s
@@ -667,6 +669,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     networks:
       - opennvr_internal
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -780,6 +783,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
 networks:
+  # Where apps live (docker-compose.apps.yml): INTERNAL — no route to the
+  # LAN or the internet. Apps reach core, the buses and the egress proxy
+  # here; everything outside goes through the proxy, which asks core per
+  # destination (docs/APP_NETWORK.md). Set APPS_EGRESS_ENFORCED=false to
+  # give apps a normal bridge again (recreate: ``docker compose down``
+  # first — a network's internal flag cannot change in place).
+  opennvr_apps:
+    driver: bridge
+    internal: ${APPS_EGRESS_ENFORCED:-true}
   opennvr_internal:
     driver: bridge
     # Pinned so the trust zone is deterministic and doesn't collide with the

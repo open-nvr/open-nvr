@@ -64,8 +64,14 @@ The rule that makes the catalog worth trusting:
   licence hook: [`docs/APP_SURFACES.md` §5b](APP_SURFACES.md).
 * **Every entry declares its network egress** (`network_egress: [...]`,
   `[]` for "never talks to the internet"). The card shows it before
-  install. An undeclared destination found in review or in the field is
-  grounds for removal.
+  install, and the platform **enforces** it: apps run on an internal
+  network and reach, through the egress proxy, only the hosts the entry
+  declares plus what the operator allows ([APP_NETWORK.md](APP_NETWORK.md)).
+  Host-shaped entries (`api.telegram.org`, `*.vendor.example`,
+  `10.0.0.0/8`, optional `:port`) become rules; free-text entries ("the
+  webhook URL the operator configures") are notes on the card. An
+  undeclared destination found in review or in the field is grounds
+  for removal.
 
 ---
 
@@ -277,7 +283,9 @@ one topic per PR. Sign the [CLA](CLA.md) when the bot asks.
   and the image digest is the one CI produced from it.
 - **Egress is declared and matches the code.** `network_egress` lists
   every host the app connects to (or is `[]`); the reviewer greps for
-  outbound calls and expects them all on the list.
+  outbound calls and expects them all on the list. Whatever is missing
+  will be refused by the egress proxy on every deployment and land in
+  the operator's inbox — so a wrong list is a broken app, not a note.
 - **You are reachable.** `contact` is an email or an https URL that
   reaches the maintainer.
 

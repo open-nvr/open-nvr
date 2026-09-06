@@ -1106,6 +1106,10 @@ class InstalledApp(Base):
     # NATS as user=<app id>, password=<its key>; core renders this into
     # the bus's users file (services/nats_users.py). Cleared on revoke.
     nats_password_bcrypt = Column(String(80), nullable=True)
+    # Hosts the operator allowed this install to reach through the egress
+    # proxy, on top of what its catalog listing declared
+    # (services/app_egress.py). A JSON list of host rules.
+    egress_allow = Column(JSON, nullable=True)
     # Licensed apps (manifest ``entitlement: license_key``): the key the
     # administrator entered, Fernet-encrypted at rest and never returned;
     # and the app's own verdict on it (services/app_entitlements.py).

@@ -42,7 +42,12 @@
                                    #   builds the image from (docs/APP_LISTING_TERMS.md).
   network_egress: []               # REQUIRED. Every host the app connects to outside the
                                    #   stack ("licence.vendor.com", "api.telegram.org"), or []
-                                   #   for "never leaves the site". Shown on the card.
+                                   #   for "never leaves the site". Shown on the card AND
+                                   #   enforced: host-shaped entries (name, *.domain, IPv4,
+                                   #   CIDR, optional :port) are the only hosts the egress
+                                   #   proxy lets the app reach; prose entries ("the webhook
+                                   #   URL the operator configures") are notes — the operator
+                                   #   allows those hosts on the card. docs/APP_NETWORK.md.
   # verified: true                 # REVIEWERS ONLY — the maintainers vouch for the author
                                    #   (identity confirmed, image reproducible from the linked
                                    #   source). Leave out of a submission; a reviewer adds it.

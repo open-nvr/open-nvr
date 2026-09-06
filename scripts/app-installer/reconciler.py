@@ -81,6 +81,10 @@ DEFAULT_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.apps.yml")
 # Compose profile the app service blocks live under (see
 # docker-compose.apps.yml — every app service is ``profiles: [apps]``).
 DEFAULT_PROFILE = "apps"
+# The egress proxy (scripts/egress-proxy) is upped with every install:
+# apps live on the internal ``opennvr_apps`` network and it is their
+# only way out. An already-running proxy is a no-op for compose.
+EGRESS_PROXY_SERVICE = "egress-proxy"
 
 
 # ── Injected seams ─────────────────────────────────────────────────────
@@ -276,8 +280,11 @@ def build_up_argv(
     curated index) are upped in the same command, ahead of the app — an
     already-running adapter is a no-op (reuse), a missing service block
     fails the whole install LOUDLY (the "cannot be provisioned" refusal).
+
+    The egress proxy goes first, always: without it an app on the
+    internal network has no route anywhere but core and the buses.
     """
-    services = [
+    services = [EGRESS_PROXY_SERVICE] + [
         adapter_service_name(a) for a in (adapters or ())
     ] + [intent.id]
     return _compose_base(compose_files, profile) + ["up", "-d", *services]
