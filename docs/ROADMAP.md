@@ -278,9 +278,11 @@ to a release window. Pull requests and design discussions are welcome.
   and declared network egress on the card; closed software lists as
   external; paid = open code that gates a licensed model or service.
   Shipped: maintainer-verified badge, Featured row, provenance line,
-  validator rules. Next: build-from-source CI for third-party
-  repositories, an app-repository template. Shipped: signed catalog
-  images (Sigstore keyless in the publish workflow) verified by the
+  validator rules, the org's `build-catalog-app` reusable workflow
+  (any `open-nvr/app-*` repository builds, signs and publishes its image
+  from source by calling it), `opennvr-app new --repo` (CI, publish
+  workflow and listing entry scaffolded), `make pin-apps-index`. Shipped:
+  signed catalog images (Sigstore keyless in the publish workflow) verified by the
   installer before any pinned install; per-app NATS credentials (the `nats-apps`
   leaf bus; user = app id, permissions from the manifest;
   `requires_scopes` enforced on the bus), per-app call tokens (no site

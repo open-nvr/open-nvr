@@ -198,10 +198,13 @@ registry the host can pull from. **The app images ARE now published**:
 `ghcr.io/open-nvr/<id>` on each main push and release tag (multi-arch,
 same tag policy as core), so the index's `image` refs resolve. What the
 index still ships WITHOUT is a per-entry `image_digest` — so an install
-today logs the UNPINNED warning and pulls the tag. Recording digests in
-the index at release time is the remaining step to make pinning bite;
-the mechanism itself is complete and tested, and the local `build:`
-overlay with `:local-build` tags remains the dev / air-gapped path.
+today logs the UNPINNED warning and pulls the tag. Recording digests is
+the release step `make pin-apps-index` (`scripts/pin_apps_index.py`):
+it asks GHCR what each entry's tag resolves to, cosign-verifies the
+digest against the org's CI identity, and writes `image_digest` into
+the index textually (comments survive); `--check` reports drift. The
+mechanism itself is complete and tested, and the local `build:` overlay
+with `:local-build` tags remains the dev / air-gapped path.
 
 ## Image signing
 

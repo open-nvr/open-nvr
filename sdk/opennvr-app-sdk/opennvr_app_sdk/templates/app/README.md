@@ -61,3 +61,4 @@ Every OpenNVR install browses the curated index. Add one entry —
 installable from your image, or `kind: external` linking to where you
 distribute it — per [CONTRIBUTING_APPS.md](__DOCS__CONTRIBUTING_APPS.md);
 the deal for developers is [DEVELOPER_PROGRAM.md](__DOCS__DEVELOPER_PROGRAM.md).
+__REPO_SECTION__

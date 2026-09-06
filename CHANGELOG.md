@@ -8,6 +8,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Build from source for every app repository.** A reusable workflow,
+  `.github/workflows/build-catalog-app.yml` (`workflow_call`): an
+  `open-nvr/app-*` repository calls it with its `app_id`, and it checks
+  that repository out at the pushed ref, builds the Dockerfile for
+  amd64 + arm64, pushes `ghcr.io/open-nvr/<id>`, signs the digest
+  (Sigstore keyless — the certificate names this workflow, so the
+  installer's existing identity check covers third-party apps) and
+  prints the `image_digest:` line in the job summary. It refuses any
+  caller outside the org. `opennvr-app new <id> --repo` scaffolds the
+  repository files — `ci.yml`, a four-line `publish.yml` that calls the
+  workflow, `apps-index-entry.yml` (the listing, reviewed with the
+  code), `.gitignore`/`.dockerignore` — and pins the published SDK.
+  `scripts/pin_apps_index.py` / `make pin-apps-index` is the release
+  step that writes every catalog entry's current digest into the index
+  (from GHCR, cosign-verified, textually so comments survive; `--check`
+  reports drift). `CONTRIBUTING_APPS.md` §2 now describes this path
+  instead of author-pushed images.
+
 - **Signed catalog images, verified at install.**
   `publish-app-images.yml` now signs every image it pushes with
   Sigstore keyless signing (cosign + the workflow's GitHub OIDC

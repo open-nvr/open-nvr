@@ -1,0 +1,176 @@
+# ==========================================================================
+# build-catalog-app — the org's build-from-source workflow for catalog apps
+# ==========================================================================
+#
+# A REUSABLE workflow (``workflow_call``). An app repository under the
+# open-nvr organisation calls it from its own publish workflow:
+#
+#     jobs:
+#       publish:
+#         uses: open-nvr/open-nvr/.github/workflows/build-catalog-app.yml@main
+#         with:
+#           app_id: my-app
+#         permissions:
+#           contents: read
+#           packages: write
+#           id-token: write
+#
+# and this workflow checks out THAT repository at the ref that triggered
+# it, builds its Dockerfile for amd64 + arm64, pushes the image to
+# ghcr.io/open-nvr/<app_id>, and signs the manifest digest with Sigstore
+# keyless signing. The signing certificate names *this* workflow file on
+# *this* repository's main branch as the job workflow — which is exactly
+# the identity the one-click installer verifies before a pinned install
+# (scripts/app-installer/signing.py). That is what "built from source by
+# OpenNVR's CI" means mechanically: the image can only have come through
+# here, from a repository under the org, at a tag anyone can read.
+#
+# The job summary prints the digest as an ``image_digest:`` line, ready
+# to paste into the listing entry (or run scripts/pin_apps_index.py).
+#
+# Guard rails: the caller must be a repository under the open-nvr org
+# (a fork calling this from elsewhere fails before anything is built),
+# and app_id must be kebab-case (it becomes the package name).
+#
+# ``opennvr-app new <id> --repo`` scaffolds an app repository with the
+# publish workflow already in place (docs/CONTRIBUTING_APPS.md §2).
+# ==========================================================================
+
+name: build-catalog-app
+
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: "Catalog app id (kebab-case) — becomes ghcr.io/open-nvr/<app_id>"
+        required: true
+        type: string
+      context:
+        description: "Docker build context, relative to the calling repository"
+        required: false
+        type: string
+        default: "."
+      dockerfile:
+        description: "Dockerfile path, relative to the calling repository"
+        required: false
+        type: string
+        default: "Dockerfile"
+      platforms:
+        description: "Platforms to build"
+        required: false
+        type: string
+        default: "linux/amd64,linux/arm64"
+      title:
+        description: "Human title for the image labels (defaults to app_id)"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      digest:
+        description: "The signed multi-arch manifest digest (sha256:…)"
+        value: ${{ jobs.build.outputs.digest }}
+      image:
+        description: "The image ref the digest belongs to"
+        value: ${{ jobs.build.outputs.image }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build + sign ${{ inputs.app_id }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ghcr.io/open-nvr/${{ inputs.app_id }}
+    steps:
+      - name: Guard — org repository, kebab-case id
+        env:
+          OWNER: ${{ github.repository_owner }}
+          APP_ID: ${{ inputs.app_id }}
+        run: |
+          set -euo pipefail
+          if [ "$OWNER" != "open-nvr" ]; then
+            echo "::error::build-catalog-app builds only repositories under the open-nvr organisation (caller owner: $OWNER)"
+            exit 1
+          fi
+          if ! printf '%s' "$APP_ID" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+            echo "::error::app_id '$APP_ID' is not kebab-case"
+            exit 1
+          fi
+
+      - name: Checkout the calling repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/${{ inputs.app_id }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR ${{ inputs.title || inputs.app_id }}
+            org.opencontainers.image.description=OpenNVR catalog app — ${{ inputs.title || inputs.app_id }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.vendor=OpenNVR
+
+      - name: Build + push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ inputs.app_id }}
+          cache-to: type=gha,scope=${{ inputs.app_id }},mode=max
+
+      - name: Sign (Sigstore keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/open-nvr/${{ inputs.app_id }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "Built from \`${{ github.repository }}@${{ github.ref_name }}\` (${{ github.sha }}), signed."
+            echo
+            echo '```yaml'
+            echo "  image: ${IMAGE}:latest"
+            echo "  image_digest: ${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
