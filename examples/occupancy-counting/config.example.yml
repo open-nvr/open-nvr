@@ -106,3 +106,9 @@ nats_alerts_token: null
 #     max_occupancy: 3
 #     zone: [[100, 100], [900, 100], [900, 900], [100, 900]]
 cameras: []
+
+# ── OpenNVR core ──────────────────────────────────────────────────
+# Where the app discovers cameras (and registers itself) when the
+# ``cameras`` list above is empty. Set OPENNVR_INTERNAL_API_KEY in the
+# environment for the first registration; the app then holds its own key.
+opennvr_url: "http://localhost:8000"

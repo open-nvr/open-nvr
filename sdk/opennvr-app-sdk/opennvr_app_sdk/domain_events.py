@@ -105,5 +105,16 @@ class DomainEventPublisher:
         )
         return self._channel.publish_json(subject, envelope)
 
+    def publish_typed(self, payload: Any, *, camera_id: str,
+                      correlation_id: str | None = None) -> bool:
+        """Publish a typed payload (``event_types``): the schema is the
+        class's, the wire payload is ``to_payload()``."""
+        from .event_types import is_typed_payload
+
+        if not is_typed_payload(payload):
+            raise TypeError(f"publish_typed needs a typed event payload, got {type(payload).__name__}")
+        return self.publish(type(payload).SCHEMA, camera_id=camera_id,
+                            payload=payload.to_payload(), correlation_id=correlation_id)
+
     def close(self) -> None:
         self._channel.close()

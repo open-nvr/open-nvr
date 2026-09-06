@@ -71,6 +71,10 @@ from .domain_subscriber import (
     DomainEvent, DomainEventSubscriber, domain_event_app, parse_domain_event,
 )
 from .egress import connect_via_proxy, proxy_address
+from .event_types import (
+    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
+    OccupancyHeatmap, PlateRecognized, TypedPayload, VisitRecorded, typed_payload,
+)
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -87,6 +91,17 @@ __all__ = [
     # The stack's egress proxy, for plain-TCP clients (docs/APP_NETWORK.md)
     "proxy_address",
     "connect_via_proxy",
+    # Typed domain-event payloads (docs/EVENT_CONTRACTS.md as Python)
+    "TypedPayload",
+    "EVENT_TYPES",
+    "typed_payload",
+    "DetectionObserved",
+    "VisitRecorded",
+    "PlateRecognized",
+    "AccessDecided",
+    "OccupancyChanged",
+    "OccupancyHeatmap",
+    "OccupancyFootfall",
     # Domain events (producing side of docs/EVENT_CONTRACTS.md)
     "DomainEventPublisher",
     "domain_envelope",
