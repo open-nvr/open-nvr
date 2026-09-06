@@ -279,8 +279,9 @@ to a release window. Pull requests and design discussions are welcome.
   external; paid = open code that gates a licensed model or service.
   Shipped: maintainer-verified badge, Featured row, provenance line,
   validator rules. Next: build-from-source CI for third-party
-  repositories, an app-repository template, image signing on top of
-  digest pinning. Shipped: per-app NATS credentials (the `nats-apps`
+  repositories, an app-repository template. Shipped: signed catalog
+  images (Sigstore keyless in the publish workflow) verified by the
+  installer before any pinned install; per-app NATS credentials (the `nats-apps`
   leaf bus; user = app id, permissions from the manifest;
   `requires_scopes` enforced on the bus), per-app call tokens (no site
   key reaches an app), and enforced egress (apps on an internal

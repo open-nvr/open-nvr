@@ -61,6 +61,14 @@
                                    #   A pinned digest is what makes one-click install
                                    #   trustworthy (supply-chain integrity). Omit only for
                                    #   a local `build:`-overlay app; unpinned = dev only.
+  # signing:                       # ONLY for an image NOT built by the org's CI (not
+  #   identity: '^https://github.com/<you>/<repo>/\.github/workflows/.*$'
+  #   issuer: https://token.actions.githubusercontent.com
+                                   #   Who signed the image (Sigstore keyless): the OIDC
+                                   #   certificate identity the installer verifies with
+                                   #   cosign before a pinned install. ghcr.io/open-nvr
+                                   #   images are signed by OpenNVR CI and need nothing
+                                   #   here. docs/APPS_INSTALL.md → Image signing.
 
   requires_tasks: [object_detection]   # REQUIRED (may be []). Adapter task types your app
                                        #   depends on. Prefer canonical names from

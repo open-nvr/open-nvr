@@ -145,6 +145,10 @@ class IndexEntry(BaseModel):
     source: str | None = None
     contact: str | None = None
     network_egress: list[str] = []
+    # Who signs the image (scripts/app-installer/signing.py). Absent for
+    # ghcr.io/open-nvr images — the org's CI signs those; declared
+    # ({identity: <regexp>, issuer}) for an image built elsewhere.
+    signing: dict[str, str] | None = None
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
@@ -172,6 +176,19 @@ class IndexEntry(BaseModel):
         if self.entitlement not in ("none", "license_key"):
             raise ValueError("entitlement must be none | license_key")
         return self
+
+
+def _signed_by(entry: IndexEntry) -> str | None:
+    """Who the installer expects to have signed the image: ``"OpenNVR CI"``
+    for the org's own images, the declared identity for others, ``None``
+    when unsigned (only ever deploys with INSTALLER_SIGNATURES=off)."""
+    if entry.kind == "external":
+        return None
+    if entry.signing and entry.signing.get("identity"):
+        return str(entry.signing["identity"])
+    if (entry.image or "").startswith("ghcr.io/open-nvr/"):
+        return "OpenNVR CI"
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -722,6 +739,9 @@ async def get_apps_index(
                 "source": entry.source,
                 "contact": entry.contact,
                 "network_egress": entry.network_egress,
+                # Signed: the one-click installer verifies a Sigstore
+                # signature from this identity before any pinned install.
+                "signed_by": _signed_by(entry),
                 "requires_tasks": entry.requires_tasks,
                 "emits": entry.emits,
                 "docs_url": entry.docs_url,

@@ -40,6 +40,10 @@ Config (env):
   INSTALLER_COMPOSE_FILES — comma-separated compose files, default
                           "docker-compose.yml,docker-compose.apps.yml".
   INSTALLER_PROFILE     — compose profile, default "apps".
+  INSTALLER_SIGNATURES  — "require" (default: a pinned image must carry a
+                          valid Sigstore signature from its expected
+                          signer, checked with cosign before compose
+                          runs) or "off" (air-gapped / lab). signing.py.
 
 Failure backoff: an intent that keeps failing (bad image, unpullable
 digest, poison row) is retried with exponential backoff (10s doubling
@@ -62,6 +66,13 @@ from reconciler import (
     docker_runner,
     load_curated_index,
     reconcile_once,
+)
+from signing import (
+    DEFAULT_MODE as DEFAULT_SIGNING_MODE,
+    SIGNING_MODES,
+    SigningPolicy,
+    cosign_available,
+    cosign_verifier,
 )
 from store import SqlIntentStore
 
@@ -112,12 +123,32 @@ def main() -> int:
         len(index), sorted(index),
     )
 
+    signing_mode = os.environ.get("INSTALLER_SIGNATURES", DEFAULT_SIGNING_MODE).strip().lower()
+    if signing_mode not in SIGNING_MODES:
+        logger.error("INSTALLER_SIGNATURES must be one of %s, got %r", SIGNING_MODES, signing_mode)
+        return 2
+    if signing_mode == "require" and not cosign_available():
+        logger.error(
+            "INSTALLER_SIGNATURES=require but 'cosign' is not on PATH — refusing "
+            "to start (rebuild the installer image, or set INSTALLER_SIGNATURES=off "
+            "for an air-gapped deployment that accepts unsigned images)"
+        )
+        return 2
+    signing = SigningPolicy(
+        mode=signing_mode,
+        verify=cosign_verifier(docker_runner) if signing_mode == "require" else None,
+    )
+    if signing_mode == "off":
+        logger.warning("IMAGE SIGNATURES NOT CHECKED (INSTALLER_SIGNATURES=off): pinned "
+                       "images deploy without proof of who built them")
+
     store = SqlIntentStore(database_url)
     logger.info(
-        "app-installer starting: poll=%ss compose_files=%s profile=%s",
+        "app-installer starting: poll=%ss compose_files=%s profile=%s signatures=%s",
         poll_seconds,
         list(compose_files),
         profile,
+        signing_mode,
     )
 
     # Per-id failure backoff state: consecutive failures + next allowed
@@ -138,6 +169,7 @@ def main() -> int:
                 skip_ids=skip_ids,
                 compose_files=compose_files,
                 profile=profile,
+                signing=signing,
             )
             for app_id, status_, message in outcomes:
                 logger.info(

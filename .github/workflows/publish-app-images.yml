@@ -30,7 +30,7 @@
 # Architecture: linux/amd64 + linux/arm64, same rationale as the core
 # image (Apple Silicon and Raspberry Pi are first-class Tier 0 targets;
 # an amd64-only manifest makes ``docker pull`` fail there with a bare
-# daemon error). All ten images are python:3.11-slim + the in-repo SDK
+# daemon error). All twelve images are python:3.11-slim + the in-repo SDK
 # with no heavy native deps, so the QEMU arm64 leg is cheap.
 #
 # To add a new catalog app: add it to apps_index.yml, to the smoke
@@ -64,12 +64,19 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing: the job proves its identity to Fulcio
+      # with a GitHub OIDC token; the resulting certificate names THIS
+      # workflow, ref and repository, and the installer verifies against
+      # exactly that (scripts/app-installer/signing.py). No key to keep.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - { app: abandoned-object,           title: Abandoned Object }
+          - { app: alert-notifier,             title: Alert Notifier }
           - { app: footage-search,             title: Footage Search }
+          - { app: gate-controller,            title: Gate Controller }
           - { app: home-assistant-relay,       title: Home Assistant Relay }
           - { app: intrusion-detection,        title: Intrusion Detection }
           - { app: license-plate-recognition,  title: License Plate Recognition }
@@ -89,6 +96,11 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -119,6 +131,7 @@ jobs:
             org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/examples/${{ matrix.app }}/README.md
 
       - name: Build + push ${{ matrix.app }}
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -131,3 +144,20 @@ jobs:
           # usually finds every layer already built.
           cache-from: type=gha,scope=${{ matrix.app }}
           cache-to: type=gha,scope=${{ matrix.app }},mode=max
+
+      # Sign the multi-arch manifest digest (not a tag — tags move). The
+      # signature lands next to the image in GHCR; the one-click
+      # installer refuses a pinned image whose signature does not
+      # verify against this workflow's identity, and anyone can check:
+      #   cosign verify \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --certificate-identity-regexp '^https://github.com/open-nvr/' \
+      #     ghcr.io/open-nvr/<app>@<digest>
+      - name: Sign ${{ matrix.app }} (Sigstore keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/${{ matrix.app }}@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/${{ matrix.app }}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"

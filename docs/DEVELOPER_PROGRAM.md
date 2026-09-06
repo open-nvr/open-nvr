@@ -147,7 +147,7 @@ closed code in the catalog. Ship that as an external listing.
 
 | Core | `api_version` | Minimum SDK | Notable |
 |---|---|---|---|
-| main (Sep 2026) | 1.4 | 0.2.0 | enforced egress: `egress` on the app record, `GET`/`PUT /apps/{id}/egress`, `opennvr_app_sdk.egress` |
+| main (Sep 2026) | 1.4 | 0.2.0 | enforced egress: `egress` on the app record, `GET`/`PUT /apps/{id}/egress`, `opennvr_app_sdk.egress`; signed images, verified at install (`signed_by` on index entries) |
 | main (Sep 2026) | 1.3 | 0.2.0 | `X-OpenNVR-Call`: core proves itself per app; the site key no longer reaches apps on SDK ≥ 0.6 |
 | 0.2.x line | 1.2 | 0.2.0 | per-app keys, user context, platform client, entitlements, async client, `opennvr-app new` |
 | 0.1.4 | 1.0 | — | registry contract: register, config, state, actions |
@@ -170,8 +170,11 @@ worth knowing.
   is refused and shows up in the operator's inbox with the host named
   ([APP_NETWORK.md](APP_NETWORK.md)). A catalog app with an empty list
   is one that *cannot* talk to the internet, not one that promises not to.
-* Catalog images are **built from your tagged source by CI** and
-  digest-pinned; what a reviewer read is what runs.
+* Catalog images are **built from your tagged source by CI**,
+  digest-pinned and **signed** (Sigstore keyless, the CI workflow's own
+  identity); the one-click installer verifies the signature before it
+  installs. What a reviewer read is what runs, and it was built by the
+  org's CI from that source.
 * Video, plates and faces **do not leave the site** unless the operator
   enables a feature that says so, in words, on the card.
 

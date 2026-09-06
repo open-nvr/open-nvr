@@ -449,3 +449,31 @@ def test_catalog_apps_must_be_open_source_under_the_org(tmp_path, monkeypatch):
     assert validator.validate_index(_write(tmp_path, [ext]))[0] == []
     ext.pop("network_egress")
     assert any("network_egress" in x for x in validator.validate_index(_write(tmp_path, [ext]))[0])
+
+
+def test_images_outside_the_org_must_declare_their_signer(tmp_path, monkeypatch):
+    """The installer verifies a Sigstore signature before a pinned
+    install: org images are signed by the org's CI, anything else has
+    to say who signs it (scripts/app-installer/signing.py)."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    digest = "sha256:" + "a" * 64
+    vendor = dict(image="ghcr.io/vendor/app:1",
+                  install=dict(_GOOD_ENTRY["install"],
+                               compose=_GOOD_ENTRY["install"]["compose"].replace(
+                                   "ghcr.io/open-nvr/sample-app:latest", "ghcr.io/vendor/app:1")))
+    assert errs(image_digest=digest) == []                                     # org image: nothing to declare
+    assert any("needs 'signing" in x for x in errs(image_digest=digest, **vendor))
+    assert errs(**vendor) == []                                                # unpinned: dev-only anyway
+    good = {"identity": "^https://github.com/vendor/app/.*$"}
+    assert errs(image_digest=digest, signing=good, **vendor) == []
+    assert any("'signing'" in x for x in errs(signing="me"))
+    assert any("signing.identity" in x for x in errs(signing={"identity": ""}))
+    assert any("not a valid regexp" in x for x in errs(signing={"identity": "("}))
+    assert any("signing.issuer" in x for x in errs(signing={"identity": "^x$", "issuer": "http://x"}))
+    assert any("unknown keys" in x for x in errs(signing={"identity": "^x$", "key": "abc"}))

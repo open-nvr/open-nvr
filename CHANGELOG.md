@@ -8,6 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Signed catalog images, verified at install.**
+  `publish-app-images.yml` now signs every image it pushes with
+  Sigstore keyless signing (cosign + the workflow's GitHub OIDC
+  identity — no key to keep), and the one-click installer runs
+  `cosign verify` on every pinned image before `docker compose up`:
+  a `ghcr.io/open-nvr` image must have been signed by a workflow in an
+  `open-nvr` repository on `main` or a `v*` tag; any other image must
+  name its signer in the index entry (`signing: {identity, issuer}`,
+  validated) or is refused as *no known signer*. A failed signature is
+  a failed intent with the reason in the catalog; compose never runs.
+  `INSTALLER_SIGNATURES=off` for air-gapped deployments (logged loudly).
+  The installer image ships cosign; the catalog card shows **signed**
+  and the index API carries `signed_by`. Also: alert-notifier and
+  gate-controller were listed with `ghcr.io/open-nvr` images that no
+  workflow published — both are now in the publish and smoke matrices.
+  `docs/APPS_INSTALL.md` → Image signing.
+
 - **Enforced app egress.** Apps now run on `opennvr_apps`, an internal
   compose network with no route to the LAN or the internet, and leave
   it only through the new `egress-proxy` service (`scripts/egress-proxy`,

@@ -203,6 +203,54 @@ the index at release time is the remaining step to make pinning bite;
 the mechanism itself is complete and tested, and the local `build:`
 overlay with `:local-build` tags remains the dev / air-gapped path.
 
+## Image signing
+
+A digest pin says *these exact bytes*. It does not say *who built
+them*: a digest in a listing PR could point at anything its author
+pushed to a registry. Signing closes that gap.
+
+**Publishing signs.** `.github/workflows/publish-app-images.yml` signs
+every catalog image it pushes with **Sigstore keyless signing** — cosign
+plus the workflow's GitHub OIDC identity. There is no signing key to
+keep, leak or rotate: the signature's certificate names the repository,
+the workflow file and the ref (`main` or a `v*` tag) that produced the
+image, and Sigstore's transparency log records it. Anyone can check:
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/open-nvr/' \
+  ghcr.io/open-nvr/loitering-detection@sha256:…
+```
+
+**Installing verifies.** Before `docker compose up`, the reconciler runs
+`cosign verify` on the pinned ref against its *expected signer*
+(`scripts/app-installer/signing.py`):
+
+* a `ghcr.io/open-nvr/…` image must have been signed by a workflow in
+  a repository under `github.com/open-nvr`, running on `main` or a
+  release tag — the org's own CI, nothing else;
+* an image from anywhere else must name its signer in the index entry
+  (`signing: {identity: <regexp>, issuer: <url>}`), reviewed with the
+  entry; without one it has *no known signer* and is refused.
+
+A failed or missing signature is a `failed` intent with the reason in
+`message` — visible in the catalog — and compose never runs. Unpinned
+(dev-only) installs are not verified: there is no digest to bind a
+signature to, and they already log the loud UNPINNED warning.
+
+`INSTALLER_SIGNATURES=off` (in `.env`, read by
+`docker-compose.installer.yml`) disables the check for an air-gapped
+deployment that cannot reach the Sigstore log; the installer logs
+`IMAGE SIGNATURES NOT CHECKED` at start-up so nobody forgets. In
+`require` mode the installer refuses to start if `cosign` is missing
+from its image. The catalog card shows **signed** on every listing the
+installer would verify.
+
+Between them, digest + signature give the sentence the catalog is built
+on: *what a reviewer read is what runs, and it was built by the org's
+CI from that source.*
+
 ---
 
 ## The reconciler
