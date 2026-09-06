@@ -158,6 +158,9 @@ server/test_*.py
 # this the blanket ``test_*.py`` above silently untracked the whole
 # sdk/opennvr-app-sdk/tests/ suite.
 !sdk/opennvr-app-sdk/tests/test_*.py
+# The privileged installer's and the egress proxy's suites, same pattern.
+!scripts/app-installer/tests/test_*.py
+!scripts/egress-proxy/tests/test_*.py
 # App template smoke test: part of the shipped scaffold — the generator
 # copies it into every new app and FIRST_DETECTOR.md promises it passes
 # out of the box. Without this negation the blanket ``test_*.py`` above

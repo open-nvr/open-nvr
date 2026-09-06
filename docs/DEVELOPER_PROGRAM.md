@@ -147,6 +147,7 @@ closed code in the catalog. Ship that as an external listing.
 
 | Core | `api_version` | Minimum SDK | Notable |
 |---|---|---|---|
+| main (Sep 2026) | 1.4 | 0.2.0 | enforced egress: `egress` on the app record, `GET`/`PUT /apps/{id}/egress`, `opennvr_app_sdk.egress` |
 | main (Sep 2026) | 1.3 | 0.2.0 | `X-OpenNVR-Call`: core proves itself per app; the site key no longer reaches apps on SDK ≥ 0.6 |
 | 0.2.x line | 1.2 | 0.2.0 | per-app keys, user context, platform client, entitlements, async client, `opennvr-app new` |
 | 0.1.4 | 1.0 | — | registry contract: register, config, state, actions |
@@ -163,9 +164,12 @@ worth knowing.
   the event bus as its own user, with subject permissions derived from
   your manifest.
 * An app declares its **network egress** (`network_egress: [...]` in the
-  index entry). The operator sees the declared hosts on the card before
-  installing; a catalog app with an empty list is one that never talks
-  to the internet.
+  index entry), and the platform **enforces** it: apps run on an
+  internal network and leave it only through the egress proxy, which
+  allows the declared hosts plus what the operator adds; anything else
+  is refused and shows up in the operator's inbox with the host named
+  ([APP_NETWORK.md](APP_NETWORK.md)). A catalog app with an empty list
+  is one that *cannot* talk to the internet, not one that promises not to.
 * Catalog images are **built from your tagged source by CI** and
   digest-pinned; what a reviewer read is what runs.
 * Video, plates and faces **do not leave the site** unless the operator

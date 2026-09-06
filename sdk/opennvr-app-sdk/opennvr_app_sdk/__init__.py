@@ -70,6 +70,7 @@ from .infer_stream import InferStream
 from .domain_subscriber import (
     DomainEvent, DomainEventSubscriber, domain_event_app, parse_domain_event,
 )
+from .egress import connect_via_proxy, proxy_address
 from .tier0 import (
     BestFrameClient,
     Tier0Snapshot,
@@ -83,6 +84,9 @@ from .tier0 import (
 from ._version import __version__  # noqa: E402
 
 __all__ = [
+    # The stack's egress proxy, for plain-TCP clients (docs/APP_NETWORK.md)
+    "proxy_address",
+    "connect_via_proxy",
     # Domain events (producing side of docs/EVENT_CONTRACTS.md)
     "DomainEventPublisher",
     "domain_envelope",

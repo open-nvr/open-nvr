@@ -21,6 +21,7 @@ Start here. Pick the row that matches what you're doing.
 - **[APP_SURFACES.md](APP_SURFACES.md)** — the surfaces (config, state, actions) an app exposes.
 - **[APPS_INSTALL.md](APPS_INSTALL.md)** — one-click install design (desired-state + reconciler).
 - **[APP_CREDENTIALS.md](APP_CREDENTIALS.md)** — per-app keys: the register handshake, roster scoping, rotate/revoke.
+- **[APP_NETWORK.md](APP_NETWORK.md)** — enforced egress: the internal apps network, the proxy, declared and allowed hosts, what the operator sees, plain-TCP clients.
 - **[APP_PLATFORM.md](APP_PLATFORM.md)** — the `OpenNVR` client: cameras, snapshots, recordings, timeline, AI, alerts, durable state, domain-event consumption.
 - **[SDK_REFERENCE.md](SDK_REFERENCE.md)** — index of every public `opennvr_app_sdk` name, by task.
 - **[PLATFORM_API.md](PLATFORM_API.md)** — the operator API: users (incl. superusers + MFA), roles and the permission catalogue, cameras, assignments, per-camera access, apps and licences.

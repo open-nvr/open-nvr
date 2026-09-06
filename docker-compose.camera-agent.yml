@@ -340,6 +340,9 @@ services:
       - opennvr_ollama_models:/root/.ollama
     networks:
       - opennvr_internal
+      # footage-search (docker-compose.apps.yml) calls ollama from the
+      # internal apps network.
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s

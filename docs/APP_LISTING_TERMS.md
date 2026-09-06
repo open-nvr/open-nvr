@@ -34,7 +34,10 @@ itself.
 * The app does what its listing says and nothing that the operator did
   not see on the card: no undeclared network destinations, no video,
   plates, faces or credentials leaving the site unless a described
-  feature the operator enabled requires it.
+  feature the operator enabled requires it. The platform holds you to
+  the first part mechanically — an app reaches only its declared hosts
+  and what the operator allows, and every refused attempt is shown to
+  the operator ([APP_NETWORK.md](APP_NETWORK.md)).
 * You are reachable at the contact given, and you respond to a security
   report within seven days.
 * For a paid app: the licence check works offline or degrades

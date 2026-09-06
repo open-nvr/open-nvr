@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+from opennvr_app_sdk import connect_via_proxy
 
 from ha_mapper import HaEntity
 
@@ -134,6 +135,18 @@ class MqttPublisher:
             )
             if self._cfg.username:
                 client.username_pw_set(self._cfg.username, self._cfg.password or "")
+            # On a deployment that runs apps on the internal network the
+            # broker is only reachable through the egress proxy: MQTT is
+            # plain TCP, so it rides an HTTP CONNECT tunnel like every
+            # other outbound call (paho + PySocks). Direct when no proxy
+            # is set or the broker is on NO_PROXY.
+            via = connect_via_proxy(self._cfg.host, self._cfg.port)
+            if via is not None:
+                import socks  # type: ignore  # PySocks, a declared dependency
+
+                client.proxy_set(proxy_type=socks.HTTP, proxy_addr=via[0], proxy_port=via[1])
+                logger.info("mqtt: tunnelling to %s:%d through the egress proxy %s:%d",
+                            self._cfg.host, self._cfg.port, via[0], via[1])
 
             # CONNACK signalling: paho's _on_connect fires on its
             # network thread, not on our event loop. We stash the

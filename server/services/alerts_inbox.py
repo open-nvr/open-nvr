@@ -83,8 +83,12 @@ def normalize_ring_config(raw: object) -> dict[str, str]:
     return merged
 
 
-def apply_alert(envelope: object) -> str:
+def apply_alert(envelope: object, db=None) -> str:
     """Store one §11.5 alert envelope into the inbox.
+
+    ``db``: an open session to write through (core raising its own
+    alerts inside a request, e.g. an egress denial); by default a fresh
+    one is opened and closed here.
 
     Pure-decision core, unit-testable without a bus. Status tokens:
 
@@ -128,10 +132,13 @@ def apply_alert(envelope: object) -> str:
 
     from datetime import datetime
 
-    from core.database import SessionLocal
     from models import AppAlert
 
-    db = SessionLocal()
+    own_session = db is None
+    if own_session:
+        from core.database import SessionLocal
+
+        db = SessionLocal()
     try:
         exists = (
             db.query(AppAlert.id)
@@ -180,7 +187,8 @@ def apply_alert(envelope: object) -> str:
                          exc_info=True)
         return "stored"
     finally:
-        db.close()
+        if own_session:
+            db.close()
 
 
 def _clip(value: object, limit: int) -> str | None:

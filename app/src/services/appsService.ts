@@ -34,6 +34,11 @@ export const appsService = {
     api.put(`/api/v1/apps/${id}/license`, { license_key: licenseKey }),
   verifyAppLicense: (id: string) => api.post(`/api/v1/apps/${id}/license/verify`),
   clearAppLicense: (id: string) => api.delete(`/api/v1/apps/${id}/license`),
+  // Network egress: what the listing declared, what the operator allowed,
+  // what the proxy refused; replace the operator's allow list (superuser).
+  getAppEgress: (id: string) => api.get(`/api/v1/apps/${id}/egress`),
+  setAppEgress: (id: string, allow: string[]) =>
+    api.put(`/api/v1/apps/${id}/egress`, { allow }),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),

@@ -219,8 +219,12 @@ component.
   that deploy come from it, never from the DB row.
   `reconcile_once(store, runner, index=…)` sweeps every pending intent
   (skips `applied`, plus any id the caller's failure backoff is holding),
-  calling `docker compose up -d <id>` for `installed` and
-  `docker compose rm -s -f <id>` for `absent` (teardown needs only the
+  calling `docker compose up -d egress-proxy [adapters…] <id>` for
+  `installed` (the egress proxy always rides along — apps live on the
+  internal network and it is their only way out, see
+  [APP_NETWORK.md](APP_NETWORK.md); an already-running proxy is a
+  compose no-op) and `docker compose rm -s -f <id>` for `absent`
+  (teardown needs only the
   kebab-case id check, so a de-listed app stays uninstallable). A
   non-zero exit → `status="failed"` with stderr in `message`. For a
   pinned entry the runner also receives the `{<ID>_IMAGE:

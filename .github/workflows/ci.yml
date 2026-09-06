@@ -56,6 +56,11 @@ jobs:
       - name: Run pytest
         working-directory: server
         run: uv run pytest tests/ -q
+      # The two stdlib-only sidecars next to core: the privileged
+      # installer's reconciler and the apps' egress proxy. Same venv —
+      # they need nothing but pytest (and PyYAML for the index).
+      - name: Sidecars (app-installer, egress-proxy)
+        run: server/.venv/bin/python -m pytest -q -p no:cacheprovider scripts/app-installer/tests scripts/egress-proxy/tests
 
   # ── App SDK ──────────────────────────────────────────────────────
   # The examples exercise the SDK indirectly; this runs its own suite
