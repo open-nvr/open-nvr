@@ -96,6 +96,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Apps join the event bus as themselves.** A second NATS server,
+  `nats-apps`, runs as a leaf of the platform bus; every SDK app joins
+  it as user = app id, password = its own key, with publish/subscribe
+  permissions derived from its manifest (`server/services/nats_users.py`:
+  inference broadcasts and the alert stream for all; a domain-event
+  family only via `requires_scopes`; publishing limited to the app's own
+  alert subjects, plus domain events for apps that `provides` a skill).
+  Core renders the users file (bcrypt of each key) on boot and on every
+  key issue / rotate / revoke; `nats-apps` reloads it; revoking a key
+  disconnects the app. Core advertises the bus in the register response
+  (`registry.bus`), the SDK (0.6) remembers it next to the key and uses
+  it for the subscribe loop, alert fan-out and domain-event publishing.
+  Apps on older SDKs, or with no bus advertised, keep the configured
+  `nats_url` + token. New compose service `nats-apps`, volume
+  `opennvr_nats_auth`, `NATS_APPS_URL` / `NATS_USERS_CONF` on core;
+  the platform `nats` now runs from `nats/nats.conf` (same token auth,
+  plus the leaf port). `requires_scopes` is now enforced.
+
 - **The site key no longer reaches apps.** Core used to forward
   `INTERNAL_API_KEY` on every action invocation and licence check
   because the SDK's write surfaces were gated on it — so every app held

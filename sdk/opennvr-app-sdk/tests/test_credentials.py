@@ -137,3 +137,53 @@ def test_old_sdk_is_warned_not_broken(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert _app().register_with_opennvr() is True
     assert any("requires opennvr-app-sdk >= 99.0.0" in r.message for r in caplog.records)
+
+
+# ── the apps bus: join NATS as the app, never with the site token ────────
+
+
+def test_registration_adopts_the_apps_bus_and_the_loop_joins_as_the_app(monkeypatch):
+    key = "oak_my-app_" + "f" * 32
+    fake = _FakePost([
+        (200, {"id": "my-app", "api_key": key,
+               "registry": {"server_version": "main", "api_version": "1.3",
+                            "min_sdk_version": "0.2.0",
+                            "bus": {"url": "nats://nats-apps:4222", "auth": "app_key"}}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    app = _app()
+    assert app.register_with_opennvr() is True
+    assert app.credentials.bus_url == "nats://nats-apps:4222"
+    assert app.credentials.app_id == "my-app"
+    # What the NATS loop and the alert channel will connect with.
+    kw = creds_mod.bus_connection(app.credentials, "nats://nats:4222", "site-secret")
+    assert kw == {"servers": ["nats://nats-apps:4222"], "user": "my-app", "password": key}
+    assert "token" not in kw
+    # A fresh process (same key file) remembers the bus.
+    again = creds_mod.AppCredentials()
+    assert again.bus_url == "nats://nats-apps:4222" and again.app_key == key
+    # Invalidation forgets both.
+    again.invalidate()
+    assert creds_mod.AppCredentials().bus_url is None
+
+
+def test_without_a_bus_the_configured_url_and_token_are_used(monkeypatch):
+    monkeypatch.delenv("OPENNVR_APP_BUS_URL", raising=False)
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw == {"servers": ["nats://nats:4222"], "token": "site-secret"}
+    assert creds_mod.bus_connection(None, "nats://nats:4222", None) == {"servers": ["nats://nats:4222"]}
+    # An app key alone (older core: no bus advertised) still falls back.
+    monkeypatch.setenv("OPENNVR_APP_KEY", "oak_my-app_" + "a" * 32)
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw["servers"] == ["nats://nats:4222"] and "user" not in kw
+    # OPENNVR_APP_BUS_URL wins over the file.
+    monkeypatch.setenv("OPENNVR_APP_BUS_URL", "nats://elsewhere:4222")
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw["servers"] == ["nats://elsewhere:4222"] and kw["user"] == "my-app"
+
+
+def test_app_id_from_key():
+    assert creds_mod.app_id_from_key("oak_plate-vip_" + "0" * 32) == "plate-vip"
+    assert creds_mod.app_id_from_key("oak_a.b_c_" + "0" * 32) == "a.b_c"     # ids may contain _
+    assert creds_mod.app_id_from_key("not-a-key") is None
+    assert creds_mod.app_id_from_key(None) is None

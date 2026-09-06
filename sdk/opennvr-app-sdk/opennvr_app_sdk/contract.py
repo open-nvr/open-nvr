@@ -702,6 +702,10 @@ class ContractMixin:
         if isinstance(key, str) and key:
             self.credentials.adopt(key)
         registry = body.get("registry") or {}
+        bus = registry.get("bus") if isinstance(registry, dict) else None
+        if isinstance(bus, dict) and bus.get("auth") == "app_key" and bus.get("url") \
+                and self.credentials.has_app_key:
+            self.credentials.adopt_bus(str(bus["url"]))
         min_sdk = registry.get("min_sdk_version") if isinstance(registry, dict) else None
         if min_sdk and _version_tuple(_sdk_version) < _version_tuple(str(min_sdk)):
             logger.warning(

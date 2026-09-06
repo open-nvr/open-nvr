@@ -70,12 +70,18 @@ def issue_key(db: Session, row) -> str:
     plain, digest = mint_key(row.id)
     row.api_key_hash = digest
     row.api_key_issued_at = datetime.now(UTC)
+    # The same key opens the apps bus (user = app id); NATS wants bcrypt.
+    import bcrypt
+
+    row.nats_password_bcrypt = bcrypt.hashpw(plain.encode("utf-8"),
+                                             bcrypt.gensalt(rounds=10)).decode("ascii")
     return plain
 
 
 def revoke_key(row) -> None:
     row.api_key_hash = None
     row.api_key_issued_at = None
+    row.nats_password_bcrypt = None
 
 
 def resolve_app_key(db: Session, supplied: str | None):

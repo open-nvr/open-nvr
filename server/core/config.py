@@ -353,6 +353,11 @@ class Settings(BaseSettings):
     # empty disables consumption (enrichment's synchronous fallback still
     # writes plate_text).
     nats_url: str = ""
+    # Per-app bus credentials (services/nats_users.py): the users file the
+    # nats-apps leaf server includes (a shared volume; empty = feature
+    # off), and the URL apps are told to join with their own key.
+    nats_users_conf: str = ""
+    nats_apps_url: str = ""
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod

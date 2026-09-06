@@ -281,8 +281,11 @@ to a release window. Pull requests and design discussions are welcome.
   validator rules. Next: build-from-source CI for third-party
   repositories, an app-repository template, egress enforcement by the
   reconciler (internal-only network by default, declared hosts allowed,
-  attempts logged), per-app NATS credentials. Still open: install
-  counts (opt-in, aggregate) and a showcase page.
+  attempts logged). Shipped: per-app NATS credentials (the `nats-apps`
+  leaf bus; user = app id, permissions from the manifest;
+  `requires_scopes` enforced on the bus) and per-app call tokens (no site
+  key reaches an app). Still open: install counts (opt-in, aggregate)
+  and a showcase page.
 - **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
   enterprise deployments with support and compliance packs first;
   OpenNVR Models (per-site fine-tuning, delivered as licensed adapters
