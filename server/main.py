@@ -237,6 +237,17 @@ async def lifespan(app: FastAPI):
                     "Upgrade-path permission seeding failed", exc_info=True
                 )
 
+            # Apps bus: (re)render the per-app NATS users file so the
+            # nats-apps leaf server knows every app that holds a key —
+            # a fresh volume, a restored DB or a crash mid-write all
+            # converge here. No-op when NATS_USERS_CONF is unset.
+            try:
+                from services.nats_users import write_users_conf
+
+                write_users_conf(db)
+            except Exception:
+                main_logger.warning("apps-bus users file not written", exc_info=True)
+
             # If any user still needs first-time setup, arm a one-time token and
             # print it to stdout; it gates /auth/first-time-setup so nobody can
             # race the operator to claim the admin account. Re-armed each boot.

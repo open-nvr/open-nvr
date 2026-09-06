@@ -59,15 +59,23 @@ class NatsSubscriberMixin:
     async def _run_nats_loop(self, *, once: bool) -> None:
         import nats
 
+        from .credentials import bus_connection
+
         connect_kwargs: dict[str, Any] = {
-            "servers": [self.cfg.nats_url],
             "connect_timeout": 5.0,
             "reconnect_time_wait": 1.0,
             "max_reconnect_attempts": -1,
         }
-        token = getattr(self.cfg, "nats_token", None)
-        if token:
-            connect_kwargs["token"] = token
+        # The apps bus as this app (user = app id, password = app key)
+        # when core told us where it is; the configured URL + site token
+        # otherwise (older core / bare dev).
+        connect_kwargs.update(bus_connection(
+            getattr(self, "credentials", None),
+            getattr(self.cfg, "nats_url", None),
+            getattr(self.cfg, "nats_token", None)))
+        logger.info("joining NATS at %s as %s",
+                    connect_kwargs.get("servers"),
+                    connect_kwargs.get("user") or ("site token" if connect_kwargs.get("token") else "anonymous"))
         self._nc = await nats.connect(**connect_kwargs)
         subjects = self._nats_subjects()
         logger.info(

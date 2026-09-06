@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("opennvr.app.credentials")
 
@@ -70,6 +71,72 @@ def store_app_key(key: str) -> bool:
     return True
 
 
+# ── The apps bus ───────────────────────────────────────────────────────
+#
+# Since api_version 1.3 core tells a registering app where to join the
+# event bus with ITS OWN key (``registry.bus = {url, auth: "app_key"}``):
+# user = the app id, password = the app key, on the ``nats-apps`` leaf
+# server whose permissions are derived from the manifest. Remembered next
+# to the key so a restart joins the right bus before re-registering.
+
+
+def bus_file() -> Path:
+    return key_file().with_name(key_file().name + ".bus")
+
+
+def stored_bus_url() -> str | None:
+    env = (os.environ.get("OPENNVR_APP_BUS_URL") or "").strip()
+    if env:
+        return env
+    try:
+        text = bus_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def store_bus_url(url: str) -> None:
+    path = bus_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(url.strip() + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("could not persist the apps-bus URL to %s (%s)", path, exc)
+
+
+def forget_bus_url() -> None:
+    try:
+        bus_file().unlink()
+    except OSError:
+        pass
+
+
+def app_id_from_key(key: str | None) -> str | None:
+    """``oak_<app-id>_<hex>`` → ``<app-id>``; the bus user name."""
+    if not key or not is_app_key(key):
+        return None
+    body = key[len(APP_KEY_PREFIX):]
+    app_id, sep, tail = body.rpartition("_")
+    return app_id if sep and app_id else None
+
+
+def bus_connection(credentials: "AppCredentials | None", fallback_url: str | None,
+                   fallback_token: str | None) -> dict[str, Any]:
+    """nats.connect() kwargs for this app. With an app key AND a bus URL
+    from core: the apps bus as user=<app id> / password=<key>. Otherwise
+    the configured ``nats_url`` (+ ``nats_token``), as before — an older
+    core, or a bare dev run."""
+    creds = credentials or AppCredentials()
+    bus = creds.bus_url
+    user = app_id_from_key(creds.app_key)
+    if bus and user and creds.app_key:
+        return {"servers": [bus], "user": user, "password": creds.app_key}
+    out: dict[str, Any] = {"servers": [fallback_url] if fallback_url else []}
+    if fallback_token:
+        out["token"] = fallback_token
+    return out
+
+
 def forget_app_key() -> None:
     """Drop the persisted key (after a 401 — it was rotated or revoked)."""
     try:
@@ -112,6 +179,20 @@ class AppCredentials:
     def has_app_key(self) -> bool:
         return bool(self._app_key)
 
+    @property
+    def bus_url(self) -> str | None:
+        """Where to join the event bus with the app key (core told us)."""
+        return stored_bus_url()
+
+    @property
+    def app_id(self) -> str | None:
+        return app_id_from_key(self._app_key)
+
+    def adopt_bus(self, url: str) -> None:
+        if url and url != stored_bus_url():
+            store_bus_url(url)
+            logger.info("apps bus at %s — joining NATS as this app, not with the site key", url)
+
     def token(self) -> str | None:
         """What to send: the app key when we have one, else the site key."""
         return self._app_key or site_key(
@@ -139,6 +220,7 @@ class AppCredentials:
                            "will request a new one at next registration")
         self._app_key = None
         forget_app_key()
+        forget_bus_url()
 
 
 def auth_headers(explicit: str | None = None) -> dict[str, str]:

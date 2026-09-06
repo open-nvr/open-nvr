@@ -1102,6 +1102,10 @@ class InstalledApp(Base):
     # may still forward the site key on the action / entitlement calls
     # (SDK < 0.6 gates them on it) or signs them per app instead.
     sdk_version = Column(String(32), nullable=True)
+    # bcrypt of the app key, for the apps bus (nats-apps): the app joins
+    # NATS as user=<app id>, password=<its key>; core renders this into
+    # the bus's users file (services/nats_users.py). Cleared on revoke.
+    nats_password_bcrypt = Column(String(80), nullable=True)
     # Licensed apps (manifest ``entitlement: license_key``): the key the
     # administrator entered, Fernet-encrypted at rest and never returned;
     # and the app's own verdict on it (services/app_entitlements.py).

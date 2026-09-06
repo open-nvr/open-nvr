@@ -159,7 +159,9 @@ worth knowing.
 * An app holds **its own key**, sees **only the cameras assigned to it**,
   and reads only its own config, state and alerts. It never sees another
   app's data — and it **never receives the site key**: core proves
-  itself to your app with a per-app signed token.
+  itself to your app with a per-app signed token, and your app joins
+  the event bus as its own user, with subject permissions derived from
+  your manifest.
 * An app declares its **network egress** (`network_egress: [...]` in the
   index entry). The operator sees the declared hosts on the card before
   installing; a catalog app with an empty list is one that never talks

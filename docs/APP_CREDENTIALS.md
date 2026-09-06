@@ -87,6 +87,37 @@ An SDK ≥ 0.6 app talking to a core older than `api_version` 1.3 accepts
 the legacy site-key gate and logs one warning asking for the upgrade.
 Forwarding the site key to old apps is removed at `api_version` 2.0.
 
+## The apps bus: your own NATS user, not the site token
+
+The last place the site key used to reach an app was the event bus:
+every app joined NATS with `INTERNAL_API_KEY` and could publish and
+subscribe to anything. Now:
+
+* The stack runs a second NATS server, **`nats-apps`**, as a leaf of the
+  platform bus. Apps join *that* one, as **user = app id, password =
+  the app's own key**. Core tells a registering app where it is
+  (`registry.bus = {url, auth: "app_key"}`); the SDK remembers it next
+  to the key and uses it for the subscribe loop, alert fan-out and
+  domain-event publishing. Nothing to configure in the app.
+* Each app's **permissions come from its manifest**
+  (`server/services/nats_users.py`): every app may read the platform's
+  inference broadcasts (`opennvr.inference.>`, `opennvr.tier0.>`) and
+  the alert stream; a domain-event family (`opennvr.events.plate.
+  recognized.>`) only when the manifest declared
+  `requires_scopes: ["events:plate.recognized"]` — this is where
+  `requires_scopes` becomes a wall, not an audit row. An app may
+  publish its **own** alert subjects (`opennvr.alerts.app.<id>.>`) and,
+  if it `provides` a skill, domain events.
+* Core renders the users file (bcrypt of each key — the key itself is
+  never on disk) on start-up and on every key issue, rotate or revoke;
+  `nats-apps` reloads within seconds. **Revoking an app's key
+  disconnects it from the bus.**
+
+Compatibility: an app on an older SDK, or one whose core advertises no
+bus, keeps using the configured `nats_url` + `nats_token` on the
+platform bus, exactly as before. Set `NATS_APPS_URL=` (empty) in `.env`
+to turn the apps bus off.
+
 ## Version negotiation
 
 The register response's `registry.min_sdk_version` is the oldest SDK the

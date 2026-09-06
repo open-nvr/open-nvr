@@ -516,13 +516,16 @@ class NatsAlertChannel:
             # backstop for the truly-closed case.
             "max_reconnect_attempts": -1,
         }
-        if self._token:
-            kwargs["token"] = self._token
+        # The apps bus as this app when core has told us where it is
+        # (credentials.py); the configured URL + token otherwise.
+        from .credentials import bus_connection
+
+        kwargs.update(bus_connection(None, self._url, self._token))
         self._nc = await nats.connect(**kwargs)
         logger.info(
-            "NATS alert channel connected to %s (token=%s, prefix=%s)",
-            self._url,
-            "set" if self._token else "none",
+            "NATS alert channel connected to %s (as=%s, prefix=%s)",
+            kwargs.get("servers"),
+            kwargs.get("user") or ("site token" if kwargs.get("token") else "none"),
             self._subject_prefix,
         )
 

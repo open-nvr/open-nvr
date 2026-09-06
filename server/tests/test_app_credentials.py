@@ -726,3 +726,78 @@ def test_old_sdk_apps_still_receive_the_site_key(env, monkeypatch):
     assert needs_legacy_site_key(row) is False
     s.rollback()
     s.close()
+
+
+# ── the apps bus: one NATS user per app, permissions from the manifest ──
+
+
+def test_bus_users_file_renders_every_keyed_app_with_scoped_permissions(env, monkeypatch, tmp_path):
+    import bcrypt
+
+    from services import nats_users
+
+    tc, _, SessionLocal = env
+    target = tmp_path / "nats" / "users.conf"
+    monkeypatch.setattr(settings, "nats_users_conf", str(target), raising=False)
+    monkeypatch.setattr(settings, "nats_apps_url", "nats://nats-apps:4222", raising=False)
+
+    # Register advertises where to join the bus with the app's own key.
+    r = _register(tc, _site(), sdk_version="0.7.0")
+    key = r.json()["api_key"]
+    assert r.json()["registry"]["bus"] == {"url": "nats://nats-apps:4222", "auth": "app_key"}
+    # A second app that consumes plate events and provides a skill.
+    lpr = {"url": "http://lpr:9200", "manifest": {
+        **_manifest("license-plate-recognition", provides=("license_plate_recognition",)),
+        "requires_scopes": ["events:plate.recognized", "bogus", "events:../evil"]}}
+    assert tc.post("/apps/register", json=lpr, headers=_site()).status_code == 200
+
+    text = target.read_text()
+    assert "authorization {" in text and 'user: "loitering-detection"' in text
+    assert 'user: "license-plate-recognition"' in text
+    # Password = bcrypt of the app key, never the key.
+    s = SessionLocal()
+    row = s.get(InstalledApp, "loitering-detection")
+    assert key not in text
+    assert bcrypt.checkpw(key.encode(), row.nats_password_bcrypt.encode())
+    s.close()
+
+    # Permissions from the manifest: everyone reads the platform
+    # broadcasts; a domain-event family only via requires_scopes; an app
+    # publishes only its OWN alert subjects (+ events when it provides).
+    loit = nats_users.app_permissions("loitering-detection", _manifest())
+    assert "opennvr.inference.>" in loit["subscribe"] and "opennvr.tier0.>" in loit["subscribe"]
+    assert not any(s.startswith("opennvr.events.") for s in loit["subscribe"])
+    assert loit["publish"] == ["_INBOX.>", "opennvr.alerts.app.loitering-detection.>",
+                               "opennvr.events.>"]      # provides=["loitering"]
+    lpr_perms = nats_users.app_permissions("license-plate-recognition", lpr["manifest"])
+    assert "opennvr.events.plate.recognized.>" in lpr_perms["subscribe"]
+    assert not any("evil" in s or s == "bogus" for s in lpr_perms["subscribe"])
+    consumer = nats_users.app_permissions("relay", {"subscribes": "opennvr.alerts.>"})
+    assert consumer["publish"] == ["_INBOX.>", "opennvr.alerts.app.relay.>"]   # no provides → no events
+    widen = nats_users.app_permissions("sneaky", {"subscribes": "opennvr.events.>"})
+    assert "opennvr.events.>" not in widen["subscribe"]                     # cannot widen itself
+
+    # Revoke drops the user from the file; rotate replaces the hash.
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = \
+        tc.app.dependency_overrides[auth_mod.get_current_superuser]
+    assert tc.delete("/apps/loitering-detection/key").status_code == 200
+    assert 'user: "loitering-detection"' not in target.read_text()
+    new_key = tc.post("/apps/license-plate-recognition/key/rotate").json()["api_key"]
+    s = SessionLocal()
+    row = s.get(InstalledApp, "license-plate-recognition")
+    assert bcrypt.checkpw(new_key.encode(), row.nats_password_bcrypt.encode())
+    s.close()
+
+
+def test_bus_users_file_is_valid_with_no_apps_and_off_when_unset(monkeypatch, tmp_path):
+    from services import nats_users
+
+    text = nats_users.render_users_conf([])
+    assert "_no_apps_yet" in text and 'deny: [">"]' in text
+    monkeypatch.setattr(settings, "nats_users_conf", "", raising=False)
+
+    class _DB:
+        def query(self, *a):
+            raise AssertionError("must not touch the DB when the feature is off")
+
+    assert nats_users.write_users_conf(_DB()) is False

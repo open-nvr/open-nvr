@@ -794,6 +794,8 @@ async def register_app(
         issued_key = issue_key(db, row)
     db.commit()
     db.refresh(row)
+    if issued_key is not None or created:
+        _sync_bus_users(db)
 
     actor_user = principal if isinstance(principal, User) else None
     registered_by = (
@@ -844,16 +846,35 @@ async def register_app(
     return out
 
 
+def _sync_bus_users(db: Session) -> None:
+    """Re-render the apps-bus users file after a credential change.
+    Best effort: a failure is logged, never surfaced to the app."""
+    try:
+        from services.nats_users import write_users_conf
+
+        write_users_conf(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("apps-bus users file not updated")
+
+
 def _registry_info() -> dict[str, Any]:
     try:
         from main import __version__ as server_version  # noqa: PLC0415
     except Exception:  # noqa: BLE001 — tests import the router alone
         server_version = "unknown"
-    return {
+    from core.config import settings
+
+    info: dict[str, Any] = {
         "server_version": server_version,
         "api_version": API_VERSION,
         "min_sdk_version": MIN_SDK_VERSION,
     }
+    # Where an app joins the event bus with ITS OWN key (user = app id,
+    # password = the key). Absent when the deployment has no apps bus
+    # yet; the SDK then falls back to the configured nats_url + token.
+    if settings.nats_apps_url:
+        info["bus"] = {"url": settings.nats_apps_url, "auth": "app_key"}
+    return info
 
 
 @router.post("/{app_id}/enable")
@@ -1242,6 +1263,7 @@ async def rotate_app_key(
     row = _get_app_or_404(db, app_id)
     plain = issue_key(db, row)
     db.commit()
+    _sync_bus_users(db)
     write_audit_log(db, action="app.key.rotate", user_id=current_user.id,
                     entity_type="app", entity_id=app_id)
     return {"id": app_id, "api_key": plain,
@@ -1259,6 +1281,7 @@ async def revoke_app_key(
     row = _get_app_or_404(db, app_id)
     revoke_key(row)
     db.commit()
+    _sync_bus_users(db)
     write_audit_log(db, action="app.key.revoke", user_id=current_user.id,
                     entity_type="app", entity_id=app_id)
     return {"id": app_id, "has_api_key": False}

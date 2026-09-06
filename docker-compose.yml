@@ -203,13 +203,42 @@ services:
     container_name: opennvr_nats
     logging: *svc-logs
     restart: unless-stopped
-    command:
-      - --name
-      - opennvr-nats
-      - --auth
-      - ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
-      - --http_port
-      - "8222"
+    # nats/nats.conf: the same token auth as before, plus the leaf-node
+    # port the apps bus (nats-apps, below) connects through.
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # The apps bus — a NATS leaf server every SDK app joins as ITS OWN
+  # user (user = app id, password = the app's key) under permissions
+  # derived from its manifest. Core writes the users file to the shared
+  # volume; the entrypoint reloads the server when it changes. Apps never
+  # hold the site token. See docs/APP_CREDENTIALS.md.
+  nats-apps:
+    image: nats:2-alpine
+    container_name: opennvr_nats_apps
+    logging: *svc-logs
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/nats/apps-entrypoint.sh"]
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./nats/apps.conf:/etc/nats/apps.conf:ro
+      - ./nats/apps-entrypoint.sh:/etc/nats/apps-entrypoint.sh:ro
+      - opennvr_nats_auth:/var/lib/opennvr/nats
+    depends_on:
+      nats:
+        condition: service_healthy
     networks:
       - opennvr_internal
     healthcheck:
@@ -498,6 +527,8 @@ services:
       # re-registered from this file on boot, so restarting/recreating
       # this container no longer silently kills plate recognition.
       - opennvr_kai_c_state:/app/kai-c-state
+      # Apps-bus users file (services/nats_users.py) — nats-apps reads it.
+      - opennvr_nats_auth:/var/lib/opennvr/nats
       # Host LAN IP hints, rewritten by the launchers on every run so ONVIF
       # discovery keeps seeing the host's *current* networks even when the
       # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
@@ -622,6 +653,12 @@ services:
       - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
       - INTERNAL_SERVICE_CIDRS=${INTERNAL_SERVICE_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
       - NATS_URL=nats://nats:4222
+      # The apps bus: where registering apps are told to join with their
+      # own key, and the users file core renders for it (nats-apps
+      # includes and reloads it). Unset both to fall back to apps on the
+      # platform bus with the site token.
+      - NATS_APPS_URL=${NATS_APPS_URL:-nats://nats-apps:4222}
+      - NATS_USERS_CONF=/var/lib/opennvr/nats/users.conf
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
       - HOST=${HOST:-0.0.0.0}
       # Avoid inheriting a generic host DEBUG value (some shells/tools set
@@ -759,6 +796,9 @@ networks:
 
 volumes:
   opennvr_db_data:
+  # Apps-bus users file: one NATS user per installed app, rendered by
+  # core, reloaded by nats-apps. Safe to wipe — core rewrites it on boot.
+  opennvr_nats_auth:
   shared_frames:
   # yolov8 model weights — persistent so the init container only
   # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``

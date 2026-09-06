@@ -110,7 +110,7 @@ Schemas and their payloads: [EVENT_CONTRACTS.md](EVENT_CONTRACTS.md).
 
 | Name | Purpose |
 |---|---|
-| `AppCredentials`, `auth_headers()` | The app's own key (`OPENNVR_APP_KEY`, or `.opennvr/app.key`), falling back to the site key only to bootstrap |
+| `AppCredentials`, `auth_headers()` | The app's own key (`OPENNVR_APP_KEY`, or `.opennvr/app.key`), falling back to the site key only to bootstrap; `.bus_url` / `.app_id` — the apps bus core advertised and the NATS user name |
 | `UserContext`, `current_user()` | Inside `/ui` and `/actions/*`: the user core forwarded — `id`, `username`, `is_superuser`, `.can_see(cam)`, `.can_manage(cam)`, `.visible(ids)` |
 | `verify_call_token(token, secret, audience=, purpose=)` | Verifies `X-OpenNVR-Call`, core's per-app proof on `/actions/*` and `/entitlement/verify`; the contract server applies it for you |
 
