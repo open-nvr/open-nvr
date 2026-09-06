@@ -34,7 +34,15 @@
                                    #   a key in the catalog, core asks YOUR app to verify it
                                    #   (ContractMixin.verify_license) and refuses to enable the
                                    #   app until it says yes. Mirror these three in AppManifest.
-  author: ""                       # Shown as "by <author>" on the listing.
+  author: ""                       # REQUIRED for catalog apps. Shown as "by <author>".
+  contact: ""                      # REQUIRED for catalog apps: an email or https:// URL
+                                   #   that reaches the maintainer (security reports go here).
+  source: https://github.com/open-nvr/app-my-app   # REQUIRED for catalog apps: the
+                                   #   open-source repository under the open-nvr org that CI
+                                   #   builds the image from (docs/APP_LISTING_TERMS.md).
+  network_egress: []               # REQUIRED. Every host the app connects to outside the
+                                   #   stack ("licence.vendor.com", "api.telegram.org"), or []
+                                   #   for "never leaves the site". Shown on the card.
   # verified: true                 # REVIEWERS ONLY — the maintainers vouch for the author
                                    #   (identity confirmed, image reproducible from the linked
                                    #   source). Leave out of a submission; a reviewer adds it.

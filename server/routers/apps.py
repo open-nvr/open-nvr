@@ -135,6 +135,14 @@ class IndexEntry(BaseModel):
     # = shown in the Featured row at the top of the catalog.
     verified: bool = False
     featured: bool = False
+    # Catalog policy (docs/APP_LISTING_TERMS.md): an installable app is
+    # open source under the open-nvr organisation — ``source`` is that
+    # repository (or a path in this one), ``contact`` reaches its
+    # maintainer, and ``network_egress`` lists every host it talks to
+    # ([] = never leaves the site). The card shows all three.
+    source: str | None = None
+    contact: str | None = None
+    network_egress: list[str] = []
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
@@ -706,6 +714,9 @@ async def get_apps_index(
                 "author": entry.author,
                 "verified": entry.verified,
                 "featured": entry.featured,
+                "source": entry.source,
+                "contact": entry.contact,
+                "network_egress": entry.network_egress,
                 "requires_tasks": entry.requires_tasks,
                 "emits": entry.emits,
                 "docs_url": entry.docs_url,

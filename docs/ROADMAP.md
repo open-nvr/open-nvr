@@ -273,10 +273,24 @@ to a release window. Pull requests and design discussions are welcome.
   variants beyond the ONNX-only adapters that ship in v0.1.
 - **Native Kubernetes operator** for Helm-chart deployments at scale.
 - **App Catalog for developers** (see `docs/DEVELOPER_PROGRAM.md`):
-  the verified-developer badge and the Featured row ship (reviewer-set
-  `verified` / `featured` index flags; policy in CONTRIBUTING_APPS.md).
-  Still open: install counts (opt-in, aggregate — needs a telemetry
-  design first) and a community showcase page.
+  catalog policy decided — installable apps are open source under the
+  `open-nvr` organisation, built from source by CI, with author, contact
+  and declared network egress on the card; closed software lists as
+  external; paid = open code that gates a licensed model or service.
+  Shipped: maintainer-verified badge, Featured row, provenance line,
+  validator rules. Next: build-from-source CI for third-party
+  repositories, an app-repository template, egress enforcement by the
+  reconciler (internal-only network by default, declared hosts allowed,
+  attempts logged), per-app NATS credentials. Still open: install
+  counts (opt-in, aggregate) and a showcase page.
+- **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
+  enterprise deployments with support and compliance packs first;
+  OpenNVR Models (per-site fine-tuning, delivered as licensed adapters
+  through the catalog) second; a paid partner tier (certification,
+  hosted licence service, lead routing — paid by the vendor, never a
+  cut of sales) once real third-party apps exist; cloud add-on and
+  hardware later. The platform and the SDK stay free; nothing in the
+  catalog is gated.
 
 ## How to influence the roadmap
 

@@ -39,16 +39,33 @@ So your entry earns trust by being reviewable: the image is pinned, the
 declared tasks are real, the manifest matches, and there are no secrets in
 the file. The rest of this guide is how to satisfy that.
 
-**Paid and external listings are welcome.** OpenNVR takes no fee and
-processes no payments; a paid app is your product, and its licence is
-checked by *your* code. Two extra fields cover it — `pricing` /
-`price_note` for the badge the catalog shows, `entitlement: license_key`
-if the administrator must enter a key before the app can be enabled. An
-app you distribute yourself lists as `kind: external` with an
-`external_url`: the catalog shows the card and a **Learn more** link
-and never installs it. The rules and the reasoning are in
-[`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md); the licence hook
-in [`docs/APP_SURFACES.md` §5b](APP_SURFACES.md).
+### Catalog apps are open source, under the org, built from source
+
+The rule that makes the catalog worth trusting:
+
+* **Installable apps are open source** (AGPL-3.0 or Apache-2.0, your
+  choice, your copyright) and live in a public repository **under the
+  `open-nvr` GitHub organisation** — first-party ones under
+  `examples/<id>/` in this repository, third-party ones as
+  `open-nvr/app-<id>`. Ask for one with an issue titled *App: <id>*; we
+  create it and you are its maintainer. Your name and a contact route
+  are required fields of the entry and stay on the listing.
+* **CI builds the image from your tagged source** and pins the digest.
+  What a reviewer read is what an operator runs.
+* **Closed software is listed as `kind: external`** — a card with your
+  description and a **Learn more** link, marked "not reviewed by
+  OpenNVR", never installed by the platform. Any licence.
+* **Paid is fine, in one shape:** open code that gates something you
+  sell — a fine-tuned model, a data service, a hosted notifier, support —
+  through `pricing` / `price_note` and `entitlement: license_key`
+  (verified by *your* `verify_license`). OpenNVR takes no fee. The deal
+  and the reasoning: [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md);
+  the terms: [`docs/APP_LISTING_TERMS.md`](APP_LISTING_TERMS.md); the
+  licence hook: [`docs/APP_SURFACES.md` §5b](APP_SURFACES.md).
+* **Every entry declares its network egress** (`network_egress: [...]`,
+  `[]` for "never talks to the internet"). The card shows it before
+  install. An undeclared destination found in review or in the field is
+  grounds for removal.
 
 ---
 
@@ -219,7 +236,8 @@ mechanically.
 
 Branch off `main`, commit your one-entry addition, and open a PR (see the
 general flow in [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Keep it to the
-index entry plus your app under `examples/<id>/` — one topic per PR.
+index entry (plus your app under `examples/<id>/` if it is first-party) —
+one topic per PR. Sign the [CLA](CLA.md) when the bot asks.
 
 **What reviewers check:**
 
@@ -245,21 +263,37 @@ index entry plus your app under `examples/<id>/` — one topic per PR.
   license_key` and implements `verify_license` — a reviewer will try
   enabling it without a key and expect a 402.
 - **Curation flags are the reviewer's, not the submitter's.** Leave
-  `verified` and `featured` out of your entry. A reviewer sets
-  `verified: true` once the author's identity is confirmed (a
-  maintained public repository or organisation behind the `author`
-  name) and the image is reproducible from the linked source;
+  `verified` and `featured` out of your entry. Every catalog app is
+  already open, built from source and reviewed; `verified: true` means
+  more than that — **the OpenNVR maintainers run this app in
+  production** and vouch for it ("maintainer-verified" on the card).
   `featured: true` is editorial and rotates. Submissions that carry
   either flag are asked to remove it.
 - **External listings link somewhere real.** `kind: external` needs an
   https `external_url` under your control and an `author`; the
   validator rejects an install block on an external entry.
+- **The source is where it says.** An installable entry's `source` is a
+  repository under `github.com/open-nvr/`, the tag named there exists,
+  and the image digest is the one CI produced from it.
+- **Egress is declared and matches the code.** `network_egress` lists
+  every host the app connects to (or is `[]`); the reviewer greps for
+  outbound calls and expects them all on the list.
+- **You are reachable.** `contact` is an email or an https URL that
+  reaches the maintainer.
 
 Once merged, your app is browsable in every OpenNVR deployment's App Catalog
 and installable via the copy-paste command (always) or one click (where the
-operator has opted in). Community apps are showcased in the project README
-and the release notes — say a line about yours in the PR. If yours is a
-first-party example, your name goes on it.
+operator has opted in). New apps are announced in the release notes and the
+project's channels — say a line about yours in the PR. Your name is on the
+card.
+
+**Review turnaround:** a first response within five working days, with a
+named reason for any decline.
+
+**If you move on:** an app whose maintainer has not responded for six
+months is marked *community-maintained* for ninety days so anyone can
+adopt it, and removed only if nobody does
+([`APP_LISTING_TERMS.md` §5](APP_LISTING_TERMS.md)).
 
 ---
 

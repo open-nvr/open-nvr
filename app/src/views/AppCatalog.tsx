@@ -144,17 +144,48 @@ function LicenceRequiredBadge({ entitlement }: { entitlement?: string }) {
   )
 }
 
-/** The maintainers vouch for this author — identity confirmed, image
- * reproducible from the linked source. Set by reviewers in the index. */
+/** Every catalog app is open source, built from source and reviewed;
+ * this badge means MORE than that: the OpenNVR maintainers run this app
+ * in production and vouch for it. Set by reviewers in the index. */
 function VerifiedBadge({ verified, author }: { verified?: boolean; author?: string }) {
   if (!verified) return null
   return (
     <Badge
       variant="success"
-      title={`Verified developer${author ? `: ${author}` : ''} — identity confirmed and image reproducible from source, per OpenNVR's app review`}
+      title={`Maintainer-verified${author ? ` (by ${author})` : ''} — the OpenNVR maintainers run this app in production`}
     >
-      <BadgeCheck size={12} /> verified
+      <BadgeCheck size={12} /> maintainer-verified
     </Badge>
+  )
+}
+
+/** What an operator should know before installing: where the code is,
+ * who to reach, and which hosts the app talks to outside the stack. */
+function ProvenanceLine({ app }: { app: IndexApp }) {
+  const egress = app.network_egress ?? []
+  const external = app.kind === 'external'
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-dim)]">
+      {external ? (
+        <span title="Distributed by its author; OpenNVR has not reviewed it and never installs it">not reviewed by OpenNVR</span>
+      ) : app.source ? (
+        <a href={app.source} target="_blank" rel="noreferrer" className="hover:text-[var(--text)]"
+           title="Open source — the catalog image is built from this repository">
+          open source · built from source
+        </a>
+      ) : null}
+      {app.contact && (
+        <a href={app.contact.includes('@') && !app.contact.startsWith('http') ? `mailto:${app.contact}` : app.contact}
+           target="_blank" rel="noreferrer" className="hover:text-[var(--text)]">
+          contact
+        </a>
+      )}
+      {!external && (
+        <span title={egress.length ? 'Hosts this app connects to outside the stack' : 'This app never connects outside the stack'}>
+          {egress.length === 0 ? 'no network egress' : `connects to: ${egress.join(', ')}`}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -211,6 +242,11 @@ type IndexApp = {
   // Reviewer-set curation flags (never from the submitter's manifest).
   verified?: boolean
   featured?: boolean
+  // Catalog policy: where the open source lives, who maintains it, and
+  // every host it talks to outside the stack ([] = never leaves the site).
+  source?: string | null
+  contact?: string | null
+  network_egress?: string[]
   image?: string | null
   requires_tasks?: string[]
   emits?: string[]
@@ -1604,6 +1640,7 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
             <VerifiedBadge verified={app.verified} author={app.author} />
           </div>
         )}
+        <ProvenanceLine app={app} />
         {app.entitlement === 'license_key' && (
           <div className="text-xs text-[var(--text-dim)]">
             Licensed app: after install, an administrator enters the vendor's key in the

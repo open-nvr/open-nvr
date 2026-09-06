@@ -68,6 +68,10 @@ _GOOD_ENTRY = {
     "image": "ghcr.io/open-nvr/sample-app:latest",
     "requires_tasks": ["object_detection"],
     "docs_url": "https://github.com/open-nvr/open-nvr/blob/main/examples/sample-app/README.md",
+    "author": "Sample Co.",
+    "contact": "maintainer@sample.example",
+    "source": "https://github.com/open-nvr/app-sample-app",
+    "network_egress": [],
     "install": {
         "compose": (
             "services:\n"
@@ -417,3 +421,31 @@ def test_curation_flags_are_booleans_and_verified_needs_an_author(tmp_path, monk
     no_author = dict(_GOOD_ENTRY, verified=True, author="")
     errors, _ = validator.validate_index(_write(tmp_path, [no_author]))
     assert any("verified listing must name its author" in e for e in errors), errors
+
+
+# ─── Catalog policy: open source under the org, reachable, declared egress ──
+
+
+def test_catalog_apps_must_be_open_source_under_the_org(tmp_path, monkeypatch):
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    assert errs() == []
+    assert any("open-nvr organisation" in x for x in errs(source="https://github.com/acme/app"))
+    assert any("open-nvr organisation" in x for x in errs(source=None))
+    assert any("name their author" in x for x in errs(author=""))
+    assert any("'contact'" in x for x in errs(contact="call me"))
+    assert errs(contact="https://example.com/support") == []
+    assert any("network_egress" in x for x in errs(network_egress=None))
+    assert any("list of host names" in x for x in errs(network_egress="api.example.com"))
+    assert errs(network_egress=["licence.vendor.example"]) == []
+    # An external listing is exempt from source/author-under-org, but still declares egress.
+    ext = {k: v for k, v in _GOOD_ENTRY.items() if k not in ("image", "install", "source", "contact")}
+    ext.update(kind="external", external_url="https://vendor.example/app", author="Vendor")
+    assert validator.validate_index(_write(tmp_path, [ext]))[0] == []
+    ext.pop("network_egress")
+    assert any("network_egress" in x for x in validator.validate_index(_write(tmp_path, [ext]))[0])

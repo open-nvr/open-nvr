@@ -365,6 +365,27 @@ def validate_entry(
             errors.append(f"{label}: {flag} must be true or false")
     if entry.get("verified") is True and not str(entry.get("author") or "").strip():
         errors.append(f"{label}: a verified listing must name its author")
+    # Catalog policy (docs/APP_LISTING_TERMS.md): an installable app is
+    # open source under the open-nvr organisation, names its maintainer,
+    # gives a way to reach them, and declares its network egress.
+    if not external:
+        if not str(entry.get("author") or "").strip():
+            errors.append(f"{label}: catalog apps must name their author")
+        src = str(entry.get("source") or "")
+        if not src.startswith("https://github.com/open-nvr/"):
+            errors.append(
+                f"{label}: catalog apps are open source under the open-nvr "
+                "organisation — 'source' must be a https://github.com/open-nvr/... URL")
+        contact = str(entry.get("contact") or "").strip()
+        if not (contact.startswith("https://") or re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", contact)):
+            errors.append(f"{label}: 'contact' must be an email or an https:// URL")
+    egress = entry.get("network_egress")
+    if egress is None:
+        errors.append(
+            f"{label}: 'network_egress' is required — list every host the app "
+            "connects to, or [] if it never leaves the site")
+    elif not isinstance(egress, list) or not all(isinstance(h, str) and h.strip() for h in egress):
+        errors.append(f"{label}: 'network_egress' must be a list of host names")
 
     # Required fields present + non-empty.
     required = tuple(f for f in REQUIRED_FIELDS

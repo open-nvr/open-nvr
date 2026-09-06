@@ -61,6 +61,10 @@
   requires_tasks: [object_detection]
   emits: [loitering]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/loitering-detection/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/loitering-detection
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -92,6 +96,10 @@
   requires_tasks: [object_detection]
   emits: [occupancy_over, occupancy_under, occupancy_cleared]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/occupancy-counting/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/occupancy-counting
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -123,6 +131,10 @@
   requires_tasks: [object_detection, multi_object_tracking]
   emits: [line-crossing]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/line-crossing/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/line-crossing
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -154,6 +166,10 @@
   requires_tasks: [object_detection, multi_object_tracking]
   emits: [abandoned-object]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/abandoned-object/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/abandoned-object
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -185,6 +201,10 @@
   requires_tasks: [object_detection]
   emits: [intrusion]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/intrusion-detection/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/intrusion-detection
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -221,6 +241,10 @@
   requires_adapters: [fast_plate_ocr]
   emits: [plate_read, plate_expected, plate_watchlist]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/license-plate-recognition/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/license-plate-recognition
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -254,6 +278,10 @@
   requires_tasks: []
   emits: [barrier_opened, barrier_fault]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/gate-controller/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/gate-controller
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -286,6 +314,10 @@
   requires_tasks: []
   emits: []
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/alert-notifier/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/alert-notifier
+  network_egress: ["api.telegram.org", "the webhook URL the operator configures"]
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -323,6 +355,10 @@
   requires_adapters: [insightface]
   emits: [known_visitor, unknown_visitor]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/smart-doorbell/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/smart-doorbell
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -354,6 +390,10 @@
   requires_tasks: [object_detection]
   emits: [package_arrived, package_lingering, package_picked_up, package_taken]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/package-delivery/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/package-delivery
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -385,6 +425,10 @@
   requires_tasks: []
   emits: []
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/footage-search/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/footage-search
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -417,6 +461,10 @@
   requires_tasks: []
   emits: []
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/home-assistant-relay/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/home-assistant-relay
+  network_egress: ["the Home Assistant host the operator configures"]
   install:
     compose: |
       # INFORMATIONAL — this service already ships in

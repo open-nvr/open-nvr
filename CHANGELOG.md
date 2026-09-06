@@ -8,6 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Catalog policy: open source under the org, built from source,
+  author on the card.** Installable apps must be open source (AGPL-3.0
+  or Apache-2.0, author's copyright) in a repository under the `open-nvr`
+  organisation, name their author and a contact, and declare
+  `network_egress` (every host they talk to, or `[]`); the validator
+  enforces all four and the shipped index carries them. Closed software
+  lists as `kind: external` ("not reviewed by OpenNVR", never
+  installed). Paid stays possible in one shape — open code gating a
+  licensed model or service — and OpenNVR takes no fee. The catalog card
+  shows a provenance line (open source · built from source, contact,
+  "no network egress" / "connects to: …"); `verified` now means
+  *maintainer-verified* (the maintainers run it in production).
+  `docs/DEVELOPER_PROGRAM.md` rewritten around the deal;
+  `docs/APP_LISTING_TERMS.md` (what you keep, what you promise, removal,
+  liability, trademarks) is new; `CONTRIBUTING_APPS.md` carries the
+  policy, the review SLA (five working days) and the abandonment rule.
+
 - **List params offer one-click values.** SDK `Param(suggestions=[…])`
   rides the manifest; the catalog's chip editor shows them under the
   input, and for any `*_labels` param puts the labels Tier-0 has

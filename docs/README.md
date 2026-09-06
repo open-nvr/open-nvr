@@ -13,7 +13,8 @@ Start here. Pick the row that matches what you're doing.
 
 ## Contribute
 - **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — PR flow, conventions, running tests.
-- **[DEVELOPER_PROGRAM.md](DEVELOPER_PROGRAM.md)** — **start here if you are building an app**: what the platform gives you, paid apps, the compatibility promise.
+- **[DEVELOPER_PROGRAM.md](DEVELOPER_PROGRAM.md)** — **start here if you are building an app**: the deal (open source under the org, we build and ship it, no fee, sell what the code needs), the compatibility promise.
+- **[APP_LISTING_TERMS.md](APP_LISTING_TERMS.md)** — the terms a catalog listing is under: what you keep, what you promise, removal, liability.
 - **[FIRST_DETECTOR.md](FIRST_DETECTOR.md)** — write your first detector app in ~15 minutes.
 - **[CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md)** — publish an app to the catalog.
 - **[EXTERNAL_APP_WALKTHROUGH.md](EXTERNAL_APP_WALKTHROUGH.md)** — a paid, out-of-tree app built on the PyPI SDK, and what the walk found.
