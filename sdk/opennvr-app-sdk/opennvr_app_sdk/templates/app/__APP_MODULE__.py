@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from opennvr_app_sdk import (
-    Alert, AlertType, AppManifest, BaseAppConfig, Detector, Param, app,
-    load_app_config,
+    DETECTION_LABELS, Alert, AlertType, AppManifest, BaseAppConfig, Detector,
+    Param, app, load_app_config,
 )
 
 logger = logging.getLogger("__APP_ID__")
@@ -49,7 +49,8 @@ MANIFEST = AppManifest(
     subscribes="opennvr.inference.>",
     params=[
         Param("watch_labels", list, default=["person"],
-              description="Detection labels that count toward the rule."),
+              description="Detection labels that count toward the rule.",
+              suggestions=list(DETECTION_LABELS[:8])),
     ],
     emits=[AlertType("__APP_ID__", severity="medium")],
     # Selling it? pricing="paid", price_note="...", entitlement="license_key"

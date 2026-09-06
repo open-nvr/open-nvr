@@ -35,6 +35,7 @@ import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, Er
 import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
+import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 
 export type ManifestParam = {
   name: string
@@ -43,6 +44,8 @@ export type ManifestParam = {
   per_camera?: boolean
   required?: boolean
   description?: string
+  // One-click values the catalog offers for list params (SDK Param.suggestions).
+  suggestions?: string[]
 }
 
 export type AppManifest = {
@@ -372,13 +375,56 @@ export function asStringList(v: unknown): string[] {
   return []
 }
 
-/** Union of every task advertised by any adapter registered with KAI-C. */
-function availableTasks(caps: CapabilitiesResp | undefined): Set<string> {
-  const tasks = new Set<string>()
-  for (const info of Object.values(caps?.adapters ?? {})) {
-    for (const t of asStringList(info?.tasks_advertised).concat(asStringList(info?.tasks))) tasks.add(t)
+/** Tier-0 detect-pipeline liveness — the platform's own object detection,
+ *  which Detector apps ride even with no KAI-C adapter registered. */
+function useTier0() {
+  return useQuery({
+    queryKey: ['tier0-metrics'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0Like
+    },
+    retry: 0,
+    staleTime: 30_000,
+  })
+}
+
+/** One-click values for a list param: for a *_labels param, the labels
+ *  Tier-0 has seen on this site first, then the manifest's own
+ *  suggestions, then the stock detection vocabulary. */
+const STOCK_LABELS = ['person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'dog', 'cat', 'backpack', 'handbag', 'suitcase']
+function suggestionsFor(p: ManifestParam, seenLabels: string[]): string[] {
+  const out: string[] = []
+  const push = (v: string) => { if (v && !out.includes(v)) out.push(v) }
+  if (/label/i.test(p.name)) for (const l of seenLabels) push(l)
+  for (const v of p.suggestions ?? []) push(String(v))
+  if (/label/i.test(p.name)) for (const l of STOCK_LABELS) push(l)
+  return out
+}
+
+/** The "requires <task>" badge: which tasks are provided, and by what. */
+function RequiresBadge({ requires, caps, tier0 }: { requires: string[]; caps: CapabilitiesLike; tier0: Tier0Like }) {
+  if (requires.length === 0) return null
+  const missing = requires.filter((t) => !taskProvider(t, caps, tier0))
+  if (missing.length === 0) {
+    const viaTier0 = requires.filter((t) => taskProvider(t, caps, tier0) === 'tier0')
+    return (
+      <Badge
+        variant="success"
+        title={viaTier0.length ? `${viaTier0.join(', ')}: provided by the platform's Tier-0 detection (no adapter needed)` : undefined}
+      >
+        ● requires {requires.join(' + ')} — {viaTier0.length === requires.length ? 'provided by Tier-0' : 'available'}
+      </Badge>
+    )
   }
-  return tasks
+  return (
+    <Badge
+      variant="warning"
+      title="No registered adapter advertises this task and Tier-0 detection does not provide it — install an adapter from AI & Detections"
+    >
+      requires {missing.join(' + ')} — nothing provides it
+    </Badge>
+  )
 }
 
 export function statusVariant(status?: string): BadgeVariant {
@@ -432,6 +478,15 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
     Object.fromEntries(params.map((p) => [p.name, initialFormValue(p, app.config)]))
   )
   const [error, setError] = useState<string | null>(null)
+  // Labels Tier-0 has actually detected on this site (from its metrics)
+  // — the most useful vocabulary for a *_labels param, ahead of the
+  // manifest's generic suggestions.
+  const tier0 = useTier0()
+  const seenLabels = useMemo(() => {
+    const by = (tier0.data as any)?.detector?.detections_by_class as Record<string, number> | undefined
+    if (!by) return [] as string[]
+    return Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k]) => k)
+  }, [tier0.data])
 
   const saveMutation = useMutation({
     mutationFn: (config: Record<string, any>) => apiService.updateAppConfig(app.id, config),
@@ -542,6 +597,8 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
                     value={String(value ?? '')}
                     placeholder={`add ${p.name} value, Enter`}
                     onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                    suggestions={suggestionsFor(p, seenLabels)}
+                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
                   />
                 ) : t === 'time_range' ? (
                   <TimeWindowEditor
@@ -1212,7 +1269,7 @@ function LicensePanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
   )
 }
 
-function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks: Set<string>; skill?: SkillEntry; onConfigure: () => void }) {
+function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry; onConfigure: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
@@ -1227,7 +1284,6 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
-  const missing = requires.filter((t) => !tasks.has(t))
   const manifestActions = (app.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
 
   const toggleMutation = useMutation({
@@ -1323,13 +1379,7 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
         )}
 
         {requires.length > 0 && (
-          <div>
-            {missing.length === 0 ? (
-              <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
-            ) : (
-              <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
-            )}
-          </div>
+          <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
         {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
@@ -1532,9 +1582,8 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
 
 /* ------------------------ Available app card --------------------- */
 
-function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set<string>; onInstall: () => void }) {
+function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps: CapabilitiesLike; tier0: Tier0Like; onInstall: () => void }) {
   const requires = asStringList(app.requires_tasks)
-  const missing = requires.filter((t) => !tasks.has(t))
 
   return (
     <Card>
@@ -1563,13 +1612,7 @@ function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set
         )}
 
         {requires.length > 0 && (
-          <div>
-            {missing.length === 0 ? (
-              <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
-            ) : (
-              <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
-            )}
-          </div>
+          <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
         <div className="flex items-center gap-2 pt-1">
@@ -1631,7 +1674,7 @@ export function AppCatalog() {
   const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
   const [installApp, setInstallApp] = useState<IndexApp | null>(null)
 
-  const tasks = useMemo(() => availableTasks(capsQuery.data), [capsQuery.data])
+  const tier0Query = useTier0()
   const apps = appsQuery.data ?? []
 
   // Registry entries for app-provided skills, keyed by app id ("app:<id>"
@@ -1666,7 +1709,7 @@ export function AppCatalog() {
     <section className="space-y-6">
       <PageHeader
         title="App Store"
-        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C."
+        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C and the platform's Tier-0 detection."
         actions={
           <Button onClick={refresh} disabled={appsQuery.isPending || indexQuery.isFetching}>
             <RefreshCw size={14} className={appsQuery.isFetching || indexQuery.isFetching ? 'animate-spin' : ''} /> Refresh
@@ -1694,7 +1737,7 @@ export function AppCatalog() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
             {apps.map((app) => (
-              <AppCard key={app.id} app={app} tasks={tasks} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
+              <AppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
             ))}
           </div>
         )}
@@ -1708,7 +1751,7 @@ export function AppCatalog() {
           <GroupHeader title="Featured" count={featured.length} />
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
             {featured.map((app) => (
-              <AvailableAppCard key={`featured-${app.id}`} app={app} tasks={tasks} onInstall={() => setInstallApp(app)} />
+              <AvailableAppCard key={`featured-${app.id}`} app={app} caps={capsQuery.data} tier0={tier0Query.data} onInstall={() => setInstallApp(app)} />
             ))}
           </div>
         </div>
@@ -1728,7 +1771,7 @@ export function AppCatalog() {
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
               {available.map((app) => (
-                <AvailableAppCard key={app.id} app={app} tasks={tasks} onInstall={() => setInstallApp(app)} />
+                <AvailableAppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} onInstall={() => setInstallApp(app)} />
               ))}
             </div>
           )}

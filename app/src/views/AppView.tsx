@@ -30,6 +30,7 @@ import { ArrowLeft, Boxes, RefreshCw, Settings2, Trash2, Activity, ExternalLink,
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
+import { availableTasks as computeAvailableTasks, taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, ErrorCard, Skeleton } from '../components/ui'
 import {
   AppConfigModal,
@@ -92,9 +93,21 @@ function useCapabilities() {
     queryKey: ['kai-c-capabilities'],
     queryFn: async () => {
       const { data } = await apiService.getCapabilities()
-      return data as { adapters?: Record<string, { tasks_advertised?: string[] }> }
+      return data as CapabilitiesLike
     },
     retry: 0,
+  })
+}
+
+function useTier0() {
+  return useQuery({
+    queryKey: ['tier0-metrics'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0Like
+    },
+    retry: 0,
+    staleTime: 30_000,
   })
 }
 
@@ -108,17 +121,15 @@ export function AppView() {
   const app = appQuery.data
   const status = useLiveStatus(appId, Boolean(app?.enabled))
   const caps = useCapabilities()
+  const tier0 = useTier0()
 
   const [configOpen, setConfigOpen] = useState(false)
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
-  const availableTasks = useMemo(() => {
-    const set = new Set<string>()
-    for (const a of Object.values(caps.data?.adapters ?? {})) {
-      for (const t of a.tasks_advertised ?? []) set.add(t)
-    }
-    return set
-  }, [caps.data])
+  const availableTasks = useMemo(
+    () => computeAvailableTasks(caps.data, tier0.data),
+    [caps.data, tier0.data]
+  )
 
   // "internal" embeds the sandboxed /ui dashboard; "external" means the
   // app is a full application — we link out instead of embedding.
@@ -200,9 +211,14 @@ export function AppView() {
             {requires.length > 0 && (
               <div className="mt-2">
                 {missing.length === 0 ? (
-                  <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
+                  <Badge variant="success">
+                    ● requires {requires.join(' + ')} —{' '}
+                    {requires.every((t) => taskProvider(t, caps.data, tier0.data) === 'tier0') ? 'provided by Tier-0' : 'available'}
+                  </Badge>
                 ) : (
-                  <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
+                  <Badge variant="warning" title="No registered adapter advertises this task and Tier-0 detection does not provide it">
+                    requires {missing.join(' + ')} — nothing provides it
+                  </Badge>
                 )}
               </div>
             )}

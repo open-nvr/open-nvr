@@ -182,7 +182,10 @@ MANIFEST = AppManifest(
     provides=["occupancy"],
     subscribes="opennvr.inference.>",
     params=[
-        Param("watch_labels", list, default=["person"]),
+        Param("watch_labels", list, default=["person"],
+              description="Detection labels to count — person for people, "
+                          "car / truck / bus for vehicles.",
+              suggestions=["person", "car", "truck", "bus", "motorcycle", "bicycle"]),
         Param("max_occupancy", int, required=True,
               description="Fire OVER when the in-zone count exceeds this."),
         Param("min_occupancy", int,

@@ -29,6 +29,8 @@ export function ChipListEditor({
   onChange,
   placeholder,
   transform,
+  suggestions,
+  suggestionsLabel,
 }: {
   value: string
   onChange: (json: string) => void
@@ -36,11 +38,21 @@ export function ChipListEditor({
   // Optional normalization applied to each added chip (e.g. plates →
   // upper). Kept UI-side convenience only; the app re-normalizes too.
   transform?: (s: string) => string
+  // One-click values (a label vocabulary, plate formats…) shown under
+  // the input; already-chosen ones are hidden. Purely additive — the
+  // operator can still type anything.
+  suggestions?: string[]
+  suggestionsLabel?: string
 }) {
   const chips = useMemo(() => parseChips(value), [value])
   const [draft, setDraft] = useState('')
 
   const write = (next: string[]) => onChange(JSON.stringify(next))
+  const addOne = (s: string) => {
+    const v = transform ? transform(s) : s
+    if (v && !chips.includes(v)) write([...chips, v])
+  }
+  const offered = (suggestions ?? []).filter((s) => s && !chips.includes(transform ? transform(s) : s))
 
   const addDraft = () => {
     // Support pasting a comma/newline-separated batch in one go.
@@ -92,6 +104,22 @@ export function ChipListEditor({
           onBlur={addDraft}
         />
       </div>
+      {offered.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-[var(--text-dim)]">
+          <span>{suggestionsLabel ?? 'Suggestions:'}</span>
+          {offered.slice(0, 12).map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => addOne(s)}
+              className="font-mono rounded border border-dashed border-[var(--border)] px-1.5 py-0.5 hover:border-[var(--accent)] hover:text-[var(--text)]"
+              title={`add ${s}`}
+            >
+              + {s}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
