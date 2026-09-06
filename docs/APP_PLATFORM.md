@@ -76,10 +76,18 @@ async with AsyncOpenNVR() as nvr:                 # or AsyncOpenNVR(http_client=
 ```
 
 Pass `http_client=` to share one `httpx.AsyncClient` (a FastAPI
-lifespan pool, a test transport); the client then leaves it open. The
-one gap: `ai.stream()` (a blocking WebSocket session) has no async form
-yet — call `ai.infer()` per frame from async code. The OpenNVR Agent's
-capabilities probe is the first consumer.
+lifespan pool, a test transport); the client then leaves it open.
+Streaming inference has its async form too:
+
+```python
+async with nvr.ai.stream("yolov8", camera_id=cam.handle) as session:
+    while running:
+        result = await session.infer(jpeg)       # same §5.1 shape, same teardown rules
+```
+
+Every public method of the sync client has its awaited twin — a test
+pins that, so a feature added to one cannot be forgotten on the other.
+The OpenNVR Agent's capabilities probe is the first consumer.
 
 ## Durable state
 

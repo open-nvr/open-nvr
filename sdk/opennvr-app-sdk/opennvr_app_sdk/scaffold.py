@@ -236,6 +236,7 @@ def print_next_steps(app_id: str, app_dir: Path, *, mode: str) -> None:
     print("  uv sync                 # " + ("opennvr-app-sdk from PyPI + pytest"
                                             if mode == "pypi" else "the SDK (editable) + pytest"))
     print("  uv run pytest -q        # the smoke test — should be GREEN")
+    print("  uv run opennvr-app validate .   # what a reviewer would check")
     print(f"  # open {module}.py and fill in on_detections — that's the rule")
     print("  cp config.example.yml config.yml   # then edit it")
     print(f"  uv run python {module}.py --config config.yml --once")
@@ -248,7 +249,7 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
          default_dest: Path | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="opennvr-app",
-        description=f"OpenNVR App SDK {__version__} — scaffold vision apps.")
+        description=f"OpenNVR App SDK {__version__} — scaffold and validate vision apps.")
     sub = parser.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new", help="scaffold a runnable Detector app")
     new.add_argument("app_id", help="kebab-case app id, e.g. 'gate-watch' (= AppManifest.id)")
@@ -263,7 +264,16 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
                      help="also lay down the repository files for open-nvr/app-<id>: CI, the "
                           "publish workflow (build + sign through the org's build-catalog-app), "
                           "the App Catalog listing entry. Implies --sdk pypi.")
+    val = sub.add_parser("validate", help="check an app's manifest, example config, listing and repository shape")
+    val.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
     args = parser.parse_args(argv)
+
+    if args.command == "validate":
+        from .validate import print_report, validate_app
+
+        report = validate_app(Path(args.path).expanduser())
+        print_report(report, Path(args.path))
+        return 0 if report.ok else 1
 
     dest_dir = Path(args.dest).expanduser().resolve()
     try:

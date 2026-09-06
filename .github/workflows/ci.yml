@@ -138,9 +138,11 @@ jobs:
       matrix:
         example:
           - abandoned-object
+          - alert-notifier
           - alerts-subscriber
           - camera-agent
           - footage-search
+          - gate-controller
           - home-assistant-relay
           - inference-listener
           - intrusion-detection
@@ -161,6 +163,12 @@ jobs:
       - name: Run pytest
         working-directory: examples/${{ matrix.example }}
         run: uv run pytest -q
+      # What a listing reviewer checks, on every example, every PR
+      # (the camera-agent is an agent, not a catalog app — no manifest).
+      - name: opennvr-app validate
+        if: matrix.example != 'camera-agent'
+        working-directory: examples/${{ matrix.example }}
+        run: uv run opennvr-app validate .
 
   # ── React frontend build ─────────────────────────────────────────
   frontend:

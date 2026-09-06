@@ -100,6 +100,15 @@ The map lives in KAI-C beside the publisher, is part of this contract
 What already flows, now with names. Payload field tables list required
 fields; producers may add optional ones under the additive-only rule.
 
+Every v1 payload below is also a class in the App SDK
+(`opennvr_app_sdk.event_types`: `DetectionObserved`, `VisitRecorded`,
+`PlateRecognized`, `AccessDecided`, `OccupancyChanged`,
+`OccupancyHeatmap`, `OccupancyFootfall`). `event.typed()` on a
+`DomainEvent` parses the payload — required fields enforced, additive
+fields kept in `.extra`, off-contract payloads returned as `None` and
+logged — and `DomainEventPublisher.publish_typed(...)` writes one. The
+tables here remain normative; the classes follow them.
+
 ### `detection.observed.v1`
 
 Subject: `opennvr.events.detection.observed.v1.<camera_id>`

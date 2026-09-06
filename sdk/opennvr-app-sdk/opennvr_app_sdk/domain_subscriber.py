@@ -60,6 +60,14 @@ class DomainEvent:
     subject: str = ""
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
+    def typed(self) -> Any:
+        """The payload as its contract class (``PlateRecognized``,
+        ``AccessDecided``, …, see ``event_types``) — ``None`` when this
+        SDK does not type the schema or the payload is off-contract."""
+        from .event_types import typed_payload
+
+        return typed_payload(self.schema, self.payload)
+
 
 def parse_domain_event(data: bytes | str | dict, *, subject: str = "") -> DomainEvent | None:
     """Decode + validate an envelope; ``None`` for anything off-contract."""

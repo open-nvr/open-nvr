@@ -8,6 +8,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **SDK toward 1.0 (on main; no tag until QA signs off 0.5.0).**
+  `opennvr_app_sdk.testing` — `RecorderChannel`, `app_config`,
+  `detection` / `inference_event` / `tier0_event` / `domain_event`
+  builders, `feed(app, *events)` through the real decode → rule →
+  dispatch path, `FakeCore` (a loopback core: cameras, snapshots,
+  state, alerts, register), and a pytest plugin with the same as
+  fixtures; the scaffold's smoke test now uses them. The v1 domain
+  events as typed classes (`PlateRecognized`, `AccessDecided`,
+  `OccupancyChanged`, `OccupancyHeatmap`, `OccupancyFootfall`,
+  `VisitRecorded`, `DetectionObserved`): `DomainEvent.typed()` parses
+  with required fields enforced and additive fields kept,
+  `DomainEventPublisher.publish_typed()` writes. `opennvr-app validate
+  [path]` checks the manifest, `config.example.yml` through the app's
+  own `AppConfig`, `apps-index-entry.yml` against the manifest and the
+  catalog policy, and the repository shape. `AsyncOpenNVR().ai.stream()`
+  (`AsyncInferStream`) closes the last sync/async gap; the parity test
+  now has no exceptions. Found by `validate`: occupancy-counting's
+  `config.example.yml` did not load (no `opennvr_url`) — fixed.
+
 - **Build from source for every app repository.** A reusable workflow,
   `.github/workflows/build-catalog-app.yml` (`workflow_call`): an
   `open-nvr/app-*` repository calls it with its `app_id`, and it checks

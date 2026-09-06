@@ -188,7 +188,7 @@ def test_requires_a_url(monkeypatch):
 ])
 def test_async_surface_mirrors_sync(sync_cls, async_cls):
     renamed = {"close": "aclose", "__enter__": "__aenter__", "__exit__": "__aexit__"}
-    not_ported = {"stream"}       # blocking WebSocket session — documented
+    not_ported: set[str] = set()  # everything has its twin, stream() included
     for name, member in inspect.getmembers(sync_cls, inspect.isfunction):
         if name.startswith("_") and name not in renamed or name in not_ported:
             continue
@@ -199,3 +199,73 @@ def test_async_surface_mirrors_sync(sync_cls, async_cls):
         sp = list(inspect.signature(member).parameters)
         ap = list(inspect.signature(getattr(async_cls, twin)).parameters)
         assert sp == ap, f"{sync_cls.__name__}.{name}{sp} != {async_cls.__name__}.{twin}{ap}"
+
+
+# ── ai.stream(): the async WebSocket session ───────────────────────────
+
+
+class _AsyncConn:
+    def __init__(self, replies):
+        self.sent, self.replies, self.closed = [], list(replies), False
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def recv(self):
+        r = self.replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    async def close(self):
+        self.closed = True
+
+
+def test_async_infer_stream_handshake_frames_and_teardown():
+    from opennvr_app_sdk.infer_stream import AsyncInferStream
+    from opennvr_app_sdk import KaiCError
+    conns = []
+
+    async def factory(url, headers):
+        assert url == "ws://kaic:8100/api/v1/infer/yolov8/stream"
+        assert ("X-Internal-Api-Key", "k") in headers
+        c = _AsyncConn([json.dumps({"type": "handshake_ack"}),
+                        json.dumps({"type": "result", "inference_ms": 7,
+                                    "result": {"detections": [{"label": "person"}]}}),
+                        ConnectionError("gone")])
+        conns.append(c)
+        return c
+
+    async def run():
+        s = AsyncInferStream("http://kaic:8100", "k", adapter="yolov8", camera_id="cam1",
+                             websocket_factory=factory)
+        async with s:
+            out = await s.infer(b"\xff\xd8")
+            assert out["result"]["detections"][0]["label"] == "person"
+            assert out["inference_ms"] == 7 and out["correlation_id"] == s.correlation_id
+            hdr = json.loads(conns[0].sent[1])
+            assert hdr["type"] == "frame" and hdr["seq"] == 1 and conns[0].sent[2] == b"\xff\xd8"
+            assert json.loads(conns[0].sent[0])["camera_id"] == "cam1"
+            with pytest.raises(KaiCError):
+                await s.infer(b"\xff\xd8")
+            assert conns[0].closed
+        assert len(conns) == 1
+
+        bad = AsyncInferStream("https://kaic", None, adapter="x", camera_id="c",
+                               websocket_factory=lambda u, h: _ret(_AsyncConn([json.dumps({"type": "error"})])))
+        assert bad.url == "wss://kaic/api/v1/infer/x/stream"
+        with pytest.raises(KaiCError):
+            await bad.open()
+        # Through the client: the session carries the client's identity.
+        nvr = AsyncOpenNVR("http://core", token="oak_x_" + "0" * 32, kaic_url="http://kaic:8100",
+                           kaic_api_key="k", client_id="gate-cam")
+        sess = nvr.ai.stream("yolov8", camera_id="cam9")
+        assert isinstance(sess, AsyncInferStream) and sess._client_id == "gate-cam"
+        await nvr.aclose()
+
+    asyncio.run(run())
+
+
+async def _ret(value):
+    return value
+

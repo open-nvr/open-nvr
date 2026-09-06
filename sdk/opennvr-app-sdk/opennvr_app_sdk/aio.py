@@ -207,10 +207,12 @@ class AsyncAIAPI:
     """KAI-C: adapters that exist, and running one on a frame."""
 
     def __init__(self, kaic_url: str | None, api_key: str | None,
-                 timeout: float, client: httpx.AsyncClient | None = None) -> None:
+                 timeout: float, client: httpx.AsyncClient | None = None,
+                 client_id: str = "opennvr-app") -> None:
         self._base = (kaic_url or "").rstrip("/")
         self._key = api_key
         self._timeout = timeout
+        self._client_id = client_id
         self._owns = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
 
@@ -245,6 +247,18 @@ class AsyncAIAPI:
             raise KaiCError(f"KAI-C returned HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    def stream(self, adapter: str, *, camera_id: str, timeout: float | None = None):
+        """A persistent WebSocket session for a camera, awaited:
+        ``async with nvr.ai.stream("yolov8", camera_id="cam1") as s:
+        result = await s.infer(jpeg)``."""
+        from .infer_stream import AsyncInferStream
+
+        if not self._base:
+            raise PlatformError("KAI-C is not configured (KAIC_URL)")
+        return AsyncInferStream(self._base, self._key, adapter=adapter,
+                                camera_id=camera_id, client_id=self._client_id,
+                                timeout=timeout or self._timeout)
+
     async def aclose(self) -> None:
         if self._owns:
             await self._client.aclose()
@@ -262,7 +276,8 @@ class AsyncOpenNVR:
     def __init__(self, url: str | None = None, *, token: str | None = None,
                  kaic_url: str | None = None, kaic_api_key: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
-                 http_client: httpx.AsyncClient | None = None) -> None:
+                 http_client: httpx.AsyncClient | None = None,
+                 client_id: str = "opennvr-app") -> None:
         base = url or os.environ.get("OPENNVR_URL") or ""
         if not base:
             raise ValueError("AsyncOpenNVR(url=...) or OPENNVR_URL is required")
@@ -271,7 +286,7 @@ class AsyncOpenNVR:
         kaic = kaic_url or os.environ.get("KAIC_URL") or os.environ.get("OPENNVR_KAIC_URL")
         self.ai = AsyncAIAPI(kaic, kaic_api_key or os.environ.get("KAIC_API_KEY")
                              or os.environ.get("OPENNVR_INTERNAL_API_KEY"),
-                             timeout, http_client)
+                             timeout, http_client, client_id)
         self.timeline = AsyncTimelineAPI(self._http)
         self.alerts = AsyncAlertsAPI(self._http)
         self.state = AsyncStateAPI(self._http)

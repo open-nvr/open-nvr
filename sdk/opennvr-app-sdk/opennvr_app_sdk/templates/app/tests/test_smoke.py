@@ -4,71 +4,29 @@
 """
 Smoke tests for __APP_NAME__ — the parity bar for a generated app.
 
-These drive the detector THROUGH ``handle_event`` (the SDK base's
-decode → on_detections → dispatch path) without spinning up a NATS
-broker: an in-memory recorder channel captures whatever the rule fires.
-Keep this green as you replace the starter rule with your own.
+These drive the detector through the SDK's decode → on_detections →
+dispatch path without a NATS broker, using ``opennvr_app_sdk.testing``:
+a recorder channel captures whatever the rule fires, and the event
+builders produce contract-shaped inference events. Keep this green as
+you replace the starter rule with your own.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
-
-from opennvr_app_sdk import Alert, AlertDispatcher
+from opennvr_app_sdk import Alert
+from opennvr_app_sdk.testing import RecorderChannel, detection, feed, inference_event
 
 from __APP_MODULE__ import __APP_CLASS__, AppConfig, load_config
 
 
-class _RecorderChannel:
-    """Captures dispatched alerts in memory so a test can assert on them
-    without a webhook or NATS broker."""
-
-    name = "recorder"
-
-    def __init__(self) -> None:
-        self.alerts: list[Alert] = []
-
-    def send(self, alert: Alert) -> bool:
-        self.alerts.append(alert)
-        return True
-
-
-def _build(
-    *, watch_labels: list[str] | None = None,
-) -> tuple[__APP_CLASS__, _RecorderChannel]:
+def _build(*, watch_labels: list[str] | None = None) -> tuple[__APP_CLASS__, RecorderChannel]:
     """Construct the detector with an in-memory dispatcher."""
     config = AppConfig(
         nats_url="nats://test:4222",
         subject_pattern="opennvr.inference.>",
         watch_labels=watch_labels or ["person"],
     )
-    recorder = _RecorderChannel()
-    dispatcher = AlertDispatcher([recorder])
-    detector = __APP_CLASS__(config, dispatcher)
-    return detector, recorder
-
-
-def _event(*, label: str = "person", camera_id: str = "cam-1") -> dict[str, Any]:
-    """A minimal §12 InferenceCompletedEvent body with one detection."""
-    return {
-        "correlation_id": "corr-1",
-        "adapter": "yolov8",
-        "adapter_version": "1.0.0",
-        "camera_id": camera_id,
-        "model_fingerprint": "sha256:test",
-        "completed_at": "2026-01-02T03:04:05Z",
-        "result": {
-            "detections": [
-                {
-                    "label": label,
-                    "confidence": 0.9,
-                    "bbox": {"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.1},
-                    "track_id": None,
-                    "attributes": {},
-                },
-            ],
-        },
-    }
+    recorder = RecorderChannel()
+    return __APP_CLASS__(config, recorder.dispatcher()), recorder
 
 
 # ── The parity bar ─────────────────────────────────────────────────
@@ -78,7 +36,8 @@ def test_matching_detection_fires_one_alert():
     """A watched-label detection fires exactly one alert, carrying the
     camera + correlation id through to the §11.5 envelope."""
     detector, recorder = _build(watch_labels=["person"])
-    fired = detector.handle_event(_event(label="person", camera_id="cam-1"))
+    fired = feed(detector, inference_event(detection("person"), camera_id="cam-1",
+                                           correlation_id="corr-1"))
 
     assert len(fired) == 1
     alert = fired[0]
@@ -92,18 +51,14 @@ def test_matching_detection_fires_one_alert():
 def test_non_watched_label_is_quiet():
     """A detection whose label isn't watched fires nothing."""
     detector, recorder = _build(watch_labels=["person"])
-    fired = detector.handle_event(_event(label="bicycle"))
-
-    assert fired == []
+    assert feed(detector, inference_event(detection("bicycle"))) == []
     assert recorder.alerts == []
 
 
 def test_no_detections_is_quiet():
     """An event with an empty detections list fires nothing."""
-    detector, recorder = _build()
-    event = _event()
-    event["result"]["detections"] = []
-    assert detector.handle_event(event) == []
+    detector, _ = _build()
+    assert feed(detector, inference_event()) == []
 
 
 def test_config_loader_roundtrips(tmp_path):

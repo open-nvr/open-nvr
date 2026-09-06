@@ -136,7 +136,14 @@ Green means your app is wired to the SDK correctly *before* you've
 written a line of your own logic. As you replace the starter rule, keep
 this file green — extend it to pin your predicate (a below-threshold
 case stays quiet, an in-zone case fires, etc.), exactly the way the
-shipped examples' tests do.
+shipped examples' tests do. The test uses `opennvr_app_sdk.testing`
+(`RecorderChannel`, `inference_event`, `detection`, `feed`,
+`FakeCore`) — [SDK_REFERENCE.md](SDK_REFERENCE.md#testing-your-app--opennvr_app_sdktesting)
+lists the rest.
+
+Then `uv run opennvr-app validate .` — it checks the manifest, the
+example config, the listing entry and the repository shape the way a
+reviewer would, in a second.
 
 ## 4. Run it against the stack (5 min)
 

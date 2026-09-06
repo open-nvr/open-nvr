@@ -72,7 +72,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | `Recording` | `start`, `duration` |
 | `PlatformError` | Raised by writes; reads degrade to `None` / `[]` and log |
 | `InferStream` | The WebSocket inference session behind `nvr.ai.stream()`; `open()`, `infer(jpeg)`, `close()`, context-manager |
-| `AsyncOpenNVR` (`opennvr_app_sdk.aio`) | The same client `await`-ed, for FastAPI/agent loops: `await nvr.cameras()`, `await nvr.state.set(...)`, `async with`; `http_client=` shares a pool; no `ai.stream()` yet |
+| `AsyncOpenNVR` (`opennvr_app_sdk.aio`) | The same client `await`-ed, for FastAPI/agent loops: `await nvr.cameras()`, `await nvr.state.set(...)`, `async with`; `http_client=` shares a pool; `async with nvr.ai.stream(...) as s: await s.infer(jpeg)` (`AsyncInferStream`) |
 
 Lower-level helpers that predate the client and remain public:
 `discover_cameras(url)`, `cameras_for_skill(...)`,
@@ -103,6 +103,10 @@ alarm actions without any further code.
 | `domain_envelope(...)`, `domain_subject(schema, camera_id)` | The wire helpers |
 | `DomainEvent` | Parsed envelope: `id`, `schema`, `camera_id`, `ts`, `payload`, `producer`, `correlation_id`, `subject` |
 | `DomainEventSubscriber`, `domain_event_app`, `parse_domain_event` | The consuming archetype (above) |
+| `DomainEvent.typed()` | The payload as its contract class, or `None` when the SDK does not type the schema / the payload is off-contract (logged) |
+| `DomainEventPublisher.publish_typed(payload, camera_id=…)` | Publish a typed payload; the schema is the class's |
+| `PlateRecognized`, `AccessDecided`, `OccupancyChanged`, `OccupancyHeatmap`, `OccupancyFootfall`, `VisitRecorded`, `DetectionObserved` | The v1 contracts as frozen dataclasses: required fields enforced, additive fields kept in `.extra`, `to_payload()` / `from_payload()` round-trip; `AccessDecided.allow` fails closed on unknown decisions |
+| `EVENT_TYPES`, `typed_payload(schema, payload)` | schema → class, and the tolerant parser behind `typed()` |
 
 Schemas and their payloads: [EVENT_CONTRACTS.md](EVENT_CONTRACTS.md).
 
@@ -139,6 +143,46 @@ container) unless you need full frame rate.
 | `BaseAppConfig` | The dataclass of everything the SDK reads from `cfg`: `nats_url` (required), `nats_token`, `subject_pattern`, `webhook_url`, `nats_alerts_*`, `contract_*`, `opennvr_url` / `opennvr_token`, `config_poll_seconds`. Subclass it and add your own fields |
 | `load_app_config(path, cls=BaseAppConfig)` | One YAML file → your subclass: base keys validated (operator-readable errors), extra fields taken by name or defaulted, a field with no default required; put app checks in `__post_init__` |
 | `load_yaml(path)`, `require(cfg, key)` | The lower-level helpers, for anything richer |
+
+## Testing your app — `opennvr_app_sdk.testing`
+
+No broker, no core, no Docker. The helpers every example's test suite
+used to hand-roll, versioned with the SDK so they stay right when the
+contracts move:
+
+| Name | Purpose |
+|---|---|
+| `RecorderChannel` | An alert channel that keeps `.alerts` (`.titles`, `.clear()`); `.dispatcher()` for the app |
+| `app_config(**overrides)` | A config object with every key the archetypes read (test hosts, nothing contacted) |
+| `detection(label, *, confidence, x, y, w, h, track_id)` | One contract-shaped detection |
+| `inference_event(*detections, camera_id=…)` | An adapter `InferenceCompletedEvent` — what `Detector` consumes |
+| `tier0_event(*tracks)`, `tier0_track(label, box=…)` | A Tier-0 event (pixel boxes; `tier0_to_detections` bridges it) |
+| `domain_event(schema, payload, camera_id=…)` | A contracted envelope; `payload` may be typed (`PlateRecognized(...)`) or a dict |
+| `feed(app, *events)` | Run raw events through the app's decode → handle → dispatch path; returns the alerts fired |
+| `FakeCore(cameras=…, snapshots=…)` | A loopback core for apps that use `OpenNVR()`: cameras, snapshots, state, alerts, register; `.requests` records every call |
+| `opennvr_app_sdk.testing.pytest_plugin` | The same as fixtures: `recorder`, `app_config_factory`, `fake_core` |
+
+```python
+from opennvr_app_sdk.testing import RecorderChannel, app_config, detection, feed, inference_event
+
+def test_fires_on_a_person():
+    rec = RecorderChannel()
+    app = MyDetector(app_config(watch_labels=["person"]), rec.dispatcher())
+    fired = feed(app, inference_event(detection("person")))
+    assert rec.titles == ["Person seen"] and fired == rec.alerts
+```
+
+## Validating — `opennvr-app validate`
+
+`opennvr-app validate [path]` imports the app and checks what the
+catalog, the registry and a listing reviewer would trip over: the
+manifest (id, version, category, params and their defaults, alert
+types, scopes, actions, commerce fields, the `verify_license` hook
+when `entitlement` says so), that `config.example.yml` loads through
+the app's own `AppConfig`, that `apps-index-entry.yml` mirrors the
+manifest and carries author, contact, source and `network_egress`,
+and the repository shape (Dockerfile, tests, LICENSE). Errors exit 1;
+warnings do not. Run it in the app's own environment.
 
 ## Scaffolding
 
