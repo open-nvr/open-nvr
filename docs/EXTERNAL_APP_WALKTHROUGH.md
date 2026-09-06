@@ -3,10 +3,17 @@
 Everything in `examples/` is built inside this repository, where the
 SDK is an editable path and core is one directory away. A third-party
 developer has none of that: they `pip install opennvr-app-sdk`, work in
-their own repository, sell their app on their own site, and list it as
-`kind: external`. This page is that walk, done for real against SDK
-0.4.0 on PyPI, with what it found. Repeat it after any SDK release —
-whatever breaks here is the next roadmap.
+their own repository, and sell what their app needs on their own site.
+This page is that walk, done for real against SDK 0.4.0 on PyPI, with
+what it found. Repeat it after any SDK release — whatever breaks here is
+the next roadmap.
+
+The app below is the reference for a **paid catalog app** under the
+catalog policy: open code (it will live at `open-nvr/app-plate-vip` once
+a maintainer adopts it), a licence gate in that open code, and the
+thing being sold — the vendor's plate service and key — outside it.
+It is listed here with `kind: external` only because the fictional
+vendor has no repository under the organisation yet.
 
 ## The app: Plate VIP
 
@@ -25,9 +32,10 @@ depending on nothing but the wheel:
   vendor issues (`issue_key`). Core's `PUT /apps/plate-vip/license` →
   `POST /entitlement/verify` exchange is exercised in the app's own
   tests against the SDK's contract server, with the site key.
-* **Listing:** a `kind: external` index entry pointing at the vendor's
-  page; the catalog shows the card, the pricing badge, *Learn more*,
-  and never offers Install.
+* **Listing:** as a catalog app — `source` under `github.com/open-nvr/`,
+  `author`, `contact`, `network_egress` naming the vendor's licence host,
+  `pricing: subscription`, `entitlement: license_key`; the catalog shows
+  the price, the egress, the "licence key required" hint, and Install.
 
 ```
 plate-vip/
