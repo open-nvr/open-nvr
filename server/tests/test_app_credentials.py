@@ -801,3 +801,20 @@ def test_bus_users_file_is_valid_with_no_apps_and_off_when_unset(monkeypatch, tm
             raise AssertionError("must not touch the DB when the feature is off")
 
     assert nats_users.write_users_conf(_DB()) is False
+
+
+def test_bus_alert_publish_permission_matches_the_sdk_subject():
+    """The permission is only useful if it is the subject the SDK will
+    actually publish on — same sanitiser, same edge cases."""
+    import sys
+
+    from services import nats_users
+
+    sdk_path = str(REPO_ROOT / "sdk" / "opennvr-app-sdk")
+    if sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+    from opennvr_app_sdk.alerts import _sanitize_subject_token
+
+    for app_id in ("plate-vip", "my.app", "_odd_", "weird id!", "___"):
+        allowed = nats_users.app_permissions(app_id, {})["publish"]
+        assert f"opennvr.alerts.app.{_sanitize_subject_token(app_id)}.>" in allowed, app_id

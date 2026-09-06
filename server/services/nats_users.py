@@ -58,8 +58,11 @@ def _subject_ok(subject: str) -> bool:
 
 
 def _alert_token(value: str) -> str:
-    """The SDK sanitises alert-subject tokens the same way (alerts.py)."""
-    return re.sub(r"[^A-Za-z0-9_-]", "_", value) or "_"
+    """Byte-for-byte the SDK's ``alerts._sanitize_subject_token``: the
+    app's alert subject is ``opennvr.alerts.app.<this>.<camera>``, so the
+    publish permission must be spelled exactly as the SDK spells it."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", value).strip("_")
+    return cleaned or "unknown"
 
 
 def app_permissions(app_id: str, manifest: dict[str, Any] | None) -> dict[str, list[str]]:
