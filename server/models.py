@@ -1098,6 +1098,10 @@ class InstalledApp(Base):
     # platform components (detect-pipeline, KAI-C, the agent).
     api_key_hash = Column(String(64), nullable=True, index=True)
     api_key_issued_at = Column(DateTime(timezone=True), nullable=True)
+    # The SDK version the app last registered with — decides whether core
+    # may still forward the site key on the action / entitlement calls
+    # (SDK < 0.6 gates them on it) or signs them per app instead.
+    sdk_version = Column(String(32), nullable=True)
     # Licensed apps (manifest ``entitlement: license_key``): the key the
     # administrator entered, Fernet-encrypted at rest and never returned;
     # and the app's own verdict on it (services/app_entitlements.py).

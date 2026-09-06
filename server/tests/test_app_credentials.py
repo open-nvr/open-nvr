@@ -615,3 +615,114 @@ def test_index_external_listing_is_not_installable(monkeypatch, env):
         apps_router.IndexEntry(id="x", name="x", summary="s", category="c", version="1",
                                docs_url="d")          # installable without image/install
 
+
+
+# ── the site key stops travelling to apps (X-OpenNVR-Call) ───────────────
+
+
+def _proxy_capture(monkeypatch):
+    seen: dict[str, dict] = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"ok"
+
+        def json(self):
+            return {"ok": True, "valid": True, "plan": "pro", "expires_at": None,
+                    "message": "", "limits": {}}
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, **kw):
+            seen["ui"] = dict(headers or {})
+            return _Resp()
+
+        async def post(self, url, json=None, headers=None, **kw):
+            seen[url.rsplit("/", 1)[-1]] = dict(headers or {})
+            return _Resp()
+
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _Client)
+    from services import app_entitlements
+    monkeypatch.setattr(app_entitlements.httpx, "AsyncClient", _Client)
+    return seen
+
+
+def _enable_actions(SessionLocal, app_id="loitering-detection", **manifest_extra):
+    s = SessionLocal()
+    row = s.get(InstalledApp, app_id)
+    row.manifest_json = {**row.manifest_json,
+                         "actions": [{"name": "reset", "label": "Reset", "params": []}],
+                         **manifest_extra}
+    row.enabled = True
+    s.commit()
+    s.close()
+
+
+def test_new_sdk_apps_get_a_call_token_and_never_the_site_key(env, monkeypatch):
+    """An app registered with SDK ≥ 0.6 verifies X-OpenNVR-Call itself,
+    so core no longer forwards INTERNAL_API_KEY on actions or licence
+    verification — the app holds nothing that opens another app."""
+    import sys
+
+    tc, ids, SessionLocal = env
+    key = _register(tc, _site(), sdk_version="0.6.0").json()["api_key"]
+    _enable_actions(SessionLocal, entitlement="license_key")
+    seen = _proxy_capture(monkeypatch)
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = \
+        tc.app.dependency_overrides[auth_mod.get_current_superuser]
+
+    assert tc.post("/apps/loitering-detection/actions/reset", json={}).status_code == 200
+    assert "X-Internal-Api-Key" not in seen["reset"]
+    assert tc.put("/apps/loitering-detection/license", json={"license_key": "k"}).status_code == 200
+    assert "X-Internal-Api-Key" not in seen["verify"]
+
+    sdk_path = str(REPO_ROOT / "sdk" / "opennvr-app-sdk")
+    if sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+    from opennvr_app_sdk.usercontext import signing_secret, verify_call_token
+
+    act = verify_call_token(seen["reset"]["X-OpenNVR-Call"], signing_secret(key),
+                            audience="loitering-detection", purpose="action")
+    assert act is not None and act["purpose"] == "action"
+    ent = verify_call_token(seen["verify"]["X-OpenNVR-Call"], signing_secret(key),
+                            audience="loitering-detection", purpose="entitlement")
+    assert ent is not None
+    # Purpose-bound and app-bound: an action token does not open the
+    # licence hook, and another app's secret does not verify it.
+    assert verify_call_token(seen["reset"]["X-OpenNVR-Call"], signing_secret(key),
+                             audience="loitering-detection", purpose="entitlement") is None
+    assert verify_call_token(seen["reset"]["X-OpenNVR-Call"],
+                             signing_secret("oak_other_" + "0" * 32),
+                             audience="loitering-detection", purpose="action") is None
+
+
+def test_old_sdk_apps_still_receive_the_site_key(env, monkeypatch):
+    """Compatibility: an app on SDK < 0.6 gates actions on the site key,
+    so core keeps sending it (alongside the call token) until it upgrades."""
+    tc, ids, SessionLocal = env
+    _register(tc, _site(), sdk_version="0.4.0")
+    _enable_actions(SessionLocal)
+    seen = _proxy_capture(monkeypatch)
+    tc.app.dependency_overrides[auth_mod.get_current_active_user] = \
+        tc.app.dependency_overrides[auth_mod.get_current_superuser]
+    assert tc.post("/apps/loitering-detection/actions/reset", json={}).status_code == 200
+    assert seen["reset"].get("X-Internal-Api-Key") == SITE_KEY
+    assert "X-OpenNVR-Call" in seen["reset"]
+    # No sdk_version at all (pre-0.2 SDK): also legacy.
+    from services.app_user_context import needs_legacy_site_key
+    s = SessionLocal()
+    row = s.get(InstalledApp, "loitering-detection")
+    row.sdk_version = None
+    assert needs_legacy_site_key(row) is True
+    row.sdk_version = "0.6.0"
+    assert needs_legacy_site_key(row) is False
+    s.rollback()
+    s.close()

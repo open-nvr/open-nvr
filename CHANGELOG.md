@@ -96,6 +96,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The site key no longer reaches apps.** Core used to forward
+  `INTERNAL_API_KEY` on every action invocation and licence check
+  because the SDK's write surfaces were gated on it — so every app held
+  the site-wide credential. Core now sends `X-OpenNVR-Call`, a
+  60-second HS256 token signed with the app's own secret (the sha256 of
+  its key, as for `X-OpenNVR-User`), bound to the app id and a purpose;
+  SDK 0.6 verifies it (`verify_call_token`) before `on_action` /
+  `verify_license` and refuses a token for another app, another purpose
+  or an old window. Apps registered with SDK < 0.6 (`installed_apps.
+  sdk_version`, new column) still receive the site key until they
+  upgrade; an SDK 0.6 app on an older core accepts the legacy gate with
+  one warning. `api_version` 1.3 (additive). Removal of the legacy
+  forward is scheduled for 2.0.
+
 - **Every app gets its own credential.** SDK apps used to boot with the
   deployment's `INTERNAL_API_KEY` and could read every camera and every
   other app's config and live state. `POST /apps/register` now mints an

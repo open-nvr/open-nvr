@@ -190,8 +190,10 @@ Actions are **operator verbs**, and the platform enforces that in
 layers: the catalog invokes them through a server proxy that requires
 a **user JWT** (never the service key — the OpenNVR Agent *cannot*
 invoke your action, by test-pinned design); your app's own `/actions`
-endpoint requires the deployment's `X-Internal-Api-Key`; and every
-invocation is audit-logged (param **keys** only — values like search
+endpoint accepts the call only with `X-OpenNVR-Call`, a 60-second token
+core signs with *your* app's secret (SDK ≥ 0.6 — see
+[APP_CREDENTIALS.md](APP_CREDENTIALS.md#core-calling-your-app-without-the-site-key));
+and every invocation is audit-logged (param **keys** only — values like search
 terms stay out of the log). The agent can *read* your state and *relay*
 your alerts; it can never *act* on your app. Design your actions
 assuming an authenticated human is on the other end — because one is.

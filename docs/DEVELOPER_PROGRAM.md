@@ -147,7 +147,8 @@ closed code in the catalog. Ship that as an external listing.
 
 | Core | `api_version` | Minimum SDK | Notable |
 |---|---|---|---|
-| main (Sep 2026) | 1.2 | 0.2.0 | per-app keys, user context, platform client, entitlements, async client, `opennvr-app new` |
+| main (Sep 2026) | 1.3 | 0.2.0 | `X-OpenNVR-Call`: core proves itself per app; the site key no longer reaches apps on SDK ≥ 0.6 |
+| 0.2.x line | 1.2 | 0.2.0 | per-app keys, user context, platform client, entitlements, async client, `opennvr-app new` |
 | 0.1.4 | 1.0 | — | registry contract: register, config, state, actions |
 
 ## Security: what an app can and cannot do
@@ -157,7 +158,8 @@ worth knowing.
 
 * An app holds **its own key**, sees **only the cameras assigned to it**,
   and reads only its own config, state and alerts. It never sees another
-  app's data.
+  app's data — and it **never receives the site key**: core proves
+  itself to your app with a per-app signed token.
 * An app declares its **network egress** (`network_egress: [...]` in the
   index entry). The operator sees the declared hosts on the card before
   installing; a catalog app with an empty list is one that never talks

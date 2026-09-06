@@ -63,7 +63,7 @@ from .cameras import (
     full_frame_polygon,
 )
 from .credentials import AppCredentials, auth_headers
-from .usercontext import UserContext, current_user
+from .usercontext import UserContext, current_user, verify_call_token
 from .client import OpenNVR, Camera, Recording, PlatformError
 from .aio import AsyncOpenNVR
 from .infer_stream import InferStream
@@ -138,6 +138,7 @@ __all__ = [
     "auth_headers",
     # The operator behind a /ui view or an action (X-OpenNVR-User)
     "UserContext",
+    "verify_call_token",
     "current_user",
     # The platform client (everything an app reads from core / KAI-C)
     "OpenNVR",

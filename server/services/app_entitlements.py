@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 
+
 logger = logging.getLogger(__name__)
 
 VERIFY_TIMEOUT_S = 10.0
@@ -127,8 +128,9 @@ async def verify_with_app(row) -> dict[str, Any]:
         row.entitlement_message = "no licence key stored"
         row.entitlement_checked_at = now
         return entitlement_view(row)
-    headers = ({"X-Internal-Api-Key": settings.internal_api_key}
-               if settings.internal_api_key else {})
+    from services.app_user_context import call_headers
+
+    headers = call_headers(row, purpose="entitlement")
     try:
         async with httpx.AsyncClient(timeout=VERIFY_TIMEOUT_S) as client:
             resp = await client.post(f"{row.url.rstrip('/')}/entitlement/verify",

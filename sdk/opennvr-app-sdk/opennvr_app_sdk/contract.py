@@ -80,8 +80,8 @@ import httpx
 from ._version import __version__ as _sdk_version
 from .credentials import AppCredentials
 from .usercontext import (
-    USER_CONTEXT_HEADER, bind_user, signing_secret, unbind_user,
-    verify_user_context,
+    CALL_TOKEN_HEADER, USER_CONTEXT_HEADER, bind_user, signing_secret, unbind_user,
+    verify_call_token, verify_user_context,
 )
 from .usercontext import current_user as _current_user
 
@@ -212,16 +212,9 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         if not name or "/" in name:
             self._send_json(404, {"error": f"unknown action path {path!r}"})
             return
-        expected_token = getattr(self.server, "action_token", None)
-        if expected_token:
-            import hmac
-
-            presented = self.headers.get("X-Internal-Api-Key") or ""
-            if not hmac.compare_digest(str(presented), str(expected_token)):
-                self._send_json(
-                    401, {"error": "action requires X-Internal-Api-Key"}
-                )
-                return
+        if not self._core_call_allowed("action"):
+            self._send_json(401, {"error": "action requires X-OpenNVR-Call from core"})
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             if length < 0 or length > ACTION_BODY_MAX_BYTES:
@@ -264,14 +257,9 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
         if verifier is None:
             self._send_json(404, {"error": "this app has no licence verifier"})
             return
-        expected_token = getattr(self.server, "action_token", None)
-        if expected_token:
-            import hmac
-
-            presented = self.headers.get("X-Internal-Api-Key") or ""
-            if not hmac.compare_digest(str(presented), str(expected_token)):
-                self._send_json(401, {"error": "requires X-Internal-Api-Key"})
-                return
+        if not self._core_call_allowed("entitlement"):
+            self._send_json(401, {"error": "requires X-OpenNVR-Call from core"})
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
@@ -287,6 +275,36 @@ class _ContractRequestHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "internal error"})
             return
         self._send_json(200, _entitlement_dict(verdict))
+
+    def _core_call_allowed(self, purpose: str) -> bool:
+        """The write-surface gate. Since SDK 0.6 core proves itself with
+        ``X-OpenNVR-Call`` signed per app (see usercontext.py); the site
+        key in ``X-Internal-Api-Key`` is still accepted for a core that
+        predates it (api_version < 1.3), with a one-time warning. With
+        neither an app key nor a legacy token configured (bare dev
+        runs) the surface stays open, as before."""
+        secret_for = getattr(self.server, "user_secret", None)
+        secret = secret_for() if callable(secret_for) else None
+        if secret and verify_call_token(self.headers.get(CALL_TOKEN_HEADER), secret,
+                                        audience=getattr(self.server, "app_id", None),
+                                        purpose=purpose) is not None:
+            return True
+        expected_token = getattr(self.server, "action_token", None)
+        if expected_token:
+            import hmac
+
+            presented = self.headers.get("X-Internal-Api-Key") or ""
+            if hmac.compare_digest(str(presented), str(expected_token)):
+                if secret and not getattr(self.server, "_warned_legacy_gate", False):
+                    self.server._warned_legacy_gate = True  # type: ignore[attr-defined]
+                    logger.warning(
+                        "core gated %s with the site key instead of X-OpenNVR-Call — "
+                        "upgrade OpenNVR core (api_version ≥ 1.3) so this app never "
+                        "receives a site-wide credential", purpose)
+                return True
+            return False
+        # No app key and no legacy token: nothing to gate on (dev).
+        return not secret
 
     def _user_context(self):
         """The operator core says is behind this request (verified

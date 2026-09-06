@@ -8,7 +8,7 @@ walkthroughs live in [FIRST_DETECTOR.md](FIRST_DETECTOR.md),
 [APP_PLATFORM.md](APP_PLATFORM.md), [APP_SURFACES.md](APP_SURFACES.md)
 and [APP_CREDENTIALS.md](APP_CREDENTIALS.md).
 
-Version: `opennvr_app_sdk.__version__` (`0.5.0`, unreleased — PyPI has 0.4.0). Licence: Apache-2.0.
+Version: `opennvr_app_sdk.__version__` (`0.6.0`, unreleased — PyPI has 0.4.0). Licence: Apache-2.0.
 
 ```bash
 pip install opennvr-app-sdk            # or: uv add opennvr-app-sdk
@@ -112,6 +112,7 @@ Schemas and their payloads: [EVENT_CONTRACTS.md](EVENT_CONTRACTS.md).
 |---|---|
 | `AppCredentials`, `auth_headers()` | The app's own key (`OPENNVR_APP_KEY`, or `.opennvr/app.key`), falling back to the site key only to bootstrap |
 | `UserContext`, `current_user()` | Inside `/ui` and `/actions/*`: the user core forwarded — `id`, `username`, `is_superuser`, `.can_see(cam)`, `.can_manage(cam)`, `.visible(ids)` |
+| `verify_call_token(token, secret, audience=, purpose=)` | Verifies `X-OpenNVR-Call`, core's per-app proof on `/actions/*` and `/entitlement/verify`; the contract server applies it for you |
 
 ## Rules — geometry and state
 
