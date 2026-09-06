@@ -28,6 +28,13 @@ trusts:
   `image_digest` **from the curated index entry, never from the caller** —
   an operator can only install an app that a reviewer already vetted into
   this file (see [`docs/APPS_INSTALL.md`](APPS_INSTALL.md)).
+- **Catalog images are signed, and the installer checks.** The org's
+  publish workflow signs every image it pushes (Sigstore keyless); the
+  one-click installer verifies a pinned image against that identity
+  before it runs and refuses one that does not match. An image built
+  outside the org's CI must declare who signs it (`signing:` in the
+  entry) or it is refused as *no known signer* —
+  [`docs/APPS_INSTALL.md` → Image signing](APPS_INSTALL.md#image-signing).
 - **A pinned `image_digest` is what makes one-click install trustworthy.**
   With a digest, the reconciler deploys `image@sha256:…` — the exact bytes
   the review vouched for (supply-chain integrity). Without one, it logs a

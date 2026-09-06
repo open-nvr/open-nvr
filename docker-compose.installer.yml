@@ -63,6 +63,11 @@ services:
       # up/down. Must match the app service blocks (docker-compose.apps.yml).
       - INSTALLER_COMPOSE_FILES=docker-compose.yml,docker-compose.apps.yml
       - INSTALLER_PROFILE=apps
+      # Image signatures: "require" (default) verifies every pinned image
+      # with cosign against its expected signer — the org's CI for
+      # ghcr.io/open-nvr images — before compose runs; "off" for an
+      # air-gapped deployment that cannot reach the Sigstore log.
+      - INSTALLER_SIGNATURES=${INSTALLER_SIGNATURES:-require}
     volumes:
       # ── THE privilege ──────────────────────────────────────────────
       # The Docker socket is mounted into THIS tiny service and NOWHERE

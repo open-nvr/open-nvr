@@ -174,6 +174,11 @@ function ProvenanceLine({ app }: { app: IndexApp }) {
           open source · built from source
         </a>
       ) : null}
+      {!external && app.signed_by && (
+        <span title={`Image signed (Sigstore) by ${app.signed_by}; the installer verifies the signature before installing`}>
+          signed
+        </span>
+      )}
       {app.contact && (
         <a href={app.contact.includes('@') && !app.contact.startsWith('http') ? `mailto:${app.contact}` : app.contact}
            target="_blank" rel="noreferrer" className="hover:text-[var(--text)]">
@@ -258,6 +263,9 @@ type IndexApp = {
   source?: string | null
   contact?: string | null
   network_egress?: string[]
+  // Who the one-click installer expects to have signed the image
+  // ("OpenNVR CI", or a declared identity); null = unsigned.
+  signed_by?: string | null
   image?: string | null
   requires_tasks?: string[]
   emits?: string[]

@@ -280,6 +280,7 @@ def test_index_response_shape_matches_contract(client):
         "source",
         "contact",
         "network_egress",
+        "signed_by",
         "version",
         "image",
         "requires_tasks",
@@ -294,6 +295,7 @@ def test_index_response_shape_matches_contract(client):
     assert isinstance(app["emits"], list)
     assert app["requires_tasks"] == ["object_detection"]
     assert app["emits"] == ["loitering"]
+    assert app["signed_by"] == "OpenNVR CI"          # ghcr.io/open-nvr image: org CI signs it
 
 
 def test_index_uninstalled_apps_are_available(client):

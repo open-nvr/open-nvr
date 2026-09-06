@@ -387,6 +387,36 @@ def validate_entry(
     elif not isinstance(egress, list) or not all(isinstance(h, str) and h.strip() for h in egress):
         errors.append(f"{label}: 'network_egress' must be a list of host names")
 
+    # Image signing (scripts/app-installer/signing.py): a ghcr.io/open-nvr
+    # image is signed by the org's CI and needs nothing here. Any other
+    # registry must declare who signs it — an OIDC certificate identity
+    # regexp (and issuer) the installer verifies with cosign — or the
+    # one-click installer refuses the pinned image as "no known signer".
+    signing = entry.get("signing")
+    image = str(entry.get("image") or "")
+    if signing is not None:
+        if not isinstance(signing, dict):
+            errors.append(f"{label}: 'signing' must be a mapping with 'identity' (and optional 'issuer')")
+        else:
+            identity = signing.get("identity")
+            if not isinstance(identity, str) or not identity.strip():
+                errors.append(f"{label}: 'signing.identity' must be a non-empty regexp")
+            else:
+                try:
+                    re.compile(identity)
+                except re.error as exc:
+                    errors.append(f"{label}: 'signing.identity' is not a valid regexp ({exc})")
+            issuer = signing.get("issuer", "https://token.actions.githubusercontent.com")
+            if not isinstance(issuer, str) or not issuer.startswith("https://"):
+                errors.append(f"{label}: 'signing.issuer' must be an https:// URL")
+            unknown = set(signing) - {"identity", "issuer"}
+            if unknown:
+                errors.append(f"{label}: 'signing' has unknown keys {sorted(unknown)}")
+    elif not external and image and not image.startswith("ghcr.io/open-nvr/") and entry.get("image_digest"):
+        errors.append(
+            f"{label}: a pinned image outside ghcr.io/open-nvr needs 'signing: "
+            "{identity: <regexp>}' — the installer verifies signatures before install")
+
     # Required fields present + non-empty.
     required = tuple(f for f in REQUIRED_FIELDS
                      if not (external and f in ("image", "install")))
