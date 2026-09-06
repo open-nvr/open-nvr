@@ -25,7 +25,6 @@
 // links there rather than duplicating it.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileText, Flame, RefreshCw, Settings2, Users } from 'lucide-react'
 import { api } from '../lib/api'
@@ -38,7 +37,7 @@ import {
   EmptyState, ErrorCard, PageHeader, Skeleton,
 } from '../components/ui'
 import { Modal } from '../components/Modal'
-import type { RegisteredApp } from './AppCatalog'
+import { AppConfigModal, type RegisteredApp } from './AppCatalog'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
 
@@ -232,6 +231,11 @@ export function Occupancy() {
     return camerasQuery.data?.find((c) => c.id === id)?.name ?? key
   }
   const [heatmapFor, setHeatmapFor] = useState<string | null>(null)
+  // The app's config form (zones, entry lines, limits, watch labels)
+  // opens HERE, over the live page, so an operator draws a zone and
+  // watches the counts move without leaving for the catalog. The same
+  // form is still reachable from the catalog card and /app-catalog/<id>.
+  const [configOpen, setConfigOpen] = useState(false)
   const [reportOpen, setReportOpen] = useState(false)
   const watchLabels: string[] = Array.isArray((occApp?.config as any)?.watch_labels)
     ? (occApp!.config as any).watch_labels.map(String)
@@ -303,12 +307,10 @@ export function Occupancy() {
         description="Live head-counts per watched zone — riding the platform's detection stream, zero extra inference. Thresholds apply live."
         actions={
           <div className="flex items-center gap-2">
-            {occApp && (
-              <Link to={`/app-catalog/${occApp.id}`}>
-                <Button variant="outline">
-                  <Settings2 size={14} /> Configure zones
-                </Button>
-              </Link>
+            {occApp && canConfigure && (
+              <Button variant="outline" onClick={() => setConfigOpen(true)}>
+                <Settings2 size={14} /> Configure
+              </Button>
             )}
             {occApp && (
               <Button variant="outline" onClick={() => setReportOpen(true)}>
@@ -390,7 +392,7 @@ export function Occupancy() {
             Save thresholds
           </Button>
           <span className="text-xs text-[var(--text-dim)] ml-auto">
-            Zones are drawn per camera in the app's Configure form.
+            Zones, entry lines and watch labels are per camera — use Configure (top right).
           </span>
         </CardContent>
       </Card>

@@ -883,10 +883,31 @@ def test_validate_type_checks_primitives():
 
 
 def test_validate_geometry_passthrough():
-    """Dotted types are list-shaped on the wire; no deep validation."""
+    """Geometry types are checked for the shape the editor writes and
+    the SDK reads — a polygon is a list of [x, y] points (any count:
+    the editor saves mid-draw), a tripwire is {a, b, count_direction}."""
     manifest = {"params": [_param("zone", "geometry.polygon")]}
     assert validate_app_config(manifest, {"zone": [[0, 0], [1, 1], [1, 0]]}) == []
+    assert validate_app_config(manifest, {"zone": [[0.2, 0.3]]}) == []       # mid-draw
+    assert validate_app_config(manifest, {"zone": []}) == []                  # cleared
     assert validate_app_config(manifest, {"zone": "not-a-list"}) != []
+    assert validate_app_config(manifest, {"zone": [[0, 0], "x"]}) != []
+
+
+def test_validate_tripwire_is_a_dict_not_a_list():
+    """The occupancy app's entry_line: the catalog editor writes
+    {a, b, count_direction} per camera; the old validator demanded a
+    list for every dotted type and rejected every tripwire ever drawn
+    ("must be of type geometry.tripwire")."""
+    manifest = {"params": [_param("entry_line", "geometry.tripwire", per_camera=True)]}
+    wire = {"a": [0.3, 0.4], "b": [0.5, 0.4], "count_direction": "both"}
+    assert validate_app_config(manifest, {"entry_line": {"1": wire}}) == []
+    assert validate_app_config(manifest, {"entry_line": {"1": {**wire, "count_direction": "a_to_b"}}}) == []
+    assert validate_app_config(manifest, {"entry_line": {"1": {"a": [0.3, 0.4], "b": [0.5, 0.4]}}}) == []
+    assert validate_app_config(manifest, {"entry_line": {"1": None}}) == []          # cleared
+    assert validate_app_config(manifest, {"entry_line": {"1": [[0, 0], [1, 1]]}}) != []   # a list is not a wire
+    assert validate_app_config(manifest, {"entry_line": {"1": {"a": [0.3], "b": [0.5, 0.4]}}}) != []
+    assert validate_app_config(manifest, {"entry_line": {"1": {**wire, "count_direction": "up"}}}) != []
 
 
 def test_validate_per_camera_requires_dict_of_typed_values():

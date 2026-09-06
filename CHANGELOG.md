@@ -220,6 +220,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Occupancy entry lines could not be saved.** The catalog editor
+  writes a tripwire as `{a, b, count_direction}`, but config validation
+  demanded a list for every `geometry.*` type, so every entry line ever
+  drawn was refused with "must be of type geometry.tripwire". Geometry
+  params are now validated for their real shape (polygon = list of
+  `[x, y]` points, any count; tripwire = `{a, b, count_direction}` or
+  null). The occupancy app also ignored the direction picked in the
+  editor (hard-coded `both`) and did not apply a direction-only change;
+  both fixed.
+- **Occupancy → Configure opens in place.** The page opened the app's
+  detail view in the catalog; it now opens the same config form as a
+  modal over the live page and refreshes the board on close, so an
+  operator draws a zone and watches the counts move.
 - **Frontend typecheck in CI.** `vite build` strips types without
   checking them, so `DeviceFirewall` shipped a `variant="secondary"`
   that no `Button` variant accepts (now `outline`). `npm run
