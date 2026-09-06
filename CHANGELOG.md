@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **List params offer one-click values.** SDK `Param(suggestions=[…])`
+  rides the manifest; the catalog's chip editor shows them under the
+  input, and for any `*_labels` param puts the labels Tier-0 has
+  actually detected on this site first (from its metrics), then the
+  manifest's suggestions, then the stock COCO vocabulary
+  (`opennvr_app_sdk.DETECTION_LABELS`). Occupancy Counting and the app
+  template declare suggestions; the field also explains what a label
+  is.
 - **Occupancy page, reworked around how occupancy products are read.**
   One time window (Last hour / Today / 7 days) drives the tiles, the
   flow chart, the zone cards and the heatmap's default, instead of a
@@ -234,6 +242,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every app said "requires object_detection — not installed".** The
+  catalog, the app page and the AI Adapters page read each adapter's
+  tasks from `adapters[name].tasks_advertised`, but KAI-C nests the
+  contract under `adapters[name].capabilities` (which the server's
+  skills registry already read correctly) — so no task was ever found.
+  One shared reader (`app/src/lib/kaic.ts`) now handles the real shape,
+  and the platform's Tier-0 detect-pipeline counts as providing
+  `object_detection` when it is running (it is what Detector apps
+  consume; no adapter needed). The badge says "provided by Tier-0" /
+  "available" / "nothing provides it" accordingly.
 - **Occupancy heatmap rendered as speckle, not heat.** Every grid cell
   with a single stray detection was painted as a visible square (an
   alpha floor of 18% plus square-root scaling), and the only smoothing

@@ -34,6 +34,19 @@ def _type_name(t: Any) -> str:
 
 
 #: Manifest ``pricing`` values the catalog understands.
+#: The detection-label vocabulary the platform's Tier-0 detector and the
+#: stock object-detection adapters emit (COCO-80). Apps that take a
+#: ``watch_labels`` list offer these as suggestions; operators can still
+#: type any label a custom model advertises.
+DETECTION_LABELS: tuple[str, ...] = (
+    "person", "bicycle", "car", "motorcycle", "bus", "truck", "boat", "train",
+    "airplane", "traffic light", "fire hydrant", "stop sign", "bench",
+    "backpack", "umbrella", "handbag", "suitcase", "dog", "cat", "bird",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+    "bottle", "cup", "knife", "laptop", "cell phone", "chair", "couch",
+    "potted plant", "bed", "dining table", "tv", "book", "clock",
+)
+
 PRICING_MODELS = frozenset({"free", "paid", "subscription", "contact"})
 #: Manifest ``entitlement`` values: how enabling is gated.
 ENTITLEMENT_MODES = frozenset({"none", "license_key"})
@@ -53,9 +66,13 @@ class Param:
     # Required params have no usable default; the future PUT /config
     # validator and the catalog form both need the distinction.
     required: bool = False
+    # Values the catalog offers as one-click chips for a ``list`` (or
+    # ``str``) param — a detection-label vocabulary, plate formats, …
+    # Advisory: the operator may still type anything.
+    suggestions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "required": self.required,
             "type": _type_name(self.type),
@@ -63,6 +80,9 @@ class Param:
             "per_camera": self.per_camera,
             "description": self.description,
         }
+        if self.suggestions:
+            out["suggestions"] = [str(s) for s in self.suggestions]
+        return out
 
 
 @dataclass

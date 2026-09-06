@@ -22,6 +22,7 @@
 // /api/v1/adapters migration.
 
 import { Fragment, useState, type ReactNode } from 'react'
+import { adapterContract, adapterTasks } from '../lib/kaic'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
@@ -83,9 +84,10 @@ function asStringList(v: unknown): string[] {
 /** Pull the interesting contract fields out of whatever shape the adapter reported. */
 function summarizeAdapter(name: string, caps: AdapterInfo | undefined, health: AdapterInfo | undefined) {
   const status = (health?.status ?? health?.health ?? (typeof health === 'string' ? health : undefined)) as string | undefined
-  const model = caps?.model ?? {}
-  const tasks = asStringList(caps?.tasks_advertised).concat(asStringList(caps?.tasks))
-  const permissions = caps?.permissions ?? {}
+  const contract = adapterContract(caps)          // {url, capabilities:{…}} or flat
+  const model = contract.model ?? {}
+  const tasks = adapterTasks(caps)
+  const permissions = contract.permissions ?? {}
   const requestedPerms: string[] = []
   if (permissions.gpu) requestedPerms.push('GPU')
   for (const host of asStringList(permissions.network_egress)) requestedPerms.push(`egress: ${host}`)
@@ -95,7 +97,7 @@ function summarizeAdapter(name: string, caps: AdapterInfo | undefined, health: A
   return {
     name,
     status,
-    modelName: model.name ?? caps?.adapter?.name,
+    modelName: model.name ?? contract.adapter?.name,
     modelVersion: model.version,
     framework: model.framework,
     fingerprint: typeof model.fingerprint === 'string' ? model.fingerprint : undefined,

@@ -190,3 +190,16 @@ def test_cli_new(tmp_path, capsys):
     assert rc == 0 and (tmp_path / "gate-watch" / "gate_watch.py").exists()
     assert "opennvr-app-sdk from PyPI" in capsys.readouterr().out
     assert scaffold.main(["new", "gate-watch", "--dest", str(tmp_path)]) == 2   # exists
+
+
+def test_param_suggestions_ride_the_manifest():
+    from opennvr_app_sdk import DETECTION_LABELS, AppManifest, Param
+
+    m = AppManifest(id="a", name="A", version="1.0.0", category="analytics",
+                    params=[Param("watch_labels", list, default=["person"],
+                                  suggestions=["person", "car"]),
+                            Param("dwell_s", float, default=30.0)])
+    ps = {p["name"]: p for p in m.to_dict()["params"]}
+    assert ps["watch_labels"]["suggestions"] == ["person", "car"]
+    assert "suggestions" not in ps["dwell_s"]          # absent when empty (wire unchanged)
+    assert "person" in DETECTION_LABELS and "car" in DETECTION_LABELS

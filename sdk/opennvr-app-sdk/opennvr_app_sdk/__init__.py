@@ -50,7 +50,8 @@ from .frame_sources import (
 )
 from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import (
-    ENTITLEMENT_MODES, PRICING_MODELS, Action, AlertType, AppManifest, Param, StateView,
+    DETECTION_LABELS, ENTITLEMENT_MODES, PRICING_MODELS, Action, AlertType, AppManifest,
+    Param, StateView,
 )
 from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
@@ -110,6 +111,7 @@ __all__ = [
     "AppManifest",
     "PRICING_MODELS",
     "ENTITLEMENT_MODES",
+    "DETECTION_LABELS",
     "Entitlement",
     "Param",
     "AlertType",
