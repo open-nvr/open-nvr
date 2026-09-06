@@ -871,16 +871,19 @@ class OccupancyCounter(Detector):
                     try:
                         a, b = scale_vertices([raw_line["a"], raw_line["b"]],
                                               cam.frame_width, cam.frame_height)
+                        direction = str(raw_line.get("count_direction") or "both")
+                        if direction not in ("both", "a_to_b", "b_to_a"):
+                            direction = "both"
                         wire = Tripwire.from_config(
-                            name="entry", a=a, b=b,
-                            count_direction="both")
+                            name="entry", a=a, b=b, count_direction=direction)
                     except (TypeError, ValueError, KeyError) as exc:
                         logger.warning("entry line for %s ignored: %s", cam_id, exc)
                         continue
                 before = cam.entry_line
                 if (before is None) != (wire is None) or (
                         before is not None and wire is not None
-                        and (before.a, before.b) != (wire.a, wire.b)):
+                        and (before.a, before.b, before.count_direction)
+                        != (wire.a, wire.b, wire.count_direction)):
                     cam.entry_line = wire
                     line_changes.append(f"{cam_id}:{'line' if wire else 'none'}")
             if line_changes:
@@ -1331,6 +1334,13 @@ class OccupancyCounter(Detector):
                     "has_entry_line": (
                         camera_id in self._config.cameras
                         and self._config.cameras[camera_id].entry_line is not None),
+                    # Which crossings count as entries — shown on the
+                    # zone card so a miswired line is visible at a glance.
+                    "entry_direction": (
+                        self._config.cameras[camera_id].entry_line.count_direction
+                        if camera_id in self._config.cameras
+                        and self._config.cameras[camera_id].entry_line is not None
+                        else None),
                     # Since app start; the platform keeps the history.
                     "entries": int(self._footfall_total.get(camera_id, {}).get("entries", 0)),
                     "exits": int(self._footfall_total.get(camera_id, {}).get("exits", 0)),

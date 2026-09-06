@@ -751,6 +751,7 @@ def test_entry_line_counts_entries_and_exits():
     assert payload["entries"] + payload["exits"] == 2
     live = app.state_snapshot()["cameras"]["cam-1"]
     assert live["has_entry_line"] is True
+    assert live["entry_direction"] == "both"
     assert live["entries"] + live["exits"] == 2
 
 
@@ -788,6 +789,14 @@ def test_entry_line_applies_live_from_the_catalog():
     assert app._config.cameras["cam-1"].entry_line is not None
     app.on_config_update({"entry_line": {}})
     assert app._config.cameras["cam-1"].entry_line is None
+    # The direction the operator picks in the editor (A→B only, B→A only)
+    # is honoured — it used to be hard-coded to "both".
+    app.on_config_update({"entry_line": {"cam-1": {"a": [0.5, 0.0], "b": [0.5, 1.0],
+                                                    "count_direction": "a_to_b"}}})
+    assert app._config.cameras["cam-1"].entry_line.count_direction == "a_to_b"
+    app.on_config_update({"entry_line": {"cam-1": {"a": [0.5, 0.0], "b": [0.5, 1.0],
+                                                    "count_direction": "sideways"}}})
+    assert app._config.cameras["cam-1"].entry_line.count_direction == "both"   # unknown → both
 # ── Alert storm (field): a zone hovering AT the limit ──────────────
 
 

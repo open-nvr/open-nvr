@@ -204,13 +204,35 @@ _PRIMITIVE_TYPES: dict[str, tuple[type, ...]] = {
 }
 
 
+def _is_point(p: Any) -> bool:
+    return (isinstance(p, (list, tuple)) and len(p) == 2
+            and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in p))
+
+
 def _value_matches_type(value: Any, type_name: str) -> bool:
     """True when ``value`` is acceptable for a manifest param ``type``.
 
-    Dotted UI-schema types (``"geometry.polygon"``) are list-shaped on
-    the wire — deep validation is the catalog zone editor's job, so we
-    only require a list. Unknown plain type names are not blocked.
+    Dotted UI-schema types are what the catalog's geometry editor
+    writes and the SDK's ``geometry`` module reads:
+
+    * ``geometry.polygon`` — a list of ``[x, y]`` points (unit space).
+      The editor saves while a zone is still being drawn, so the point
+      COUNT is the app's to judge; an empty list clears the zone.
+    * ``geometry.tripwire`` — ``{"a": [x, y], "b": [x, y],
+      "count_direction": both|a_to_b|b_to_a}`` (``Tripwire.from_config``);
+      ``null`` clears it.
+
+    Other dotted types are list-shaped by convention. Unknown plain
+    type names are not blocked.
     """
+    if type_name == "geometry.tripwire":
+        if value is None:
+            return True
+        return (isinstance(value, dict)
+                and _is_point(value.get("a")) and _is_point(value.get("b"))
+                and value.get("count_direction", "both") in ("both", "a_to_b", "b_to_a"))
+    if type_name == "geometry.polygon":
+        return isinstance(value, list) and all(_is_point(p) for p in value)
     if "." in type_name:
         return isinstance(value, list)
     expected = _PRIMITIVE_TYPES.get(type_name)

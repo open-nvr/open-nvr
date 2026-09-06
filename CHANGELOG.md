@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Occupancy page, reworked around how occupancy products are read.**
+  One time window (Last hour / Today / 7 days) drives the tiles, the
+  flow chart, the zone cards and the heatmap's default, instead of a
+  fixed 24 h here and a per-dialog range there. The headline is
+  capacity: people now with an over / near / within-limit badge, the
+  peak seen in a zone over the window, zones over limit, zones watched
+  — and every empty tile says why ("app unreachable", "no limit set",
+  "assign the occupancy skill"). Zone cards show which way an entry
+  line counts (entries A→B / B→A; the app now reports
+  `entry_direction`). A setup hint appears when cameras carry a vehicle
+  skill but Occupancy watches only `person`, with a one-click path to
+  the config form; non-superusers see a "showing the cameras you have
+  access to" note.
+
 - **App Catalog: licence hint, verified badge, Featured row.** A
   listing with `entitlement: license_key` now says so *before* install
   ("licence key required" badge + one line on what happens next), so
@@ -220,6 +234,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Occupancy entry lines could not be saved.** The catalog editor
+  writes a tripwire as `{a, b, count_direction}`, but config validation
+  demanded a list for every `geometry.*` type, so every entry line ever
+  drawn was refused with "must be of type geometry.tripwire". Geometry
+  params are now validated for their real shape (polygon = list of
+  `[x, y]` points, any count; tripwire = `{a, b, count_direction}` or
+  null). The occupancy app also ignored the direction picked in the
+  editor (hard-coded `both`) and did not apply a direction-only change;
+  both fixed.
+- **Occupancy → Configure opens in place.** The page opened the app's
+  detail view in the catalog; it now opens the same config form as a
+  modal over the live page and refreshes the board on close, so an
+  operator draws a zone and watches the counts move.
 - **Frontend typecheck in CI.** `vite build` strips types without
   checking them, so `DeviceFirewall` shipped a `variant="secondary"`
   that no `Button` variant accepts (now `outline`). `npm run
