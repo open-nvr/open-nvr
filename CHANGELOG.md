@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **OpenNVR Models — design.** `docs/design/models-service.md`: site-
+  tuned detection models delivered as Ed25519-signed, licensed weight
+  bundles to the adapters a site already runs, under a flat per-site
+  subscription; the "OpenNVR Models" catalog app (open source,
+  `entitlement: license_key`, one declared egress host) as the licence
+  holder, dataset exporter and installer; the bundle format; the
+  adapter path (shipped in the ai-adapter repository — `licensed_model`,
+  pure-Python Ed25519, `ModelInfo.license`, yolov8 as the reference);
+  the service's routes; keys and rotation; offline behaviour and
+  grace; what it is not. `AI_ADAPTER_CONTRACT.md` documents the
+  additive `model.license` field.
+
 - **Enterprise: the offer, the appliance, the evidence pack.**
   `docs/ENTERPRISE.md` states what an enterprise engagement includes
   (reference-appliance deployment, the evidence pack reviewed against

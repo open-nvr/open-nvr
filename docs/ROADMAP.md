@@ -297,7 +297,10 @@ to a release window. Pull requests and design discussions are welcome.
 - **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
   enterprise deployments with support and compliance packs first
   (shipped: `docs/ENTERPRISE.md`, `docs/REFERENCE_APPLIANCE.md`,
-  `scripts/evidence_pack.py`);
+  `scripts/evidence_pack.py`); OpenNVR Models designed
+  (`docs/design/models-service.md`) with the adapter side shipped in
+  the ai-adapter repository (signed licensed bundles, yolov8 as the
+  reference);
   OpenNVR Models (per-site fine-tuning, delivered as licensed adapters
   through the catalog) second; a paid partner tier (certification,
   hosted licence service, lead routing — paid by the vendor, never a
