@@ -116,17 +116,18 @@ def observe(result: dict[str, Any], *, now: float | None = None) -> dict[str, An
         st = _state
         st.checked_at = now
         if "error" in result:
+            # nats-apps itself is down or restarting (a config that will not
+            # parse loops forever under restart: unless-stopped) — the same
+            # outage for the apps as a dead link, so it counts the same way.
             st.reachable = False
             st.linked = None
             st.remotes = []
             st.error = str(result["error"])
-            # An unreachable monitor is its own problem (compose healthcheck
-            # covers a dead container); it does not count as "unlinked".
-            return out
-        st.reachable = True
-        st.error = ""
-        st.linked = bool(result.get("linked"))
-        st.remotes = list(result.get("remotes") or [])
+        else:
+            st.reachable = True
+            st.error = ""
+            st.linked = bool(result.get("linked"))
+            st.remotes = list(result.get("remotes") or [])
         if st.linked:
             if st.unlinked_since is not None and now - st.unlinked_since >= GRACE_S:
                 out["transition"] = "restored"
@@ -149,22 +150,30 @@ def observe(result: dict[str, Any], *, now: float | None = None) -> dict[str, An
 def alert_envelope(now: float | None = None) -> dict[str, Any]:
     now = time.time() if now is None else now
     snap = state()
+    down = snap["reachable"] is False
     return {
         "alert_id": f"apps-bus-unlinked-{int(now // ALERT_EVERY_S)}",
         "severity": "high",
-        "title": "Apps bus is not linked to the platform bus — app alerts cannot reach the inbox",
+        "title": ("Apps bus is down — app alerts cannot reach the inbox" if down else
+                  "Apps bus is not linked to the platform bus — app alerts cannot reach the inbox"),
         "description": (
-            "The apps bus (nats-apps) has had no leaf connection to the platform "
-            f"bus for {snap['unlinked_for_s'] // 60} minute(s). Installed apps are "
-            "connected and running, but nothing they publish crosses to core: no "
-            "app alerts, no domain events, and the platform's detections do not "
-            "reach them. Check `docker logs opennvr_nats_apps` for "
-            "'Leafnode Error' / 'Authorization Violation' (the leaf link "
-            "authenticates with INTERNAL_API_KEY — nats-apps and nats must "
-            "see the same value) and `docker logs opennvr_nats` for "
-            "'authentication error' on port 7422. docs/APP_CREDENTIALS.md → "
-            "\"When alerts stop\"."
-        ),
+            (f"The apps bus (nats-apps) has not answered its monitoring endpoint for "
+             f"{snap['unlinked_for_s'] // 60} minute(s) ({snap['error']}) — most likely the "
+             "container is restarting on a config it cannot parse: "
+             "`docker compose ps nats-apps` and `docker logs opennvr_nats_apps`. "
+             "Apps cannot resolve or reach it ('Temporary failure in name resolution' "
+             "in their logs) and reconnect forever; nothing they publish reaches core. ")
+            if down else
+            (f"The apps bus (nats-apps) has had no leaf connection to the platform "
+             f"bus for {snap['unlinked_for_s'] // 60} minute(s). Installed apps are "
+             "connected and running, but nothing they publish crosses to core: no "
+             "app alerts, no domain events, and the platform's detections do not "
+             "reach them. Check `docker logs opennvr_nats_apps` for "
+             "'Leafnode Error' / 'Authorization Violation' (the leaf link "
+             "authenticates with INTERNAL_API_KEY — nats-apps and nats must "
+             "see the same value) and `docker logs opennvr_nats` for "
+             "'authentication error' on port 7422. ")
+        ) + "docs/APP_CREDENTIALS.md → \"When alerts stop\".",
         "source": {"kind": "platform", "name": "nats-apps"},
         "tags": ["apps-bus", "leaf-link", "infrastructure"],
         "evidence": snap,
@@ -178,12 +187,17 @@ def check_once(url: str, db=None) -> dict[str, Any]:
     verdict = observe(result)
     try:
         if verdict["transition"] == "lost":
-            logger.error("apps bus: NO leaf connection to the platform bus for %ds — app alerts "
-                         "and platform detections are not crossing (%s)", GRACE_S, url)
+            snap = state()
+            if snap["reachable"] is False:
+                logger.error("apps bus: nats-apps has not answered %s for %ds (%s) — is the "
+                             "container restarting? apps cannot reach the bus", url, GRACE_S, snap["error"])
+            else:
+                logger.error("apps bus: NO leaf connection to the platform bus for %ds — app alerts "
+                             "and platform detections are not crossing (%s)", GRACE_S, url)
         elif verdict["transition"] == "restored":
             logger.info("apps bus: leaf link to the platform bus restored (%s)",
                         ", ".join(state()["remotes"]) or "?")
-        elif "error" in result:
+        elif "error" in result and verdict["transition"] is None and not verdict["alert"]:
             logger.debug("apps bus: monitor %s unreachable: %s", url, result["error"])
         if verdict["alert"]:
             from services.alerts_inbox import apply_alert

@@ -55,13 +55,22 @@ def test_template_has_no_dollar_variable_in_the_leaf_url():
     assert "@@INTERNAL_API_KEY_URL@@" in live
 
 
+def test_include_is_relative_to_the_rendered_file():
+    # nats-server joins EVERY include path onto the config file's
+    # directory — an absolute include never opens. The entrypoint renders
+    # next to users.conf so a bare "users.conf" is the only correct form.
+    live = _config_lines(TEMPLATE.read_text())
+    includes = [l for l in live.splitlines() if l.strip().startswith("include")]
+    assert includes == ['include "users.conf"']
+
+
 @pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
 def test_render_puts_the_hex_key_in_the_leaf_url():
     out = _render("c0ffee1234deadbeef")
     assert 'url: "nats://opennvr-apps-bus:c0ffee1234deadbeef@nats:7422"' in out
     live = _config_lines(out)
     assert "@@INTERNAL_API_KEY_URL@@" not in live and "$INTERNAL_API_KEY" not in live
-    assert 'include "/var/lib/opennvr/nats/users.conf"' in out
+    assert 'include "users.conf"' in out
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
@@ -118,12 +127,20 @@ def test_unlinked_counts_only_after_the_grace_period_and_alerts_hourly():
     assert w.state()["linked"] is True and w.state()["remotes"] == ["opennvr-nats"]
 
 
-def test_unreachable_monitor_is_not_treated_as_unlinked():
+def test_unreachable_monitor_counts_as_an_outage_after_the_grace_period():
+    # nats-apps restarting on a config it cannot parse: every app logs
+    # "Temporary failure in name resolution" forever. Same outage, same alert.
     t0 = 2_000_000.0
-    for i in range(10):
-        assert w.observe({"error": "ConnectError: boom"}, now=t0 + i * 60) == {"transition": None, "alert": False}
+    assert w.observe({"error": "ConnectError: boom"}, now=t0) == {"transition": None, "alert": False}
+    assert w.observe({"error": "ConnectError: boom"}, now=t0 + 60) == {"transition": None, "alert": False}
+    assert w.observe({"error": "ConnectError: boom"}, now=t0 + w.GRACE_S) == {"transition": "lost", "alert": True}
     snap = w.state()
     assert snap["reachable"] is False and snap["linked"] is None and "boom" in snap["error"]
+    env_ = w.alert_envelope(now=t0 + w.GRACE_S)
+    assert env_["title"].startswith("Apps bus is down") and "restarting" in env_["description"]
+    # it comes back linked → restored
+    assert w.observe({"linked": True, "remotes": ["opennvr-nats"]}, now=t0 + w.GRACE_S + 30) == \
+        {"transition": "restored", "alert": False}
 
 
 def test_check_once_writes_the_inbox_alert(monkeypatch, env):
