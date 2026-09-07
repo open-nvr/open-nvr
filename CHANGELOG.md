@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Apps bus refused every app: core could never write the users
+  file.** The `opennvr_nats_auth` volume is created root-owned by
+  `nats-apps` when it seeds `users.conf`, and core runs as `opennvr`
+  (uid 1000) — so its atomic tempfile-and-rename in that directory
+  failed on every start and every key issue, the bus only ever knew
+  the `_no_apps_yet` seed user, and logged `authentication error -
+  User "license-plate-recognition"` (and the same for every other app)
+  once the server was actually up. Core's `docker-entrypoint.sh` now
+  takes ownership of `/var/lib/opennvr/nats` like the other shared
+  volumes, `apps-entrypoint.sh` hands the directory and the seed to
+  uid 1000 from its side (so start order never matters), and a failed
+  write is an ERROR naming the cause instead of a warning. Also: the
+  rendered `apps.conf` no longer repeats the key inside a comment.
+
 - **Apps bus never started: `nats-apps` restart-looped on its `include`
   path, and every app failed to resolve it.** nats-server joins *every*
   `include` onto the config file's own directory — an absolute path

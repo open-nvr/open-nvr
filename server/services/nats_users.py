@@ -160,7 +160,11 @@ def write_users_conf(db, path: str | os.PathLike | None = None) -> bool:
         os.chmod(tmp, 0o640)
         os.replace(tmp, target)
     except OSError as exc:
-        logger.warning("could not write the apps-bus users file %s: %s", target, exc)
+        logger.error("could not write the apps-bus users file %s: %s — the apps bus "
+                     "keeps its previous users and refuses every app whose key is not "
+                     "in it. Usually ownership: the directory must be writable by the "
+                     "user core runs as (docker-entrypoint.sh chowns it on start)",
+                     target, exc)
         return False
     logger.info("apps-bus users file written: %d app(s) → %s",
                 sum(1 for r in rows if getattr(r, "nats_password_bcrypt", None)), target)

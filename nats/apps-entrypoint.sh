@@ -50,6 +50,11 @@ if [ "${1:-}" = "--render" ]; then
 fi
 
 mkdir -p "$(dirname "$USERS")"
+# core (uid 1000 in its image) rewrites the users file in this directory
+# by tempfile + rename; this server runs as root and would otherwise leave
+# the directory root-owned and core locked out. Best effort — core's own
+# entrypoint does the same from its side.
+chown 1000:1000 "$(dirname "$USERS")" 2>/dev/null || true
 render > "$RENDERED"
 chmod 600 "$RENDERED" 2>/dev/null || true
 if grep -v '^[[:space:]]*#' "$RENDERED" | grep -q -e '@@INTERNAL_API_KEY_URL@@' -e '$INTERNAL_API_KEY'; then
@@ -65,6 +70,7 @@ authorization {
   ]
 }
 SEED
+  chown 1000:1000 "$USERS" 2>/dev/null || true
 fi
 
 # Fail fast with nats-server's own parse error rather than a restart loop.

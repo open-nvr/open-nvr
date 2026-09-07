@@ -55,6 +55,23 @@ def test_template_has_no_dollar_variable_in_the_leaf_url():
     assert "@@INTERNAL_API_KEY_URL@@" in live
 
 
+def test_core_entrypoint_takes_ownership_of_the_users_volume():
+    # core runs as uid opennvr; nats-apps (root) creates the shared volume
+    # directory. Without this chown core can never replace the seed users
+    # file and the bus refuses every app.
+    text = (REPO / "docker-entrypoint.sh").read_text()
+    assert "chown -R opennvr:opennvr /var/lib/opennvr/nats" in text
+    live = _config_lines(ENTRYPOINT.read_text())
+    assert 'chown 1000:1000 "$(dirname "$USERS")"' in live
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh")
+def test_rendered_comment_does_not_carry_the_key():
+    out = _render("c0ffee1234deadbeef")
+    comments = "\n".join(l for l in out.splitlines() if l.strip().startswith("#"))
+    assert "c0ffee1234deadbeef" not in comments
+
+
 def test_include_is_relative_to_the_rendered_file():
     # nats-server joins EVERY include path onto the config file's
     # directory — an absolute include never opens. The entrypoint renders
