@@ -59,6 +59,7 @@ from services.app_keys import (
     AppPrincipal, issue_key, looks_like_app_key,
     resolve_app_key, revoke_key,
 )
+from services.app_tls import app_verify
 from services.audit_service import write_audit_log
 from services.app_entitlements import (
     entitlement_view, may_enable, store_license_key, verify_with_app,
@@ -1205,7 +1206,7 @@ async def invoke_app_action(
     # for this app (services/app_user_context.py) so it can render or
     # refuse per user without a login of its own.
     headers.update(user_context_headers(db, row, current_user, purpose="action"))
-    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S, verify=app_verify()) as client:
         try:
             resp = await client.post(
                 f"{base_url}/actions/{action_name}",
@@ -1367,7 +1368,7 @@ async def get_app_status(
     health: dict[str, Any]
     state: Any = None
     reachable = False
-    async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S, verify=app_verify()) as client:
         try:
             health_resp = await client.get(f"{base_url}/health")
             health_resp.raise_for_status()
@@ -1780,7 +1781,7 @@ async def get_app_ui(
 
     headers = user_context_headers(db, row, current_user, purpose="ui")
     try:
-        async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S, verify=app_verify()) as client:
             resp = await client.get(f"{base_url}/ui", headers=headers)
     except Exception:
         raise HTTPException(

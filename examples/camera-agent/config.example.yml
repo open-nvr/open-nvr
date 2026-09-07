@@ -216,6 +216,13 @@ event_ring_size: 256
 # your reverse proxy; localhost only by default.
 host: 127.0.0.1
 port: 9100
+# agent_contract_url — the base URL OpenNVR core reaches THIS agent at,
+# registered with the App Catalog as the agent's contract URL (core probes
+# <url>/health and <url>/state from there). Under compose it is the
+# service name, https://camera-agent:9100 (in the TLS certificate's SAN);
+# on a bare host, wherever core can reach this process. Unset = this
+# machine's hostname on `port`.
+# agent_contract_url: http://127.0.0.1:9100
 
 # Cameras the agent knows about. Each entry contributes a sentence
 # to the LLM's system prompt ("front-porch is the main entrance...")

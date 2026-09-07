@@ -86,6 +86,11 @@ opennvr_api_url: http://opennvr-core:8000
 auth_mode: opennvr
 
 # TLS: self-signed pair from camera-agent-certs-init (see config.docker.yml).
+# The URL core reaches this agent at on the compose network — registered
+# with the App Catalog as the contract URL core probes (/health, /state).
+# The service name, which is in the certificate's SAN; the container's
+# own hostname would be an unresolvable container id.
+agent_contract_url: https://camera-agent-chat:9100
 tls_certfile: /certs/server.crt
 tls_keyfile: /certs/server.key
 
