@@ -685,6 +685,26 @@ async def list_apps(
     return [_serialize_app(row) for row in rows]
 
 
+@router.get("/bus")
+async def get_apps_bus(
+    current_user: User = Depends(get_current_active_user),
+):
+    """The apps bus and its leaf link to the platform bus, as core last
+    saw it (``services/apps_bus_watch.py``). ``linked: false`` for more
+    than the grace period is the "apps are up but alerts stopped"
+    condition; the inbox alert says the same thing."""
+    from core.config import settings
+    from services import apps_bus_watch
+
+    url = apps_bus_watch.monitor_url(settings.nats_apps_url, settings.nats_apps_monitor_url)
+    return {
+        "enabled": bool(settings.nats_apps_url),
+        "url": settings.nats_apps_url or None,
+        "monitor_url": url or None,
+        **apps_bus_watch.state(),
+    }
+
+
 @router.get("/index")
 async def get_apps_index(
     current_user: User = Depends(get_current_active_user),

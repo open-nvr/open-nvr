@@ -358,6 +358,10 @@ class Settings(BaseSettings):
     # off), and the URL apps are told to join with their own key.
     nats_users_conf: str = ""
     nats_apps_url: str = ""
+    # Where nats-apps publishes /leafz (services/apps_bus_watch.py checks
+    # the leaf link to the platform bus is up). Empty = derived from
+    # nats_apps_url's host on the standard monitoring port 8222.
+    nats_apps_monitor_url: str = ""
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod

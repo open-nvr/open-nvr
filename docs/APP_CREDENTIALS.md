@@ -118,6 +118,40 @@ bus, keeps using the configured `nats_url` + `nats_token` on the
 platform bus, exactly as before. Set `NATS_APPS_URL=` (empty) in `.env`
 to turn the apps bus off.
 
+### When alerts stop
+
+The apps bus reaches the platform bus over **one leaf link**, and
+everything crosses it: app alerts to the inbox, domain events to core,
+the platform's detections to the apps. When that link is down nothing
+looks broken — both NATS containers are healthy, every app logs
+`joining NATS at ['nats://nats-apps:4222'] as <app id>` and stays
+connected — and the operator's alerts simply stop. So:
+
+* **Core watches the link** (`services/apps_bus_watch.py`): it polls
+  `nats-apps`' monitoring endpoint (`/leafz` on port 8222, derived from
+  `NATS_APPS_URL`; override with `NATS_APPS_MONITOR_URL`) every 30 s. No
+  leaf connection for more than two minutes logs an error, raises a
+  **high** inbox alert ("Apps bus is not linked to the platform bus")
+  once an hour while it lasts, and shows under `GET /api/v1/apps/bus`
+  (`linked`, `remotes`, `unlinked_for_s`). Recovery is logged.
+* **The link authenticates with `INTERNAL_API_KEY`** — `nats-apps`
+  presents it as the `opennvr-apps-bus` user on the platform server's
+  port 7422. `nats/apps.conf` is a *template*: nats-server does not
+  expand `$VAR` inside a URL, so `apps-entrypoint.sh` renders the key
+  (percent-encoded — a base64 key carries `/`, `+`, `=`) into
+  `/tmp/apps.conf` before starting, and refuses to start if the
+  placeholder is still there. Both containers must see the same value.
+* To look yourself: `curl -s http://nats-apps:8222/leafz` from inside
+  the stack (`leafs` must not be empty); `docker logs opennvr_nats_apps`
+  for `Leafnode Error 'Authorization Violation'`; `docker logs
+  opennvr_nats` for `authentication error` on 7422.
+
+Do **not** "fix" this by letting apps fall back to the platform bus with
+the site token: that silently trades every app's manifest-scoped
+permissions for the unrestricted bus the apps bus exists to take away.
+An unlinked apps bus is an outage to surface, not a path to route
+around.
+
 ## Version negotiation
 
 The register response's `registry.min_sdk_version` is the oldest SDK the

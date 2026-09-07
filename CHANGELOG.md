@@ -6,6 +6,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Apps bus: the leaf link to the platform bus never authenticated —
+  app alerts stopped.** `nats/apps.conf` put `$INTERNAL_API_KEY` inside
+  the leaf remote URL; nats-server expands `$VAR` only as a whole
+  value, never inside a URL, so `nats-apps` presented the literal
+  string as its password and the platform server refused it forever.
+  Both servers were healthy and every app logged "connected", but
+  nothing crossed: no app alert reached the inbox, no detection reached
+  an app (reproduced against nats-server 2.10 — an LPR alert published
+  on the apps bus never arrived on the platform bus; with the fix it
+  does). `apps-entrypoint.sh` now renders the key (percent-encoded, so
+  a base64 key with `/`, `+`, `=` works) into the config before start
+  and refuses to start with the placeholder in place. And the failure
+  is loud from now on: core polls `nats-apps`' `/leafz` and, after two
+  minutes without a leaf connection, logs an error, raises a high
+  inbox alert (hourly while it lasts) and reports it at
+  `GET /api/v1/apps/bus`; `NATS_APPS_MONITOR_URL` overrides the
+  derived monitoring URL. docs/APP_CREDENTIALS.md → "When alerts stop".
+
 ### Changed
 
 - **camera-agent on Pipecat 1.8 with Smart Turn v3.** The agent moves
