@@ -117,6 +117,18 @@ llm_temperature: 0.4
 # model ramble for ~20s of CPU generation; 128 is plenty and noticeably
 # faster per turn.
 llm_max_tokens: 128
+
+# ── Turn-taking ───────────────────────────────────────────────────
+# Silero VAD opens a turn; Smart Turn v3 (Pipecat's semantic end-of-turn
+# model, bundled, CPU) closes it — a pause mid-sentence no longer ends
+# the turn. The VAD stop window is short on purpose (the model judges
+# the pause). Raise turn_stop_secs on slow speakers; lower it for snappier
+# replies at the cost of occasional early cut-offs.
+vad_confidence: 0.55
+vad_start_secs: 0.15
+vad_stop_secs: 0.2
+turn_stop_secs: 2.0
+turn_max_secs: 12.0
 # Context window. The default (4096) no longer fits this config's toolset:
 # 13 advertised tool schemas + the system prompt (rules, clock, roster, task
 # guidance) measure ~3.5-4.5k tokens BEFORE any conversation history — and

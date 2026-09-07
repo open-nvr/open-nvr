@@ -10,19 +10,15 @@ license = { text = "AGPL-3.0" }
 # nats-py taps the inference event bus for the recent_events tool.
 # Pillow re-encodes camera frames to JPEG for the vision adapters.
 #
-# Pipecat is pinned to the 0.0.5x series. We use ``FrameSerializerType``
-# and the keyword-kwargs ``InputAudioRawFrame(audio=, sample_rate=,
-# num_channels=)`` constructor, both of which were removed/reworked
-# in the 0.0.10x series (verified live: pipecat-ai 0.0.108 deletes
-# ``FrameSerializerType`` from ``pipecat.serializers.base_serializer``,
-# which collapses the import block in ``serializer.py`` to stubs and
-# turns ``InputAudioRawFrame(...)`` into ``object(...)`` →
-# ``TypeError: object() takes no arguments``). When upstream
-# stabilises 1.x, port ``serializer.py`` and bump this pin in lock-
-# step; until then the upper bound prevents pip from drifting onto
-# the new API.
+# Pipecat 1.8+: the universal LLMContext + LLMContextAggregatorPair,
+# user-turn strategies (Silero VAD to start, Smart Turn v3 — the
+# semantic end-of-turn model, bundled in the wheel and run on CPU with
+# onnxruntime — to stop), and services under pipecat.services.*_service.
+# The 0.0.5x API this agent was born on (FrameSerializerType,
+# OpenAILLMContext, vad_analyzer on the transport) is gone; the port
+# lives in serializer.py / services.py / build_pipeline_task.
 dependencies = [
-    "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60",
+    "pipecat-ai[silero,websocket]>=1.8.1,<2.0",
     "httpx>=0.27,<1.0",
     "fastapi>=0.110,<1.0",
     "uvicorn>=0.27,<1.0",

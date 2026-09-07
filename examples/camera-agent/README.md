@@ -71,7 +71,7 @@ On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
                                              │ audio frames
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ Silero VAD (turn detection)       │
+                              │ Silero VAD → Smart Turn v3 (turn) │
                               └──────────────┬────────────────────┘
                                              │ utterance bytes
                                              ▼
@@ -165,11 +165,17 @@ Real-world limitations the example does NOT yet handle:
   starts fresh. "What did you tell me yesterday?" won't work.
   Use the `recent_events` tool with a long window for ad-hoc
   recall against NATS history.
-* **No real interrupts.** Pipecat's barge-in support is set up
-  (`allow_interruptions=True`), but the demo HTML client doesn't
-  yet send the right cancel frames when you start talking again.
-  Wait for the agent to finish before asking the next thing for
-  v0.1.
+* **No real interrupts.** Barge-in is switched off
+  (`VADUserTurnStartStrategy(enable_interruptions=False)`) because the
+  demo HTML client doesn't send cancel frames when you start talking
+  again. Wait for the agent to finish before asking the next thing.
+* **Turn-taking is semantic.** Pipecat 1.8's user aggregator runs
+  Silero VAD to open a turn and **Smart Turn v3** (the bundled,
+  CPU-only end-of-turn model) to close it, so a pause mid-sentence
+  no longer ends your question the way the old 0.7 s silence timer
+  did. Tune `vad_*` / `turn_*` in `config.yml` if your speakers pause
+  longer; the model, the VAD weights and NLTK's tokenizer are all in
+  the image — nothing is downloaded at runtime.
 * **Browser demo is minimal.** ~200 lines of vanilla JS. Audio
   worklets, jitter buffering, transcript display — none of it.
   The intent is to demonstrate the agent shape; production UIs
