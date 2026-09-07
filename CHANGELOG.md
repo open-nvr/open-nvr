@@ -22,6 +22,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `punkt_tab` so a sovereign site never downloads at first reply.
   `RawPcmSerializer` follows the 1.x `FrameSerializer` (BaseObject,
   `setup(FrameProcessorSetup)`, no `type`).
+- **camera-agent turn-taking sized to the hardware.** Smart Turn v3's
+  cost was measured on a CPU-only 4-core box (one ~60–90 ms verdict per
+  pause, Silero ≈0.7 % of a core) and the agent now fits itself to what
+  it runs on: numpy's BLAS/OpenMP pools are capped to one thread before
+  the model loads (uncapped, the 8 s log-mel fanned out across every core
+  and was *slower*, 90–130 ms), onnxruntime's thread count follows the
+  cores the process may actually use (scheduler affinity and cgroup CPU
+  quotas, not `os.cpu_count()`), and a single-core box gets a plain
+  silence timer instead of the model. New `turn_detector` (auto | smart
+  | timer), `turn_cpu_threads` and `turn_timer_secs` knobs;
+  `turn_max_secs` defaults to the model's 8 s window. The resolved
+  profile is logged at startup and returned by `GET /hardware` under
+  `turn`. MODELS_AND_LATENCY.md gains "Turn detection on CPU".
 
 ### Added
 
