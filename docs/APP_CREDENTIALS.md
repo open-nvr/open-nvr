@@ -141,6 +141,14 @@ connected — and the operator's alerts simply stop. So:
   (percent-encoded — a base64 key carries `/`, `+`, `=`) into
   `/tmp/apps.conf` before starting, and refuses to start if the
   placeholder is still there. Both containers must see the same value.
+* **`nats-apps` must be *up* first.** `docker compose ps nats-apps`
+  showing `Restarting` means its config did not parse — read
+  `docker logs opennvr_nats_apps`. nats-server joins every `include`
+  onto the config file's directory (absolute paths too), which is why
+  the entrypoint renders the config next to the users file and the
+  template includes a bare `users.conf`. While it restarts, apps log
+  `Temporary failure in name resolution` for `nats-apps` and reconnect
+  forever; core raises "Apps bus is down" after two minutes.
 * To look yourself: `curl -s http://nats-apps:8222/leafz` from inside
   the stack (`leafs` must not be empty); `docker logs opennvr_nats_apps`
   for `Leafnode Error 'Authorization Violation'`; `docker logs

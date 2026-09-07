@@ -8,6 +8,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Apps bus never started: `nats-apps` restart-looped on its `include`
+  path, and every app failed to resolve it.** nats-server joins *every*
+  `include` onto the config file's own directory — an absolute path
+  included — so `include "/var/lib/opennvr/nats/users.conf"` from
+  `/etc/nats/apps.conf` opened `/etc/nats/var/lib/…/users.conf`, the
+  server exited on parse, and `restart: unless-stopped` looped it
+  forever. A container that never comes up has no DNS entry, which is
+  the `socket.gaierror: Temporary failure in name resolution` for
+  `nats-apps` every SDK app logged while reconnecting without end, and
+  why no alert has reached the inbox since the apps bus landed. The
+  entrypoint now renders the config *next to* the users file
+  (`/var/lib/opennvr/nats/apps.conf`, mode 600) and the template
+  includes a bare `users.conf`; a test pins the include relative.
+  Verified against nats-server 2.10 in the container's exact layout
+  from an empty volume: server up, leaf link up, users-file reload, an
+  LPR alert crossing to the platform bus. The core watchdog now treats
+  `nats-apps` not answering its monitoring endpoint for two minutes as
+  the same outage as a dead leaf link (log error + high inbox alert
+  "Apps bus is down"), instead of a debug line.
+
 - **Apps bus: the leaf link to the platform bus never authenticated —
   app alerts stopped.** `nats/apps.conf` put `$INTERNAL_API_KEY` inside
   the leaf remote URL; nats-server expands `$VAR` only as a whole

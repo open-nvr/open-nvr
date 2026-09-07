@@ -6,7 +6,9 @@
 #    by us — percent-encoded, since INTERNAL_API_KEY may be base64 with
 #    '/', '+' or '=' (nats-server URL-decodes it on the way out).
 #    `sh apps-entrypoint.sh --render` prints the rendered config and
-#    exits (what the tests exercise).
+#    exits (what the tests exercise). The rendered file lives NEXT TO
+#    the users file because nats-server resolves every `include` — even
+#    an absolute path — relative to the config file's directory.
 # 2. Seed the users file. It lives on a volume core writes to. On a fresh
 #    volume it does not exist yet, so seed a valid file with no matchable
 #    user; core replaces it on its first start
@@ -15,8 +17,8 @@
 #    `nats-server --signal reload` sends.
 set -eu
 TEMPLATE="${APPS_CONF_TEMPLATE:-/etc/nats/apps.conf}"
-RENDERED="${APPS_CONF_RENDERED:-/tmp/apps.conf}"
 USERS="${APPS_USERS_CONF:-/var/lib/opennvr/nats/users.conf}"
+RENDERED="${APPS_CONF_RENDERED:-$(dirname "$USERS")/apps.conf}"
 
 url_encode() {
   # Every character that is not unreserved (RFC 3986) — the userinfo
@@ -47,12 +49,13 @@ if [ "${1:-}" = "--render" ]; then
   exit 0
 fi
 
+mkdir -p "$(dirname "$USERS")"
 render > "$RENDERED"
+chmod 600 "$RENDERED" 2>/dev/null || true
 if grep -v '^[[:space:]]*#' "$RENDERED" | grep -q -e '@@INTERNAL_API_KEY_URL@@' -e '$INTERNAL_API_KEY'; then
   echo "apps bus: config render left the key placeholder in place — refusing to start" >&2
   exit 1
 fi
-mkdir -p "$(dirname "$USERS")"
 if [ ! -s "$USERS" ]; then
   cat > "$USERS" <<'SEED'
 # seeded by apps-entrypoint.sh — core replaces this file
