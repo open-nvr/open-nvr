@@ -54,6 +54,21 @@ defending the architectural choice in a regulated procurement, see
 printable one-pager for IT decision-makers; this page is the
 implementation evidence behind it.
 
+## The evidence pack
+
+Everything on this page, as it stands on one deployment, in one zip:
+
+```
+python3 scripts/evidence_pack.py --url https://nvr.example.org --user admin --days 90
+```
+
+Posture, the camera security check, recording coverage, adapters and
+fingerprints, installed apps with their signer and egress, firewall
+rules and the audit log for the period, plus `EVIDENCE.md` (PASS /
+ATTENTION / UNKNOWN per check, framework → files) and `manifest.json`
+with the SHA-256 of every artefact. Read-only; credentials redacted.
+[ENTERPRISE.md](ENTERPRISE.md#the-evidence-pack).
+
 ## Audit-chain quick reference
 
 For an auditor asking "show me the evidence trail for an alert":

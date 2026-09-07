@@ -8,6 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Enterprise: the offer, the appliance, the evidence pack.**
+  `docs/ENTERPRISE.md` states what an enterprise engagement includes
+  (reference-appliance deployment, the evidence pack reviewed against
+  the customer's framework, §889 via Scout, support with response
+  times, custom AI) and what it never includes. `docs/REFERENCE_APPLIANCE.md`
+  is the known-good site: three sizes with hardware, the storage
+  arithmetic, the three network segments and exposed ports, host
+  hardening, and the checklist the evidence pack scores.
+  `scripts/evidence_pack.py` generates that pack from a running
+  deployment, read-only: posture, the camera security check, recording
+  coverage against retention, adapters with fingerprints and declared
+  egress, installed apps with signer and egress, firewall rules,
+  retention, the audit log for the period — plus `EVIDENCE.md`
+  (PASS / ATTENTION / UNKNOWN per check, framework → files) and a
+  `manifest.json` of SHA-256 hashes. Stream URLs and secrets are
+  redacted; missing routes are recorded, never fatal.
+
 - **SDK toward 1.0 (on main; no tag until QA signs off 0.5.0).**
   `opennvr_app_sdk.testing` — `RecorderChannel`, `app_config`,
   `detection` / `inference_event` / `tier0_event` / `domain_event`

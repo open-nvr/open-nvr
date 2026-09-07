@@ -33,6 +33,8 @@ Start here. Pick the row that matches what you're doing.
 ## Security, compliance & deployment
 - **[SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md)** — threat model + the `V-###` control matrix (code refs `See V-###` point here).
 - **[COMPLIANCE.md](COMPLIANCE.md)** — control-to-framework mapping (procurement evidence).
+- **[ENTERPRISE.md](ENTERPRISE.md)** — the enterprise offer: reference appliance deployment, the compliance evidence pack, §889, support with response times, custom AI.
+- **[REFERENCE_APPLIANCE.md](REFERENCE_APPLIANCE.md)** — the known-good site: three sizes, storage arithmetic, three network segments, host hardening, the checklist the evidence pack scores.
 - **[GOVERNMENT_DEPLOYMENT.md](GOVERNMENT_DEPLOYMENT.md)** — air-gapped / regulated deployment brief.
 - **[EDGE_AUTONOMY.md](EDGE_AUTONOMY.md)** — edge / robotics on-board agent notes.
 - **[../SECURITY.md](../SECURITY.md)** — how to report a vulnerability.
