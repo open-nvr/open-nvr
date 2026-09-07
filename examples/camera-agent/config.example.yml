@@ -276,6 +276,16 @@ system_prompt: |
 #     frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
 #     opennvr_camera_id: 3
 
+# Which alerts relayed from INSTALLED APPS the voice UI speaks aloud. They
+# always land in the feed with a chime; this only decides narration:
+#   important — high & critical only (default: a plate reader's every read
+#               is shown, not read out loud)
+#   all       — every app alert
+#   none      — never speak app alerts
+# The operator can change it live (Automations → ⚙); that choice persists
+# in the state file and wins over this value.
+announce_app_alerts: important
+
 # Per-site alert-level defaults by target (merged over the built-ins:
 # fire/smoke/flame/gas → siren). Levels: siren = CRITICAL, rings until
 # silenced · pulse = URGENT, loud ~1 min then stands down · chime =

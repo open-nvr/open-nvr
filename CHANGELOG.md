@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **camera-agent: removing an installed app's skill said "skill can't
+  be enabled yet".** Installed catalog apps appear in the skills rail
+  read-only — they are enabled/disabled in the App Catalog — but the
+  rail offered ✕ and the server answered with the enable-time message.
+  The rail now shows ⚙ linking to the app's catalog page, and
+  `POST /skills/app:<id>/disable` answers 409 naming the app and where
+  it is managed (`manage_url` on the skill entry).
+- **camera-agent: every relayed app alert was read aloud.** New
+  `announce_app_alerts` policy — `important` (default: high/critical
+  only), `all`, `none` — settable in the UI (Automations → ⚙, persisted)
+  or config; every alert still lands in the feed with a chime, the
+  voice UI speaks only those the server marks `announce`. Relayed text
+  no longer repeats the title when the summary already starts with it.
+
 - **OpenNVR Agent showed "unreachable" in the App Catalog while it
   worked.** It registered its contract URL as
   `https://<container id>:9100` — under compose the container's

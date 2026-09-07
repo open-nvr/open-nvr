@@ -449,3 +449,37 @@ def test_leaving_the_camera_screen_cancels_a_pending_grace_timer():
     fn = html[html.index("function stopWebrtc"):]
     fn = fn[:fn.index("// The same WebRTC")]
     assert "_clearWhepGrace();" in fn
+
+
+def test_app_backed_skill_cannot_be_toggled_here_and_points_at_the_catalog():
+    """An installed catalog app appears as a read-only skill; the ✕ used
+    to answer "skill can't be enabled yet" — wrong verb, wrong place. Now:
+    a 409 that names the app and where it is managed."""
+    from fastapi.testclient import TestClient
+
+    from camera_agent import AppConfig, CameraAgentRuntime, build_app
+    from context import CameraSpec
+
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    opennvr_api_url="http://core:8000", opennvr_ui_url="https://nvr.local",
+                    cameras=[CameraSpec(camera_id="c", frame_url="http://x", role="f")])
+    rt = CameraAgentRuntime(cfg)
+
+    class _Reg:
+        apps_cached = [{"id": "license-plate-recognition", "name": "License Plate Recognition",
+                        "enabled": True, "manifest": {"summary": "Reads plates"}}]
+    rt.app_registry = _Reg()
+    entry = next(s for s in rt.skills_payload() if s["id"] == "app:license-plate-recognition")
+    assert entry["read_only"] is True
+    assert entry["manage_url"] == "https://nvr.local/app-catalog/license-plate-recognition"
+    assert "App Catalog" in entry["hint"]
+
+    tc = TestClient(build_app(rt))
+    r = tc.post("/skills/app:license-plate-recognition/disable")
+    assert r.status_code == 409
+    body = r.json()
+    assert "License Plate Recognition" in body["error"] and "App Catalog" in body["error"]
+    assert body["url"] == "https://nvr.local/app-catalog/license-plate-recognition"
+    assert "can't be enabled yet" not in body["error"]
+    # the app entry is still there — nothing was toggled
+    assert any(s["id"] == "app:license-plate-recognition" for s in rt.skills_payload())

@@ -287,6 +287,12 @@ class AppConfig:
     # arms its after-hours person alarm as  person: siren . An explicit
     # ring on the alarm always wins; this only decides the DEFAULT.
     alarm_ring_defaults: dict[str, str] | None = None
+    # Which relayed APP alerts the voice UI speaks aloud (they always land
+    # in the feed with a chime): "all", "important" (high/critical only —
+    # the default, so a plate reader's every read is shown, not narrated),
+    # or "none". Operator-editable in the UI (Automations → ⚙); the UI
+    # choice persists in the state file and wins over this.
+    announce_app_alerts: str = "important"
 
     # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
     # only to put a tap-to-open deep link (/demo/camera/{id}) into outgoing
@@ -2934,6 +2940,7 @@ def load_config(path: str | Path) -> AppConfig:
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         agent_public_url=raw.get("agent_public_url"),
         agent_contract_url=raw.get("agent_contract_url"),
+        announce_app_alerts=_str("announce_app_alerts", "important"),
         alarm_ring_defaults=(
             {str(k).strip().lower(): str(v).strip().lower()
              for k, v in raw["alarm_ring_defaults"].items()}
@@ -3241,6 +3248,7 @@ class CameraAgentRuntime:
         # LAST layer over config + built-ins in ring_defaults(); durable
         # via persist()/load_state like the skill toggles.
         self._ring_overrides: dict[str, str] = {}
+        self._announce_app_alerts: str | None = None   # UI override of cfg
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -3432,6 +3440,33 @@ class CameraAgentRuntime:
                 if v in ("siren", "pulse", "chime", "silent"):
                     merged[k] = v
         return merged
+
+    ANNOUNCE_LEVELS = ("all", "important", "none")
+
+    def announce_app_alerts(self) -> str:
+        """Effective policy for speaking relayed app alerts: the UI
+        override when one was saved, else config, else "important"."""
+        for v in (self._announce_app_alerts, getattr(self.cfg, "announce_app_alerts", None)):
+            v = str(v or "").strip().lower()
+            if v in self.ANNOUNCE_LEVELS:
+                return v
+        return "important"
+
+    def set_announce_app_alerts(self, level: str) -> str:
+        level = str(level or "").strip().lower()
+        if level not in self.ANNOUNCE_LEVELS:
+            raise ValueError("announce_app_alerts must be all|important|none")
+        self._announce_app_alerts = level
+        self.persist()
+        return level
+
+    def should_announce_app_alert(self, severity: str | None) -> bool:
+        policy = self.announce_app_alerts()
+        if policy == "all":
+            return True
+        if policy == "none":
+            return False
+        return str(severity or "").strip().lower() in ("high", "critical")
 
     def set_ring_overrides(self, overrides: dict[str, str]) -> dict[str, str]:
         """Replace the UI-edited overrides (sanitized), persist, return
@@ -3698,7 +3733,11 @@ class CameraAgentRuntime:
                 "enabled": True,
                 "available": True,
                 "read_only": True,
-                "hint": "",
+                "hint": "installed app — enable, disable or uninstall it in the App Catalog",
+                # Where the operator manages it (the app's catalog page).
+                "manage_url": (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog/{app_id}"
+                    if getattr(self.cfg, "opennvr_ui_url", None) else None),
                 "backing_tasks": [],
                 "tasks_available": True,
             })
@@ -3974,6 +4013,7 @@ class CameraAgentRuntime:
             # comes back on the next restart (its tools re-advertised).
             "disabled_skills": sorted(self.disabled_skills),
             "ring_overrides": dict(self._ring_overrides),
+            "announce_app_alerts": self._announce_app_alerts,
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -4010,6 +4050,9 @@ class CameraAgentRuntime:
             self._ring_overrides = {
                 str(k).lower(): str(v).lower() for k, v in ro.items()
                 if str(v).lower() in ("siren", "pulse", "chime", "silent")}
+        aa = data.get("announce_app_alerts")
+        if isinstance(aa, str) and aa.lower() in self.ANNOUNCE_LEVELS:
+            self._announce_app_alerts = aa.lower()
         restored_disabled: list[str] = []
         for sid in (data.get("disabled_skills") or []):
             if self.set_skill_enabled(sid, False):
@@ -4255,7 +4298,12 @@ class CameraAgentRuntime:
         self.monitors._notifications.append({
             "id": self.monitors._next_note_id,
             "source": f"app:{alert.app_id}",
-            "text": f"{alert.title} — {alert.summary}",
+            "text": relay_text(alert.title, alert.summary),
+            "severity": str(alert.severity or "info"),
+            "camera": alert.camera_id,
+            # The feed always shows it (with a chime); whether the voice
+            # UI also SPEAKS it follows the site's announce policy.
+            "announce": self.should_announce_app_alert(alert.severity),
             "ts": now,
         })
         self.monitors._next_note_id += 1
@@ -5250,6 +5298,22 @@ def turn_vad_params(cfg: Any) -> Any:
 AGENT_VERSION = "1.0.0"
 
 
+def relay_text(title: str | None, summary: str | None) -> str:
+    """One line for the feed / the voice: ``title — summary``, unless the
+    summary already restates the title (SDK alerts often do: "Monitored
+    plate X seen — Monitored plate X seen: License plate…"), in which
+    case the summary alone."""
+    t = " ".join(str(title or "").split())
+    m = " ".join(str(summary or "").split())
+    if not m:
+        return t
+    if not t:
+        return m
+    if m.lower().startswith(t.lower().rstrip(".:")):
+        return m
+    return f"{t} — {m}"
+
+
 def agent_scheme(cfg: Any) -> str:
     return "https" if getattr(cfg, "tls_certfile", None) else "http"
 
@@ -5606,7 +5670,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         (the editor edits ONLY the overrides; config/built-ins show as
         inherited)."""
         return {"defaults": runtime.ring_defaults(),
-                "overrides": dict(runtime._ring_overrides)}
+                "overrides": dict(runtime._ring_overrides),
+                "announce_app_alerts": runtime.announce_app_alerts()}
 
     @app.put("/alarm-defaults")
     async def _put_alarm_defaults(request: Request) -> JSONResponse:
@@ -5616,14 +5681,21 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             body = await request.json()
         except Exception:
             body = {}
-        overrides = (body or {}).get("overrides")
+        body = body or {}
+        overrides = body.get("overrides", dict(runtime._ring_overrides))
         if not isinstance(overrides, dict):
             return JSONResponse({"error": "overrides must be a mapping of "
                                           "target -> siren|pulse|chime|silent"},
                                 status_code=400)
+        if "announce_app_alerts" in body:
+            try:
+                runtime.set_announce_app_alerts(body.get("announce_app_alerts"))
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
         merged = runtime.set_ring_overrides(overrides)
         return JSONResponse({"defaults": merged,
-                             "overrides": dict(runtime._ring_overrides)})
+                             "overrides": dict(runtime._ring_overrides),
+                             "announce_app_alerts": runtime.announce_app_alerts()})
 
     @app.get("/events")
     async def _events() -> dict[str, Any]:
@@ -5879,6 +5951,18 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse({"error": "action must be enable or disable"},
                                 status_code=400)
         await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
+        if skill_id.startswith("app:"):
+            # An installed catalog app shows up as a skill so the operator
+            # can SEE it; enabling/disabling it is the App Catalog's job
+            # (operator permission, audit) — the agent only reads apps.
+            skill = next((s for s in runtime.skills_payload() if s["id"] == skill_id), None)
+            name = skill["name"] if skill else skill_id[4:]
+            return JSONResponse({
+                "error": f"{name} is an installed app, managed in the App Catalog",
+                "hint": (f"Disable or uninstall {name} from OpenNVR → App Catalog; "
+                         "the agent only reads installed apps."),
+                "url": (skill or {}).get("manage_url"),
+            }, status_code=409)
         ok = runtime.set_skill_enabled(skill_id, action == "enable")
         if not ok:
             # Unknown skill, or its backend isn't configured yet.
@@ -5886,6 +5970,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             if skill is None:
                 return JSONResponse({"error": f"unknown skill {skill_id!r}"},
                                     status_code=404)
+            if action == "disable":
+                return JSONResponse({"error": "skill can't be disabled", "hint": skill["hint"]},
+                                    status_code=409)
             return JSONResponse(
                 {"error": "skill can't be enabled yet", "hint": skill["hint"]},
                 status_code=409)
