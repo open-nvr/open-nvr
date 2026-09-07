@@ -6,6 +6,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Apps go dark when `nats-apps` is unreachable.** Since the apps bus
+  (per-app NATS credentials), an app that had adopted
+  `nats://nats-apps:4222` connected to that server alone with
+  `max_reconnect_attempts=-1`: if the name did not resolve or the
+  service was down, the app reconnected forever — `socket.gaierror:
+  Temporary failure in name resolution` every second — and published
+  nothing (QA, 2026-09-07: the LPR app's Vehicles alerts stopped).
+  The SDK now connects with a two-server pool: the apps bus as the app
+  first, the platform bus with the site token second, credentials in
+  each server's URI (`dont_randomize` keeps the order). An unreachable
+  apps bus fails over with a warning naming it; a reachable one is
+  used as before. Verified against the real nats-py client and a
+  minimal NATS server in `tests/test_bus_failover.py`.
+  `docs/APP_CREDENTIALS.md` → Failover.
+
 ### Changed
 
 - **camera-agent on Pipecat 1.8 with Smart Turn v3.** The agent moves

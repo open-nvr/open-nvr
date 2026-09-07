@@ -518,16 +518,15 @@ class NatsAlertChannel:
         }
         # The apps bus as this app when core has told us where it is
         # (credentials.py); the configured URL + token otherwise.
-        from .credentials import bus_connection
+        from .credentials import bus_connection, connected_via_fallback, describe_connection
 
         kwargs.update(bus_connection(None, self._url, self._token))
         self._nc = await nats.connect(**kwargs)
-        logger.info(
-            "NATS alert channel connected to %s (as=%s, prefix=%s)",
-            kwargs.get("servers"),
-            kwargs.get("user") or ("site token" if kwargs.get("token") else "none"),
-            self._subject_prefix,
-        )
+        logger.info("NATS alert channel connected %s (prefix=%s)",
+                    describe_connection(kwargs), self._subject_prefix)
+        if connected_via_fallback(self._nc, kwargs):
+            logger.warning("alert channel: apps bus unreachable — publishing on the platform "
+                           "bus with the site token instead; check the nats-apps service")
 
 
 # ── Dispatcher ─────────────────────────────────────────────────────

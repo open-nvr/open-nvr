@@ -59,7 +59,7 @@ class NatsSubscriberMixin:
     async def _run_nats_loop(self, *, once: bool) -> None:
         import nats
 
-        from .credentials import bus_connection
+        from .credentials import bus_connection, connected_via_fallback, describe_connection
 
         connect_kwargs: dict[str, Any] = {
             "connect_timeout": 5.0,
@@ -73,10 +73,14 @@ class NatsSubscriberMixin:
             getattr(self, "credentials", None),
             getattr(self.cfg, "nats_url", None),
             getattr(self.cfg, "nats_token", None)))
-        logger.info("joining NATS at %s as %s",
-                    connect_kwargs.get("servers"),
-                    connect_kwargs.get("user") or ("site token" if connect_kwargs.get("token") else "anonymous"))
+        logger.info("joining NATS %s", describe_connection(connect_kwargs))
         self._nc = await nats.connect(**connect_kwargs)
+        if connected_via_fallback(self._nc, connect_kwargs):
+            logger.warning(
+                "apps bus %s is unreachable — connected to the platform bus with the site "
+                "token instead. Alerts and events keep flowing; per-app bus permissions do "
+                "not apply on this connection. Check the nats-apps service.",
+                connect_kwargs["servers"][0].split("@")[-1])
         subjects = self._nats_subjects()
         logger.info(
             "%s started: subject=%r",

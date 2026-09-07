@@ -155,10 +155,32 @@ def test_registration_adopts_the_apps_bus_and_the_loop_joins_as_the_app(monkeypa
     assert app.register_with_opennvr() is True
     assert app.credentials.bus_url == "nats://nats-apps:4222"
     assert app.credentials.app_id == "my-app"
-    # What the NATS loop and the alert channel will connect with.
+    # What the NATS loop and the alert channel will connect with: the apps
+    # bus as the app, the platform bus with the site token as the pool's
+    # second server — so an unreachable nats-apps fails over instead of
+    # looping forever (field report 2026-09-07: LPR alerts stopped with
+    # "Temporary failure in name resolution" on every reconnect).
     kw = creds_mod.bus_connection(app.credentials, "nats://nats:4222", "site-secret")
+    assert kw == {"servers": [f"nats://my-app:{key}@nats-apps:4222", "nats://site-secret@nats:4222"],
+                  "dont_randomize": True}
+    assert "token" not in kw and "user" not in kw
+    assert creds_mod.describe_connection(kw) == (
+        "['nats://my-app:***@nats-apps:4222', 'nats://<token>@nats:4222'] as the app, site-token fallback second")
+    # No site token to fall back with (a pure app-key deployment): the apps bus alone.
+    kw = creds_mod.bus_connection(app.credentials, "nats://nats:4222", None)
     assert kw == {"servers": ["nats://nats-apps:4222"], "user": "my-app", "password": key}
-    assert "token" not in kw
+    # A token that is not URL-safe cannot ride in a URI: apps bus alone, as before.
+    kw = creds_mod.bus_connection(app.credentials, "nats://nats:4222", "has spaces/and:colons")
+    assert kw == {"servers": ["nats://nats-apps:4222"], "user": "my-app", "password": key}
+    # connected_via_fallback reads where nats-py actually landed.
+    from types import SimpleNamespace
+    from urllib.parse import urlsplit
+    on_apps = SimpleNamespace(connected_url=urlsplit("nats://nats-apps:4222"))
+    on_platform = SimpleNamespace(connected_url=urlsplit("nats://nats:4222"))
+    pool = creds_mod.bus_connection(app.credentials, "nats://nats:4222", "site-secret")
+    assert creds_mod.connected_via_fallback(on_apps, pool) is False
+    assert creds_mod.connected_via_fallback(on_platform, pool) is True
+    assert creds_mod.connected_via_fallback(on_platform, {"servers": ["nats://nats:4222"]}) is False
     # A fresh process (same key file) remembers the bus.
     again = creds_mod.AppCredentials()
     assert again.bus_url == "nats://nats-apps:4222" and again.app_key == key
@@ -179,7 +201,8 @@ def test_without_a_bus_the_configured_url_and_token_are_used(monkeypatch):
     # OPENNVR_APP_BUS_URL wins over the file.
     monkeypatch.setenv("OPENNVR_APP_BUS_URL", "nats://elsewhere:4222")
     kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
-    assert kw["servers"] == ["nats://elsewhere:4222"] and kw["user"] == "my-app"
+    assert kw["servers"][0].endswith("@elsewhere:4222") and kw["servers"][0].startswith("nats://my-app:oak_")
+    assert kw["servers"][1] == "nats://site-secret@nats:4222"
 
 
 def test_app_id_from_key():

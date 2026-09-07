@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any
 
@@ -120,21 +122,91 @@ def app_id_from_key(key: str | None) -> str | None:
     return app_id if sep and app_id else None
 
 
+_URL_SAFE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+
+def _with_userinfo(url: str, userinfo: str) -> str | None:
+    """``nats://host:port`` → ``nats://<userinfo>@host:port`` (nats-py reads
+    per-server credentials from the URI); ``None`` when the URL already
+    carries userinfo or the credential is not URL-safe verbatim."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.hostname or parts.username is not None:
+        return None
+    return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment))
+
+
 def bus_connection(credentials: "AppCredentials | None", fallback_url: str | None,
                    fallback_token: str | None) -> dict[str, Any]:
-    """nats.connect() kwargs for this app. With an app key AND a bus URL
-    from core: the apps bus as user=<app id> / password=<key>. Otherwise
-    the configured ``nats_url`` (+ ``nats_token``), as before — an older
-    core, or a bare dev run."""
+    """nats.connect() kwargs for this app.
+
+    With an app key AND a bus URL from core: the apps bus as
+    user=<app id> / password=<key> — and, when the configured
+    ``nats_url`` (+ ``nats_token``) is also known, that platform bus as
+    the **second server in the pool** with the site token in its URI, so
+    a bus that cannot be resolved or reached (``nats-apps`` down, an
+    older compose file, a stack half-upgraded) fails over instead of
+    leaving the app reconnecting forever with no alerts. nats-py tries
+    the pool in order (``dont_randomize``) and takes each server's
+    credentials from its URI. Otherwise the configured URL (+ token),
+    as before — an older core, or a bare dev run.
+    """
     creds = credentials or AppCredentials()
     bus = creds.bus_url
     user = app_id_from_key(creds.app_key)
     if bus and user and creds.app_key:
+        primary = _with_userinfo(bus, f"{user}:{creds.app_key}") if _URL_SAFE_RE.match(creds.app_key) else None
+        secondary = None
+        if fallback_url and fallback_url != bus and fallback_token and _URL_SAFE_RE.match(fallback_token):
+            secondary = _with_userinfo(fallback_url, fallback_token)
+        if primary and secondary:
+            return {"servers": [primary, secondary], "dont_randomize": True}
         return {"servers": [bus], "user": user, "password": creds.app_key}
     out: dict[str, Any] = {"servers": [fallback_url] if fallback_url else []}
     if fallback_token:
         out["token"] = fallback_token
     return out
+
+
+def describe_connection(kwargs: dict[str, Any]) -> str:
+    """One line for the log: where and as whom (never the secret)."""
+    servers = kwargs.get("servers") or []
+    shown = [redact_url(s) for s in servers]
+    if kwargs.get("user"):
+        who = f"as {kwargs['user']}"
+    elif kwargs.get("token"):
+        who = "with the site token"
+    elif len(servers) == 2:
+        who = "as the app, site-token fallback second"
+    else:
+        who = "anonymous"
+    return f"{shown} {who}"
+
+
+def redact_url(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.username is None:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    who = parts.username if parts.password is not None else "<token>"
+    return urlunsplit((parts.scheme, f"{who}:***@{host}" if parts.password is not None else f"{who}@{host}",
+                       parts.path, parts.query, parts.fragment))
+
+
+def connected_via_fallback(nc: Any, kwargs: dict[str, Any]) -> bool:
+    """After ``nats.connect``: True when the pool had a fallback and the
+    client landed on it rather than on the apps bus."""
+    servers = kwargs.get("servers") or []
+    if len(servers) < 2:
+        return False
+    try:
+        current = nc.connected_url
+    except Exception:  # noqa: BLE001
+        return False
+    if current is None:
+        return False
+    return (current.hostname, current.port) == (urlsplit(servers[1]).hostname, urlsplit(servers[1]).port)
 
 
 def forget_app_key() -> None:

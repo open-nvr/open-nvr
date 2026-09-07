@@ -118,6 +118,21 @@ bus, keeps using the configured `nats_url` + `nats_token` on the
 platform bus, exactly as before. Set `NATS_APPS_URL=` (empty) in `.env`
 to turn the apps bus off.
 
+**Failover.** An app that knows both connects with a two-server pool:
+the apps bus as itself first, the platform bus with the site token
+second (`nats://<token>@nats:4222`, nats-py takes each server's
+credentials from its URI). If `nats-apps` cannot be resolved or
+reached — the service down, an older compose file, a half-upgraded
+stack — the client lands on the platform bus and logs a **warning**
+(`apps bus … is unreachable — connected to the platform bus with the
+site token instead`); alerts and events keep flowing, per-app bus
+permissions do not apply on that connection. An app whose logs show
+`socket.gaierror: Temporary failure in name resolution` on every
+reconnect is on an SDK before this failover and cannot reach the
+apps bus: check `docker compose ps nats-apps` and
+`docker logs opennvr_nats_apps`, and that the app container is on the
+`opennvr_apps` network (`docker inspect <app> --format '{{json .NetworkSettings.Networks}}'`).
+
 ## Version negotiation
 
 The register response's `registry.min_sdk_version` is the oldest SDK the
