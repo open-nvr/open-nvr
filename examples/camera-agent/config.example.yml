@@ -89,7 +89,18 @@ vad_confidence: 0.55
 vad_start_secs: 0.15
 vad_stop_secs: 0.2
 turn_stop_secs: 2.0
-turn_max_secs: 12.0
+# Smart Turn only ever looks at the last 8 s of a turn; buffering more is
+# pure cost.
+turn_max_secs: 8.0
+# Hardware fit (see MODELS_AND_LATENCY.md → "Turn detection on CPU").
+#   turn_detector: auto | smart | timer — auto runs Smart Turn v3 whenever
+#     this process has ≥2 cores and falls back to a plain silence timer
+#     (turn_timer_secs, no model) on a single core.
+#   turn_cpu_threads: onnxruntime threads for one verdict; leave unset for
+#     auto (1 thread — measured fastest up to 7 cores — 2 from 8 cores).
+turn_detector: auto
+# turn_cpu_threads: 1
+# turn_timer_secs: 0.8
 
 # How long Ollama keeps the model resident. Sent on every request, so a
 # host-run `ollama serve` stays warm even without OLLAMA_KEEP_ALIVE in its

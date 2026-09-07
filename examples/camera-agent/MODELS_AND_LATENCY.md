@@ -104,6 +104,58 @@ and (b) doesn't react to room noise. Two layers handle this:
   `looks_like_noise()` drops these so a noisy room can't trigger a phantom turn;
   the UI just keeps listening. Set `stt_noise_filter: false` to disable.
 
+## Turn detection on CPU (Smart Turn v3)
+
+Since Pipecat 1.8 the agent closes a turn with **Smart Turn v3** — a small
+semantic end-of-turn model bundled in the wheel and run on CPU with
+onnxruntime — instead of a silence timer. What it costs, measured on a
+4-core ARM VM with no GPU (`tests/test_turn_hardware.py` covers the sizing;
+the numbers come from `LocalSmartTurnAnalyzerV3._predict_endpoint` on 8 s
+of audio):
+
+| Stage | When it runs | Cost |
+|---|---|---|
+| Silero VAD | every 32 ms audio chunk | ~0.24 ms per chunk (≈0.7 % of one core) |
+| Smart Turn v3 verdict | **once per pause** (VAD stop), not per frame | ~60–90 ms single-threaded |
+| same, BLAS/OMP left uncapped | | 90–130 ms — *slower*, and it takes every core |
+| model load | once per WebSocket conversation | ~50–90 ms |
+
+Two things follow, and the agent does both by itself:
+
+- **Thread caps.** The verdict's feature step is an 8 s Whisper-style log-mel
+  computed in numpy; uncapped, OpenBLAS/OpenMP fans it across every core,
+  which is slower for a 1×8 s input *and* steals cores from Whisper, Piper
+  and Ollama next door. `camera_agent.py` sets
+  `OMP_NUM_THREADS=OPENBLAS_NUM_THREADS=MKL_NUM_THREADS=1` before numpy
+  loads (the Dockerfile sets the same); an explicit value in the environment
+  wins. onnxruntime has its own pool — `turn_cpu_threads` — and **1 thread is
+  the fastest setting up to 7 cores**; auto uses 2 from 8 cores.
+- **Hardware profile.** `turn_detector: auto` (the default) looks at the cores
+  *this process may use* — scheduler affinity **and** a cgroup CPU quota
+  (`docker run --cpus`, compose `cpus:`), which `os.cpu_count()` ignores —
+  and runs Smart Turn whenever there are ≥ 2. On a single core it falls back
+  to a plain silence timer (`turn_timer_secs`, default 0.8 s; no model at
+  all). The startup log prints the resolved choice
+  (`turn-taking: Smart Turn v3 … 1 onnxruntime thread(s) … 4 core(s)`), and
+  `GET /hardware` returns it under `turn`.
+
+Knobs (`config.yml`):
+
+```yaml
+turn_detector: auto      # auto | smart | timer
+# turn_cpu_threads: 1    # onnxruntime threads per verdict (auto: 1, 2 from 8 cores)
+# turn_timer_secs: 0.8   # timer mode: silence that ends a turn
+turn_max_secs: 8.0       # the model only ever sees the last 8 s; more is pure cost
+turn_stop_secs: 2.0      # after this much silence the turn ends regardless
+```
+
+Memory is negligible (the model is ~8 MB; a 16 kHz int16 buffer for
+`turn_max_secs` is 256 KB). The one thing worth knowing on a busy box: the
+verdict runs on the pipeline's event loop thread pool, so a 60–90 ms pause
+verdict is the floor of the "you stop → agent starts" latency; the Whisper
+transcript for the turn is usually still in flight at that point, so it
+rarely adds to the wall clock.
+
 ## Recommended model choices
 
 | Role | Default (snappy) | Upgrade (quality, slower) | Why |

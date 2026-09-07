@@ -28,6 +28,20 @@ and speak.
 """
 from __future__ import annotations
 
+import os
+
+# Math-library thread caps — set BEFORE anything imports numpy (Pipecat
+# pulls it in lazily). Smart Turn v3's feature step (an 8 s Whisper
+# log-mel computed in numpy) otherwise fans out across every core through
+# OpenBLAS/OpenMP; on a 4-core box that made one end-of-turn verdict
+# SLOWER (90–130 ms) than single-threaded (~60 ms) while stealing cores
+# from Whisper and Piper next door. onnxruntime keeps its own pool, sized
+# by ``turn_cpu_threads``. An operator's explicit value in the
+# environment always wins (setdefault).
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+del _var
+
 import argparse
 import asyncio
 import base64
@@ -168,8 +182,19 @@ class AppConfig:
     vad_stop_secs: float = 0.2
     vad_min_volume: float = 0.08
     turn_stop_secs: float = 2.0
-    turn_max_secs: float = 12.0
+    # Smart Turn v3 only ever looks at the LAST 8 s of a turn (it pads or
+    # truncates to the model window), so buffering more is pure cost.
+    turn_max_secs: float = 8.0
     turn_stop_timeout_secs: float = 6.0
+    # Hardware fit. turn_detector: "smart" (Smart Turn v3), "timer" (a
+    # plain silence timer, no model — for single-core boxes), or "auto"
+    # (smart when ≥2 cores are available to this process, else timer).
+    # turn_cpu_threads: onnxruntime threads for one Smart Turn verdict;
+    # None = auto (1 thread up to 7 cores — measured fastest — 2 from 8).
+    # turn_timer_secs: the silence that ends a turn in timer mode.
+    turn_detector: str = "auto"
+    turn_cpu_threads: int | None = None
+    turn_timer_secs: float = 0.8
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
@@ -2872,8 +2897,11 @@ def load_config(path: str | Path) -> AppConfig:
         vad_stop_secs=_float("vad_stop_secs", 0.2),
         vad_min_volume=_float("vad_min_volume", 0.08),
         turn_stop_secs=_float("turn_stop_secs", 2.0),
-        turn_max_secs=_float("turn_max_secs", 12.0),
+        turn_max_secs=_float("turn_max_secs", 8.0),
         turn_stop_timeout_secs=_float("turn_stop_timeout_secs", 6.0),
+        turn_detector=_str("turn_detector", "auto"),
+        turn_cpu_threads=(int(raw["turn_cpu_threads"]) if raw.get("turn_cpu_threads") else None),
+        turn_timer_secs=_float("turn_timer_secs", 0.8),
         enabled_tools=(
             list(raw["enabled_tools"])
             if isinstance(raw.get("enabled_tools"), list)
@@ -3737,6 +3765,7 @@ class CameraAgentRuntime:
             "gpu_recommended": bool(gpu_labels),
             "summary": summary,
             "rows": rows,
+            "turn": turn_hardware_profile(self.cfg),
             "tips": [
                 "Chat mode instead of voice skips Piper TTS — the measured "
                 "CPU hog (~4 cores while speaking).",
@@ -5006,32 +5035,117 @@ class CameraAgentRuntime:
 # ── Pipecat pipeline factory ───────────────────────────────────────
 
 
+def available_cores() -> int:
+    """CPU cores THIS process may actually use: the scheduler affinity
+    mask, further capped by a cgroup CPU quota (``docker run --cpus``,
+    compose ``cpus:``), which ``os.cpu_count()`` never reflects. Never
+    below 1."""
+    cores = None
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+    cores = cores or os.cpu_count() or 1
+    quota: float | None = None
+    try:  # cgroup v2
+        raw = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if raw and raw[0] != "max":
+            quota = float(raw[0]) / float(raw[1])
+    except (OSError, ValueError, IndexError):
+        try:  # cgroup v1
+            q = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+            per = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+            if q > 0 and per > 0:
+                quota = q / per
+        except (OSError, ValueError):
+            pass
+    if quota:
+        cores = min(cores, max(1, int(math.ceil(quota))))
+    return max(1, int(cores))
+
+
+def turn_hardware_profile(cfg: Any, cores: int | None = None) -> dict[str, Any]:
+    """Resolve the turn-taking knobs against the hardware the agent is
+    running on. ``auto`` picks the semantic detector wherever it has a
+    core to run on, and one onnxruntime thread per verdict (measured
+    fastest on ≤4 cores: ~60 ms; two threads only pay off from 8 cores).
+    Explicit config values are honoured verbatim."""
+    cores = int(cores if cores is not None else available_cores())
+    wanted = str(getattr(cfg, "turn_detector", "auto") or "auto").strip().lower()
+    if wanted not in ("auto", "smart", "timer"):
+        logger.warning("turn_detector=%r is not auto|smart|timer; using auto", wanted)
+        wanted = "auto"
+    if wanted == "auto":
+        detector = "smart" if cores >= 2 else "timer"
+        why = ("auto: Smart Turn v3 has a core to run on" if detector == "smart"
+               else "auto: single core — silence timer, no model")
+    else:
+        detector, why = wanted, "set in config"
+    threads = getattr(cfg, "turn_cpu_threads", None)
+    if threads is None:
+        threads = 2 if cores >= 8 else 1
+    threads = max(1, min(int(threads), cores))
+    return {
+        "cores": cores,
+        "detector": detector,
+        "cpu_threads": threads,
+        "math_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
+        "reason": why,
+    }
+
+
+def describe_turn_profile(cfg: Any) -> str:
+    p = turn_hardware_profile(cfg)
+    if p["detector"] == "smart":
+        return (f"Smart Turn v3 (semantic end-of-turn) on CPU, "
+                f"{p['cpu_threads']} onnxruntime thread(s), BLAS/OMP threads="
+                f"{p['math_threads']}; {p['cores']} core(s) available ({p['reason']})")
+    return (f"silence timer ({float(getattr(cfg, 'turn_timer_secs', 0.8)):.2f}s), "
+            f"no turn model; {p['cores']} core(s) available ({p['reason']})")
+
+
 def build_user_turn_params(cfg: Any) -> Any:
     """The user aggregator's parameters — where turn-taking lives in
     Pipecat 1.8. Silero VAD opens a turn; **Smart Turn v3** (the
     bundled semantic end-of-turn model, CPU) closes it; the aggregator's
     ``user_turn_stop_timeout`` is the last resort so a turn never hangs.
-    Interruptions stay off (the demo client sends no cancel frames)."""
-    from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
-    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    Interruptions stay off (the demo client sends no cancel frames).
+
+    Sized to the hardware by ``turn_hardware_profile``: the model's
+    onnxruntime thread count follows the cores available, and a
+    single-core box gets a plain silence timer instead of the model."""
     from pipecat.audio.vad.silero import SileroVADAnalyzer
     from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
     from pipecat.turns.user_start import VADUserTurnStartStrategy
-    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+    profile = turn_hardware_profile(cfg)
+    if profile["detector"] == "smart":
+        from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+        from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+        from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+
+        stop = TurnAnalyzerUserTurnStopStrategy(
+            turn_analyzer=LocalSmartTurnAnalyzerV3(
+                cpu_count=int(profile["cpu_threads"]),
+                params=SmartTurnParams(
+                    stop_secs=float(getattr(cfg, "turn_stop_secs", 2.0)),
+                    max_duration_secs=float(getattr(cfg, "turn_max_secs", 8.0)),
+                ),
+            ),
+        )
+    else:
+        from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+
+        stop = SpeechTimeoutUserTurnStopStrategy(
+            user_speech_timeout=float(getattr(cfg, "turn_timer_secs", 0.8)),
+        )
 
     return LLMUserAggregatorParams(
         vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(cfg)),
         user_turn_strategies=UserTurnStrategies(
             start=[VADUserTurnStartStrategy(enable_interruptions=False)],
-            stop=[TurnAnalyzerUserTurnStopStrategy(
-                turn_analyzer=LocalSmartTurnAnalyzerV3(
-                    params=SmartTurnParams(
-                        stop_secs=float(getattr(cfg, "turn_stop_secs", 2.0)),
-                        max_duration_secs=float(getattr(cfg, "turn_max_secs", 12.0)),
-                    ),
-                ),
-            )],
+            stop=[stop],
         ),
         user_turn_stop_timeout=float(getattr(cfg, "turn_stop_timeout_secs", 6.0)),
     )
@@ -7177,6 +7291,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     runtime = CameraAgentRuntime(cfg)
     app = build_app(runtime)
+    logger.info("turn-taking: %s", describe_turn_profile(cfg))
 
     import uvicorn
     config = uvicorn.Config(
