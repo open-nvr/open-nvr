@@ -538,6 +538,31 @@ async def lifespan(app: FastAPI):
     spawn_background(background_recording_watchdog(),
                      name="recording-watchdog")
 
+    # Apps-bus link watchdog: the apps bus is a leaf of the platform bus
+    # and every app alert crosses that one link. When it is down both
+    # servers look healthy and alerts just stop — so core checks
+    # nats-apps' /leafz itself and raises an inbox alert if the link is
+    # gone for more than a couple of minutes.
+    async def background_apps_bus_watch():
+        try:
+            from services import apps_bus_watch
+
+            url = apps_bus_watch.monitor_url(settings.nats_apps_url,
+                                             settings.nats_apps_monitor_url)
+            if not url:
+                return
+            await asyncio.sleep(30)  # let nats-apps come up and dial the leaf
+            while True:
+                try:
+                    await asyncio.to_thread(apps_bus_watch.check_once, url)
+                except Exception as e:
+                    main_logger.error(f"Apps-bus watch failed: {e}", exc_info=True)
+                await asyncio.sleep(apps_bus_watch.CHECK_INTERVAL_S)
+        except Exception as e:
+            main_logger.error(f"Apps-bus watch scheduler failed: {e}", exc_info=True)
+
+    spawn_background(background_apps_bus_watch(), name="apps-bus-watch")
+
     # Recordings-index reconciler: startup backfill of the recordings table
     # from the on-disk archive, then a periodic recent-window convergence
     # pass. Keeps the DB (the listing/timeline source of truth) honest even
