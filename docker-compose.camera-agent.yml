@@ -426,7 +426,7 @@ services:
           exit 0
         fi
         umask 077
-        SAN="DNS:localhost,DNS:camera-agent,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
+        SAN="DNS:localhost,DNS:camera-agent,DNS:camera-agent-chat,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
         if [ -n "$${OPENNVR_HOST_IP}" ]; then
           SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
         fi
@@ -498,6 +498,10 @@ services:
     # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
     image: ghcr.io/open-nvr/camera-agent:${CORE_TAG:-latest}
     container_name: opennvr_camera_agent
+    # The hostname the agent sees itself as = the service name other
+    # containers resolve and the certificate's SAN (default would be the
+    # bare container id, which neither resolves nor matches the cert).
+    hostname: camera-agent
     logging: *svc-logs
     restart: unless-stopped
     depends_on:
@@ -598,6 +602,7 @@ services:
       dockerfile: examples/camera-agent/Dockerfile
     image: opennvr/camera-agent:local-build
     container_name: opennvr_camera_agent_chat
+    hostname: camera-agent-chat
     logging: *svc-logs
     restart: unless-stopped
     depends_on:
@@ -632,6 +637,16 @@ services:
       - /app/config/config.yml
     networks:
       - opennvr_internal
+
+  # Core calls the agent's contract (/health, /state) over https — the
+  # agent terminates TLS itself with the self-signed certificate above.
+  # Mounting the certificate directory read-only under core's app-certs
+  # trust directory (services/app_tls.py) lets core verify it; the
+  # hostname must still match the SAN, hence the service name above.
+  # The key inside is 0600 root: unreadable to core's user, and unneeded.
+  opennvr-core:
+    volumes:
+      - ./agent-certs/camera-agent:/etc/opennvr/app-certs/camera-agent:ro
 
 volumes:
   # footage-search's SQLite index. Declared here as well as in

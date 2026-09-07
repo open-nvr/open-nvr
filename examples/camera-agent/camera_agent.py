@@ -293,6 +293,14 @@ class AppConfig:
     # notifications — a phone push lands on the right camera's screen.
     # Unset = notifications carry no link.
     agent_public_url: str | None = None
+    # The base URL CORE reaches this agent at on the compose network —
+    # what the agent registers with the App Catalog as its contract URL
+    # (core probes {url}/health and {url}/state from there). Must be the
+    # compose service name, which is also in the TLS certificate's SAN
+    # (``https://camera-agent:9100``). Unset = this container's hostname,
+    # which under compose is the bare container id: not resolvable by
+    # other containers, and not in any certificate.
+    agent_contract_url: str | None = None
 
     # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
     # used only to build a deep link into the AI Adapters view when a skill is
@@ -2925,6 +2933,7 @@ def load_config(path: str | Path) -> AppConfig:
         opennvr_ui_url=_opennvr_ui_url,
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         agent_public_url=raw.get("agent_public_url"),
+        agent_contract_url=raw.get("agent_contract_url"),
         alarm_ring_defaults=(
             {str(k).strip().lower(): str(v).strip().lower()
              for k, v in raw["alarm_ring_defaults"].items()}
@@ -4644,12 +4653,11 @@ class CameraAgentRuntime:
             return False
         import socket
 
-        scheme = "https" if self.cfg.tls_certfile else "http"
         own_url = (
-            self.cfg.agent_public_url
-            or f"{scheme}://{socket.gethostname()}:{self.cfg.port}"
+            self.cfg.agent_contract_url
+            or f"{agent_scheme(self.cfg)}://{socket.gethostname()}:{self.cfg.port}"
         ).rstrip("/")
-        payload = {"url": own_url, "manifest": agent_manifest()}
+        payload = {"url": own_url, "manifest": agent_manifest(self.cfg)}
         headers: dict[str, str] = {}
         if self._registry_key:
             # Both header shapes, same reason as the SDK: one configured
@@ -5242,7 +5250,26 @@ def turn_vad_params(cfg: Any) -> Any:
 AGENT_VERSION = "1.0.0"
 
 
-def agent_manifest() -> dict[str, Any]:
+def agent_scheme(cfg: Any) -> str:
+    return "https" if getattr(cfg, "tls_certfile", None) else "http"
+
+
+def agent_ui_url(cfg: Any | None) -> str:
+    """Where the catalog's "Open app" button sends the operator's
+    browser: the agent's own web UI (``/demo``). ``agent_public_url``
+    when the operator set one (a LAN hostname, a reverse proxy);
+    otherwise the catalog's ``{host}`` placeholder — the hostname the
+    operator is browsing OpenNVR from — on the agent's port, which is
+    how the compose overlay publishes it."""
+    if cfg is None:
+        return "http://{host}:9100/demo"
+    public = (getattr(cfg, "agent_public_url", None) or "").rstrip("/")
+    if public:
+        return f"{public}/demo"
+    return f"{agent_scheme(cfg)}://{{host}}:{getattr(cfg, 'port', 9100)}/demo"
+
+
+def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
     """RFC-0002 gap 8 (contract parity): the flagship app's identity, in
     the same shape every SDK app serves. AppManifest is an identity
     dataclass, not a base class — the agent still doesn't ride
@@ -5253,6 +5280,10 @@ def agent_manifest() -> dict[str, Any]:
     ``requires_tasks`` is empty on purpose: every capability degrades
     gracefully (that's the agent's whole design), so nothing is a hard
     requirement the catalog should warn about.
+
+    The agent is a full application with its own web UI, so the manifest
+    declares ``ui_mode="external"``: the catalog shows an "Open app"
+    button to ``ui_url`` instead of trying to embed a sandboxed ``/ui``.
     """
     from opennvr_app_sdk import AppManifest
 
@@ -5267,6 +5298,9 @@ def agent_manifest() -> dict[str, Any]:
             "capability degrades gracefully when its backend is absent."
         ),
         requires_tasks=[],
+        has_ui=True,
+        ui_mode="external",
+        ui_url=agent_ui_url(cfg),
     ).to_dict()
 
 
@@ -5469,7 +5503,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/manifest")
     async def _manifest() -> dict[str, Any]:
-        return agent_manifest()
+        return agent_manifest(runtime.cfg)
 
     @app.get("/state")
     async def _state() -> dict[str, Any]:

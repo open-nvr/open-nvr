@@ -54,6 +54,57 @@ def test_manifest_is_the_sdk_shape_with_fixed_identity():
     assert m["requires_tasks"] == []
 
 
+def test_manifest_declares_the_external_ui(monkeypatch):
+    # The agent is a full application: the catalog shows "Open app" to its
+    # own /demo, never an embedded /ui. {host} = wherever the operator is
+    # browsing from, on the port the compose overlay publishes.
+    m = agent_manifest(_cfg(tls_certfile="/certs/a.pem", tls_keyfile="/certs/a.key"))
+    assert m["has_ui"] is True and m["ui_mode"] == "external"
+    assert m["ui_url"] == "https://{host}:9100/demo"
+    assert agent_manifest(_cfg())["ui_url"] == "http://{host}:9100/demo"
+    # an operator-set public URL wins (LAN hostname, reverse proxy)
+    m = agent_manifest(_cfg(agent_public_url="https://agent.lan/"))
+    assert m["ui_url"] == "https://agent.lan/demo"
+    # a runtime's /manifest serves the same thing
+    rt = CameraAgentRuntime(_cfg(tls_certfile="/certs/a.pem", tls_keyfile="/certs/a.key"))
+    from fastapi.testclient import TestClient
+    body = TestClient(build_app(rt)).get("/manifest").json()
+    assert body["ui_url"] == "https://{host}:9100/demo"
+
+
+def test_public_url_is_not_the_contract_url(monkeypatch):
+    # agent_public_url is for the operator's browser (deep links, "Open
+    # app"); it is never what core is told to probe — a LAN name would
+    # fail core's single-label URL policy and the container id would not
+    # resolve. Only agent_contract_url or the hostname go to the registry.
+    import socket
+    monkeypatch.setattr(socket, "gethostname", lambda: "camera-agent")
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, url, json=None, headers=None):
+            seen.update(json=json)
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    rt = CameraAgentRuntime(_cfg(opennvr_api_url="http://core:8000",
+                                 agent_public_url="https://agent.lan:9100",
+                                 tls_certfile="/certs/a.pem", tls_keyfile="/certs/a.key"))
+    asyncio.run(rt.register_with_app_catalog())
+    assert seen["json"]["url"] == "https://camera-agent:9100"
+    assert seen["json"]["manifest"]["ui_url"] == "https://agent.lan:9100/demo"
+
+
 def test_contract_routes_exist_and_are_open():
     runtime = CameraAgentRuntime(_cfg(auth_mode="opennvr",
                                       opennvr_api_url="http://core:8000"))
@@ -84,7 +135,7 @@ def test_registration_posts_the_sdk_body_shape(monkeypatch):
     runtime = CameraAgentRuntime(_cfg(
         opennvr_api_url="http://core:8000",
         opennvr_api_key="sekrit",
-        agent_public_url="https://agent.lan:9100",
+        agent_contract_url="https://agent.lan:9100",
     ))
     seen = {}
 

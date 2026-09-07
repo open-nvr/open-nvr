@@ -8,6 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **OpenNVR Agent showed "unreachable" in the App Catalog while it
+  worked.** It registered its contract URL as
+  `https://<container id>:9100` — under compose the container's
+  hostname is its bare id, which other containers cannot resolve — and
+  core's probe could not verify its self-signed certificate either. New
+  `agent_contract_url` (compose config: `https://camera-agent:9100`),
+  `hostname: camera-agent` on the service, and core now trusts app
+  certificates mounted read-only under `/etc/opennvr/app-certs/`
+  (`services/app_tls.py`; the overlay mounts `agent-certs/camera-agent`
+  there; hostname must still match the SAN — verified end to end
+  against a real TLS server in tests). `agent_public_url` is no longer
+  used as the contract URL — it is for the browser only. The agent's
+  manifest now declares its external web UI (`ui_mode: external`,
+  `ui_url: https://{host}:9100/demo`), so the catalog card and app page
+  show **Open app**; the chat variant gets `DNS:camera-agent-chat` in
+  new certificates. GUIDE.md explains the two URLs.
+
 - **Apps bus refused every app: core could never write the users
   file.** The `opennvr_nats_auth` volume is created root-owned by
   `nats-apps` when it seeds `users.conf`, and core runs as `opennvr`

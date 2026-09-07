@@ -286,6 +286,37 @@ healthy?", "any alerts from the loitering detector?". Strictly
 **read-only** — the agent reports on apps; enabling, disabling, or
 configuring one stays in the OpenNVR App Catalog UI.
 
+## The agent in the App Catalog
+
+On boot the agent registers itself with the App Catalog the way every
+SDK app does (`POST /api/v1/apps/register`), so it appears under
+**Installed** with a status chip, a skill entry and an **Open app**
+button. Two URLs are involved, and they are different things:
+
+* **Contract URL** (`agent_contract_url`) — where *core* reaches the
+  agent on the compose network to probe `/health` and `/state` ("Check"
+  in the catalog). It must be the compose service name,
+  `https://camera-agent:9100`, which other containers can resolve and
+  which is in the agent's TLS certificate SAN. Left unset, the agent
+  would register its own hostname — under compose the bare container
+  id, which neither resolves nor matches the certificate, and the
+  catalog would show it "unreachable" while it works fine in a browser.
+  Because the agent terminates TLS itself with a self-signed
+  certificate, the compose overlay also mounts `agent-certs/camera-agent`
+  read-only into core under `/etc/opennvr/app-certs/` so core can verify
+  it (`server/services/app_tls.py`; hostname still has to match).
+* **Public URL** (`agent_public_url`, optional) — where the *operator's
+  browser* reaches the agent: deep links in notifications and the
+  catalog's **Open app** button (`manifest.ui_url`). Unset, the button
+  uses the hostname you are browsing OpenNVR from on port 9100 — which
+  is how the overlay publishes it.
+
+The agent is a full application, not a sandboxed `/ui` dashboard, so its
+manifest declares `ui_mode: external`; the catalog links out instead of
+embedding. It is not listed under the sidebar's **Applications** group —
+that group holds the first-class pages (Vehicles, Occupancy) an app
+*provides*; the agent's page is its own.
+
 ## Faces
 
 Off by default — it needs the InsightFace recognition adapter, which

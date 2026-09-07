@@ -362,6 +362,11 @@ class Settings(BaseSettings):
     # the leaf link to the platform bus is up). Empty = derived from
     # nats_apps_url's host on the standard monitoring port 8222.
     nats_apps_monitor_url: str = ""
+    # Certificates core trusts when it calls an app's contract over
+    # https (services/app_tls.py): every *.crt under this directory, one
+    # subdirectory per app, mounted read-only by the overlay that runs
+    # the app. Empty directory = default trust store only.
+    app_trusted_certs_dir: str = "/etc/opennvr/app-certs"
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod

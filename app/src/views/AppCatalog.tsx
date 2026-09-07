@@ -1554,6 +1554,18 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
             {toggleMutation.isPending ? 'Working…' : app.enabled ? 'Disable' : 'Enable'}
           </Button>
           )}
+          {app.manifest?.ui_mode === 'external' && app.manifest?.ui_url && (
+            // A full application with its own web UI (the OpenNVR Agent):
+            // link out to it — its {host} is wherever this browser is.
+            <Button
+              variant="primary"
+              onClick={() => window.open(resolveUiUrl(app.manifest!.ui_url!), '_blank', 'noopener,noreferrer')}
+              disabled={!app.enabled}
+              title={app.enabled ? resolveUiUrl(app.manifest.ui_url) : 'Enable the app first'}
+            >
+              <ExternalLink size={14} /> Open app
+            </Button>
+          )}
           <Button variant="outline" onClick={onConfigure}>
             <Settings2 size={14} /> Configure
           </Button>
