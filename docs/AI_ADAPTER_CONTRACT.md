@@ -463,6 +463,15 @@ A few notes on the shape:
   fingerprint (e.g., cloud-fronting adapters) omit the field; KAI-C
   surfaces "model identity not verifiable" in the UI rather than
   silently trusting.
+- `model.license` (optional, additive since adapter SDK 1.3) —
+  `{source, site_id, plan, expires_at}` when the loaded weights came
+  from a signed, licensed bundle (OpenNVR Models, or a site's own
+  signed fine-tune; [`design/models-service.md`](design/models-service.md)).
+  The adapter verified the bundle's Ed25519-signed manifest and every
+  file's hash before loading; `model.fingerprint` is then the manifest
+  hash, identifying weights, site and licence in one string. Absent for
+  stock weights. KAI-C ignores fields it does not know, so gateways
+  older than the field are unaffected.
 
 ### 4.1 The canonical task taxonomy — "curated + open"
 
