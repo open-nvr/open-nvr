@@ -42,6 +42,7 @@ try:  # pragma: no cover — import-time only
         LLMFullResponseEndFrame,
         LLMFullResponseStartFrame,
         LLMTextFrame,
+        LLMUpdateSettingsFrame,
         TextFrame,
         TranscriptionFrame,
         TTSAudioRawFrame,
@@ -62,6 +63,7 @@ except Exception:  # pragma: no cover
     LLMFullResponseEndFrame = object  # type: ignore
     LLMFullResponseStartFrame = object  # type: ignore
     LLMTextFrame = object  # type: ignore
+    LLMUpdateSettingsFrame = object  # type: ignore
     TextFrame = object  # type: ignore
     TranscriptionFrame = object  # type: ignore
     TTSAudioRawFrame = object  # type: ignore
@@ -242,6 +244,8 @@ class OpenNvrOllamaLLM(LLMService):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMContextFrame):
             await self._handle_context(frame.context)
+        elif isinstance(frame, LLMUpdateSettingsFrame):
+            pass  # the base consumed it (ours) or already forwarded it (another service's)
         else:
             await self.push_frame(frame, direction)
 

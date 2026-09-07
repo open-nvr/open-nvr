@@ -5006,35 +5006,45 @@ class CameraAgentRuntime:
 # ── Pipecat pipeline factory ───────────────────────────────────────
 
 
-def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
-    """Construct one Pipecat pipeline per WebSocket conversation.
-    Imported here (not at module top) so the camera-agent module
-    stays importable in test environments without Pipecat.
-
-    Turn-taking (Pipecat 1.8): the user aggregator owns it. Silero VAD
-    opens a turn; **Smart Turn v3** — Pipecat's semantic end-of-turn
-    model, bundled with the wheel and run on CPU with onnxruntime —
-    closes it, so a pause mid-sentence ("show me the… gate camera") no
-    longer ends the turn the way a silence timer did, and background
-    noise that Whisper would transcribe as a phantom question is not
-    a turn at all. Interruptions stay off (the bundled demo client
-    sends no cancel frames), so the agent finishes an answer, then
-    listens again.
-    """
+def build_user_turn_params(cfg: Any) -> Any:
+    """The user aggregator's parameters — where turn-taking lives in
+    Pipecat 1.8. Silero VAD opens a turn; **Smart Turn v3** (the
+    bundled semantic end-of-turn model, CPU) closes it; the aggregator's
+    ``user_turn_stop_timeout`` is the last resort so a turn never hangs.
+    Interruptions stay off (the demo client sends no cancel frames)."""
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
     from pipecat.audio.vad.silero import SileroVADAnalyzer
-    from pipecat.audio.vad.vad_analyzer import VADParams
-    from pipecat.pipeline.pipeline import Pipeline
-    from pipecat.pipeline.task import PipelineParams, PipelineTask
-    from pipecat.processors.aggregators.llm_context import LLMContext
-    from pipecat.processors.aggregators.llm_response_universal import (
-        LLMContextAggregatorPair,
-        LLMUserAggregatorParams,
-    )
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
     from pipecat.turns.user_start import VADUserTurnStartStrategy
     from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+    return LLMUserAggregatorParams(
+        vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(cfg)),
+        user_turn_strategies=UserTurnStrategies(
+            start=[VADUserTurnStartStrategy(enable_interruptions=False)],
+            stop=[TurnAnalyzerUserTurnStopStrategy(
+                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                    params=SmartTurnParams(
+                        stop_secs=float(getattr(cfg, "turn_stop_secs", 2.0)),
+                        max_duration_secs=float(getattr(cfg, "turn_max_secs", 12.0)),
+                    ),
+                ),
+            )],
+        ),
+        user_turn_stop_timeout=float(getattr(cfg, "turn_stop_timeout_secs", 6.0)),
+    )
+
+
+def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = None) -> tuple[list, Any]:
+    """The processors between the transport's input and output —
+    STT → user aggregator → LLM → TTS — plus the assistant aggregator
+    that closes the loop, and the shared ``LLMContext``. Split from the
+    transport so a test can run the real pipeline without a WebSocket.
+    """
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 
     from services import (
         OpenNvrOllamaLLM,
@@ -5055,36 +5065,38 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
     context = LLMContext(messages=[
         {"role": "system", "content": runtime.build_system_prompt()},
     ])
-
     aggregators = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(runtime.cfg)),
-            user_turn_strategies=UserTurnStrategies(
-                start=[VADUserTurnStartStrategy(enable_interruptions=False)],
-                stop=[TurnAnalyzerUserTurnStopStrategy(
-                    turn_analyzer=LocalSmartTurnAnalyzerV3(
-                        params=SmartTurnParams(
-                            stop_secs=float(getattr(runtime.cfg, "turn_stop_secs", 2.0)),
-                            max_duration_secs=float(getattr(runtime.cfg, "turn_max_secs", 12.0)),
-                        ),
-                    ),
-                )],
-            ),
-            # If neither the model nor the fallback timer closes a turn,
-            # the aggregator closes it here so the agent never hangs.
-            user_turn_stop_timeout=float(getattr(runtime.cfg, "turn_stop_timeout_secs", 6.0)),
-        ),
+        context, user_params=user_params or build_user_turn_params(runtime.cfg),
     )
+    return [stt, aggregators.user(), llm, tts, aggregators.assistant()], context
 
+
+def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
+    """Construct one Pipecat pipeline per WebSocket conversation.
+    Imported here (not at module top) so the camera-agent module
+    stays importable in test environments without Pipecat.
+
+    Turn-taking (Pipecat 1.8): the user aggregator owns it. Silero VAD
+    opens a turn; **Smart Turn v3** — Pipecat's semantic end-of-turn
+    model, bundled with the wheel and run on CPU with onnxruntime —
+    closes it, so a pause mid-sentence ("show me the… gate camera") no
+    longer ends the turn the way a silence timer did, and background
+    noise that Whisper would transcribe as a phantom question is not
+    a turn at all. See ``build_user_turn_params``.
+    """
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+
+    core, _context = build_core_processors(runtime)
+    stt, user_agg, llm, tts, assistant_agg = core
     pipeline = Pipeline([
         transport.input(),
         stt,
-        aggregators.user(),
+        user_agg,
         llm,
         tts,
         transport.output(),
-        aggregators.assistant(),
+        assistant_agg,
     ])
 
     return PipelineTask(
