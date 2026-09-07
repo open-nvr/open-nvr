@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     for i in 1 2 3 4 5; do \
         echo "pip install attempt $i/5..."; \
         pip install --timeout 300 --retries 10 \
-            "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
+            "pipecat-ai[silero,websocket]>=1.8.1,<2.0" \
             "httpx>=0.27,<1.0" \
             "fastapi>=0.110,<1.0" \
             "uvicorn>=0.27,<1.0" \
@@ -57,6 +57,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         if [ "$i" = 5 ]; then echo "pip install failed after 5 attempts" >&2; exit 1; fi; \
         echo "attempt $i failed; retrying in 15s..."; sleep 15; \
     done
+
+# Pipecat's TTS sentence aggregation uses NLTK's punkt_tab tokenizer and
+# downloads it on first use — which a sovereign, offline site cannot do,
+# and which would otherwise delay the first spoken reply. Bundle it at
+# build time; NLTK_DATA points the runtime at it. Smart Turn v3 and the
+# Silero VAD ship inside the pipecat wheel already (no download).
+ENV NLTK_DATA=/opt/nltk_data
+RUN python -m nltk.downloader -d /opt/nltk_data punkt_tab
 
 # The OpenNVR App SDK — monitor_host.py (the create_monitor convergence)
 # imports opennvr_app_sdk, and the count/crossing rule libraries below are

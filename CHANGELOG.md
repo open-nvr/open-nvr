@@ -6,6 +6,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **camera-agent on Pipecat 1.8 with Smart Turn v3.** The agent moves
+  from the 0.0.5x API it was born on to `pipecat-ai 1.8.1`: the
+  universal `LLMContext` + `LLMContextAggregatorPair`, services under
+  `pipecat.services.*_service`, the `pipecat.transports.websocket.fastapi`
+  transport, `WorkerRunner`. Turn-taking is now the aggregator's user-turn
+  strategies — Silero VAD opens a turn, **Smart Turn v3** (Pipecat's
+  semantic end-of-turn model, bundled in the wheel, CPU via onnxruntime)
+  closes it — so a pause mid-sentence no longer ends the question the
+  way the 0.7 s silence timer did, and the STT-side force-stop timers
+  that compensated for it are gone. New `vad_*` / `turn_*` config knobs;
+  interruptions stay off for the demo client. The image bundles NLTK's
+  `punkt_tab` so a sovereign site never downloads at first reply.
+  `RawPcmSerializer` follows the 1.x `FrameSerializer` (BaseObject,
+  `setup(FrameProcessorSetup)`, no `type`).
+
 ### Added
 
 - **OpenNVR Models — design.** `docs/design/models-service.md`: site-

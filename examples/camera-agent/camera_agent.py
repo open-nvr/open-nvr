@@ -8,7 +8,7 @@ camera feeds via tool calling.
 Pipeline:
     WebSocket transport (browser ⇄ server raw PCM 16k mono)
         ↓
-    SileroVADAnalyzer (turn detection)
+    Silero VAD (turn start) + Smart Turn v3 (semantic end of turn)
         ↓
     OpenNvrWhisperSTT (Whisper adapter → text)
         ↓
@@ -155,6 +155,21 @@ class AppConfig:
     llm_model: str = "qwen2.5:1.5b"
     llm_temperature: float = 0.4
     llm_max_tokens: int = 256
+
+    # Turn-taking (Pipecat 1.8). Silero VAD opens a turn; Smart Turn v3
+    # (semantic end-of-turn, bundled, CPU) closes it. The VAD stop window
+    # is short on purpose — the model judges the pause, the VAD only
+    # notices it. turn_stop_secs: silence after which Smart Turn is
+    # consulted for an "incomplete" verdict again / a fallback stop;
+    # turn_max_secs: the longest single utterance; turn_stop_timeout_secs:
+    # the aggregator's last resort so a turn can never hang.
+    vad_confidence: float = 0.55
+    vad_start_secs: float = 0.15
+    vad_stop_secs: float = 0.2
+    vad_min_volume: float = 0.08
+    turn_stop_secs: float = 2.0
+    turn_max_secs: float = 12.0
+    turn_stop_timeout_secs: float = 6.0
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
@@ -2852,6 +2867,13 @@ def load_config(path: str | Path) -> AppConfig:
         llm_model=_str("llm_model", "qwen2.5:1.5b"),
         llm_temperature=_float("llm_temperature", 0.4),
         llm_max_tokens=_int("llm_max_tokens", 256),
+        vad_confidence=_float("vad_confidence", 0.55),
+        vad_start_secs=_float("vad_start_secs", 0.15),
+        vad_stop_secs=_float("vad_stop_secs", 0.2),
+        vad_min_volume=_float("vad_min_volume", 0.08),
+        turn_stop_secs=_float("turn_stop_secs", 2.0),
+        turn_max_secs=_float("turn_max_secs", 12.0),
+        turn_stop_timeout_secs=_float("turn_stop_timeout_secs", 6.0),
         enabled_tools=(
             list(raw["enabled_tools"])
             if isinstance(raw.get("enabled_tools"), list)
@@ -4984,26 +5006,45 @@ class CameraAgentRuntime:
 # ── Pipecat pipeline factory ───────────────────────────────────────
 
 
-def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
-    """Construct one Pipecat pipeline per WebSocket conversation.
-    Imported here (not at module top) so the camera-agent module
-    stays importable in test environments without Pipecat."""
-    from pipecat.pipeline.pipeline import Pipeline
-    from pipecat.pipeline.task import PipelineParams, PipelineTask
-    from pipecat.processors.aggregators.openai_llm_context import (
-        OpenAILLMContext,
+def build_user_turn_params(cfg: Any) -> Any:
+    """The user aggregator's parameters — where turn-taking lives in
+    Pipecat 1.8. Silero VAD opens a turn; **Smart Turn v3** (the
+    bundled semantic end-of-turn model, CPU) closes it; the aggregator's
+    ``user_turn_stop_timeout`` is the last resort so a turn never hangs.
+    Interruptions stay off (the demo client sends no cancel frames)."""
+    from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
+    from pipecat.turns.user_start import VADUserTurnStartStrategy
+    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+    return LLMUserAggregatorParams(
+        vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(cfg)),
+        user_turn_strategies=UserTurnStrategies(
+            start=[VADUserTurnStartStrategy(enable_interruptions=False)],
+            stop=[TurnAnalyzerUserTurnStopStrategy(
+                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                    params=SmartTurnParams(
+                        stop_secs=float(getattr(cfg, "turn_stop_secs", 2.0)),
+                        max_duration_secs=float(getattr(cfg, "turn_max_secs", 12.0)),
+                    ),
+                ),
+            )],
+        ),
+        user_turn_stop_timeout=float(getattr(cfg, "turn_stop_timeout_secs", 6.0)),
     )
-    # Context-aware aggregators (not the message-list variants).
-    # The plain LLMUserResponseAggregator / LLMAssistantResponseAggregator
-    # accept a ``List[dict]`` and call .append() on it; passing an
-    # OpenAILLMContext to those crashes with AttributeError on the
-    # first turn. The *Context* variants below take ``context=...``
-    # and route .add_message() correctly, which also mirrors the
-    # final assistant turn back into the context for observers.
-    from pipecat.processors.aggregators.llm_response import (
-        LLMUserContextAggregator,
-        LLMAssistantContextAggregator,
-    )
+
+
+def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = None) -> tuple[list, Any]:
+    """The processors between the transport's input and output —
+    STT → user aggregator → LLM → TTS — plus the assistant aggregator
+    that closes the loop, and the shared ``LLMContext``. Split from the
+    transport so a test can run the real pipeline without a WebSocket.
+    """
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 
     from services import (
         OpenNvrOllamaLLM,
@@ -5021,13 +5062,33 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
     )
     tts = OpenNvrPiperTTS(client=runtime.piper)
 
-    context = OpenAILLMContext(messages=[
+    context = LLMContext(messages=[
         {"role": "system", "content": runtime.build_system_prompt()},
     ])
+    aggregators = LLMContextAggregatorPair(
+        context, user_params=user_params or build_user_turn_params(runtime.cfg),
+    )
+    return [stt, aggregators.user(), llm, tts, aggregators.assistant()], context
 
-    user_agg = LLMUserContextAggregator(context=context)
-    assistant_agg = LLMAssistantContextAggregator(context=context)
 
+def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
+    """Construct one Pipecat pipeline per WebSocket conversation.
+    Imported here (not at module top) so the camera-agent module
+    stays importable in test environments without Pipecat.
+
+    Turn-taking (Pipecat 1.8): the user aggregator owns it. Silero VAD
+    opens a turn; **Smart Turn v3** — Pipecat's semantic end-of-turn
+    model, bundled with the wheel and run on CPU with onnxruntime —
+    closes it, so a pause mid-sentence ("show me the… gate camera") no
+    longer ends the turn the way a silence timer did, and background
+    noise that Whisper would transcribe as a phantom question is not
+    a turn at all. See ``build_user_turn_params``.
+    """
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+
+    core, _context = build_core_processors(runtime)
+    stt, user_agg, llm, tts, assistant_agg = core
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -5040,16 +5101,24 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
 
     return PipelineTask(
         pipeline,
-        params=PipelineParams(
-            # Interruptions are DISABLED for v0.1: the bundled demo client
-            # doesn't send proper cancel frames, so any speech/noise while
-            # the agent is thinking would otherwise cancel the in-flight
-            # reply before it reaches TTS. With this off, the agent always
-            # finishes its answer, then listens again. (See README "No real
-            # interrupts".)
-            allow_interruptions=False,
-            enable_metrics=True,
-        ),
+        params=PipelineParams(enable_metrics=True),
+        # The bundled demo client speaks raw PCM, not RTVI.
+        enable_rtvi=False,
+    )
+
+
+def turn_vad_params(cfg: Any) -> Any:
+    """Silero VAD parameters for turn *start* (Smart Turn decides the
+    end). The stop window is short on purpose — with a semantic
+    end-of-turn model the VAD only has to notice a pause, not judge
+    it; Pipecat's guidance is 0.2 s."""
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
+    return VADParams(
+        confidence=float(getattr(cfg, "vad_confidence", 0.55)),
+        start_secs=float(getattr(cfg, "vad_start_secs", 0.15)),
+        stop_secs=float(getattr(cfg, "vad_stop_secs", 0.2)),
+        min_volume=float(getattr(cfg, "vad_min_volume", 0.08)),
     )
 
 
@@ -6365,12 +6434,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
         # Lazy-imported so the module loads without Pipecat installed.
-        from pipecat.transports.network.fastapi_websocket import (
+        from pipecat.transports.websocket.fastapi import (
             FastAPIWebsocketParams,
             FastAPIWebsocketTransport,
         )
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
-        from pipecat.audio.vad.vad_analyzer import VADParams
         from serializer import RawPcmSerializer
 
         await websocket.accept()
@@ -6390,24 +6457,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 audio_out_sample_rate=22050,
                 audio_out_channels=1,
                 add_wav_header=False,
-                vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(
-                    sample_rate=16000,
-                    params=VADParams(
-                        confidence=0.55,
-                        start_secs=0.15,
-                        stop_secs=0.7,
-                        min_volume=0.08,
-                    ),
-                ),
-                vad_audio_passthrough=True,
+                # VAD and turn-taking live on the user aggregator now
+                # (build_pipeline_task) — the transport just moves audio.
                 serializer=RawPcmSerializer(),
             ),
         )
 
         task = build_pipeline_task(runtime, transport)
-        from pipecat.pipeline.runner import PipelineRunner
-        runner = PipelineRunner(handle_sigint=False)
+        from pipecat.workers.runner import WorkerRunner
+        runner = WorkerRunner(handle_sigint=False)
         try:
             await runner.run(task)
         except Exception:
