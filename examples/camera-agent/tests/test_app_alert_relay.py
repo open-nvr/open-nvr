@@ -717,3 +717,53 @@ def test_alarm_defaults_endpoint_carries_the_announce_policy():
     tc.put("/alarm-defaults", json={"announce_app_alerts": "all"})
     d = tc.get("/alarm-defaults").json()
     assert d["overrides"] == {"snake": "siren"} and d["announce_app_alerts"] == "all"
+
+
+# ── muting an app in the agent ─────────────────────────────────────────
+
+
+def test_muted_app_is_not_relayed_listed_or_queried():
+    rt = _runtime(nats_url="nats://x")
+
+    class _Reg:
+        apps_cached = [
+            {"id": "lpr", "name": "LPR", "enabled": True, "manifest": {"summary": "plates"}},
+            {"id": "ppe", "name": "PPE", "enabled": True, "manifest": {"summary": "helmets"}},
+        ]
+
+        async def list_apps(self):
+            return self.apps_cached
+
+        async def app_status(self, app_id):
+            return {"health": {"status": "ok"}, "state": {"n": 1}}
+
+    rt.app_registry = _Reg()
+    rt.monitors._cooldown = 0
+    assert rt.set_skill_enabled("app:lpr", False) is True
+    assert rt.app_muted("lpr") and not rt.app_muted("ppe")
+
+    # relay: dropped for the muted app, still pushed for the other
+    rt._relay_app_alert(_sev("lpr", "Monitored plate seen", "high"))
+    rt._relay_app_alert(_sev("ppe", "PPE violation", "high"))
+    assert [n["source"] for n in rt.monitors.notifications()] == ["app:ppe"]
+
+    # tools: the muted app is not listed, answers "muted", and its
+    # alerts are filtered out of the recent-alerts view
+    out = asyncio.run(rt._handle_list_apps({}))
+    assert "PPE" in out and "LPR" not in out
+    assert "muted" in asyncio.run(rt._handle_app_status({"app_id": "lpr"}))
+    assert "ok" in asyncio.run(rt._handle_app_status({"app_id": "ppe"}))
+    rt.context.record_app_alert(_sev("lpr", "plate", "high"))
+    rt.context.record_app_alert(_sev("ppe", "helmet", "high"))
+    out = asyncio.run(rt._handle_recent_app_alerts({}))
+    assert "app:ppe" in out and "app:lpr" not in out
+    assert "muted" in asyncio.run(rt._handle_recent_app_alerts({"app_id": "lpr"}))
+
+    # unmute: everything flows again
+    assert rt.set_skill_enabled("app:lpr", True) is True
+    rt._relay_app_alert(_sev("lpr", "Monitored plate seen", "high"))
+    assert rt.monitors.notifications()[-1]["source"] == "app:lpr"
+    assert "LPR" in asyncio.run(rt._handle_list_apps({}))
+    # every app muted → an honest answer, not "none installed"
+    rt.set_skill_enabled("app:lpr", False); rt.set_skill_enabled("app:ppe", False)
+    assert "muted in this agent" in asyncio.run(rt._handle_list_apps({}))

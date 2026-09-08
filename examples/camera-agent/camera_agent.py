@@ -3717,6 +3717,7 @@ class CameraAgentRuntime:
                 for e in (manifest.get("emits") or [])
                 if isinstance(e, dict) and e.get("name")
             ]
+            muted = self.app_muted(app_id)
             entries.append({
                 "id": f"app:{app_id}",
                 "source": "app",           # clearly marks the app door origin
@@ -3728,12 +3729,17 @@ class CameraAgentRuntime:
                         else "installed app",
                 "summary": summary,
                 "emits": emits,
-                # Installed + enabled by an operator ⇒ enabled. The agent
-                # can query it (read-only); it can't toggle or configure it.
-                "enabled": True,
+                # Installed + enabled by an operator in the catalog ⇒ the
+                # agent may use it; ✕ here MUTES it in the agent only (no
+                # relay, not listed, not queried) — the app keeps running
+                # for the rest of OpenNVR. Re-add it from "+" any time.
+                "enabled": not muted,
                 "available": True,
-                "read_only": True,
-                "hint": "installed app — enable, disable or uninstall it in the App Catalog",
+                "read_only": False,
+                "hint": ("muted in the agent — add it back from + any time; the "
+                         "app itself keeps running" if muted else
+                         "installed app — ✕ mutes it in the agent only; enable, "
+                         "disable or uninstall the app itself in the App Catalog"),
                 # Where the operator manages it (the app's catalog page).
                 "manage_url": (
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog/{app_id}"
@@ -3746,6 +3752,20 @@ class CameraAgentRuntime:
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
         """Turn a skill on/off and reconfigure the toolset. Returns False if the
         skill is unknown or can't be enabled (backend not configured)."""
+        if skill_id.startswith("app:"):
+            # An installed catalog app, muted or unmuted IN THE AGENT only:
+            # the app keeps running for the rest of OpenNVR (its own page,
+            # the inbox); the agent just stops relaying its alerts and
+            # stops counting it among the apps it queries. Same durable
+            # toggle set as the agent's own skills, same Restore defaults.
+            app_id = skill_id[4:].strip()
+            if not app_id or not self._app_known(app_id):
+                return False
+            if enabled:
+                self.disabled_skills.discard(skill_id)
+            else:
+                self.disabled_skills.add(skill_id)
+            return True
         if skill_id not in SKILL_TOOLS:
             return False
         if enabled:
@@ -3757,6 +3777,20 @@ class CameraAgentRuntime:
             self.disabled_skills.add(skill_id)
         self._configure_tools()
         return True
+
+    def _app_known(self, app_id: str) -> bool:
+        """Is ``app_id`` an installed app as far as the registry cache
+        knows? With the registry unreachable (cache None) the answer is
+        yes — a stale state file must still be able to restore a mute."""
+        registry = getattr(self, "app_registry", None)
+        apps = getattr(registry, "apps_cached", None) if registry is not None else None
+        if apps is None:
+            return True
+        return any(str(a.get("id") or "") == app_id for a in apps)
+
+    def app_muted(self, app_id: str | None) -> bool:
+        """Muted in the agent: alerts not relayed, not listed, not queried."""
+        return bool(app_id) and f"app:{app_id}" in self.disabled_skills
 
     def hardware_recommendation(self) -> dict[str, Any]:
         """What the ENABLED skills run on vs. what makes them fast — the
@@ -4170,8 +4204,15 @@ class CameraAgentRuntime:
         apps = await self.app_registry.list_apps()
         if apps is None:
             return self._APP_REGISTRY_UNREACHABLE
-        enabled = [a for a in apps if a.get("enabled")]
+        muted = [a for a in apps if a.get("enabled") and self.app_muted(str(a.get("id") or ""))]
+        enabled = [a for a in apps if a.get("enabled") and not self.app_muted(str(a.get("id") or ""))]
         if not enabled:
+            if muted:
+                return (
+                    "Every installed app is muted in this agent "
+                    f"({', '.join(str(a.get('name') or a.get('id')) for a in muted)}). "
+                    "The operator can add one back from the skills panel."
+                )
             if apps:
                 return (
                     "There are catalog apps installed, but none are currently "
@@ -4203,6 +4244,9 @@ class CameraAgentRuntime:
         app_id = str(args.get("app_id") or "").strip()
         if not app_id:
             return "Tell me which app — I need its id (from list_apps)."
+        if self.app_muted(app_id):
+            return (f"App '{app_id}' is muted in this agent — I don't relay or "
+                    "query it. The operator can add it back from the skills panel.")
         status = await self.app_registry.app_status(app_id)
         if status is None:
             return self._APP_REGISTRY_UNREACHABLE
@@ -4246,9 +4290,13 @@ class CameraAgentRuntime:
         else:
             app_id = str(app_arg).strip() or None
 
-        alerts = self.context.recent_app_alerts(
-            app_id=app_id, window_seconds=window
-        )
+        if app_id and self.app_muted(app_id):
+            return (f"App '{app_id}' is muted in this agent — its alerts aren't "
+                    "relayed here. The operator can add it back from the skills panel.")
+        alerts = [
+            a for a in self.context.recent_app_alerts(app_id=app_id, window_seconds=window)
+            if not self.app_muted(str(a.app_id))
+        ]
         if not alerts:
             scope = f"'{app_id}'" if app_id else "any app"
             mins = int(window / 60) or 1
@@ -4286,6 +4334,9 @@ class CameraAgentRuntime:
         side is rate-limited."""
         import time as _t
 
+        if self.app_muted(str(alert.app_id)):
+            logger.debug("app alert dropped (muted in the agent): app:%s", alert.app_id)
+            return
         now = _t.time()
         key = (str(alert.app_id), str(alert.camera_id))
         if now - self._app_relay_last.get(key, 0.0) < self.monitors._cooldown:
@@ -5951,19 +6002,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return JSONResponse({"error": "action must be enable or disable"},
                                 status_code=400)
         await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
-        if skill_id.startswith("app:"):
-            # An installed catalog app shows up as a skill so the operator
-            # can SEE it; enabling/disabling it is the App Catalog's job
-            # (operator permission, audit) — the agent only reads apps.
-            skill = next((s for s in runtime.skills_payload() if s["id"] == skill_id), None)
-            name = skill["name"] if skill else skill_id[4:]
-            return JSONResponse({
-                "error": f"{name} is an installed app, managed in the App Catalog",
-                "hint": (f"Disable or uninstall {name} from OpenNVR → App Catalog; "
-                         "the agent only reads installed apps."),
-                "url": (skill or {}).get("manage_url"),
-            }, status_code=409)
         ok = runtime.set_skill_enabled(skill_id, action == "enable")
+        if not ok and skill_id.startswith("app:"):
+            return JSONResponse({"error": f"no installed app {skill_id[4:]!r} — "
+                                          "install and enable it in the App Catalog first"},
+                                status_code=404)
         if not ok:
             # Unknown skill, or its backend isn't configured yet.
             skill = next((s for s in runtime.skills_payload() if s["id"] == skill_id), None)

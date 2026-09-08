@@ -6,6 +6,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **camera-agent: mute an installed app in the agent.** ✕ on an app
+  entry in the skills rail now mutes it *in the agent only* — its
+  alerts are not relayed or spoken, it is not listed by `list_apps`,
+  and `app_status` / `recent_app_alerts` say so — while the app keeps
+  running for the rest of OpenNVR. Add it back from **+** any time;
+  persisted like every other toggle, cleared by Restore defaults. ⚙
+  still opens the app in the App Catalog for the real enable/disable/
+  uninstall. (`disabled_skills` accepts `app:<id>`.)
+
 ### Fixed
 
 - **camera-agent: removing an installed app's skill said "skill can't
