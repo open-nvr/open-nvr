@@ -212,3 +212,48 @@ def test_say_endpoint_text_only_when_tts_down(monkeypatch):
     client = TestClient(build_app(rt))
     r = client.post("/say", json={"text": "hello"})
     assert r.status_code == 200 and r.json()["audio_b64"] is None
+
+
+def test_greeting_opens_with_the_time_of_day():
+    import camera_agent as ca
+
+    assert ca.time_of_day_salutation(7) == "Good morning"
+    assert ca.time_of_day_salutation(11) == "Good morning"
+    assert ca.time_of_day_salutation(12) == "Good afternoon"
+    assert ca.time_of_day_salutation(16) == "Good afternoon"
+    assert ca.time_of_day_salutation(17) == "Good evening"
+    assert ca.time_of_day_salutation(21) == "Good evening"
+    assert ca.time_of_day_salutation(23) == "Hello"      # nobody means "good morning" at 2 am
+    assert ca.time_of_day_salutation(2) == "Hello"
+    assert ca.time_of_day_salutation("bogus") in ("Good morning", "Good afternoon", "Good evening", "Hello")
+    assert ca.greeting_for(hour=9).startswith("Good morning, I'm the OpenNVR Agent")
+    assert ca.greeting_for(hour=None).split(",")[0] in ("Good morning", "Good afternoon", "Good evening", "Hello")
+
+
+def test_intro_takes_the_operators_hour_and_the_page_greets_on_open():
+    from fastapi.testclient import TestClient
+    from pathlib import Path
+
+    import camera_agent as ca
+    from context import CameraSpec
+
+    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                       cameras=[CameraSpec(camera_id="c", frame_url="http://x", role="f")])
+    rt = ca.CameraAgentRuntime(cfg)
+
+    class _NoPiper:
+        async def synthesize(self, text):
+            raise RuntimeError("down")
+    rt.piper = _NoPiper()
+    tc = TestClient(ca.build_app(rt))
+    assert tc.get("/intro?hour=8").json()["text"].startswith("Good morning")
+    assert tc.get("/intro?hour=19").json()["text"].startswith("Good evening")
+    assert tc.get("/intro?hour=19").json()["audio_b64"] is None      # text always, audio when Piper is up
+
+    html = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
+    # greets when the page opens (after auth resolves), not only on Talk
+    assert 'if(!introPlayed){ introPlayed=true; playIntro(); }' in html
+    # the browser's own hour rides along
+    assert '"/intro?hour="+new Date().getHours()' in html
+    # autoplay-safe: held audio is spoken on the first gesture or on Talk
+    assert "playHeldIntro" in html and 'addEventListener("pointerdown"' in html
