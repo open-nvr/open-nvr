@@ -6,6 +6,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **AI Adapters metrics: an idle adapter looked broken.** The panel
+  printed "60 samples" next to all-dash percentiles — the samples were
+  the once-a-minute `/metrics` scrapes, not inferences, and the dashes
+  meant the adapter had served nothing in the window. KAI-C's rollup
+  now reports `requests` (the +Inf bucket delta over the window), the
+  header reads "60 scrapes · 0 requests", and the latency card says
+  "No inference requests in this window — nothing to measure yet"
+  instead of dashes.
+
 ### Added
 
 - **camera-agent: thinks aloud before a slow tool.** When a voice

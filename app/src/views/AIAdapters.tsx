@@ -144,6 +144,8 @@ type AdapterMetricsResp = {
   series?: SeriesPoint[]
   fingerprint_changes: string[]
   samples: number
+  // Inferences actually served in the window (scrapes are `samples`).
+  requests?: number
   // SDK ≥1.2: model identity labels from adapter_model_info, and the
   // adapter's own domain series (detections by class, audio seconds,
   // realtime factor…) as windowed deltas keyed by series identity.
@@ -216,8 +218,17 @@ function outcomeBarClass(outcome: string): string {
   return 'bg-red-500'
 }
 
-function LatencyBars({ latency }: { latency: AdapterMetricsResp['latency_ms'] }) {
+function LatencyBars({ latency, requests }: { latency: AdapterMetricsResp['latency_ms']; requests?: number }) {
   const scale = latency?.p99 ?? 0
+  if (requests === 0 && latency?.p50 == null) {
+    // Scraped fine, asked nothing: dashes here read as "broken" — say what it is.
+    return (
+      <div className="text-xs text-[var(--text-dim)]">
+        No inference requests in this window — nothing to measure yet. Percentiles appear once something
+        (an app, the agent, a camera task) sends this adapter work.
+      </div>
+    )
+  }
   const rows = [
     { label: 'p50', value: latency?.p50 ?? null },
     { label: 'p95', value: latency?.p95 ?? null },
@@ -565,7 +576,8 @@ function AdapterMetricsSection({ name }: { name: string }) {
           ) : m ? (
             <div className="space-y-2">
               <div className="font-mono text-[11px] text-[var(--text-dim)]">
-                {formatWindow(m.window_s)}{m.samples != null ? ` · ${m.samples} samples` : ''}
+                {formatWindow(m.window_s)}{m.samples != null ? ` · ${m.samples} scrapes` : ''}
+                {m.requests != null ? ` · ${m.requests} request${m.requests === 1 ? '' : 's'}` : ''}
                 {m.model_info?.model ? (
                   <span>
                     {' · '}
@@ -582,7 +594,7 @@ function AdapterMetricsSection({ name }: { name: string }) {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <MetricPanel title="Inference latency" decision="which model per camera; is the SLA breached">
-                  <LatencyBars latency={m.latency_ms} />
+                  <LatencyBars latency={m.latency_ms} requests={m.requests} />
                 </MetricPanel>
                 <MetricPanel title="Outcomes" decision="rollback / retire / investigate the adapter">
                   <OutcomesSplit outcomes={m.outcomes} />
