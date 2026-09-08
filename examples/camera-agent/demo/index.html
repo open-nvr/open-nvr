@@ -2171,10 +2171,25 @@
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
       if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
 
+    // The greeting plays when the page OPENS, not when Talk is pressed — a
+    // person greets you when you walk in. ?hour= is this browser's local
+    // hour so a remote operator hears the right "Good morning". Browsers
+    // refuse audio before a user gesture: the text shows at once and, if
+    // playback is blocked, the audio is held and spoken on the first tap
+    // or click anywhere (or on Talk).
+    let _introAudio=null;
     async function playIntro(){ setStatus("Introducing…"); setAvatar("speaking");
-      try{ const d=await (await fetch("/intro")).json();
-        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; setAvatar("speaking"); await speak(d.audio_b64); speaking=false; } }
-      catch{ addMsg("Hi, I'm the OpenNVR Agent.","agent"); } }
+      try{ const d=await (await fetch("/intro?hour="+new Date().getHours())).json();
+        if(d.text) addMsg(d.text,"agent");
+        if(d.audio_b64){ const ok=await trySpeak(d.audio_b64); if(!ok) _introAudio=d.audio_b64; } }
+      catch{ addMsg("Hi, I'm the OpenNVR Agent.","agent"); }
+      finally{ if(!sessionActive){ setAvatar("idle"); setStatus("Ready. Type, dictate, or tap Talk."); } } }
+    async function trySpeak(b64){
+      try{ ensureOutputAudio(); if(audioCtx.state!=="running") return false;
+        speaking=true; setAvatar("speaking"); await speak(b64); speaking=false; return true; }
+      catch{ speaking=false; return false; } }
+    async function playHeldIntro(){ if(!_introAudio) return; const a=_introAudio; _introAudio=null; await trySpeak(a); }
+    document.addEventListener("pointerdown",()=>{ if(_introAudio) playHeldIntro(); },{capture:true});
 
     // ── listening loop ──
     function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
@@ -2249,6 +2264,7 @@
       if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
       talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
+      else if(_introAudio){ await playHeldIntro(); }   // page-open greeting the browser held back
       if(!sessionActive) return;
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
@@ -3015,7 +3031,8 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents();
+        if(!introPlayed){ introPlayed=true; playIntro(); } } connectUpdates(); });
     pollHealth(); setInterval(pollHealth, 15000);
     // Phone tab bar: pure show/hide via body[data-mtab]; boot on Chat.
     (function(){ const bar=$("mtabs"); if(!bar) return;

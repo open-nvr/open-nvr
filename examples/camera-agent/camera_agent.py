@@ -993,14 +993,37 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
     return out
 
 
-def greeting_for(name: str | None = None) -> str:
+def time_of_day_salutation(hour: int | None = None) -> str:
+    """"Good morning" / "Good afternoon" / "Good evening" for ``hour``
+    (0–23; the OPERATOR's local hour when the browser sent one, else this
+    process's local clock — the site's TZ under compose). Late night
+    (00:00–04:59) says "Hello" rather than a "Good morning" nobody means."""
+    from datetime import datetime as _dt
+
+    if hour is None:
+        hour = _dt.now().hour
+    try:
+        hour = int(hour) % 24
+    except (TypeError, ValueError):
+        hour = _dt.now().hour
+    if 5 <= hour < 12:
+        return "Good morning"
+    if 12 <= hour < 17:
+        return "Good afternoon"
+    if 17 <= hour < 22:
+        return "Good evening"
+    return "Hello"
+
+
+def greeting_for(name: str | None = None, hour: int | None = None) -> str:
     # No persona name by design — the agent introduces itself by the product
     # name, "the OpenNVR Agent" (formerly "Camera Agent"), described as your
     # camera agent. (``name`` is accepted for call-site compat.)
-    # Short by design: this is SPOKEN (Piper) before the first
-    # interaction — every extra word delays the user's first question.
+    # Short by design: this is SPOKEN (Piper) when the page opens — every
+    # extra word delays the user's first question. Opens with the time of
+    # day like a person would.
     return (
-        "Hi, I'm the OpenNVR Agent — your camera agent. "
+        f"{time_of_day_salutation(hour)}, I'm the OpenNVR Agent — your camera agent. "
         "Ask me anything about your cameras; I can also set alarms, "
         "watches, and reports."
     )
@@ -6149,9 +6172,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({"delivered": ok, "channels": runtime.notifier.status()["channels"]})
 
     @app.get("/intro")
-    async def _intro() -> JSONResponse:
-        """The agent's greeting — text always; audio when Piper is reachable."""
-        greeting = greeting_for(runtime.agent_name)
+    async def _intro(hour: int | None = None) -> JSONResponse:
+        """The agent's greeting — text always; audio when Piper is reachable.
+        ``?hour=<0-23>`` is the operator's local hour (the browser's clock)
+        so a remote operator hears the right time of day; without it the
+        site's clock decides."""
+        greeting = greeting_for(runtime.agent_name, hour)
         audio_b64 = None
         try:
             audio = await runtime.piper.synthesize(greeting)

@@ -8,6 +8,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **camera-agent: greets when the page opens, with the time of day.**
+  The introduction used to wait for Talk; now it plays as soon as the
+  page has loaded (after auth resolves) — text at once and, because
+  browsers refuse audio before a gesture, the spoken greeting is held
+  and played on the first tap, click, or Talk when autoplay is blocked.
+  It opens "Good morning / afternoon / evening" from the operator's own
+  clock (`GET /intro?hour=`), falling back to the site's; 22:00–05:00
+  says "Hello".
+
 - **camera-agent demo: the ⛓ pipeline line under each reply now shows
   what every stage cost** — `stt 0.4s → llm 1.2s → search_history (cam1)
   35ms → llm 0.9s → tts 0.3s · 2.9s`, slowest stage emphasised, total at
