@@ -92,6 +92,7 @@ COPY examples/camera-agent/frame_sources.py   ./frame_sources.py
 COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
+COPY examples/camera-agent/turns.py           ./turns.py
 COPY examples/camera-agent/footage_index.py   ./footage_index.py
 COPY examples/camera-agent/monitor_host.py    ./monitor_host.py
 COPY examples/camera-agent/system_check.py    ./system_check.py
