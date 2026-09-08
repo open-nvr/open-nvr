@@ -6,6 +6,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **camera-agent: interruptions like a person's on the streaming
+  pipeline.** New `turns.py` start strategy for the 1.8 user aggregator:
+  while the agent speaks, a phrase interrupts it only if it is real
+  speech (a Silero VAD pair) of at least `interrupt_min_ms`, holds at
+  least `interrupt_min_words` words once backchannels ("yeah", "okay",
+  "mm-hm") are stripped, and reads as addressed to the agent (its name,
+  a question, a request or correction, the site's own vocabulary —
+  camera names, gate, plate) rather than a remark to someone else;
+  anything else is dropped and the agent keeps talking. While the agent
+  is silent the first sound of speech opens the turn as before, so
+  Smart Turn end-of-turn is untouched. `interruptions: gated` (default)
+  | `eager` | `off`; every decision with its reason at
+  `GET /interruptions`. Proven through the real pipeline: "yeah okay"
+  over the speaking agent → no interruption, no LLM turn; "no wait,
+  show the gate camera" → InterruptionFrame and the turn.
+
 ### Fixed
 
 - **camera-agent demo: a couple of words from anyone cut the agent off.**

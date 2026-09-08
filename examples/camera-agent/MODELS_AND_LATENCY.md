@@ -109,6 +109,36 @@ So if the demo page "stopped speaking when someone said a couple of random
 words", that was the client barge-in gate (now *firm* by default, see
 below), not Smart Turn.
 
+### Interruptions on the streaming pipeline (`turns.py`)
+
+On `/ws` the question "should the agent yield?" is answered the way a
+person answers it, from four cues the pipeline already has — and only
+while the agent is speaking (when it is silent the first sound of speech
+opens the turn, so Smart Turn's end-of-turn detection is untouched):
+
+| cue | source | rule (config) |
+|---|---|---|
+| it is speech | Silero VAD start/stop pair | a cough or a chair never makes one |
+| it lasts | the pair's span | ≥ `interrupt_min_ms` (300) |
+| it has words | Whisper transcript, backchannels stripped | ≥ `interrupt_min_words` (2); "yeah", "okay", "mm-hm" count for nothing |
+| it is for the agent | `addressed_to_agent()` | its name, a question, a request/correction ("no, wait", "show", "the other"), the site's own words (camera names, gate, plate…) — vs a third-person aside ("he said lunch is at one") or a long narrative with none of those |
+
+A phrase that passes all four interrupts (an `InterruptionFrame`; the
+reply is cut and the phrase becomes the next user turn); anything else is
+dropped from the aggregation and the agent keeps talking. If the agent
+has already gone quiet by the time the transcript lands, the addressee
+test is skipped — nobody was being interrupted. Every decision is logged
+(`interruption accepted/ignored (<reason>): '<text>'`) and kept in
+`GET /interruptions` with the text, duration and reason, which is the
+evidence to tune the three knobs from on your own site. `interruptions:
+eager` restores plain VAD barge-in; `off` lets the agent always finish.
+
+Cost: the decision needs the transcript, so on CPU it lands ~0.2 s (VAD
+stop) + Whisper's time after the interrupter pauses — a *firm* yield, not
+an instant one. What it does not do: read gaze, or know voices — a
+wake-word mode and per-operator voice enrolment are the two stronger
+addressee signals, both possible later on the same gate.
+
 Two layers handle the demo page:
 
 - **Client VAD (browser).** The mic uses `echoCancellation` + `noiseSuppression`

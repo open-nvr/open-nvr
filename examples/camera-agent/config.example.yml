@@ -99,6 +99,18 @@ turn_max_secs: 8.0
 #   turn_cpu_threads: onnxruntime threads for one verdict; leave unset for
 #     auto (1 thread — measured fastest up to 7 cores — 2 from 8 cores).
 turn_detector: auto
+# Interruptions on the streaming (/ws) pipeline — like a person's. While the
+# agent speaks, only a phrase that is real speech of ≥ interrupt_min_ms,
+# holds ≥ interrupt_min_words words once backchannels ("mm-hm", "okay") are
+# stripped, and reads as said TO the agent (its name, a question, a
+# request or correction, the site's own words — cameras, gate, plate…)
+# cuts it off; a cough, "yeah", or a remark to someone else does not.
+# GET /interruptions lists every decision with its reason — tune from that.
+#   interruptions: gated (default) | eager (any speech interrupts) | off
+interruptions: gated
+interrupt_min_ms: 300
+interrupt_min_words: 2
+interrupt_addressee: true
 # turn_cpu_threads: 1
 # turn_timer_secs: 0.8
 

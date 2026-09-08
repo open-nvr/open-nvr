@@ -195,6 +195,18 @@ class AppConfig:
     turn_detector: str = "auto"
     turn_cpu_threads: int | None = None
     turn_timer_secs: float = 0.8
+    # Interruptions on the streaming (/ws) pipeline — turns.py. "gated"
+    # (default): while the agent speaks, only a phrase that is real speech
+    # of at least interrupt_min_ms, holds interrupt_min_words words once
+    # backchannels ("mm-hm", "okay") are stripped, and — when
+    # interrupt_addressee is on — reads as said TO the agent, cuts it off;
+    # everything else is ignored and the agent keeps talking. "off": the
+    # agent always finishes (the pre-1.8 behaviour). "eager": any speech
+    # interrupts (plain VAD).
+    interruptions: str = "gated"
+    interrupt_min_ms: float = 300.0
+    interrupt_min_words: int = 2
+    interrupt_addressee: bool = True
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
@@ -2916,6 +2928,11 @@ def load_config(path: str | Path) -> AppConfig:
         turn_detector=_str("turn_detector", "auto"),
         turn_cpu_threads=(int(raw["turn_cpu_threads"]) if raw.get("turn_cpu_threads") else None),
         turn_timer_secs=_float("turn_timer_secs", 0.8),
+        interruptions=_str("interruptions", "gated"),
+        interrupt_min_ms=_float("interrupt_min_ms", 300.0),
+        interrupt_min_words=_int("interrupt_min_words", 2),
+        interrupt_addressee=(True if raw.get("interrupt_addressee") is None
+                             else bool(raw.get("interrupt_addressee"))),
         enabled_tools=(
             list(raw["enabled_tools"])
             if isinstance(raw.get("enabled_tools"), list)
@@ -3249,6 +3266,10 @@ class CameraAgentRuntime:
         # via persist()/load_state like the skill toggles.
         self._ring_overrides: dict[str, str] = {}
         self._announce_app_alerts: str | None = None   # UI override of cfg
+        # Interruption decisions on the streaming pipeline (turns.py): what
+        # was said over the agent, how long, and whether it yielded — the
+        # evidence to tune the gate from. GET /interruptions.
+        self.interruption_log: deque = deque(maxlen=200)
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -5211,7 +5232,7 @@ def describe_turn_profile(cfg: Any) -> str:
             f"no turn model; {p['cores']} core(s) available ({p['reason']})")
 
 
-def build_user_turn_params(cfg: Any) -> Any:
+def build_user_turn_params(cfg: Any, runtime: Any = None) -> Any:
     """The user aggregator's parameters — where turn-taking lives in
     Pipecat 1.8. Silero VAD opens a turn; **Smart Turn v3** (the
     bundled semantic end-of-turn model, CPU) closes it; the aggregator's
@@ -5227,6 +5248,7 @@ def build_user_turn_params(cfg: Any) -> Any:
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
     profile = turn_hardware_profile(cfg)
+    start = build_interruption_strategy(cfg, runtime=runtime)
     if profile["detector"] == "smart":
         from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
         from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -5251,11 +5273,60 @@ def build_user_turn_params(cfg: Any) -> Any:
     return LLMUserAggregatorParams(
         vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(cfg)),
         user_turn_strategies=UserTurnStrategies(
-            start=[VADUserTurnStartStrategy(enable_interruptions=False)],
+            start=[start],
             stop=[stop],
         ),
         user_turn_stop_timeout=float(getattr(cfg, "turn_stop_timeout_secs", 6.0)),
     )
+
+
+def interruption_gate(cfg: Any, runtime: Any = None) -> "Any":
+    """The rule set for ``turns.GatedInterruptionStartStrategy`` from
+    config: thresholds, the agent's name, and the site's own vocabulary
+    (camera ids, names and roles) so "the gate camera" reads as addressed
+    to the agent."""
+    from turns import InterruptionGate
+
+    site: list[str] = []
+    for cam in (getattr(cfg, "cameras", None) or []):
+        for attr in ("camera_id", "name", "role"):
+            v = getattr(cam, attr, None)
+            if v:
+                site.append(str(v))
+    site += ["camera", "cameras", "gate", "plate", "plates", "alarm", "alarms",
+             "recording", "recordings", "footage", "monitor", "watch", "zone"]
+    return InterruptionGate(
+        min_ms=float(getattr(cfg, "interrupt_min_ms", 300.0)),
+        min_words=max(1, int(getattr(cfg, "interrupt_min_words", 2))),
+        addressee=bool(getattr(cfg, "interrupt_addressee", True)),
+        agent_name=str(getattr(cfg, "agent_name", "") or ""),
+        site_words=tuple(site),
+    )
+
+
+def build_interruption_strategy(cfg: Any, runtime: Any = None) -> Any:
+    """The user-turn START strategy for the streaming pipeline, by the
+    ``interruptions`` setting: gated (turns.py), eager (plain VAD, any
+    speech interrupts) or off (the agent always finishes)."""
+    from pipecat.turns.user_start import VADUserTurnStartStrategy
+
+    mode = str(getattr(cfg, "interruptions", "gated") or "gated").strip().lower()
+    if mode == "off":
+        return VADUserTurnStartStrategy(enable_interruptions=False)
+    if mode == "eager":
+        return VADUserTurnStartStrategy(enable_interruptions=True)
+    if mode != "gated":
+        logger.warning("interruptions=%r is not gated|eager|off; using gated", mode)
+    from turns import make_start_strategy
+
+    gate = interruption_gate(cfg, runtime)
+    log = getattr(runtime, "interruption_log", None) if runtime is not None else None
+
+    def _record(event: dict[str, Any]) -> None:
+        if log is not None:
+            log.append({"ts": time.time(), **event})
+
+    return make_start_strategy(gate, on_decision=_record)
 
 
 def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = None) -> tuple[list, Any]:
@@ -5287,7 +5358,7 @@ def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = Non
         {"role": "system", "content": runtime.build_system_prompt()},
     ])
     aggregators = LLMContextAggregatorPair(
-        context, user_params=user_params or build_user_turn_params(runtime.cfg),
+        context, user_params=user_params or build_user_turn_params(runtime.cfg, runtime),
     )
     return [stt, aggregators.user(), llm, tts, aggregators.assistant()], context
 
@@ -5714,6 +5785,21 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 {"error": "no recordings for this camera yet", "recordings": []},
                 status_code=200), None
         return None, (token, path)
+
+    @app.get("/interruptions")
+    async def _interruptions() -> dict[str, Any]:
+        """The interruption gate on the streaming pipeline and its recent
+        decisions (viewer tier: look only). Tune from evidence: every
+        phrase spoken over the agent is here with why it did or did not
+        interrupt."""
+        cfg = runtime.cfg
+        return {
+            "mode": str(getattr(cfg, "interruptions", "gated")),
+            "min_ms": float(getattr(cfg, "interrupt_min_ms", 300.0)),
+            "min_words": int(getattr(cfg, "interrupt_min_words", 2)),
+            "addressee": bool(getattr(cfg, "interrupt_addressee", True)),
+            "recent": list(runtime.interruption_log)[-50:],
+        }
 
     @app.get("/alarm-defaults")
     async def _alarm_defaults() -> dict[str, Any]:
