@@ -6,6 +6,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **camera-agent: thinks aloud before a slow tool.** When a voice
+  question needs a slow tool the agent says what it is about to do —
+  "Let me check the gate camera for vehicles between 2 and 3", "Let me
+  check the plate reads for 6 6 H H 0 7 in the last hour" — built from
+  the tool call's own arguments (no LLM), Piper-synthesised in parallel
+  with the tool and cached by text, pushed over the page's `/updates`
+  socket the moment the tool is known; the answer cuts it if it lands
+  first. At most once per turn, never for instant lookups, and only when
+  the expected wait (the agent's own recent stage timings) is at least
+  `filler_min_ms`. Typed questions get the line as a status only.
+  `thinking_aloud`, `filler_min_ms`, `filler_source: template | model`
+  (the model writes the line in the same first pass, template as
+  fallback); `GET /thinking-aloud` shows the decisions. `/updates` now
+  wakes immediately for pushed lines instead of only on its 2 s tick.
+
 ### Changed
 
 - **camera-agent: greets when the page opens, with the time of day.**
