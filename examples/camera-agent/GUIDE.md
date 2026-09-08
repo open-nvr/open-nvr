@@ -317,6 +317,18 @@ embedding. It is not listed under the sidebar's **Applications** group —
 that group holds the first-class pages (Vehicles, Occupancy) an app
 *provides*; the agent's page is its own.
 
+## Muting an app in the agent
+
+Installed catalog apps show in the skills rail next to the agent's own
+skills. ✕ on one **mutes it in the agent only**: its alerts are no
+longer relayed into the feed or spoken, it drops out of `list_apps`, and
+`app_status` / `recent_app_alerts` answer "muted in this agent". The app
+itself keeps running for the rest of OpenNVR — its own page, the inbox,
+other consumers. Add it back from **+** at any time; the mute is
+persisted like every other toggle and cleared by **Restore defaults**.
+The ⚙ next to it opens the app in the App Catalog, which remains the
+place to enable, disable or uninstall the app for real.
+
 ## Faces
 
 Off by default — it needs the InsightFace recognition adapter, which

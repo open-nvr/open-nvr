@@ -451,10 +451,11 @@ def test_leaving_the_camera_screen_cancels_a_pending_grace_timer():
     assert "_clearWhepGrace();" in fn
 
 
-def test_app_backed_skill_cannot_be_toggled_here_and_points_at_the_catalog():
-    """An installed catalog app appears as a read-only skill; the ✕ used
-    to answer "skill can't be enabled yet" — wrong verb, wrong place. Now:
-    a 409 that names the app and where it is managed."""
+def test_app_backed_skill_is_muted_in_the_agent_not_disabled_in_the_catalog(tmp_path):
+    """An installed catalog app appears as a skill. ✕ mutes it IN THE
+    AGENT (no relay, not listed, not queried), persisted like any other
+    toggle and reversible from +; the app itself keeps running — the
+    catalog stays the place to enable/disable/uninstall it (manage_url)."""
     from fastapi.testclient import TestClient
 
     from camera_agent import AppConfig, CameraAgentRuntime, build_app
@@ -462,6 +463,7 @@ def test_app_backed_skill_cannot_be_toggled_here_and_points_at_the_catalog():
 
     cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
                     opennvr_api_url="http://core:8000", opennvr_ui_url="https://nvr.local",
+                    state_path=str(tmp_path / "state.json"),
                     cameras=[CameraSpec(camera_id="c", frame_url="http://x", role="f")])
     rt = CameraAgentRuntime(cfg)
 
@@ -470,16 +472,25 @@ def test_app_backed_skill_cannot_be_toggled_here_and_points_at_the_catalog():
                         "enabled": True, "manifest": {"summary": "Reads plates"}}]
     rt.app_registry = _Reg()
     entry = next(s for s in rt.skills_payload() if s["id"] == "app:license-plate-recognition")
-    assert entry["read_only"] is True
+    assert entry["enabled"] is True and entry["read_only"] is False
     assert entry["manage_url"] == "https://nvr.local/app-catalog/license-plate-recognition"
-    assert "App Catalog" in entry["hint"]
 
     tc = TestClient(build_app(rt))
     r = tc.post("/skills/app:license-plate-recognition/disable")
-    assert r.status_code == 409
-    body = r.json()
-    assert "License Plate Recognition" in body["error"] and "App Catalog" in body["error"]
-    assert body["url"] == "https://nvr.local/app-catalog/license-plate-recognition"
-    assert "can't be enabled yet" not in body["error"]
-    # the app entry is still there — nothing was toggled
-    assert any(s["id"] == "app:license-plate-recognition" for s in rt.skills_payload())
+    assert r.status_code == 200, r.text
+    entry = next(s for s in r.json()["skills"] if s["id"] == "app:license-plate-recognition")
+    assert entry["enabled"] is False and "muted" in entry["hint"]
+    assert rt.app_muted("license-plate-recognition")
+    # persisted: a fresh runtime restores the mute even before the registry answers
+    rt2 = CameraAgentRuntime(cfg)
+    rt2.load_state()
+    assert rt2.app_muted("license-plate-recognition")
+    # and back
+    assert tc.post("/skills/app:license-plate-recognition/enable").status_code == 200
+    assert not rt.app_muted("license-plate-recognition")
+    # an app the catalog does not know cannot be toggled
+    assert tc.post("/skills/app:nope/disable").status_code == 404
+    # Restore defaults clears a mute like any other toggle
+    tc.post("/skills/app:license-plate-recognition/disable")
+    tc.post("/skills/restore")
+    assert not rt.app_muted("license-plate-recognition")

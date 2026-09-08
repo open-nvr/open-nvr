@@ -2655,13 +2655,14 @@
       const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
       if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
       for(const s of on){ const d=document.createElement("div"); d.className="skill";
-        // An installed catalog app is shown here so the operator can SEE
-        // it; it is enabled/disabled in the App Catalog (operator
-        // permission, audit) — so a link there, not a remove button.
-        const ctl = s.read_only
-          ? (s.manage_url?`<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Managed in the App Catalog — open it">⚙</a>`
-                         :`<span class="sk-x sk-manage" title="Managed in the App Catalog">⚙</span>`)
-          : `<button class="sk-x" title="Remove skill">✕</button>`;
+        // An installed catalog app: ✕ MUTES it in the agent only (no relay,
+        // not listed, not queried — the app keeps running for the rest of
+        // OpenNVR; add it back from +). ⚙ opens the app in the App Catalog,
+        // where the app itself is enabled, disabled or uninstalled.
+        const manage = (s.source==="app" && s.manage_url)
+          ? `<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Open in the App Catalog (enable/disable/uninstall the app itself)">⚙</a>` : "";
+        const ctl = s.read_only ? manage
+          : manage+`<button class="sk-x" title="${s.source==="app"?"Mute in the agent (the app keeps running)":"Remove skill"}">✕</button>`;
         d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span>${ctl}`;
         d.querySelector(".sk-nm").textContent=s.name;
         d.querySelector(".sk-uses").textContent="uses "+s.uses;
@@ -2757,7 +2758,8 @@
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
         _skills=d.skills||_skills; renderSkills(); loadHardware();
-        addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
+        if(id.startsWith("app:")) addMsg(action==="enable"?"App added back — the agent relays and queries it again.":"App muted in the agent — its alerts won't be relayed here and it won't be queried. The app itself keeps running; add it back from + any time.","sys");
+        else addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
     // One-click undo for an over-pruned agent: clears every runtime toggle
     // server-side (fresh-boot state). Backend-gated skills stay gated.
