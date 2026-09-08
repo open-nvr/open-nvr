@@ -267,6 +267,9 @@
     .msg.agent{align-self:flex-start; background:var(--glass2); border:1px solid var(--stroke);
       border-radius:14px 14px 14px 4px; padding:0.55rem 0.75rem;} .msg.agent .who{color:var(--agent);}
     .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--faint); font-size:0.78rem; font-style:italic;}
+    .msg.flowline .ms{opacity:0.75; font-variant-numeric:tabular-nums;}
+    .msg.flowline .stage.slowest{color:var(--muted); font-style:normal;}
+    .msg.flowline .ms.total{opacity:1; color:var(--muted);}
     .msg .olink{margin-top:6px; font-size:0.76rem; padding:0.35rem 0.6rem;}
     .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:7px;}
     .frame-thumb{width:132px; max-width:42vw; border-radius:9px; border:1px solid var(--stroke); cursor:pointer; display:block;}
@@ -1242,16 +1245,32 @@
       t.textContent=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       t.title=now.toLocaleString();
       return t; }
-    function addFlow(trace,timings){
+    // Stage durations are the server's own perf_counter marks (the trace
+    // carries ms per step; /converse adds stt/tts/total) — nothing extra
+    // is measured or computed for this line.
+    const fmtMs=ms=>ms==null?"":(ms<1000?Math.round(ms)+"ms":(ms/1000).toFixed(ms<10000?1:0)+"s");
+    function addFlow(trace,timings,total){
       // One muted line under the reply: the pipeline this turn actually ran,
-      // e.g.  stt → llm → describe_camera (cam1 · vlm) → llm → tts
+      // with what each stage cost, the slowest stage emphasised, total at the end:
+      //   stt 0.4s → llm 1.2s → describe_camera (cam1 · vlm) 35ms → llm 0.9s → tts 0.3s · 2.9s
       if(!trace||!trace.length) return;
-      const steps=trace.map(s=>s.step+(s.detail?" ("+s.detail+")":""));
-      if(timings&&timings.stt!=null) steps.unshift("stt");
-      if(timings&&timings.tts!=null) steps.push("tts");
+      const stages=trace.map(s=>({label:s.step+(s.detail?" ("+s.detail+")":""), ms:s.ms}));
+      if(timings&&timings.stt!=null) stages.unshift({label:"stt", ms:timings.stt});
+      if(timings&&timings.tts!=null) stages.push({label:"tts", ms:timings.tts});
+      const known=stages.filter(x=>x.ms!=null);
+      const slowest=known.length>1?known.reduce((a,b)=>b.ms>a.ms?b:a):null;
+      const sum=known.reduce((a,x)=>a+x.ms,0);
+      const tot=(timings&&timings.total!=null)?timings.total:(total!=null?total:null);
       const d=document.createElement("div"); d.className="msg sys flowline";
-      d.title=trace.map(s=>s.step+": "+s.ms+" ms").join("\n");
-      d.textContent="⛓ "+steps.join(" → ");
+      d.appendChild(document.createTextNode("⛓ "));
+      stages.forEach((x,i)=>{
+        if(i) d.appendChild(document.createTextNode(" → "));
+        const st=document.createElement("span"); st.className="stage"+(x===slowest?" slowest":"");
+        st.appendChild(document.createTextNode(x.label));
+        if(x.ms!=null){ const t=document.createElement("span"); t.className="ms"; t.textContent=" "+fmtMs(x.ms); st.appendChild(t); }
+        d.appendChild(st); });
+      if(tot!=null){ const t=document.createElement("span"); t.className="ms total"; t.textContent=" · "+fmtMs(tot); d.appendChild(t); }
+      d.title="Server-side stage timings (ms). "+(tot!=null&&tot>sum+50?"Total includes transport/decode; ":"")+(slowest?"Slowest: "+slowest.label:"");
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
     }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
@@ -1339,7 +1358,7 @@
           body:JSON.stringify(body)});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace,null,d.latency_ms); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
       finally{ $("askBtn").disabled=false; setAvatar("idle"); }
