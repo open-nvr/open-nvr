@@ -643,3 +643,77 @@ def test_subscriber_reconnects_after_connection_closes(monkeypatch):
         await asyncio.wait_for(task, timeout=2.0)
 
     asyncio.run(_drive())
+
+
+# ── what gets SPOKEN vs only shown ─────────────────────────────────────
+
+
+def _sev(app_id, title, severity, summary=None):
+    return AlertRecord(received_at=time.time(), app_id=app_id, camera_id="front-door",
+                       title=title, severity=severity, summary=summary or title)
+
+
+def test_relayed_alerts_carry_the_announce_policy():
+    """Default "important": every relayed app alert lands in the feed, but
+    only high/critical ones are marked for the voice UI to speak — a plate
+    reader's every read is shown with a chime, not narrated."""
+    rt = _runtime(nats_url="nats://x")
+    assert rt.announce_app_alerts() == "important"
+    rt._relay_app_alert(_sev("lpr", "Monitored plate 66HH07 seen", "medium"))
+    rt.monitors._cooldown = 0
+    rt._relay_app_alert(_sev("lpr", "Unknown vehicle K884RS", "info"))
+    rt._relay_app_alert(_sev("intrusion", "Intrusion at the gate", "high"))
+    notes = rt.monitors.notifications()
+    assert [n["announce"] for n in notes] == [False, False, True]
+    assert [n["severity"] for n in notes] == ["medium", "info", "high"]
+
+    rt.set_announce_app_alerts("all")
+    rt._relay_app_alert(_sev("lpr", "Monitored plate H644LX seen", "medium"))
+    assert rt.monitors.notifications()[-1]["announce"] is True
+    rt.set_announce_app_alerts("none")
+    rt._relay_app_alert(_sev("fire", "Fire", "critical"))
+    assert rt.monitors.notifications()[-1]["announce"] is False
+    with pytest.raises(ValueError):
+        rt.set_announce_app_alerts("loud")
+
+
+def test_announce_policy_persists_and_config_is_the_fallback(tmp_path):
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        state_path=str(tmp_path / "state.json"), announce_app_alerts="all",
+        cameras=[CameraSpec(camera_id="front-door", frame_url="http://x/1.jpg", role="front")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    assert rt.announce_app_alerts() == "all"          # config
+    rt.set_announce_app_alerts("none")                # UI override, persisted
+    rt2 = CameraAgentRuntime(cfg)
+    rt2.load_state()
+    assert rt2.announce_app_alerts() == "none"
+
+
+def test_relay_text_does_not_repeat_the_title():
+    from camera_agent import relay_text
+    assert relay_text("Monitored plate 66HH07 seen",
+                      "Monitored plate 66HH07 seen: License plate '66HH07' read on camera cam1") == \
+        "Monitored plate 66HH07 seen: License plate '66HH07' read on camera cam1"
+    assert relay_text("PPE violation", "No helmet on worker 3") == "PPE violation — No helmet on worker 3"
+    assert relay_text("PPE violation", "") == "PPE violation"
+    assert relay_text("", "just a summary") == "just a summary"
+
+
+def test_alarm_defaults_endpoint_carries_the_announce_policy():
+    from fastapi.testclient import TestClient
+
+    from camera_agent import build_app
+
+    rt = _runtime()
+    tc = TestClient(build_app(rt))
+    assert tc.get("/alarm-defaults").json()["announce_app_alerts"] == "important"
+    r = tc.put("/alarm-defaults", json={"announce_app_alerts": "none"})
+    assert r.status_code == 200 and r.json()["announce_app_alerts"] == "none"
+    assert tc.put("/alarm-defaults", json={"announce_app_alerts": "loud"}).status_code == 400
+    # the ring overrides survive a save that only changed the policy
+    tc.put("/alarm-defaults", json={"overrides": {"snake": "siren"}})
+    tc.put("/alarm-defaults", json={"announce_app_alerts": "all"})
+    d = tc.get("/alarm-defaults").json()
+    assert d["overrides"] == {"snake": "siren"} and d["announce_app_alerts"] == "all"

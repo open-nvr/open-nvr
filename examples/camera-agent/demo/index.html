@@ -328,6 +328,8 @@
       border:1px solid var(--stroke); border-radius:999px; padding:0 0.4rem;}
     .skill .sk-tool.off{opacity:0.45; text-decoration:line-through;}
     .skill .sk-x{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem; flex:0 0 auto; padding:0 0.1rem;}
+    .skill .sk-manage{text-decoration:none; color:var(--faint);}
+    .skill a.sk-manage:hover{color:var(--text);}
     .skill .sk-x:hover{color:var(--danger);}
     #skillBrowse{margin-top:0.5rem; border-top:1px solid var(--stroke); padding-top:0.5rem;}
     #skillSearch,.addform input,.addform select{width:100%; background:rgba(0,0,0,0.28); color:var(--text);
@@ -809,6 +811,12 @@
             <div class="empty-note" id="ringInherited"></div>
             <div id="ringRows"></div>
             <button class="ghost" id="ringAddRow" type="button">+ add target</button>
+            <div class="rec-lbl">Speak alerts from installed apps</div>
+            <select id="announceApps" aria-label="Speak app alerts">
+              <option value="important">Important only — high &amp; critical (default)</option>
+              <option value="all">All — every app alert, e.g. each plate read</option>
+              <option value="none">Never — show in the feed with a chime, don't speak</option>
+            </select>
             <button class="ghost primary" id="ringSave" type="button">Save defaults</button>
           </div>
           <!-- One-click presets, rendered from GET /alarm-presets with HONEST
@@ -2422,7 +2430,10 @@
 
     // ── monitors ──
     async function pollMonitors(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
-      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify");
+          // App alerts carry announce=false under the site's "important
+          // only" / "never" policy: shown + chimed, not narrated.
+          if(n.announce!==false) await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
       if(!active.length){ monitorListEl.innerHTML=""; updateAutoEmpty(); return; }
@@ -2644,7 +2655,14 @@
       const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
       if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
       for(const s of on){ const d=document.createElement("div"); d.className="skill";
-        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
+        // An installed catalog app is shown here so the operator can SEE
+        // it; it is enabled/disabled in the App Catalog (operator
+        // permission, audit) — so a link there, not a remove button.
+        const ctl = s.read_only
+          ? (s.manage_url?`<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Managed in the App Catalog — open it">⚙</a>`
+                         :`<span class="sk-x sk-manage" title="Managed in the App Catalog">⚙</span>`)
+          : `<button class="sk-x" title="Remove skill">✕</button>`;
+        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span>${ctl}`;
         d.querySelector(".sk-nm").textContent=s.name;
         d.querySelector(".sk-uses").textContent="uses "+s.uses;
         // Tool-level honesty: list every tool this skill bundles; grey out
@@ -2660,7 +2678,7 @@
             tl.appendChild(c); }
           d.querySelector(".sk-body").appendChild(tl);
         }
-        d.querySelector(".sk-x").addEventListener("click",()=>{
+        if(!s.read_only) d.querySelector(".sk-x").addEventListener("click",()=>{
           if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
           toggleSkill(s.id,"disable"); });
         el.appendChild(d); }
@@ -2775,6 +2793,7 @@
       if(!d){ addMsg("Couldn't load alert defaults.","sys"); return; }
       const rows=$("ringRows"); rows.innerHTML="";
       for(const [k,v] of Object.entries(d.overrides||{})) rows.appendChild(_ringRow(k,v));
+      const an=$("announceApps"); if(an) an.value=d.announce_app_alerts||"important";
       const inherited=Object.entries(d.defaults||{}).filter(([k])=>!(k in (d.overrides||{})));
       $("ringInherited").textContent=inherited.length?
         ("Inherited: "+inherited.map(([k,v])=>k+" → "+v).join(", ")):"";
@@ -2786,8 +2805,9 @@
         for(const row of document.querySelectorAll("#ringRows .ringrow")){
           const t=row.querySelector("input").value.trim().toLowerCase();
           if(t) overrides[t]=row.querySelector("select").value; }
+        const announce_app_alerts=($("announceApps")||{}).value||"important";
         try{ const r=await fetch("/alarm-defaults",{method:"PUT",
-            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides})});
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides,announce_app_alerts})});
           const d=await r.json().catch(()=>({}));
           if(!r.ok){ addMsg("Couldn't save alert defaults: "+(d.error||("HTTP "+r.status)),"sys"); return; }
           window._ringDefaults=d.defaults||{};
