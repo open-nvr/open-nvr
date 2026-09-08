@@ -90,7 +90,26 @@ It reports p50/p95 per phase and quantifies how much background polling
 ## Turn detection & background-noise rejection
 
 A hands-free loop only feels good if it (a) ends the turn when you stop talking
-and (b) doesn't react to room noise. Two layers handle this:
+and (b) doesn't react to room noise.
+
+**Which path you are on matters.** The agent has two voice paths:
+
+* The **demo page's Talk mode** (`/demo`) records an utterance in the
+  browser and POSTs it to `/converse`. Turn-taking there is the browser's
+  own *energy* detector described below — there is no speech model on the
+  client. Smart Turn is **not** in this loop.
+* The **streaming pipeline** (`/ws`, Pipecat 1.8) is where Silero VAD +
+  **Smart Turn v3** live: semantic end-of-turn, and — for clients that opt
+  in — model-backed interruptions (`MinWordsUserTurnStartStrategy`: a reply
+  is only cut when the interrupter has actually said a few words). The demo
+  page does not use `/ws` yet; a client that streams 16 kHz PCM over it
+  gets the semantic behaviour.
+
+So if the demo page "stopped speaking when someone said a couple of random
+words", that was the client barge-in gate (now *firm* by default, see
+below), not Smart Turn.
+
+Two layers handle the demo page:
 
 - **Client VAD (browser).** The mic uses `echoCancellation` + `noiseSuppression`
   + `autoGainControl`, then an RMS energy gate that **adapts to the ambient
@@ -98,7 +117,13 @@ and (b) doesn't react to room noise. Two layers handle this:
   `max(floor, noiseFloor × 2.2)`, so steady background noise never crosses it,
   while soft speech still does. Endpointing stops the turn after ~900 ms of
   silence (min 350 ms, max 15 s), and capture is suppressed while the agent is
-  speaking so it never hears itself.
+  speaking so it never hears itself. **Barge-in** (talking over the agent)
+  is a separate gate on the same mic: *firm* (default) stops the reply only
+  after ~550 ms of sustained speech well above the noise floor (short dips
+  tolerated — speech has gaps), so a cough, a word to someone else, or a
+  chair scraping does not; *eager* stops on the first clear syllable (the
+  old ~70 ms rule); *off* always lets the agent finish. Set it under the
+  header ("interrupt when I talk over it"); persisted per browser.
 - **Server STT guard (`stt_noise_filter`, on by default).** Whisper hallucinates
   stock phrases from silence/noise — "Thank you.", "you", "Thanks for watching".
   `looks_like_noise()` drops these so a noisy room can't trigger a phantom turn;

@@ -290,3 +290,18 @@ def test_dictation_still_works_without_an_analyser():
     # never start — fall back to one segment for the session instead.
     tog = _fn("toggleDictate")
     assert "if(!dictAnalyser) dictSegStart();" in tog
+
+
+def test_barge_in_is_firm_by_default_and_configurable():
+    """Interrupting the speaking agent needs sustained speech, not ~70 ms
+    of loud mic: a cough or a word to someone else must not cut a reply.
+    The mode (firm / eager / off) is an operator choice persisted per
+    browser."""
+    html = _HTML
+    assert 'id="bargeMode"' in html
+    assert "BARGE_PRESETS" in html and "firm:{ms:550" in html
+    assert 'localStorage.getItem("agent_barge_mode")' in html
+    # the old frame-count rule is gone
+    assert "bargeFrames>=4" not in html
+    # default mode is firm
+    assert 'return v in BARGE_PRESETS?v:"firm"' in html

@@ -633,6 +633,13 @@
               <p class="lede" id="lede">Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.</p>
               <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
                 <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
+              <label class="wakeopt" id="bargeOpt" title="Interrupting the agent while it speaks. Firm (default): only sustained speech — about half a second of clear talking over it — stops the reply, so a cough, a word or two aside, or room noise does not. Eager: stops on the first clear syllable. Off: the agent always finishes; speak after it stops.">
+                interrupt when I talk over it:
+                <select id="bargeMode" aria-label="Barge-in">
+                  <option value="firm">firm — sustained speech only</option>
+                  <option value="eager">eager — first syllable</option>
+                  <option value="off">off — let it finish</option>
+                </select></label>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
@@ -1142,6 +1149,21 @@
     // mouth from the live amplitude — so she visibly "speaks". If the user talks
     // clearly over her (mic well above the room floor), playback stops so they
     // can ask straight away (barge-in).
+    //
+    // Barge-in is deliberately NOT eager by default. This page's hands-free
+    // loop is an energy detector (no speech model on the client), so the
+    // only evidence that someone is talking TO the agent is how long and
+    // how loudly they keep talking. Four animation frames (~70 ms) above
+    // the gate — the old rule — stopped a reply on a cough, a word to
+    // someone else in the room, or a chair scraping. "firm" needs ~550 ms
+    // of speech, well above the noise floor, with short dips tolerated
+    // (natural speech has gaps); "eager" is the old behaviour; "off"
+    // never interrupts. Persisted per browser.
+    const BARGE_PRESETS={firm:{ms:550,margin:2.5,dipMs:150},eager:{ms:70,margin:1.7,dipMs:0},off:null};
+    let bargeMode=(function(){ try{ const v=localStorage.getItem("agent_barge_mode"); return v in BARGE_PRESETS?v:"firm"; }catch{ return "firm"; } })();
+    (function(){ const sel=$("bargeMode"); if(!sel) return; sel.value=bargeMode;
+      sel.addEventListener("change",()=>{ bargeMode=sel.value in BARGE_PRESETS?sel.value:"firm";
+        try{ localStorage.setItem("agent_barge_mode",bargeMode); }catch{} }); })();
     function setMouth(amp){ if(mouthEl) mouthEl.setAttribute("ry",(2+Math.min(1,amp*4)*14).toFixed(1)); }
     function stopSpeaking(){ if(currentSource){ try{currentSource.stop();}catch{} currentSource=null; }
       if(mouthRAF){ cancelAnimationFrame(mouthRAF); mouthRAF=null; } setMouth(0); }
@@ -1155,15 +1177,19 @@
           playbackAnalyser.connect(audioCtx.destination); }   // wire to speakers once
         const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
         const src=audioCtx.createBufferSource(); src.buffer=buf;
-        src.connect(an); currentSource=src; let bargeFrames=0;
+        src.connect(an); currentSource=src;
+        let bargeStart=0, bargeLastLoud=0;              // ms timestamps of the current over-talk run
         const tick=()=>{
           if(currentSource!==src){ fin(); return; }       // stopped (barge-in / reset)
           an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++)s+=abuf[i]*abuf[i];
           setMouth(Math.sqrt(s/abuf.length));
-          if(analyser && sessionActive){                   // barge-in detection
-            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*1.7;
-            bargeFrames = mic>gate ? bargeFrames+1 : 0;
-            if(bargeFrames>=4){ stopSpeaking(); fin(); return; }
+          const preset=BARGE_PRESETS[bargeMode];
+          if(analyser && sessionActive && preset){         // barge-in detection
+            const now=performance.now();
+            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*preset.margin;
+            if(mic>gate){ if(!bargeStart) bargeStart=now; bargeLastLoud=now; }
+            else if(bargeStart && now-bargeLastLoud>preset.dipMs){ bargeStart=0; }   // the run ended
+            if(bargeStart && bargeLastLoud-bargeStart>=preset.ms){ stopSpeaking(); fin(); return; }
           }
           mouthRAF=requestAnimationFrame(tick);
         };
