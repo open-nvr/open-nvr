@@ -1347,7 +1347,7 @@
     async function ask(){
       const inp=$("askInput"), q=inp.value.trim(); if(!q) return;
       inp.value=""; addMsg(q,"user"); setStatus("Thinking…"); setAvatar("thinking");
-      $("askBtn").disabled=true;
+      $("askBtn").disabled=true; _askInFlight=true;
       // A pinned frame scopes the turn to its camera and rides along so the
       // agent answers about the EXACT frame the user clicked. One-shot:
       // cleared after the send either way.
@@ -1361,7 +1361,7 @@
         else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace,null,d.latency_ms); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
-      finally{ $("askBtn").disabled=false; setAvatar("idle"); }
+      finally{ $("askBtn").disabled=false; _askInFlight=false; setAvatar("idle"); }
     }
     // ── the camera roster: a live view, not a boot snapshot ─────────────
     // This used to run exactly ONCE, at page load, and the /updates socket
@@ -2218,6 +2218,20 @@
     function stopCapture(){ if(!recorder||recorder.state==="inactive")return; capturing=false; loudFrames=0;
       setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
 
+    // ── thinking aloud ──
+    // The server publishes a "working" line the moment it knows which slow
+    // tool the turn needs ("Let me check the gate camera between 2 and 3").
+    // Voice turn: speak it while the tool runs; the answer cuts it if it
+    // lands first. Typed turn: status line only. Ignored when no turn is in
+    // flight (a late line after Stop) or while the agent is already speaking.
+    let _fillerSrc=null, _askInFlight=false;
+    async function onWorking(w){ if(!w||!w.text||!(busy||_askInFlight)) return;
+      setStatus(w.text,"active");
+      if(!w.audio_b64||!sessionActive||speaking) return;
+      try{ speaking=true; setAvatar("speaking"); _fillerSrc=true; await speak(w.audio_b64); }
+      catch{} finally{ _fillerSrc=null; speaking=false; if(busy) setAvatar("thinking"); } }
+    function cutFiller(){ if(_fillerSrc){ stopSpeaking(); _fillerSrc=null; speaking=false; } }
+
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true; const gen=++turnGen; inflightCtl=new AbortController();
@@ -2245,6 +2259,7 @@
         addFlow(data.trace,data.timings_ms);
         if(data.reply && !data.audio_b64 && data.tts_error && !ttsWarned){ ttsWarned=true;
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
+        cutFiller();                                    // the answer outranks "let me check…"
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
       }catch(err){ if(gen!==turnGen || err.name==="AbortError") return;  // user cancelled — not an error
@@ -2605,6 +2620,7 @@
       _updWs=ws;
       ws.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch{ return; }
         _updLive=true; _updBackoff=1500;
+        if(d.working) onWorking(d.working);
         if(d.tasks) pollTasks(d.tasks);
         if(d.monitors) pollMonitors(d.monitors);
         if(d.reports) pollReports(d.reports);

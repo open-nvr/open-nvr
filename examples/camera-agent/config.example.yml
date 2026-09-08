@@ -111,6 +111,18 @@ interruptions: gated
 interrupt_min_ms: 300
 interrupt_min_words: 2
 interrupt_addressee: true
+# Thinking aloud: when a voice question needs a slow tool, the agent says
+# what it is about to do while it does it — "Let me check the gate camera
+# for vehicles between 2 and 3" — built from the tool call's own arguments
+# (no LLM), Piper-synthesised in parallel with the tool and cached by
+# text, at most once per turn, and only when the expected wait (this
+# site's own recent stage timings) is at least filler_min_ms. Typed
+# questions get the line as a status only. GET /thinking-aloud shows the
+# decisions. filler_source "model" asks the LLM to write the line in the
+# same first pass (a few extra tokens) with the template as fallback.
+thinking_aloud: true
+filler_min_ms: 1500
+filler_source: template
 # turn_cpu_threads: 1
 # turn_timer_secs: 0.8
 

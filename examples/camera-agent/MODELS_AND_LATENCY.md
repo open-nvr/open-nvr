@@ -211,6 +211,37 @@ verdict is the floor of the "you stop → agent starts" latency; the Whisper
 transcript for the turn is usually still in flight at that point, so it
 rarely adds to the wall clock.
 
+## Thinking aloud (`fillers.py`)
+
+A person who has to look something up says what they are about to do,
+then goes quiet and does it. The agent knows *what it is about to do* the
+moment the first LLM pass returns a tool call — the tool and its
+arguments — and that is the only moment worth filling: the tool, the
+second LLM pass and TTS are the slow part. So when a voice question needs
+a slow tool it says, from the call's own arguments, "Let me check the
+gate camera for vehicles between 2 and 3" / "Let me take a look at the
+front door camera — is the door open" / "Let me check the plate reads for
+6 6 H H 0 7 in the last hour", and the line plays while the tool runs.
+
+What it costs: no LLM (one sentence shape per tool, slots filled from the
+arguments the model already extracted), one short Piper synthesis run in
+parallel with the tool and cached by text, one message on the page's
+`/updates` socket. Nothing is added to the answer's path; the answer cuts
+the line if it lands first. On a CPU-only box Piper is the CPU hog, so
+the parallel synthesis is the one real cost — cached lines are free, and
+typed questions never synthesise (status text only).
+
+When it speaks: at most once per turn, never for instant lookups or
+control verbs (`recent_events`, `create_alarm`…), and only when the
+expected wait — the agent's own recent medians for that tool + the second
+LLM pass + TTS, seeded from defaults — is at least `filler_min_ms`
+(1500). On a GPU box where a history search plus reply takes a second,
+it stays quiet. `GET /thinking-aloud` lists the recent decisions with
+their reasons. `filler_source: model` asks the LLM to write the line in
+the *same* first pass (about ten extra output tokens) and falls back to
+the template when the model's line is missing, long, or is the answer
+itself — worth trying with your model; the template is the safe default.
+
 ## Recommended model choices
 
 | Role | Default (snappy) | Upgrade (quality, slower) | Why |

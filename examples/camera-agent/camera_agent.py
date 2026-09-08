@@ -207,6 +207,18 @@ class AppConfig:
     interrupt_min_ms: float = 300.0
     interrupt_min_words: int = 2
     interrupt_addressee: bool = True
+    # Thinking aloud (fillers.py): when a voice question needs a slow tool,
+    # the agent says what it is about to do ("let me check the gate camera
+    # between 2 and 3") while it does it. One sentence shape per tool with
+    # the tool call's own arguments slotted in — no LLM; Piper synthesis
+    # cached by text and run in parallel with the tool; at most one per
+    # turn; only when the expected wait (this site's own recent stage
+    # timings) is at least filler_min_ms. filler_source "model" asks the
+    # LLM to write the line in the SAME first pass (a few extra output
+    # tokens), template as fallback.
+    thinking_aloud: bool = True
+    filler_min_ms: float = 1500.0
+    filler_source: str = "template"
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
@@ -2956,6 +2968,9 @@ def load_config(path: str | Path) -> AppConfig:
         interrupt_min_words=_int("interrupt_min_words", 2),
         interrupt_addressee=(True if raw.get("interrupt_addressee") is None
                              else bool(raw.get("interrupt_addressee"))),
+        thinking_aloud=(True if raw.get("thinking_aloud") is None else bool(raw.get("thinking_aloud"))),
+        filler_min_ms=_float("filler_min_ms", 1500.0),
+        filler_source=_str("filler_source", "template"),
         enabled_tools=(
             list(raw["enabled_tools"])
             if isinstance(raw.get("enabled_tools"), list)
@@ -3293,6 +3308,17 @@ class CameraAgentRuntime:
         # was said over the agent, how long, and whether it yielded — the
         # evidence to tune the gate from. GET /interruptions.
         self.interruption_log: deque = deque(maxlen=200)
+        # Thinking aloud (fillers.py) + the push channel the demo page
+        # listens on (/updates): a "working" line is published the moment
+        # the first tool call is known, so the page can speak it while
+        # the tool runs.
+        from fillers import ThinkingAloud
+        self.thinking = ThinkingAloud(
+            min_ms=float(getattr(cfg, "filler_min_ms", 1500.0)),
+            source=str(getattr(cfg, "filler_source", "template") or "template"),
+            enabled=bool(getattr(cfg, "thinking_aloud", True)),
+        )
+        self._update_subscribers: set = set()
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -3484,6 +3510,42 @@ class CameraAgentRuntime:
                 if v in ("siren", "pulse", "chime", "silent"):
                     merged[k] = v
         return merged
+
+    # ── push channel for the page (/updates) ─────────────────────────
+    def subscribe_updates(self) -> "asyncio.Queue":
+        q: asyncio.Queue = asyncio.Queue(maxsize=32)
+        self._update_subscribers.add(q)
+        return q
+
+    def unsubscribe_updates(self, q: "asyncio.Queue") -> None:
+        self._update_subscribers.discard(q)
+
+    def publish_update(self, payload: dict[str, Any]) -> None:
+        for q in list(self._update_subscribers):
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+
+    async def say_working(self, text: str, *, voice: bool) -> None:
+        """Push a "working" line to the page — with audio for a voice turn
+        (Piper, cached by text, run here in parallel with the tool the
+        line announces); text only for a typed question. Never raises."""
+        audio_b64 = None
+        if voice:
+            try:
+                cache = self.thinking.audio
+                audio_b64 = cache.get(text)
+                if audio_b64 is None:
+                    audio = await self.piper.synthesize(text)
+                    if audio:
+                        audio_b64 = base64.b64encode(audio).decode("ascii")
+                        if len(cache) >= 64:
+                            cache.pop(next(iter(cache)))
+                        cache[text] = audio_b64
+            except Exception as exc:  # noqa: BLE001 — the line is optional
+                logger.debug("thinking aloud: TTS unavailable (%s); text only", exc)
+        self.publish_update({"working": {"text": text, "audio_b64": audio_b64, "ts": time.time()}})
 
     ANNOUNCE_LEVELS = ("all", "important", "none")
 
@@ -5178,6 +5240,13 @@ class CameraAgentRuntime:
         # Disable Qwen3-style "thinking" for snappy tool-calling when the
         # operator opted out. Only appended when llm_think is explicitly False,
         # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.
+        if getattr(self.cfg, "filler_source", "template") == "model" and getattr(self.cfg, "thinking_aloud", True):
+            prompt += (
+                "\n\nWhen you call a tool, also write ONE short sentence (under twelve "
+                "words) telling the user what you are about to check — for example "
+                "'Let me look at the gate camera between two and three.' Never guess "
+                "the answer in that sentence."
+            )
         if self.cfg.llm_think is False:
             prompt += "\n\n/no_think"
         return prompt
@@ -5823,6 +5892,16 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "addressee": bool(getattr(cfg, "interrupt_addressee", True)),
             "recent": list(runtime.interruption_log)[-50:],
         }
+
+    @app.get("/thinking-aloud")
+    async def _thinking_aloud() -> dict[str, Any]:
+        """The thinking-aloud gate and its recent decisions (viewer tier):
+        which tools got a line, which were too quick to need one."""
+        t = runtime.thinking
+        return {"enabled": t.enabled, "min_ms": t.min_ms, "source": t.source,
+                "expected_ms": {k: int(t.expected_wait_ms(k)) for k in
+                                ("describe_camera", "search_history", "search_footage", "recent_plates")},
+                "recent": list(t.recent)}
 
     @app.get("/alarm-defaults")
     async def _alarm_defaults() -> dict[str, Any]:
@@ -6486,11 +6565,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 runtime, demo_history, text, preferred_camera=camera_hint,
                 tool_definitions=runtime.tools_for_tier(
                     getattr(request.state, "agent_tier", "admin")),
+                speak_progress="text",
             )
             # Capture "what I saw" while the pin is still visible — a
             # racing thumbnail fetch may have overwritten the cache seed,
             # and the chat must show the frame the answer was ABOUT.
             frames = _frames_for(runtime)
+            runtime.thinking.record_stages(runtime.last_turn_trace)
         except LLMTurnError as exc:
             # The diagnosis IS the message (issue #344): "model X not found,
             # try pulling it first" must reach the operator, not the log.
@@ -6656,6 +6737,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 runtime, demo_history, question, preferred_camera=camera_hint,
                 tool_definitions=runtime.tools_for_tier(
                     getattr(request.state, "agent_tier", "admin")),
+                speak_progress="voice",
             ), name="converse-turn")
             _inflight["turn"] = turn
             try:
@@ -6719,6 +6801,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                         "adapter (docker logs, /health); text-only reply")
         _mark("tts", t3)
         timings["total"] = int((_t.perf_counter() - t0) * 1000)
+        runtime.thinking.record_stages(runtime.last_turn_trace, timings)
         # Log the per-stage breakdown so a slow turn can be diagnosed straight
         # from the agent logs (grep "converse: timings_ms") instead of only the
         # browser's Network tab: transcode / stt / llm / tts / total, in ms.
@@ -6768,8 +6851,18 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             set_camera_scope(await _scope_for(_tok, _user))
         await websocket.accept()
         last: str | None = None
+        inbox = runtime.subscribe_updates()
         try:
             while True:
+                # Anything published (a "working" line while a tool runs)
+                # goes out at once; the panel diff below every 2 s.
+                try:
+                    pushed = await asyncio.wait_for(inbox.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pushed = None
+                if pushed is not None:
+                    await websocket.send_text(json.dumps(pushed, default=str))
+                    continue
                 alarms = runtime.alarms.list()
                 payload = {
                     "tasks": {"tasks": runtime.tasks.list()},
@@ -6797,11 +6890,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 if text != last:
                     await websocket.send_text(text)
                     last = text
-                await asyncio.sleep(2.0)
         except Exception:
             # Disconnect (or send on a closed socket) ends the loop; the page
             # reconnects with backoff and polls in the meantime.
             return
+        finally:
+            runtime.unsubscribe_updates(inbox)
 
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:
@@ -7278,9 +7372,12 @@ async def _run_conversation_turn(
     max_iterations: int = 4,
     preferred_camera: str | None = None,
     tool_definitions: list[dict[str, Any]] | None = None,
+    speak_progress: str | None = None,
 ) -> str:
     """Run the tool-calling LLM loop for one user utterance and return the
-    final spoken reply. ``history`` holds prior user/assistant text turns
+    final spoken reply. ``speak_progress``: "voice" / "text" for an
+    interactive turn (the agent may think aloud — fillers.py — before a
+    slow tool; audio only for voice), None for background work. ``history`` holds prior user/assistant text turns
     (tool internals are kept turn-local, not persisted).
 
     Anti-fabrication guard: small CPU models sometimes answer a camera
@@ -7322,6 +7419,29 @@ async def _run_conversation_turn(
     # explains itself. Overwritten each turn (turns are serialized).
     trace: list[dict[str, Any]] = []
     runtime.last_turn_trace = trace
+    thinking = getattr(runtime, "thinking", None)
+    if thinking is not None:
+        thinking.new_turn()
+
+    def _think_aloud(call: dict[str, Any], model_line: str) -> None:
+        """Say what the first slow tool is about to do — in parallel with it."""
+        if thinking is None or not speak_progress:
+            return
+        func = call.get("function") or {}
+        name = str(func.get("name") or "")
+        raw = func.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+        try:
+            line = thinking.line_for(name, args, cameras=runtime.visible_cameras(), model_line=model_line)
+        except Exception:  # noqa: BLE001
+            line = None
+        if line:
+            logger.info("thinking aloud (%s): %r", name, line)
+            asyncio.create_task(runtime.say_working(line, voice=(speak_progress == "voice")),
+                                name="thinking-aloud")
 
     final = ""
     grounded = False   # did any tool actually run this turn?
@@ -7356,6 +7476,7 @@ async def _run_conversation_turn(
                 "role": "assistant", "content": content, "tool_calls": tool_calls,
             })
             for call in tool_calls:
+                _think_aloud(call, content)
                 name, result = await _invoke_tool(runtime, call)
                 logger.info("converse: tool %s -> %s", name, result[:120])
                 tools_called += 1
@@ -7402,6 +7523,7 @@ async def _run_conversation_turn(
                 "id": "forced-0", "type": "function",
                 "function": {"name": tool_name, "arguments": tool_args},
             }
+            _think_aloud(call, "")
             name, result = await _invoke_tool(runtime, call)
             logger.info("converse: FORCED grounding (%s) on %s -> %s",
                         tool_name, cam, result[:120])
