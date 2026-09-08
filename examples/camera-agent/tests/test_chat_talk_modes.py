@@ -305,3 +305,16 @@ def test_barge_in_is_firm_by_default_and_configurable():
     assert "bargeFrames>=4" not in html
     # default mode is firm
     assert 'return v in BARGE_PRESETS?v:"firm"' in html
+
+
+def test_flowline_shows_stage_timings_from_the_server_marks():
+    """The ⛓ line under a reply carries each stage's duration and the
+    total, from the timings the server already measures (perf_counter
+    marks in the trace / timings_ms) — nothing new is computed."""
+    html = _HTML
+    assert "function addFlow(trace,timings,total)" in html
+    assert 'className="stage"' in html and 'className="ms total"' in html
+    assert "fmtMs" in html and "slowest" in html
+    # both entry points hand the total over: voice (timings_ms.total) and text (latency_ms)
+    assert "addFlow(data.trace,data.timings_ms)" in html
+    assert "addFlow(d.trace,null,d.latency_ms)" in html

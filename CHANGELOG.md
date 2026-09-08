@@ -6,6 +6,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **camera-agent demo: the ⛓ pipeline line under each reply now shows
+  what every stage cost** — `stt 0.4s → llm 1.2s → search_history (cam1)
+  35ms → llm 0.9s → tts 0.3s · 2.9s`, slowest stage emphasised, total at
+  the end — from the timings the server already records (the trace's
+  per-step `ms`, `/converse`'s `timings_ms`, `/ask`'s `latency_ms`);
+  nothing new is measured.
+
 ### Added
 
 - **camera-agent: interruptions like a person's on the streaming
