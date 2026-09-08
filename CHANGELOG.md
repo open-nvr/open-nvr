@@ -6,6 +6,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **camera-agent demo: a couple of words from anyone cut the agent off.**
+  The page's barge-in stopped playback after ~70 ms of mic above the
+  gate — a cough or an aside to someone in the room. Now *firm* by
+  default: ~550 ms of sustained speech well above the noise floor,
+  short dips tolerated; *eager* (the old rule) and *off* selectable
+  under the header, persisted per browser. MODELS_AND_LATENCY.md now
+  says plainly which voice path uses what: the demo page's Talk mode is
+  the browser's energy detector + `/converse`; Silero + Smart Turn v3
+  (and model-backed interruptions) live on the `/ws` streaming pipeline,
+  which the demo page does not use yet.
+
 ### Added
 
 - **camera-agent: mute an installed app in the agent.** ✕ on an app
