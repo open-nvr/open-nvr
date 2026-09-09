@@ -160,6 +160,19 @@ async def events_stream(
     db: Session = next(db_gen)
     try:
         user = _authenticate_ws(ticket, db)
+        # AUTHORIZE the subscription, not just the connection. Being logged
+        # in said nothing about WHICH cameras you may watch: `camera_id` was
+        # taken from the query string unchecked, and leaving it off meant
+        # "every camera on the site" — so any active account could stream
+        # every other user's detections and alerts. Resolve what this user
+        # may see and hand that to the bus, which enforces it per event.
+        #
+        # Resolved in the SAME session that loaded `user`: visible_camera_ids
+        # reads user.id/is_superuser and queries on them, and doing that
+        # against a detached instance works only for as long as its
+        # attributes happen to still be loaded. Not a gamble worth taking
+        # on an authorization path.
+        allowed = visible_camera_ids(db, user) if user is not None else set()
     finally:
         # Mirror FastAPI's get_db teardown without relying on Depends here
         # (WebSocket routes can't use Depends() for request-scoped DB sessions
@@ -172,22 +185,6 @@ async def events_stream(
     if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="unauthorized")
         return
-
-    # AUTHORIZE the subscription, not just the connection. Being logged in
-    # said nothing about WHICH cameras you may watch: `camera_id` was taken
-    # from the query string unchecked, and leaving it off meant "every
-    # camera on the site" — so any active account could stream every
-    # other user's detections and alerts. Resolve what this user may see
-    # and hand that to the bus, which enforces it per event.
-    db_gen2 = get_db()
-    db2: Session = next(db_gen2)
-    try:
-        allowed = visible_camera_ids(db2, user)   # None => superuser
-    finally:
-        try:
-            next(db_gen2)
-        except StopIteration:
-            pass
 
     # Asking for a camera you cannot see is refused outright rather than
     # silently answered with an empty stream — an authorization failure

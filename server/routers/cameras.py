@@ -28,6 +28,8 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
+from urllib.parse import urlparse
+
 from core.config import _host_is_internal, settings
 from core.database import get_db
 from core.logging_config import camera_logger
@@ -285,6 +287,33 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
 require_cameras_manage = RequirePermission("cameras.manage")
 
 
+def _reject_external_camera_hosts(camera_create) -> None:
+    """403 unless every host this create would dial is on the operator's
+    own network. Covers ``ip_address`` and the host inside ``rtsp_url``,
+    which are separate caller-controlled inputs reached by different code
+    paths."""
+    hosts: list[tuple[str, str]] = []
+    if camera_create.ip_address:
+        hosts.append(("ip_address", str(camera_create.ip_address)))
+    if camera_create.rtsp_url:
+        try:
+            parsed = urlparse(str(camera_create.rtsp_url))
+        except Exception:
+            raise HTTPException(status_code=400, detail="rtsp_url is not a valid URL")
+        if parsed.hostname:
+            hosts.append(("rtsp_url", parsed.hostname))
+
+    for field, host in hosts:
+        if not _host_is_internal(host):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Refusing to reach non-internal address {host!r} "
+                    f"({field}); cameras are reached on the local network."
+                ),
+            )
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -306,6 +335,25 @@ async def create_camera(
     """
     _log_camera_creation_start(current_user.id, camera_create, request)
 
+    # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
+    # camera-create did not. It runs FIRST, before any branch, because
+    # this handler dials the caller's input from four places and they do
+    # not share a condition:
+    #   resolve_source()          ip_address, when no rtsp_url was given
+    #   fetch_identity()          ip_address, when one WAS given
+    #   sync_camera_time()        ip_address
+    #   TransportProbeService     the rtsp_url HOST — and this one runs
+    #                             even with no credentials at all
+    # Guarding inside the credentials branch (as the first cut of this fix
+    # did) left that last path wide open: post a camera with no username
+    # and an rtsp_url of your choosing and the server still opens a TCP +
+    # TLS connection to it.
+    #
+    # Blind — nothing is reflected — but it is still this server's network
+    # being used as someone else's port scanner, or as an out-of-band
+    # beacon to a host they control.
+    _reject_external_camera_hosts(camera_create)
+
     # Referenced after creation regardless of the credentials branch below —
     # without these initializers a credential-less create crashed with
     # UnboundLocalError before ever returning.
@@ -322,26 +370,6 @@ async def create_camera(
             resolve_source,
             sync_camera_time,
         )
-
-        # SSRF guard, mirroring the ONVIF router (routers/onvif.py:83),
-        # which has always had it — camera-create did not.
-        #
-        # It sits ABOVE both branches deliberately: resolve_source() dials
-        # ip_address:port when no RTSP URL was given, and fetch_identity()
-        # dials ip_address even when one WAS given, so guarding only the
-        # derive path would leave the probe reachable by supplying any
-        # rtsp_url at all. Blind — nothing is reflected — but it is still
-        # this server's network being used as someone else's scanner, or
-        # as an out-of-band beacon to a host they control.
-        if not _host_is_internal(camera_create.ip_address):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Refusing to probe non-internal address "
-                    f"{camera_create.ip_address!r}; cameras are reached on "
-                    "the local network."
-                ),
-            )
 
         onvif_port = None
         control_scheme = None

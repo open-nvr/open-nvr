@@ -22,9 +22,12 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
 
 - **Camera-create probed arbitrary hosts (blind SSRF).** `POST /cameras`
   dialled the caller's address with none of the `_host_is_internal`
-  guarding the ONVIF router has always had. Both probe paths are now
-  covered — `resolve_source` and `fetch_identity`. *Adding a camera by a
-  public IP or DDNS hostname now returns 403.*
+  guarding the ONVIF router has always had. Every host the handler
+  reaches is now checked before any branch runs — `ip_address` for
+  `resolve_source`, `fetch_identity` and `sync_camera_time`, and the host
+  inside `rtsp_url`, which `TransportProbeService` connects to even when
+  no credentials are supplied. *Adding a camera by a public IP or DDNS
+  hostname now returns 403.*
 
 - **Cloud metadata counted as "internal".** `_ip_is_internal` admitted
   169.254.0.0/16 via `is_link_local`, so 169.254.169.254 was reachable
