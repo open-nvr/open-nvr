@@ -42,6 +42,7 @@ import {
   type RegisteredApp,
   type AppStatusResp,
   type ManifestAction,
+  UninstalledAppPage,
 } from './AppCatalog'
 
 function useApp(appId: string) {
@@ -173,16 +174,10 @@ export function AppView() {
   if (appQuery.isError) {
     return <ErrorCard message={extractApiError(appQuery.error, 'Could not load this app.')} />
   }
-  if (!app) {
-    return (
-      <div className="space-y-3">
-        <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
-          <ArrowLeft size={14} /> App Store
-        </Link>
-        <ErrorCard message={`App "${appId}" is not installed.`} />
-      </div>
-    )
-  }
+  // Not installed is not an error — it is the listing, which is exactly
+  // what someone following a link from the catalog wants to read before
+  // deciding. The catalog owns that page; this route just defers to it.
+  if (!app) return <UninstalledAppPage appId={appId} />
 
   const health = status.data?.health?.status ?? (app.enabled ? 'checking…' : 'disabled')
   const uptimeS = status.data?.health?.uptime_s as number | undefined
@@ -190,7 +185,7 @@ export function AppView() {
   return (
     <div className="space-y-5">
       <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
-        <ArrowLeft size={14} /> App Store
+        <ArrowLeft size={14} /> App Catalog
       </Link>
 
       {/* ── Hero header ─────────────────────────────────────────── */}

@@ -25,7 +25,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowDownWideNarrow, ArrowLeft, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
@@ -37,7 +37,7 @@ import { ChipListEditor } from './apps/ChipListEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
-import { matchesCatalogFilter } from '../lib/catalogFilter'
+import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
 
 export type ManifestParam = {
   name: string
@@ -254,6 +254,10 @@ export type AppStatusResp = {
 // An entry from GET /api/v1/apps/index — the store listing. Entries with
 // installed=true are already registered and surface under "Installed" instead.
 type IndexApp = {
+  /** Editorial rank set by maintainers (0-100), not measured telemetry. */
+  popularity?: number | null
+  /** Paths under the frontend build; see app/public/app-screenshots. */
+  screenshots?: string[]
   id: string
   name: string
   summary?: string
@@ -1918,14 +1922,21 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
           column, and without this the last ones are clipped at the edge. */}
       <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>{app.name}</CardTitle>
+        {/* An uninstalled listing has a detail page too now, so the title
+            behaves like the installed card's: click it to read more
+            before deciding. */}
+        <Link to={`/app-catalog/${app.id}`} className="hover:underline">
+          <CardTitle>{app.name}</CardTitle>
+        </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <PricingBadge pricing={app.pricing} note={app.price_note} />
         <LicenceRequiredBadge entitlement={app.entitlement} />
+        <PopularityBadge popularity={app.popularity} />
         {app.kind === 'external' && <Badge variant="neutral">third-party</Badge>}
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
+        <ScreenshotStrip shots={app.screenshots} appName={app.name} />
         <div className="text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</div>
         {(app.author || app.verified) && (
           <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
@@ -1957,6 +1968,12 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
               <Download size={14} /> Install
             </Button>
           )}
+          <Link
+            to={`/app-catalog/${app.id}`}
+            className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]"
+          >
+            Details <ArrowRight size={14} />
+          </Link>
           {app.docs_url && (
             <a
               href={app.docs_url}
@@ -1970,6 +1987,198 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+/* --------------------- Uninstalled app detail --------------------- */
+
+/** The detail page for an app that is NOT installed — /app-catalog/<id>
+ *  used to dead-end there with "App <id> is not installed", which is
+ *  backwards: the moment you most want to read about an app is before
+ *  you install it. Rendered here rather than in AppView because every
+ *  piece it needs (provenance, requires, egress, install) already lives
+ *  in this file. */
+export function UninstalledAppPage({ appId }: { appId: string }) {
+  const indexQuery = useAppIndex()
+  const capsQuery = useKaiCapabilities()
+  const tier0Query = useTier0()
+  const [installOpen, setInstallOpen] = useState(false)
+  const [pendingInstall, setPendingInstall] = useState<string | null>(null)
+
+  const app = (indexQuery.data ?? []).find((a) => a.id === appId) ?? null
+
+  const back = (
+    <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
+      <ArrowLeft size={14} /> App Catalog
+    </Link>
+  )
+
+  if (indexQuery.isPending) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    )
+  }
+  // An errored index and a genuinely unknown id are different problems
+  // and get different messages — the first is retryable, the second is
+  // a bad link.
+  if (indexQuery.isError) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <ErrorCard
+          title="App index unavailable"
+          message={extractApiError(indexQuery.error, `Could not look up "${appId}".`)}
+          onRetry={() => indexQuery.refetch()}
+        />
+      </div>
+    )
+  }
+  if (!app) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <ErrorCard message={`"${appId}" is not installed, and no app by that id is listed in the catalog.`} />
+      </div>
+    )
+  }
+
+  const requires = asStringList(app.requires_tasks)
+  const external = app.kind === 'external'
+
+  return (
+    <div className="space-y-5">
+      {back}
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)] p-5 space-y-4">
+        <div className="flex flex-wrap items-start gap-4">
+          <div className="grid place-items-center h-14 w-14 rounded-xl bg-[var(--bg-2)] border border-[var(--border)] shrink-0">
+            <Boxes size={26} className="text-[var(--accent,var(--text-dim))]" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-semibold text-[var(--text)]">{app.name}</h2>
+              <Badge variant="info">{app.category}</Badge>
+              <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+              <PricingBadge pricing={app.pricing} note={app.price_note} />
+              <LicenceRequiredBadge entitlement={app.entitlement} />
+              <PopularityBadge popularity={app.popularity} />
+              <VerifiedBadge verified={app.verified} author={app.author} />
+              {external && <Badge variant="neutral">third-party</Badge>}
+              <Badge variant="neutral">not installed</Badge>
+            </div>
+            <p className="text-sm text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</p>
+            <ProvenanceLine app={app} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {external && app.external_url ? (
+              <a href={app.external_url} target="_blank" rel="noreferrer">
+                <Button variant="primary"><ExternalLink size={14} /> Learn more</Button>
+              </a>
+            ) : (
+              <Button variant="primary" onClick={() => setInstallOpen(true)}>
+                <Download size={14} /> Install
+              </Button>
+            )}
+            {app.docs_url && (
+              <a href={app.docs_url} target="_blank" rel="noreferrer">
+                <Button variant="outline"><ExternalLink size={14} /> Docs</Button>
+              </a>
+            )}
+          </div>
+        </div>
+
+        {app.screenshots && app.screenshots.length > 0 && (
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {app.screenshots.map((src) => (
+              <img
+                key={src}
+                src={`/${src}`}
+                alt={`${app.name} screenshot`}
+                loading="lazy"
+                className="h-64 rounded-lg border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {requires.length > 0 && (
+          <Card>
+            <CardHeader><CardTitle>What it needs</CardTitle></CardHeader>
+            <CardContent className="text-sm space-y-2">
+              <p className="text-[var(--text-dim)]">
+                Checked against the adapters registered with KAI-C and the platform&apos;s
+                Tier-0 detection on THIS deployment — so a missing piece is visible
+                before you install, not after.
+              </p>
+              <RequiresBadge requires={requires} caps={capsQuery.data} tier0={tier0Query.data} />
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader><CardTitle>Network</CardTitle></CardHeader>
+          <CardContent className="text-sm space-y-2">
+            <p className="text-[var(--text-dim)]">
+              Apps run on an isolated network with no route to your camera network or
+              the internet. These are the only hosts this listing declares; after
+              install, anything else it tries is blocked and reported.
+            </p>
+            {(app.network_egress ?? []).length === 0 ? (
+              <Badge variant="success">nothing outside OpenNVR</Badge>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {(app.network_egress ?? []).map((h) => (
+                  <Badge key={h} variant="neutral">{h}</Badge>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {(app.emits ?? []).length > 0 && (
+          <Card>
+            <CardHeader><CardTitle>What it publishes</CardTitle></CardHeader>
+            <CardContent className="text-sm">
+              <div className="flex flex-wrap gap-1">
+                {(app.emits ?? []).map((e) => (
+                  <Badge key={e} variant="neutral">{e}</Badge>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {app.entitlement === 'license_key' && (
+          <Card>
+            <CardHeader><CardTitle>Licensing</CardTitle></CardHeader>
+            <CardContent className="text-sm text-[var(--text-dim)]">
+              Licensed app: after install, an administrator enters the vendor&apos;s key
+              in the catalog; the app cannot be enabled until it accepts one.
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
+      {installOpen && (
+        <InstallModal
+          app={app}
+          onClose={() => setInstallOpen(false)}
+          onAccepted={(id) => setPendingInstall(id)}
+        />
+      )}
+      {/* Same reason as the catalog grid: the watcher must outlive the
+          dialog, or closing it strands the page on "not installed". */}
+      {pendingInstall && (
+        <InstallWatcher id={pendingInstall} onSettled={() => setPendingInstall(null)} />
+      )}
+    </div>
   )
 }
 
@@ -1987,6 +2196,7 @@ function SkeletonGrid({ count = 3 }: { count?: number }) {
 
 function CatalogFilters({
   query, onQuery, category, onCategory, categories, resultCount,
+  sort, onSort, allowPopular,
 }: {
   query: string
   onQuery: (v: string) => void
@@ -1995,6 +2205,11 @@ function CatalogFilters({
   categories: string[]
   /** null when no filter is active — the counts below speak for themselves. */
   resultCount: number | null
+  sort: CatalogSort
+  onSort: (v: CatalogSort) => void
+  /** False when no listing carries an editorial rank, so the option is
+   *  hidden rather than offered as a no-op. */
+  allowPopular: boolean
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -2037,11 +2252,64 @@ function CatalogFilters({
           </button>
         ))}
       </div>
+      <label className="flex items-center gap-1 text-xs text-[var(--text-dim)]">
+        <ArrowDownWideNarrow size={14} />
+        <span className="sr-only sm:not-sr-only">Sort</span>
+        <select
+          value={sort}
+          onChange={(e) => onSort(e.target.value as CatalogSort)}
+          aria-label="Sort apps"
+          className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+        >
+          <option value="recommended">Recommended</option>
+          <option value="name">Name (A–Z)</option>
+          {allowPopular && <option value="popular">Most popular</option>}
+        </select>
+      </label>
       {resultCount !== null && (
         <span className="text-xs text-[var(--text-dim)]">
           {resultCount === 0 ? 'no matches' : `${resultCount} match${resultCount === 1 ? '' : 'es'}`}
         </span>
       )}
+    </div>
+  )
+}
+
+/** Editorial rank, shown as a word rather than a number. The value is a
+ *  maintainer's judgement, not a measured install count — rendering
+ *  "87" would read as telemetry this product deliberately does not
+ *  collect. Only the clearly-popular end of the scale says anything. */
+function PopularityBadge({ popularity }: { popularity?: number | null }) {
+  if (typeof popularity !== 'number' || popularity < 70) return null
+  return (
+    <Badge
+      variant="info"
+      title="Editorial pick by the OpenNVR maintainers — not an install count; deployments never phone home."
+    >
+      popular
+    </Badge>
+  )
+}
+
+/** Listing screenshots. Local files only (see app/public/app-screenshots),
+ *  so this never reaches off-site and works air-gapped. */
+function ScreenshotStrip({ shots, appName }: { shots?: string[]; appName: string }) {
+  if (!shots || shots.length === 0) return null
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1">
+      {shots.slice(0, 4).map((src) => (
+        <img
+          key={src}
+          src={`/${src}`}
+          alt={`${appName} screenshot`}
+          loading="lazy"
+          className="h-24 rounded border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
+          // A listing must survive a missing file rather than showing a
+          // broken-image glyph; the CI gate blocks that case, but a
+          // partial deploy should not disfigure the card.
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+        />
+      ))}
     </div>
   )
 }
@@ -2120,20 +2388,35 @@ export function AppCatalog() {
     }
   }, [categories, category])
 
+  const [sort, setSort] = useState<CatalogSort>('recommended')
+  // Offer "Most popular" only when something is actually ranked. With no
+  // editorial ranks set, that order collapses to alphabetical, and a
+  // control that silently does nothing is worse than one that is absent.
+  const anyRanked = useMemo(
+    () => (indexQuery.data ?? []).some((a) => typeof a.popularity === 'number'),
+    [indexQuery.data]
+  )
+  useEffect(() => {
+    if (!anyRanked && sort === 'popular') setSort('recommended')
+  }, [anyRanked, sort])
+
   const filtering = query.trim() !== '' || category !== null
   const shownInstalled = useMemo(
-    () => apps.filter((a) => matchesCatalogFilter(
+    () => sortCatalog(apps, sort === 'popular' ? 'name' : sort).filter((a) => matchesCatalogFilter(
       { name: a.name, id: a.id, category: a.category,
         summary: a.manifest?.summary, author: a.manifest?.author },
       query, category)),
-    [apps, query, category]
+    // Installed rows carry no editorial rank — "most popular" among apps
+    // you already chose to install means nothing, so that order falls
+    // back to name here rather than pretending to rank them.
+    [apps, query, category, sort]
   )
   const shownAvailable = useMemo(
-    () => available.filter((a) => matchesCatalogFilter(
+    () => sortCatalog(available, sort).filter((a) => matchesCatalogFilter(
       { name: a.name, id: a.id, category: a.category,
         summary: a.summary, author: a.author },
       query, category)),
-    [available, query, category]
+    [available, query, category, sort]
   )
 
   // Refresh everything the page RENDERS, not just the two app lists. The
@@ -2175,6 +2458,9 @@ export function AppCatalog() {
         onCategory={setCategory}
         categories={categories}
         resultCount={filtering ? shownInstalled.length + shownAvailable.length : null}
+        sort={sort}
+        onSort={setSort}
+        allowPopular={anyRanked}
       />
 
       {/* --------------------------- Installed --------------------------- */}

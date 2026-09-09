@@ -8,6 +8,39 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **App Catalog: sorting.** Recommended (editorial shelf, then rank, then
+  name), Name A-Z, and Most popular — the last offered only when a listing
+  actually carries an editorial rank, since with none set it collapses to
+  alphabetical and a control that silently does nothing is worse than one
+  that is absent. Unranked apps sort last rather than lowest: an app
+  nobody ranked is an unknown, not the least popular.
+
+- **App Catalog: a detail page for apps you have NOT installed.**
+  `/app-catalog/<id>` used to dead-end with "App <id> is not installed",
+  which is backwards — the moment you most want to read about an app is
+  before installing it. Listings now open a full page: screenshots,
+  what it needs (checked against THIS deployment's adapters), what it
+  publishes, the hosts it declares, provenance and licensing, with
+  Install on it.
+
+- **App listings can carry screenshots and an editorial rank.**
+  `screenshots` are local files under `app/public/app-screenshots/<id>/`
+  — remote URLs are refused because they leak viewer IPs and break
+  air-gapped installs. `popularity` is a maintainer's 0-100 judgement,
+  explicitly not an install count: nothing phones home, so there is no
+  telemetry to count with and no number is invented. Both are validated
+  in CI, screenshots down to the file existing on disk.
+
+### Changed
+
+- **The App Catalog has its own `apps.view` permission** instead of
+  riding `ai.view`. Installing still requires `apps.install`. The boot
+  that creates the permission grants it to every role already holding
+  `ai.view`, so nobody loses a surface they could use yesterday — and it
+  runs only on that boot, so a deliberate revoke stays revoked.
+
+### Added
+
 - **App Catalog: search and category filter.** One box filters installed
   and available apps together (name, id, summary, category, author; all
   terms must match, so a second word narrows), with category chips built

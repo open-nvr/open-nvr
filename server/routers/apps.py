@@ -775,6 +775,8 @@ async def get_apps_index(
                 "author": entry.author,
                 "verified": entry.verified,
                 "featured": entry.featured,
+                "popularity": entry.popularity,
+                "screenshots": entry.screenshots,
                 "source": entry.source,
                 "contact": entry.contact,
                 "network_egress": entry.network_egress,
