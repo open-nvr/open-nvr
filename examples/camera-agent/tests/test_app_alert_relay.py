@@ -777,6 +777,44 @@ def test_alarm_defaults_endpoint_carries_the_announce_policy():
     assert d["overrides"] == {"snake": "siren"} and d["announce_app_alerts"] == "all"
 
 
+class _StubAppRegistry:
+    apps_cached = [{"id": "license-plate-recognition",
+                    "name": "License Plate Recognition",
+                    "enabled": True, "manifest": {"summary": "Reads plates"}}]
+
+
+def _app_entry(rt, app_id="license-plate-recognition"):
+    rt.app_registry = _StubAppRegistry()
+    return next(s for s in rt.skills_payload() if s["id"] == f"app:{app_id}")
+
+
+def test_skill_payload_speaker_reflects_whether_the_app_can_speak():
+    """The chip's speaker must not read "silent" for an app whose
+    critical alerts do get spoken. It answers "can this app speak at
+    all", not "would THIS severity" — there is no alert in hand when the
+    panel renders."""
+    rt = _runtime()
+    rt.set_announce_app_alerts("none")
+    entry = _app_entry(rt)
+    assert entry["speaks"] is False and entry["speaks_override"] is None
+
+    # Site speaks high/critical: the app CAN speak, so the speaker is lit
+    # even though no per-app decision has been made.
+    rt.set_announce_app_alerts("important")
+    entry = _app_entry(rt)
+    assert entry["speaks"] is True and entry["speaks_override"] is None
+
+    # A per-app decision overrides in both directions and is reported.
+    rt.set_app_announce("license-plate-recognition", False)
+    entry = _app_entry(rt)
+    assert entry["speaks"] is False and entry["speaks_override"] is False
+
+    rt.set_announce_app_alerts("none")
+    rt.set_app_announce("license-plate-recognition", True)
+    entry = _app_entry(rt)
+    assert entry["speaks"] is True and entry["speaks_override"] is True
+
+
 def test_app_speech_endpoint_sets_clears_and_validates():
     from fastapi.testclient import TestClient
 

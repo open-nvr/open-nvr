@@ -311,16 +311,19 @@ class AppConfig:
     # arms its after-hours person alarm as  person: siren . An explicit
     # ring on the alarm always wins; this only decides the DEFAULT.
     alarm_ring_defaults: dict[str, str] | None = None
-    # Which relayed APP alerts the voice UI speaks aloud (they always land
-    # in the feed with a chime): "all", "important" (high/critical only —
-    # the default, so a plate reader's every read is shown, not narrated),
-    # or "none". Operator-editable in the UI (Automations → ⚙); the UI
-    # choice persists in the state file and wins over this.
-    # OFF by default. An app alert arriving mid-conversation used to talk
-    # over the operator — ANPR reading out every plate, occupancy calling
-    # counts — because "important" speaks high/critical and app alerts are
-    # usually exactly that. The feed still shows every alert with a chime;
-    # speaking is opt-in, per app, from the Skills panel.
+    # SITE FALLBACK for which relayed APP alerts the voice UI speaks aloud
+    # (they always land in the feed with a chime): "all", "important"
+    # (high/critical only) or "none".
+    #
+    # "none" is the default, and the default changed: "important" used to
+    # be, but app alerts are mostly high/critical — so ANPR narrated every
+    # plate and occupancy called every count, mid-conversation. Speaking is
+    # opt-in now.
+    #
+    # This is only the fallback. A per-app decision from the Skills panel
+    # (persisted as `app_announce`) beats it in both directions.
+    # Operator-editable in the UI (Automations → ⚙); the UI choice persists
+    # in the state file and wins over this.
     announce_app_alerts: str = "none"
 
     # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
@@ -3862,6 +3865,8 @@ class CameraAgentRuntime:
                 if isinstance(e, dict) and e.get("name")
             ]
             muted = self.app_muted(app_id)
+            _app_speech_override = self._app_announce.get(
+                str(app_id or "").strip().lower())
             entries.append({
                 "id": f"app:{app_id}",
                 "source": "app",           # clearly marks the app door origin
@@ -3885,12 +3890,17 @@ class CameraAgentRuntime:
                          "installed app — tapping turns it off in the agent "
                          "only; enable, disable or uninstall the app itself "
                          "in the App Catalog"),
-                # Does THIS app's alert get spoken aloud? Off unless the
-                # operator turned it on, so a plate read or a head-count
-                # never talks over the conversation uninvited. `null` means
-                # no per-app decision — it follows the site policy.
-                "speaks": self.should_announce_app_alert(None, app_id),
-                "speaks_override": self._app_announce.get(app_id),
+                # Can this app speak AT ALL? Not "would this particular
+                # severity be spoken" — the chip has no alert in hand, and
+                # asking should_announce_app_alert() with no severity would
+                # answer False under the "important" policy, showing a
+                # muted speaker for an app whose critical alerts do speak.
+                # `speaks_override` is null when the operator has made no
+                # per-app decision and the app follows the site policy.
+                "speaks": (
+                    bool(_app_speech_override) if _app_speech_override is not None
+                    else self.announce_app_alerts() != "none"),
+                "speaks_override": _app_speech_override,
                 # Where the operator manages it (the app's catalog page).
                 "manage_url": (
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog/{app_id}"
@@ -4510,7 +4520,8 @@ class CameraAgentRuntime:
             "severity": str(alert.severity or "info"),
             "camera": alert.camera_id,
             # The feed always shows it (with a chime); whether the voice
-            # UI also SPEAKS it follows the site's announce policy.
+            # UI also SPEAKS it is this app's own setting when the operator
+            # made one, else the site policy.
             "announce": self.should_announce_app_alert(
                 alert.severity, alert.app_id),
             "ts": now,

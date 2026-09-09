@@ -6,6 +6,34 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **camera-agent: installed apps no longer speak unless asked.**
+  `announce_app_alerts` defaulted to `important`, which speaks
+  high/critical — and app alerts are mostly exactly that, so ANPR read
+  out every plate and occupancy called every count, over the top of the
+  conversation. It defaults to `none` now, and speech is set per app
+  from the Skills panel: a per-app decision beats the site policy in
+  both directions, so the doorbell can speak while ANPR stays quiet.
+  Persisted, so a silenced app stays silent across a restart.
+
+- **camera-agent: the Skills panel is one tappable list.** Every skill
+  the agent could carry is shown — on ones green at the top, the rest
+  grey below — and a tap moves a skill between them. Previously only
+  enabled skills were listed and the rest hid behind a "browse to add"
+  panel, so "what else can this do?" was invisible. Search filters the
+  whole list; `+` now means "get more from the App Catalog". The confirm
+  before turning off a core skill and the greyed-skill on-ramp (name the
+  adapter, deep-link AI Adapters or the catalog) are unchanged; a skill
+  whose backend is missing stays untappable rather than failing silently.
+
+### Fixed
+
+- **camera-agent: ⚙ on an app skill muted the app instead of opening the
+  App Catalog.** The ⚙ link and the ✕ button both carried `sk-x`, and ⚙
+  was rendered first, so `querySelector(".sk-x")` bound the "mute"
+  handler to the link — ⚙ removed the skill and ✕ did nothing.
+
 ### Added
 
 - **App Catalog: sorting.** Recommended (editorial shelf, then rank, then
