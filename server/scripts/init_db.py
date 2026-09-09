@@ -163,6 +163,14 @@ def create_initial_data():
         p_apps_install = get_or_create_perm(
             "apps.install", "Install/uninstall curated App Store apps"
         )
+        # Browsing the catalog is its own permission, not a corner of
+        # ai.view: most apps are not AI (the notifier, the barrier, the
+        # agent), and "may look at what is installed" is a much weaker
+        # right than "may install". Granted to operator, withheld from
+        # viewer, and NEVER implying apps.install.
+        p_apps_view = get_or_create_perm(
+            "apps.view", "Browse the App Catalog and view installed apps"
+        )
 
         # Compliance
         p_compliance_view = get_or_create_perm(
@@ -197,6 +205,7 @@ def create_initial_data():
                 "onvif.discover",
                 "alerts.view",
                 "ai.view",
+                "apps.view",
             ],
         )
         set_role_perms(
