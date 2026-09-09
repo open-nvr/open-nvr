@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Alarms stayed silent while the tab was in the background.** A
+  high or critical alarm rings `continuous` by default, but the bell's
+  inbox poll used React Query's `refetchInterval` without
+  `refetchIntervalInBackground`, and the library gates interval
+  refetches on `focusManager.isFocused()` — i.e.
+  `document.visibilityState !== 'hidden'`. Switch to another tab and
+  the poll stopped dead: the bell never learned an alarm had arrived,
+  so nothing sounded until the operator came back and looked, which
+  is the one moment an alarm is not needed. The poll now runs in the
+  background, so a plate that trips an alarm sounds it while OpenNVR
+  sits behind another tab.
+
 - **Occupancy: the Configure button did nothing.** Moving the
   action from a link to the catalog into an in-place modal wired up
   the state and the import but never rendered `AppConfigModal`, so

@@ -206,6 +206,13 @@ export function AlertBell() {
       return data as { alerts: InboxAlert[]; unacked_count: number }
     },
     refetchInterval: POLL_MS,
+    // The alarm poll MUST keep running in a background tab. React Query
+    // gates interval refetches on `focusManager.isFocused()` — which is
+    // `document.visibilityState !== 'hidden'` — so by default an operator
+    // who switches tabs stops fetching entirely: the siren never learns
+    // there is anything to sound, and the alarm only fires when they come
+    // back and look. That is the exact opposite of what an alarm is for.
+    refetchIntervalInBackground: true,
   })
 
   const ringCfg = useQuery({
