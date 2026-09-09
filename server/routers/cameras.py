@@ -28,7 +28,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
-from core.config import settings
+from core.config import _host_is_internal, settings
 from core.database import get_db
 from core.logging_config import camera_logger
 from core.permissions import RequirePermission, get_camera_or_403
@@ -322,6 +322,26 @@ async def create_camera(
             resolve_source,
             sync_camera_time,
         )
+
+        # SSRF guard, mirroring the ONVIF router (routers/onvif.py:83),
+        # which has always had it — camera-create did not.
+        #
+        # It sits ABOVE both branches deliberately: resolve_source() dials
+        # ip_address:port when no RTSP URL was given, and fetch_identity()
+        # dials ip_address even when one WAS given, so guarding only the
+        # derive path would leave the probe reachable by supplying any
+        # rtsp_url at all. Blind — nothing is reflected — but it is still
+        # this server's network being used as someone else's scanner, or
+        # as an out-of-band beacon to a host they control.
+        if not _host_is_internal(camera_create.ip_address):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Refusing to probe non-internal address "
+                    f"{camera_create.ip_address!r}; cameras are reached on "
+                    "the local network."
+                ),
+            )
 
         onvif_port = None
         control_scheme = None
