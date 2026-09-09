@@ -23,11 +23,15 @@ import { api } from '../lib/api'
 // best-frame evidence photo — plus the aggregates endpoint for the
 // stat tiles. Owner-scoped server-side, same rule as everything else.
 export const vehiclesService = {
+  // The response is { events, count, total }: `count` is this page's
+  // length and `total` is how many reads match the filters, for the
+  // pager. `skip`/`limit` are the server's paging pair.
   getPlateEvents: (params: {
     plate?: string
     camera_id?: number
     from?: string
     to?: string
+    skip?: number
     limit?: number
   }) => api.get('/api/v1/events', { params: { has_plate: true, ...params } }),
 

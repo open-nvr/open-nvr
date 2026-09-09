@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
+from core.pagination import resolve_total
 from core.database import get_db, release
 from models import TimelineEvent, User
 from services.camera_scope import visible_camera_ids
@@ -119,7 +120,8 @@ async def list_events(
     has_plate: bool = False,
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
-    limit: int = 100,
+    skip: int = Query(0, ge=0, le=100_000),
+    limit: int = Query(100, ge=1, le=500),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -128,19 +130,47 @@ async def list_events(
     Time filters use the OVERLAP rule — an event counts if any part of it
     intersects [from, to) — because "who was here 3-4pm" must include the
     visit that started 14:58 and left 15:03.
-    """
-    from services.timeline_service import query_events
 
-    rows = query_events(
-        db, camera_id=camera_id, label=label, source=source, plate=plate,
-        has_plate=has_plate, from_=from_, to=to, limit=limit,
+    Paging is ``skip``/``limit`` (the house shape — audit-logs, cameras,
+    users). ``limit`` is now VALIDATED at the 500 the service always
+    clamped to: silently trimming a larger request was harmless while
+    nothing paged, but a client that believes it asked for 1000 and then
+    asks for skip=1000 would step clean over rows 500-999. A 422 is the
+    honest answer.
+
+    ``skip`` is capped because page numbers invite a "last page" jump,
+    and the last page of a large scoped set is the single most expensive
+    query this endpoint can be asked for.
+
+    Two counts, deliberately different:
+      count  — rows in THIS page (unchanged; every existing client
+               ignores it, which is why it stays rather than moving).
+      total  — rows matching these filters and this caller's scope, for
+               the pager's "1-25 of 312".
+    """
+    from services.timeline_service import count_events, query_events
+
+    # ONE filter dict for the page and the total. That shared dict is the
+    # structural guarantee they cannot drift apart — a total built from a
+    # separately-written query is how a row count for a camera the caller
+    # cannot see leaks out.
+    filters = dict(
+        camera_id=camera_id, label=label, source=source, plate=plate,
+        has_plate=has_plate, from_=from_, to=to,
         # Camera data is scoped to the caller's cameras (owned + can_view
         # grants) everywhere in OpenNVR; history and evidence photos are
         # the MOST sensitive camera data, so the same rule applies here.
         # Superusers see the fleet.
         scope=visible_camera_ids(db, current_user),
     )
-    return {"events": [_serialize(e) for e in rows], "count": len(rows)}
+    rows = query_events(db, limit=limit, skip=skip, **filters)
+    total = resolve_total(len(rows), skip, limit,
+                          lambda: count_events(db, **filters))
+    return {
+        "events": [_serialize(e) for e in rows],
+        "count": len(rows),
+        "total": total,
+    }
 
 
 @router.get("/events/{event_id}/evidence")

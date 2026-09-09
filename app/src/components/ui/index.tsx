@@ -44,7 +44,7 @@ export function CardContent({ children, className = '' }: { children: ReactNode;
 
 /* ----------------------------- Badge ---------------------------- */
 
-export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'neutral' | 'info'
+export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'neutral' | 'info' | 'critical'
 
 // Theme-token driven (see the --badge-* variables in index.css): the dark
 // theme keeps the translucent deep tints, the light theme swaps to pale
@@ -55,6 +55,33 @@ const BADGE_STYLES: Record<BadgeVariant, string> = {
   destructive: 'bg-[var(--badge-destructive-bg)] text-[var(--badge-destructive-text)]',
   neutral: 'bg-[var(--badge-neutral-bg)] text-[var(--badge-neutral-text)]',
   info: 'bg-[var(--badge-info-bg)] text-[var(--badge-info-text)]',
+  critical: 'bg-[var(--badge-critical-bg)] text-[var(--badge-critical-text)]',
+}
+
+/* ------------------------- SeverityBadge ------------------------ */
+
+// One severity pill for every alarm surface. Both alarm tables used to
+// carry their own identical Record<string,string> of raw palette classes
+// (`bg-red-600 text-white`, ...), which is the rule this file states at
+// the top not to do — and it showed: `bg-yellow-600 text-black` on the
+// light theme was close to unreadable. Four severities, four tokens.
+const SEVERITY_VARIANT: Record<string, BadgeVariant> = {
+  critical: 'critical',
+  high: 'destructive',
+  medium: 'warning',
+  low: 'neutral',
+}
+
+export function SeverityBadge({ severity, className = '' }: { severity?: string | null; className?: string }) {
+  const key = (severity ?? '').toLowerCase()
+  return (
+    <Badge
+      variant={SEVERITY_VARIANT[key] ?? 'neutral'}
+      className={clsx('uppercase text-[10px] tracking-wide', className)}
+    >
+      {severity || 'unknown'}
+    </Badge>
+  )
 }
 
 // Spreads span attributes so callers can attach a `title` — a badge that
@@ -75,13 +102,29 @@ const BUTTON_STYLES: Record<ButtonVariant, string> = {
   danger: 'border border-red-700/50 bg-red-900/30 text-red-300 hover:bg-red-900/50',
 }
 
-export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }
+// Two sizes, because a page header full of default-size buttons competes
+// with the page title for weight. `sm` is for toolbars and header
+// actions; `md` stays the default everywhere else. A size PROP rather
+// than a className override: Tailwind utilities have equal specificity,
+// so passing `px-2` alongside the base `px-3` wins or loses on
+// stylesheet order, not on intent.
+export type ButtonSize = 'sm' | 'md'
 
-export function Button({ children, variant = 'default', className = '', type = 'button', ...rest }: ButtonProps) {
+const BUTTON_SIZES: Record<ButtonSize, string> = {
+  sm: 'gap-1.5 px-2 py-1 text-xs',
+  md: 'gap-2 px-3 py-1.5 text-sm',
+}
+
+export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant
+  size?: ButtonSize
+}
+
+export function Button({ children, variant = 'default', size = 'md', className = '', type = 'button', ...rest }: ButtonProps) {
   return (
     <button
       type={type}
-      className={clsx('inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed', BUTTON_STYLES[variant], className)}
+      className={clsx('inline-flex items-center rounded disabled:opacity-50 disabled:cursor-not-allowed', BUTTON_SIZES[size], BUTTON_STYLES[variant], className)}
       {...rest}
     >
       {children}
@@ -112,14 +155,28 @@ export function StatusDot({ status }: { status: Status }) {
 
 /* -------------------------- PageHeader -------------------------- */
 
+// The text column must SHRINK, not push. Without `min-w-0 flex-1` its
+// hypothetical size is max-content — a long description laid out on one
+// unbroken line — and flexbox wraps a line before it shrinks an item, so
+// any page with a sentence-length description shoved its actions onto a
+// second flex row. `justify-between` then parked that lone item at the
+// START, which is why several pages render their buttons bottom-LEFT
+// under the description instead of top-right. AIAdapters, AppCatalog and
+// Vehicles all had it; Occupancy was one button away from it.
+//
+// `ml-auto` (not `justify-between`) is what right-aligns the actions,
+// and it keeps working on the wrapped line at narrow widths. `shrink-0`
+// stops the buttons compressing into two-line labels before the row
+// wraps. `max-w-3xl` keeps a long description readable rather than
+// running the full width of a 2560px monitor.
 export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-      <div>
+    <div className="flex flex-wrap items-start gap-3 mb-4">
+      <div className="min-w-0 flex-1">
         <h2 className="text-lg font-semibold text-[var(--text)]">{title}</h2>
-        {description && <p className="text-sm text-[var(--text-dim)] mt-0.5">{description}</p>}
+        {description && <p className="text-sm text-[var(--text-dim)] mt-0.5 max-w-3xl">{description}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="ml-auto shrink-0 flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
   )
 }
@@ -204,9 +261,12 @@ export function TR({ children, className = '', ...rest }: HTMLAttributes<HTMLTab
   )
 }
 
-export function TH({ children, className = '', ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
+// scope="col" is defaulted rather than left to callers: it is what makes
+// a screen reader announce the column name with each cell, and no caller
+// had ever passed it. Still overridable via the spread.
+export function TH({ children, className = '', scope = 'col', ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
   return (
-    <th className={clsx('px-3 py-2 font-medium whitespace-nowrap', className)} {...rest}>
+    <th scope={scope} className={clsx('px-3 py-2 font-medium whitespace-nowrap', className)} {...rest}>
       {children}
     </th>
   )

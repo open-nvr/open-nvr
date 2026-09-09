@@ -21,6 +21,11 @@
   --badge-warning-text: #facc15;                /* yellow-400 */
   --badge-destructive-bg: rgba(127, 29, 29, 0.5); /* red-900/50 */
   --badge-destructive-text: #f87171;            /* red-400 */
+  /* Critical is the one badge that stays SOLID in both themes: it has to
+     out-shout `destructive` on a wall display, and a translucent tint
+     cannot. */
+  --badge-critical-bg: #dc2626;                 /* red-600 */
+  --badge-critical-text: #ffffff;
   --badge-neutral-bg: rgba(17, 24, 39, 0.5);    /* gray-900/50 */
   --badge-neutral-text: #9ca3af;                /* gray-400 */
   --badge-info-bg: rgba(30, 58, 138, 0.5);      /* blue-900/50 */
@@ -48,6 +53,8 @@
   --badge-warning-text: #a16207;                /* yellow-700 */
   --badge-destructive-bg: #fee2e2;              /* red-100 */
   --badge-destructive-text: #b91c1c;            /* red-700 */
+  --badge-critical-bg: #dc2626;                 /* red-600 */
+  --badge-critical-text: #ffffff;
   --badge-neutral-bg: #f3f4f6;                  /* gray-100 */
   --badge-neutral-text: #374151;                /* gray-700 */
   --badge-info-bg: #dbeafe;                     /* blue-100 */

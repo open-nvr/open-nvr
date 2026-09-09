@@ -17,6 +17,7 @@
  */
 
 import { api } from '../lib/api'
+import { formatSeenAt, seenAtTitle } from '../lib/time'
 
 // The operator alert inbox: app-emitted §11.5 alerts landed by the
 // core's opennvr.alerts.> consumer. The bell polls unacked rows, rings
@@ -54,20 +55,34 @@ export type InboxAlert = {
 //
 // fired_at still ORDERS the inbox (the server sorts by id, i.e. arrival),
 // so a slow read cannot insert its alarm above ones already on screen.
+export function alarmSeenIso(a: InboxAlert): string | null {
+  return a.observed_at ?? a.fired_at
+}
+
 export function alarmSeenAt(a: InboxAlert): string {
-  const seen = a.observed_at ?? a.fired_at
-  return seen ? new Date(seen).toLocaleString() : '—'
+  return formatSeenAt(alarmSeenIso(a)) || '—'
 }
 
 // Tooltip for the cell above. When the two differ by a noticeable margin
 // the lag rides along: it is a useful health signal, and hiding it would
 // be the same dishonesty in the other direction.
 export function alarmSeenTitle(a: InboxAlert): string | undefined {
-  if (!a.observed_at || !a.fired_at) return undefined
+  const full = seenAtTitle(alarmSeenIso(a))
+  if (!a.observed_at || !a.fired_at) return full
   const lagMs = new Date(a.fired_at).getTime() - new Date(a.observed_at).getTime()
-  if (!Number.isFinite(lagMs) || lagMs < 1000) return undefined
+  if (!Number.isFinite(lagMs) || lagMs < 1000) return full
   const at = new Date(a.fired_at).toLocaleTimeString()
-  return `Alerted ${Math.round(lagMs / 1000)}s later, at ${at}`
+  return `${full} · alerted ${Math.round(lagMs / 1000)}s later, at ${at}`
+}
+
+/** One page of the inbox. `total` matches the request's filters; and
+ *  `unacked_count` is the BELL BADGE — scoped, but blind to every filter
+ *  on the request, so ?severity=critical can return unacked_count 40
+ *  beside total 3. Do not put one where the other belongs. */
+export type InboxPage = {
+  alerts: InboxAlert[]
+  unacked_count: number
+  total?: number
 }
 
 export type RingMode = 'none' | 'ping' | 'continuous'
@@ -79,12 +94,20 @@ export const alertsInboxService = {
     severity?: string
     source_name?: string
     after_id?: number
+    before_id?: number
+    skip?: number
     limit?: number
   }) => api.get('/api/v1/alerts-inbox', { params }),
 
-  // ids omitted/undefined = acknowledge everything unacked.
+  // Three shapes, matching the server: ids acknowledges exactly those;
+  // a filter acknowledges every unacked alert in scope matching it ("all
+  // 39 vehicle alarms", not "the 25 on this page"); nothing at all
+  // acknowledges everything unacked in scope.
   ackInboxAlerts: (ids?: number[]) =>
     api.post('/api/v1/alerts-inbox/ack', ids ? { ids } : {}),
+
+  ackInboxAlertsMatching: (filters: { source_name?: string; severity?: string }) =>
+    api.post('/api/v1/alerts-inbox/ack', filters),
 
   getRingConfig: () => api.get('/api/v1/alerts-inbox/ring-config'),
   putRingConfig: (ring: RingConfig) =>

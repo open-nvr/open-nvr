@@ -40,7 +40,9 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from core.database import Base  # noqa: E402
 from models import Camera, Role, User  # noqa: E402
 from services import evidence_store  # noqa: E402
-from services.timeline_service import query_events, record_track_visit  # noqa: E402
+from services.timeline_service import (  # noqa: E402
+    count_events, query_events, record_track_visit,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +83,16 @@ def db():
         yield s
     finally:
         s.close()
+
+
+def _camera(db, name):
+    """A second camera, for the scope and tie-ordering cases."""
+    cam = Camera(name=name, ip_address="10.0.0.10", port=80,
+                 owner_id=db.query(User).first().id)
+    db.add(cam)
+    db.commit()
+    db.refresh(cam)
+    return cam.id
 
 
 def _visit(db, *, start_min, end_min=None, label="person", cam=None, **kw):
@@ -330,3 +342,168 @@ def test_extract_plate_keeps_a_whole_read():
         {"result": {"plate_text": "66HH07", "accepted": True}},
         image_size=(1035, 720),
     ) == "66HH07"
+
+
+# ── paging (#451 follow-up) ─────────────────────────────────────────
+#
+# The rule these pin: walking `skip` through a result set must visit
+# every row exactly once. That is only true if the ordering is a TOTAL
+# order, which is why the `id` tiebreaker exists.
+
+
+def test_skip_walks_pages_without_gaps_or_repeats(db):
+    for m in range(10):
+        _visit(db, start_min=m)
+    whole = [r.id for r in query_events(db, limit=100)]
+    paged = []
+    for skip in (0, 4, 8):
+        paged += [r.id for r in query_events(db, limit=4, skip=skip)]
+    # List equality, not set equality: this catches a page boundary that
+    # repeats a row as well as one that drops it.
+    assert paged == whole
+
+
+def test_ties_on_started_at_page_stably(db):
+    """Six visits sharing ONE timestamp across two cameras and three
+    tracks — permitted by uq_events_visit (camera, track, start).
+
+    Without the id tiebreaker the database is free to return these in a
+    different order per query, so paging would repeat and drop rows at
+    random. This test is flaky by construction against the old ordering,
+    which is exactly the bug it guards.
+    """
+    other = _camera(db, "second")
+    for i in range(3):
+        _visit(db, start_min=0, track_id=f"a{i}")
+        _visit(db, start_min=0, cam=other, track_id=f"b{i}")
+    whole = [r.id for r in query_events(db, limit=100)]
+    assert len(whole) == 6
+    paged = []
+    for skip in (0, 2, 4):
+        paged += [r.id for r in query_events(db, limit=2, skip=skip)]
+    assert paged == whole
+    assert whole == sorted(whole, reverse=True)   # id DESC within the tie
+
+
+def test_skip_past_the_end_is_empty(db):
+    _visit(db, start_min=1)
+    assert query_events(db, skip=999) == []
+
+
+def test_count_matches_the_rows_it_pages(db):
+    for m in range(6):
+        _visit(db, start_min=m, label="car" if m % 2 else "person")
+    for filters in ({}, {"label": "car"}, {"label": "person"}):
+        assert count_events(db, **filters) == len(
+            query_events(db, limit=500, **filters))
+
+
+def test_count_is_scoped_and_does_not_leak_other_cameras(db):
+    """The security case: a total that ignores scope tells an operator
+    how many rows exist on cameras they cannot open."""
+    other = _camera(db, "not-mine")
+    for m in range(3):
+        _visit(db, start_min=m)
+    for m in range(7):
+        _visit(db, start_min=m, cam=other)
+    assert count_events(db, scope={db.cam_id}) == 3
+    assert count_events(db) == 10                 # superuser: unrestricted
+    assert count_events(db, scope=set()) == 0     # granted nothing: nothing
+
+
+# ── the HTTP envelope (nothing pinned it before) ────────────────────
+
+
+@pytest.fixture
+def api():
+    """Just the timeline router on a bare app — enough to pin the
+    response envelope, which nothing did before.
+
+    Its own engine rather than the `db` fixture's: TestClient serves the
+    request on another thread, and a plain sqlite :memory: connection
+    refuses to cross one. StaticPool keeps every thread on the ONE
+    connection, which is also what keeps the in-memory schema alive.
+
+    Yields (client, session) so a test can seed rows the route will see.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy.pool import StaticPool
+
+    import core.auth as auth_mod
+    from core.database import get_db
+    from routers.timeline_events import router
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                        poolclass=StaticPool)
+    Base.metadata.create_all(eng)
+    s = sessionmaker(bind=eng)()
+    role = Role(name="admin")
+    s.add(role)
+    s.commit()
+    owner = User(username="t", email="t@t.io", hashed_password="x",
+                 role_id=role.id)
+    s.add(owner)
+    s.commit()
+    cam = Camera(name="gate", ip_address="10.0.0.9", port=80,
+                 owner_id=owner.id)
+    s.add(cam)
+    s.commit()
+    s.refresh(cam)
+    s.cam_id = cam.id
+
+    def _fake_db():
+        # A generator FUNCTION, not a lambda returning an iterator —
+        # FastAPI only unwraps the former as a dependency.
+        yield s
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = _fake_db
+    app.dependency_overrides[auth_mod.get_current_active_user] = lambda: owner
+    try:
+        yield TestClient(app), s
+    finally:
+        s.close()
+
+
+def test_response_carries_page_length_and_total_separately(api):
+    client, db = api
+    for m in range(7):
+        _visit(db, start_min=m)
+    r = client.get("/events", params={"limit": 3})
+    assert r.status_code == 200
+    body = r.json()
+    # `count` is the PAGE length and `total` the whole set. Existing
+    # clients read neither, but `count` predates this work and stays.
+    assert body["count"] == len(body["events"]) == 3
+    assert body["total"] == 7
+
+
+def test_a_short_page_reports_an_exact_total(api):
+    client, db = api
+    for m in range(3):
+        _visit(db, start_min=m)
+    body = client.get("/events", params={"limit": 25}).json()
+    assert body["count"] == 3 and body["total"] == 3
+
+
+def test_paging_past_the_end_reports_the_true_total(api):
+    """The resolve_total trap, through the route: an empty page at a big
+    skip must not report the skip as the total."""
+    client, db = api
+    for m in range(4):
+        _visit(db, start_min=m)
+    body = client.get("/events", params={"skip": 100, "limit": 25}).json()
+    assert body["events"] == [] and body["count"] == 0
+    assert body["total"] == 4
+
+
+@pytest.mark.parametrize("params", [
+    {"limit": 0}, {"limit": 501}, {"skip": -1},
+])
+def test_out_of_range_paging_is_rejected(api, params):
+    """Previously `limit=1000` was silently trimmed to 500 — harmless
+    until skip existed, then it steps over rows 500-999 in silence."""
+    client, _db = api
+    assert client.get("/events", params=params).status_code == 422
