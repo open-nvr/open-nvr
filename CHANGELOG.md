@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **App Catalog is its own item in the sidebar.** It sat under "AI &
+  Detections", which miscategorised it — plenty of apps are not AI (the
+  notifier, the barrier, the agent) — and buried the place apps come
+  from inside a collapsed section. It now renders as a flat link
+  directly below Applications, or immediately under Cameras when no app
+  vertical is enabled, so it is one click precisely when nothing is
+  installed yet. Nav groups gained a `flat` mode for a destination that
+  is one page rather than a section; sticky header offsets count headers
+  instead of groups so a flat entry leaves no gap in the stack.
+
 - **The app card's "Network" panel never said what it was.** It showed a
   bare list of hostnames and an input, with the guarantee behind it —
   apps run on an isolated network and reach the outside only through

@@ -48,6 +48,11 @@ type NavGroup = {
   label: string
   /** pinned groups render their items directly — no header, never collapsible */
   pinned?: boolean
+  /** flat groups scroll with the rest of the menu but render as bare
+   *  links — no header, nothing to expand. For a destination that is one
+   *  page, not a section: a collapsible header hiding a single item is
+   *  a click for nothing. */
+  flat?: boolean
   items: NavItem[]
 }
 
@@ -73,7 +78,6 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
       { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
       { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
-      { to: '/app-catalog', label: 'App Catalog', icon: <Boxes size={16} />, perm: '/ai-engine' },
     ],
   },
   {
@@ -190,9 +194,27 @@ export function AppShell() {
           icon: verticalIcon[v.to] ?? <Boxes size={16} />,
           perm: v.to as keyof typeof NAV_PERMISSIONS,
         }))
+      // Right after the pinned NVR group (i.e. under Cameras): these are
+      // operational pages, not settings.
+      let at = 1
       if (appItems.length > 0) {
-        // Right after the pinned NVR group: these are operational pages.
-        groups.splice(1, 0, { key: 'applications', label: 'Applications', items: appItems })
+        groups.splice(at, 0, { key: 'applications', label: 'Applications', items: appItems })
+        at += 1
+      }
+      // App Catalog sits with the apps, not under "AI & Detections" —
+      // plenty of apps are not AI at all (the notifier, the barrier, the
+      // agent), and the catalog is where the pages above come FROM. Flat
+      // and directly below Applications, so it stays one click even when
+      // no app is installed yet — which is exactly when someone needs to
+      // find it.
+      const catalog: NavItem = {
+        to: '/app-catalog', label: 'App Catalog',
+        icon: <Boxes size={16} />, perm: '/ai-engine',
+      }
+      if (canView(catalog.perm)) {
+        groups.splice(at, 0, {
+          key: 'app-catalog', label: 'App Catalog', flat: true, items: [catalog],
+        })
       }
       return groups
     },
@@ -201,6 +223,14 @@ export function AppShell() {
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)
+  // Sticky headers dock at `index * 32`, but a flat group contributes no
+  // header — counting it would leave a 32px hole in the stack and push
+  // every header below it out of place. Offsets count headers, not groups.
+  const headerSlot = useMemo(() => {
+    let n = 0
+    return menuGroups.map((g) => (g.flat ? -1 : n++))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGroups])
 
   const activeGroupKey = useMemo(() => {
     for (const g of NAV_GROUPS) {
@@ -337,6 +367,17 @@ export function AppShell() {
                   </div>
                 )
               }
+              // Flat: a single destination, so no header and nothing to
+              // collapse — it just sits in the list as a link.
+              if (group.flat) {
+                return (
+                  <div key={group.key} className="py-1 space-y-0.5">
+                    {group.items.map((item) => (
+                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
+                    ))}
+                  </div>
+                )
+              }
               // Sticky headers: headers and item lists are direct children of
               // the scroll container (sticky is bounded by its parent, so
               // nesting would defeat it). Headers passed while scrolling stack
@@ -344,7 +385,7 @@ export function AppShell() {
               return (
                 <Fragment key={group.key}>
                   <button
-                    style={{ top: gi * 32 }}
+                    style={{ top: headerSlot[gi] * 32 }}
                     className="sticky z-10 w-full h-8 flex items-center justify-between px-2.5 text-sm font-medium bg-[var(--bg-2)] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!collapsed}
