@@ -44,13 +44,33 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _DNS_RESOLVE_TIMEOUT_SECONDS = 2.0
 
 
+#: Cloud instance-metadata services, denied outright on every path that
+#: reaches _ip_is_internal. 169.254.169.254 (AWS/GCP/Azure/DO) and
+#: fd00:ec2::254 (AWS IPv6) are link-local, so "internal" used to admit
+#: them — and "internal" is exactly what an SSRF guard permits. Reading
+#: instance metadata yields cloud credentials, which is a far worse
+#: outcome than reaching a camera on the LAN.
+#:
+#: validate_app_url() in routers/apps.py already refuses this range; this
+#: brings the MediaMTX/ONVIF trust zone in line with that precedent.
+_METADATA_ADDRESSES = frozenset({
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("169.254.170.2"),      # ECS task metadata
+    ipaddress.ip_address("fd00:ec2::254"),
+})
+
+
 def _ip_is_internal(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True if ``addr`` is inside the MediaMTX trust zone: loopback, RFC1918,
-    IPv6 ULA, or link-local. Public addresses and the 0.0.0.0 wildcard are
-    rejected. See V-015.
+    IPv6 ULA, or link-local. Public addresses, the 0.0.0.0 wildcard and the
+    cloud metadata endpoints are rejected. See V-015.
     """
     # is_private also matches 0.0.0.0/8, so exclude the wildcard explicitly.
     if addr.is_unspecified:
+        return False
+    # Denied BEFORE the allow rules below, so no later clause can
+    # re-admit it: metadata is never "internal" for our purposes.
+    if addr in _METADATA_ADDRESSES:
         return False
     return bool(
         addr.is_loopback
