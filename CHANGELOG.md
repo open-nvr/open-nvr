@@ -8,6 +8,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The app card's "Network" panel never said what it was.** It showed a
+  bare list of hostnames and an input, with the guarantee behind it —
+  apps run on an isolated network and reach the outside only through
+  OpenNVR's egress proxy, which refuses and reports anything not
+  declared or allowed — left entirely implicit. The panel now explains
+  that in two lines, and the pre-install provenance line says "no
+  outside connections" with a tooltip covering the same ground instead
+  of the jargon "no network egress" / "outside the stack".
+
 - **The plate app and the page it lights up had unrelated names.** The App
   Catalog said "License Plate Recognition" and the sidebar said
   "Vehicles", with nothing to connect them. Both now carry ANPR — the

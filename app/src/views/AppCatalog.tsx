@@ -187,8 +187,16 @@ function ProvenanceLine({ app }: { app: IndexApp }) {
         </a>
       )}
       {!external && (
-        <span title={egress.length ? 'Hosts this app connects to outside the stack' : 'This app never connects outside the stack'}>
-          {egress.length === 0 ? 'no network egress' : `connects to: ${egress.join(', ')}`}
+        <span
+          title={
+            egress.length
+              ? 'Apps run on an isolated network. These are the only hosts this one declared, reviewed with the listing; anything else it tries is blocked and reported after install.'
+              : 'Apps run on an isolated network with no route to your LAN or the internet, and this one declared no hosts at all — anything it tries is blocked and reported.'
+          }
+        >
+          {egress.length === 0
+            ? 'no outside connections'
+            : `connects to: ${egress.join(', ')}`}
         </span>
       )}
     </div>
@@ -1396,7 +1404,7 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
       <div className="flex items-center gap-2 flex-wrap">
         <span className="font-medium text-[var(--text)]">Network</span>
         {eg.enforced.length === 0 && denied.length === 0 ? (
-          <span className="text-[var(--text-dim)]">no connections outside the stack</span>
+          <span className="text-[var(--text-dim)]">nothing outside OpenNVR</span>
         ) : null}
         {listingHosts.map((h) => (
           <Badge key={`l-${h}`} variant="neutral" title="Declared in the catalog listing">{h}</Badge>
@@ -1423,6 +1431,18 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
           </span>
         )}
       </div>
+      {/* Say what this panel IS. It reads like a bare list of hostnames
+          otherwise, and the guarantee behind it — the reason to care
+          about an app's listed hosts BEFORE installing it — is invisible.
+          Two lines: the rule, then what to do about it. */}
+      <p className="text-[var(--text-dim)] leading-relaxed">
+        Apps run on an isolated network with no route to your camera
+        network or the internet. Everything above is what this app may
+        reach through the OpenNVR egress proxy — anything else is blocked
+        and reported here, so an app cannot quietly send footage or data
+        somewhere you did not approve.
+        {isAdmin && ' Allow a host only if you know why the app needs it.'}
+      </p>
       {denied.length > 0 && (
         <div className="space-y-1">
           <div className="text-[var(--text-dim)]">
