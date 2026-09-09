@@ -31,10 +31,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.config import settings
 from core.database import get_db
-from models import Camera
+from models import Camera, User
 
 # Import hook token verification (shared with mediamtx_hooks router)
 from routers.mediamtx_hooks import _verify_hook_token
@@ -49,13 +49,27 @@ router = APIRouter(
 )  # mounted at /api/v1
 
 
-# ---- Simple health endpoint (no superuser required) ----
+# ---- Simple health endpoint (any signed-in user; details are superuser) ----
 @router.get("/health")
-async def mediamtx_health():
+async def mediamtx_health(
+    current_user: User = Depends(get_current_active_user),
+):
     """Lightweight health check for MediaMTX Admin API.
 
-    Returns { status: "ok"|"down", admin_api: str | None, http_status?: int }
+    Returns { status: "ok"|"down", admin_api?: str | None, http_status?: int }
+
+    AUTHENTICATION, added after a coordinated disclosure (S9S Security
+    Research, 2026): this was the one endpoint in the router with no
+    dependency at all, and no middleware covers it, so it answered
+    anonymously — publishing ``mediamtx_admin_api``, the internal admin
+    URL, and raw exception text to anyone who asked.
+
+    It stays open to any signed-in user rather than superusers because
+    the UI shows a health dot to everyone; the ADDRESS and the error
+    detail are the parts that are privileged, so those are returned only
+    to a superuser. Everyone else gets the up/down they need.
     """
+    detailed = bool(getattr(current_user, "is_superuser", False))
     try:
         if not MediaMtxAdminService.is_configured():
             return {
@@ -68,19 +82,21 @@ async def mediamtx_health():
         healthy = (res or {}).get("status") == "ok" and (res or {}).get(
             "http_status"
         ) in (200, 201)
-        out = {
-            "status": "ok" if healthy else "down",
-            "admin_api": settings.mediamtx_admin_api,
-        }
+        out: dict = {"status": "ok" if healthy else "down"}
+        if detailed:
+            out["admin_api"] = settings.mediamtx_admin_api
         if "http_status" in res:
             out["http_status"] = res["http_status"]
         return out
     except Exception as e:
-        return {
-            "status": "down",
-            "admin_api": settings.mediamtx_admin_api,
-            "error": str(e),
-        }
+        # The exception text can name internal hosts and ports; it goes to
+        # the log unconditionally and to the caller only if privileged.
+        mediamtx_logger.warning("mediamtx health probe failed: %s", e)
+        out = {"status": "down"}
+        if detailed:
+            out["admin_api"] = settings.mediamtx_admin_api
+            out["error"] = str(e)
+        return out
 
 
 # ---- Control API passthrough (superuser) ----
