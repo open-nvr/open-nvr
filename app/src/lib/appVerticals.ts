@@ -47,7 +47,14 @@ export const APP_VERTICALS: AppVertical[] = [
   {
     capability: 'vehicles',
     to: '/vehicles',
-    label: 'Vehicles',
+    // "ANPR" is the internationally recognised name for this (UK, EU,
+    // India, AU; "LPR"/"ALPR" is the US synonym) and it is the token the
+    // catalog app carries too, so an operator can tell that the
+    // "ANPR — License Plate Recognition" app they installed is what lit
+    // this page up. "Vehicles" stays the head noun because the page is
+    // wider than the OCR: plate reads, the vehicle register, monitoring
+    // and alarms.
+    label: 'Vehicles (ANPR)',
     legacy: (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'),
   },
   { capability: 'occupancy', to: '/occupancy', label: 'Occupancy' },

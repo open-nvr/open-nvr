@@ -249,7 +249,11 @@ def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = 
 
 MANIFEST = AppManifest(
     id="license-plate-recognition",
-    name="License Plate Recognition",
+    # ANPR is what most of the world calls this (UK, EU, India, AU; the
+    # US says LPR/ALPR), and the nav page it lights up carries the same
+    # token — "Vehicles (ANPR)". The spelled-out term stays for anyone
+    # who does not know the acronym. The id is a key and does not move.
+    name="ANPR — License Plate Recognition",
     version="2.5.0",
     category="vehicle",
     summary=(
@@ -1045,7 +1049,7 @@ class PlateAlerter(Detector):
             ", ".join(_html.escape(c) for c in scope)
             if scope else "all cameras (no assignment restriction)"
         )
-        return f"""<title>License Plate Recognition</title>
+        return f"""<title>ANPR — License Plate Recognition</title>
 <style>
  body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a;
         background: #fafafa; }}
@@ -1059,7 +1063,7 @@ class PlateAlerter(Detector):
  th {{ color: #6b6f76; font-weight: 500 }}
  .note {{ margin-top: 1rem; font-size: .85rem; color: #6b6f76 }}
 </style>
-<h1>License Plate Recognition</h1>
+<h1>ANPR — License Plate Recognition</h1>
 <div class="dim">Watching: {scope_line}</div>
 <div class="stats">
  <div><b>{len(allow)}</b><span class="dim">allowlist</span></div>

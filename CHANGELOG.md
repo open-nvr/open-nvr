@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The plate app and the page it lights up had unrelated names.** The App
+  Catalog said "License Plate Recognition" and the sidebar said
+  "Vehicles", with nothing to connect them. Both now carry ANPR — the
+  name most of the world uses (UK, EU, India, AU; the US says LPR/ALPR) —
+  as "ANPR — License Plate Recognition" in the catalog and the app's own
+  dashboard, and "Vehicles (ANPR)" in the nav and page header. "Vehicles"
+  stays the head noun because the page is wider than the OCR: plate reads,
+  the vehicle register, monitoring and alarms. The app id, the
+  `license_plate_recognition` AI task and its skill label are unchanged —
+  those are keys and the technical capability, not product names.
+
 - **A running app was reported "skill: degraded — app unreachable at last
   contact".** `installed_apps.status` and `last_seen` were only ever
   written by boot registration and the on-demand "Check" probe, and

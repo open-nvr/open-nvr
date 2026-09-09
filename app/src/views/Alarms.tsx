@@ -204,7 +204,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         <div className="border border-[var(--border)] rounded p-3 space-y-2 md:col-span-2">
           <div className="font-medium">Arm vehicle alarms (LPR)</div>
           <div className="text-[12px] text-[var(--text-dim)]">
-            Vehicle alarm policy lives in the License Plate Recognition
+            Vehicle alarm policy lives in the ANPR — License Plate Recognition
             app:{' '}
             <Link
               to="/app-catalog/license-plate-recognition"
