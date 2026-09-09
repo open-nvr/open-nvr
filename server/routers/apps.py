@@ -154,6 +154,20 @@ class IndexEntry(BaseModel):
     # ghcr.io/open-nvr images — the org's CI signs those; declared
     # ({identity: <regexp>, issuer}) for an image built elsewhere.
     signing: dict[str, str] | None = None
+    # Editorial popularity rank, 0-100, set by the maintainers — NOT a
+    # measured install count. OpenNVR deployments never phone home (the
+    # egress proxy exists precisely so apps cannot), so there is no
+    # telemetry to count installs with, and inventing a number would be
+    # a lie told in a security product. Absent = unranked; the catalog
+    # sorts those last and never renders a fake total.
+    popularity: int | None = None
+    # Listing screenshots as paths inside the frontend build
+    # (app/public/app-screenshots/<id>/...), served by core's static
+    # route. Deliberately NOT remote URLs: a third-party image would
+    # leak every catalog viewer's IP to that host and would not load at
+    # all on an air-gapped site — both of which this product promises
+    # against everywhere else.
+    screenshots: list[str] = []
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
