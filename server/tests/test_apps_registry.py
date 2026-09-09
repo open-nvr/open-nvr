@@ -913,6 +913,98 @@ def test_status_non_object_health_does_not_500(client, monkeypatch):
     assert resp.json()["health"]["body"] == ["not", "an", "object"]
 
 
+def _seen(client, app_id="loitering-detection"):
+    """last_seen for one row, as an aware datetime."""
+    from datetime import UTC, datetime
+
+    row = next(r for r in client.get("/apps").json() if r["id"] == app_id)
+    dt = datetime.fromisoformat(str(row["last_seen"]))
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _backdate_last_seen(client, *, hours):
+    """Age every row's last_seen, so a heartbeat is unmistakable."""
+    from datetime import UTC, datetime, timedelta
+
+    from core.database import get_db
+    from models import InstalledApp
+
+    db = next(client.app.dependency_overrides[get_db]())
+    try:
+        for row in db.query(InstalledApp).all():
+            row.last_seen = datetime.now(UTC) - timedelta(hours=hours)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_config_poll_from_the_app_is_a_heartbeat(client):
+    """The SDK polls GET /{id}/config every ~10s from the running app.
+    That is the platform's best liveness signal and core used to discard
+    it, so `last_seen` froze at boot and the skill badge decayed to
+    "no recent contact" for an app that had been talking to us all
+    along."""
+    from datetime import UTC, datetime, timedelta
+
+    from services.app_keys import AppPrincipal
+
+    _register(client)
+    # Age the row past every freshness window.
+    _backdate_last_seen(client, hours=3)
+    assert datetime.now(UTC) - _seen(client) > timedelta(hours=2)
+
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: AppPrincipal(app_id="loitering-detection")
+    )
+    assert client.get("/apps/loitering-detection/config").status_code == 200
+
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: _StubUser()
+    )
+    assert datetime.now(UTC) - _seen(client) < timedelta(minutes=1)
+
+
+def test_config_poll_by_a_user_is_not_a_heartbeat(client):
+    """A person opening the config form says nothing about whether the
+    app process is alive — only the app's own key refreshes last_seen.
+    The site's internal key is held by companion services too, so it
+    must not count either."""
+    from datetime import UTC, datetime, timedelta
+
+    _register(client)
+    _backdate_last_seen(client, hours=3)
+
+    # The default override IS a user principal.
+    assert client.get("/apps/loitering-detection/config").status_code == 200
+    assert datetime.now(UTC) - _seen(client) > timedelta(hours=2)
+
+    # And the bare internal-key path (principal None) is not a heartbeat.
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: None
+    )
+    assert client.get("/apps/loitering-detection/config").status_code == 200
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: _StubUser()
+    )
+    assert datetime.now(UTC) - _seen(client) > timedelta(hours=2)
+
+
+def test_another_apps_key_is_not_a_heartbeat(client):
+    """An app key may only touch its own row (_own_app_only), so it can
+    never refresh someone else's liveness."""
+    from services.app_keys import AppPrincipal
+
+    _register(client)
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: AppPrincipal(app_id="some-other-app")
+    )
+    resp = client.get("/apps/loitering-detection/config")
+    client.app.dependency_overrides[apps_router.get_read_principal] = (
+        lambda: _StubUser()
+    )
+    assert resp.status_code == 403
+
+
 def test_status_unknown_app_is_404(client):
     assert client.get("/apps/ghost/status").status_code == 404
 

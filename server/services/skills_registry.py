@@ -40,6 +40,16 @@ from typing import Any, Iterable, Optional
 #: re-registration; recency is the real signal.
 APP_STALE_AFTER = timedelta(minutes=10)
 
+#: Contact fresher than this OUTRANKS a stored "unreachable". That column
+#: is the verdict of the last on-demand /status probe and nothing ever
+#: re-runs it, so one failed probe — an app still booting, a blip — used
+#: to pin a healthy app to "degraded" forever. The app's config poll
+#: (~10s) is live proof to the contrary, so anything inside this window
+#: means the app is talking to us regardless of what that probe found.
+#: Kept far tighter than APP_STALE_AFTER: a genuinely dead app must not
+#: coast on a heartbeat from nine minutes ago.
+APP_LIVE_CONTACT_WITHIN = timedelta(seconds=60)
+
 #: Domain events per provider. Mirrors the KAI-C normaliser map
 #: (kai-c/kai_c/domain_events.py) and the App SDK alert dispatcher —
 #: both contracted in docs/EVENT_CONTRACTS.md. Keep the three in step:
@@ -140,12 +150,20 @@ def _adapter_skill(entry: Any, *,
 def _app_status(row: Any, now: datetime) -> tuple[str, Optional[str]]:
     if not row.enabled:
         return "dormant", "installed but not enabled"
-    if row.status == "unreachable":
-        return "degraded", "app unreachable at last contact"
     last_seen = row.last_seen
     if last_seen is not None and last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
-    if last_seen is None or now - last_seen > APP_STALE_AFTER:
+    age = None if last_seen is None else now - last_seen
+    # Recency first. `row.status` is the last on-demand probe's verdict
+    # and nothing re-runs it, so it goes stale the moment it is written:
+    # an app that failed one probe while booting stayed "degraded" while
+    # it ran perfectly well for days. A heartbeat inside the live window
+    # is direct evidence the app is up, and it wins.
+    if age is not None and age <= APP_LIVE_CONTACT_WITHIN:
+        return "active", None
+    if row.status == "unreachable":
+        return "degraded", "app unreachable at last contact"
+    if age is None or age > APP_STALE_AFTER:
         return "degraded", "no recent contact from app"
     return "active", None
 

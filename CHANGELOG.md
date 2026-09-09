@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A running app was reported "skill: degraded — app unreachable at last
+  contact".** `installed_apps.status` and `last_seen` were only ever
+  written by boot registration and the on-demand "Check" probe, and
+  nothing re-runs that probe — so one failure (an app still starting, a
+  blip) pinned the skill badge to degraded for as long as the app ran,
+  and an app nobody probed decayed to "no recent contact" after ten
+  minutes. Meanwhile the SDK polls `GET /apps/{id}/config` every ~10s from
+  inside the running app and core discarded that. That poll is now a
+  heartbeat (throttled to one write per 30s, and only for the app's own
+  key — the site's internal key is held by companion services too), and
+  the skill view trusts contact newer than 60s over an older failed
+  probe. A genuinely dead app still degrades: the live window is far
+  tighter than the ten-minute staleness cutoff.
+
 - **App Catalog: "Check" could never report a healthy app.** The chip read
   `health.status`, but the SDK's `health_snapshot()` speaks `ready` (spec
   §03) and never sets a `status` string — so every SDK-built app came back
