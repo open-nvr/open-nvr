@@ -6,6 +6,36 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **App Catalog: search and category filter.** One box filters installed
+  and available apps together (name, id, summary, category, author; all
+  terms must match, so a second word narrows), with category chips built
+  from whatever the index and the registry actually carry. The Featured
+  shelf hides while filtering rather than showing the same cards twice.
+
+### Fixed
+
+- **App Catalog: Refresh left half the page stale.** It refetched the two
+  app lists but not KAI-C capabilities, Tier-0 or the skills registry —
+  the very things behind "requires X — nothing provides it" and the
+  per-app skill line. Registering the missing adapter and pressing
+  Refresh left the warning sitting there until a full page reload.
+
+- **App Catalog: a failed index looked like an empty one.** When
+  `/apps/index` errored, both Featured and "Available to install"
+  vanished with no message, so an index that was down was
+  indistinguishable from having nothing left to install. It now says so,
+  with a retry.
+
+- **App Catalog: the page called itself "App Store"** while the sidebar
+  said "App Catalog". Both now say App Catalog.
+
+- **App Catalog: available-app cards clipped their header badges.** The
+  same non-wrapping header fixed on installed cards, missed on the
+  listing cards, where name + category + version + pricing + licence +
+  "third-party" is six items in a narrow column.
+
 ### Fixed
 
 - **App Catalog is its own item in the sidebar.** It sat under "AI &

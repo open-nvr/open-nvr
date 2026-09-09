@@ -25,7 +25,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
@@ -37,6 +37,7 @@ import { ChipListEditor } from './apps/ChipListEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
+import { matchesCatalogFilter } from '../lib/catalogFilter'
 
 export type ManifestParam = {
   name: string
@@ -1912,7 +1913,10 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
 
   return (
     <Card>
-      <CardHeader>
+      {/* Same wrap as the installed card: name + category + version +
+          pricing + licence + "third-party" is six things in a narrow grid
+          column, and without this the last ones are clipped at the edge. */}
+      <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
         <CardTitle>{app.name}</CardTitle>
         <Badge variant="info">{app.category}</Badge>
@@ -1941,7 +1945,7 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
           <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           {app.kind === 'external' && app.external_url ? (
             <a href={app.external_url} target="_blank" rel="noreferrer">
               <Button variant="primary">
@@ -1977,6 +1981,67 @@ function SkeletonGrid({ count = 3 }: { count?: number }) {
       {Array.from({ length: count }).map((_, i) => (
         <Skeleton key={i} className="h-44" />
       ))}
+    </div>
+  )
+}
+
+function CatalogFilters({
+  query, onQuery, category, onCategory, categories, resultCount,
+}: {
+  query: string
+  onQuery: (v: string) => void
+  category: string | null
+  onCategory: (v: string | null) => void
+  categories: string[]
+  /** null when no filter is active — the counts below speak for themselves. */
+  resultCount: number | null
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="relative flex-1 min-w-[14rem]">
+        <Search
+          size={14}
+          className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)] pointer-events-none"
+        />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder="Search apps by name, category or what they do"
+          aria-label="Search apps"
+          className="w-full pl-7 pr-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by category">
+        <button
+          type="button"
+          onClick={() => onCategory(null)}
+          aria-pressed={category === null}
+          className={`px-2 py-1 text-xs rounded border ${category === null
+            ? 'border-[var(--accent)] text-[var(--text)]'
+            : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+        >
+          All
+        </button>
+        {categories.map((c) => (
+          <button
+            key={c}
+            type="button"
+            onClick={() => onCategory(category === c ? null : c)}
+            aria-pressed={category === c}
+            className={`px-2 py-1 text-xs rounded border ${category === c
+              ? 'border-[var(--accent)] text-[var(--text)]'
+              : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+          >
+            {c}
+          </button>
+        ))}
+      </div>
+      {resultCount !== null && (
+        <span className="text-xs text-[var(--text-dim)]">
+          {resultCount === 0 ? 'no matches' : `${resultCount} match${resultCount === 1 ? '' : 'es'}`}
+        </span>
+      )}
     </div>
   )
 }
@@ -2030,26 +2095,91 @@ export function AppCatalog() {
   // category scan still finds them).
   const featured = useMemo(() => available.filter((a) => a.featured), [available])
 
+  // ── Search + category ───────────────────────────────────────────
+  // The catalog is meant to grow (community and third-party listings on
+  // top of the shipped index), and scrolling three grids to find one app
+  // stops working well before that. Both groups filter together: an
+  // operator searching "plate" wants to know it is already installed
+  // just as much as they want the listing.
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState<string | null>(null)
+
+  const categories = useMemo(() => {
+    const seen = new Set<string>()
+    for (const a of apps) if (a.category) seen.add(a.category)
+    for (const a of indexQuery.data ?? []) if (a.category) seen.add(a.category)
+    return Array.from(seen).sort()
+  }, [apps, indexQuery.data])
+
+  // Drop a category that nothing carries any more (the index changed
+  // under a stale selection), so the page cannot filter to nothing with
+  // no way back except reloading.
+  useEffect(() => {
+    if (category && categories.length > 0 && !categories.includes(category)) {
+      setCategory(null)
+    }
+  }, [categories, category])
+
+  const filtering = query.trim() !== '' || category !== null
+  const shownInstalled = useMemo(
+    () => apps.filter((a) => matchesCatalogFilter(
+      { name: a.name, id: a.id, category: a.category,
+        summary: a.manifest?.summary, author: a.manifest?.author },
+      query, category)),
+    [apps, query, category]
+  )
+  const shownAvailable = useMemo(
+    () => available.filter((a) => matchesCatalogFilter(
+      { name: a.name, id: a.id, category: a.category,
+        summary: a.summary, author: a.author },
+      query, category)),
+    [available, query, category]
+  )
+
+  // Refresh everything the page RENDERS, not just the two app lists. The
+  // "requires X — nothing provides it" badge and the per-app skill line
+  // are computed from KAI-C's capabilities, Tier-0 and the skills
+  // registry; leaving those three stale meant an operator who registered
+  // the missing adapter and pressed Refresh watched the warning sit
+  // there, with no way short of a full page reload to clear it.
   const refresh = () => {
     appsQuery.refetch()
     indexQuery.refetch()
+    capsQuery.refetch()
+    skillsQuery.refetch()
+    tier0Query.refetch()
   }
+  const refreshing =
+    appsQuery.isFetching || indexQuery.isFetching ||
+    capsQuery.isFetching || skillsQuery.isFetching || tier0Query.isFetching
 
   return (
     <section className="space-y-6">
+      {/* "App Catalog", matching the sidebar. It called itself "App Store"
+          while the nav said "App Catalog" — the same two-names-for-one-
+          thing that made the plate app hard to place. */}
       <PageHeader
-        title="App Store"
-        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C and the platform's Tier-0 detection."
+        title="App Catalog"
+        description="Apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C and the platform's Tier-0 detection."
         actions={
-          <Button onClick={refresh} disabled={appsQuery.isPending || indexQuery.isFetching}>
-            <RefreshCw size={14} className={appsQuery.isFetching || indexQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+          <Button onClick={refresh} disabled={refreshing}>
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh
           </Button>
         }
       />
 
+      <CatalogFilters
+        query={query}
+        onQuery={setQuery}
+        category={category}
+        onCategory={setCategory}
+        categories={categories}
+        resultCount={filtering ? shownInstalled.length + shownAvailable.length : null}
+      />
+
       {/* --------------------------- Installed --------------------------- */}
       <div className="space-y-3">
-        <GroupHeader title="Installed" count={apps.length} />
+        <GroupHeader title="Installed" count={shownInstalled.length} />
         {appsQuery.isPending ? (
           <SkeletonGrid count={6} />
         ) : appsQuery.isError ? (
@@ -2064,9 +2194,13 @@ export function AppCatalog() {
             title="No apps installed yet"
             description="Apps self-register on boot; install one from the index below or see sdk/opennvr-app-sdk to build your own."
           />
+        ) : shownInstalled.length === 0 ? (
+          <div className="text-sm text-[var(--text-dim)]">
+            No installed app matches this filter.
+          </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-            {apps.map((app) => (
+            {shownInstalled.map((app) => (
               <AppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
             ))}
           </div>
@@ -2076,7 +2210,20 @@ export function AppCatalog() {
       {/* ---------------------- Available to install --------------------- */}
       {/* Best-effort: if the index endpoint errors, we simply omit this group
           rather than blanking the page above. */}
-      {!indexQuery.isError && featured.length > 0 && (
+      {/* An index that fails to load used to remove BOTH groups below with
+          no message at all, so "the index is down" looked exactly like
+          "there is nothing to install". Say which it is. */}
+      {indexQuery.isError && (
+        <ErrorCard
+          title="App index unavailable"
+          message={extractApiError(indexQuery.error, 'Could not load the list of apps available to install. Installed apps above are unaffected.')}
+          onRetry={() => indexQuery.refetch()}
+        />
+      )}
+
+      {/* Featured is a discovery shelf; while filtering it is just the
+          same cards twice. */}
+      {!indexQuery.isError && !filtering && featured.length > 0 && (
         <div className="space-y-3">
           <GroupHeader title="Featured" count={featured.length} />
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -2089,7 +2236,7 @@ export function AppCatalog() {
 
       {!indexQuery.isError && (
         <div className="space-y-3">
-          <GroupHeader title="Available to install" count={available.length} />
+          <GroupHeader title="Available to install" count={shownAvailable.length} />
           {indexQuery.isPending ? (
             <SkeletonGrid count={3} />
           ) : available.length === 0 ? (
@@ -2098,9 +2245,13 @@ export function AppCatalog() {
               title="No additional apps available"
               description="Every app in the index is already installed."
             />
+          ) : shownAvailable.length === 0 ? (
+            <div className="text-sm text-[var(--text-dim)]">
+              No available app matches this filter.
+            </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-              {available.map((app) => (
+              {shownAvailable.map((app) => (
                 <AvailableAppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} onInstall={() => setInstallApp(app)} />
               ))}
             </div>
