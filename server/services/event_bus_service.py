@@ -68,21 +68,40 @@ _DEFAULT_SUBSCRIBER_QUEUE_SIZE = 100
 class _Subscriber:
     """One subscription slot. Owns the queue and the optional filters."""
 
-    __slots__ = ("queue", "camera_id", "tasks", "dropped", "created_at")
+    __slots__ = ("queue", "camera_id", "tasks", "allowed_camera_ids",
+                 "dropped", "created_at")
 
     def __init__(
         self,
         queue_size: int,
         camera_id: int | None,
         tasks: frozenset[str] | None,
+        allowed_camera_ids: frozenset[int] | None = None,
     ):
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
         self.camera_id = camera_id
         self.tasks = tasks
+        #: Cameras this subscriber is ENTITLED to, or ``None`` for
+        #: unrestricted (a superuser, or an internal caller that has
+        #: already done its own authorization).
+        #:
+        #: This is an authorization boundary, not a filter, and it lives
+        #: here rather than in the route on purpose: ``camera_id`` below
+        #: is a client-supplied preference and omitting it used to mean
+        #: "every camera". Enforcing entitlement in the same place the
+        #: event is matched means no present or future caller can widen
+        #: its own scope by leaving a query parameter off.
+        self.allowed_camera_ids = allowed_camera_ids
         self.dropped: int = 0
         self.created_at = time.time()
 
     def matches(self, event: dict[str, Any]) -> bool:
+        # Entitlement first: a subscriber never sees a camera it was not
+        # granted, whatever it asked to filter on.
+        if self.allowed_camera_ids is not None:
+            cam = event.get("camera_id")
+            if cam is None or cam not in self.allowed_camera_ids:
+                return False
         if self.camera_id is not None and event.get("camera_id") != self.camera_id:
             return False
         if self.tasks is not None and event.get("task") not in self.tasks:
@@ -142,6 +161,7 @@ class EventBus:
         self,
         camera_id: int | None = None,
         tasks: list[str] | None = None,
+        allowed_camera_ids: set[int] | frozenset[int] | None = None,
     ) -> AsyncIterator[_Subscriber]:
         """
         Context-managed subscription. Use as::
@@ -159,6 +179,9 @@ class EventBus:
             queue_size=self._subscriber_queue_size,
             camera_id=camera_id,
             tasks=frozenset(tasks) if tasks else None,
+            allowed_camera_ids=(
+                None if allowed_camera_ids is None
+                else frozenset(allowed_camera_ids)),
         )
         async with self._lock:
             self._subscribers.add(sub)

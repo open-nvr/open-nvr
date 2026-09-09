@@ -56,6 +56,7 @@ from core.auth import get_current_active_user
 from core.database import get_db
 from core.logging_config import main_logger
 from models import User
+from services.camera_scope import visible_camera_ids
 from services.event_bus_service import get_event_bus
 
 router = APIRouter()
@@ -172,6 +173,36 @@ async def events_stream(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="unauthorized")
         return
 
+    # AUTHORIZE the subscription, not just the connection. Being logged in
+    # said nothing about WHICH cameras you may watch: `camera_id` was taken
+    # from the query string unchecked, and leaving it off meant "every
+    # camera on the site" — so any active account could stream every
+    # other user's detections and alerts. Resolve what this user may see
+    # and hand that to the bus, which enforces it per event.
+    db_gen2 = get_db()
+    db2: Session = next(db_gen2)
+    try:
+        allowed = visible_camera_ids(db2, user)   # None => superuser
+    finally:
+        try:
+            next(db_gen2)
+        except StopIteration:
+            pass
+
+    # Asking for a camera you cannot see is refused outright rather than
+    # silently answered with an empty stream — an authorization failure
+    # the caller can act on beats a feed that looks broken.
+    if camera_id is not None and allowed is not None and camera_id not in allowed:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION, reason="forbidden")
+        return
+    # A user with no cameras has nothing to stream; say so instead of
+    # holding an idle socket open forever.
+    if allowed is not None and not allowed:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION, reason="no cameras")
+        return
+
     await websocket.accept()
 
     bus = get_event_bus()
@@ -187,7 +218,8 @@ async def events_stream(
 
     reported_drops = 0
 
-    async with bus.subscribe(camera_id=camera_id, tasks=task) as sub:
+    async with bus.subscribe(camera_id=camera_id, tasks=task,
+                             allowed_camera_ids=allowed) as sub:
         main_logger.info(
             "events_stream opened: user=%s filters=%s subscribers_total=%d",
             user.username, filters, bus.subscriber_count,
