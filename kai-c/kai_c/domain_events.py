@@ -138,6 +138,7 @@ def _normalise_fast_plate_ocr(
     camera_id: str,
     correlation_id: Optional[str],
     event_id: Optional[int],
+    observed_at: Optional[str] = None,
 ) -> Normalised:
     """``fast_plate_ocr`` completion → ``plate.recognized.v1``.
 
@@ -170,6 +171,16 @@ def _normalise_fast_plate_ocr(
         "vehicle_label": None,
         "event_id": event_id,
     }
+    # Additive optional field: WHEN the look this read came off was
+    # captured, ISO-8601 UTC, exactly as the initiator sent it.
+    #
+    # The envelope's own ``ts`` cannot answer this — it is publish time,
+    # so a consumer had no way to date a read except by when the message
+    # reached it, and that drifts with OCR backlog. Echoed like
+    # ``event_id``, never interpreted: KAI-C does not know this system's
+    # clocks and must not invent a value when the initiator omits one.
+    if isinstance(observed_at, str) and observed_at:
+        payload["observed_at"] = observed_at[:40]
     # Additive optional field (EVENT_CONTRACTS.md "additive-only"): the
     # plate box the adapter localised, in the OCR'd crop's pixel space.
     # Consumers use it to reject PARTIAL reads — a crop whose edge cuts
@@ -221,6 +232,7 @@ def normalise_completion(
     camera_id: Optional[str],
     correlation_id: Optional[str] = None,
     event_id: Optional[int] = None,
+    observed_at: Optional[str] = None,
 ) -> Normalised:
     """Domain event for one successful completion, or None.
 
@@ -246,6 +258,7 @@ def normalise_completion(
             camera_id=camera_id,
             correlation_id=correlation_id,
             event_id=event_id,
+            observed_at=observed_at,
         )
     except Exception:  # noqa: BLE001 — normalisation must never hurt the caller
         logger.warning(

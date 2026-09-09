@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,24 @@ def _read_is_clipped(box, evidence_path: str | None,
     except Exception:  # noqa: BLE001
         logger.debug("plate consumer: clipping check failed", exc_info=True)
         return False
+
+
+def _observed_at_of(payload: dict):
+    """``observed_at`` off a plate event payload as an aware datetime.
+
+    The contract carries it as an ISO-8601 UTC string (additive and
+    optional — see EVENT_CONTRACTS.md). Anything unparseable is treated
+    as absent: a bad stamp must not cost us an otherwise good read, and a
+    row with no observed time falls back to started_at.
+    """
+    raw = payload.get("observed_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def apply_plate_event(envelope: object) -> str:
@@ -171,6 +190,10 @@ def apply_plate_event(envelope: object) -> str:
             note_sighting(row.camera_id, normalized)
             return "duplicate"
         row.plate_text = plate.strip()[:32]
+        # When the producer said the look was captured. Optional and
+        # additive: a producer that does not send it leaves the row
+        # undated, and readers fall back to started_at.
+        row.observed_at = _observed_at_of(payload)
         # A single forwarded read: no images, one look. The sweep (if
         # any) may attach evidence or, with several disagreeing looks,
         # replace it — see plate_enrichment's precedence rules.

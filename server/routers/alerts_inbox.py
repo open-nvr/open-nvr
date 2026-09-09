@@ -92,6 +92,10 @@ def _row_out(a: AppAlert) -> dict:
         "id": a.id,
         "alert_id": a.alert_id,
         "fired_at": a.fired_at.isoformat() if a.fired_at else None,
+        # When the thing happened, as opposed to when the app decided.
+        # The UI shows this and falls back to fired_at; fired_at stays
+        # the ORDER (see the model) so the inbox is append-only.
+        "observed_at": a.observed_at.isoformat() if a.observed_at else None,
         "severity": a.severity,
         "title": a.title,
         "description": a.description,

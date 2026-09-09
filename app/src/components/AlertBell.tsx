@@ -180,6 +180,10 @@ function useAudioBlocked(active: boolean): boolean {
   return blocked
 }
 
+// Fed the alarm's observed_at where there is one, so "3m ago" means the
+// car was there three minutes ago rather than "we finished deciding three
+// minutes ago". Under OCR backlog those differ, and a bell disagreeing
+// with the row it links to is the same bug in miniature (#451).
 function timeAgo(iso: string | null): string {
   if (!iso) return ''
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
@@ -363,7 +367,8 @@ export function AlertBell() {
                   <div className="flex-1 min-w-0">
                     <div className="truncate font-medium">{a.title}</div>
                     <div className="text-[11px] text-[var(--text-dim)] truncate">
-                      {[a.source_name, a.camera_id, timeAgo(a.fired_at)]
+                      {[a.source_name, a.camera_id,
+                        timeAgo(a.observed_at ?? a.fired_at)]
                         .filter(Boolean)
                         .join(' · ')}
                     </div>

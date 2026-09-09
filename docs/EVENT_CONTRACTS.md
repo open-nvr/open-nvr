@@ -166,7 +166,20 @@ empty/failed reads do not fire).
 | `event_id` | int \| null | Timeline visit row this read enriches, when initiated from a visit. |
 | `plate_box` | `[x1,y1,x2,y2]` \| absent | Optional. Where the adapter localised the plate, in the pixel space of the crop it was given. KAI-C does not publish a read whose box abuts the crop edge (a **partial** read), whose localiser scored below `KAI_C_PLATE_MIN_DETECTION_CONFIDENCE` (default 0.6), or whose localiser looked and found no plate (`KAI_C_PLATE_REQUIRE_LOCALISATION`, default on) — so every subscriber sees the same gate. The box is still forwarded for consumers with stricter policies. Consumers may use it to reject **partial** reads: a crop whose edge cuts through the plate still OCRs the surviving characters at high confidence, so `confidence` cannot distinguish `K884` (a fragment of `K884RS`) from a whole plate — only the geometry can. Absent when the adapter reports no localisation. |
 | `plate_box_confidence` | number \| absent | Optional. How sure the adapter's localiser was that it had found a plate at all — distinct from `confidence`, which scores the characters. Consumers reject **false localisations** with it: a manufacturer badge reads as plausible characters (the Audi four rings OCR as `C00D`) at plausible read confidence, from a box in the middle of the crop, so neither `confidence` nor `plate_box` can catch it — but the localiser scored it 0.38 where genuine plates score 0.85+. Absent from OCR-only adapters and from producers that predate the field (consumers then have no opinion to apply). |
+| `observed_at` | string \| absent | Optional. ISO-8601 UTC capture time of the **look this read came off** — when the plate was seen, as distinct from when anything processed it. Supplied by the initiator and echoed verbatim (KAI-C never mints one: it has no knowledge of the initiating system's clocks). This is the authoritative observation time for a read; see the note under the table on why the envelope's `ts` is not. Consumers that display or export a read MUST prefer it, falling back only for producers that predate it. Absent when the initiator did not know the capture time — e.g. a read taken from a stored evidence frame rather than a timestamped candidate look. |
 | `plate_box_image` | `[width,height]` \| absent | Optional. The size of the image `plate_box` is measured in — exactly the bytes the adapter OCR'd. Multi-frame OCR sends plate *candidate* crops whose size differs from the visit's evidence frame, so a consumer judging the box against the evidence file would measure in the wrong image; when this field is present it is the only correct denominator. Absent from adapters that predate it (consumers then fall back to the evidence file's size, correct for single-evidence producers). |
+
+> **`observed_at` vs the envelope's `ts`.** The envelope contract above
+> defines `ts` as the wall-clock time of the *observation*. For
+> `plate.recognized.v1` the current implementation does not meet that:
+> `kai_c/domain_events.py::_envelope` stamps `ts` at publish, so it
+> trails the observation by however long OCR and queueing took — a lag
+> that grows with backlog and is therefore worst exactly when a gate is
+> busiest. Rather than redefine `ts` for every producer mid-flight, the
+> observation time is carried explicitly in `observed_at`, which is
+> additive and unambiguous. Treat `ts` as "when this was published" for
+> this schema, and `observed_at` as "when it happened". Consumers that
+> date a read by `ts` are measuring our pipeline, not the world.
 
 #### Producer convergence (Phase 0 exit criterion)
 

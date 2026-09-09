@@ -104,6 +104,12 @@ class Track:
     # BGR crop of the best frame, retained only when the tracker is fed pixels
     # (the Tier-1 gate dispatches THIS on escalation — see gate/dispatch, PR B #10).
     best_crop: object | None = field(default=None, repr=False, compare=False)
+    # Monotonic capture stamp of the frame best_crop came from, set with it.
+    # A visit whose camera has no LPR skill ships no plate candidates, so
+    # core's sweep OCRs THIS crop — and without a time of its own that read
+    # got no observed_at at all, which is every read on a default install
+    # (#451). Same clock as the candidate ring, so both convert alike.
+    best_crop_ts: float | None = field(default=None, compare=False)
     # Multi-frame OCR: top-K plate-readability-scored crops spread across
     # the pass (vehicle labels on LPR cameras only — None everywhere else,
     # so non-LPR deployments pay zero memory or scoring cost).
@@ -364,6 +370,7 @@ class Tracker:
                 crop = _crop_bgr(bgr, det.box, margin=self.crop_margin)
                 if crop is not None:
                     tr.best_crop = crop
+                    tr.best_crop_ts = self._clock()
                     # Gated on the crop, so the two evidence images always
                     # describe the SAME frame — a scene whose crop was
                     # rejected would be an inconsistent pair.

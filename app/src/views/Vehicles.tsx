@@ -36,7 +36,12 @@ import {
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { Link } from 'react-router-dom'
-import { alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
+import {
+  alarmSeenAt,
+  alarmSeenTitle,
+  alertsInboxService,
+  type InboxAlert,
+} from '../services/alertsInboxService'
 import { extractApiError } from '../lib/apiError'
 import { AuthedImage } from '../components/AuthedImage'
 import { Modal } from '../components/Modal'
@@ -57,6 +62,10 @@ type PlateEvent = {
   plate_text?: string | null
   started_at?: string | null
   ended_at?: string | null
+  // When the PLATE was seen: the capture time of the look the read won
+  // on. Null on rows with no plate and on reads made before the platform
+  // recorded it — use plateSeenAt(), never this directly.
+  observed_at?: string | null
   has_evidence?: boolean
   evidence_url?: string | null
   // TRUE means there are two distinct images to show: the crop the plate
@@ -452,11 +461,33 @@ const RANGE_PRESETS = [
   { key: '30d', label: '30 days', hours: 24 * 30 },
 ] as const
 
+// When this row's plate was seen, as an ISO string - the ONE timestamp
+// a plate read is dated by.
+//
+// observed_at is the capture time of the look the read won on; it is the
+// only time on the row that provably belongs to the vehicle whose number
+// was read. started_at is the VISIT's start, and a visit is not always
+// one vehicle: track association merges a departing car with the one
+// arriving behind it, so on a merged track started_at is the moment a
+// different car arrived. It is the fallback only because rows written
+// before the platform recorded observed_at have nothing better (#451).
+function plateSeenIso(e: PlateEvent): string | null {
+  return e.observed_at ?? e.started_at ?? null
+}
+
+function plateSeenAt(e: PlateEvent): string | null {
+  const iso = plateSeenIso(e)
+  return iso ? new Date(iso).toLocaleString() : null
+}
+
 function toCsv(rows: PlateEvent[], cameraName: (id: number) => string): string {
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
   const head = 'plate,camera,seen_at,left_at,label'
+  // seen_at is the READ's time, not the visit's start: an export is
+  // evidence, and its timestamp has to scrub to the frame the plate is
+  // legible in.
   const body = rows.map((r) =>
-    [r.plate_text, cameraName(r.camera_id), r.started_at, r.ended_at, r.label]
+    [r.plate_text, cameraName(r.camera_id), plateSeenIso(r), r.ended_at, r.label]
       .map(esc).join(','))
   return [head, ...body].join('\n')
 }
@@ -1062,7 +1093,7 @@ export function Vehicles() {
                         })()}
                       </td>
                       <td className="px-3 py-1.5 text-[var(--text-dim)]">
-                        {e.started_at ? new Date(e.started_at).toLocaleString() : '—'}
+                        {plateSeenAt(e) ?? '—'}
                       </td>
                       <td className="px-3 py-1.5">
                         {inDeny ? <Badge variant="destructive" title={monitors.find((m) => m.plate === p)?.note}>monitored</Badge>
@@ -1383,7 +1414,7 @@ function EvidenceDialog({
   const [showVehicleAnyway, setShowVehicleAnyway] = useState(false)
   const reads = e.payload?.plate_reads
   const singleRead = !!plate && (reads === 1 || reads === undefined)
-  const seen = e.started_at ? new Date(e.started_at).toLocaleString() : null
+  const seen = plateSeenAt(e)
   // One stage, no chooser: the frame the plate was READ from. The scene
   // is the visit's best-thumbnail moment, which a merged track can take
   // off a DIFFERENT car, so offering it just gave the operator a
@@ -2419,7 +2450,7 @@ function VehicleAlarmsTab() {
               <th className="px-2 py-1.5">Severity</th>
               <th className="px-2 py-1.5">Alarm</th>
               <th className="px-2 py-1.5">Camera</th>
-              <th className="px-2 py-1.5">Fired</th>
+              <th className="px-2 py-1.5">Seen</th>
               <th className="px-2 py-1.5">Status</th>
               <th className="px-2 py-1.5" />
             </tr>
@@ -2448,8 +2479,9 @@ function VehicleAlarmsTab() {
                   )}
                 </td>
                 <td className="px-2 py-1.5 text-[var(--text-dim)]">{a.camera_id || '—'}</td>
-                <td className="px-2 py-1.5 text-[var(--text-dim)]">
-                  {a.fired_at ? new Date(a.fired_at).toLocaleString() : '—'}
+                <td className="px-2 py-1.5 text-[var(--text-dim)]"
+                    title={alarmSeenTitle(a)}>
+                  {alarmSeenAt(a)}
                 </td>
                 <td className="px-2 py-1.5">
                   {a.acknowledged_at

@@ -130,11 +130,18 @@ class PlateRecognized(TypedPayload):
     plate_box: list[float] | None = None
     plate_box_confidence: float | None = None
     plate_box_image: list[int] | None = None
+    # ISO-8601 UTC capture time of the look this read came off: WHEN the
+    # plate was seen, as opposed to when anything processed it. Prefer it
+    # over the envelope's ts, which for this schema is publish time and
+    # so trails the read by the OCR + delivery lag (EVENT_CONTRACTS.md).
+    # None from producers that predate it.
+    observed_at: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         out = super().to_payload()
-        # The optional geometry fields are "absent", not null, when unknown.
-        for name in ("plate_box", "plate_box_confidence", "plate_box_image"):
+        # The optional fields are "absent", not null, when unknown.
+        for name in ("plate_box", "plate_box_confidence", "plate_box_image",
+                     "observed_at"):
             if out.get(name) is None:
                 out.pop(name, None)
         return out

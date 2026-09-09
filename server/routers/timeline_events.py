@@ -52,6 +52,13 @@ def _serialize(e: TimelineEvent) -> dict:
         "score": e.score,
         "track_id": e.track_id,
         "started_at": e.started_at.isoformat() if e.started_at else None,
+        # When the plate on this row was SEEN — the capture time of the
+        # look the read won on. Null on rows with no plate, on reads made
+        # before this existed, and on reads taken from the visit's
+        # evidence frame (which is not a dated look); clients fall back
+        # to started_at, which is the visit's start and NOT the same
+        # moment — on a merged track it can even be a different vehicle.
+        "observed_at": e.observed_at.isoformat() if e.observed_at else None,
         "ended_at": e.ended_at.isoformat() if e.ended_at else None,
         "recording_ref": e.recording_ref,
         "plate_text": e.plate_text,

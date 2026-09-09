@@ -249,3 +249,46 @@ def test_plate_box_confidence_is_omitted_when_absent_or_malformed():
             "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
             camera_id="cam1", correlation_id=None, event_id=7)
         assert "plate_box_confidence" not in env["payload"], bad
+
+
+# ── observed_at: the read's own time, echoed (#451) ────────────────
+
+
+def test_observed_at_is_echoed_into_the_payload():
+    """The envelope's ts is PUBLISH time, so a consumer could only date a
+    read by when the message reached it — which drifts with OCR backlog.
+    observed_at is when the look was captured, passed by the initiator
+    and echoed verbatim, exactly like event_id."""
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+        observed_at="2026-09-03T09:59:52+00:00",
+    )
+    assert out is not None
+    _subject, env = out
+    assert env["payload"]["observed_at"] == "2026-09-03T09:59:52+00:00"
+    # Publish time is still its own field, and is NOT the same moment.
+    assert env["ts"] != env["payload"]["observed_at"]
+
+
+def test_observed_at_is_omitted_when_the_initiator_sent_none():
+    """Additive-only: a producer that does not know the capture time
+    publishes a payload without the key, and KAI-C must not invent one —
+    it has no idea what this system's clocks say."""
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+    )
+    assert out is not None
+    assert "observed_at" not in out[1]["payload"]
+
+
+@pytest.mark.parametrize("junk", [123, "", None, {"a": 1}, []])
+def test_junk_observed_at_is_dropped_not_published(junk):
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+        observed_at=junk,
+    )
+    assert out is not None
+    assert "observed_at" not in out[1]["payload"]

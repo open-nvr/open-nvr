@@ -66,6 +66,33 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
 
 ### Fixed
 
+- **A plate read showed two different times (#451).** The Vehicles page
+  dated a read by `events.started_at` — the *visit's* start — while the
+  Alarms inbox dated the same read by the app's `fired_at`, stamped when
+  the LPR app finished deciding. The gap was the rest of the track plus
+  OCR, the agreement vote, the bus hop and dispatch: seconds, growing
+  with backlog, so the two pages disagreed by more the busier a gate got.
+  Neither value scrubbed to the frame the plate is legible in, and on a
+  merged track `started_at` is the moment a *different* car arrived.
+
+  A plate read is now dated once, by the capture time of the look the
+  read won on, carried end to end: Tier-0 converts the candidate's
+  monotonic frame stamp to wall clock (`detect_pipeline/captime.py`) and
+  ships it with the crop; core stores it as `events.observed_at` and
+  passes it to KAI-C, which echoes it into `plate.recognized.v1` as the
+  additive `observed_at`; the LPR app forwards it in its alert evidence
+  and core's inbox keeps it as `app_alerts.observed_at`. Both pages, the
+  CSV export and the app-facing events query now read it, falling back
+  to the old fields only for rows that predate it.
+
+  `fired_at` is kept and still orders the alarm inbox — sorting by
+  observed time would stop the inbox being append-only, letting a slow
+  read insert its alarm above ones already on the guard's screen. Where
+  the two differ by a second or more, the lag is shown in the row's
+  tooltip rather than hidden. No backfill: a swept frame's capture time
+  is not recoverable, and inventing one would put a processing time in
+  the column that exists to not be one.
+
 - **camera-agent: ⚙ on an app skill muted the app instead of opening the
   App Catalog.** The ⚙ link and the ✕ button both carried `sk-x`, and ⚙
   was rendered first, so `querySelector(".sk-x")` bound the "mute"

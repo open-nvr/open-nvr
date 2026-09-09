@@ -104,6 +104,17 @@ class TrackEventIn(BaseModel):
     # base64), most promising first. Enrichment sweeps them in order —
     # several diverse OCR attempts per vehicle instead of one.
     candidate_jpegs_b64: list[str] | None = None
+    # Wall-clock capture time of each candidate above, same order. The
+    # winning read's stamp becomes the row's observed_at — the one time
+    # on a plate row that belongs to the vehicle the number came off.
+    # Ignored unless it lines up 1:1 with the crops: a short list would
+    # hand a read someone else's timestamp, which is worse than none.
+    candidate_ts: list[float] | None = None
+    # Capture time of ``evidence_jpeg_b64``. A visit from a camera without
+    # the LPR skill ships no candidates at all, so the sweep below reads
+    # the evidence crop — and until this arrived that read got no
+    # observed_at, which on a default install is EVERY read (#451).
+    evidence_ts: float | None = None
     # The whole camera frame the best crop came from (JPEG, base64). The
     # crop answers "what was it"; a 163x187 rectangle of knuckles cannot
     # answer "where was it and what else was in shot". Optional, and DROPPED
@@ -236,7 +247,7 @@ async def ingest_track_event(
         from services.plate_attempt_cache import cache as _attempt_cache
         from services.plate_enrichment import (
             dedup_window_s, is_duplicate_sighting, note_sighting,
-            stamp_plate_evidence,
+            observed_dt, stamp_plate_evidence,
         )
 
         pending = _attempt_cache.claim(
@@ -256,6 +267,11 @@ async def ingest_track_event(
                 )
             else:
                 row.plate_text = plate
+                # The attempt's own capture time — the frame this read
+                # came off, not this ingest. Tier-0 fires the attempt
+                # the moment the track confirms, which can be minutes
+                # before the visit closes and lands here.
+                row.observed_at = observed_dt(pending.attempt_ts)
                 # Marked as a SINGLE early look: the sweep below may
                 # confirm it (and say how many looks agree) or, when
                 # several later looks disagree, replace it.
@@ -278,13 +294,29 @@ async def ingest_track_event(
     # NOT skip this any more: the candidates are the looks that confirm
     # (or overturn) it — see plate_enrichment's consensus policy.
     candidates: list[bytes] = []
+    candidate_stamps: list[float | None] = []
     if payload.candidate_jpegs_b64 and (not row.plate_text or early_read) \
             and not plate_resolved_as_duplicate:
         import base64 as _b64
 
         from services.evidence_store import MAX_EVIDENCE_BYTES as _MAX
 
-        for encoded in payload.candidate_jpegs_b64[:MAX_INGEST_ATTEMPTS]:
+        # Zipped, not indexed: a crop that fails to decode must take its
+        # stamp out of the list with it, or every later read inherits the
+        # timestamp of a different look.
+        stamps = payload.candidate_ts or []
+        if len(stamps) != len(payload.candidate_jpegs_b64):
+            stamps = []                  # partial/absent -> no observed_at
+        # strict: both branches of the fallback above are exactly as long
+        # as the crop list, so this cannot raise today — it is here so a
+        # future edit that breaks that invariant fails loudly instead of
+        # silently dating reads by another look's clock.
+        paired = list(zip(
+            payload.candidate_jpegs_b64,
+            stamps or [None] * len(payload.candidate_jpegs_b64),
+            strict=True,
+        ))
+        for encoded, stamp in paired[:MAX_INGEST_ATTEMPTS]:
             if not isinstance(encoded, str) \
                     or len(encoded) > (_MAX * 4) // 3 + 8:
                 continue
@@ -292,6 +324,10 @@ async def ingest_track_event(
                 candidates.append(_b64.b64decode(encoded, validate=True))
             except (ValueError, binascii.Error):
                 continue
+            candidate_stamps.append(
+                float(stamp) if isinstance(stamp, (int, float))
+                and not isinstance(stamp, bool) else None
+            )
 
     # An early read is re-checked only against CANDIDATES (fresh looks);
     # OCR-ing the evidence frame alone would be one more single look.
@@ -307,7 +343,8 @@ async def ingest_track_event(
         from services.plate_enrichment import mark_sweep_pending
 
         mark_sweep_pending(row.id)
-        background.add_task(enrich_event_plate, row.id, candidates or None)
+        background.add_task(enrich_event_plate, row.id, candidates or None,
+                            candidate_stamps or None, payload.evidence_ts)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a
     # detached instance.
@@ -406,6 +443,10 @@ async def run_early_plate_attempt(
                 or row.ended_at >= attempt_dt - timedelta(seconds=10)
             ):
                 row.plate_text = read["plate"][:32]
+                # Same capture time the cache would have carried had the
+                # claim path won this race — the row must not read
+                # differently for having been ingested a moment earlier.
+                row.observed_at = attempt_dt
                 stamp_plate_evidence(row, plate_crop_rel,
                                      frame_path=plate_frame_rel,
                                      reads=1, source="early",
@@ -489,6 +530,12 @@ async def internal_list_events(
                 "score": e.score,
                 "started_at": e.started_at.isoformat() if e.started_at else None,
                 "ended_at": e.ended_at.isoformat() if e.ended_at else None,
+                # When the plate was seen, for apps that log or report on
+                # reads — the visit's start is a different moment. Null
+                # when unknown; fall back to started_at.
+                "observed_at": (
+                    e.observed_at.isoformat() if e.observed_at else None
+                ),
                 "stationary": (e.payload or {}).get("stationary"),
                 "plate_text": e.plate_text,
                 "has_evidence": bool(e.evidence_path),

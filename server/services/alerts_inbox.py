@@ -124,6 +124,15 @@ def apply_alert(envelope: object, db=None) -> str:
         severity = "high"
 
     fired_at = _parse_fired_at(envelope.get("fired_at"))
+    # When the thing this alert is ABOUT was seen. Producers that know it
+    # put it in the alert's evidence (the LPR app forwards the plate
+    # event's observed_at); everyone else leaves the row undated and the
+    # UI falls back to fired_at. Evidence is free-form by contract, so a
+    # non-dict or a junk string is simply "not sent".
+    evidence = envelope.get("evidence")
+    observed_at = _parse_fired_at(
+        evidence.get("observed_at") if isinstance(evidence, dict) else None
+    )
     source = envelope.get("source")
     source_kind = source_name = None
     if isinstance(source, dict):
@@ -159,6 +168,7 @@ def apply_alert(envelope: object, db=None) -> str:
             correlation_id=_clip(envelope.get("correlation_id"), 64),
             evidence=_json_or_none(envelope.get("evidence")),
             tags=_json_or_none(envelope.get("tags")),
+            observed_at=observed_at,
         )
         # Snapshot BEFORE commit: commit expires the instance, and every
         # attribute read after it is a fresh SELECT the write path has no
@@ -208,6 +218,12 @@ def _json_or_none(value: object) -> str | None:
 
 
 def _parse_fired_at(value: object):
+    """An ISO-8601 wire timestamp as a datetime, or None.
+
+    Used for both ``fired_at`` (when the app decided) and the evidence's
+    ``observed_at`` (when the thing happened). Anything unparseable is
+    None — a producer's bad timestamp must never cost us the alert.
+    """
     from datetime import datetime
 
     if not isinstance(value, str):

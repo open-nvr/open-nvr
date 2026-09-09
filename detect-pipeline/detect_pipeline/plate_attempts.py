@@ -35,6 +35,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 
+from .captime import capture_wall
 from .platecands import VEHICLE_LABELS, EarlyAttemptPolicy
 
 log = logging.getLogger("detect_pipeline.plates")
@@ -49,7 +50,12 @@ class Attempt:
     camera_id: str            # platform handle ("cam1") — for logs/metrics
     nvr_camera_id: int | None  # core's numeric Camera.id — what core keys on
     track_id: str
-    ts: float                 # wall clock of submission (visit-window match)
+    # Wall clock of the CAPTURE this crop was cut from, not of submission.
+    # Core parks it as the read's observed_at (the operator-visible "when
+    # was this car here") and matches it against the visit window, and
+    # both want the moment in the video, not the moment we got round to
+    # posting it. Submission time drifted with the attempt queue.
+    ts: float
     jpeg: bytes
 
 
@@ -150,12 +156,18 @@ class EarlyPlateAttempts:
         nvr_camera_id: int | None = None,
         max_attempts: int = 2,
         clock=None,
+        capture_clock=None,
     ) -> None:
         self.poster = poster
         self.camera_id = camera_id
         self.nvr_camera_id = nvr_camera_id
         self.max_attempts = max_attempts
         self._clock = clock or time.monotonic
+        # Candidate stamps are monotonic (the tracker's clock); this turns
+        # one into the wall clock the rest of the platform speaks.
+        # Injectable so a test driving a fake monotonic clock does not get
+        # a wall time derived from it.
+        self._capture_clock = capture_clock or capture_wall
         self._policies: dict = {}
         self.attempts_submitted = 0
 
@@ -191,7 +203,7 @@ class EarlyPlateAttempts:
                 camera_id=self.camera_id,
                 nvr_camera_id=self.nvr_camera_id,
                 track_id=str(tr.id),
-                ts=time.time(),
+                ts=self._capture_clock(best.ts),
                 jpeg=jpeg,
             ))
             # Budget is consumed even when the queue was full — an
