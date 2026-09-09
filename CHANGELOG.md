@@ -6,6 +6,43 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+Five findings from a coordinated disclosure by Kamal Sentassi (S9S
+Security Research), each verified against the code before fixing.
+Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
+
+- **Cross-camera event disclosure over the live-event WebSocket.**
+  `/events/ws` authenticated the connection but not the subscription:
+  `camera_id` came off the query string unchecked, and omitting it made
+  the bus match every event — so any active account could stream every
+  camera's detections, alarms and system alerts. Entitlement is now
+  resolved with `visible_camera_ids()` and enforced per event inside the
+  bus, where a client-supplied filter cannot widen it.
+
+- **Camera-create probed arbitrary hosts (blind SSRF).** `POST /cameras`
+  dialled the caller's address with none of the `_host_is_internal`
+  guarding the ONVIF router has always had. Every host the handler
+  reaches is now checked before any branch runs — `ip_address` for
+  `resolve_source`, `fetch_identity` and `sync_camera_time`, and the host
+  inside `rtsp_url`, which `TransportProbeService` connects to even when
+  no credentials are supplied. *Adding a camera by a public IP or DDNS
+  hostname now returns 403.*
+
+- **Cloud metadata counted as "internal".** `_ip_is_internal` admitted
+  169.254.0.0/16 via `is_link_local`, so 169.254.169.254 was reachable
+  on SSRF-gated paths. The metadata addresses are denied before the
+  allow rules; ordinary link-local stays internal.
+
+- **MediaMTX health answered anonymously**, publishing the internal
+  admin API URL and raw exception text. It now needs a signed-in user;
+  the address and error detail are superuser-only.
+
+- **Integration webhooks had no target restriction.** Cloud metadata is
+  refused outright and a new, empty-by-default `webhook_allowed_hosts`
+  allowlist is available; delivery errors no longer distinguish refused
+  from timed-out, which made a webhook test an internal port scanner.
+
 ### Changed
 
 - **camera-agent: installed apps no longer speak unless asked.**

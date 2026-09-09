@@ -26,6 +26,53 @@ from models import Integration
 logger = logging.getLogger(__name__)
 
 
+def _webhook_target_refusal(url: str) -> str | None:
+    """An operator-facing reason to refuse this webhook target, or None.
+
+    A webhook is SUPPOSED to leave the building — Slack, Teams, a
+    customer endpoint — so this is not the camera/ONVIF guard inverted
+    onto it. Two things are refused:
+
+    * cloud instance metadata (169.254.169.254 and friends), which no
+      real webhook targets and which hands out cloud credentials to
+      anyone who can aim a POST at it; and
+    * anything outside ``settings.webhook_allowed_hosts`` when the
+      operator has set that allowlist.
+
+    Superuser-only today, so this is hardening rather than a privilege
+    boundary — but "superuser" is not "may read the cloud account's
+    credentials", and metadata is exactly that escalation.
+    """
+    from urllib.parse import urlparse
+
+    from core.config import _METADATA_ADDRESSES, settings
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "Webhook URL could not be parsed"
+    if parsed.scheme not in ("http", "https"):
+        return "Webhook URL must be http or https"
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return "Webhook URL has no host"
+
+    try:
+        import ipaddress
+
+        if ipaddress.ip_address(host) in _METADATA_ADDRESSES:
+            return "Refusing to POST to the cloud metadata endpoint"
+    except ValueError:
+        pass   # a hostname, not an IP literal
+
+    allow = [h.strip().lower() for h in
+             (settings.webhook_allowed_hosts or "").split(",") if h.strip()]
+    if allow and host not in allow:
+        return (f"Host {host!r} is not in webhook_allowed_hosts; "
+                "add it there to allow this destination")
+    return None
+
+
 class IntegrationService:
     @staticmethod
     async def test_integration(integration: Integration) -> dict:
@@ -122,6 +169,10 @@ class IntegrationService:
         if not url:
             return {"success": False, "message": "Missing Webhook URL"}
 
+        refusal = _webhook_target_refusal(url)
+        if refusal:
+            return {"success": False, "message": refusal}
+
         async with httpx.AsyncClient() as client:
             try:
                 # Some webhooks need headers
@@ -143,9 +194,15 @@ class IntegrationService:
                     "message": f"Webhook endpoint returned error: {e.response.status_code}",
                 }
             except httpx.RequestError as e:
+                # Coarse on purpose. The exact error distinguishes
+                # "connection refused" from "timed out", which turns a
+                # webhook test into an internal port scanner that reports
+                # its findings. The detail goes to the log instead.
+                logger.warning("webhook delivery failed for integration %s: %s",
+                               getattr(integration, "id", "?"), e)
                 return {
                     "success": False,
-                    "message": f"Webhook connection failed: {e!s}",
+                    "message": "Webhook connection failed — see the server log.",
                 }
 
     @staticmethod
