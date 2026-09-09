@@ -42,16 +42,53 @@ def html() -> str:
 
 
 def test_skill_render_handlers_present(script: str) -> None:
-    # The three functions that load the panel and render the enabled list +
-    # the add-list. Dropping any of them breaks the panel.
-    for fn in ("function loadSkills", "function renderSkills", "function renderBrowse"):
+    # Load the panel, render the one list, build a chip. The separate
+    # "browse to add" renderer is gone on purpose: every skill (on and
+    # off) is listed inline now, so there is nothing left to browse to.
+    for fn in ("function loadSkills", "function renderSkills", "function skillChip"):
         assert fn in script, f"demo skills handler missing: {fn!r}"
 
 
 def test_skill_panel_element_ids_present(html: str) -> None:
-    # The card, the '+' add button, the enabled list, and the browse/add list.
-    for eid in ("skillsCard", "skillAdd", "skillsList", "skillBrowseList"):
+    # The card, the '+' button, the single list, and the search box that
+    # filters it (search used to exist only inside the browse panel).
+    for eid in ("skillsCard", "skillAdd", "skillsList", "skillSearch"):
         assert f'id="{eid}"' in html, f"demo skills element id missing: {eid!r}"
+
+
+def test_every_skill_is_listed_not_just_the_enabled_ones(script: str) -> None:
+    """The panel's whole point after the redesign: an operator can see
+    what the agent COULD do, not only what it already does. Both groups
+    must be rendered from the one payload."""
+    assert "_skills.filter(s=>s.enabled)" in script.replace(" ", ""), \
+        "the 'on' group is no longer derived from the payload"
+    assert "!s.enabled" in script, "the 'available' group is no longer rendered"
+
+
+def test_chip_toggles_in_both_directions(script: str) -> None:
+    """Tapping a chip must be able to turn a skill ON as well as off —
+    the old panel could only remove, with adding hidden behind '+'."""
+    assert 'toggleSkill(s.id, s.enabled?"disable":"enable")' in script.replace(" ", "").replace(
+        "toggleSkill(s.id,", "toggleSkill(s.id, "), \
+        "chip click no longer toggles both ways"
+
+
+def test_gated_skill_is_not_tappable(script: str) -> None:
+    """A skill whose backend is missing must NOT present as a toggle: a
+    tap cannot fix it, and a control that silently fails is worse than a
+    label that explains."""
+    assert "const gated" in script, "gated state no longer computed"
+    assert "!s.read_only && !gated" in script.replace("  ", " "), \
+        "tappability no longer excludes gated skills"
+
+
+def test_per_app_speech_control_wired(script: str, html: str) -> None:
+    """Speech is per app and off by default — the reason this redesign
+    happened. The chip must offer the toggle and post it to the agent."""
+    assert "sk-speak" in html or "sk-speak" in script, "no per-app speech control"
+    assert "function setAppSpeech" in script, "speech toggle not wired to a handler"
+    assert "/speech" in script, "speech toggle does not call the agent endpoint"
+    assert "s.speaks" in script, "chip does not read the per-app speech state"
 
 
 def test_greyed_skill_onramp_fields_consumed(script: str) -> None:
@@ -96,7 +133,10 @@ def test_core_skill_disable_asks_first(script: str) -> None:
         assert re.search(rf'CORE_SKILLS\s*=\s*{{[^}}]*\b{sid}\b', script), (
             f"core-skill map lost entry {sid!r}"
         )
-    assert re.search(r"CORE_SKILLS\[s\.id\][^\n]*confirm", script), (
+    # Whitespace-insensitive across lines: the guard now sits inside the
+    # chip's toggle handler and wraps, but the contract is unchanged —
+    # turning off a core skill asks first.
+    assert re.search(r"CORE_SKILLS\[s\.id\].{0,200}?confirm", script, re.S), (
         "disable path no longer confirms before removing a core skill"
     )
 
@@ -451,11 +491,17 @@ def test_leaving_the_camera_screen_cancels_a_pending_grace_timer():
     assert "_clearWhepGrace();" in fn
 
 
-def test_app_backed_skill_is_muted_in_the_agent_not_disabled_in_the_catalog(tmp_path):
-    """An installed catalog app appears as a skill. ✕ mutes it IN THE
-    AGENT (no relay, not listed, not queried), persisted like any other
-    toggle and reversible from +; the app itself keeps running — the
-    catalog stays the place to enable/disable/uninstall it (manage_url)."""
+def test_app_backed_skill_is_turned_off_in_the_agent_not_disabled_in_the_catalog(tmp_path):
+    """An installed catalog app appears as a skill. Turning it off here
+    stops the agent relaying, listing and querying it, persisted like any
+    other toggle and reversible with another tap; the app itself keeps
+    running — the catalog stays the place to enable/disable/uninstall it
+    (manage_url).
+
+    The hint deliberately no longer says "muted": with per-app speech,
+    muting means "do not SPEAK this app's alerts", and reusing the word
+    for "do not use this app at all" made the two controls sound like the
+    same thing. Assert the distinction, not the vocabulary."""
     from fastapi.testclient import TestClient
 
     from camera_agent import AppConfig, CameraAgentRuntime, build_app
@@ -479,7 +525,11 @@ def test_app_backed_skill_is_muted_in_the_agent_not_disabled_in_the_catalog(tmp_
     r = tc.post("/skills/app:license-plate-recognition/disable")
     assert r.status_code == 200, r.text
     entry = next(s for s in r.json()["skills"] if s["id"] == "app:license-plate-recognition")
-    assert entry["enabled"] is False and "muted" in entry["hint"]
+    assert entry["enabled"] is False
+    # Off in the AGENT, still running everywhere else — that is the whole
+    # distinction this test exists to protect.
+    assert "app itself keeps running" in entry["hint"]
+    assert entry["manage_url"].endswith("/app-catalog/license-plate-recognition")
     assert rt.app_muted("license-plate-recognition")
     # persisted: a fresh runtime restores the mute even before the registry answers
     rt2 = CameraAgentRuntime(cfg)

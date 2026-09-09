@@ -653,28 +653,86 @@ def _sev(app_id, title, severity, summary=None):
                        title=title, severity=severity, summary=summary or title)
 
 
-def test_relayed_alerts_carry_the_announce_policy():
-    """Default "important": every relayed app alert lands in the feed, but
-    only high/critical ones are marked for the voice UI to speak — a plate
-    reader's every read is shown with a chime, not narrated."""
+def test_relayed_alerts_are_silent_by_default():
+    """Default "none": every relayed app alert lands in the feed with a
+    chime, and NOTHING is spoken. The old default was "important", which
+    meant an app whose alerts are mostly high/critical — a plate reader,
+    an occupancy counter — narrated itself over whatever the operator was
+    saying. Speaking is opt-in now, per app."""
     rt = _runtime(nats_url="nats://x")
-    assert rt.announce_app_alerts() == "important"
+    assert rt.announce_app_alerts() == "none"
     rt._relay_app_alert(_sev("lpr", "Monitored plate 66HH07 seen", "medium"))
     rt.monitors._cooldown = 0
-    rt._relay_app_alert(_sev("lpr", "Unknown vehicle K884RS", "info"))
     rt._relay_app_alert(_sev("intrusion", "Intrusion at the gate", "high"))
+    rt._relay_app_alert(_sev("fire", "Fire", "critical"))
     notes = rt.monitors.notifications()
-    assert [n["announce"] for n in notes] == [False, False, True]
-    assert [n["severity"] for n in notes] == ["medium", "info", "high"]
+    assert [n["announce"] for n in notes] == [False, False, False]
+    # …but the feed still carries every one of them.
+    assert [n["severity"] for n in notes] == ["medium", "high", "critical"]
 
     rt.set_announce_app_alerts("all")
     rt._relay_app_alert(_sev("lpr", "Monitored plate H644LX seen", "medium"))
     assert rt.monitors.notifications()[-1]["announce"] is True
-    rt.set_announce_app_alerts("none")
-    rt._relay_app_alert(_sev("fire", "Fire", "critical"))
-    assert rt.monitors.notifications()[-1]["announce"] is False
+    rt.set_announce_app_alerts("important")
+    rt._relay_app_alert(_sev("intrusion", "At the gate", "high"))
+    assert rt.monitors.notifications()[-1]["announce"] is True
     with pytest.raises(ValueError):
         rt.set_announce_app_alerts("loud")
+
+
+def test_per_app_speech_beats_the_site_policy():
+    """The point of per-app: silence the plate reader while the doorbell
+    still speaks. A per-app decision wins in BOTH directions, or the
+    control is a lie."""
+    rt = _runtime(nats_url="nats://x")
+    rt.monitors._cooldown = 0
+    rt.set_announce_app_alerts("all")          # site says speak everything
+    rt.set_app_announce("lpr", False)          # …except this one
+    rt._relay_app_alert(_sev("lpr", "Plate seen", "critical"))
+    assert rt.monitors.notifications()[-1]["announce"] is False
+    rt._relay_app_alert(_sev("doorbell", "Someone at the door", "info"))
+    assert rt.monitors.notifications()[-1]["announce"] is True
+
+    rt.set_announce_app_alerts("none")         # site says speak nothing
+    rt.set_app_announce("doorbell", True)      # …except this one
+    rt._relay_app_alert(_sev("doorbell", "Someone at the door", "info"))
+    assert rt.monitors.notifications()[-1]["announce"] is True
+    rt._relay_app_alert(_sev("intrusion", "At the gate", "critical"))
+    assert rt.monitors.notifications()[-1]["announce"] is False
+
+
+def test_clearing_a_per_app_override_returns_it_to_the_site_policy():
+    rt = _runtime(nats_url="nats://x")
+    rt.monitors._cooldown = 0
+    rt.set_announce_app_alerts("all")
+    rt.set_app_announce("lpr", False)
+    rt._relay_app_alert(_sev("lpr", "Plate", "high"))
+    assert rt.monitors.notifications()[-1]["announce"] is False
+    rt.set_app_announce("lpr", None)           # clear, not "set to false"
+    assert "lpr" not in rt.app_announce_overrides()
+    rt._relay_app_alert(_sev("lpr", "Plate", "high"))
+    assert rt.monitors.notifications()[-1]["announce"] is True
+    with pytest.raises(ValueError):
+        rt.set_app_announce("", True)
+
+
+def test_per_app_speech_persists(tmp_path):
+    """A silenced app must stay silent across a restart — otherwise the
+    interruption comes back the next time the container cycles."""
+    cfg = AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+        state_path=str(tmp_path / "state.json"), announce_app_alerts="all",
+        cameras=[CameraSpec(camera_id="front-door", frame_url="http://x/1.jpg", role="front")],
+    )
+    rt = CameraAgentRuntime(cfg)
+    rt.set_app_announce("lpr", False)
+    rt.set_app_announce("doorbell", True)
+
+    rt2 = CameraAgentRuntime(cfg)
+    rt2.load_state()
+    assert rt2.app_announce_overrides() == {"lpr": False, "doorbell": True}
+    assert rt2.should_announce_app_alert("critical", "lpr") is False
+    assert rt2.should_announce_app_alert("info", "doorbell") is True
 
 
 def test_announce_policy_persists_and_config_is_the_fallback(tmp_path):
@@ -708,15 +766,40 @@ def test_alarm_defaults_endpoint_carries_the_announce_policy():
 
     rt = _runtime()
     tc = TestClient(build_app(rt))
-    assert tc.get("/alarm-defaults").json()["announce_app_alerts"] == "important"
-    r = tc.put("/alarm-defaults", json={"announce_app_alerts": "none"})
-    assert r.status_code == 200 and r.json()["announce_app_alerts"] == "none"
+    assert tc.get("/alarm-defaults").json()["announce_app_alerts"] == "none"
+    r = tc.put("/alarm-defaults", json={"announce_app_alerts": "important"})
+    assert r.status_code == 200 and r.json()["announce_app_alerts"] == "important"
     assert tc.put("/alarm-defaults", json={"announce_app_alerts": "loud"}).status_code == 400
     # the ring overrides survive a save that only changed the policy
     tc.put("/alarm-defaults", json={"overrides": {"snake": "siren"}})
     tc.put("/alarm-defaults", json={"announce_app_alerts": "all"})
     d = tc.get("/alarm-defaults").json()
     assert d["overrides"] == {"snake": "siren"} and d["announce_app_alerts"] == "all"
+
+
+def test_app_speech_endpoint_sets_clears_and_validates():
+    from fastapi.testclient import TestClient
+
+    from camera_agent import build_app
+
+    rt = _runtime()
+    tc = TestClient(build_app(rt))
+
+    r = tc.post("/skills/app/lpr/speech", json={"speak": True})
+    assert r.status_code == 200
+    assert r.json()["app_announce"] == {"lpr": True}
+    assert rt.should_announce_app_alert("info", "lpr") is True
+
+    r = tc.post("/skills/app/lpr/speech", json={"speak": False})
+    assert r.json()["app_announce"] == {"lpr": False}
+    assert rt.should_announce_app_alert("critical", "lpr") is False
+
+    # null clears the override rather than pinning it to false, so the app
+    # follows the site policy again.
+    r = tc.post("/skills/app/lpr/speech", json={"speak": None})
+    assert r.status_code == 200 and r.json()["app_announce"] == {}
+
+    assert tc.post("/skills/app/lpr/speech", json={"speak": "yes"}).status_code == 400
 
 
 # ── muting an app in the agent ─────────────────────────────────────────

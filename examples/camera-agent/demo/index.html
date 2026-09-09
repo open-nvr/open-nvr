@@ -330,28 +330,40 @@
     .skill .sk-tool{font-size:0.6rem; color:var(--faint); background:rgba(0,0,0,0.25);
       border:1px solid var(--stroke); border-radius:999px; padding:0 0.4rem;}
     .skill .sk-tool.off{opacity:0.45; text-decoration:line-through;}
+    /* The whole chip is the on/off control, so it must LOOK pressable and
+       announce its state: green when the agent carries the skill, grey
+       when it does not. A skill whose backend is missing is neither —
+       it is not the toggle's fault, so it reads as unavailable and says
+       why instead of pretending a tap would work. */
+    .skill.sk-on{background:rgba(46,160,67,0.13); border-color:rgba(46,160,67,0.5);}
+    .skill.sk-off{opacity:0.6;}
+    .skill.sk-tappable{cursor:pointer;}
+    .skill.sk-tappable:hover{border-color:var(--accent);}
+    .skill.sk-tappable:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+    .skill.sk-gated{cursor:not-allowed;}
+    .skill .sk-dot{width:7px; height:7px; border-radius:50%; flex:0 0 auto;
+      background:var(--faint);}
+    .skill.sk-on .sk-dot{background:#2ea043;}
+    /* Scroll the list, not the page: with every skill listed (on and off)
+       this grows well past the card. */
+    #skillsList{max-height:22rem; overflow-y:auto; padding-right:0.15rem;}
+    .sk-group{font-size:0.62rem; text-transform:uppercase; letter-spacing:0.06em;
+      color:var(--faint); margin:0.55rem 0 0.15rem;}
+    .sk-group:first-child{margin-top:0.15rem;}
     .skill .sk-x{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem; flex:0 0 auto; padding:0 0.1rem;}
+    /* Speech, per app. Muted is the resting state and must read as such
+       at a glance — a lit speaker means this app WILL talk over you. */
+    .skill .sk-speak{opacity:0.45;}
+    .skill .sk-speak.on{opacity:1; color:var(--accent);}
     .skill .sk-manage{text-decoration:none; color:var(--faint);}
     .skill a.sk-manage:hover{color:var(--text);}
     .skill .sk-x:hover{color:var(--danger);}
-    #skillBrowse{margin-top:0.5rem; border-top:1px solid var(--stroke); padding-top:0.5rem;}
     #skillSearch,.addform input,.addform select{width:100%; background:rgba(0,0,0,0.28); color:var(--text);
       border:1px solid var(--stroke); border-radius:9px; padding:0.45rem 0.55rem; font-size:0.8rem; margin-bottom:0.4rem;}
     #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none; border-color:var(--accent);}
-    .brow{display:flex; align-items:center; gap:0.5rem; padding:0.42rem 0.5rem; border-radius:10px; margin:0.25rem 0;
       font-size:0.8rem; background:var(--glass2); border:1px solid var(--stroke);}
-    .brow .b-ic{width:18px; text-align:center; flex:0 0 auto;}
-    .brow .b-nm{flex:1; min-width:0;} .brow .b-nm small{display:block; color:var(--faint); font-size:0.66rem;}
-    .brow .b-add{background:var(--accent); color:#04121f; border:none; border-radius:7px; font-weight:700;
       font-size:0.72rem; padding:0.28rem 0.55rem; pointer-events:none;}
-    .brow .b-need{font-size:0.66rem; color:var(--faint); text-align:right; max-width:52%;}
-    .brow .b-enable{flex:0 0 auto; font-size:0.66rem; font-weight:700; color:var(--accent); text-decoration:none;
       border:1px solid var(--accent); border-radius:7px; padding:0.2rem 0.4rem; white-space:nowrap;}
-    .brow .b-enable:hover{background:var(--accent); color:#04121f;}
-    .brow.addable{cursor:pointer;}
-    .brow.addable:hover{outline:1px solid var(--accent);}
-    .brow.addable:hover .b-add{background:var(--accent-strong);}
-    .brow.off{opacity:0.55;}
     .addform{margin:0.3rem 0 0.5rem;}
     .addform-lbl{display:flex; align-items:center; gap:0.4rem; font-size:0.72rem; color:var(--muted); margin-bottom:0.4rem;}
     .addform-lbl input{width:auto; flex:1; margin:0;}
@@ -794,14 +806,10 @@
           <div id="histList"></div>
         </div>
         <div class="card" id="skillsCard">
-          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
-          <div class="skillhint">Capabilities the agent carries. × to remove.</div>
+          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Get more skills from the App Catalog" aria-label="Get more skills">+</button></span></div>
+          <div class="skillhint">Tap a skill to turn it on or off. On ones sit at the top. 🔊 speaks that app&#39;s alerts aloud — off unless you turn it on.</div>
+          <input id="skillSearch" type="search" placeholder="Search skills…" autocomplete="off" aria-label="Search skills">
           <div id="skillsList"></div>
-          <div id="skillBrowse" hidden>
-            <input id="skillSearch" type="text" placeholder="Search skills to add…" autocomplete="off">
-            <div id="skillBrowseList"></div>
-            <button class="ghost" id="skillBrowseClose" type="button">Done</button>
-          </div>
         </div>
         <!-- One AUTOMATIONS surface for every standing behavior the agent
              runs — alarms, watches, background tasks, scheduled reports.
@@ -2723,49 +2731,116 @@
     // capability away, so the ✕ asks first. Value = what the agent loses.
     const CORE_SKILLS={alarm:"set or silence alarms",watch:"keep watches and live counts",
       report:"run scheduled reports",task:"work on longer jobs in the background"};
+    // ONE list, not two. Every skill the agent could carry is here: the
+    // ones it has are green and on top, the rest grey below, and a tap
+    // moves a skill between them. The old design hid everything that was
+    // off behind a separate "browse to add" panel, so the answer to "what
+    // else can this thing do?" was invisible until you went looking.
+    function skillMatches(s, q){
+      if(!q) return true;
+      return (s.name||"").toLowerCase().includes(q)
+          || (s.id||"").toLowerCase().includes(q)
+          || (s.uses||"").toLowerCase().includes(q)
+          || (s.summary||"").toLowerCase().includes(q);
+    }
     function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
+      const q=(($("skillSearch")||{}).value||"").trim().toLowerCase();
       const on=_skills.filter(s=>s.enabled);
       gateRailCards(on.map(s=>s.id));
       // "Restore defaults" appears only when something is actually restorable:
       // a skill that's off but whose backend is available (backend-gated
       // skills aren't the toggle's fault and restoring can't enable them).
       const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
-      if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
-      for(const s of on){ const d=document.createElement("div"); d.className="skill";
-        // An installed catalog app: ✕ MUTES it in the agent only (no relay,
-        // not listed, not queried — the app keeps running for the rest of
-        // OpenNVR; add it back from +). ⚙ opens the app in the App Catalog,
-        // where the app itself is enabled, disabled or uninstalled.
-        const manage = (s.source==="app" && s.manage_url)
-          ? `<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Open in the App Catalog (enable/disable/uninstall the app itself)">⚙</a>` : "";
-        const ctl = s.read_only ? manage
-          : manage+`<button class="sk-x sk-remove" title="${s.source==="app"?"Mute in the agent (the app keeps running)":"Remove skill"}">✕</button>`;
-        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span>${ctl}`;
-        d.querySelector(".sk-nm").textContent=s.name;
-        d.querySelector(".sk-uses").textContent="uses "+s.uses;
-        // Tool-level honesty: list every tool this skill bundles; grey out
-        // (and strike through) any the model can't actually call, so an
-        // "on" card can't imply hidden tools work. App-door entries carry
-        // no tools array — nothing is rendered for them.
-        if(Array.isArray(s.tools)&&s.tools.length){
-          const tl=document.createElement("span"); tl.className="sk-tools";
-          for(const t of s.tools){ const c=document.createElement("span");
-            c.className="sk-tool"+(t.advertised?"":" off");
-            c.textContent=t.name;
-            if(!t.advertised) c.title="Hidden from the model — not in enabled_tools (or its backend isn't wired). The agent can't call this tool.";
-            tl.appendChild(c); }
-          d.querySelector(".sk-body").appendChild(tl);
-        }
-        // Query .sk-remove, NOT .sk-x: the ⚙ manage link carries sk-x too
-        // (for the shared icon styling) and is rendered FIRST, so
-        // querySelector(".sk-x") returned the LINK and bound "disable" to
-        // it — clicking ⚙ muted the app instead of opening the catalog,
-        // and ✕ did nothing at all.
-        if(!s.read_only) d.querySelector(".sk-remove").addEventListener("click",()=>{
-          if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
-          toggleSkill(s.id,"disable"); });
-        el.appendChild(d); }
-      renderBrowse(); renderSuggestions(); }
+      const shownOn=on.filter(s=>skillMatches(s,q));
+      const shownOff=_skills.filter(s=>!s.enabled&&skillMatches(s,q));
+      if(!shownOn.length&&!shownOff.length){
+        el.innerHTML='<div class="empty-note">'+(q?"No skill matches that.":"No skills yet — tap + to get some.")+'</div>';
+        renderSuggestions(); return; }
+      const group=t=>{const g=document.createElement("div"); g.className="sk-group"; g.textContent=t; el.appendChild(g);};
+      if(shownOn.length) group("On — the agent can do these");
+      for(const s of shownOn) el.appendChild(skillChip(s));
+      if(shownOff.length) group("Available — tap to turn on");
+      for(const s of shownOff) el.appendChild(skillChip(s));
+      renderSuggestions(); }
+
+    function skillChip(s){
+      const d=document.createElement("div");
+      // Gated = a tap cannot turn this on, for one of two reasons: the
+      // backend isn't configured, or no adapter advertises a task that
+      // could back it. Both keep their GUIDANCE from the old browse
+      // panel — name the adapter, offer the deep link — because "off,
+      // and here is why, and here is where to fix it" is the whole
+      // value of listing an unavailable skill at all.
+      let reason="", suggested=[], apps=[];
+      if(!s.enabled && !s.available) reason = s.hint || "needs setup";
+      else if(!s.enabled && s.tasks_available===false){
+        reason = "needs an adapter advertising " +
+          ((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
+        suggested = s.suggested_adapters || [];
+        if(suggested.length) reason += " — suggested: " + suggested.map(adapterLabel).join(", ");
+        apps = s.suggested_apps || [];
+      }
+      const gated = Boolean(reason);
+      const tappable = !s.read_only && !gated;
+      d.className="skill "+(s.enabled?"sk-on":"sk-off")+(gated?" sk-gated":(tappable?" sk-tappable":""));
+      if(tappable){ d.tabIndex=0; d.setAttribute("role","switch");
+        d.setAttribute("aria-checked",s.enabled?"true":"false"); }
+      d.title = gated ? reason : (s.enabled?"Tap to turn off":"Tap to turn on");
+      const manage = (s.source==="app" && s.manage_url)
+        ? `<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Open in the App Catalog (enable, disable or uninstall the app itself)">⚙</a>` : "";
+      // Speech is per app and OFF unless asked for: an app alert that
+      // speaks itself interrupts whatever the operator was saying.
+      const speak = (s.source==="app" && s.enabled)
+        ? `<button class="sk-x sk-speak${s.speaks?" on":""}" title="${s.speaks?"Speaking this app's alerts aloud — tap to silence":"Silent — tap to speak this app's alerts aloud"}" aria-label="Speak alerts from this app" aria-pressed="${s.speaks?"true":"false"}">${s.speaks?"🔊":"🔇"}</button>` : "";
+      d.innerHTML=`<span class="sk-dot"></span><span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span>${speak}${manage}`;
+      d.querySelector(".sk-nm").textContent=s.name;
+      d.querySelector(".sk-uses").textContent = gated ? reason : "uses "+s.uses;
+      // Navigation only — the agent never enables an adapter or installs
+      // an app; both stay operator actions behind OpenNVR's own gates.
+      const enableUrl = (gated && s.tasks_available===false) ? (s.enable_url||"") : "";
+      const appUrl = (gated && s.tasks_available===false) ? (s.app_enable_url||"") : "";
+      const app0 = apps.length ? apps[0] : "";
+      if(enableUrl || (appUrl && app0)){
+        const fix=document.createElement("span"); fix.className="sk-tools";
+        if(enableUrl){ const a=document.createElement("a");
+          a.className="sk-tool"; a.href=enableUrl; a.target="_blank"; a.rel="noopener";
+          a.textContent="Enable an adapter →";
+          a.title="Open OpenNVR's AI Adapters view";
+          a.addEventListener("click",e=>e.stopPropagation()); fix.appendChild(a); }
+        if(appUrl && app0){ const a=document.createElement("a");
+          a.className="sk-tool"; a.href=appUrl; a.target="_blank"; a.rel="noopener";
+          a.textContent="or install "+appLabel(app0);
+          a.title="Install a packaged app from OpenNVR's App Catalog";
+          a.addEventListener("click",e=>e.stopPropagation()); fix.appendChild(a); }
+        d.querySelector(".sk-body").appendChild(fix);
+      }
+      // Tool-level honesty: list every tool this skill bundles; grey out
+      // (and strike through) any the model can't actually call, so an
+      // "on" card can't imply hidden tools work. App-door entries carry
+      // no tools array — nothing is rendered for them.
+      if(Array.isArray(s.tools)&&s.tools.length){
+        const tl=document.createElement("span"); tl.className="sk-tools";
+        for(const t of s.tools){ const c=document.createElement("span");
+          c.className="sk-tool"+(t.advertised?"":" off");
+          c.textContent=t.name;
+          if(!t.advertised) c.title="Hidden from the model — not in enabled_tools (or its backend isn't wired). The agent can't call this tool.";
+          tl.appendChild(c); }
+        d.querySelector(".sk-body").appendChild(tl);
+      }
+      // Inner controls must not toggle the chip they sit on.
+      const stop=e=>e.stopPropagation();
+      const mg=d.querySelector(".sk-manage"); if(mg) mg.addEventListener("click",stop);
+      const sp=d.querySelector(".sk-speak");
+      if(sp) sp.addEventListener("click",e=>{ stop(e); setAppSpeech(s.app_id,!s.speaks); });
+      if(tappable){
+        const toggle=()=>{
+          if(s.enabled && CORE_SKILLS[s.id] &&
+             !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you turn it back on.')) return;
+          toggleSkill(s.id, s.enabled?"disable":"enable"); };
+        d.addEventListener("click",toggle);
+        d.addEventListener("keydown",e=>{ if(e.key===" "||e.key==="Enter"){ e.preventDefault(); toggle(); } });
+      }
+      return d; }
     // ── "try asking…" chips: each enabled skill's example question, made
     // tappable. The examples already live in the skills payload — this just
     // surfaces them where a new user is actually looking (above the input).
@@ -2791,56 +2866,15 @@
       "loitering-detection":"Loitering Detection","occupancy-counting":"Occupancy Counting",
       "license-plate-recognition":"License Plate Recognition","smart-doorbell":"Smart Doorbell"};
     const appLabel=a=>APP_LABELS[a]||a.replace(/-/g," ").replace(/\b\w/g,c=>c.toUpperCase());
-    function renderBrowse(){ const el=$("skillBrowseList"); if(!el) return;
-      const q=(($("skillSearch")||{}).value||"").toLowerCase();
-      const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
-      el.innerHTML = add.length?"":'<div class="empty-note">No matching skills.</div>';
-      for(const s of add){
-        // Grey the row with a reason when the skill can't be enabled yet:
-        // either its backend requirement is unmet (server hint), or no adapter
-        // currently advertises a task that could back it (live KAI-C view).
-        // For the latter, GUIDE the operator: name the suggested adapter(s)
-        // and, when the server knows the OpenNVR UI URL, offer an "Enable →"
-        // link into the AI Adapters view. It's a navigation link only — the
-        // agent never enables/approves an adapter (operator action, gated).
-        let reason="",suggested=[],apps=[];
-        if(!s.available) reason=s.hint||"needs setup";
-        else if(s.tasks_available===false){
-          reason="needs an adapter advertising "+((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
-          suggested=(s.suggested_adapters||[]);
-          if(suggested.length) reason+=" — suggested: "+suggested.map(adapterLabel).join(", ");
-          apps=(s.suggested_apps||[]);
-        }
-        const enableUrl=(reason&&s.tasks_available===false)?(s.enable_url||""):"";
-        // App-install on-ramp, symmetric to the adapter "Enable →": when
-        // this skill is greyed and we know a packaged catalog app that
-        // delivers it, offer "or install the <App> app" deep-linking the
-        // App Catalog. Navigation only — install stays an operator action.
-        const appUrl=(reason&&s.tasks_available===false)?(s.app_enable_url||""):"";
-        const app0=apps.length?apps[0]:"";
-        const d=document.createElement("div"); d.className="brow"+(reason?" off":" addable");
-        d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
-          (reason?'<span class="b-need"></span>':'<span class="b-add">Add</span>')+
-          (enableUrl?'<a class="b-enable" target="_blank" rel="noopener">Enable →</a>':'')+
-          ((appUrl&&app0)?'<a class="b-enable b-app" target="_blank" rel="noopener"></a>':'');
-        d.querySelector(".b-nm span").textContent=s.name;
-        d.querySelector(".b-nm small").textContent="uses "+s.uses;
-        if(reason){ d.querySelector(".b-need").textContent=reason; d.title=reason;
-          if(enableUrl){ const a=d.querySelector(".b-enable"); a.href=enableUrl;
-            a.title="Enable an adapter in OpenNVR's AI Adapters view";
-            a.addEventListener("click",e=>e.stopPropagation()); }
-          if(appUrl&&app0){ const a=d.querySelector(".b-app"); a.href=appUrl;
-            a.textContent="or install the "+appLabel(app0)+" app";
-            a.title="Install a packaged app from OpenNVR's App Catalog";
-            a.addEventListener("click",e=>e.stopPropagation()); } }
-        else { d.title="Enable "+s.name; d.addEventListener("click",()=>toggleSkill(s.id,"enable")); }
-        el.appendChild(d); } }
     async function toggleSkill(id,action){
       try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
         _skills=d.skills||_skills; renderSkills(); loadHardware();
-        if(id.startsWith("app:")) addMsg(action==="enable"?"App added back — the agent relays and queries it again.":"App muted in the agent — its alerts won't be relayed here and it won't be queried. The app itself keeps running; add it back from + any time.","sys");
+        // "muted" now means "not spoken" (the 🔊 toggle), so this says
+        // "off in the agent" instead — the two controls must not sound
+        // like the same thing.
+        if(id.startsWith("app:")) addMsg(action==="enable"?"App turned back on in the agent — it relays and answers questions again.":"App turned off in the agent — its alerts won't appear here and it won't be queried. The app itself keeps running; tap it again to turn it back on.","sys");
         else addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
     // One-click undo for an over-pruned agent: clears every runtime toggle
@@ -2852,11 +2886,30 @@
         _skills=d.skills||_skills; renderSkills(); loadHardware();
         addMsg(d.restored?("Restored "+d.restored+" default skill"+(d.restored===1?"":"s")+" — the agent reconfigured its tools."):"Skills already at defaults.","sys");
       }catch(err){ addMsg("Couldn't restore default skills: "+err.message,"sys"); } }
-    // + / browse / search / restore wiring
-    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch"), restore=$("skillRestore");
-      if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
-      if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
-      if(search) search.addEventListener("input", renderBrowse);
+    // Speak (or silence) one app's relayed alerts. Per app on purpose:
+    // the site-wide policy could only choose between "every app talks"
+    // and "none do", which is why a plate read could interrupt a
+    // conversation that had nothing to do with the gate.
+    async function setAppSpeech(appId, speak){
+      if(!appId) return;
+      try{ const r=await fetch("/skills/app/"+encodeURIComponent(appId)+"/speech",
+             {method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({speak:!!speak})});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't change speech for that app: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills();
+        addMsg(speak?"That app's alerts will now be read aloud.":"That app's alerts stay silent — they still appear in the feed.","sys");
+      }catch(err){ addMsg("Couldn't change speech for that app: "+err.message,"sys"); } }
+
+    // + now means "get MORE skills", not "reveal the ones you already
+    // have": everything installed is listed inline, so the only thing
+    // left to add comes from the App Catalog.
+    (function(){ const add=$("skillAdd"), search=$("skillSearch"), restore=$("skillRestore");
+      if(add) add.addEventListener("click",()=>{
+        const base=(window._opennvrUi||"").replace(/\/$/,"");
+        if(base){ window.open(base+"/app-catalog","_blank","noopener"); }
+        else{ addMsg("More skills come from installed apps — open the App Catalog in OpenNVR and enable an app; its skill appears here automatically.","sys"); } });
+      if(search) search.addEventListener("input", renderSkills);
       if(restore) restore.addEventListener("click", restoreSkills); })();
 
     // ── Site alert-level defaults editor (admin): edits the OVERRIDE
