@@ -1990,6 +1990,37 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
   )
 }
 
+/** The catalog is a curated index anyone can add to, and nothing on the
+ *  page said so. Deliberately ONE line at the page and detail level
+ *  rather than on every card: repeated twelve times down a grid it stops
+ *  being an invitation and becomes chrome competing with Install. */
+function ContributeNote({ appName }: { appName?: string }) {
+  return (
+    <p className="text-xs text-[var(--text-dim)] leading-relaxed">
+      Your feedback shapes this catalog
+      {appName ? <> — including what {appName} should do next</> : null}. Tell us
+      what is missing or broken at{' '}
+      <a
+        className="text-[var(--accent)] hover:underline"
+        href="mailto:contact@opennvr.org?subject=OpenNVR%20App%20Catalog%20feedback"
+      >
+        contact@opennvr.org
+      </a>
+      , or send the improvement yourself — apps are one entry in a curated
+      index and the PR is five steps:{' '}
+      <a
+        className="text-[var(--accent)] hover:underline"
+        href="https://github.com/open-nvr/open-nvr/blob/main/docs/CONTRIBUTING_APPS.md"
+        target="_blank"
+        rel="noreferrer"
+      >
+        How to contribute an app
+      </a>
+      .
+    </p>
+  )
+}
+
 /* --------------------- Uninstalled app detail --------------------- */
 
 /** The detail page for an app that is NOT installed — /app-catalog/<id>
@@ -2164,6 +2195,10 @@ export function UninstalledAppPage({ appId }: { appId: string }) {
             </CardContent>
           </Card>
         )}
+      </div>
+
+      <div className="pt-2 border-t border-[var(--border)]">
+        <ContributeNote appName={app.name} />
       </div>
 
       {installOpen && (
@@ -2544,6 +2579,10 @@ export function AppCatalog() {
           )}
         </div>
       )}
+
+      <div className="pt-2 border-t border-[var(--border)]">
+        <ContributeNote />
+      </div>
 
       {configApp && <AppConfigModal key={configApp.id} app={configApp} onClose={() => setConfigApp(null)} />}
       {installApp && (

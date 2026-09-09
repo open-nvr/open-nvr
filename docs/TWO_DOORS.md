@@ -51,7 +51,7 @@ The two doors differ only in **who configures it and for how long**:
 | Code you write | The `Detector` class + manifest | **Nothing extra** — same class, instantiated at runtime |
 
 Write your rule once and it is simultaneously an installable app card
-in Settings → App Catalog *and* a voice/chat skill the agent can
+in the App Catalog *and* a voice/chat skill the agent can
 invoke. You never touch the agent's codebase.
 
 ## 2. How capability matching works
