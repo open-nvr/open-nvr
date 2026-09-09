@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Occupancy: the Configure button did nothing.** Moving the
+  action from a link to the catalog into an in-place modal wired up
+  the state and the import but never rendered `AppConfigModal`, so
+  the click flipped a flag nothing read and the bundler tree-shook
+  the unused import away. The modal is rendered now, and closing it
+  invalidates `apps` and `app-status` so a new zone, entry line or
+  watch label shows on the board without a reload. Same fix revives
+  "Add car / truck to watch labels" in the vehicle-skill hint,
+  which was dead for the same reason.
+
 - **AI Adapters metrics: an idle adapter looked broken.** The panel
   printed "60 samples" next to all-dash percentiles — the samples were
   the once-a-minute `/metrics` scrapes, not inferences, and the dashes

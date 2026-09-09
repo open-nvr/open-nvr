@@ -635,6 +635,21 @@ export function Occupancy() {
         </div>
       )}
 
+      {configOpen && occApp && (
+        <AppConfigModal
+          key={occApp.id}
+          app={occApp}
+          onClose={() => {
+            setConfigOpen(false)
+            // A new zone, entry line or watch label changes both the
+            // app's config and what the status board reports — refetch
+            // each so the page reflects the edit without a reload.
+            queryClient.invalidateQueries({ queryKey: ['apps'] })
+            queryClient.invalidateQueries({ queryKey: ['app-status', occApp.id] })
+          }}
+        />
+      )}
+
       {reportOpen && (
         <OccupancyReportOverlay
           cameraName={(id) => cameraName(`cam${id}`)}
