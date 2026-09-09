@@ -10,6 +10,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Five findings from a coordinated disclosure by Kamal Sentassi (S9S
 Security Research), each verified against the code before fixing.
+Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
 
 - **Cross-camera event disclosure over the live-event WebSocket.**
   `/events/ws` authenticated the connection but not the subscription:
