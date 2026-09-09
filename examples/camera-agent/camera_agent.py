@@ -311,12 +311,20 @@ class AppConfig:
     # arms its after-hours person alarm as  person: siren . An explicit
     # ring on the alarm always wins; this only decides the DEFAULT.
     alarm_ring_defaults: dict[str, str] | None = None
-    # Which relayed APP alerts the voice UI speaks aloud (they always land
-    # in the feed with a chime): "all", "important" (high/critical only —
-    # the default, so a plate reader's every read is shown, not narrated),
-    # or "none". Operator-editable in the UI (Automations → ⚙); the UI
-    # choice persists in the state file and wins over this.
-    announce_app_alerts: str = "important"
+    # SITE FALLBACK for which relayed APP alerts the voice UI speaks aloud
+    # (they always land in the feed with a chime): "all", "important"
+    # (high/critical only) or "none".
+    #
+    # "none" is the default, and the default changed: "important" used to
+    # be, but app alerts are mostly high/critical — so ANPR narrated every
+    # plate and occupancy called every count, mid-conversation. Speaking is
+    # opt-in now.
+    #
+    # This is only the fallback. A per-app decision from the Skills panel
+    # (persisted as `app_announce`) beats it in both directions.
+    # Operator-editable in the UI (Automations → ⚙); the UI choice persists
+    # in the state file and wins over this.
+    announce_app_alerts: str = "none"
 
     # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
     # only to put a tap-to-open deep link (/demo/camera/{id}) into outgoing
@@ -2995,7 +3003,7 @@ def load_config(path: str | Path) -> AppConfig:
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         agent_public_url=raw.get("agent_public_url"),
         agent_contract_url=raw.get("agent_contract_url"),
-        announce_app_alerts=_str("announce_app_alerts", "important"),
+        announce_app_alerts=_str("announce_app_alerts", "none"),
         alarm_ring_defaults=(
             {str(k).strip().lower(): str(v).strip().lower()
              for k, v in raw["alarm_ring_defaults"].items()}
@@ -3304,6 +3312,11 @@ class CameraAgentRuntime:
         # via persist()/load_state like the skill toggles.
         self._ring_overrides: dict[str, str] = {}
         self._announce_app_alerts: str | None = None   # UI override of cfg
+        # Per-app speech, set from the Skills panel: app_id -> bool. An
+        # entry here BEATS the global policy for that app, so an operator
+        # can let the doorbell speak while ANPR stays quiet. Absent = fall
+        # back to the global policy (which itself defaults to "none").
+        self._app_announce: dict[str, bool] = {}
         # Interruption decisions on the streaming pipeline (turns.py): what
         # was said over the agent, how long, and whether it yielded — the
         # evidence to tune the gate from. GET /interruptions.
@@ -3566,7 +3579,35 @@ class CameraAgentRuntime:
         self.persist()
         return level
 
-    def should_announce_app_alert(self, severity: str | None) -> bool:
+    def app_announce_overrides(self) -> dict[str, bool]:
+        """Per-app speech decisions the operator has actually made."""
+        return dict(self._app_announce)
+
+    def set_app_announce(self, app_id: str, speak: bool | None) -> dict[str, bool]:
+        """Turn speech on/off for one app; ``None`` clears the override so
+        the app follows the global policy again."""
+        key = str(app_id or "").strip().lower()
+        if not key:
+            raise ValueError("app_id is required")
+        if speak is None:
+            self._app_announce.pop(key, None)
+        else:
+            self._app_announce[key] = bool(speak)
+        self.persist()
+        return self.app_announce_overrides()
+
+    def should_announce_app_alert(
+        self, severity: str | None, app_id: str | None = None
+    ) -> bool:
+        """Speak this relayed app alert?
+
+        A per-app decision wins outright — that is the point of it: the
+        operator silenced THIS app, or asked for it specifically, and a
+        global rule must not overrule either. Only when no such decision
+        exists does the site policy apply."""
+        key = str(app_id or "").strip().lower()
+        if key and key in self._app_announce:
+            return self._app_announce[key]
         policy = self.announce_app_alerts()
         if policy == "all":
             return True
@@ -3824,6 +3865,8 @@ class CameraAgentRuntime:
                 if isinstance(e, dict) and e.get("name")
             ]
             muted = self.app_muted(app_id)
+            _app_speech_override = self._app_announce.get(
+                str(app_id or "").strip().lower())
             entries.append({
                 "id": f"app:{app_id}",
                 "source": "app",           # clearly marks the app door origin
@@ -3842,10 +3885,22 @@ class CameraAgentRuntime:
                 "enabled": not muted,
                 "available": True,
                 "read_only": False,
-                "hint": ("muted in the agent — add it back from + any time; the "
-                         "app itself keeps running" if muted else
-                         "installed app — ✕ mutes it in the agent only; enable, "
-                         "disable or uninstall the app itself in the App Catalog"),
+                "hint": ("off in the agent — tap to add it back; the app "
+                         "itself keeps running" if muted else
+                         "installed app — tapping turns it off in the agent "
+                         "only; enable, disable or uninstall the app itself "
+                         "in the App Catalog"),
+                # Can this app speak AT ALL? Not "would this particular
+                # severity be spoken" — the chip has no alert in hand, and
+                # asking should_announce_app_alert() with no severity would
+                # answer False under the "important" policy, showing a
+                # muted speaker for an app whose critical alerts do speak.
+                # `speaks_override` is null when the operator has made no
+                # per-app decision and the app follows the site policy.
+                "speaks": (
+                    bool(_app_speech_override) if _app_speech_override is not None
+                    else self.announce_app_alerts() != "none"),
+                "speaks_override": _app_speech_override,
                 # Where the operator manages it (the app's catalog page).
                 "manage_url": (
                     f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog/{app_id}"
@@ -4154,6 +4209,7 @@ class CameraAgentRuntime:
             "disabled_skills": sorted(self.disabled_skills),
             "ring_overrides": dict(self._ring_overrides),
             "announce_app_alerts": self._announce_app_alerts,
+            "app_announce": dict(self._app_announce),
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -4193,6 +4249,11 @@ class CameraAgentRuntime:
         aa = data.get("announce_app_alerts")
         if isinstance(aa, str) and aa.lower() in self.ANNOUNCE_LEVELS:
             self._announce_app_alerts = aa.lower()
+        ap = data.get("app_announce")
+        if isinstance(ap, dict):
+            self._app_announce = {
+                str(k).strip().lower(): bool(v) for k, v in ap.items()
+                if str(k).strip()}
         restored_disabled: list[str] = []
         for sid in (data.get("disabled_skills") or []):
             if self.set_skill_enabled(sid, False):
@@ -4459,8 +4520,10 @@ class CameraAgentRuntime:
             "severity": str(alert.severity or "info"),
             "camera": alert.camera_id,
             # The feed always shows it (with a chime); whether the voice
-            # UI also SPEAKS it follows the site's announce policy.
-            "announce": self.should_announce_app_alert(alert.severity),
+            # UI also SPEAKS it is this app's own setting when the operator
+            # made one, else the site policy.
+            "announce": self.should_announce_app_alert(
+                alert.severity, alert.app_id),
             "ts": now,
         })
         self.monitors._next_note_id += 1
@@ -6180,6 +6243,31 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                         "%d tools advertised)", restored,
                         len(runtime.tool_definitions))
         return JSONResponse({"restored": restored,
+                             "skills": runtime.skills_payload()})
+
+    @app.post("/skills/app/{app_id}/speech")
+    async def _skill_app_speech(app_id: str, request: Request) -> JSONResponse:
+        """Speak this app's relayed alerts, or don't.
+
+        Per-app because the site-wide policy is the wrong grain for the
+        problem it was causing: an operator wants the doorbell to speak
+        and ANPR to stay quiet, not one switch for both. Body
+        {"speak": true|false} sets it; {"speak": null} clears the
+        override so the app follows the site policy again."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        speak = (body or {}).get("speak", None)
+        if speak is not None and not isinstance(speak, bool):
+            return JSONResponse({"error": "speak must be true, false or null"},
+                                status_code=400)
+        try:
+            runtime.set_app_announce(app_id, speak)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        logger.info("app speech set: app:%s -> %s", app_id, speak)
+        return JSONResponse({"app_announce": runtime.app_announce_overrides(),
                              "skills": runtime.skills_payload()})
 
     @app.post("/skills/{skill_id}/{action}")
