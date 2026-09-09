@@ -204,6 +204,16 @@ class Settings(BaseSettings):
     # services/webrtc_ice_host_service.py for why the env var alone is not
     # enough (it is baked in at container-create time and silently lost).
     mediamtx_webrtc_hosts: str = ""
+    #: Optional comma-separated allowlist of hosts an integration webhook
+    #: may POST to (e.g. "hooks.slack.com,ntfy.local"). Empty = no
+    #: restriction beyond the cloud-metadata deny that always applies.
+    #:
+    #: Deliberately opt-in: a webhook's whole job is to reach an outside
+    #: endpoint, so unlike the camera/ONVIF probes there is no safe
+    #: default set — locking it down by default would break every working
+    #: Slack and Teams integration on upgrade. Operators who want the
+    #: tighter posture set this.
+    webhook_allowed_hosts: str = ""
 
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
