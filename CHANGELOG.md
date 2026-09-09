@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **App Catalog cards: clipped status pill, and results that were not
+  the catalog's to show.** The action row was a non-wrapping flex with
+  the enabled/disabled badge pinned to it by `ml-auto`, so a card
+  carrying several manifest actions pushed the badge past the card edge
+  and collided it with Uninstall. Status is state, not an action: it now
+  sits beside the health chip in the (wrapping) header, and the button
+  row wraps. The card also no longer renders `LiveStateViews` — an app's
+  output belongs to the app, and `/app-catalog/<id>` already renders the
+  same `state_schema` as a polling dashboard, with first-class verticals
+  on top of that. Because the card shared the `['app-status', id]` query
+  key with those pages, visiting Vehicles or Occupancy filled the cache
+  and the catalog sprouted plate tables nobody asked for.
+
 - **Alarms stayed silent while the tab was in the background.** A
   high or critical alarm rings `continuous` by default, but the bell's
   inbox poll used React Query's `refetchInterval` without

@@ -1496,7 +1496,11 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
 
   return (
     <Card>
-      <CardHeader>
+      {/* flex-wrap locally rather than on the shared CardHeader: a long
+          app name plus category, version, pricing and the two status
+          pills overflows a narrow grid column, and clipping status is
+          how "disabled" ends up half-hidden behind Uninstall. */}
+      <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
         <Link to={`/app-catalog/${app.id}`} className="hover:underline">
           <CardTitle>{app.name}</CardTitle>
@@ -1504,7 +1508,14 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <PricingBadge pricing={app.manifest?.pricing} note={app.manifest?.price_note} />
-        <div className="ml-auto">
+        {/* enabled/disabled is STATE, not an action — it belongs beside the
+            health chip, not pinned with ml-auto to the end of the button
+            row, where a card with several manifest actions pushed it off
+            the edge and clipped it against Uninstall. */}
+        <div className="ml-auto flex items-center gap-2">
+          <Badge variant={app.enabled ? 'success' : 'neutral'}>
+            {app.enabled ? 'enabled' : 'disabled'}
+          </Badge>
           <AppStatusChip appId={app.id} />
         </div>
       </CardHeader>
@@ -1538,11 +1549,17 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
           <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
-        {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
-          <LiveStateViews appId={app.id} views={app.manifest.state_schema as StateViewSpec[]} />
-        )}
+        {/* Live results deliberately do NOT render here. The catalog is
+            the management surface — install, enable, configure, remove —
+            and an app's output belongs to the app: /app-catalog/<id>
+            (AppView) already renders the same state_schema as a polling
+            dashboard, and a first-class vertical has its own page on top
+            of that. Worse, this card shares the ['app-status', id] query
+            key with those pages, so merely visiting Vehicles or Occupancy
+            filled the cache and the card sprouted plate tables nobody
+            asked for. Card title → AppView is the route to results. */}
 
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           {isAdmin && (
           <Button
             variant={app.enabled ? 'default' : 'primary'}
@@ -1583,9 +1600,6 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
           <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
             <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
           </Button>
-          <Badge variant={app.enabled ? 'success' : 'neutral'} className="ml-auto">
-            {app.enabled ? 'enabled' : 'disabled'}
-          </Badge>
         </div>
 
         {uninstallNote && <div className="text-sm text-amber-400">{uninstallNote}</div>}
