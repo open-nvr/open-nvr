@@ -37,7 +37,7 @@ Routes (mounted under ``/api/v1``):
 import ipaddress
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -81,6 +81,10 @@ STATUS_PROBE_TIMEOUT_S = 3.0
 # Actions can do real work (a footage query over SQLite); more generous
 # than a health probe, still bounded so a hung app can't pin a worker.
 ACTION_PROXY_TIMEOUT_S = 10.0
+# How often the app's own config poll is allowed to write `last_seen`.
+# The SDK polls every ~10s; the freshness windows that read this column
+# are minutes wide, so a write per poll would be pure DB churn.
+APP_SEEN_WRITE_EVERY = timedelta(seconds=30)
 
 
 # ── App Store index (the "discover" half of the catalog) ───────────
@@ -1003,6 +1007,26 @@ async def get_app_config(
     """
     _own_app_only(principal, app_id)
     row = _get_app_or_404(db, app_id)
+
+    # HEARTBEAT. The SDK polls this endpoint every ~10s from the running
+    # app, which is the best liveness signal the platform has — and core
+    # was throwing it away, leaving `last_seen` frozen at boot and the
+    # skill badge reporting "no recent contact" (or a sticky "unreachable"
+    # from one failed probe) for an app that had been talking to us all
+    # along. Only an AppPrincipal for THIS app counts: the site's internal
+    # key is held by companion services too, and their polling says
+    # nothing about whether the app is alive.
+    if isinstance(principal, AppPrincipal) and principal.app_id == app_id:
+        now = datetime.now(UTC)
+        prev = row.last_seen
+        if prev is not None and prev.tzinfo is None:
+            prev = prev.replace(tzinfo=UTC)
+        # Throttled: at a 10s poll this would otherwise commit on every
+        # request, per app, forever.
+        if prev is None or (now - prev) > APP_SEEN_WRITE_EVERY:
+            row.last_seen = now
+            db.commit()
+
     config = row.config_json or {}
     if isinstance(principal, User) and not principal.is_superuser:
         # A user sees the site-wide settings (read-only for them) but
@@ -1372,7 +1396,12 @@ async def get_app_status(
         try:
             health_resp = await client.get(f"{base_url}/health")
             health_resp.raise_for_status()
-            health = health_resp.json()
+            payload = health_resp.json()
+            # /health is contractually an object. An app that answers 200
+            # with a list or a bare scalar must not crash the probe (the
+            # dict access below would raise and 500 the whole endpoint) —
+            # keep the body for the operator under a key and carry on.
+            health = payload if isinstance(payload, dict) else {"body": payload}
             reachable = True
         except Exception:
             health = {"status": "unreachable"}
@@ -1389,6 +1418,15 @@ async def get_app_status(
     # a 200 rather than flagging a healthy app unreachable.
     ready = reachable and bool(health.get("ready", True))
     row.status = "ok" if ready else "unreachable"
+    # PUBLISH that verdict. The SDK's health_snapshot() speaks `ready`
+    # and never sets `status`, so a consumer reading health["status"] saw
+    # nothing for every SDK-built app and rendered it "unknown" — only
+    # hand-written apps (the camera-agent) that happen to emit a `status`
+    # string ever looked healthy, and the failure paths below are the
+    # only reason "unreachable" showed at all. Normalising here keeps ONE
+    # derivation of health: an app that sets its own `status` still wins.
+    if reachable and not isinstance(health.get("status"), str):
+        health["status"] = "ok" if ready else "degraded"
     if reachable:
         row.last_seen = datetime.now(UTC)
     db.commit()

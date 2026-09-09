@@ -8,6 +8,95 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **App Catalog is its own item in the sidebar.** It sat under "AI &
+  Detections", which miscategorised it — plenty of apps are not AI (the
+  notifier, the barrier, the agent) — and buried the place apps come
+  from inside a collapsed section. It now renders as a flat link
+  directly below Applications, or immediately under Cameras when no app
+  vertical is enabled, so it is one click precisely when nothing is
+  installed yet. Nav groups gained a `flat` mode for a destination that
+  is one page rather than a section; sticky header offsets count headers
+  instead of groups so a flat entry leaves no gap in the stack.
+
+- **The app card's "Network" panel never said what it was.** It showed a
+  bare list of hostnames and an input, with the guarantee behind it —
+  apps run on an isolated network and reach the outside only through
+  OpenNVR's egress proxy, which refuses and reports anything not
+  declared or allowed — left entirely implicit. The panel now explains
+  that in two lines, and the pre-install provenance line says "no
+  outside connections" with a tooltip covering the same ground instead
+  of the jargon "no network egress" / "outside the stack".
+
+- **The plate app and the page it lights up had unrelated names.** The App
+  Catalog said "License Plate Recognition" and the sidebar said
+  "Vehicles", with nothing to connect them. Both now carry ANPR — the
+  name most of the world uses (UK, EU, India, AU; the US says LPR/ALPR) —
+  as "ANPR — License Plate Recognition" in the catalog and the app's own
+  dashboard, and "Vehicles (ANPR)" in the nav and page header. "Vehicles"
+  stays the head noun because the page is wider than the OCR: plate reads,
+  the vehicle register, monitoring and alarms. The app id, the
+  `license_plate_recognition` AI task and its skill label are unchanged —
+  those are keys and the technical capability, not product names.
+
+- **A running app was reported "skill: degraded — app unreachable at last
+  contact".** `installed_apps.status` and `last_seen` were only ever
+  written by boot registration and the on-demand "Check" probe, and
+  nothing re-runs that probe — so one failure (an app still starting, a
+  blip) pinned the skill badge to degraded for as long as the app ran,
+  and an app nobody probed decayed to "no recent contact" after ten
+  minutes. Meanwhile the SDK polls `GET /apps/{id}/config` every ~10s from
+  inside the running app and core discarded that. That poll is now a
+  heartbeat (throttled to one write per 30s, and only for the app's own
+  key — the site's internal key is held by companion services too), and
+  the skill view trusts contact newer than 60s over an older failed
+  probe. A genuinely dead app still degrades: the live window is far
+  tighter than the ten-minute staleness cutoff.
+
+- **App Catalog: "Check" could never report a healthy app.** The chip read
+  `health.status`, but the SDK's `health_snapshot()` speaks `ready` (spec
+  §03) and never sets a `status` string — so every SDK-built app came back
+  "unknown", and "unreachable" only ever appeared because core writes that
+  string itself on a failed probe. The one app that looked healthy was the
+  hand-written camera-agent, which happens to emit `status`. `GET
+  /apps/{id}/status` now publishes the verdict it was already computing
+  (`ok`, or `degraded` when reachable but not ready), leaving an app's own
+  `status` untouched when it sets one; the chip falls back to `ready` for
+  older cores. A non-object `/health` body no longer 500s the probe, and
+  the button reads "Check health" with a tooltip saying what it does and
+  why it is on demand.
+
+- **A freshly installed app needed a manual Refresh to appear under
+  Installed.** The poll that watches the reconciler and invalidates
+  `['apps']` lived inside the install dialog, so dismissing the dialog —
+  the natural thing to do while the reconciler works — killed the only
+  thing that would have refreshed the groups. Accepted intents are now
+  tracked by the page and keep polling after the dialog closes. The
+  invalidation also moved out of `refetchInterval` (an observer computing
+  its next delay, with no promise about terminal states) into an effect
+  keyed on the status transition.
+
+- **Enabling an app did not say where it had gone.** It redirected to the
+  app's own page, which answered "what does it do" but not "where do I
+  find this again". Enable now leaves you on the catalog and states the
+  surface: an external app shows the URL it runs at, as a link; an app
+  providing a vertical says it is listed under Applications and links to
+  the page; anything else points at its own dashboard. The nav and the
+  catalog read one shared `APP_VERTICALS` table, so the promise and the
+  menu entry cannot disagree.
+
+- **App Catalog cards: clipped status pill, and results that were not
+  the catalog's to show.** The action row was a non-wrapping flex with
+  the enabled/disabled badge pinned to it by `ml-auto`, so a card
+  carrying several manifest actions pushed the badge past the card edge
+  and collided it with Uninstall. Status is state, not an action: it now
+  sits beside the health chip in the (wrapping) header, and the button
+  row wraps. The card also no longer renders `LiveStateViews` — an app's
+  output belongs to the app, and `/app-catalog/<id>` already renders the
+  same `state_schema` as a polling dashboard, with first-class verticals
+  on top of that. Because the card shared the `['app-status', id]` query
+  key with those pages, visiting Vehicles or Occupancy filled the cache
+  and the catalog sprouted plate tables nobody asked for.
+
 - **Alarms stayed silent while the tab was in the background.** A
   high or critical alarm rings `continuous` by default, but the bell's
   inbox poll used React Query's `refetchInterval` without

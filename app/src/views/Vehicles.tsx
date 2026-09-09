@@ -713,7 +713,7 @@ export function Vehicles() {
   return (
     <section className="space-y-4">
       <PageHeader
-        title="Vehicles"
+        title="Vehicles (ANPR)"
         description="License plate reads across your cameras — searched from the evidence store, whichever part of the platform ran the OCR. Watchlists apply live."
         actions={
           <div className="flex items-center gap-2">
@@ -1613,7 +1613,7 @@ function RegistryTab({
       <EmptyState
         icon={<Car size={28} />}
         title="The register needs an enabled LPR app"
-        description="Install and enable a License Plate Recognition app from the App Catalog — the vehicle register and the unknown-vehicle alarm live in that app and apply live."
+        description="Install and enable an ANPR — License Plate Recognition app from the App Catalog — the vehicle register and the unknown-vehicle alarm live in that app and apply live."
       />
     )
   }
@@ -1922,7 +1922,7 @@ function MonitoringTab({
       <EmptyState
         icon={<ShieldAlert size={28} />}
         title="Monitoring needs an enabled LPR app"
-        description="Install and enable a License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
+        description="Install and enable an ANPR — License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
       />
     )
   }

@@ -23,7 +23,7 @@
 // manifest param schema — no app-specific UI code.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
@@ -36,6 +36,7 @@ import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
+import { verticalFor } from '../lib/appVerticals'
 
 export type ManifestParam = {
   name: string
@@ -186,8 +187,16 @@ function ProvenanceLine({ app }: { app: IndexApp }) {
         </a>
       )}
       {!external && (
-        <span title={egress.length ? 'Hosts this app connects to outside the stack' : 'This app never connects outside the stack'}>
-          {egress.length === 0 ? 'no network egress' : `connects to: ${egress.join(', ')}`}
+        <span
+          title={
+            egress.length
+              ? 'Apps run on an isolated network. These are the only hosts this one declared, reviewed with the listing; anything else it tries is blocked and reported after install.'
+              : 'Apps run on an isolated network with no route to your LAN or the internet, and this one declared no hosts at all — anything it tries is blocked and reported.'
+          }
+        >
+          {egress.length === 0
+            ? 'no outside connections'
+            : `connects to: ${egress.join(', ')}`}
         </span>
       )}
     </div>
@@ -235,7 +244,9 @@ export type AppEgress = {
 }
 
 export type AppStatusResp = {
-  health?: { status?: string; [k: string]: any } | null
+  // `ready` is the SDK contract (spec §03); `status` is the string core
+  // normalises on top of it. Read status first, fall back to ready.
+  health?: { status?: string; ready?: boolean; [k: string]: any } | null
   state?: any
 }
 
@@ -388,11 +399,6 @@ function useInstallStatusPoll(id: string, active: boolean) {
     retry: 0,
     refetchInterval: (query) => {
       const status = query.state.data?.status
-      if (status === 'applied') {
-        queryClient.invalidateQueries({ queryKey: ['apps'] })
-        queryClient.invalidateQueries({ queryKey: ['apps-index'] })
-        return false
-      }
       if (status !== 'pending') return false
       const started = startedAtRef.current
       if (started !== null && Date.now() - started > INSTALL_POLL_MAX_MS) {
@@ -402,7 +408,35 @@ function useInstallStatusPoll(id: string, active: boolean) {
       return 2000
     },
   })
+  // Refresh the groups from an EFFECT, not from inside refetchInterval.
+  // That callback is the observer computing its next delay — a spot React
+  // Query may call more than once per settle and never promises to call
+  // on a terminal status, so invalidating there made "the app appears
+  // under Installed" depend on scheduler timing. Keyed on the status
+  // transition instead, it fires exactly once when the reconciler lands.
+  const settledStatus = query.data?.status
+  useEffect(() => {
+    if (settledStatus !== 'applied') return
+    queryClient.invalidateQueries({ queryKey: ['apps'] })
+    queryClient.invalidateQueries({ queryKey: ['apps-index'] })
+  }, [settledStatus, queryClient])
   return { ...query, timedOut }
+}
+
+/** Headless: keeps an accepted install intent polling at PAGE level, so
+ *  the group refresh survives the operator closing the install dialog.
+ *  Mounted per pending id by AppCatalog; shares the modal's query key,
+ *  so this costs no extra requests while the dialog is still open. */
+function InstallWatcher({ id, onSettled }: { id: string; onSettled: () => void }) {
+  const { data, timedOut } = useInstallStatusPoll(id, true)
+  const status = data?.status
+  useEffect(() => {
+    if (timedOut || (status && status !== 'pending')) onSettled()
+    // onSettled is recreated per render by the parent; depending on it
+    // here would retrigger the effect endlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, timedOut])
+  return null
 }
 
 function InstallStatusNote({ status }: { status: InstallStatusResp }) {
@@ -932,8 +966,13 @@ function AppStatusChip({ appId }: { appId: string }) {
 
   if (!requested) {
     return (
-      <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => setRequested(true)}>
-        <Activity size={12} /> Check
+      <Button
+        variant="ghost"
+        className="text-xs px-2 py-1"
+        onClick={() => setRequested(true)}
+        title="Ask the app for its health — core fetches the app's /health and /state on demand. Not automatic: probing every card on load would fan out one request per installed app."
+      >
+        <Activity size={12} /> Check health
       </Button>
     )
   }
@@ -941,7 +980,19 @@ function AppStatusChip({ appId }: { appId: string }) {
   if (statusQuery.isError) {
     return <Badge variant="destructive">{extractApiError(statusQuery.error, 'status check failed')}</Badge>
   }
-  const health = statusQuery.data?.health?.status ?? 'unknown'
+  // Core normalises `status` onto /health now. Still derive from the
+  // contract's own `ready` when it is absent, so a newer UI against an
+  // older core shows the truth instead of "unknown" — the SDK has always
+  // spoken `ready` (spec §03), and `status` is the convenience on top.
+  const rawHealth = statusQuery.data?.health
+  const health =
+    typeof rawHealth?.status === 'string'
+      ? rawHealth.status
+      : typeof rawHealth?.ready === 'boolean'
+        ? rawHealth.ready
+          ? 'ok'
+          : 'degraded'
+        : 'unknown'
   return (
     <span className="inline-flex items-center gap-1">
       <Badge variant={statusVariant(health)}>{health}</Badge>
@@ -1353,7 +1404,7 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
       <div className="flex items-center gap-2 flex-wrap">
         <span className="font-medium text-[var(--text)]">Network</span>
         {eg.enforced.length === 0 && denied.length === 0 ? (
-          <span className="text-[var(--text-dim)]">no connections outside the stack</span>
+          <span className="text-[var(--text-dim)]">nothing outside OpenNVR</span>
         ) : null}
         {listingHosts.map((h) => (
           <Badge key={`l-${h}`} variant="neutral" title="Declared in the catalog listing">{h}</Badge>
@@ -1380,6 +1431,18 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
           </span>
         )}
       </div>
+      {/* Say what this panel IS. It reads like a bare list of hostnames
+          otherwise, and the guarantee behind it — the reason to care
+          about an app's listed hosts BEFORE installing it — is invisible.
+          Two lines: the rule, then what to do about it. */}
+      <p className="text-[var(--text-dim)] leading-relaxed">
+        Apps run on an isolated network with no route to your camera
+        network or the internet. Everything above is what this app may
+        reach through the OpenNVR egress proxy — anything else is blocked
+        and reported here, so an app cannot quietly send footage or data
+        somewhere you did not approve.
+        {isAdmin && ' Allow a host only if you know why the app needs it.'}
+      </p>
       {denied.length > 0 && (
         <div className="space-y-1">
           <div className="text-[var(--text-dim)]">
@@ -1425,7 +1488,6 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
 
 function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry; onConfigure: () => void }) {
   const queryClient = useQueryClient()
-  const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
   // Enable/disable is a site decision (superuser-only on the server;
   // uninstall keeps its own apps.install permission); everyone can open
@@ -1434,21 +1496,48 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
   const isAdmin = !!me?.is_superuser
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
+  // Shown after THIS operator enables the app — a toast is gone in a few
+  // seconds and an external app's URL is something you need to read,
+  // click, or copy.
+  const [enableNote, setEnableNote] = useState(false)
   // Manifest-declared operator action currently open in its form modal.
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
   const manifestActions = (app.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
 
+  // Where this app surfaces once enabled, decided from the manifest:
+  // an external app is a product of its own at a URL; an internal app
+  // that provides a vertical gets a page under Applications; anything
+  // else lives on its own catalog dashboard.
+  const externalUrl =
+    app.manifest?.ui_mode === 'external' && app.manifest?.ui_url
+      ? resolveUiUrl(app.manifest.ui_url)
+      : null
+  const vertical = externalUrl ? null : verticalFor(app.manifest)
+
   const toggleMutation = useMutation({
     mutationFn: () => (app.enabled ? apiService.disableApp(app.id) : apiService.enableApp(app.id)),
     onSuccess: () => {
       const wasEnabling = !app.enabled
       queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(`${app.name} ${app.enabled ? 'disabled' : 'enabled'}`)
-      // First enable takes the operator straight to the app's own page so
-      // they land on its live dashboard and actions, not back on the grid.
-      if (wasEnabling) navigate(`/app-catalog/${app.id}`)
+      if (!wasEnabling) {
+        setEnableNote(false)
+        showSuccess(`${app.name} disabled`)
+        return
+      }
+      // Enabling used to redirect straight to the app's page, which
+      // answered "what does it do" but not "where do I find it again" —
+      // the operator was moved somewhere without being told why. Say
+      // where it now lives and let them choose to go.
+      showSuccess(
+        externalUrl
+          ? `${app.name} enabled — open it at ${externalUrl}`
+          : vertical
+            ? `${app.name} enabled — listed under Applications → ${vertical.label}`
+            : `${app.name} enabled — open it from its card`
+      )
+      setEnableNote(true)
     },
     onError: (e) => showError(extractApiError(e, `Failed to ${app.enabled ? 'disable' : 'enable'} ${app.name}.`)),
   })
@@ -1496,7 +1585,11 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
 
   return (
     <Card>
-      <CardHeader>
+      {/* flex-wrap locally rather than on the shared CardHeader: a long
+          app name plus category, version, pricing and the two status
+          pills overflows a narrow grid column, and clipping status is
+          how "disabled" ends up half-hidden behind Uninstall. */}
+      <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
         <Link to={`/app-catalog/${app.id}`} className="hover:underline">
           <CardTitle>{app.name}</CardTitle>
@@ -1504,7 +1597,14 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
         <PricingBadge pricing={app.manifest?.pricing} note={app.manifest?.price_note} />
-        <div className="ml-auto">
+        {/* enabled/disabled is STATE, not an action — it belongs beside the
+            health chip, not pinned with ml-auto to the end of the button
+            row, where a card with several manifest actions pushed it off
+            the edge and clipped it against Uninstall. */}
+        <div className="ml-auto flex items-center gap-2">
+          <Badge variant={app.enabled ? 'success' : 'neutral'}>
+            {app.enabled ? 'enabled' : 'disabled'}
+          </Badge>
           <AppStatusChip appId={app.id} />
         </div>
       </CardHeader>
@@ -1538,11 +1638,17 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
           <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
-        {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
-          <LiveStateViews appId={app.id} views={app.manifest.state_schema as StateViewSpec[]} />
-        )}
+        {/* Live results deliberately do NOT render here. The catalog is
+            the management surface — install, enable, configure, remove —
+            and an app's output belongs to the app: /app-catalog/<id>
+            (AppView) already renders the same state_schema as a polling
+            dashboard, and a first-class vertical has its own page on top
+            of that. Worse, this card shares the ['app-status', id] query
+            key with those pages, so merely visiting Vehicles or Occupancy
+            filled the cache and the card sprouted plate tables nobody
+            asked for. Card title → AppView is the route to results. */}
 
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           {isAdmin && (
           <Button
             variant={app.enabled ? 'default' : 'primary'}
@@ -1583,10 +1689,45 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
           <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
             <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
           </Button>
-          <Badge variant={app.enabled ? 'success' : 'neutral'} className="ml-auto">
-            {app.enabled ? 'enabled' : 'disabled'}
-          </Badge>
         </div>
+
+        {enableNote && app.enabled && (
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 text-sm space-y-2">
+            {externalUrl ? (
+              <>
+                <div className="text-[var(--text-dim)]">
+                  {app.name} runs as its own application. Open it at:
+                </div>
+                <a
+                  href={externalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs break-all text-[var(--accent)] hover:underline"
+                >
+                  {externalUrl}
+                </a>
+              </>
+            ) : vertical ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[var(--text-dim)]">
+                  Listed in the sidebar under Applications →
+                </span>
+                <Link to={vertical.to} className="text-[var(--accent)] hover:underline">
+                  {vertical.label}
+                </Link>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[var(--text-dim)]">
+                  This app has no page of its own — its dashboard lives on
+                </span>
+                <Link to={`/app-catalog/${app.id}`} className="text-[var(--accent)] hover:underline">
+                  its app page
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
 
         {uninstallNote && <div className="text-sm text-amber-400">{uninstallNote}</div>}
         {uninstallPollActive && uninstallStatus.data && <InstallStatusNote status={uninstallStatus.data} />}
@@ -1611,7 +1752,17 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
 // works. When the backend opts in AND the caller is permitted, the primary
 // "Install (one-click)" button POSTs an intent and we poll the reconciler; a
 // 403 quietly degrades to "run the command below instead."
-function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) {
+function InstallModal({
+  app,
+  onClose,
+  onAccepted,
+}: {
+  app: IndexApp
+  onClose: () => void
+  /** Fired when the backend accepts the intent, so the PAGE can keep
+   *  watching the reconciler even after this dialog is dismissed. */
+  onAccepted: (id: string) => void
+}) {
   const { showSuccess, showError } = useSnackbar()
   const [copied, setCopied] = useState<string | null>(null)
   const [pollActive, setPollActive] = useState(false)
@@ -1629,6 +1780,12 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
     onSuccess: () => {
       showSuccess('Install requested — the app will appear under Installed once the reconciler applies it')
       setPollActive(true)
+      // Hand the intent to the page too: closing this dialog unmounts the
+      // poll above, and that poll is what refreshes the groups. Without
+      // it, an operator who dismissed the dialog (the normal thing to do
+      // while the reconciler works) had to hit Refresh by hand before the
+      // app showed up under Installed.
+      onAccepted(app.id)
     },
     onError: (e) => {
       if (isForbidden(e)) {
@@ -1842,6 +1999,10 @@ export function AppCatalog() {
   const skillsQuery = useSkillsRegistry()
   const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
   const [installApp, setInstallApp] = useState<IndexApp | null>(null)
+  // Install intents the reconciler has not settled yet. Held at page
+  // level on purpose — the dialog that started them is usually closed
+  // long before the reconciler finishes.
+  const [pendingInstalls, setPendingInstalls] = useState<string[]>([])
 
   const tier0Query = useTier0()
   const apps = appsQuery.data ?? []
@@ -1948,7 +2109,23 @@ export function AppCatalog() {
       )}
 
       {configApp && <AppConfigModal key={configApp.id} app={configApp} onClose={() => setConfigApp(null)} />}
-      {installApp && <InstallModal key={installApp.id} app={installApp} onClose={() => setInstallApp(null)} />}
+      {installApp && (
+        <InstallModal
+          key={installApp.id}
+          app={installApp}
+          onClose={() => setInstallApp(null)}
+          onAccepted={(id) => setPendingInstalls((p) => (p.includes(id) ? p : [...p, id]))}
+        />
+      )}
+      {/* Outlives the dialog: these are what move a freshly installed app
+          into the Installed group without a manual Refresh. */}
+      {pendingInstalls.map((id) => (
+        <InstallWatcher
+          key={id}
+          id={id}
+          onSettled={() => setPendingInstalls((p) => p.filter((x) => x !== id))}
+        />
+      ))}
     </section>
   )
 }

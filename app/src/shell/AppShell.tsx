@@ -21,12 +21,13 @@ import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
 import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
+import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
@@ -47,6 +48,11 @@ type NavGroup = {
   label: string
   /** pinned groups render their items directly — no header, never collapsible */
   pinned?: boolean
+  /** flat groups scroll with the rest of the menu but render as bare
+   *  links — no header, nothing to expand. For a destination that is one
+   *  page, not a section: a collapsible header hiding a single item is
+   *  a click for nothing. */
+  flat?: boolean
   items: NavItem[]
 }
 
@@ -72,7 +78,6 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
       { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
       { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
-      { to: '/app-catalog', label: 'App Catalog', icon: <Boxes size={16} />, perm: '/ai-engine' },
     ],
   },
   {
@@ -159,41 +164,73 @@ export function AppShell() {
     refetchInterval: 120_000,
   })
   // The curated first-class pages, capability-keyed on manifest
-  // `provides` (with a legacy predicate for manifests that predate the
-  // field). Adding a vertical = one row here + its page — the nav
-  // scales with what THIS install enabled, never with catalog size.
+  // `provides` from the shared APP_VERTICALS table (with its legacy
+  // predicate for manifests that predate the field). The catalog reads
+  // that same table to tell an operator where a freshly enabled app will
+  // show up — one row, so the promise and the menu cannot disagree.
+  // Adding a vertical = one row there + its page.
   const apps = appsNav.data ?? []
-  const providesEnabled = (capability: string, legacy?: (m: any) => boolean) =>
-    apps.some((a) => a.enabled && (
-      (a.manifest?.provides ?? []).includes(capability) ||
-      (legacy ? legacy(a.manifest ?? {}) : false)
-    ))
-  const lprEnabled = providesEnabled('vehicles',
-    (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'))
-  const occupancyEnabled = providesEnabled('occupancy')
+  const enabledVerticals = APP_VERTICALS.filter((v) =>
+    apps.some((a) => a.enabled && manifestProvides(a.manifest, v))
+  )
+  // Icons live here (the nav owns its own presentation), keyed by route.
+  const verticalIcon: Record<string, ReactNode> = {
+    '/vehicles': <Car size={16} />,
+    '/occupancy': <Users size={16} />,
+  }
+  const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 
   const visibleGroups = useMemo(
     () => {
       const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0)
-      const appItems = [
-        ...(lprEnabled && canView('/vehicles')
-          ? [{ to: '/vehicles', label: 'Vehicles', icon: <Car size={16} />, perm: '/vehicles' as const }]
-          : []),
-        ...(occupancyEnabled && canView('/occupancy')
-          ? [{ to: '/occupancy', label: 'Occupancy', icon: <Users size={16} />, perm: '/occupancy' as const }]
-          : []),
-      ]
+      const appItems = enabledVerticals
+        // `v.to in NAV_PERMISSIONS` first: a vertical added to the table
+        // without its permission row would otherwise ask canView about an
+        // unknown path and get an undefined requirement — fail closed.
+        .filter((v) => v.to in NAV_PERMISSIONS && canView(v.to as keyof typeof NAV_PERMISSIONS))
+        .map((v) => ({
+          to: v.to,
+          label: v.label,
+          icon: verticalIcon[v.to] ?? <Boxes size={16} />,
+          perm: v.to as keyof typeof NAV_PERMISSIONS,
+        }))
+      // Right after the pinned NVR group (i.e. under Cameras): these are
+      // operational pages, not settings.
+      let at = 1
       if (appItems.length > 0) {
-        // Right after the pinned NVR group: these are operational pages.
-        groups.splice(1, 0, { key: 'applications', label: 'Applications', items: appItems })
+        groups.splice(at, 0, { key: 'applications', label: 'Applications', items: appItems })
+        at += 1
+      }
+      // App Catalog sits with the apps, not under "AI & Detections" —
+      // plenty of apps are not AI at all (the notifier, the barrier, the
+      // agent), and the catalog is where the pages above come FROM. Flat
+      // and directly below Applications, so it stays one click even when
+      // no app is installed yet — which is exactly when someone needs to
+      // find it.
+      const catalog: NavItem = {
+        to: '/app-catalog', label: 'App Catalog',
+        icon: <Boxes size={16} />, perm: '/ai-engine',
+      }
+      if (canView(catalog.perm)) {
+        groups.splice(at, 0, {
+          key: 'app-catalog', label: 'App Catalog', flat: true, items: [catalog],
+        })
       }
       return groups
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission, lprEnabled, occupancyEnabled]
+    [hasPermission, enabledRoutes]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)
+  // Sticky headers dock at `index * 32`, but a flat group contributes no
+  // header — counting it would leave a 32px hole in the stack and push
+  // every header below it out of place. Offsets count headers, not groups.
+  const headerSlot = useMemo(() => {
+    let n = 0
+    return menuGroups.map((g) => (g.flat ? -1 : n++))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGroups])
 
   const activeGroupKey = useMemo(() => {
     for (const g of NAV_GROUPS) {
@@ -330,6 +367,17 @@ export function AppShell() {
                   </div>
                 )
               }
+              // Flat: a single destination, so no header and nothing to
+              // collapse — it just sits in the list as a link.
+              if (group.flat) {
+                return (
+                  <div key={group.key} className="py-1 space-y-0.5">
+                    {group.items.map((item) => (
+                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
+                    ))}
+                  </div>
+                )
+              }
               // Sticky headers: headers and item lists are direct children of
               // the scroll container (sticky is bounded by its parent, so
               // nesting would defeat it). Headers passed while scrolling stack
@@ -337,7 +385,7 @@ export function AppShell() {
               return (
                 <Fragment key={group.key}>
                   <button
-                    style={{ top: gi * 32 }}
+                    style={{ top: headerSlot[gi] * 32 }}
                     className="sticky z-10 w-full h-8 flex items-center justify-between px-2.5 text-sm font-medium bg-[var(--bg-2)] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!collapsed}

@@ -227,7 +227,12 @@
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d intrusion-detection
 
 - id: license-plate-recognition
-  name: License Plate Recognition
+  # ANPR leads: it is the name most of the world uses for this (UK, EU,
+  # India, AU), with the spelled-out term kept for newcomers and for US
+  # readers who know it as LPR/ALPR. The nav page carries the same token
+  # ("Vehicles (ANPR)") so the app and the surface it lights up read as
+  # one thing. The id is unchanged — it is a key, not a label.
+  name: ANPR — License Plate Recognition
   summary: Reads license plates via a YOLOv8 to crop to fast-plate-ocr chain and routes severity through allow/deny watchlists.
   category: vehicle
   version: "1.0.0"
