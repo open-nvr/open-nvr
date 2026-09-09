@@ -53,3 +53,44 @@ export function matchesCatalogFilter(
     .toLowerCase()
   return terms.every((t) => hay.includes(t))
 }
+
+/** How the catalog orders a group. */
+export type CatalogSort = 'recommended' | 'name' | 'popular'
+
+export type CatalogSortable = {
+  name?: string
+  featured?: boolean
+  /** Editorial rank 0-100 set by maintainers; absent = unranked. */
+  popularity?: number | null
+}
+
+/** Unranked sorts LAST under every popularity-aware order — an app
+ *  nobody has ranked is not the least popular app, it is an unknown, and
+ *  putting it above a ranked one would invent a comparison. */
+function rank(a: CatalogSortable): number {
+  return typeof a.popularity === 'number' ? a.popularity : -1
+}
+
+function byName(a: CatalogSortable, b: CatalogSortable): number {
+  return (a.name ?? '').localeCompare(b.name ?? '', undefined, { sensitivity: 'base' })
+}
+
+/** A new array, ordered. Name is the final tie-break everywhere, so the
+ *  grid never reshuffles between renders for equal-ranked apps. */
+export function sortCatalog<T extends CatalogSortable>(
+  apps: readonly T[],
+  sort: CatalogSort
+): T[] {
+  const out = [...apps]
+  if (sort === 'name') return out.sort(byName)
+  if (sort === 'popular') {
+    return out.sort((a, b) => rank(b) - rank(a) || byName(a, b))
+  }
+  // Recommended: the editorial shelf first, then rank, then name.
+  return out.sort(
+    (a, b) =>
+      Number(Boolean(b.featured)) - Number(Boolean(a.featured)) ||
+      rank(b) - rank(a) ||
+      byName(a, b)
+  )
+}

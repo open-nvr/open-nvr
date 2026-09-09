@@ -209,7 +209,7 @@ export function AppShell() {
       // find it.
       const catalog: NavItem = {
         to: '/app-catalog', label: 'App Catalog',
-        icon: <Boxes size={16} />, perm: '/ai-engine',
+        icon: <Boxes size={16} />, perm: '/app-catalog',
       }
       if (canView(catalog.perm)) {
         groups.splice(at, 0, {

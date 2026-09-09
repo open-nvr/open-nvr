@@ -84,6 +84,10 @@ DEFAULT_INDEX = REPO_ROOT / "server" / "config" / "apps_index.yml"
 USE_CASE_MAP = REPO_ROOT / "server" / "config" / "use_case_map.yml"
 TASKS_REGISTRY = REPO_ROOT / "server" / "config" / "tasks.yml"
 APPS_OVERLAY = REPO_ROOT / "docker-compose.apps.yml"
+# Listing screenshots live in the frontend build so core serves them
+# from its own origin — see the `screenshots` note on IndexEntry.
+SCREENSHOT_ROOT = REPO_ROOT / "app" / "public"
+SCREENSHOT_DIR = "app-screenshots"
 
 # Required top-level fields, mirroring the IndexEntry pydantic model in
 # server/routers/apps.py (build_context / emits / image_digest are optional).
@@ -105,6 +109,13 @@ _KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # image ref: a ghcr.io/... path or an opennvr/... path, optionally :tagged.
 # (The digest lives in image_digest, not here.)
 _IMAGE_RE = re.compile(r"^(?:ghcr\.io/[a-z0-9._/-]+|opennvr/[a-z0-9._/-]+)(?::[a-zA-Z0-9._-]+)?$")
+
+# A screenshot path: app-screenshots/<app-id>/<file>.<ext>, repo-relative.
+# Anchored and segment-limited, so "../" or an absolute path cannot pass.
+_SCREENSHOT_RE = re.compile(
+    r"^app-screenshots/[a-z0-9]+(?:-[a-z0-9]+)*"
+    r"/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpg|jpeg|webp|avif)$"
+)
 
 # A published-image digest is sha256 + exactly 64 lowercase hex chars.
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -443,6 +454,48 @@ def validate_entry(
                 f"{label}: field '{str_field}' must be a string, got "
                 f"{type(val).__name__} ({val!r}) — quote it in the YAML"
             )
+    # Editorial popularity: an int in 0-100 or absent. It is a curated
+    # rank, not telemetry (nothing phones home), so the only thing to
+    # enforce is that it is a sane number rather than a fake total.
+    pop = entry.get("popularity")
+    if pop is not None:
+        if isinstance(pop, bool) or not isinstance(pop, int):
+            errors.append(
+                f"{label}: 'popularity' must be an integer 0-100, got "
+                f"{type(pop).__name__} ({pop!r})"
+            )
+        elif not (0 <= pop <= 100):
+            errors.append(f"{label}: 'popularity' must be within 0-100, got {pop}")
+
+    # Screenshots: repo-relative paths under app/public/app-screenshots/
+    # that ACTUALLY EXIST. A remote URL is refused on purpose — it would
+    # leak every catalog viewer's IP to a third party and would not load
+    # on an air-gapped site. A missing file is refused because a listing
+    # advertising a broken image is worse than one with no image.
+    shots = entry.get("screenshots")
+    if shots is not None:
+        if not isinstance(shots, list) or any(not isinstance(x, str) for x in shots):
+            errors.append(f"{label}: 'screenshots' must be a list of strings")
+        else:
+            for shot in shots:
+                if shot.startswith(("http://", "https://", "//")):
+                    errors.append(
+                        f"{label}: screenshot {shot!r} is a remote URL — ship the "
+                        f"image under app/public/{SCREENSHOT_DIR}/{entry.get('id')}/ "
+                        "instead; a remote image leaks viewer IPs and breaks "
+                        "air-gapped installs"
+                    )
+                elif not _SCREENSHOT_RE.match(shot):
+                    errors.append(
+                        f"{label}: screenshot {shot!r} must look like "
+                        f"'{SCREENSHOT_DIR}/<app-id>/<file>.png|jpg|jpeg|webp|avif'"
+                    )
+                elif not (SCREENSHOT_ROOT / shot).is_file():
+                    errors.append(
+                        f"{label}: screenshot {shot!r} does not exist at "
+                        f"app/public/{shot}"
+                    )
+
     emits = entry.get("emits")
     if emits is not None and (
         not isinstance(emits, list)

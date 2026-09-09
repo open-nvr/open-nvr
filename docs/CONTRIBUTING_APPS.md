@@ -2,7 +2,7 @@
 
 This is the developer-facing guide for getting **your** app into the curated
 OpenNVR App Store — the browse-and-install catalog an operator sees under
-**Settings → App Catalog**. The model is the same one Homebrew taps and the
+**App Catalog** in the sidebar. The model is the same one Homebrew taps and the
 Home Assistant add-on store use: **you build and publish your app; you open a
 PR that adds one entry to a curated index; a reviewer merges it.**
 

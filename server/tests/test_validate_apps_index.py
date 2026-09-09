@@ -490,3 +490,89 @@ def test_compose_snippet_may_default_the_pin_slot_to_the_published_image(tmp_pat
     assert with_image("${SAMPLE_APP_IMAGE:-ghcr.io/open-nvr/sample-app:latest}") == []
     assert with_image("${SAMPLE_APP_IMAGE:-opennvr/sample-app:local-build}") == []
     assert any("does not match" in x for x in with_image("${SAMPLE_APP_IMAGE:-ghcr.io/evil/sample-app:latest}"))
+
+
+# ─── popularity: an editorial rank, not telemetry ───────────────────────
+
+
+def test_popularity_absent_passes(tmp_path):
+    errors, _ = validator.validate_index(_write(tmp_path, [dict(_GOOD_ENTRY)]))
+    assert errors == []
+
+
+@pytest.mark.parametrize("value", [0, 50, 100])
+def test_popularity_in_range_passes(tmp_path, value):
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert errors == []
+
+
+@pytest.mark.parametrize("value", [-1, 101, 1000])
+def test_popularity_out_of_range_fails(tmp_path, value):
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("popularity" in e and "0-100" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("value", ["high", 3.5, True])
+def test_popularity_wrong_type_fails(tmp_path, value):
+    """`True` matters specifically: bool is an int subclass in Python, so a
+    naive isinstance check would let `popularity: yes` through as 1."""
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("popularity" in e and "integer" in e for e in errors), errors
+
+
+# ─── screenshots: local files only ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("url", [
+    "https://cdn.example.com/shot.png",
+    "http://cdn.example.com/shot.png",
+    "//cdn.example.com/shot.png",
+])
+def test_remote_screenshot_is_refused(tmp_path, url):
+    """A remote image would leak every catalog viewer's IP to that host
+    and would not load on an air-gapped site — the two things this
+    product promises against elsewhere."""
+    entry = dict(_GOOD_ENTRY, screenshots=[url])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("remote URL" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("path", [
+    "app-screenshots/../../../etc/passwd.png",
+    "/etc/passwd.png",
+    "elsewhere/sample-app/shot.png",
+    "app-screenshots/sample-app/shot.svg",
+    "app-screenshots/sample-app/shot",
+])
+def test_malformed_screenshot_path_is_refused(tmp_path, path):
+    entry = dict(_GOOD_ENTRY, screenshots=[path])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("screenshot" in e for e in errors), errors
+
+
+def test_screenshot_must_be_a_list_of_strings(tmp_path):
+    entry = dict(_GOOD_ENTRY, screenshots="app-screenshots/sample-app/shot.png")
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("list of strings" in e for e in errors), errors
+
+
+def test_screenshot_that_does_not_exist_is_refused(tmp_path):
+    """A listing advertising a broken image is worse than one with none."""
+    entry = dict(_GOOD_ENTRY, screenshots=["app-screenshots/sample-app/nope.png"])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("does not exist" in e for e in errors), errors
+
+
+def test_existing_screenshot_passes(tmp_path, monkeypatch):
+    """The happy path, with the file actually present on disk."""
+    shot_root = tmp_path / "public"
+    (shot_root / "app-screenshots" / "sample-app").mkdir(parents=True)
+    (shot_root / "app-screenshots" / "sample-app" / "shot.png").write_bytes(b"x")
+    monkeypatch.setattr(validator, "SCREENSHOT_ROOT", shot_root)
+
+    entry = dict(_GOOD_ENTRY, screenshots=["app-screenshots/sample-app/shot.png"])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert errors == []

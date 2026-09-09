@@ -214,11 +214,16 @@ async def lifespan(app: FastAPI):
             # apps.install); the full seed above only runs on an empty table.
             try:
                 from models import Permission as _Permission2
+                from services.apps_view_backfill import backfill_apps_view
 
                 for _pname, _pdesc in (
                     (
                         "apps.install",
                         "Install/uninstall curated App Store apps",
+                    ),
+                    (
+                        "apps.view",
+                        "Browse the App Catalog and view installed apps",
                     ),
                 ):
                     if (
@@ -232,6 +237,18 @@ async def lifespan(app: FastAPI):
                         main_logger.info(
                             "Seeded new permission %r (upgrade path)", _pname
                         )
+                        # apps.view took the App Catalog off ai.view.
+                        # Creating the row alone would REVOKE the catalog
+                        # from everyone who could open it yesterday, so
+                        # backfill it to whoever holds ai.view — but ONLY
+                        # on the boot that creates it. Doing it every boot
+                        # would undo a deliberate revoke.
+                        if _pname == "apps.view":
+                            _granted = backfill_apps_view(db)
+                            main_logger.info(
+                                "Granted apps.view to %d role(s) holding "
+                                "ai.view", _granted
+                            )
             except Exception:
                 main_logger.warning(
                     "Upgrade-path permission seeding failed", exc_info=True
