@@ -21,12 +21,13 @@ import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
 import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
+import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
@@ -159,30 +160,36 @@ export function AppShell() {
     refetchInterval: 120_000,
   })
   // The curated first-class pages, capability-keyed on manifest
-  // `provides` (with a legacy predicate for manifests that predate the
-  // field). Adding a vertical = one row here + its page — the nav
-  // scales with what THIS install enabled, never with catalog size.
+  // `provides` from the shared APP_VERTICALS table (with its legacy
+  // predicate for manifests that predate the field). The catalog reads
+  // that same table to tell an operator where a freshly enabled app will
+  // show up — one row, so the promise and the menu cannot disagree.
+  // Adding a vertical = one row there + its page.
   const apps = appsNav.data ?? []
-  const providesEnabled = (capability: string, legacy?: (m: any) => boolean) =>
-    apps.some((a) => a.enabled && (
-      (a.manifest?.provides ?? []).includes(capability) ||
-      (legacy ? legacy(a.manifest ?? {}) : false)
-    ))
-  const lprEnabled = providesEnabled('vehicles',
-    (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'))
-  const occupancyEnabled = providesEnabled('occupancy')
+  const enabledVerticals = APP_VERTICALS.filter((v) =>
+    apps.some((a) => a.enabled && manifestProvides(a.manifest, v))
+  )
+  // Icons live here (the nav owns its own presentation), keyed by route.
+  const verticalIcon: Record<string, ReactNode> = {
+    '/vehicles': <Car size={16} />,
+    '/occupancy': <Users size={16} />,
+  }
+  const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 
   const visibleGroups = useMemo(
     () => {
       const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0)
-      const appItems = [
-        ...(lprEnabled && canView('/vehicles')
-          ? [{ to: '/vehicles', label: 'Vehicles', icon: <Car size={16} />, perm: '/vehicles' as const }]
-          : []),
-        ...(occupancyEnabled && canView('/occupancy')
-          ? [{ to: '/occupancy', label: 'Occupancy', icon: <Users size={16} />, perm: '/occupancy' as const }]
-          : []),
-      ]
+      const appItems = enabledVerticals
+        // `v.to in NAV_PERMISSIONS` first: a vertical added to the table
+        // without its permission row would otherwise ask canView about an
+        // unknown path and get an undefined requirement — fail closed.
+        .filter((v) => v.to in NAV_PERMISSIONS && canView(v.to as keyof typeof NAV_PERMISSIONS))
+        .map((v) => ({
+          to: v.to,
+          label: v.label,
+          icon: verticalIcon[v.to] ?? <Boxes size={16} />,
+          perm: v.to as keyof typeof NAV_PERMISSIONS,
+        }))
       if (appItems.length > 0) {
         // Right after the pinned NVR group: these are operational pages.
         groups.splice(1, 0, { key: 'applications', label: 'Applications', items: appItems })
@@ -190,7 +197,7 @@ export function AppShell() {
       return groups
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission, lprEnabled, occupancyEnabled]
+    [hasPermission, enabledRoutes]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)

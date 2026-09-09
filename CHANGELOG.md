@@ -8,6 +8,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A freshly installed app needed a manual Refresh to appear under
+  Installed.** The poll that watches the reconciler and invalidates
+  `['apps']` lived inside the install dialog, so dismissing the dialog —
+  the natural thing to do while the reconciler works — killed the only
+  thing that would have refreshed the groups. Accepted intents are now
+  tracked by the page and keep polling after the dialog closes. The
+  invalidation also moved out of `refetchInterval` (an observer computing
+  its next delay, with no promise about terminal states) into an effect
+  keyed on the status transition.
+
+- **Enabling an app did not say where it had gone.** It redirected to the
+  app's own page, which answered "what does it do" but not "where do I
+  find this again". Enable now leaves you on the catalog and states the
+  surface: an external app shows the URL it runs at, as a link; an app
+  providing a vertical says it is listed under Applications and links to
+  the page; anything else points at its own dashboard. The nav and the
+  catalog read one shared `APP_VERTICALS` table, so the promise and the
+  menu entry cannot disagree.
+
 - **App Catalog cards: clipped status pill, and results that were not
   the catalog's to show.** The action row was a non-wrapping flex with
   the enabled/disabled badge pinned to it by `ml-auto`, so a card
