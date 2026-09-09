@@ -338,3 +338,71 @@ def test_visit_still_takes_its_original_positional_arguments():
     v = _visit(b"crop")
     assert v.camera_id == "3" and v.jpeg == b"crop"
     assert v.scene_jpeg is None and v.candidate_jpegs == ()
+
+
+# ── candidate capture times (#451) ─────────────────────────────────
+
+
+def test_post_carries_the_candidates_capture_times():
+    """Core dates the winning read by these — without them a plate row
+    falls back to the visit's START, which on a merged track is when a
+    DIFFERENT car arrived."""
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(replace(_visit(b"crop"),
+                    candidate_jpegs=(b"a", b"b"),
+                    candidate_ts=(11.5, 12.5)))
+    assert posted["body"]["candidate_ts"] == [11.5, 12.5]
+    assert len(posted["body"]["candidate_jpegs_b64"]) == 2
+
+
+def test_post_drops_stamps_that_do_not_line_up_with_the_crops():
+    """A short list is worse than none: core zips the two, so every read
+    past the gap would inherit a different look's timestamp."""
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(replace(_visit(b"crop"),
+                    candidate_jpegs=(b"a", b"b"),
+                    candidate_ts=(11.5,)))
+    assert "candidate_ts" not in posted["body"]
+    assert len(posted["body"]["candidate_jpegs_b64"]) == 2
+
+
+def test_finished_visit_dates_each_candidate_it_ships():
+    """The stamps come off the ring, so they describe the LOOK, not the
+    moment the visit closed."""
+    import numpy as np
+
+    from detect_pipeline.platecands import CandidateRing
+
+    ring = CandidateRing(min_gap_s=0.0)
+    ring.offer(T0 + 1, 10.0, np.zeros((8, 8, 3), np.uint8))
+    ring.offer(T0 + 2, 90.0, np.zeros((8, 8, 3), np.uint8))
+
+    class _Car:
+        id = 1
+        label = "car"
+        score = 0.9
+        confirmed = True
+        best_crop = None
+        plate_ring = ring
+
+    lc = VisitLifecycle("3")
+    lc.observe([_Car()], T0)
+    lc.observe([_Car()], T0 + 3)
+    done = lc.observe([], T0 + 4)
+    assert len(done) == 1
+    v = done[0]
+    # One stamp per shipped crop, and none of them is the visit's end.
+    assert len(v.candidate_ts) == len(v.candidate_jpegs) == 2
+    assert all(isinstance(t, float) for t in v.candidate_ts)

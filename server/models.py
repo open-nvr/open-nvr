@@ -35,6 +35,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -485,6 +486,15 @@ class TimelineEvent(Base):
     __tablename__ = "events"
     __table_args__ = (
         Index("ix_events_cam_start", "camera_id", "started_at"),
+        # The plate aggregations range over WHEN A READ HAPPENED, which is
+        # coalesce(observed_at, started_at) (services.timeline_service.
+        # SEEN_AT). That expression cannot use the index above — the planner
+        # matched camera_id and then filtered the range against every row the
+        # camera ever recorded, and this table holds every track, people
+        # included. Mirrors ix_events_cam_start so the same queries seek the
+        # same way (#451).
+        Index("ix_events_cam_seen", "camera_id",
+              text("coalesce(observed_at, started_at)")),
         # One visit = one (camera, track, start): ingest retries are
         # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
         Index("uq_events_visit", "camera_id", "track_id", "started_at",
@@ -529,6 +539,27 @@ class TimelineEvent(Base):
     # plate came off. This image is the only one on the row that is
     # guaranteed to show the car the number belongs to.
     plate_frame_path = Column(String(500), nullable=True)
+    # When the plate was SEEN — the capture time of the frame the winning
+    # read came from, as opposed to when any part of the platform got
+    # round to processing it.
+    #
+    # started_at cannot answer this. It is the visit's start, and a visit
+    # is not always one vehicle: track association merges a departing car
+    # with the one arriving behind it, so on a merged track started_at is
+    # the moment a DIFFERENT car arrived — the same defect that makes
+    # plate_frame_path the only trustworthy image on the row. This column
+    # is that image's timestamp, so the picture and the time agree.
+    #
+    # Why it is not a processing time: OCR latency varies with backlog and
+    # track length, so a processing stamp is wrong by an amount that grows
+    # exactly when the gate is busiest; it does not scrub to the right
+    # second of recording; and re-running the enrichment sweep would
+    # restamp history as "now". This value is stable under reprocessing.
+    #
+    # NULL for non-plate rows, for rows read from the evidence frame
+    # (no candidate stamp to inherit), and for every row written before
+    # this column existed: readers fall back to started_at.
+    observed_at = Column(DateTime(timezone=True), nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -811,6 +842,17 @@ class AppAlert(Base):
     correlation_id = Column(String(64), nullable=True)
     evidence = Column(Text, nullable=True)              # JSON, as received
     tags = Column(Text, nullable=True)                  # JSON list
+    # When the thing the alert is ABOUT was seen, as opposed to fired_at,
+    # which is when the app got round to deciding. Producers that know it
+    # send it in the alert's evidence; NULL for everyone else, and
+    # readers fall back to fired_at.
+    #
+    # fired_at stays the sort key. An inbox ordered by observed time is
+    # not append-only — a read that took longer to OCR would insert its
+    # alarm ABOVE ones already on the guard's screen, where it is
+    # scrolled past rather than seen. So: order by arrival, display when
+    # it happened.
+    observed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)

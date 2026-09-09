@@ -190,7 +190,10 @@ def test_enrichment_fallback_threads_event_id():
     # pool — so `row` is not in scope there any more; the function's own
     # event_id parameter is the same value that row.id was.)
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert "await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)" in src, (
+    # Trailing comma, not a closing paren: the call also carries
+    # observed_at now (the capture time the domain event echoes), so
+    # pinning the whole call would break on every additive argument.
+    assert "await _ocr_jpeg(jpeg, camera_handle, event_id=event_id," in src, (
         "plate_enrichment no longer sends event_id with its OCR call — "
         "the plate.recognized.v1 it triggers can't be joined back to the "
         "visit row, so the bus consumer becomes a no-op for the fallback "

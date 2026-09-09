@@ -779,6 +779,24 @@ def store_plate_images(
     return store_plate_crop(jpeg, box), store_plate_frame(jpeg)
 
 
+def observed_dt(ts: float | None):
+    """Producer epoch seconds -> aware UTC datetime, or None.
+
+    Producers report capture times as epoch floats; ``events.observed_at``
+    is a timezone-aware DateTime. Junk in must never break a write that is
+    otherwise fine — the row simply keeps no observed time, and readers
+    fall back to started_at.
+    """
+    from datetime import datetime as _datetime, timezone as _timezone
+
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    try:
+        return _datetime.fromtimestamp(float(ts), tz=_timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def stamp_plate_evidence(row, rel_path: str | None, *,
                          frame_path: str | None = None,
                          merged: bool = False,
@@ -833,6 +851,11 @@ def clear_plate(row) -> None:
     row.plate_text = None
     row.plate_evidence_path = None
     row.plate_frame_path = None
+    # observed_at dates the READ, so it goes with it. Left behind, it
+    # would keep overriding started_at on a row that is once more an
+    # ordinary vehicle visit — the UI would show the retracted read's
+    # moment as the time the car was seen.
+    row.observed_at = None
     payload = dict(row.payload or {})
     for key in _PLATE_MARKS:
         payload.pop(key, None)
@@ -967,7 +990,8 @@ def is_duplicate_sighting(camera_id: int, plate: str,
 
 
 async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
-                    event_id: int | None = None) -> dict | None:
+                    event_id: int | None = None,
+                    observed_at: float | None = None) -> dict | None:
     """One OCR attempt through KAI-C. Returns ``extract_read``'s dict,
     or None on transport failure / non-200 / empty read. Factored out
     of ``enrich_event_plate`` so the early-attempt endpoint and the
@@ -981,6 +1005,14 @@ async def _ocr_jpeg(jpeg: bytes, camera_handle: str,
     params: dict = {"camera_id": camera_handle}
     if event_id is not None:
         params["event_id"] = int(event_id)
+    # Client reference, exactly like event_id: KAI-C echoes it into
+    # plate.recognized.v1 and never interprets it, so a consumer that only
+    # ever sees the bus (the LPR app, and its alarm) can show the same
+    # moment this row will. Sent in the wire form the event uses — an
+    # ISO-8601 UTC string — so no clock semantics travel with it.
+    observed = observed_dt(observed_at)
+    if observed is not None:
+        params["observed_at"] = observed.replace(microsecond=0).isoformat()
     payload = build_infer_payload(task=PLATE_TASK, jpeg_bytes=jpeg,
                                   params=params)
     try:
@@ -1030,6 +1062,8 @@ def _row_already_reads(event_id: int, plate: str) -> bool:
 
 async def enrich_event_plate(
     event_id: int, candidate_jpegs: list[bytes] | None = None,
+    candidate_ts: list[float | None] | None = None,
+    evidence_ts: float | None = None,
 ) -> None:
     """Background task: read the visit's plate, multi-frame style.
 
@@ -1097,6 +1131,12 @@ async def enrich_event_plate(
         # sole attempt when none were shipped (pre-multi-frame producers,
         # non-LPR cameras).
         attempts: list[bytes] = list(candidate_jpegs or [])[:MAX_INGEST_ATTEMPTS]
+        # Capture time per attempt, same order. Only trusted when it lines
+        # up 1:1 — a short list would give a read the timestamp of a
+        # different look, and a wrong observed time is worse than none.
+        stamps: list[float | None] = list(candidate_ts or [])[:MAX_INGEST_ATTEMPTS]
+        if len(stamps) != len(attempts):
+            stamps = [None] * len(attempts)
         if not attempts:
             if not evidence_path:
                 return
@@ -1106,6 +1146,12 @@ async def enrich_event_plate(
             # Off the loop: a full-frame read is blocking file I/O on the
             # same loop every other request is served from.
             attempts = [await _asyncio.to_thread(path.read_bytes)]
+            # It IS a look with a time of its own: the tracker stamps the
+            # frame it cut the best crop from, and Tier-0 ships that as
+            # evidence_ts. This branch is not a rare fallback — a camera
+            # without the LPR skill retains no candidate ring, so every
+            # one of its reads lands here.
+            stamps = [evidence_ts]
 
         # The early read (a single track-confirm look, already on the
         # row) is one vote. It brings its own stored images, so a
@@ -1131,16 +1177,22 @@ async def enrich_event_plate(
         # winning crop is the only image that actually shows this plate,
         # and it is discarded the moment this function returns unless we
         # persist it here.
-        rejects: list[tuple[dict, bytes]] = []
+        rejects: list[tuple[dict, bytes, float | None]] = []
         jpeg_of: dict[int, bytes] = {}
+        # Same keying as jpeg_of: the capture time of the look each read
+        # came from, so the winner can date itself.
+        ts_of: dict[int, float | None] = {}
         merged_ids: set[int] = set()
-        for jpeg in attempts:
-            read = await _ocr_jpeg(jpeg, camera_handle, event_id=event_id)
+        # strict: the guard above forces len(stamps) == len(attempts).
+        for jpeg, stamp in zip(attempts, stamps, strict=True):
+            read = await _ocr_jpeg(jpeg, camera_handle, event_id=event_id,
+                                   observed_at=stamp)
             if read is None:
                 continue
             if read["accepted"]:
                 votes.append(read)
                 jpeg_of[id(read)] = jpeg
+                ts_of[id(read)] = stamp
             else:
                 # Character-consensus with every earlier reject: two near
                 # misses of the same plate often reconstruct the truth.
@@ -1152,16 +1204,20 @@ async def enrich_event_plate(
                 # in: the contributors are different frames, so the
                 # loser's box would cut the wrong rectangle out of the
                 # winner's pixels (#385).
-                for prev, prev_jpeg in rejects:
+                for prev, prev_jpeg, prev_ts in rejects:
                     merged = merge_reads(prev, read)
                     if merged is not None and merged["accepted"]:
                         keep_prev = prev["confidence"] >= read["confidence"]
                         merged["box"] = (prev if keep_prev else read).get("box")
                         votes.append(merged)
                         jpeg_of[id(merged)] = prev_jpeg if keep_prev else jpeg
+                        # The time follows the pixels: a merged plate is
+                        # whole in neither look, so it is dated by the
+                        # same contributor whose crop and box it keeps.
+                        ts_of[id(merged)] = prev_ts if keep_prev else stamp
                         merged_ids.add(id(merged))
                         break
-                rejects.append((read, jpeg))
+                rejects.append((read, jpeg, stamp))
             # Enough agreeing looks already? Then the rest of the budget
             # is pure waste — stop here.
             if len(votes) >= min_agree:
@@ -1183,6 +1239,10 @@ async def enrich_event_plate(
             return                       # honest non-read beats a guess
         plate = winner["plate"][:32]
         was_merged = id(winner) in merged_ids
+        # The moment the winning look was captured. None when the looks
+        # came without stamps (a producer predating candidate_ts, or the
+        # evidence-frame fallback) — the row then keeps no observed time.
+        won_at = observed_dt(ts_of.get(id(winner)))
         if prior_plate and plate == prior_plate:
             # The early read held up; the row just learns how many
             # looks agree with it (and keeps the images it already has).
@@ -1191,6 +1251,11 @@ async def enrich_event_plate(
                 row = db.query(TimelineEvent).filter(
                     TimelineEvent.id == event_id).first()
                 if row is not None and row.plate_text == plate:
+                    # The early read already dated this row from its own
+                    # attempt; only fill a gap, never overwrite (the
+                    # early look IS the read being confirmed).
+                    if row.observed_at is None and won_at is not None:
+                        row.observed_at = won_at
                     stamp_plate_evidence(row, None, reads=agreeing,
                                          source="sweep")
                     db.commit()
@@ -1246,6 +1311,8 @@ async def enrich_event_plate(
                     # SAME plate while we were in OCR — from the very
                     # bytes we just stored. Give the row the proof it is
                     # missing; never leave a plate without its picture.
+                    if row.observed_at is None and won_at is not None:
+                        row.observed_at = won_at
                     if not row.plate_frame_path or not row.plate_evidence_path:
                         stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
                                              merged=was_merged,
@@ -1302,6 +1369,11 @@ async def enrich_event_plate(
                 note_sighting(camera_id, plate)
                 return
             row.plate_text = plate
+            # Set unconditionally here: this branch either writes a plate
+            # onto a bare row or REPLACES a single read the looks
+            # overturned, and a retracted read's timestamp must go with
+            # it — the row is now dated by the look that actually won.
+            row.observed_at = won_at
             stamp_plate_evidence(row, crop_rel, frame_path=frame_rel,
                                  merged=was_merged, reads=agreeing,
                                  source="sweep")

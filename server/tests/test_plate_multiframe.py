@@ -250,7 +250,7 @@ class _ScriptedOcr:
         self.reads = list(reads)
         self.calls = []
 
-    async def __call__(self, jpeg, camera_handle, event_id=None):
+    async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
         self.calls.append((jpeg, camera_handle, event_id))
         return self.reads.pop(0) if self.reads else None
 
@@ -339,9 +339,21 @@ def test_ingest_claims_the_cache_and_passes_candidates():
     assert "_attempt_cache.claim(" in src, (
         "ingest no longer claims early-attempt reads — the latency half "
         "of multi-frame OCR is disconnected")
-    assert "background.add_task(enrich_event_plate, row.id, candidates or None)" in src, (
+    assert "background.add_task(enrich_event_plate, row.id, candidates or None," in src, (
         "ingest no longer hands candidates to the enrichment sweep — the "
         "recall half of multi-frame OCR is disconnected")
+    # Named, not positional: these assert the two time sources reach the
+    # sweep, and an earlier version pinned the exact closing paren — which
+    # broke the moment a third argument was added, flagging a correct
+    # change as a regression. What matters is that both are passed.
+    assert "candidate_stamps" in src, (
+        "ingest no longer hands the candidates' capture times to the "
+        "sweep — a winning read would have no observed_at, and the "
+        "vehicle list would fall back to the visit's start time (#451)")
+    assert "payload.evidence_ts" in src, (
+        "ingest no longer hands the evidence frame's capture time to the "
+        "sweep — and on a camera without the LPR skill that is the ONLY "
+        "look there is, so every one of its reads would be undated (#451)")
     assert '@router.post("/plates/attempt"' in src, (
         "the early-attempt endpoint is gone — Tier-0's posts would 404")
 
@@ -378,7 +390,7 @@ def test_early_attempt_parks_read_and_covers_the_ingest_race(db, monkeypatch):
     s.commit()
     s.close()
 
-    async def fake_ocr(jpeg, camera_handle, event_id=None):
+    async def fake_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         assert camera_handle.startswith("cam")
         return _accepted("RACE99")
 
@@ -403,7 +415,7 @@ def test_early_attempt_rejected_read_parks_nothing(db, monkeypatch):
     fresh = pac.PlateAttemptCache()
     monkeypatch.setattr(pac, "cache", fresh)
 
-    async def fake_ocr(jpeg, camera_handle, event_id=None):
+    async def fake_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         return _rejected("JUNK1", [0.1] * 5)
 
     monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
@@ -592,7 +604,7 @@ def test_early_attempt_carries_its_crop_through_to_the_row(
     s.commit()
     s.close()
 
-    async def fake_ocr(jpeg, camera_handle, event_id=None):
+    async def fake_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         return _accepted("EARLY7")
 
     monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
@@ -803,9 +815,9 @@ def test_the_sweep_holds_no_session_while_ocr_runs(db, monkeypatch):
     monkeypatch.setattr(cdb, "SessionLocal", _tracking)
 
     class _Watching(_ScriptedOcr):
-        async def __call__(self, jpeg, camera_handle, event_id=None):
+        async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
             live["peak_during_ocr"] = max(live["peak_during_ocr"], live["n"])
-            return await super().__call__(jpeg, camera_handle, event_id)
+            return await super().__call__(jpeg, camera_handle, event_id, observed_at)
 
     monkeypatch.setattr(pe, "_ocr_jpeg", _Watching([_accepted("CLEAR1")]))
     asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))
@@ -824,14 +836,14 @@ def test_a_plate_written_during_ocr_is_not_overwritten(db, monkeypatch):
     SessionLocal, row_id = db
 
     class _RacingOcr(_ScriptedOcr):
-        async def __call__(self, jpeg, camera_handle, event_id=None):
+        async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
             other = SessionLocal()
             try:
                 other.get(models.TimelineEvent, row_id).plate_text = "EARLY1"
                 other.commit()
             finally:
                 other.close()
-            return await super().__call__(jpeg, camera_handle, event_id)
+            return await super().__call__(jpeg, camera_handle, event_id, observed_at)
 
     monkeypatch.setattr(pe, "_ocr_jpeg", _RacingOcr([_accepted("LATE99")]))
     asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))
@@ -844,14 +856,14 @@ def test_a_row_deleted_during_ocr_does_not_raise(db, monkeypatch):
     SessionLocal, row_id = db
 
     class _DeletingOcr(_ScriptedOcr):
-        async def __call__(self, jpeg, camera_handle, event_id=None):
+        async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
             other = SessionLocal()
             try:
                 other.delete(other.get(models.TimelineEvent, row_id))
                 other.commit()
             finally:
                 other.close()
-            return await super().__call__(jpeg, camera_handle, event_id)
+            return await super().__call__(jpeg, camera_handle, event_id, observed_at)
 
     monkeypatch.setattr(pe, "_ocr_jpeg", _DeletingOcr([_accepted("GONE11")]))
     asyncio.run(pe.enrich_event_plate(row_id, [b"a"]))   # must not raise

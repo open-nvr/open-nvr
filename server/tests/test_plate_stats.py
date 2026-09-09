@@ -245,3 +245,151 @@ def test_vehicle_report_owner_scoped(db):
     got = vehicle_report(s, year=2026, month=8, scope=visible_camera_ids(s, users["alice"]))
     assert {p["plate"] for p in got["per_plate"]} == {"AAA111", "BBB222"}
     assert got["total_reads"] == 3
+
+
+# ── the aggregations date a read by observed_at (#451) ─────────────
+#
+# The fixture above sets only started_at, so every test before this
+# point already pins the fallback for rows written before the column
+# existed. These pin the other half: when a read knows when it was
+# SEEN, that is the time the aggregations use.
+
+
+def _read(s, cams, cam, plate, *, started, observed=None):
+    s.add(models.TimelineEvent(
+        camera_id=cams[cam].id, source="tier0", event_type="track",
+        label="car", plate_text=plate,
+        started_at=started, observed_at=observed))
+    s.commit()
+
+
+def test_dwell_time_is_measured_between_reads_not_visit_starts(db):
+    """The headline case. Both visits began well before their plates
+    were read, and by different amounts — a duration built from
+    started_at would silently include the difference between two OCR
+    lags, and that difference is largest when a gate is busiest."""
+    from services.timeline_service import plate_sessions
+
+    s, users, cams = db
+    # In: visit opened at 10:00, plate read at 10:05 (5 min of track).
+    _read(s, cams, "gate", "DWELL1",
+          started=NOW - timedelta(hours=2),
+          observed=NOW - timedelta(hours=2) + timedelta(minutes=5))
+    # Out: visit opened at 11:00, plate read at 11:01 (1 min of track).
+    _read(s, cams, "yard", "DWELL1",
+          started=NOW - timedelta(hours=1),
+          observed=NOW - timedelta(hours=1) + timedelta(minutes=1))
+    got = plate_sessions(
+        s, plate="DWELL1",
+        in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
+        scope=visible_camera_ids(s, users["alice"]))
+    closed = got["sessions"][0]
+    # Read to read: 10:05 -> 11:01 = 56 minutes. Visit start to visit
+    # start would have said 60 — four minutes of our own OCR lag,
+    # reported to the operator as time the vehicle was on site.
+    assert closed["duration_seconds"] == 56 * 60
+    assert closed["entered_at"].startswith("2026-08-29T10:05")
+    assert closed["exited_at"].startswith("2026-08-29T11:01")
+
+
+def test_first_and_last_seen_use_the_read_time(db):
+    from services.timeline_service import plate_summary
+
+    s, users, cams = db
+    _read(s, cams, "gate", "SEEN01",
+          started=NOW - timedelta(hours=3),
+          observed=NOW - timedelta(hours=3) + timedelta(minutes=7))
+    got = plate_summary(s, plate="SEEN01",
+                        scope=visible_camera_ids(s, users["alice"]))
+    assert got["total_reads"] == 1
+    assert got["first_seen"].startswith("2026-08-29T09:07")
+    assert got["last_seen"].startswith("2026-08-29T09:07")
+
+
+def test_a_row_with_no_read_time_still_falls_back(db):
+    """Mixed estates are the normal case during a rollout: rows written
+    before the column sit beside rows written after it."""
+    from services.timeline_service import plate_summary
+
+    s, users, cams = db
+    _read(s, cams, "gate", "MIX001", started=NOW - timedelta(hours=4))
+    _read(s, cams, "gate", "MIX001",
+          started=NOW - timedelta(hours=1),
+          observed=NOW - timedelta(minutes=50))
+    got = plate_summary(s, plate="MIX001",
+                        scope=visible_camera_ids(s, users["alice"]))
+    assert got["total_reads"] == 2
+    assert got["first_seen"].startswith("2026-08-29T08:00")   # fallback
+    assert got["last_seen"].startswith("2026-08-29T11:10")    # observed
+
+
+def test_the_window_and_day_series_bucket_by_the_read_time(db):
+    """Also the type check: coalesce() must hand back a real datetime,
+    not a string — the day bucketing calls .date() on it."""
+    s, users, cams = db
+    # Visit opened just OUTSIDE the 24h window; the plate was read just
+    # inside it. The read is what happened in the window.
+    scope = visible_camera_ids(s, users["alice"])
+    before = plate_stats(s, days=1, scope=scope, now=NOW)["total_reads"]
+    _read(s, cams, "gate", "EDGE01",
+          started=NOW - timedelta(hours=25),
+          observed=NOW - timedelta(hours=23))
+    got = plate_stats(s, days=1, scope=scope, now=NOW)
+    # The visit start is 25h old, so a started_at window would have
+    # dropped this read entirely.
+    assert got["total_reads"] == before + 1
+    # NOW is the 29th at noon, so 23h earlier is the 28th — and EDGE01
+    # is the only read that far back. The bucket proves it was dated by
+    # the read rather than by the visit start (which is the 28th too,
+    # but an hour earlier and outside the window altogether).
+    by_day = {d["day"]: d["reads"] for d in got["per_day"]}
+    assert by_day.get("2026-08-28") == 1
+
+
+def test_the_monthly_report_dates_reads_by_when_they_happened(db):
+    """A read at 00:20 on the 1st, from a visit that opened at 23:50 on
+    the last day of the previous month, belongs to the new month."""
+    from services.timeline_service import vehicle_report
+
+    s, users, cams = db
+    _read(s, cams, "gate", "MONTH1",
+          started=datetime(2026, 7, 31, 23, 50, tzinfo=timezone.utc),
+          observed=datetime(2026, 8, 1, 0, 20, tzinfo=timezone.utc))
+    got = vehicle_report(s, year=2026, month=8,
+                         scope=visible_camera_ids(s, users["alice"]))
+    plates = {p["plate"] for p in got["per_plate"]}
+    assert "MONTH1" in plates
+    row = next(p for p in got["per_plate"] if p["plate"] == "MONTH1")
+    assert row["first_seen"].startswith("2026-08-01T00:20")
+    assert "2026-08-01" in {d["day"] for d in got["per_day"]}
+
+
+def test_the_read_time_window_still_seeks_the_index(db):
+    """SEEN_AT is coalesce(observed_at, started_at), and an expression
+    cannot use the plain (camera_id, started_at) index: the planner
+    matched camera_id and then tested the range against every row the
+    camera ever recorded — and this table holds every track, people
+    included. ix_events_cam_seen exists to restore the seek, so pin it.
+    """
+    from sqlalchemy import text as sa_text
+
+    from models import TimelineEvent
+    from services.timeline_service import SEEN_AT
+
+    s, users, cams = db
+    q = (
+        s.query(TimelineEvent)
+        .filter(TimelineEvent.plate_text.isnot(None))
+        .filter(TimelineEvent.camera_id.in_([cams["gate"].id]))
+        .filter(SEEN_AT >= NOW - timedelta(days=1))
+    )
+    sql = str(q.statement.compile(
+        s.get_bind(), compile_kwargs={"literal_binds": True}))
+    plan = " ".join(
+        str(r[-1]) for r in s.execute(sa_text("EXPLAIN QUERY PLAN " + sql))
+    )
+    assert "ix_events_cam_seen" in plan, plan
+    # Not merely "the index was opened": the range must be part of the
+    # seek. Without it the plan says (camera_id=?) alone and the window
+    # degrades to a filter over that camera's whole history.
+    assert "camera_id=? AND" in plan, plan

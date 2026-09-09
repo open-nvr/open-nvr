@@ -27,10 +27,34 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import func as _func
 from sqlalchemy.orm import Session
 
 from models import TimelineEvent
 from services.camera_scope import can_view_camera, scope_query
+
+#: When a PLATE READ happened, for the aggregations below.
+#:
+#: ``observed_at`` is the capture time of the look the read won on;
+#: ``started_at`` is the VISIT's start, which is a different moment and,
+#: on a merged track, can belong to a different vehicle entirely. Reads
+#: written before observed_at existed have only the fallback (#451).
+#:
+#: This matters most where reads are SUBTRACTED. A dwell time built from
+#: two started_at values is off by the difference between two visits'
+#: OCR lag, and that lag is largest exactly when a gate is busiest — so
+#: the number was least trustworthy when it mattered most.
+#:
+#: Only for plate-filtered queries. ``query_events`` deliberately keeps
+#: filtering by started_at: it ranges over EVERY visit (people, vehicles,
+#: alarms), most of which have no read to be dated by, and the visit's
+#: start is the honest answer to "who was here between 3 and 4".
+SEEN_AT = _func.coalesce(TimelineEvent.observed_at, TimelineEvent.started_at)
+
+
+def seen_at_of(row) -> datetime | None:
+    """The Python-side twin of :data:`SEEN_AT`, for rows already loaded."""
+    return getattr(row, "observed_at", None) or row.started_at
 
 
 def record_track_visit(
@@ -142,7 +166,7 @@ def plate_stats(
     base = (
         db.query(TimelineEvent)
         .filter(TimelineEvent.plate_text.isnot(None))
-        .filter(TimelineEvent.started_at >= cutoff)
+        .filter(SEEN_AT >= cutoff)
     )
     base = scope_query(base, TimelineEvent.camera_id, scope)
 
@@ -163,11 +187,11 @@ def plate_stats(
         )
     ]
     # Day bucketing in SQL is dialect-divergent (date_trunc vs strftime);
-    # the window is small (<= a few thousand rows of (id, started_at)),
+    # the window is small (<= a few thousand rows of one timestamp),
     # so bucket in Python for portability.
     per_day_counts: dict[str, int] = {}
-    for (started_at,) in base.with_entities(TimelineEvent.started_at).all():
-        day = started_at.date().isoformat()
+    for (seen_at,) in base.with_entities(SEEN_AT).all():
+        day = seen_at.date().isoformat()
         per_day_counts[day] = per_day_counts.get(day, 0) + 1
     per_day = [
         {"day": day, "reads": per_day_counts[day]}
@@ -203,9 +227,7 @@ def plate_summary(
 
     total = base.count()
     first_seen, last_seen = (
-        base.with_entities(
-            func.min(TimelineEvent.started_at), func.max(TimelineEvent.started_at)
-        ).one()
+        base.with_entities(func.min(SEEN_AT), func.max(SEEN_AT)).one()
         if total
         else (None, None)
     )
@@ -260,18 +282,21 @@ def plate_sessions(
         .filter(TimelineEvent.camera_id.in_(gates))
     )
     q = scope_query(q, TimelineEvent.camera_id, scope)
-    reads = q.order_by(TimelineEvent.started_at.asc()).all()
+    reads = q.order_by(SEEN_AT.asc()).all()
 
     def _row(entry, exit_) -> dict:
+        entered = seen_at_of(entry) if entry is not None else None
+        exited = seen_at_of(exit_) if exit_ is not None else None
         duration = None
-        if entry is not None and exit_ is not None:
-            duration = max(
-                0, int((exit_.started_at - entry.started_at).total_seconds())
-            )
+        if entered is not None and exited is not None:
+            # Both ends are READ times, so the difference is how long the
+            # vehicle was inside — not that plus the difference between
+            # two visits' OCR lag.
+            duration = max(0, int((exited - entered).total_seconds()))
         return {
-            "entered_at": entry.started_at.isoformat() if entry else None,
+            "entered_at": entered.isoformat() if entered else None,
             "entry_camera_id": entry.camera_id if entry else None,
-            "exited_at": exit_.started_at.isoformat() if exit_ else None,
+            "exited_at": exited.isoformat() if exited else None,
             "exit_camera_id": exit_.camera_id if exit_ else None,
             "duration_seconds": duration,
         }
@@ -324,11 +349,11 @@ def gate_occupancy(
         db.query(TimelineEvent)
         .filter(TimelineEvent.plate_text.isnot(None))
         .filter(TimelineEvent.camera_id.in_(gates))
-        .filter(TimelineEvent.started_at >= cutoff)
+        .filter(SEEN_AT >= cutoff)
     )
     q = scope_query(q, TimelineEvent.camera_id, scope)
     last_by_plate: dict[str, TimelineEvent] = {}
-    for r in q.order_by(TimelineEvent.started_at.asc()).all():
+    for r in q.order_by(SEEN_AT.asc()).all():
         last_by_plate[r.plate_text] = r
     inside = sorted(
         p for p, r in last_by_plate.items() if r.camera_id in in_set
@@ -364,8 +389,8 @@ def vehicle_report(
     base = (
         db.query(TimelineEvent)
         .filter(TimelineEvent.plate_text.isnot(None))
-        .filter(TimelineEvent.started_at >= start)
-        .filter(TimelineEvent.started_at < end)
+        .filter(SEEN_AT >= start)
+        .filter(SEEN_AT < end)
     )
     base = scope_query(base, TimelineEvent.camera_id, scope)
 
@@ -383,8 +408,8 @@ def vehicle_report(
         base.with_entities(
             TimelineEvent.plate_text,
             func.count(TimelineEvent.id),
-            func.min(TimelineEvent.started_at),
-            func.max(TimelineEvent.started_at),
+            func.min(SEEN_AT),
+            func.max(SEEN_AT),
         )
         .group_by(TimelineEvent.plate_text)
         .order_by(func.count(TimelineEvent.id).desc())
@@ -393,13 +418,12 @@ def vehicle_report(
     )
     per_plate_cameras: dict[str, dict[int, int]] = {}
     per_day_counts: dict[str, int] = {}
-    for plate, cid, started_at in base.with_entities(
-        TimelineEvent.plate_text, TimelineEvent.camera_id,
-        TimelineEvent.started_at,
+    for plate, cid, seen_at in base.with_entities(
+        TimelineEvent.plate_text, TimelineEvent.camera_id, SEEN_AT,
     ).all():
         per_plate_cameras.setdefault(plate, {})
         per_plate_cameras[plate][cid] = per_plate_cameras[plate].get(cid, 0) + 1
-        day = started_at.date().isoformat()
+        day = seen_at.date().isoformat()
         per_day_counts[day] = per_day_counts.get(day, 0) + 1
 
     per_plate = [

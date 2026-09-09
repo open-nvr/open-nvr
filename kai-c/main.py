@@ -1279,6 +1279,7 @@ async def _publish_inference_completed(
     latency_ms: int,
     body: Dict[str, Any],
     event_id: Optional[int] = None,
+    observed_at: Optional[str] = None,
 ) -> None:
     """Build an ``InferenceCompletedEvent`` from the response body the
     adapter returned and publish it on NATS. Shared by HTTP and WS
@@ -1351,6 +1352,7 @@ async def _publish_inference_completed(
         camera_id=camera_id,
         correlation_id=correlation_id,
         event_id=event_id,
+        observed_at=observed_at,
     )
     if normalised is not None:
         subject, envelope = normalised
@@ -1473,6 +1475,12 @@ async def v1_infer(
         # EVENT_CONTRACTS.md, plate.recognized.v1). Plucked like
         # camera_id: a top-level request param, echoed never interpreted.
         raw_event_id = payload.get("event_id") if isinstance(payload, dict) else None
+        # ``observed_at`` rides along the same way: when the frame this
+        # inference ran on was captured, ISO-8601 UTC. Plucked and echoed,
+        # never interpreted — see EVENT_CONTRACTS.md, plate.recognized.v1.
+        raw_observed_at = (
+            payload.get("observed_at") if isinstance(payload, dict) else None
+        )
         asyncio.create_task(_publish_inference_completed(
             adapter_name=adapter_name,
             adapter=adapter,
@@ -1483,6 +1491,8 @@ async def v1_infer(
             event_id=raw_event_id
             if isinstance(raw_event_id, int) and not isinstance(raw_event_id, bool)
             else None,
+            observed_at=raw_observed_at
+            if isinstance(raw_observed_at, str) else None,
         ))
         return body
 

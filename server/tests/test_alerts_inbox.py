@@ -197,6 +197,53 @@ def test_unparseable_fired_at_still_stores(db):
     assert _rows(SessionLocal)[0].fired_at is not None
 
 
+# ── observed_at: when it happened vs when the app decided (#451) ───
+
+
+def test_the_alert_carries_when_the_thing_was_seen(db):
+    """fired_at is when the producing app finished deciding; observed_at
+    is when the plate was actually read. Storing only fired_at is what
+    made one read show two different times — this page and the vehicle
+    list disagreed by however long OCR and the bus took."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(
+        evidence={"plate": "ZZ999XX",
+                  "observed_at": "2026-09-03T09:59:52+00:00"},
+    )) == "stored"
+    row = _rows(SessionLocal)[0]
+    assert row.observed_at is not None
+    # Eight seconds before the app fired — the pipeline lag, now visible
+    # rather than baked into the only timestamp on the row.
+    assert row.observed_at.replace(tzinfo=None).isoformat()         == "2026-09-03T09:59:52"
+    assert row.fired_at is not None
+
+
+def test_an_alert_without_an_observed_time_is_undated_not_guessed(db):
+    """Producers that do not send one leave it NULL and the UI falls
+    back to fired_at. Copying fired_at in here would forge the very
+    distinction the column exists to make."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope()) == "stored"
+    assert _rows(SessionLocal)[0].observed_at is None
+
+
+def test_a_junk_observed_time_never_costs_us_the_alert(db):
+    """An app bug in one field must not hide a fired alarm."""
+    SessionLocal, _ = db
+    for i, junk in enumerate([12345, "not-a-date", None, {"a": 1}]):
+        assert apply_alert(_envelope(
+            alert_id=f"alrt_junk{i}",
+            evidence={"observed_at": junk},
+        )) == "stored"
+    assert all(r.observed_at is None for r in _rows(SessionLocal))
+
+
+def test_evidence_that_is_not_a_dict_is_simply_not_a_source(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(evidence="just a string")) == "stored"
+    assert _rows(SessionLocal)[0].observed_at is None
+
+
 # ── the API (list / ack / ring config) ─────────────────────────────
 
 

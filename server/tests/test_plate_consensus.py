@@ -160,7 +160,7 @@ class _ScriptedOcr:
         self.reads = list(reads)
         self.calls = []
 
-    async def __call__(self, jpeg, camera_handle, event_id=None):
+    async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
         self.calls.append((jpeg, camera_handle, event_id))
         return self.reads.pop(0) if self.reads else None
 
@@ -442,7 +442,7 @@ def test_sweep_attaches_evidence_when_the_same_plate_landed_meanwhile(
     SessionLocal, row_id = db
     from services.plate_event_consumer import apply_plate_event
 
-    async def racing_ocr(jpeg, camera_handle, event_id=None):
+    async def racing_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         # the bus consumer wins the write while the sweep is in OCR
         # (simulating an install without the pending-mark, or a foreign
         # producer's event for the same row)
@@ -466,7 +466,7 @@ def test_sweep_consensus_replaces_a_lone_bus_write(db, stored, monkeypatch):
     SessionLocal, row_id = db
     from services.plate_event_consumer import apply_plate_event
 
-    async def racing_ocr(jpeg, camera_handle, event_id=None):
+    async def racing_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         if jpeg == b"a":
             assert apply_plate_event(_envelope(row_id, "R183JF")) == "applied"
         return _acc("R197GB", 0.9)

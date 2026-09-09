@@ -854,6 +854,7 @@ class PlateAlerter(Detector):
             camera_id, plate,
             confidence=confidence,
             vehicle_label=payload.get("vehicle_label"),
+            observed_at=payload.get("observed_at"),
             correlation_id=event.get("correlation_id"),
             monitor=monitor,
             registry_entry=registry_entry if registry_active else None,
@@ -920,6 +921,7 @@ class PlateAlerter(Detector):
         confidence: float | None,
         vehicle_label: str | None,
         correlation_id: str | None,
+        observed_at: str | None = None,
         monitor: dict[str, Any] | None = None,
         registry_entry: dict[str, str] | None = None,
         registry_expired: bool = False,
@@ -979,6 +981,14 @@ class PlateAlerter(Detector):
                 "plate_text": plate,
                 "confidence": confidence,
                 "vehicle_label": vehicle_label,
+                # WHEN the plate was seen, forwarded from the platform's
+                # event. fired_at is when THIS app got round to deciding,
+                # which lags the read by however long OCR and the bus
+                # took — so an operator comparing the alarm with the
+                # vehicle list saw two times for one read. Optional: an
+                # older platform sends nothing and the inbox falls back.
+                "observed_at": observed_at
+                if isinstance(observed_at, str) and observed_at else None,
                 "in_allowlist": plate in allowlist,
                 # Kept name for consumers: "on the bad list" now means
                 # "has a monitor rule" (denylist is monitor shorthand).

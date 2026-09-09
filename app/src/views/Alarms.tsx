@@ -24,6 +24,8 @@ import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import {
+  alarmSeenAt,
+  alarmSeenTitle,
   alertsInboxService,
   type InboxAlert,
   type RingConfig,
@@ -271,7 +273,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
               <th className="px-3 py-2">Alarm</th>
               <th className="px-3 py-2">Source</th>
               <th className="px-3 py-2">Camera</th>
-              <th className="px-3 py-2">Fired</th>
+              <th className="px-3 py-2">Seen</th>
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2" />
             </tr>
@@ -312,8 +314,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
                 <td className="px-3 py-2 text-[var(--text-dim)]">
                   {a.camera_id || '—'}
                 </td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">
-                  {a.fired_at ? new Date(a.fired_at).toLocaleString() : '—'}
+                <td className="px-3 py-2 text-[var(--text-dim)]"
+                    title={alarmSeenTitle(a)}>
+                  {alarmSeenAt(a)}
                 </td>
                 <td className="px-3 py-2">
                   {a.acknowledged_at ? (

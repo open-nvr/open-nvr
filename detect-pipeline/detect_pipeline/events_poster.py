@@ -31,6 +31,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .captime import capture_wall
 from .metrics import record_visit_dropped, record_visit_posted
 
 log = logging.getLogger("detect_pipeline.events")
@@ -71,6 +72,20 @@ class Visit:
     # off or the tracker was never fed pixels. Appended LAST, same rule
     # candidate_jpegs followed, so positional constructions keep meaning.
     scene_jpeg: bytes | None = None
+    # Wall-clock capture time of each entry in ``candidate_jpegs``, same
+    # order. The read that wins core's consensus sweep takes its
+    # observed_at from here — the moment in the video the winning look
+    # came from, which is the only time on the row that provably belongs
+    # to the vehicle whose number was read. Empty (never partial) when
+    # the ring could not supply stamps. Appended LAST, same rule as
+    # above, so positional constructions keep meaning.
+    candidate_ts: tuple = ()
+    # Wall-clock capture time of the frame ``jpeg`` was cut from. When a
+    # visit ships no candidates — every visit on a camera without the LPR
+    # skill — core's sweep OCRs that evidence crop instead, and this is the
+    # only time that read can honestly carry. Appended LAST, same rule as
+    # above, so positional constructions keep meaning.
+    evidence_ts: float | None = None
 
 
 def _core_camera_id(v: Visit) -> int:
@@ -218,6 +233,10 @@ class VisitPoster:
         }
         if v.jpeg:
             body["evidence_jpeg_b64"] = base64.b64encode(v.jpeg).decode("ascii")
+            # Dates the crop above, and only it. Core uses this when the
+            # visit ships no candidates and its sweep reads that crop.
+            if v.evidence_ts is not None:
+                body["evidence_ts"] = float(v.evidence_ts)
         # Omitted entirely when absent (not sent as null), so a core that
         # predates the field never sees a key it has no opinion about.
         if v.scene_jpeg:
@@ -226,6 +245,11 @@ class VisitPoster:
             body["candidate_jpegs_b64"] = [
                 base64.b64encode(j).decode("ascii") for j in v.candidate_jpegs
             ]
+            # Sent only when it lines up 1:1 with the crops: core zips the
+            # two, and a short list would hand a read someone else's
+            # timestamp. A missing list just means no observed_at.
+            if len(v.candidate_ts) == len(v.candidate_jpegs):
+                body["candidate_ts"] = [float(t) for t in v.candidate_ts]
         req = urllib.request.Request(
             f"{self.core_url}{EVENTS_PATH}",
             data=json.dumps(body).encode("utf-8"),
@@ -269,7 +293,7 @@ class VisitLifecycle:
                 v = self._live[tr.id] = {
                     "start": now_wall, "label": tr.label, "score": float(tr.score),
                     "stationary": False, "confirmed": False, "crop": None,
-                    "ring": None, "scene": None,
+                    "crop_ts": None, "ring": None, "scene": None,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
@@ -282,6 +306,11 @@ class VisitLifecycle:
             crop = getattr(tr, "best_crop", None)
             if crop is not None:
                 v["crop"] = crop
+                # Kept in lockstep with the crop: a stamp from an older
+                # best frame would date the read by a look it did not
+                # come from. getattr default, like best_crop itself —
+                # test doubles and older trackers lack the field.
+                v["crop_ts"] = getattr(tr, "best_crop_ts", None)
             # getattr with a default, like best_crop above: test doubles and
             # any older tracker simply do not carry the field.
             scene = getattr(tr, "best_scene_jpeg", None)
@@ -329,6 +358,7 @@ class VisitLifecycle:
             except Exception:
                 jpeg = None  # a visit without a photo still beats no history
         candidate_jpegs: list[bytes] = []
+        candidate_ts: list[float] = []
         ring = v.get("ring")
         if ring is not None:
             try:
@@ -338,11 +368,19 @@ class VisitLifecycle:
                     encoded = _encode_jpeg(cand.crop)
                     if encoded:
                         candidate_jpegs.append(encoded)
+                        # Monotonic on the ring (the tracker's clock) —
+                        # converted here, while the reading is fresh, so
+                        # the age it is measured against is the encode,
+                        # not core's ingest.
+                        candidate_ts.append(capture_wall(cand.ts))
             except Exception:
                 # Candidates are an enhancement; the visit itself (and its
                 # single-crop enrichment fallback) must never be lost to a
                 # bad encode.
                 candidate_jpegs = candidate_jpegs or []
+                # Never ship a partial stamp list — see _post.
+                if len(candidate_ts) != len(candidate_jpegs):
+                    candidate_ts = []
         return Visit(
             camera_id=self.camera_id,
             nvr_camera_id=self.nvr_camera_id,
@@ -354,6 +392,13 @@ class VisitLifecycle:
             stationary=v["stationary"],
             jpeg=jpeg,
             candidate_jpegs=tuple(candidate_jpegs),
+            candidate_ts=tuple(candidate_ts),
+            # Converted here, like the candidate stamps: the age measured
+            # is this call, not core's ingest. None when the tracker never
+            # recorded one (older tracker, or a visit with no crop).
+            evidence_ts=(capture_wall(v["crop_ts"])
+                         if jpeg is not None and v.get("crop_ts") is not None
+                         else None),
             # Already bytes — deliberately NOT re-encoded here (unlike crop
             # and the candidates, which arrive as pixels).
             scene_jpeg=v.get("scene"),

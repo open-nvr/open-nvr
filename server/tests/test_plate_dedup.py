@@ -204,7 +204,7 @@ class _ScriptedOcr:
         self.reads = list(reads)
         self.calls = []
 
-    async def __call__(self, jpeg, camera_handle, event_id=None):
+    async def __call__(self, jpeg, camera_handle, event_id=None, observed_at=None):
         self.calls.append((jpeg, camera_handle, event_id))
         return self.reads.pop(0) if self.reads else None
 
@@ -341,7 +341,7 @@ def test_early_attempt_duplicate_parks_but_never_writes_the_row(db, monkeypatch)
     s.commit()
     s.close()
 
-    async def fake_ocr(jpeg, camera_handle, event_id=None):
+    async def fake_ocr(jpeg, camera_handle, event_id=None, observed_at=None):
         return _accepted("66HH07", conf=0.98)
 
     monkeypatch.setattr(pe, "_ocr_jpeg", fake_ocr)
