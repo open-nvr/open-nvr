@@ -790,11 +790,127 @@ def test_status_healthy_app_proxies_health_and_state(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["health"]["ready"] is True
+    # The SDK's health_snapshot() never sets `status`, so core normalises
+    # its own verdict onto the payload. Without this the catalog chip read
+    # health["status"], found nothing, and rendered every SDK-built app
+    # "unknown" — a healthy app could not show healthy.
+    assert body["health"]["status"] == "ok"
     assert body["state"] == {"active_tracks": 2}
 
     row = client.get("/apps").json()[0]
     assert row["status"] == "ok"
     assert row["last_seen"] is not None
+
+
+def test_status_not_ready_app_reports_degraded(client, monkeypatch):
+    """Reachable but ready=false is 'degraded' — distinct from the
+    unreachable case, so an operator can tell 'starting up / broken
+    inside' from 'nothing is listening'."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _NotReadyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            if url.endswith("/health"):
+                return _Resp({"ready": False, "uptime_s": 1})
+            return _Resp({})
+
+    _register(client)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _NotReadyClient)
+
+    body = client.get("/apps/loitering-detection/status").json()
+    assert body["health"]["status"] == "degraded"
+    assert client.get("/apps").json()[0]["status"] == "unreachable"
+
+
+def test_status_app_declaring_its_own_status_is_left_alone(client, monkeypatch):
+    """A hand-written app (the camera-agent) that already emits a status
+    string keeps it — core normalises only when the field is missing."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _OwnStatusClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            if url.endswith("/health"):
+                return _Resp({"status": "starting", "ready": True})
+            return _Resp({})
+
+    _register(client)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _OwnStatusClient)
+
+    body = client.get("/apps/loitering-detection/status").json()
+    assert body["health"]["status"] == "starting"
+
+
+def test_status_non_object_health_does_not_500(client, monkeypatch):
+    """An app answering 200 with a non-object body must not crash the
+    probe — the dict access behind `ready` would raise otherwise."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _ListClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            if url.endswith("/health"):
+                return _Resp(["not", "an", "object"])
+            return _Resp({})
+
+    _register(client)
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", _ListClient)
+
+    resp = client.get("/apps/loitering-detection/status")
+    assert resp.status_code == 200
+    assert resp.json()["health"]["body"] == ["not", "an", "object"]
 
 
 def test_status_unknown_app_is_404(client):

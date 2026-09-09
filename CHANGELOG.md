@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **App Catalog: "Check" could never report a healthy app.** The chip read
+  `health.status`, but the SDK's `health_snapshot()` speaks `ready` (spec
+  §03) and never sets a `status` string — so every SDK-built app came back
+  "unknown", and "unreachable" only ever appeared because core writes that
+  string itself on a failed probe. The one app that looked healthy was the
+  hand-written camera-agent, which happens to emit `status`. `GET
+  /apps/{id}/status` now publishes the verdict it was already computing
+  (`ok`, or `degraded` when reachable but not ready), leaving an app's own
+  `status` untouched when it sets one; the chip falls back to `ready` for
+  older cores. A non-object `/health` body no longer 500s the probe, and
+  the button reads "Check health" with a tooltip saying what it does and
+  why it is on demand.
+
 - **A freshly installed app needed a manual Refresh to appear under
   Installed.** The poll that watches the reconciler and invalidates
   `['apps']` lived inside the install dialog, so dismissing the dialog —

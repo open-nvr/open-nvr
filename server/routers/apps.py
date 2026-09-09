@@ -1372,7 +1372,12 @@ async def get_app_status(
         try:
             health_resp = await client.get(f"{base_url}/health")
             health_resp.raise_for_status()
-            health = health_resp.json()
+            payload = health_resp.json()
+            # /health is contractually an object. An app that answers 200
+            # with a list or a bare scalar must not crash the probe (the
+            # dict access below would raise and 500 the whole endpoint) —
+            # keep the body for the operator under a key and carry on.
+            health = payload if isinstance(payload, dict) else {"body": payload}
             reachable = True
         except Exception:
             health = {"status": "unreachable"}
@@ -1389,6 +1394,15 @@ async def get_app_status(
     # a 200 rather than flagging a healthy app unreachable.
     ready = reachable and bool(health.get("ready", True))
     row.status = "ok" if ready else "unreachable"
+    # PUBLISH that verdict. The SDK's health_snapshot() speaks `ready`
+    # and never sets `status`, so a consumer reading health["status"] saw
+    # nothing for every SDK-built app and rendered it "unknown" — only
+    # hand-written apps (the camera-agent) that happen to emit a `status`
+    # string ever looked healthy, and the failure paths below are the
+    # only reason "unreachable" showed at all. Normalising here keeps ONE
+    # derivation of health: an app that sets its own `status` still wins.
+    if reachable and not isinstance(health.get("status"), str):
+        health["status"] = "ok" if ready else "degraded"
     if reachable:
         row.last_seen = datetime.now(UTC)
     db.commit()

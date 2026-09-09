@@ -236,7 +236,9 @@ export type AppEgress = {
 }
 
 export type AppStatusResp = {
-  health?: { status?: string; [k: string]: any } | null
+  // `ready` is the SDK contract (spec §03); `status` is the string core
+  // normalises on top of it. Read status first, fall back to ready.
+  health?: { status?: string; ready?: boolean; [k: string]: any } | null
   state?: any
 }
 
@@ -956,8 +958,13 @@ function AppStatusChip({ appId }: { appId: string }) {
 
   if (!requested) {
     return (
-      <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => setRequested(true)}>
-        <Activity size={12} /> Check
+      <Button
+        variant="ghost"
+        className="text-xs px-2 py-1"
+        onClick={() => setRequested(true)}
+        title="Ask the app for its health — core fetches the app's /health and /state on demand. Not automatic: probing every card on load would fan out one request per installed app."
+      >
+        <Activity size={12} /> Check health
       </Button>
     )
   }
@@ -965,7 +972,19 @@ function AppStatusChip({ appId }: { appId: string }) {
   if (statusQuery.isError) {
     return <Badge variant="destructive">{extractApiError(statusQuery.error, 'status check failed')}</Badge>
   }
-  const health = statusQuery.data?.health?.status ?? 'unknown'
+  // Core normalises `status` onto /health now. Still derive from the
+  // contract's own `ready` when it is absent, so a newer UI against an
+  // older core shows the truth instead of "unknown" — the SDK has always
+  // spoken `ready` (spec §03), and `status` is the convenience on top.
+  const rawHealth = statusQuery.data?.health
+  const health =
+    typeof rawHealth?.status === 'string'
+      ? rawHealth.status
+      : typeof rawHealth?.ready === 'boolean'
+        ? rawHealth.ready
+          ? 'ok'
+          : 'degraded'
+        : 'unknown'
   return (
     <span className="inline-flex items-center gap-1">
       <Badge variant={statusVariant(health)}>{health}</Badge>
