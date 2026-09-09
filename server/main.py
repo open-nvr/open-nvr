@@ -244,9 +244,10 @@ async def lifespan(app: FastAPI):
                         # on the boot that creates it. Doing it every boot
                         # would undo a deliberate revoke.
                         if _pname == "apps.view":
-                            backfill_apps_view(db)
+                            _granted = backfill_apps_view(db)
                             main_logger.info(
-                                "Granted apps.view to roles holding ai.view"
+                                "Granted apps.view to %d role(s) holding "
+                                "ai.view", _granted
                             )
             except Exception:
                 main_logger.warning(

@@ -2079,6 +2079,12 @@ export function UninstalledAppPage({ appId }: { appId: string }) {
 
   const requires = asStringList(app.requires_tasks)
   const external = app.kind === 'external'
+  // The index and /apps are separate cache entries refreshed by separate
+  // requests, so just after an install the index can already say
+  // installed while the registry list this page fell through from is
+  // still stale. Offering "Install" there would be wrong, and briefly
+  // duplicate an install. Say what is happening instead.
+  const registryLagging = Boolean(app.installed)
 
   return (
     <div className="space-y-5">
@@ -2099,7 +2105,7 @@ export function UninstalledAppPage({ appId }: { appId: string }) {
               <PopularityBadge popularity={app.popularity} />
               <VerifiedBadge verified={app.verified} author={app.author} />
               {external && <Badge variant="neutral">third-party</Badge>}
-              <Badge variant="neutral">not installed</Badge>
+              <Badge variant="neutral">{registryLagging ? 'registering…' : 'not installed'}</Badge>
             </div>
             <p className="text-sm text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</p>
             <ProvenanceLine app={app} />
@@ -2109,6 +2115,10 @@ export function UninstalledAppPage({ appId }: { appId: string }) {
               <a href={app.external_url} target="_blank" rel="noreferrer">
                 <Button variant="primary"><ExternalLink size={14} /> Learn more</Button>
               </a>
+            ) : registryLagging ? (
+              <Button variant="outline" onClick={() => indexQuery.refetch()}>
+                <RefreshCw size={14} /> Finishing install…
+              </Button>
             ) : (
               <Button variant="primary" onClick={() => setInstallOpen(true)}>
                 <Download size={14} /> Install

@@ -18,9 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/x")
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
-from core.database import Base  # noqa: E402
-from models import Permission, Role, RolePermission  # noqa: E402
-from services.apps_view_backfill import backfill_apps_view  # noqa: E402
+from core.database import Base
+from models import Permission, Role, RolePermission
+from services.apps_view_backfill import backfill_apps_view
 
 
 @pytest.fixture
