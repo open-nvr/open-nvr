@@ -93,6 +93,16 @@ select optgroup {
   color: var(--text);
 }
 
+/* Placeholders are EXAMPLES and must not pass for values. Preflight draws
+   them at half the input's text colour, which on the register's add form
+   made "MH12DE1433 / A. Sharma / B-402" read like a row already filled
+   in. In the base layer, so a placeholder: utility can still win. */
+@layer base {
+  ::placeholder {
+    color: color-mix(in oklab, var(--text-dim) 55%, transparent);
+  }
+}
+
 /* Reusable UI primitives for consistent styling */
 .card {
   background: var(--panel-2);

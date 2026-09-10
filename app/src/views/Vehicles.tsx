@@ -27,12 +27,15 @@
 // providing app's config endpoint — the same live-update path the
 // catalog form uses.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useEffect, useId, useMemo, useRef, useState,
+  type ChangeEvent, type FormEvent, type ReactNode,
+} from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowRight, BellRing, BookUser, Car, Download, FileText, Fingerprint, History,
-  PhoneCall, Plus, RefreshCw, ScanLine, Search, ShieldAlert, ShieldCheck, Trash2,
-  Upload, Volume2,
+  ArrowRight, BellRing, BookUser, Car, ChevronRight, Download, FileText, Fingerprint,
+  History, Pencil, PhoneCall, Plus, RefreshCw, ScanLine, Search, ShieldAlert,
+  ShieldCheck, Trash2, Upload, Volume2,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
@@ -57,6 +60,8 @@ import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
 import { SegmentedControl } from '../components/ui/SegmentedControl'
+import { Switch } from '../components/ui/Switch'
+import { InfoTip } from '../components/ui/InfoTip'
 import { formatSeenAt, seenAtTitle } from '../lib/time'
 import {
   LPR_SKILL,
@@ -982,7 +987,6 @@ export function Vehicles() {
               + 'Removing it discards that entry and those details.')) {
             return
           }
-          if (list === 'registry' && on) setRegisterPrefill(p)
           toggleList.mutate({ plateText: p, list, on })
         }
 
@@ -1380,6 +1384,7 @@ export function Vehicles() {
             saveConfig.mutate({ camera_roles: next })
           }}
           initialPlate={registerPrefill}
+          onPrefillConsumed={() => setRegisterPrefill('')}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
               onSuccess: () => showSuccess(`Register saved — ${entries.length} vehicles`),
@@ -1940,6 +1945,14 @@ function EvidenceDialog({
 // deliberate: a society secretary has 300 plates in a spreadsheet, and
 // "export" doubles as the import template.
 
+// The register's type column is free text (CSV imports carry whatever a
+// spreadsheet said), so these are the dialog's choices, not a closed set:
+// an existing value outside the list is kept and offered as-is.
+const VEHICLE_TYPES = ['Car', 'Two-wheeler', 'Truck', 'Van', 'Bus', 'Other']
+
+/** Where the overstay alert starts when it is switched on. */
+const OVERSTAY_DEFAULT_HOURS = 4
+
 function RegistryTab({
   registry,
   alarmOnUnknown,
@@ -1948,6 +1961,7 @@ function RegistryTab({
   overstayHours,
   onSetOverstay,
   initialPlate,
+  onPrefillConsumed,
   canEdit,
   saving,
   cameras,
@@ -1963,6 +1977,8 @@ function RegistryTab({
   overstayHours: number
   onSetOverstay: (hours: number) => void
   initialPlate?: string
+  /** Called once `initialPlate` has opened the dialog, so it opens once. */
+  onPrefillConsumed: () => void
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
@@ -1971,22 +1987,32 @@ function RegistryTab({
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
-  const [draft, setDraft] = useState<RegistryEntry>({ plate: initialPlate ?? '' })
+  // The dialog's subject: a new entry to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ entry: RegistryEntry; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
   const [overstayDraft, setOverstayDraft] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-register')
+  const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
+  // Settings are set once and then left alone, so they fold away under the
+  // list — except while nothing is set up, when they are the only useful
+  // thing on the tab.
+  const [settingsOpen, setSettingsOpen] = useState(() => reading.length === 0)
+  const settingsRef = useRef<HTMLDivElement | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const { showError, showSuccess } = useSnackbar()
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    const entry: RegistryEntry = { plate }
-    for (const k of REGISTRY_FIELDS) {
-      const v = (draft[k] ?? '').trim()
-      if (v) entry[k] = v
-    }
-    onSaveRegistry([...registry.filter((r) => r.plate !== plate), entry])
-    setDraft({ plate: '' })
-  }
+  // A plate handed over from elsewhere on the page ("Register" on a
+  // vehicle's history) opens the dialog once, then is spent — otherwise
+  // every later visit to this tab would pop it up again. Only a NEW
+  // hand-over re-runs this; registry edits must not re-open it.
+  useEffect(() => {
+    if (!initialPlate) return
+    const plate = normalizePlate(initialPlate)
+    const existing = registry.find((r) => r.plate === plate)
+    setDialog(existing ? { entry: existing, editing: plate } : { entry: { plate }, editing: null })
+    onPrefillConsumed()
+  }, [initialPlate])
 
   // CSV or Excel — a society's list usually already exists as a sheet.
   const importFile = async (file: File) => {
@@ -2009,14 +2035,7 @@ function RegistryTab({
     }
   }
 
-  const exportCsv = () => {
-    const blob = new Blob([registryToCsv(registry)], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = 'vehicle-register.csv'
-    a.click()
-    URL.revokeObjectURL(a.href)
-  }
+  const exportCsv = () => downloadCsv(registryToCsv(registry), 'vehicle-register.csv')
 
   if (!canEdit) {
     return (
@@ -2028,304 +2047,704 @@ function RegistryTab({
     )
   }
 
+  const saveEntry = (entry: RegistryEntry, replaces: string | null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSaveRegistry([
+      ...registry.filter((r) => r.plate !== entry.plate && r.plate !== replaces),
+      entry,
+    ])
+    setDialog(null)
+  }
+
+  // Saved on blur or Enter — no separate Save button to find. 0 turns the
+  // alert off, the same as the switch.
+  const commitOverstay = () => {
+    if (overstayDraft === null) return
+    const h = Number(overstayDraft)
+    setOverstayDraft(null)
+    if (Number.isFinite(h) && h >= 0 && h !== overstayHours) onSetOverstay(h)
+  }
+
+  const openSettings = () => {
+    setSettingsOpen(true)
+    requestAnimationFrame(() =>
+      settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+
+  const q = query.trim().toLowerCase()
+  const rows = registry
+    .filter((r) => !q || [r.plate, r.owner, r.unit, r.model, r.note]
+      .some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser — the whole register is already here, as app
+  // config — but through the same pager as the server-paged tables, so
+  // every list on the page moves the same way. Clamped rather than reset
+  // by an effect: deleting the last row of the last page must not strand
+  // the operator on an empty page.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (r: RegistryEntry) => setDialog({ entry: r, editing: r.plate })
+
+  const registerColumns: Column<RegistryEntry>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap',
+      cell: (r) => (
+        <>
+          {r.plate}
+          {!entryActive(r) && <Badge variant="warning" className="ml-1.5">expired</Badge>}
+        </>
+      ),
+    },
+    { key: 'owner', header: 'Owner', width: 'w-[180px]', cellClassName: 'truncate', cell: (r) => r.owner || '—' },
+    { key: 'unit', header: 'Flat / unit', width: 'w-[110px]', cellClassName: 'truncate', cell: (r) => r.unit || '—' },
+    {
+      key: 'type', header: 'Type', width: 'w-[110px]', hideBelow: 'md',
+      cellClassName: 'truncate', cell: (r) => r.type || '—',
+    },
+    {
+      key: 'model', header: 'Model', width: 'w-[150px]', hideBelow: 'lg',
+      cellClassName: 'truncate', cell: (r) => r.model || '—',
+    },
+    {
+      key: 'expires', header: 'Valid till', width: 'w-[120px]',
+      cellClassName: 'whitespace-nowrap tabular-nums', cell: (r) => r.expires || '—',
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: 'Note', cellClassName: 'truncate text-[var(--text-dim)]',
+      cell: (r) => <span title={r.note || undefined}>{r.note || ''}</span>,
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (r) => (
+        <>
+          <button
+            title={`Edit ${r.plate}`}
+            aria-label={`Edit ${r.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(r)}
+            disabled={saving}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title="Remove from the register"
+            aria-label={`Remove ${r.plate} from the register`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
+            disabled={saving}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
+  const roles = Object.values(cameraRoles)
+  const hasIn = roles.some((r) => r.role === 'gate_in')
+  const hasOut = roles.some((r) => r.role === 'gate_out')
+  const withRole = cameras.filter((c) => cameraRoles[String(c.id)]).length
+  // What the folded panel says, so its state is visible without opening it.
+  const settingsSummary = [
+    `Unknown-vehicle alarm ${alarmOnUnknown ? 'on' : 'off'}`,
+    `barrier ${barrierMode === 'registered' ? 'on' : 'off'}`,
+    `overstay ${overstayHours > 0 ? `${overstayHours} h` : 'off'}`,
+    `${withRole} of ${cameras.length} camera${cameras.length === 1 ? '' : 's'} with a role`,
+  ].join(' · ')
+
+  const addButton = (
+    <Button
+      variant="primary" size="sm" disabled={saving}
+      onClick={() => setDialog({ entry: { plate: '' }, editing: null })}
+    >
+      <Plus size={14} /> Add vehicle
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" disabled={saving} onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> Import CSV / Excel
+    </Button>
+  )
+
   return (
     <div className="space-y-4">
-      {/* Alarm mode */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Alarm on unknown vehicles</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Any plate not in this register (or the allowlist) raises a high-severity
-              alert the moment it is read — one alarm per stranger, across all gate
-              cameras. Watchlisted plates keep their own alarm.
-            </div>
-          </div>
-          <Button
-            // The shared 'danger' variant is dark-theme-tuned and washes
-            // out on light; an outlined red reads in both themes.
-            variant={alarmOnUnknown ? 'outline' : 'primary'}
-            className={alarmOnUnknown
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleAlarm(!alarmOnUnknown)}
-            disabled={saving}
-          >
-            {alarmOnUnknown ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
 
-      {/* Automatic barrier — the decision half of gate automation */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Automatic barrier</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Publish an allow/deny decision for every read on a Gate IN camera —
-              registered and allowlisted vehicles allow, everything else denies.
-              Install the <b>Gate Controller</b> app from the catalog to wire the
-              decisions to your relay; it ships in dry-run so nothing moves until
-              you say so.
-              {!Object.values(cameraRoles).some((r) => r.role === 'gate_in') &&
-                ' Needs at least one Gate IN camera below.'}
-            </div>
-          </div>
-          <Button
-            variant={barrierMode === 'registered' ? 'outline' : 'primary'}
-            className={barrierMode === 'registered'
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleBarrier(barrierMode !== 'registered')}
-            disabled={saving}
-          >
-            {barrierMode === 'registered' ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
+      {/* The one setup problem that makes everything else moot, as a single
+          banner that leads to the fix — not a warning buried in a card. */}
+      {reading.length === 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-sm text-[var(--warning,#b7791f)]">
+          <span className="min-w-0 flex-1">
+            No camera is reading plates yet — give a camera a role and this app starts reading it.
+          </span>
+          {cameras.length > 0 && (
+            <Button variant="outline" size="sm" onClick={openSettings}>
+              Assign camera roles
+            </Button>
+          )}
+        </div>
+      )}
 
-      {/* Visitor overstay */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Visitor overstay alert</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Alert when a visitor (not registered or allowlisted) has been inside
-              longer than this many hours — one alert per visit, checked as reads
-              arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit.
-            </div>
-          </div>
-          <label className="text-xs text-[var(--text-dim)]">
-            Hours (0 = off)
-            <input
-              type="number"
-              min={0}
-              step={0.5}
-              value={overstayDraft ?? String(overstayHours || 0)}
-              onChange={(e) => setOverstayDraft(e.target.value)}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-28"
+      {/* The register is what this tab is for, so it comes first — on the
+          same table as the plate reads: header pinned, rows scrolling in
+          whatever height the screen has left, pager in the toolbar. Import
+          and export act on the whole list, so they sit here too. */}
+      {registry.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<Car size={28} />}
+            title="No vehicles registered yet"
+            description="Add each resident vehicle, or import the whole list from a spreadsheet — Import shows the columns it reads and has a template. Then switch on the unknown-vehicle alarm and any stranger raises an alert."
+            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
+          />
+        </Card>
+      ) : (
+        <DataTable<RegistryEntry>
+          caption="Vehicle register"
+          columns={registerColumns}
+          rows={pageRows}
+          rowKey={(r) => r.plate}
+          fillHeight
+          fixed
+          dense
+          minWidth="min-w-[720px]"
+          // The row IS the record, as on the plate reads: clicking it opens
+          // the entry to edit. The action cell keeps its own buttons.
+          onRowClick={editRow}
+          striped={false}
+          empty={
+            <EmptyState
+              icon={<Search size={28} />}
+              title={`No vehicle matches “${query.trim()}”`}
+              description="Search looks at the plate, owner, flat, model and note."
             />
-          </label>
-          <Button
-            onClick={() => {
-              const h = Number(overstayDraft ?? overstayHours)
-              if (Number.isFinite(h) && h >= 0) {
-                onSetOverstay(h)
-                setOverstayDraft(null)
-              }
-            }}
-            disabled={saving || overstayDraft === null}
-          >
-            Save
-          </Button>
-        </CardContent>
-      </Card>
+          }
+          toolbar={
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                <input
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                  placeholder="Search plate, owner, flat…"
+                  aria-label="Search the register"
+                  className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                />
+              </div>
+              {importButton}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download size={14} /> Export CSV
+              </Button>
+              {addButton}
+              <div className="ml-auto">
+                <Pagination
+                  page={page}
+                  pageSize={pager.pageSize}
+                  total={rows.length}
+                  rowCount={pageRows.length}
+                  label="vehicles"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                />
+              </div>
+            </div>
+          }
+        />
+      )}
 
-      {/* Camera roles — the site's layout in the vehicle story */}
-      <Card>
-        <CardContent className="py-3">
-          <div className="text-sm font-medium mb-1">Camera roles</div>
-          <div className="text-xs text-[var(--text-dim)] mb-2">
-            Give each camera its place: <b>Gate IN</b> (required for gate features),
-            <b> Gate OUT</b> (optional — unlocks exits, stay durations and "inside now"),
-            <b> Parking</b>, or a named location of your own — every role enriches the
-            per-vehicle history.
-          </div>
-          {(() => {
-            const hasIn = Object.values(cameraRoles).some((r) => r.role === 'gate_in')
-            const hasOut = Object.values(cameraRoles).some((r) => r.role === 'gate_out')
-            // Adoption is the switch that costs money, so its absence is
-            // the loudest thing on the card: no camera claimed, no plate
-            // is read anywhere, and nothing else here matters yet.
-            const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
-            if (reading.length === 0) {
-              return (
-                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
-                  No camera is reading plates. Give a camera a role below and this app
-                  starts reading it — until then plate recognition runs nowhere, which
-                  is also why it costs nothing.
-                </div>
-              )
-            }
-            if (!hasIn) {
-              return (
-                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
-                  No Gate IN camera yet — mark at least one. Until then there is no gate
-                  history and no "inside now"; reads still collect normally.
-                </div>
-              )
-            }
-            if (!hasOut) {
-              return (
-                <div className="text-xs rounded border border-[var(--border)] text-[var(--text-dim)] px-3 py-2 mb-2">
-                  No Gate OUT camera — entries are recorded, but exit times, stay
-                  durations and "inside now" stay off until you mark one.
-                </div>
-              )
-            }
-            return null
-          })()}
-          <div className="flex flex-wrap gap-3">
-            {cameras.map((c) => {
-              const entry = cameraRoles[String(c.id)]
-              // Ineligible cameras stay on screen, greyed, with the
-              // reason. Hiding them makes an operator hunt for a camera
-              // that is right there — the question is always "why is it
-              // not in the list", so answer it in the list.
-              const blocked = ineligibleReason(c, LPR_SKILL)
-              return (
-                <label
-                  key={c.id}
-                  className={`inline-flex items-center gap-2 text-sm${blocked ? ' opacity-60' : ''}`}
-                  title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
-                >
-                  <span>{c.name}</span>
-                  <select
-                    value={entry?.role ?? ''}
-                    onChange={(e) => {
-                      const role = e.target.value as CameraRole | ''
-                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
-                    }}
-                    disabled={saving || Boolean(blocked)}
-                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                  >
-                    <option value="">no role</option>
-                    <option value="gate_in">Gate IN</option>
-                    <option value="gate_out">Gate OUT</option>
-                    <option value="parking">Parking</option>
-                    <option value="other">Other…</option>
-                  </select>
-                  {entry?.role === 'other' && (
+      {/* Gate settings — set once, so folded under the list, with a
+          summary line that shows their state without opening them. */}
+      <div ref={settingsRef} className="scroll-mt-4">
+        <Card>
+          <button
+            type="button"
+            aria-expanded={settingsOpen}
+            onClick={() => setSettingsOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+          >
+            <ChevronRight
+              size={16}
+              className={`shrink-0 text-[var(--text-dim)] transition-transform ${settingsOpen ? 'rotate-90' : ''}`}
+            />
+            <span className="shrink-0 text-sm font-medium">Gate settings</span>
+            {!settingsOpen && (
+              <span className="min-w-0 truncate text-xs text-[var(--text-dim)]">{settingsSummary}</span>
+            )}
+          </button>
+          {settingsOpen && (
+            <div className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
+              <SettingRow
+                icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title="Alarm on unknown vehicles"
+                summary="A high-severity alert for any plate not in this register."
+                info="One alarm per stranger, across all gate cameras. Allowlisted plates count as known; monitored plates keep their own alarm."
+              >
+                <Switch
+                  checked={alarmOnUnknown}
+                  onChange={onToggleAlarm}
+                  label="Alarm on unknown vehicles"
+                  disabled={saving}
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
+                title="Automatic barrier"
+                summary={hasIn
+                  ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
+                  : (
+                    <span className="text-[var(--warning,#b7791f)]">
+                      Needs a Gate IN camera — set one under Camera roles below.
+                    </span>
+                  )}
+                info={
+                  <>
+                    Publishes an allow/deny decision for every read on a Gate IN
+                    camera. Install the <b>Gate Controller</b> app from the App
+                    Catalog to wire those decisions to your relay — it ships in
+                    dry-run, so nothing moves until you say so.
+                  </>
+                }
+              >
+                <Switch
+                  checked={barrierMode === 'registered'}
+                  onChange={onToggleBarrier}
+                  label="Automatic barrier"
+                  disabled={saving}
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title="Visitor overstay alert"
+                summary="Alert when a visitor stays inside longer than a set time."
+                info="One alert per visit, checked as reads arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit."
+              >
+                {overstayHours > 0 && (
+                  <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+                    after
                     <input
-                      defaultValue={entry.label ?? ''}
-                      placeholder="name it (e.g. Basement)"
-                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      aria-label="Overstay threshold in hours"
+                      value={overstayDraft ?? String(overstayHours)}
+                      onChange={(e) => setOverstayDraft(e.target.value)}
+                      onBlur={commitOverstay}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                        if (e.key === 'Escape') setOverstayDraft(null)
                       }}
                       disabled={saving}
-                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                      className="w-16 rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
                     />
-                  )}
-                  {blocked && (
-                    <span className="text-xs text-[var(--text-dim)]">{blocked}</span>
-                  )}
-                </label>
-              )
-            })}
-            {cameras.length === 0 && (
-              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+                    hours
+                  </label>
+                )}
+                <Switch
+                  checked={overstayHours > 0}
+                  onChange={(on) => {
+                    setOverstayDraft(null)
+                    onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
+                  }}
+                  label="Visitor overstay alert"
+                  disabled={saving}
+                />
+              </SettingRow>
 
-      {/* Add + import */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          {([
-            ['plate', 'Plate *', 'MH12DE1433', 'text'],
-            ['owner', 'Owner', 'A. Sharma', 'text'],
-            ['unit', 'Flat / unit', 'B-402', 'text'],
-            ['type', 'Type', 'car / truck', 'text'],
-            ['model', 'Model', 'Honda City', 'text'],
-            ['note', 'Note', '', 'text'],
-            ['expires', 'Valid till', '', 'date'],
-          ] as const).map(([k, label, ph, kind]) => (
-            <label key={k} className="text-xs text-[var(--text-dim)]">
-              {label}
-              <input
-                type={kind}
-                value={draft[k] ?? ''}
-                onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-                placeholder={ph}
-                className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-32"
-              />
-            </label>
-          ))}
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Add vehicle
-          </Button>
-          <div className="ml-auto flex items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void importFile(f)
-                e.target.value = ''
-              }}
-            />
-            <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={saving}>
-              <Upload size={14} /> Import CSV / Excel
-            </Button>
-            <Button variant="outline" onClick={exportCsv} disabled={!registry.length}>
-              <Download size={14} /> Export CSV
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* The register */}
-      {registry.length === 0 ? (
-        <EmptyState
-          icon={<Car size={28} />}
-          title="No vehicles registered yet"
-          description="Add each resident vehicle above, or import the whole list from a CSV (columns: plate, owner, unit, type, note). Then turn on the unknown-vehicle alarm and any stranger raises an alert."
-        />
-      ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Owner</th>
-                  <th className="px-3 py-2">Flat / unit</th>
-                  <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">Model</th>
-                  <th className="px-3 py-2">Valid till</th>
-                  <th className="px-3 py-2">Note</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...registry].sort((a, b) => a.plate.localeCompare(b.plate)).map((r) => (
-                  <tr key={r.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">
-                      {r.plate}
-                      {!entryActive(r) && (
-                        <Badge variant="warning" className="ml-1.5">expired</Badge>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5">{r.owner || '—'}</td>
-                    <td className="px-3 py-1.5">{r.unit || '—'}</td>
-                    <td className="px-3 py-1.5">{r.type || '—'}</td>
-                    <td className="px-3 py-1.5">{r.model || '—'}</td>
-                    <td className="px-3 py-1.5">{r.expires || '—'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-dim)]">{r.note || ''}</td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Remove from the register"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
+              {/* Camera roles — the site's layout in the vehicle story */}
+              <div className="space-y-2 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  Camera roles
+                  <InfoTip label="About camera roles">
+                    <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
+                    unlocks exit times, stay durations and “inside now”.{' '}
+                    <b>Parking</b>, or a named location of your own, enriches each
+                    vehicle’s history.
+                  </InfoTip>
+                </div>
+                <div className="text-xs text-[var(--text-dim)]">
+                  Where each camera sits. Giving a camera a role starts plate reading on it.
+                </div>
+                {reading.length > 0 && !hasIn && (
+                  <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
+                    No Gate IN camera yet — mark at least one. Until then there is no gate
+                    history and no “inside now”; reads still collect normally.
+                  </div>
+                )}
+                {reading.length > 0 && hasIn && !hasOut && (
+                  <div className="rounded border border-[var(--border)] px-3 py-2 text-xs text-[var(--text-dim)]">
+                    No Gate OUT camera — entries are recorded, but exit times, stay
+                    durations and “inside now” stay off until you mark one.
+                  </div>
+                )}
+                {cameras.length === 0 ? (
+                  <div className="text-xs text-[var(--text-dim)]">No cameras yet.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                          <th className="py-1.5 pr-4 font-normal">Camera</th>
+                          <th className="py-1.5 pr-4 font-normal">Role</th>
+                          <th className="py-1.5 font-normal">Plate reading</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cameras.map((c) => {
+                          const entry = cameraRoles[String(c.id)]
+                          // Ineligible cameras stay on screen, greyed, with the
+                          // reason. Hiding them makes an operator hunt for a
+                          // camera that is right there — the question is always
+                          // "why is it not in the list", so answer it in the list.
+                          const blocked = ineligibleReason(c, LPR_SKILL)
+                          return (
+                            <tr
+                              key={c.id}
+                              className={`border-b border-[var(--border)] last:border-0${blocked ? ' opacity-60' : ''}`}
+                              title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
+                            >
+                              <td className="py-1.5 pr-4">{c.name}</td>
+                              <td className="py-1.5 pr-4">
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={entry?.role ?? ''}
+                                    aria-label={`Role of ${c.name}`}
+                                    onChange={(e) => {
+                                      const role = e.target.value as CameraRole | ''
+                                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
+                                    }}
+                                    disabled={saving || Boolean(blocked)}
+                                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                                  >
+                                    <option value="">No role</option>
+                                    <option value="gate_in">Gate IN</option>
+                                    <option value="gate_out">Gate OUT</option>
+                                    <option value="parking">Parking</option>
+                                    <option value="other">Other…</option>
+                                  </select>
+                                  {entry?.role === 'other' && (
+                                    <input
+                                      defaultValue={entry.label ?? ''}
+                                      placeholder="e.g. Basement"
+                                      aria-label={`Location name for ${c.name}`}
+                                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                                      }}
+                                      disabled={saving}
+                                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                                    />
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-1.5 text-xs">
+                                {blocked ? (
+                                  <span className="text-[var(--text-dim)]">{blocked}</span>
+                                ) : cameraAdopted(c, LPR_SKILL) ? (
+                                  <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
+                                    <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+                                    Reading plates
+                                  </span>
+                                ) : (
+                                  <span className="text-[var(--text-dim)]">Not reading</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </Card>
+      </div>
+
+      {importOpen && (
+        <ImportDialog
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          // Header row only, no sample vehicles: a sample plate left in by
+          // mistake would be REGISTERED — and the barrier opens for those.
+          onDownloadTemplate={() => downloadCsv(registryToCsv([]), 'vehicle-register-template.csv')}
+        />
+      )}
+      {dialog && (
+        <VehicleDialog
+          initial={dialog.entry}
+          editing={dialog.editing}
+          registry={registry}
+          saving={saving}
+          onClose={() => setDialog(null)}
+          onSave={saveEntry}
+        />
       )}
     </div>
+  )
+}
+
+function downloadCsv(text: string, filename: string) {
+  const blob = new Blob([text], { type: 'text/csv' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// What an import file must look like, beside the button that takes one. A
+// bare file picker left the operator guessing at column names — and a plate
+// header we don't recognise silently turns the header row into a vehicle.
+const IMPORT_COLUMNS: {
+  field: (typeof REGISTRY_FIELDS)[number] | 'plate'
+  meaning: string
+  example: string
+}[] = [
+  { field: 'plate', meaning: 'Vehicle number', example: 'MH12DE1433' },
+  { field: 'owner', meaning: 'Owner or resident', example: 'A. Sharma' },
+  { field: 'unit', meaning: 'Flat / unit', example: 'B-402' },
+  { field: 'type', meaning: 'Vehicle type', example: 'Car' },
+  { field: 'model', meaning: 'Make / model', example: 'Honda City' },
+  { field: 'note', meaning: 'Anything else', example: 'Second car' },
+  { field: 'expires', meaning: 'Valid till — visitor pass', example: '2026-12-31' },
+]
+
+/** The other header names the importer maps to `field` — read from the
+ *  parser's own table, so the dialog can never promise one it ignores. */
+function headerSynonyms(field: string): string[] {
+  return Object.entries(HEADER_SYNONYMS)
+    .filter(([header, f]) => f === field && header !== field)
+    .map(([header]) => header)
+}
+
+function ImportDialog({
+  onClose, onChooseFile, onDownloadTemplate,
+}: {
+  onClose: () => void
+  onChooseFile: () => void
+  onDownloadTemplate: () => void
+}) {
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Import vehicles"
+      widthClassName="w-full max-w-2xl mx-4"
+      footer={
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onDownloadTemplate}>
+            <Download size={14} /> Download template
+          </Button>
+          <div className="ml-auto flex gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" size="sm" onClick={onChooseFile}>
+              <Upload size={14} /> Choose file…
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p className="text-[var(--text-dim)]">
+          A CSV or Excel file (.csv, .xlsx, .xls) with one vehicle per row and the
+          column names in the first row. From Excel, the first sheet is read.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                <th className="py-1.5 pr-4 font-normal">Column</th>
+                <th className="py-1.5 pr-4 font-normal">Example</th>
+                <th className="py-1.5 font-normal">Also accepted as</th>
+              </tr>
+            </thead>
+            <tbody>
+              {IMPORT_COLUMNS.map((c) => (
+                <tr key={c.field} className="border-b border-[var(--border)] last:border-0 align-top">
+                  <td className="py-1.5 pr-4 whitespace-nowrap">
+                    <span className="font-mono">{c.field}</span>
+                    {c.field === 'plate' && (
+                      <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">required</span>
+                    )}
+                    <div className="text-xs text-[var(--text-dim)]">{c.meaning}</div>
+                  </td>
+                  <td className="py-1.5 pr-4 font-mono text-xs whitespace-nowrap">{c.example}</td>
+                  <td className="py-1.5 text-xs text-[var(--text-dim)]">
+                    {headerSynonyms(c.field).join(', ') || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <ul className="list-disc space-y-1 pl-5 text-xs text-[var(--text-dim)]">
+          <li>
+            Only <span className="font-mono">plate</span> is required. Column order doesn’t
+            matter and names aren’t case-sensitive, but each must be one of the names above.
+          </li>
+          <li>
+            <span className="font-mono">expires</span> is a date written YYYY-MM-DD. Leave it
+            empty for a resident; a date makes the row a visitor pass that lapses after that
+            day. Date-formatted Excel cells are converted for you.
+          </li>
+          <li>A plate already in the register is replaced by the file’s row; every other vehicle stays.</li>
+          <li>
+            If the plate column’s name isn’t recognised, the first row is read as a vehicle
+            and the columns are taken in the order above.
+          </li>
+        </ul>
+      </div>
+    </Modal>
+  )
+}
+
+/** One setting: what it is in a line, the detail behind an ⓘ, its control. */
+function SettingRow({
+  icon, title, summary, info, children,
+}: {
+  icon: ReactNode
+  title: string
+  summary: ReactNode
+  info?: ReactNode
+  children?: ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+      <span className="shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          {title}
+          {info && <InfoTip label={`About ${title.toLowerCase()}`}>{info}</InfoTip>}
+        </div>
+        <div className="text-xs text-[var(--text-dim)]">{summary}</div>
+      </div>
+      {children && <div className="flex items-center gap-3">{children}</div>}
+    </div>
+  )
+}
+
+// Adding a vehicle is a dialog, not a form left open above the list: seven
+// always-visible inputs pushed the register itself below the fold, and
+// their example placeholders read like a row already filled in.
+function VehicleDialog({
+  initial, editing, registry, saving, onClose, onSave,
+}: {
+  initial: RegistryEntry
+  /** The plate being edited, or null when adding. */
+  editing: string | null
+  registry: RegistryEntry[]
+  saving: boolean
+  onClose: () => void
+  onSave: (entry: RegistryEntry, replaces: string | null) => void
+}) {
+  const formId = useId()
+  const [draft, setDraft] = useState<RegistryEntry>(initial)
+  const plate = normalizePlate(draft.plate)
+  // Saving over another vehicle's plate replaces it — say so before, not after.
+  const clash = Boolean(plate) && plate !== editing && registry.some((r) => r.plate === plate)
+  const set = (k: keyof RegistryEntry) =>
+    (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setDraft((d) => ({ ...d, [k]: e.target.value }))
+
+  const type = draft.type ?? ''
+  const knownType = VEHICLE_TYPES.find((t) => t.toLowerCase() === type.toLowerCase())
+  const typeOptions = type && !knownType ? [...VEHICLE_TYPES, type] : VEHICLE_TYPES
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!plate || saving) return
+    const entry: RegistryEntry = { plate }
+    for (const k of REGISTRY_FIELDS) {
+      const v = (draft[k] ?? '').trim()
+      if (v) entry[k] = v
+    }
+    onSave(entry, editing)
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${editing}` : 'Add vehicle'}
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!plate || saving}>
+            {editing ? 'Save changes' : 'Add vehicle'}
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={draft.plate}
+            onChange={set('plate')}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already registered — saving replaces that entry.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Owner
+          <input value={draft.owner ?? ''} onChange={set('owner')} placeholder="e.g. A. Sharma" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Flat / unit
+          <input value={draft.unit ?? ''} onChange={set('unit')} placeholder="e.g. B-402" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Type
+          <select value={knownType ?? type} onChange={set('type')} className={inputCls}>
+            <option value="">—</option>
+            {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label className={labelCls}>
+          Model
+          <input value={draft.model ?? ''} onChange={set('model')} placeholder="e.g. Honda City" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Valid till
+          <input type="date" value={draft.expires ?? ''} onChange={set('expires')} className={inputCls} />
+          <span className="mt-1 block">Empty for a resident; a date makes it a visitor pass.</span>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Note
+          <input value={draft.note ?? ''} onChange={set('note')} placeholder="e.g. second car, parks in B2" className={inputCls} />
+        </label>
+      </form>
+    </Modal>
   )
 }
 
@@ -2348,9 +2767,7 @@ function MonitoringTab({
   cameras: CameraRow[]
   onSave: (next: Monitor[]) => void
 }) {
-  const [draft, setDraft] = useState<{ plate: string; note: string; severity: Monitor['severity'] }>({
-    plate: '', note: '', severity: 'high',
-  })
+  const [adding, setAdding] = useState(false)
 
   if (!canEdit) {
     return (
@@ -2366,155 +2783,232 @@ function MonitoringTab({
     onSave([...monitors.filter((x) => x.plate !== m.plate), m])
   }
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    upsert({
-      plate,
-      note: draft.note.trim() || undefined,
-      severity: draft.severity ?? 'high',
-      active: true,
-    })
-    setDraft({ plate: '', note: '', severity: 'high' })
-  }
+  // Same shape as the register: the list first, adding behind a button.
+  const addButton = (
+    <Button variant="primary" size="sm" disabled={saving} onClick={() => setAdding(true)}>
+      <Plus size={14} /> Monitor a plate
+    </Button>
+  )
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          <label className="text-xs text-[var(--text-dim)]">
-            Plate *
-            <input
-              value={draft.plate}
-              onChange={(e) => setDraft((d) => ({ ...d, plate: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="MH12DE1433"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-36"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Reason / note
-            <input
-              value={draft.note}
-              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="reported stolen — FIR 42/2026"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-64"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Alert severity
-            <select
-              value={draft.severity}
-              onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as Monitor['severity'] }))}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-            >
-              {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </label>
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Monitor plate
-          </Button>
-        </CardContent>
-      </Card>
-
-      {monitors.length === 0 ? (
-        <EmptyState
-          icon={<ShieldAlert size={28} />}
-          title="No plates under monitoring"
-          description="Add a plate above — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
-        />
-      ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Reason / note</th>
-                  <th className="px-3 py-2">Severity</th>
-                  <th className="px-3 py-2">Where</th>
-                  <th className="px-3 py-2">Armed</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
-                  <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
-                    <td className="px-3 py-1.5">
-                      <input
-                        defaultValue={m.note ?? ''}
-                        placeholder="add a reason…"
-                        onBlur={(e) => {
-                          const v = e.target.value.trim()
-                          if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
-                        }}
-                        disabled={saving}
-                        className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
-                      />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={m.severity ?? 'high'}
-                        onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={(m.cameras ?? [])[0] ?? ''}
-                        onChange={(e) => upsert({
-                          ...m,
-                          cameras: e.target.value ? [e.target.value] : undefined,
-                        })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        <option value="">any camera</option>
-                        {cameras.map((c) => (
-                          <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <button
-                        onClick={() => upsert({ ...m, active: m.active === false })}
-                        disabled={saving}
-                        title={m.active !== false
-                          ? 'Armed — click to silence without deleting'
-                          : 'Silenced — click to re-arm'}
-                      >
-                        {m.active !== false
-                          ? <Badge variant="destructive">armed</Badge>
-                          : <Badge variant="neutral">silenced</Badge>}
-                      </button>
-                    </td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Stop monitoring this plate"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
+        {monitors.length === 0 ? (
+          <EmptyState
+            icon={<ShieldAlert size={28} />}
+            title="No plates under monitoring"
+            description="Monitor a plate — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
+            action={addButton}
+          />
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2">
+              <span className="text-xs text-[var(--text-dim)]">
+                {monitors.length} plate{monitors.length === 1 ? '' : 's'} under monitoring
+              </span>
+              <div className="ml-auto">{addButton}</div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                    <th className="px-3 py-2">Plate</th>
+                    <th className="px-3 py-2">Reason / note</th>
+                    <th className="px-3 py-2">Severity</th>
+                    <th className="px-3 py-2">Where</th>
+                    <th className="px-3 py-2">Armed</th>
+                    <th className="px-3 py-2 text-right pr-4" />
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-      )}
+                </thead>
+                <tbody>
+                  {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
+                    <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
+                      <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
+                      <td className="px-3 py-1.5">
+                        <input
+                          defaultValue={m.note ?? ''}
+                          placeholder="add a reason…"
+                          onBlur={(e) => {
+                            const v = e.target.value.trim()
+                            if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
+                          }}
+                          disabled={saving}
+                          className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
+                        />
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <select
+                          value={m.severity ?? 'high'}
+                          onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
+                          disabled={saving}
+                          className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                        >
+                          {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <select
+                          value={(m.cameras ?? [])[0] ?? ''}
+                          onChange={(e) => upsert({
+                            ...m,
+                            cameras: e.target.value ? [e.target.value] : undefined,
+                          })}
+                          disabled={saving}
+                          className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                        >
+                          <option value="">any camera</option>
+                          {cameras.map((c) => (
+                            <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <button
+                          onClick={() => upsert({ ...m, active: m.active === false })}
+                          disabled={saving}
+                          title={m.active !== false
+                            ? 'Armed — click to silence without deleting'
+                            : 'Silenced — click to re-arm'}
+                        >
+                          {m.active !== false
+                            ? <Badge variant="destructive">armed</Badge>
+                            : <Badge variant="neutral">silenced</Badge>}
+                        </button>
+                      </td>
+                      <td className="px-3 py-1.5 text-right pr-4">
+                        <button
+                          title="Stop monitoring this plate"
+                          aria-label={`Stop monitoring ${m.plate}`}
+                          className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+                          onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
+                          disabled={saving}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </Card>
       <div className="text-xs text-[var(--text-dim)]">
         Monitored plates never trigger the unknown-vehicle alarm — they fire their own
         alert at the severity set here, and "silenced" keeps the rule without alerting.
       </div>
+
+      {adding && (
+        <MonitorDialog
+          monitors={monitors}
+          cameras={cameras}
+          saving={saving}
+          onClose={() => setAdding(false)}
+          onSave={(m) => {
+            upsert(m)
+            setAdding(false)
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function MonitorDialog({
+  monitors, cameras, saving, onClose, onSave,
+}: {
+  monitors: Monitor[]
+  cameras: CameraRow[]
+  saving: boolean
+  onClose: () => void
+  onSave: (m: Monitor) => void
+}) {
+  const formId = useId()
+  const [plate, setPlate] = useState('')
+  const [note, setNote] = useState('')
+  const [severity, setSeverity] = useState<NonNullable<Monitor['severity']>>('high')
+  const [camera, setCamera] = useState('')
+  const norm = normalizePlate(plate)
+  const clash = Boolean(norm) && monitors.some((m) => m.plate === norm)
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!norm || saving) return
+    onSave({
+      plate: norm,
+      note: note.trim() || undefined,
+      severity,
+      active: true,
+      cameras: camera ? [camera] : undefined,
+    })
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Monitor a plate"
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!norm || saving}>
+            Monitor plate
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={plate}
+            onChange={(e) => setPlate(e.target.value)}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already monitored — saving replaces that rule.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Alert severity
+          <select
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as NonNullable<Monitor['severity']>)}
+            className={inputCls}
+          >
+            {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Reason / note
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. reported stolen — FIR 42/2026"
+            className={inputCls}
+          />
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Where
+          <select value={camera} onChange={(e) => setCamera(e.target.value)} className={inputCls}>
+            <option value="">Any camera</option>
+            {cameras.map((c) => (
+              <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
+            ))}
+          </select>
+        </label>
+      </form>
+    </Modal>
   )
 }
 
