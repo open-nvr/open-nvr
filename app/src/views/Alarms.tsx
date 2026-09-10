@@ -259,7 +259,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
             <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
               <AlarmsFilters
                 onlyUnacked={onlyUnacked}
-                onToggleUnacked={() => { setOnlyUnacked((v) => !v); pager.setPage(1) }}
+                onUnacked={(only) => { setOnlyUnacked(only); pager.setPage(1) }}
                 severity={severityFilter}
                 onSeverity={(sev: string | null) => { setSeverityFilter(sev); pager.setPage(1) }}
               />

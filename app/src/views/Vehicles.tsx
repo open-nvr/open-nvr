@@ -56,6 +56,7 @@ import { AlarmsFilters, AlarmsSelectionBar, AlarmsTable, cameraIdFromHandle } fr
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
+import { SegmentedControl } from '../components/ui/SegmentedControl'
 import { formatSeenAt, seenAtTitle } from '../lib/time'
 import {
   LPR_SKILL,
@@ -1517,25 +1518,15 @@ export function Vehicles() {
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
-            {/* The selected range reads as a state, not a call to action:
-                a filled accent segment competed with the one primary
-                button on the page. Weight and a tint carry it instead. */}
-            <div className="flex overflow-hidden rounded border border-[var(--border)]"
-                 role="group" aria-label="Time range">
-              {RANGE_PRESETS.map((r) => (
-                <button
-                  key={r.key}
-                  type="button"
-                  aria-pressed={range.key === r.key}
-                  onClick={() => { setRange(r); reads.setPage(1) }}
-                  className={`px-2.5 py-1 text-xs ${range.key === r.key
-                    ? 'bg-[var(--panel-2)] font-semibold text-[var(--text)]'
-                    : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
-                >
-                  {r.label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              label="Time range"
+              options={RANGE_PRESETS.map((r) => ({ value: r.key, label: r.label }))}
+              value={range.key}
+              onChange={(key) => {
+                setRange(RANGE_PRESETS.find((r) => r.key === key) ?? RANGE_PRESETS[0])
+                reads.setPage(1)
+              }}
+            />
             {alarmOnUnknown && (
               <Badge variant="warning" title="Any plate not in the vehicle register raises a high-severity alert">
                 <BellRing size={12} /> Unknown-vehicle alarm ON
@@ -2856,7 +2847,7 @@ function VehicleAlarmsTab({ cameraName }: { cameraName: (id: number) => string }
               <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
                 <AlarmsFilters
                   onlyUnacked={onlyUnacked}
-                  onToggleUnacked={() => { setOnlyUnacked((v) => !v); pager.setPage(1) }}
+                  onUnacked={(only) => { setOnlyUnacked(only); pager.setPage(1) }}
                   severity={severityFilter}
                   onSeverity={(sev) => { setSeverityFilter(sev); pager.setPage(1) }}
                 />

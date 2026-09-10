@@ -3,6 +3,7 @@ import { clsx } from 'clsx'
 import { Check } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
 import { DataTable, type Column } from '../ui/DataTable'
+import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
 import {
   alarmSeenAt, alarmSeenTitle, type InboxAlert,
 } from '../../services/alertsInboxService'
@@ -283,46 +284,49 @@ export function AlarmsSelectionBar({
  * pagination — the same shape the plate-reads table uses — rather than
  * as a separate bar above a separately-bordered table.
  *
- * Severity is a segmented control rather than a row of buttons for the
- * same reason the reads table's time range is: it is one choice from a
- * fixed set, and five outlined buttons read as five separate actions.
+ * Status and severity are both segmented controls, like the reads
+ * table's time range: each is one choice from a fixed set. Status used
+ * to be a lone "Unacknowledged only" toggle whose on-state looked like
+ * its hover-state. Both groups are labelled because both start "All".
  */
 export const ALARM_SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 
+const SEVERITY_OPTIONS: SegmentOption<string | null>[] = [
+  { value: null, label: 'All' },
+  ...ALARM_SEVERITIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) })),
+]
+
+const STATUS_OPTIONS: SegmentOption<'all' | 'unacked'>[] = [
+  { value: 'all', label: 'All' },
+  { value: 'unacked', label: 'Unacknowledged', title: 'Only alarms nobody has acknowledged yet' },
+]
+
 export function AlarmsFilters({
-  onlyUnacked, onToggleUnacked, severity, onSeverity, children,
+  onlyUnacked, onUnacked, severity, onSeverity, children,
 }: {
   onlyUnacked: boolean
-  onToggleUnacked: () => void
+  onUnacked: (only: boolean) => void
   severity: string | null
   onSeverity: (s: string | null) => void
   children?: ReactNode
 }) {
   return (
     <>
-      <Button
-        size="sm"
-        variant={onlyUnacked ? 'default' : 'outline'}
-        aria-pressed={onlyUnacked}
-        onClick={onToggleUnacked}
-      >
-        Unacknowledged only
-      </Button>
-      <div className="flex overflow-hidden rounded border border-[var(--border)]"
-           role="group" aria-label="Severity">
-        {([null, ...ALARM_SEVERITIES] as const).map((sev) => (
-          <button
-            key={sev ?? 'all'}
-            type="button"
-            aria-pressed={severity === sev}
-            onClick={() => onSeverity(sev)}
-            className={`px-2.5 py-1 text-xs capitalize ${severity === sev
-              ? 'bg-[var(--panel-2)] font-semibold text-[var(--text)]'
-              : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
-          >
-            {sev ?? 'All'}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SegmentedControl
+          label="Status"
+          showLabel
+          options={STATUS_OPTIONS}
+          value={onlyUnacked ? 'unacked' : 'all'}
+          onChange={(v) => onUnacked(v === 'unacked')}
+        />
+        <SegmentedControl
+          label="Severity"
+          showLabel
+          options={SEVERITY_OPTIONS}
+          value={severity}
+          onChange={onSeverity}
+        />
       </div>
       {children}
     </>
