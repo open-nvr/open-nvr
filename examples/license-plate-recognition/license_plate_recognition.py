@@ -53,7 +53,7 @@ from opennvr_app_sdk import (
     AlertType, AppManifest, Detector, DomainEventPublisher, Param,
     StateView, app,
 )
-from opennvr_app_sdk.cameras import cameras_for_skill
+from opennvr_app_sdk.cameras import cameras_for_skill, discover_cameras
 
 logger = logging.getLogger("license-plate-recognition")
 
@@ -595,6 +595,11 @@ class PlateAlerter(Detector):
         )
         self._assigned_scope: frozenset[str] | None = None
         self._scope_fetched_at: float | None = None
+        # Camera display names, for the words in an alert. Fetched apart
+        # from the scope: an explicit config scope never asks core, but
+        # its alarms still have to say "Gate IN", not "cam1".
+        self._camera_names: dict[str, str] = {}
+        self._names_fetched_at: float | None = None
 
     @staticmethod
     def _merged_monitors(monitors_raw: Any, denylist: Any) -> dict[str, dict[str, Any]]:
@@ -711,7 +716,7 @@ class PlateAlerter(Detector):
                 title=f"Overstay: visitor {plate} inside {hours:.1f}h",
                 description=(
                     f"Visitor vehicle {plate} entered at "
-                    f"{rec['camera_id']} and has been inside "
+                    f"{self._camera_label(rec['camera_id'])} and has been inside "
                     f"{hours:.1f} hours (threshold "
                     f"{self._overstay_hours:g}h) with no gate-out read."),
                 camera_id=rec["camera_id"],
@@ -754,6 +759,33 @@ class PlateAlerter(Detector):
             if assigned is not None:
                 self._assigned_scope = frozenset(assigned)
         return self._assigned_scope
+
+    def _camera_label(self, camera_id: str) -> str:
+        """The camera's name as the operator gave it, for alert TEXT.
+
+        The handle (``cam1``) is what OpenNVR routes on and stays in
+        ``camera_id``. Words meant for a person — the inbox, an SMS, a
+        spoken announcement — use the name the Cameras page shows, or the
+        same row reads ``cam1`` in its text and ``Gate IN`` in its Camera
+        column. Falls back to the handle when core can't say: a cosmetic
+        lookup must never cost an alarm."""
+        if self.cfg.opennvr_url:
+            now = time.monotonic()
+            if (self._names_fetched_at is None
+                    or now - self._names_fetched_at >= SCOPE_REFRESH_SECONDS):
+                self._names_fetched_at = now
+                try:
+                    roster = discover_cameras(
+                        self.cfg.opennvr_url, api_key=self.cfg.opennvr_token)
+                except Exception:  # noqa: BLE001 — names are cosmetic
+                    roster = []
+                names = {str(c["camera_id"]): str(c.get("name") or "").strip()
+                         for c in roster}
+                # [] is "could not ask" as often as "no cameras" — keep
+                # the names we had rather than forget them on a blip.
+                if names:
+                    self._camera_names = {k: v for k, v in names.items() if v}
+        return self._camera_names.get(camera_id) or camera_id
 
     # ── The rule (one domain envelope) ─────────────────────────────
 
@@ -902,7 +934,7 @@ class PlateAlerter(Detector):
                 self._decisions_published += 1
 
         self._recent.append({
-            "message": f"{plate} on {camera_id}",
+            "message": f"{plate} on {self._camera_label(camera_id)}",
             "time": time.time(),
             "level": alert.severity,
         })
@@ -973,7 +1005,8 @@ class PlateAlerter(Detector):
             severity=severity,
             title=title,
             description=(
-                f"License plate '{plate}' read on camera {camera_id} "
+                f"License plate '{plate}' read on camera "
+                f"{self._camera_label(camera_id)} "
                 f"({vehicle_label or 'vehicle'}{conf_note})."
             ),
             camera_id=camera_id,

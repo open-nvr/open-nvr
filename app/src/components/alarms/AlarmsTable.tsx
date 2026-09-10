@@ -27,6 +27,22 @@ export function cameraIdFromHandle(handle: string | null): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/** A description with the row's own camera handle swapped for its display
+ *  name. Producers wrote the raw handle into the text ("read on camera
+ *  cam1") while the Camera column resolved it, so one row said both `cam1`
+ *  and `Demo IN`. The LPR app now writes the name; rows already stored keep
+ *  their text, and this fixes them on display. Only the row's OWN handle,
+ *  as a whole word — `cam1` never rewrites part of `cam10`. */
+export function withCameraName(
+  text: string, handle: string | null, label?: (handle: string | null) => string,
+): string {
+  if (!handle || !label) return text
+  const name = label(handle)
+  if (!name || name === handle) return text
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return text.replace(new RegExp(`\\b${escaped}\\b`, 'g'), name)
+}
+
 export type AlarmsTableProps = {
   rows: InboxAlert[]
   /** Alerts & Incidents shows it; the Vehicles tab is one source already. */
@@ -131,23 +147,27 @@ export function AlarmsTable({
       // under every title, which doubled the row height to show a
       // sentence that mostly restates the title. Inline and dim, it
       // still reads as the detail it is — and twice as many alarms fit.
-      cell: (a) => (
-        <div
-          className="truncate"
-          title={a.description ? `${a.title} — ${a.description}` : a.title}
-        >
-          <span className={a.acknowledged_at ? 'font-normal' : 'font-semibold'}>
-            {a.title}
-          </span>
-          {a.description && (
-            <span className="ml-1.5 text-[var(--text-dim)]">
-              {/* The description already ends in a full stop, which
-                  would read as "(….)" once bracketed. */}
-              ({a.description.replace(/\.\s*$/, '')})
+      cell: (a) => {
+        const description = a.description
+          && withCameraName(a.description, a.camera_id, cameraLabel)
+        return (
+          <div
+            className="truncate"
+            title={description ? `${a.title} — ${description}` : a.title}
+          >
+            <span className={a.acknowledged_at ? 'font-normal' : 'font-semibold'}>
+              {a.title}
             </span>
-          )}
-        </div>
-      ),
+            {description && (
+              <span className="ml-1.5 text-[var(--text-dim)]">
+                {/* The description already ends in a full stop, which
+                    would read as "(….)" once bracketed. */}
+                ({description.replace(/\.\s*$/, '')})
+              </span>
+            )}
+          </div>
+        )
+      },
     },
     ...(showSource ? [{
       key: 'source', header: 'Source', hideBelow: 'lg' as const,

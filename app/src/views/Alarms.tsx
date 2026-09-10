@@ -23,6 +23,7 @@ import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
+import { apiService } from '../lib/apiService'
 import {
   alertsInboxService,
   type InboxAlert,
@@ -31,7 +32,9 @@ import {
 } from '../services/alertsInboxService'
 import { Button, SeverityBadge } from '../components/ui'
 import { Pagination } from '../components/ui/Pagination'
-import { AlarmsFilters, AlarmsSelectionBar, AlarmsTable } from '../components/alarms/AlarmsTable'
+import {
+  AlarmsFilters, AlarmsSelectionBar, AlarmsTable, cameraIdFromHandle,
+} from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import { usePagination } from '../hooks/usePagination'
 import { useRowSelection } from '../hooks/useRowSelection'
@@ -74,6 +77,24 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
     },
     staleTime: 60_000,
   })
+
+  // Same key and shape as the Vehicles and Occupancy pages, so the list
+  // comes from cache. Without it the Camera column printed the handle the
+  // producer sent (`cam1`) where every other page says the camera's name.
+  const camerasQuery = useQuery({
+    queryKey: ['cameras'],
+    queryFn: async () => {
+      const { data } = await apiService.getCameras()
+      const list = Array.isArray(data) ? data : (data as any)?.cameras
+      return (Array.isArray(list) ? list : []) as { id: number; name: string }[]
+    },
+    retry: 0,
+  })
+  const cameraLabel = (handle: string | null) => {
+    const id = cameraIdFromHandle(handle)
+    const name = id === null ? undefined : camerasQuery.data?.find((c) => c.id === id)?.name
+    return name || handle || '—'
+  }
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['alarms-page'] })
@@ -236,6 +257,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         caption="Alerts and incidents"
         rows={rows}
         showSource
+        cameraLabel={cameraLabel}
         selected={sel.selected}
         onToggle={sel.toggle}
         onToggleAll={(on) => sel.toggleMany(rows.map((a) => a.id), on)}

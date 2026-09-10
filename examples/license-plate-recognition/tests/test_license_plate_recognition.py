@@ -174,6 +174,30 @@ def test_scope_fetch_failure_means_no_restriction(monkeypatch):
     assert len(alerter.handle_event(_envelope(camera="anything"))) == 1
 
 
+# ── Camera names in alert text ──────────────────────────────────────
+
+
+def test_alert_text_names_the_camera_not_its_handle(monkeypatch):
+    """A person reads the description — inbox, SMS, spoken relay — and
+    knows the camera as "Gate IN", not "cam7". The handle stays in
+    camera_id, where machines route on it. An explicit scope never asks
+    core for the roster, so the names must not ride on that fetch."""
+    alerter, _ = _alerter(opennvr_url="http://core:8000", cameras=["cam7"])
+    monkeypatch.setattr(lpr, "discover_cameras", lambda url, api_key=None: [
+        {"camera_id": "cam7", "name": "Gate IN"}])
+    fired = alerter.handle_event(_envelope(camera="cam7"))
+    assert "read on camera Gate IN " in fired[0].description
+    assert "cam7" not in fired[0].description
+    assert fired[0].camera_id == "cam7"
+
+
+def test_alert_text_falls_back_to_the_handle_when_core_cannot_say():
+    # conftest's roster stub answers [] — core could not be asked.
+    alerter, _ = _alerter(opennvr_url="http://core:8000", cameras=["cam7"])
+    fired = alerter.handle_event(_envelope(camera="cam7"))
+    assert "read on camera cam7 " in fired[0].description
+
+
 # ── Contract surface ────────────────────────────────────────────────
 
 
