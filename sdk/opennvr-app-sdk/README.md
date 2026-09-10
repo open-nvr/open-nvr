@@ -13,7 +13,42 @@ Apache-2.0 — ship your app under any licence, closed included.
 pip install opennvr-app-sdk
 ```
 
-## A detector in one method
+## An app in one function
+
+```python
+from opennvr_app_sdk import App
+
+app = App("loitering", name="Loitering", version="1.0.0", category="perimeter")
+
+@app.on_detection("person", zone="driveway", dwell=30)
+def loitering(event):
+    event.alert(f"Person loitering on {event.camera}", severity="high")
+
+if __name__ == "__main__":
+    raise SystemExit(app.run())
+```
+
+That app subscribes to the platform's detections, serves the registry
+contract (`/health`, `/state`, `/manifest`, config form, actions),
+registers itself in the App Catalog, is issued its own credential, and
+fires alerts that reach the operator inbox — none of which you wrote.
+The zone becomes an editor the operator draws on a camera still; the
+dwell timer, the once-per-episode latch, the alert envelope and the
+config file are the SDK's.
+
+See it fire before you touch Docker:
+
+```bash
+opennvr-app new loitering        # a runnable app + tests
+opennvr-app dev                  # run it against a simulated camera
+opennvr-app validate .           # what a reviewer would check
+```
+
+## …or the class underneath it
+
+`App` compiles to a `Detector`. When a rule outgrows the decorators,
+write the `Detector` directly — same process, same manifest, same
+alerts:
 
 ```python
 from opennvr_app_sdk import Alert, AppManifest, Detector, Param, app
@@ -42,10 +77,9 @@ if __name__ == "__main__":
     raise SystemExit(app(Loitering).run())
 ```
 
-That app subscribes to the platform's detections, serves the registry
-contract (`/health`, `/state`, `/manifest`, config form, actions),
-registers itself in the App Catalog, is issued its own credential, and
-fires alerts that reach the operator inbox — none of which you wrote.
+`FrameApp` drives its own inference, `AlertSubscriber` consumes the
+alert bus and `DomainEventSubscriber` consumes contracted domain
+events — same shape, different input.
 
 ## The platform, from an app
 

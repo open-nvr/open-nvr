@@ -6,6 +6,55 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **App SDK: the `App` facade — apps in one function.** Writing a first
+  app required knowing about NATS subjects, inference envelopes,
+  normalized bboxes, alert dispatchers and keyed TTL state before
+  writing a line of the rule. `App` collapses that into a declaration
+  and a decorated function:
+
+  ```python
+  app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+
+  @app.on_detection("person", zone="driveway", dwell=30)
+  def loitering(event):
+      event.alert(f"Person loitering on {event.camera}", severity="high")
+  ```
+
+  The facade owns the manifest (a `zone=` anywhere adds the per-camera
+  zone editor the catalog renders), the config dataclass (from
+  `app.param(...)`, so `config.yml` and `event.config` cannot drift),
+  per-detection fan-out, `dwell=`/`cooldown=` keyed per
+  camera/label/track, and an `event.alert()` that fills in camera,
+  correlation id, label, confidence, track, zone and dwell.
+  `@app.on_event()` is the whole-frame escape hatch; `@app.on_setup()`
+  runs once with the parsed config.
+
+  It is additive: `App.detector_class()` compiles to an ordinary
+  `Detector`, so the process, the manifest, the alerts and the contract
+  surface are unchanged, and `Detector`, `FrameApp`, `AlertSubscriber`
+  and `DomainEventSubscriber` remain the documented path for rules that
+  outgrow the decorators. Every app already in the catalog keeps working
+  without a change.
+
+- **`opennvr-app dev` — run an app against a simulated camera.** Between
+  `opennvr-app new` and a working stack there used to be Docker, a NATS
+  broker, a KAI-C adapter and a real camera, which is a long way to go
+  to find out whether a rule fires. `opennvr-app dev` walks a simulated
+  object across the frame in-process and prints the alerts as they fire,
+  annotating zone entry and exit, with `--label`, `--camera`, `--rate`,
+  `--count`, `--still` and `--fast`. It drives the same `handle_event`
+  path a real subscription uses, so what fires there fires in
+  production. Works for facade apps and for plain `Detector` apps alike.
+
+### Changed
+
+- The scaffold template, its README and its smoke tests lead with the
+  facade, and `opennvr-app validate` discovers a facade app (its
+  manifest, compiled class and generated config class) alongside the
+  existing archetypes.
+
 ## [0.1.5] — 2026-09-10
 
 The largest release since 0.1.0, and the one where the app platform grew
