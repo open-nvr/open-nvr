@@ -79,9 +79,9 @@ export type DataTableProps<T> = {
   /** Rendered inside the bordered shell, under the table. */
   footer?: ReactNode
   /**
-   * Rendered inside the shell ABOVE the rows — the same pagination as
-   * the footer, so a long page can be walked from either end without
-   * scrolling to find the control.
+   * Rendered inside the shell ABOVE the rows — where the pagination
+   * lives, beside the filters it pages through, and visible without
+   * scrolling to the end of a long page.
    */
   toolbar?: ReactNode
   /**

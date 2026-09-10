@@ -3,6 +3,7 @@ import { clsx } from 'clsx'
 import { Check } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
 import { DataTable, type Column } from '../ui/DataTable'
+import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
 import {
   alarmSeenAt, alarmSeenTitle, type InboxAlert,
 } from '../../services/alertsInboxService'
@@ -24,6 +25,22 @@ export function cameraIdFromHandle(handle: string | null): number | null {
   if (!handle) return null
   const n = Number(String(handle).replace(/^cam-?/i, ''))
   return Number.isFinite(n) ? n : null
+}
+
+/** A description with the row's own camera handle swapped for its display
+ *  name. Producers wrote the raw handle into the text ("read on camera
+ *  cam1") while the Camera column resolved it, so one row said both `cam1`
+ *  and `Demo IN`. The LPR app now writes the name; rows already stored keep
+ *  their text, and this fixes them on display. Only the row's OWN handle,
+ *  as a whole word — `cam1` never rewrites part of `cam10`. */
+export function withCameraName(
+  text: string, handle: string | null, label?: (handle: string | null) => string,
+): string {
+  if (!handle || !label) return text
+  const name = label(handle)
+  if (!name || name === handle) return text
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return text.replace(new RegExp(`\\b${escaped}\\b`, 'g'), name)
 }
 
 export type AlarmsTableProps = {
@@ -130,23 +147,27 @@ export function AlarmsTable({
       // under every title, which doubled the row height to show a
       // sentence that mostly restates the title. Inline and dim, it
       // still reads as the detail it is — and twice as many alarms fit.
-      cell: (a) => (
-        <div
-          className="truncate"
-          title={a.description ? `${a.title} — ${a.description}` : a.title}
-        >
-          <span className={a.acknowledged_at ? 'font-normal' : 'font-semibold'}>
-            {a.title}
-          </span>
-          {a.description && (
-            <span className="ml-1.5 text-[var(--text-dim)]">
-              {/* The description already ends in a full stop, which
-                  would read as "(….)" once bracketed. */}
-              ({a.description.replace(/\.\s*$/, '')})
+      cell: (a) => {
+        const description = a.description
+          && withCameraName(a.description, a.camera_id, cameraLabel)
+        return (
+          <div
+            className="truncate"
+            title={description ? `${a.title} — ${description}` : a.title}
+          >
+            <span className={a.acknowledged_at ? 'font-normal' : 'font-semibold'}>
+              {a.title}
             </span>
-          )}
-        </div>
-      ),
+            {description && (
+              <span className="ml-1.5 text-[var(--text-dim)]">
+                {/* The description already ends in a full stop, which
+                    would read as "(….)" once bracketed. */}
+                ({description.replace(/\.\s*$/, '')})
+              </span>
+            )}
+          </div>
+        )
+      },
     },
     ...(showSource ? [{
       key: 'source', header: 'Source', hideBelow: 'lg' as const,
@@ -283,46 +304,49 @@ export function AlarmsSelectionBar({
  * pagination — the same shape the plate-reads table uses — rather than
  * as a separate bar above a separately-bordered table.
  *
- * Severity is a segmented control rather than a row of buttons for the
- * same reason the reads table's time range is: it is one choice from a
- * fixed set, and five outlined buttons read as five separate actions.
+ * Status and severity are both segmented controls, like the reads
+ * table's time range: each is one choice from a fixed set. Status used
+ * to be a lone "Unacknowledged only" toggle whose on-state looked like
+ * its hover-state. Both groups are labelled because both start "All".
  */
 export const ALARM_SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 
+const SEVERITY_OPTIONS: SegmentOption<string | null>[] = [
+  { value: null, label: 'All' },
+  ...ALARM_SEVERITIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) })),
+]
+
+const STATUS_OPTIONS: SegmentOption<'all' | 'unacked'>[] = [
+  { value: 'all', label: 'All' },
+  { value: 'unacked', label: 'Unacknowledged', title: 'Only alarms nobody has acknowledged yet' },
+]
+
 export function AlarmsFilters({
-  onlyUnacked, onToggleUnacked, severity, onSeverity, children,
+  onlyUnacked, onUnacked, severity, onSeverity, children,
 }: {
   onlyUnacked: boolean
-  onToggleUnacked: () => void
+  onUnacked: (only: boolean) => void
   severity: string | null
   onSeverity: (s: string | null) => void
   children?: ReactNode
 }) {
   return (
     <>
-      <Button
-        size="sm"
-        variant={onlyUnacked ? 'default' : 'outline'}
-        aria-pressed={onlyUnacked}
-        onClick={onToggleUnacked}
-      >
-        Unacknowledged only
-      </Button>
-      <div className="flex overflow-hidden rounded border border-[var(--border)]"
-           role="group" aria-label="Severity">
-        {([null, ...ALARM_SEVERITIES] as const).map((sev) => (
-          <button
-            key={sev ?? 'all'}
-            type="button"
-            aria-pressed={severity === sev}
-            onClick={() => onSeverity(sev)}
-            className={`px-2.5 py-1 text-xs capitalize ${severity === sev
-              ? 'bg-[var(--panel-2)] font-semibold text-[var(--text)]'
-              : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
-          >
-            {sev ?? 'All'}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <SegmentedControl
+          label="Status"
+          showLabel
+          options={STATUS_OPTIONS}
+          value={onlyUnacked ? 'unacked' : 'all'}
+          onChange={(v) => onUnacked(v === 'unacked')}
+        />
+        <SegmentedControl
+          label="Severity"
+          showLabel
+          options={SEVERITY_OPTIONS}
+          value={severity}
+          onChange={onSeverity}
+        />
       </div>
       {children}
     </>

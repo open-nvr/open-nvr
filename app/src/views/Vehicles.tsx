@@ -27,12 +27,15 @@
 // providing app's config endpoint — the same live-update path the
 // catalog form uses.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useEffect, useId, useMemo, useRef, useState,
+  type ChangeEvent, type FormEvent, type ReactNode,
+} from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowRight, BellRing, BookUser, Car, Download, FileText, Fingerprint, History,
-  PhoneCall, Plus, RefreshCw, ScanLine, Search, ShieldAlert, ShieldCheck, Trash2,
-  Upload, Volume2,
+  ArrowRight, BellRing, BookUser, Car, ChevronRight, Download, FileText, Fingerprint,
+  History, Pencil, PhoneCall, Plus, RefreshCw, ScanLine, Search, ShieldAlert,
+  ShieldCheck, SlidersHorizontal, Trash2, Upload, Volume2,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
@@ -56,6 +59,9 @@ import { AlarmsFilters, AlarmsSelectionBar, AlarmsTable, cameraIdFromHandle } fr
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
+import { SegmentedControl } from '../components/ui/SegmentedControl'
+import { Switch } from '../components/ui/Switch'
+import { InfoTip } from '../components/ui/InfoTip'
 import { formatSeenAt, seenAtTitle } from '../lib/time'
 import {
   LPR_SKILL,
@@ -66,7 +72,7 @@ import {
 import { cameraService } from '../services/cameraService'
 import {
   Badge, Button, Card, CardContent,
-  EmptyState, PageHeader, Skeleton,
+  EmptyState, PageHeader, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
 
@@ -330,9 +336,10 @@ export function registryFromRows(rows: (string | number | null | undefined)[][])
   return out
 }
 
-/** Minimal CSV parse (quoted fields supported) → registry entries via
- * the shared row parser (header synonyms and all). */
-export function registryFromCsv(text: string): RegistryEntry[] {
+type SheetCell = string | number | null | undefined
+
+/** Minimal CSV parse (quoted fields supported) → rows of cells. */
+function csvRows(text: string): string[][] {
   const rows: string[][] = []
   let field = '', row: string[] = [], inQ = false
   for (let i = 0; i < text.length; i++) {
@@ -352,13 +359,12 @@ export function registryFromCsv(text: string): RegistryEntry[] {
   }
   row.push(field)
   if (row.some((f) => f.trim())) rows.push(row)
-  return registryFromRows(rows)
+  return rows
 }
 
-/** Excel (.xlsx/.xls) → registry entries. SheetJS is lazy-loaded so
- * the page's normal bundle doesn't carry it; the first sheet's rows
- * go through the same header matching as CSV. */
-export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+/** Excel (.xlsx/.xls) → the first sheet's rows. SheetJS is lazy-loaded so
+ * the page's normal bundle doesn't carry it. */
+async function excelRows(buf: ArrayBuffer): Promise<SheetCell[][]> {
   const XLSX = await import('xlsx')
   // cellDates + dateNF: a date-TYPED "Valid Till" cell must land as
   // YYYY-MM-DD (what the app's expiry check parses), not the sheet's
@@ -366,17 +372,36 @@ export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry
   const wb = XLSX.read(buf, { type: 'array', cellDates: true })
   const sheet = wb.Sheets[wb.SheetNames[0]]
   if (!sheet) return []
-  const rows = XLSX.utils.sheet_to_json(sheet, {
+  return XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,   // numbers come back as displayed strings
     dateNF: 'yyyy-mm-dd',
     defval: '',
-  }) as (string | number | null)[][]
-  return registryFromRows(rows)
+  }) as SheetCell[][]
 }
 
+/** A picked CSV or Excel file → rows, by its extension. */
+async function fileRows(file: File): Promise<SheetCell[][]> {
+  return /\.xlsx?$/i.test(file.name)
+    ? excelRows(await file.arrayBuffer())
+    : csvRows(await file.text())
+}
+
+/** CSV → registry entries via the shared row parser (header synonyms and all). */
+export function registryFromCsv(text: string): RegistryEntry[] {
+  return registryFromRows(csvRows(text))
+}
+
+/** Excel → registry entries, through the same header matching as CSV. */
+export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+  return registryFromRows(await excelRows(buf))
+}
+
+/** One CSV cell, always quoted — owner names and notes carry commas. */
+const csvCell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+
 function registryToCsv(entries: RegistryEntry[]): string {
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  const esc = csvCell
   return [
     'plate,owner,unit,type,model,note,expires',
     ...entries.map((e) =>
@@ -468,6 +493,108 @@ export function parseMonitors(cfg: any): Monitor[] {
     if (plate && !out.has(plate)) out.set(plate, { plate, severity: 'high', active: true })
   }
   return [...out.values()]
+}
+
+// ── Monitor import / export ─────────────────────────────────────────
+// The same spreadsheet round trip as the register: a watch list often
+// arrives as a sheet from a security office, and export is the backup
+// before a bulk change.
+
+type MonitorColumn = 'plate' | 'note' | 'severity' | 'camera' | 'armed'
+
+const MONITOR_HEADER_SYNONYMS: Record<string, MonitorColumn> = {
+  // Plate headers are the register's: one vocabulary for "vehicle number".
+  ...(Object.fromEntries(
+    Object.entries(HEADER_SYNONYMS).filter(([, f]) => f === 'plate'),
+  ) as Record<string, 'plate'>),
+  note: 'note', notes: 'note', reason: 'note', remark: 'note', remarks: 'note',
+  description: 'note',
+  severity: 'severity', priority: 'severity', level: 'severity',
+  'alert severity': 'severity',
+  camera: 'camera', cameras: 'camera', where: 'camera', location: 'camera',
+  'camera name': 'camera',
+  armed: 'armed', active: 'armed', enabled: 'armed', status: 'armed',
+}
+
+const MONITOR_COLUMN_ORDER: MonitorColumn[] = ['plate', 'note', 'severity', 'camera', 'armed']
+
+/** A spreadsheet's "armed" cell → on/off. Empty means armed: a list of
+ *  plates to watch is a list of plates to watch. */
+function parseArmed(v: string | undefined): boolean {
+  return !/^(no|n|false|0|off|silenced|inactive|disabled)$/i.test((v ?? '').trim())
+}
+
+/** Rows → monitors. Cameras are matched by NAME (as the Cameras page shows
+ *  it) or by handle (`cam1`), and stored as handles — what the LPR app
+ *  matches reads against. Names that match no camera are returned so the
+ *  caller can say so: they are dropped, and a rule left with no camera
+ *  watches every camera — surveillance over-alerts, never under. */
+export function monitorsFromRows(
+  rows: SheetCell[][],
+  cameras: { id: number; name: string }[],
+): { monitors: Monitor[]; unknownCameras: string[] } {
+  const clean = rows
+    .map((r) => r.map((c) => String(c ?? '').trim()))
+    .filter((r) => r.some(Boolean))
+  if (!clean.length) return { monitors: [], unknownCameras: [] }
+
+  const header = clean[0].map((h) => MONITOR_HEADER_SYNONYMS[h.toLowerCase()] ?? null)
+  const hasHeader = header.includes('plate')
+  const cols: (MonitorColumn | null)[] = hasHeader ? header : MONITOR_COLUMN_ORDER
+  const body = hasHeader ? clean.slice(1) : clean
+
+  const handleOf = (token: string): string | null => {
+    const byName = cameras.find((c) => c.name.trim().toLowerCase() === token.toLowerCase())
+    if (byName) return `cam${byName.id}`
+    const m = /^cam-?(\d+)$/i.exec(token)
+    if (m && cameras.some((c) => c.id === Number(m[1]))) return `cam${Number(m[1])}`
+    return null
+  }
+
+  const unknown = new Set<string>()
+  const out = new Map<string, Monitor>()
+  for (const r of body) {
+    const rec: Partial<Record<MonitorColumn, string>> = {}
+    r.forEach((v, i) => {
+      const k = cols[i]
+      if (k && v) rec[k] = v
+    })
+    const plate = normalizePlate(rec.plate ?? '')
+    if (!plate) continue
+    const sev = (rec.severity ?? '').toLowerCase()
+    const handles: string[] = []
+    for (const token of (rec.camera ?? '').split(/[;|]/).map((s) => s.trim()).filter(Boolean)) {
+      if (/^(any|all|any camera|all cameras)$/i.test(token)) continue
+      const h = handleOf(token)
+      if (!h) unknown.add(token)
+      else if (!handles.includes(h)) handles.push(h)
+    }
+    out.set(plate, {
+      plate,
+      note: rec.note || undefined,
+      severity: (MONITOR_SEVERITIES as readonly string[]).includes(sev)
+        ? (sev as Monitor['severity']) : 'high',
+      active: parseArmed(rec.armed),
+      cameras: handles.length ? handles : undefined,
+    })
+  }
+  return { monitors: [...out.values()], unknownCameras: [...unknown] }
+}
+
+/** Monitors → CSV, cameras by NAME so the file reads like the screen and
+ *  imports straight back. */
+function monitorsToCsv(monitors: Monitor[], cameras: { id: number; name: string }[]): string {
+  const nameOf = (h: string) => cameras.find((c) => `cam${c.id}` === h)?.name ?? h
+  return [
+    MONITOR_COLUMN_ORDER.join(','),
+    ...[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => [
+      m.plate,
+      m.note,
+      m.severity ?? 'high',
+      (m.cameras ?? []).map(nameOf).join('; '),
+      m.active === false ? 'no' : 'yes',
+    ].map(csvCell).join(',')),
+  ].join('\n')
 }
 
 function formatStay(seconds: number): string {
@@ -684,6 +811,10 @@ export function Vehicles() {
     },
     retry: 0,
     refetchInterval: 60_000,
+    // Keep the last figures up while a new range loads, as the reads list
+    // does. Without it every first visit to a range blanked the tiles to
+    // "…" and back — a flicker that read as the numbers being unstable.
+    placeholderData: keepPreviousData,
   })
 
   const lprApp = findLprApp(appsQuery.data)
@@ -788,17 +919,63 @@ export function Vehicles() {
     retry: 0,
   })
 
-  const saveConfig = useMutation({
-    mutationFn: async (patch: Record<string, any>) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the register.')
-      await apiService.updateAppConfig(lprApp.id, {
-        ...((lprApp.config ?? {}) as Record<string, any>),
-        ...patch,
-      })
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
-    onError: (e) => showError(extractApiError(e, 'Could not save the register.')),
-  })
+  // ── Writing the app's config ────────────────────────────────────
+  // Every write sends the WHOLE config, so each has to be built on the
+  // latest one — writes still in flight included. Built from what the page
+  // last fetched, a second quick change (flip one switch, then another)
+  // silently undid the first; the controls were disabled during a save to
+  // stop that, which is what made them flicker, and it still left a gap
+  // between the save returning and the refetch landing.
+  //
+  // So every write: applies its change to the cached config at once (the
+  // page shows it immediately, and the next change builds on it); goes out
+  // in order behind any write before it (one scope); re-applies its change
+  // to the config as it stands when its turn comes, so an earlier write
+  // that failed and rolled back cannot take this one with it; and refetches
+  // only after the last queued write, so the server's older copy never
+  // flashes up in between.
+  function lprConfigWrite<V>(
+    build: (cfg: Record<string, any>, vars: V) => Record<string, any>,
+    errorText: string,
+    onDone?: (vars: V) => void,
+  ) {
+    const cfgOf = (app: RegisteredApp) => ({ ...((app.config ?? {}) as Record<string, any>) })
+    return {
+      mutationKey: ['lpr-config'],
+      scope: { id: 'lpr-config' },
+      mutationFn: async (vars: V) => {
+        const app = findLprApp(queryClient.getQueryData<RegisteredApp[]>(['apps']))
+        if (!app) throw new Error('No enabled LPR app to hold the register.')
+        await apiService.updateAppConfig(app.id, build(cfgOf(app), vars))
+      },
+      onMutate: async (vars: V) => {
+        await queryClient.cancelQueries({ queryKey: ['apps'] })
+        const prev = queryClient.getQueryData<RegisteredApp[]>(['apps'])
+        const app = findLprApp(prev)
+        if (prev && app) {
+          queryClient.setQueryData<RegisteredApp[]>(['apps'], prev.map((a) =>
+            a === app ? { ...a, config: build(cfgOf(a), vars) } : a))
+        }
+        return { prev }
+      },
+      onSuccess: (_data: void, vars: V) => onDone?.(vars),
+      onError: (e: unknown, _vars: V, ctx: { prev?: RegisteredApp[] } | undefined) => {
+        if (ctx?.prev) queryClient.setQueryData(['apps'], ctx.prev)
+        showError(extractApiError(e, errorText))
+      },
+      onSettled: () => {
+        // This write still counts as pending here, so 1 means "the last".
+        if (queryClient.isMutating({ mutationKey: ['lpr-config'] }) <= 1) {
+          void queryClient.invalidateQueries({ queryKey: ['apps'] })
+        }
+      },
+    }
+  }
+
+  const saveConfig = useMutation(lprConfigWrite<Record<string, any>>(
+    (cfg, patch) => ({ ...cfg, ...patch }),
+    'Could not save the register.',
+  ))
 
   // The providing app's live state: the review queue (reads a human
   // should look at) and the inside-visitors count for overstay.
@@ -831,31 +1008,21 @@ export function Vehicles() {
   // Quick actions off the reads table: allowlist stays a plain list;
   // "monitor this plate" writes a monitor rule (the denylist's
   // successor — same live-update path, per-plate alert config).
-  const watchlist = useMutation({
-    mutationFn: async ({ plateText, list }: { plateText: string; list: 'allowlist' | 'monitor' }) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
-      const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
+  const watchlist = useMutation(lprConfigWrite<{ plateText: string; list: 'allowlist' | 'monitor' }>(
+    (cfg, { plateText, list }) => {
       if (list === 'allowlist') {
         const current: string[] = Array.isArray(cfg.allowlist) ? cfg.allowlist : []
-        if (current.includes(plateText)) return
-        cfg.allowlist = [...current, plateText]
-      } else {
-        if (monitoredPlates.has(plateText)) return
-        cfg.monitors = [
-          ...monitors,
-          { plate: plateText, severity: 'high', active: true },
-        ]
+        return current.includes(plateText) ? cfg : { ...cfg, allowlist: [...current, plateText] }
       }
-      await apiService.updateAppConfig(lprApp.id, cfg)
+      const current = parseMonitors(cfg)
+      if (current.some((m) => m.plate === plateText)) return cfg
+      return { ...cfg, monitors: [...current, { plate: plateText, severity: 'high', active: true }] }
     },
-    onSuccess: (_d, vars) => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(vars.list === 'monitor'
-        ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
-        : `${vars.plateText} added to the allowlist`)
-    },
-    onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
-  })
+    'Could not update the watchlist.',
+    (vars) => showSuccess(vars.list === 'monitor'
+      ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
+      : `${vars.plateText} added to the allowlist`),
+  ))
 
   // Register and monitor are SEPARATE lists on the app's config, so they
   // are separate toggles: a resident's car can be registered and also
@@ -867,40 +1034,38 @@ export function Vehicles() {
   // Turning a plate OFF the register discards owner/unit/model details
   // that nothing else on the platform holds, so that direction asks
   // first. Everything else here is retypable.
-  const toggleList = useMutation({
-    mutationFn: async ({ plateText, list, on }: {
-      plateText: string
-      list: 'registry' | 'monitor'
-      on: boolean
-    }) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
-      const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
-      const without = (entries: any[]) => entries.filter((entry) => {
+  const toggleList = useMutation(lprConfigWrite<{
+    plateText: string
+    list: 'registry' | 'monitor'
+    on: boolean
+  }>(
+    (cfg, { plateText, list, on }) => {
+      const without = <T,>(entries: T[]) => entries.filter((entry: any) => {
         const plate = typeof entry === 'string' ? entry : entry?.plate
         return String(plate ?? '').toUpperCase() !== plateText
       })
+      const next = { ...cfg }
       if (list === 'registry') {
-        cfg.registry = on ? [...without(registry), { plate: plateText }] : without(registry)
+        const current = parseRegistry(cfg.registry)
+        next.registry = on ? [...without(current), { plate: plateText }] : without(current)
       } else {
-        cfg.monitors = on
-          ? [...without(monitors), { plate: plateText, severity: 'high', active: true }]
-          : without(monitors)
+        const current = parseMonitors(cfg)
+        next.monitors = on
+          ? [...without(current), { plate: plateText, severity: 'high', active: true }]
+          : without(current)
         // The legacy denylist is monitor shorthand — a plate leaving the
         // monitored state has to leave there too, or it comes straight back.
-        if (Array.isArray(cfg.denylist)) cfg.denylist = without(cfg.denylist)
+        if (Array.isArray(cfg.denylist)) next.denylist = without(cfg.denylist)
       }
-      await apiService.updateAppConfig(lprApp.id, cfg)
+      return next
     },
-    onSuccess: (_d, v) => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(v.list === 'registry'
-        ? (v.on ? `${v.plateText} registered — add owner details in the Vehicle register tab`
-          : `${v.plateText} removed from the vehicle register`)
-        : (v.on ? `${v.plateText} is now monitored — configure its alert in the Monitoring tab`
-          : `${v.plateText} is no longer monitored`))
-    },
-    onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
-  })
+    'Could not update the watchlist.',
+    (v) => showSuccess(v.list === 'registry'
+      ? (v.on ? `${v.plateText} registered — add owner details in the Vehicle register tab`
+        : `${v.plateText} removed from the vehicle register`)
+      : (v.on ? `${v.plateText} is now monitored — configure its alert in the Monitoring tab`
+        : `${v.plateText} is no longer monitored`)),
+  ))
 
   // Replace the whole monitors list (Monitoring tab edits). The tab
   // edits the MERGED view (explicit monitors + denylist shorthand), so
@@ -981,7 +1146,6 @@ export function Vehicles() {
               + 'Removing it discards that entry and those details.')) {
             return
           }
-          if (list === 'registry' && on) setRegisterPrefill(p)
           toggleList.mutate({ plateText: p, list, on })
         }
 
@@ -1379,6 +1543,7 @@ export function Vehicles() {
             saveConfig.mutate({ camera_roles: next })
           }}
           initialPlate={registerPrefill}
+          onPrefillConsumed={() => setRegisterPrefill('')}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
               onSuccess: () => showSuccess(`Register saved — ${entries.length} vehicles`),
@@ -1517,25 +1682,15 @@ export function Vehicles() {
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
-            {/* The selected range reads as a state, not a call to action:
-                a filled accent segment competed with the one primary
-                button on the page. Weight and a tint carry it instead. */}
-            <div className="flex overflow-hidden rounded border border-[var(--border)]"
-                 role="group" aria-label="Time range">
-              {RANGE_PRESETS.map((r) => (
-                <button
-                  key={r.key}
-                  type="button"
-                  aria-pressed={range.key === r.key}
-                  onClick={() => { setRange(r); reads.setPage(1) }}
-                  className={`px-2.5 py-1 text-xs ${range.key === r.key
-                    ? 'bg-[var(--panel-2)] font-semibold text-[var(--text)]'
-                    : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
-                >
-                  {r.label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              label="Time range"
+              options={RANGE_PRESETS.map((r) => ({ value: r.key, label: r.label }))}
+              value={range.key}
+              onChange={(key) => {
+                setRange(RANGE_PRESETS.find((r) => r.key === key) ?? RANGE_PRESETS[0])
+                reads.setPage(1)
+              }}
+            />
             {alarmOnUnknown && (
               <Badge variant="warning" title="Any plate not in the vehicle register raises a high-severity alert">
                 <BellRing size={12} /> Unknown-vehicle alarm ON
@@ -1557,23 +1712,9 @@ export function Vehicles() {
                 label="reads"
                 onPageChange={reads.setPage}
                 onPageSizeChange={reads.setPageSize}
-                announce={false}
               />
             </div>
           </div>
-        }
-        footer={
-          <Pagination
-            page={reads.page}
-            pageSize={reads.pageSize}
-            total={eventsTotal}
-            rowCount={events.length}
-            hasNext={events.length === reads.pageSize}
-            isFetching={eventsQuery.isFetching}
-            label="reads"
-            onPageChange={reads.setPage}
-            onPageSizeChange={reads.setPageSize}
-          />
         }
       />
       </>
@@ -1963,6 +2104,14 @@ function EvidenceDialog({
 // deliberate: a society secretary has 300 plates in a spreadsheet, and
 // "export" doubles as the import template.
 
+// The register's type column is free text (CSV imports carry whatever a
+// spreadsheet said), so these are the dialog's choices, not a closed set:
+// an existing value outside the list is kept and offered as-is.
+const VEHICLE_TYPES = ['Car', 'Two-wheeler', 'Truck', 'Van', 'Bus', 'Other']
+
+/** Where the overstay alert starts when it is switched on. */
+const OVERSTAY_DEFAULT_HOURS = 4
+
 function RegistryTab({
   registry,
   alarmOnUnknown,
@@ -1971,6 +2120,7 @@ function RegistryTab({
   overstayHours,
   onSetOverstay,
   initialPlate,
+  onPrefillConsumed,
   canEdit,
   saving,
   cameras,
@@ -1986,6 +2136,8 @@ function RegistryTab({
   overstayHours: number
   onSetOverstay: (hours: number) => void
   initialPlate?: string
+  /** Called once `initialPlate` has opened the dialog, so it opens once. */
+  onPrefillConsumed: () => void
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
@@ -1994,22 +2146,35 @@ function RegistryTab({
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
-  const [draft, setDraft] = useState<RegistryEntry>({ plate: initialPlate ?? '' })
+  // The dialog's subject: a new entry to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ entry: RegistryEntry; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
   const [overstayDraft, setOverstayDraft] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-register')
+  const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
+  // Settings are set once and then left alone, so they fold away under the
+  // list — except while nothing is set up, when they are the only useful
+  // thing on the tab.
+  const [settingsOpen, setSettingsOpen] = useState(() => reading.length === 0)
+  const settingsRef = useRef<HTMLDivElement | null>(null)
+  const settingsToggleRef = useRef<HTMLButtonElement | null>(null)
+  const settingsPanelId = useId()
+  const [settingsFlash, setSettingsFlash] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const { showError, showSuccess } = useSnackbar()
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    const entry: RegistryEntry = { plate }
-    for (const k of REGISTRY_FIELDS) {
-      const v = (draft[k] ?? '').trim()
-      if (v) entry[k] = v
-    }
-    onSaveRegistry([...registry.filter((r) => r.plate !== plate), entry])
-    setDraft({ plate: '' })
-  }
+  // A plate handed over from elsewhere on the page ("Register" on a
+  // vehicle's history) opens the dialog once, then is spent — otherwise
+  // every later visit to this tab would pop it up again. Only a NEW
+  // hand-over re-runs this; registry edits must not re-open it.
+  useEffect(() => {
+    if (!initialPlate) return
+    const plate = normalizePlate(initialPlate)
+    const existing = registry.find((r) => r.plate === plate)
+    setDialog(existing ? { entry: existing, editing: plate } : { entry: { plate }, editing: null })
+    onPrefillConsumed()
+  }, [initialPlate])
 
   // CSV or Excel — a society's list usually already exists as a sheet.
   const importFile = async (file: File) => {
@@ -2032,14 +2197,7 @@ function RegistryTab({
     }
   }
 
-  const exportCsv = () => {
-    const blob = new Blob([registryToCsv(registry)], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = 'vehicle-register.csv'
-    a.click()
-    URL.revokeObjectURL(a.href)
-  }
+  const exportCsv = () => downloadCsv(registryToCsv(registry), 'vehicle-register.csv')
 
   if (!canEdit) {
     return (
@@ -2051,304 +2209,741 @@ function RegistryTab({
     )
   }
 
+  const saveEntry = (entry: RegistryEntry, replaces: string | null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSaveRegistry([
+      ...registry.filter((r) => r.plate !== entry.plate && r.plate !== replaces),
+      entry,
+    ])
+    setDialog(null)
+  }
+
+  // Saved on blur or Enter — no separate Save button to find. 0 turns the
+  // alert off, the same as the switch.
+  const commitOverstay = () => {
+    if (overstayDraft === null) return
+    const h = Number(overstayDraft)
+    setOverstayDraft(null)
+    if (Number.isFinite(h) && h >= 0 && h !== overstayHours) onSetOverstay(h)
+  }
+
+  // Opens the panel AND brings it into view. It sits under a table that
+  // takes every pixel the screen has left, so opening it in place changed
+  // nothing the operator could see. Two frames, not one: the table shrinks
+  // to make room only after the panel renders, and a scroll taken before
+  // that lands short of a panel the shrink then moves.
+  const openSettings = ({ highlight = false }: { highlight?: boolean } = {}) => {
+    setSettingsOpen(true)
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // Focus follows, so a keyboard user lands where the page went.
+      settingsToggleRef.current?.focus({ preventScroll: true })
+      if (highlight) {
+        setSettingsFlash(true)
+        window.setTimeout(() => setSettingsFlash(false), 1500)
+      }
+    }))
+  }
+
+  const q = query.trim().toLowerCase()
+  const rows = registry
+    .filter((r) => !q || [r.plate, r.owner, r.unit, r.model, r.note]
+      .some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser — the whole register is already here, as app
+  // config — but through the same pager as the server-paged tables, so
+  // every list on the page moves the same way. Clamped rather than reset
+  // by an effect: deleting the last row of the last page must not strand
+  // the operator on an empty page.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (r: RegistryEntry) => setDialog({ entry: r, editing: r.plate })
+
+  const registerColumns: Column<RegistryEntry>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap',
+      cell: (r) => (
+        <>
+          {r.plate}
+          {!entryActive(r) && <Badge variant="warning" className="ml-1.5">expired</Badge>}
+        </>
+      ),
+    },
+    { key: 'owner', header: 'Owner', width: 'w-[180px]', cellClassName: 'truncate', cell: (r) => r.owner || '—' },
+    { key: 'unit', header: 'Flat / unit', width: 'w-[110px]', cellClassName: 'truncate', cell: (r) => r.unit || '—' },
+    {
+      key: 'type', header: 'Type', width: 'w-[110px]', hideBelow: 'md',
+      cellClassName: 'truncate', cell: (r) => r.type || '—',
+    },
+    {
+      key: 'model', header: 'Model', width: 'w-[150px]', hideBelow: 'lg',
+      cellClassName: 'truncate', cell: (r) => r.model || '—',
+    },
+    {
+      key: 'expires', header: 'Valid till', width: 'w-[120px]',
+      cellClassName: 'whitespace-nowrap tabular-nums', cell: (r) => r.expires || '—',
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: 'Note', cellClassName: 'truncate text-[var(--text-dim)]',
+      cell: (r) => <span title={r.note || undefined}>{r.note || ''}</span>,
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (r) => (
+        <>
+          <button
+            title={`Edit ${r.plate}`}
+            aria-label={`Edit ${r.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(r)}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title="Remove from the register"
+            aria-label={`Remove ${r.plate} from the register`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
+  const roles = Object.values(cameraRoles)
+  const hasIn = roles.some((r) => r.role === 'gate_in')
+  const hasOut = roles.some((r) => r.role === 'gate_out')
+  const withRole = cameras.filter((c) => cameraRoles[String(c.id)]).length
+  // What the folded panel says, so its state is visible without opening it.
+  const settingsSummary = [
+    `Unknown-vehicle alarm ${alarmOnUnknown ? 'on' : 'off'}`,
+    `barrier ${barrierMode === 'registered' ? 'on' : 'off'}`,
+    `overstay ${overstayHours > 0 ? `${overstayHours} h` : 'off'}`,
+    `${withRole} of ${cameras.length} camera${cameras.length === 1 ? '' : 's'} with a role`,
+  ].join(' · ')
+
+  const addButton = (
+    <Button
+      variant="primary" size="sm"
+      onClick={() => setDialog({ entry: { plate: '' }, editing: null })}
+    >
+      <Plus size={14} /> Add vehicle
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> Import CSV / Excel
+    </Button>
+  )
+
   return (
     <div className="space-y-4">
-      {/* Alarm mode */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Alarm on unknown vehicles</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Any plate not in this register (or the allowlist) raises a high-severity
-              alert the moment it is read — one alarm per stranger, across all gate
-              cameras. Watchlisted plates keep their own alarm.
-            </div>
-          </div>
-          <Button
-            // The shared 'danger' variant is dark-theme-tuned and washes
-            // out on light; an outlined red reads in both themes.
-            variant={alarmOnUnknown ? 'outline' : 'primary'}
-            className={alarmOnUnknown
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleAlarm(!alarmOnUnknown)}
-            disabled={saving}
-          >
-            {alarmOnUnknown ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
 
-      {/* Automatic barrier — the decision half of gate automation */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Automatic barrier</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Publish an allow/deny decision for every read on a Gate IN camera —
-              registered and allowlisted vehicles allow, everything else denies.
-              Install the <b>Gate Controller</b> app from the catalog to wire the
-              decisions to your relay; it ships in dry-run so nothing moves until
-              you say so.
-              {!Object.values(cameraRoles).some((r) => r.role === 'gate_in') &&
-                ' Needs at least one Gate IN camera below.'}
-            </div>
-          </div>
-          <Button
-            variant={barrierMode === 'registered' ? 'outline' : 'primary'}
-            className={barrierMode === 'registered'
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleBarrier(barrierMode !== 'registered')}
-            disabled={saving}
-          >
-            {barrierMode === 'registered' ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
+      {/* The one setup problem that makes everything else moot, as a single
+          banner that leads to the fix — not a warning buried in a card. */}
+      {reading.length === 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-sm text-[var(--warning,#b7791f)]">
+          <span className="min-w-0 flex-1">
+            No camera is reading plates yet — give a camera a role and this app starts reading it.
+          </span>
+          {cameras.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => openSettings({ highlight: true })}>
+              Assign camera roles
+            </Button>
+          )}
+        </div>
+      )}
 
-      {/* Visitor overstay */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Visitor overstay alert</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Alert when a visitor (not registered or allowlisted) has been inside
-              longer than this many hours — one alert per visit, checked as reads
-              arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit.
-            </div>
-          </div>
-          <label className="text-xs text-[var(--text-dim)]">
-            Hours (0 = off)
-            <input
-              type="number"
-              min={0}
-              step={0.5}
-              value={overstayDraft ?? String(overstayHours || 0)}
-              onChange={(e) => setOverstayDraft(e.target.value)}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-28"
+      {/* The register is what this tab is for, so it comes first — on the
+          same table as the plate reads: header pinned, rows scrolling in
+          whatever height the screen has left, pager in the toolbar. Import
+          and export act on the whole list, so they sit here too. */}
+      {registry.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<Car size={28} />}
+            title="No vehicles registered yet"
+            description="Add each resident vehicle, or import the whole list from a spreadsheet — Import shows the columns it reads and has a template. Then switch on the unknown-vehicle alarm and any stranger raises an alert."
+            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
+          />
+        </Card>
+      ) : (
+        <DataTable<RegistryEntry>
+          caption="Vehicle register"
+          columns={registerColumns}
+          rows={pageRows}
+          rowKey={(r) => r.plate}
+          fillHeight
+          fixed
+          dense
+          minWidth="min-w-[720px]"
+          // The row IS the record, as on the plate reads: clicking it opens
+          // the entry to edit. The action cell keeps its own buttons.
+          onRowClick={editRow}
+          striped={false}
+          empty={
+            <EmptyState
+              icon={<Search size={28} />}
+              title={`No vehicle matches “${query.trim()}”`}
+              description="Search looks at the plate, owner, flat, model and note."
             />
-          </label>
-          <Button
-            onClick={() => {
-              const h = Number(overstayDraft ?? overstayHours)
-              if (Number.isFinite(h) && h >= 0) {
-                onSetOverstay(h)
-                setOverstayDraft(null)
-              }
-            }}
-            disabled={saving || overstayDraft === null}
-          >
-            Save
-          </Button>
-        </CardContent>
-      </Card>
+          }
+          toolbar={
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                <input
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                  placeholder="Search plate, owner, flat…"
+                  aria-label="Search the register"
+                  className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                />
+              </div>
+              {importButton}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download size={14} /> Export CSV
+              </Button>
+              {addButton}
+              {/* Always opens (never closes) the panel under the table and
+                  takes the page to it — the panel's own header toggles. */}
+              <Button
+                variant="outline" size="sm"
+                aria-controls={settingsPanelId}
+                onClick={() => openSettings({ highlight: true })}
+              >
+                <SlidersHorizontal size={14} /> Gate settings
+              </Button>
+              <div className="ml-auto">
+                <Pagination
+                  page={page}
+                  pageSize={pager.pageSize}
+                  total={rows.length}
+                  rowCount={pageRows.length}
+                  label="vehicles"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                />
+              </div>
+            </div>
+          }
+        />
+      )}
 
-      {/* Camera roles — the site's layout in the vehicle story */}
-      <Card>
-        <CardContent className="py-3">
-          <div className="text-sm font-medium mb-1">Camera roles</div>
-          <div className="text-xs text-[var(--text-dim)] mb-2">
-            Give each camera its place: <b>Gate IN</b> (required for gate features),
-            <b> Gate OUT</b> (optional — unlocks exits, stay durations and "inside now"),
-            <b> Parking</b>, or a named location of your own — every role enriches the
-            per-vehicle history.
-          </div>
-          {(() => {
-            const hasIn = Object.values(cameraRoles).some((r) => r.role === 'gate_in')
-            const hasOut = Object.values(cameraRoles).some((r) => r.role === 'gate_out')
-            // Adoption is the switch that costs money, so its absence is
-            // the loudest thing on the card: no camera claimed, no plate
-            // is read anywhere, and nothing else here matters yet.
-            const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
-            if (reading.length === 0) {
-              return (
-                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
-                  No camera is reading plates. Give a camera a role below and this app
-                  starts reading it — until then plate recognition runs nowhere, which
-                  is also why it costs nothing.
-                </div>
-              )
-            }
-            if (!hasIn) {
-              return (
-                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
-                  No Gate IN camera yet — mark at least one. Until then there is no gate
-                  history and no "inside now"; reads still collect normally.
-                </div>
-              )
-            }
-            if (!hasOut) {
-              return (
-                <div className="text-xs rounded border border-[var(--border)] text-[var(--text-dim)] px-3 py-2 mb-2">
-                  No Gate OUT camera — entries are recorded, but exit times, stay
-                  durations and "inside now" stay off until you mark one.
-                </div>
-              )
-            }
-            return null
-          })()}
-          <div className="flex flex-wrap gap-3">
-            {cameras.map((c) => {
-              const entry = cameraRoles[String(c.id)]
-              // Ineligible cameras stay on screen, greyed, with the
-              // reason. Hiding them makes an operator hunt for a camera
-              // that is right there — the question is always "why is it
-              // not in the list", so answer it in the list.
-              const blocked = ineligibleReason(c, LPR_SKILL)
-              return (
-                <label
-                  key={c.id}
-                  className={`inline-flex items-center gap-2 text-sm${blocked ? ' opacity-60' : ''}`}
-                  title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
-                >
-                  <span>{c.name}</span>
-                  <select
-                    value={entry?.role ?? ''}
-                    onChange={(e) => {
-                      const role = e.target.value as CameraRole | ''
-                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
-                    }}
-                    disabled={saving || Boolean(blocked)}
-                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                  >
-                    <option value="">no role</option>
-                    <option value="gate_in">Gate IN</option>
-                    <option value="gate_out">Gate OUT</option>
-                    <option value="parking">Parking</option>
-                    <option value="other">Other…</option>
-                  </select>
-                  {entry?.role === 'other' && (
+      {/* Gate settings — set once, so folded under the list, with a
+          summary line that shows their state without opening them. */}
+      <div ref={settingsRef} className="scroll-mt-4">
+        {/* A brief accent ring when opened from elsewhere, so the eye lands
+            on the panel the page just scrolled to. */}
+        <Card className={`transition-shadow duration-300 ${settingsFlash ? 'ring-2 ring-[var(--accent)]' : ''}`}>
+          <button
+            ref={settingsToggleRef}
+            type="button"
+            aria-expanded={settingsOpen}
+            aria-controls={settingsPanelId}
+            onClick={() => (settingsOpen ? setSettingsOpen(false) : openSettings())}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+          >
+            <ChevronRight
+              size={16}
+              className={`shrink-0 text-[var(--text-dim)] transition-transform ${settingsOpen ? 'rotate-90' : ''}`}
+            />
+            <span className="shrink-0 text-sm font-medium">Gate settings</span>
+            {!settingsOpen && (
+              <span className="min-w-0 truncate text-xs text-[var(--text-dim)]">{settingsSummary}</span>
+            )}
+          </button>
+          {settingsOpen && (
+            <div id={settingsPanelId} className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
+              <SettingRow
+                icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title="Alarm on unknown vehicles"
+                summary="A high-severity alert for any plate not in this register."
+                info="One alarm per stranger, across all gate cameras. Allowlisted plates count as known; monitored plates keep their own alarm."
+              >
+                <Switch
+                  checked={alarmOnUnknown}
+                  onChange={onToggleAlarm}
+                  label="Alarm on unknown vehicles"
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
+                title="Automatic barrier"
+                summary={hasIn
+                  ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
+                  : (
+                    <span className="text-[var(--warning,#b7791f)]">
+                      Needs a Gate IN camera — set one under Camera roles below.
+                    </span>
+                  )}
+                info={
+                  <>
+                    Publishes an allow/deny decision for every read on a Gate IN
+                    camera. Install the <b>Gate Controller</b> app from the App
+                    Catalog to wire those decisions to your relay — it ships in
+                    dry-run, so nothing moves until you say so.
+                  </>
+                }
+              >
+                <Switch
+                  checked={barrierMode === 'registered'}
+                  onChange={onToggleBarrier}
+                  label="Automatic barrier"
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title="Visitor overstay alert"
+                summary="Alert when a visitor stays inside longer than a set time."
+                info="One alert per visit, checked as reads arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit."
+              >
+                {overstayHours > 0 && (
+                  <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+                    after
                     <input
-                      defaultValue={entry.label ?? ''}
-                      placeholder="name it (e.g. Basement)"
-                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      aria-label="Overstay threshold in hours"
+                      value={overstayDraft ?? String(overstayHours)}
+                      onChange={(e) => setOverstayDraft(e.target.value)}
+                      onBlur={commitOverstay}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                        if (e.key === 'Escape') setOverstayDraft(null)
                       }}
-                      disabled={saving}
-                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                      className="w-16 rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
                     />
-                  )}
-                  {blocked && (
-                    <span className="text-xs text-[var(--text-dim)]">{blocked}</span>
-                  )}
-                </label>
-              )
-            })}
-            {cameras.length === 0 && (
-              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+                    hours
+                  </label>
+                )}
+                <Switch
+                  checked={overstayHours > 0}
+                  onChange={(on) => {
+                    setOverstayDraft(null)
+                    onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
+                  }}
+                  label="Visitor overstay alert"
+                />
+              </SettingRow>
 
-      {/* Add + import */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          {([
-            ['plate', 'Plate *', 'MH12DE1433', 'text'],
-            ['owner', 'Owner', 'A. Sharma', 'text'],
-            ['unit', 'Flat / unit', 'B-402', 'text'],
-            ['type', 'Type', 'car / truck', 'text'],
-            ['model', 'Model', 'Honda City', 'text'],
-            ['note', 'Note', '', 'text'],
-            ['expires', 'Valid till', '', 'date'],
-          ] as const).map(([k, label, ph, kind]) => (
-            <label key={k} className="text-xs text-[var(--text-dim)]">
-              {label}
-              <input
-                type={kind}
-                value={draft[k] ?? ''}
-                onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-                placeholder={ph}
-                className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-32"
-              />
-            </label>
-          ))}
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Add vehicle
-          </Button>
-          <div className="ml-auto flex items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void importFile(f)
-                e.target.value = ''
-              }}
-            />
-            <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={saving}>
-              <Upload size={14} /> Import CSV / Excel
-            </Button>
-            <Button variant="outline" onClick={exportCsv} disabled={!registry.length}>
-              <Download size={14} /> Export CSV
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* The register */}
-      {registry.length === 0 ? (
-        <EmptyState
-          icon={<Car size={28} />}
-          title="No vehicles registered yet"
-          description="Add each resident vehicle above, or import the whole list from a CSV (columns: plate, owner, unit, type, note). Then turn on the unknown-vehicle alarm and any stranger raises an alert."
-        />
-      ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Owner</th>
-                  <th className="px-3 py-2">Flat / unit</th>
-                  <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">Model</th>
-                  <th className="px-3 py-2">Valid till</th>
-                  <th className="px-3 py-2">Note</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...registry].sort((a, b) => a.plate.localeCompare(b.plate)).map((r) => (
-                  <tr key={r.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">
-                      {r.plate}
-                      {!entryActive(r) && (
-                        <Badge variant="warning" className="ml-1.5">expired</Badge>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5">{r.owner || '—'}</td>
-                    <td className="px-3 py-1.5">{r.unit || '—'}</td>
-                    <td className="px-3 py-1.5">{r.type || '—'}</td>
-                    <td className="px-3 py-1.5">{r.model || '—'}</td>
-                    <td className="px-3 py-1.5">{r.expires || '—'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-dim)]">{r.note || ''}</td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Remove from the register"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
+              {/* Camera roles — the site's layout in the vehicle story */}
+              <div className="space-y-2 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  Camera roles
+                  <InfoTip label="About camera roles">
+                    <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
+                    unlocks exit times, stay durations and “inside now”.{' '}
+                    <b>Parking</b>, or a named location of your own, enriches each
+                    vehicle’s history.
+                  </InfoTip>
+                </div>
+                <div className="text-xs text-[var(--text-dim)]">
+                  Where each camera sits. Giving a camera a role starts plate reading on it.
+                </div>
+                {reading.length > 0 && !hasIn && (
+                  <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
+                    No Gate IN camera yet — mark at least one. Until then there is no gate
+                    history and no “inside now”; reads still collect normally.
+                  </div>
+                )}
+                {reading.length > 0 && hasIn && !hasOut && (
+                  <div className="rounded border border-[var(--border)] px-3 py-2 text-xs text-[var(--text-dim)]">
+                    No Gate OUT camera — entries are recorded, but exit times, stay
+                    durations and “inside now” stay off until you mark one.
+                  </div>
+                )}
+                {cameras.length === 0 ? (
+                  <div className="text-xs text-[var(--text-dim)]">No cameras yet.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                          <th className="py-1.5 pr-4 font-normal">Camera</th>
+                          <th className="py-1.5 pr-4 font-normal">Role</th>
+                          <th className="py-1.5 font-normal">Plate reading</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cameras.map((c) => {
+                          const entry = cameraRoles[String(c.id)]
+                          // Ineligible cameras stay on screen, greyed, with the
+                          // reason. Hiding them makes an operator hunt for a
+                          // camera that is right there — the question is always
+                          // "why is it not in the list", so answer it in the list.
+                          const blocked = ineligibleReason(c, LPR_SKILL)
+                          return (
+                            <tr
+                              key={c.id}
+                              className={`border-b border-[var(--border)] last:border-0${blocked ? ' opacity-60' : ''}`}
+                              title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
+                            >
+                              <td className="py-1.5 pr-4">{c.name}</td>
+                              <td className="py-1.5 pr-4">
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={entry?.role ?? ''}
+                                    aria-label={`Role of ${c.name}`}
+                                    onChange={(e) => {
+                                      const role = e.target.value as CameraRole | ''
+                                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
+                                    }}
+                                    disabled={Boolean(blocked)}
+                                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                                  >
+                                    <option value="">No role</option>
+                                    <option value="gate_in">Gate IN</option>
+                                    <option value="gate_out">Gate OUT</option>
+                                    <option value="parking">Parking</option>
+                                    <option value="other">Other…</option>
+                                  </select>
+                                  {entry?.role === 'other' && (
+                                    <input
+                                      defaultValue={entry.label ?? ''}
+                                      placeholder="e.g. Basement"
+                                      aria-label={`Location name for ${c.name}`}
+                                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                                      }}
+                                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                                    />
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-1.5 text-xs">
+                                {blocked ? (
+                                  <span className="text-[var(--text-dim)]">{blocked}</span>
+                                ) : cameraAdopted(c, LPR_SKILL) ? (
+                                  <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
+                                    <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+                                    Reading plates
+                                  </span>
+                                ) : (
+                                  <span className="text-[var(--text-dim)]">Not reading</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </Card>
+      </div>
+
+      {importOpen && (
+        <ImportDialog
+          title="Import vehicles"
+          noun="vehicle"
+          columns={REGISTER_IMPORT_COLUMNS}
+          notes={REGISTER_IMPORT_NOTES}
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          // Header row only, no sample vehicles: a sample plate left in by
+          // mistake would be REGISTERED — and the barrier opens for those.
+          onDownloadTemplate={() => downloadCsv(registryToCsv([]), 'vehicle-register-template.csv')}
+        />
+      )}
+      {dialog && (
+        <VehicleDialog
+          initial={dialog.entry}
+          editing={dialog.editing}
+          registry={registry}
+          saving={saving}
+          onClose={() => setDialog(null)}
+          onSave={saveEntry}
+        />
       )}
     </div>
+  )
+}
+
+function downloadCsv(text: string, filename: string) {
+  const blob = new Blob([text], { type: 'text/csv' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// What an import file must look like, beside the button that takes one. A
+// bare file picker left the operator guessing at column names — and a plate
+// header we don't recognise silently turns the header row into a record.
+type ImportColumn = {
+  field: string
+  meaning: string
+  example: string
+  required?: boolean
+  /** Other header names the parser maps to this column. */
+  synonyms: string[]
+}
+
+/** The other header names a parser's table maps to `field` — read from the
+ *  table itself, so the dialog can never promise a name the parser ignores. */
+function headerSynonyms(table: Record<string, string>, field: string): string[] {
+  return Object.entries(table)
+    .filter(([header, f]) => f === field && header !== field)
+    .map(([header]) => header)
+}
+
+const REGISTER_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['owner', 'Owner or resident', 'A. Sharma'],
+  ['unit', 'Flat / unit', 'B-402'],
+  ['type', 'Vehicle type', 'Car'],
+  ['model', 'Make / model', 'Honda City'],
+  ['note', 'Anything else', 'Second car'],
+  ['expires', 'Valid till — visitor pass', '2026-12-31'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(HEADER_SYNONYMS, field),
+}))
+
+const REGISTER_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">expires</span> is a date written YYYY-MM-DD. Leave it
+    empty for a resident; a date makes the row a visitor pass that lapses after that
+    day. Date-formatted Excel cells are converted for you.
+  </>,
+  'A plate already in the register is replaced by the file’s row; every other vehicle stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a vehicle and the columns are taken in the order above.',
+]
+
+function ImportDialog({
+  title, noun, columns, notes, onClose, onChooseFile, onDownloadTemplate,
+}: {
+  title: string
+  /** What one row is, for the intro: "vehicle", "monitored plate". */
+  noun: string
+  columns: ImportColumn[]
+  notes: ReactNode[]
+  onClose: () => void
+  onChooseFile: () => void
+  onDownloadTemplate: () => void
+}) {
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={title}
+      widthClassName="w-full max-w-2xl mx-4"
+      footer={
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onDownloadTemplate}>
+            <Download size={14} /> Download template
+          </Button>
+          <div className="ml-auto flex gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" size="sm" onClick={onChooseFile}>
+              <Upload size={14} /> Choose file…
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p className="text-[var(--text-dim)]">
+          A CSV or Excel file (.csv, .xlsx, .xls) with one {noun} per row and the
+          column names in the first row. From Excel, the first sheet is read.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                <th className="py-1.5 pr-4 font-normal">Column</th>
+                <th className="py-1.5 pr-4 font-normal">Example</th>
+                <th className="py-1.5 font-normal">Also accepted as</th>
+              </tr>
+            </thead>
+            <tbody>
+              {columns.map((c) => (
+                <tr key={c.field} className="border-b border-[var(--border)] last:border-0 align-top">
+                  <td className="py-1.5 pr-4 whitespace-nowrap">
+                    <span className="font-mono">{c.field}</span>
+                    {c.required && (
+                      <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">required</span>
+                    )}
+                    <div className="text-xs text-[var(--text-dim)]">{c.meaning}</div>
+                  </td>
+                  <td className="py-1.5 pr-4 font-mono text-xs whitespace-nowrap">{c.example}</td>
+                  <td className="py-1.5 text-xs text-[var(--text-dim)]">
+                    {c.synonyms.join(', ') || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <ul className="list-disc space-y-1 pl-5 text-xs text-[var(--text-dim)]">
+          {notes.map((n, i) => <li key={i}>{n}</li>)}
+        </ul>
+      </div>
+    </Modal>
+  )
+}
+
+/** One setting: what it is in a line, the detail behind an ⓘ, its control. */
+function SettingRow({
+  icon, title, summary, info, children,
+}: {
+  icon: ReactNode
+  title: string
+  summary: ReactNode
+  info?: ReactNode
+  children?: ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+      <span className="shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          {title}
+          {info && <InfoTip label={`About ${title.toLowerCase()}`}>{info}</InfoTip>}
+        </div>
+        <div className="text-xs text-[var(--text-dim)]">{summary}</div>
+      </div>
+      {children && <div className="flex items-center gap-3">{children}</div>}
+    </div>
+  )
+}
+
+// Adding a vehicle is a dialog, not a form left open above the list: seven
+// always-visible inputs pushed the register itself below the fold, and
+// their example placeholders read like a row already filled in.
+function VehicleDialog({
+  initial, editing, registry, saving, onClose, onSave,
+}: {
+  initial: RegistryEntry
+  /** The plate being edited, or null when adding. */
+  editing: string | null
+  registry: RegistryEntry[]
+  saving: boolean
+  onClose: () => void
+  onSave: (entry: RegistryEntry, replaces: string | null) => void
+}) {
+  const formId = useId()
+  const [draft, setDraft] = useState<RegistryEntry>(initial)
+  const plate = normalizePlate(draft.plate)
+  // Saving over another vehicle's plate replaces it — say so before, not after.
+  const clash = Boolean(plate) && plate !== editing && registry.some((r) => r.plate === plate)
+  const set = (k: keyof RegistryEntry) =>
+    (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setDraft((d) => ({ ...d, [k]: e.target.value }))
+
+  const type = draft.type ?? ''
+  const knownType = VEHICLE_TYPES.find((t) => t.toLowerCase() === type.toLowerCase())
+  const typeOptions = type && !knownType ? [...VEHICLE_TYPES, type] : VEHICLE_TYPES
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!plate || saving) return
+    const entry: RegistryEntry = { plate }
+    for (const k of REGISTRY_FIELDS) {
+      const v = (draft[k] ?? '').trim()
+      if (v) entry[k] = v
+    }
+    onSave(entry, editing)
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${editing}` : 'Add vehicle'}
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!plate || saving}>
+            {editing ? 'Save changes' : 'Add vehicle'}
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={draft.plate}
+            onChange={set('plate')}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already registered — saving replaces that entry.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Owner
+          <input value={draft.owner ?? ''} onChange={set('owner')} placeholder="e.g. A. Sharma" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Flat / unit
+          <input value={draft.unit ?? ''} onChange={set('unit')} placeholder="e.g. B-402" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Type
+          <select value={knownType ?? type} onChange={set('type')} className={inputCls}>
+            <option value="">—</option>
+            {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label className={labelCls}>
+          Model
+          <input value={draft.model ?? ''} onChange={set('model')} placeholder="e.g. Honda City" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Valid till
+          <input type="date" value={draft.expires ?? ''} onChange={set('expires')} className={inputCls} />
+          <span className="mt-1 block">Empty for a resident; a date makes it a visitor pass.</span>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Note
+          <input value={draft.note ?? ''} onChange={set('note')} placeholder="e.g. second car, parks in B2" className={inputCls} />
+        </label>
+      </form>
+    </Modal>
   )
 }
 
@@ -2357,6 +2952,40 @@ function RegistryTab({
 // alert is, whether it's currently armed, and (optionally) at which
 // camera it matters. Edits write through the app's config and apply
 // live — the same path as the register and the watchlists.
+
+const MONITOR_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['note', 'Why it is watched', 'Reported stolen'],
+  ['severity', 'info, low, medium, high or critical', 'high'],
+  ['camera', 'Camera name; several split by ;', 'Gate IN'],
+  ['armed', 'yes or no', 'yes'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(MONITOR_HEADER_SYNONYMS, field),
+}))
+
+const MONITOR_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">severity</span>: anything else, or empty, becomes high.
+  </>,
+  <>
+    <span className="font-mono">camera</span> is the camera’s name as on the Cameras
+    page, or its handle (cam1); separate several with “;”. Empty — or “any” — watches
+    every camera. A name that matches no camera is skipped and reported, and a rule
+    left with none watches every camera.
+  </>,
+  <>
+    <span className="font-mono">armed</span>: empty means armed; no, false, off or
+    silenced keeps the rule without alerting.
+  </>,
+  'A plate already monitored is replaced by the file’s row; every other rule stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a plate and the columns are taken in the order above.',
+]
 
 function MonitoringTab({
   monitors,
@@ -2371,9 +3000,13 @@ function MonitoringTab({
   cameras: CameraRow[]
   onSave: (next: Monitor[]) => void
 }) {
-  const [draft, setDraft] = useState<{ plate: string; note: string; severity: Monitor['severity'] }>({
-    plate: '', note: '', severity: 'high',
-  })
+  // The dialog's subject: a new rule to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ monitor: Monitor; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-monitors')
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const { showError, showSuccess } = useSnackbar()
 
   if (!canEdit) {
     return (
@@ -2385,159 +3018,375 @@ function MonitoringTab({
     )
   }
 
-  const upsert = (m: Monitor) => {
-    onSave([...monitors.filter((x) => x.plate !== m.plate), m])
+  const save = (m: Monitor, replaces: string | null = null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSave([...monitors.filter((x) => x.plate !== m.plate && x.plate !== replaces), m])
   }
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    upsert({
-      plate,
-      note: draft.note.trim() || undefined,
-      severity: draft.severity ?? 'high',
-      active: true,
-    })
-    setDraft({ plate: '', note: '', severity: 'high' })
+  const cameraLabel = (handle: string) =>
+    cameras.find((c) => `cam${c.id}` === handle)?.name ?? handle
+
+  const importFile = async (file: File) => {
+    try {
+      const { monitors: imported, unknownCameras } = monitorsFromRows(await fileRows(file), cameras)
+      if (!imported.length) {
+        showError('No plates found in that file — the plate column was not recognised.')
+        return
+      }
+      // Imported rows win over existing rules for the same plate.
+      const merged = new Map(monitors.map((m) => [m.plate, m] as const))
+      for (const m of imported) merged.set(m.plate, m)
+      onSave([...merged.values()])
+      showSuccess(
+        `Imported ${imported.length} monitored plate${imported.length === 1 ? '' : 's'} from ${file.name}`
+        + (unknownCameras.length
+          ? ` — no camera named ${unknownCameras.map((c) => `“${c}”`).join(', ')}, skipped`
+          : ''),
+      )
+    } catch (e: any) {
+      showError(e?.message || 'Could not read that file.')
+    }
   }
+
+  const exportCsv = () => downloadCsv(monitorsToCsv(monitors, cameras), 'monitored-plates.csv')
+
+  const q = query.trim().toLowerCase()
+  const rows = monitors
+    .filter((m) => !q || [m.plate, m.note].some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser, clamped like the register's.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (m: Monitor) => setDialog({ monitor: m, editing: m.plate })
+
+  const columns: Column<Monitor>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap', cell: (m) => m.plate,
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: 'Reason / note', cellClassName: 'truncate',
+      cell: (m) => m.note
+        ? <span title={m.note}>{m.note}</span>
+        : <span className="text-[var(--text-dim)]">—</span>,
+    },
+    {
+      key: 'severity', header: 'Severity', width: 'w-[110px]',
+      cell: (m) => <SeverityBadge severity={m.severity ?? 'high'} />,
+    },
+    {
+      key: 'where', header: 'Where', width: 'w-[180px]', hideBelow: 'md', cellClassName: 'truncate',
+      cell: (m) => m.cameras?.length
+        ? <span title={m.cameras.map(cameraLabel).join(', ')}>{m.cameras.map(cameraLabel).join(', ')}</span>
+        : <span className="text-[var(--text-dim)]">Any camera</span>,
+    },
+    {
+      // A switch in the row: silencing a rule for a while is the everyday
+      // change, and it should not take a dialog.
+      key: 'armed', header: 'Armed', width: 'w-[130px]', className: 'whitespace-nowrap',
+      isAction: true,
+      cell: (m) => (
+        <span className="inline-flex items-center gap-2">
+          <Switch
+            checked={m.active !== false}
+            onChange={(on) => save({ ...m, active: on })}
+            label={`${m.plate} armed`}
+          />
+          <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? 'Armed' : 'Silenced'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (m) => (
+        <>
+          <button
+            title={`Edit ${m.plate}`}
+            aria-label={`Edit ${m.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(m)}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title="Stop monitoring this plate"
+            aria-label={`Stop monitoring ${m.plate}`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
+  const addButton = (
+    <Button
+      variant="primary" size="sm"
+      onClick={() => setDialog({ monitor: { plate: '', severity: 'high', active: true }, editing: null })}
+    >
+      <Plus size={14} /> Monitor a plate
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> Import CSV / Excel
+    </Button>
+  )
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          <label className="text-xs text-[var(--text-dim)]">
-            Plate *
-            <input
-              value={draft.plate}
-              onChange={(e) => setDraft((d) => ({ ...d, plate: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="MH12DE1433"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-36"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Reason / note
-            <input
-              value={draft.note}
-              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="reported stolen — FIR 42/2026"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-64"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Alert severity
-            <select
-              value={draft.severity}
-              onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as Monitor['severity'] }))}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-            >
-              {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </label>
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Monitor plate
-          </Button>
-        </CardContent>
-      </Card>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
 
+      {/* Same table as the register and the plate reads: header pinned,
+          rows scrolling in the height left, pager in the toolbar. */}
       {monitors.length === 0 ? (
-        <EmptyState
-          icon={<ShieldAlert size={28} />}
-          title="No plates under monitoring"
-          description="Add a plate above — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
-        />
-      ) : (
         <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Reason / note</th>
-                  <th className="px-3 py-2">Severity</th>
-                  <th className="px-3 py-2">Where</th>
-                  <th className="px-3 py-2">Armed</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
-                  <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
-                    <td className="px-3 py-1.5">
-                      <input
-                        defaultValue={m.note ?? ''}
-                        placeholder="add a reason…"
-                        onBlur={(e) => {
-                          const v = e.target.value.trim()
-                          if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
-                        }}
-                        disabled={saving}
-                        className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
-                      />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={m.severity ?? 'high'}
-                        onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={(m.cameras ?? [])[0] ?? ''}
-                        onChange={(e) => upsert({
-                          ...m,
-                          cameras: e.target.value ? [e.target.value] : undefined,
-                        })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        <option value="">any camera</option>
-                        {cameras.map((c) => (
-                          <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <button
-                        onClick={() => upsert({ ...m, active: m.active === false })}
-                        disabled={saving}
-                        title={m.active !== false
-                          ? 'Armed — click to silence without deleting'
-                          : 'Silenced — click to re-arm'}
-                      >
-                        {m.active !== false
-                          ? <Badge variant="destructive">armed</Badge>
-                          : <Badge variant="neutral">silenced</Badge>}
-                      </button>
-                    </td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Stop monitoring this plate"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
+          <EmptyState
+            icon={<ShieldAlert size={28} />}
+            title="No plates under monitoring"
+            description="Monitor a plate — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
+            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
+          />
         </Card>
+      ) : (
+        <DataTable<Monitor>
+          caption="Monitored plates"
+          columns={columns}
+          rows={pageRows}
+          rowKey={(m) => m.plate}
+          fillHeight
+          fixed
+          dense
+          minWidth="min-w-[720px]"
+          // The row IS the rule: clicking it opens the rule to edit.
+          onRowClick={editRow}
+          striped={false}
+          // A silenced rule recedes, the way an acknowledged alarm does.
+          rowClassName={(m) => (m.active === false ? 'opacity-70' : '')}
+          empty={
+            <EmptyState
+              icon={<Search size={28} />}
+              title={`No monitored plate matches “${query.trim()}”`}
+              description="Search looks at the plate and the reason."
+            />
+          }
+          toolbar={
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                <input
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                  placeholder="Search plate or reason…"
+                  aria-label="Search monitored plates"
+                  className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                />
+              </div>
+              {importButton}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download size={14} /> Export CSV
+              </Button>
+              {addButton}
+              <div className="ml-auto">
+                <Pagination
+                  page={page}
+                  pageSize={pager.pageSize}
+                  total={rows.length}
+                  rowCount={pageRows.length}
+                  label="plates"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                />
+              </div>
+            </div>
+          }
+        />
       )}
       <div className="text-xs text-[var(--text-dim)]">
         Monitored plates never trigger the unknown-vehicle alarm — they fire their own
-        alert at the severity set here, and "silenced" keeps the rule without alerting.
+        alert at the severity set here, and a silenced rule is kept without alerting.
       </div>
+
+      {importOpen && (
+        <ImportDialog
+          title="Import monitored plates"
+          noun="monitored plate"
+          columns={MONITOR_IMPORT_COLUMNS}
+          notes={MONITOR_IMPORT_NOTES}
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          onDownloadTemplate={() => downloadCsv(monitorsToCsv([], cameras), 'monitored-plates-template.csv')}
+        />
+      )}
+      {dialog && (
+        <MonitorDialog
+          initial={dialog.monitor}
+          editing={dialog.editing}
+          monitors={monitors}
+          cameras={cameras}
+          saving={saving}
+          onClose={() => setDialog(null)}
+          onSave={(m, replaces) => {
+            save(m, replaces)
+            setDialog(null)
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function MonitorDialog({
+  initial, editing, monitors, cameras, saving, onClose, onSave,
+}: {
+  initial: Monitor
+  /** The plate being edited, or null when adding. */
+  editing: string | null
+  monitors: Monitor[]
+  cameras: CameraRow[]
+  saving: boolean
+  onClose: () => void
+  onSave: (m: Monitor, replaces: string | null) => void
+}) {
+  const formId = useId()
+  const [plate, setPlate] = useState(initial.plate)
+  const [note, setNote] = useState(initial.note ?? '')
+  const [severity, setSeverity] = useState<NonNullable<Monitor['severity']>>(initial.severity ?? 'high')
+  const [where, setWhere] = useState<string[]>(initial.cameras ?? [])
+  const [armed, setArmed] = useState(initial.active !== false)
+  const norm = normalizePlate(plate)
+  // Saving over another rule's plate replaces it — say so before, not after.
+  const clash = Boolean(norm) && norm !== editing && monitors.some((m) => m.plate === norm)
+
+  // Checkboxes, not one select: a rule can watch several cameras (imports
+  // carry them), and a single select silently dropped all but the first.
+  // A handle whose camera is gone stays listed, so it can be unticked.
+  const options = [
+    ...cameras.map((c) => ({ handle: `cam${c.id}`, name: c.name })),
+    ...(initial.cameras ?? [])
+      .filter((h) => !cameras.some((c) => `cam${c.id}` === h))
+      .map((h) => ({ handle: h, name: `${h} (not found)` })),
+  ]
+  const toggleWhere = (handle: string, on: boolean) =>
+    setWhere((w) => (on ? [...w, handle] : w.filter((x) => x !== handle)))
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!norm || saving) return
+    onSave({
+      plate: norm,
+      note: note.trim() || undefined,
+      severity,
+      active: armed,
+      cameras: where.length ? where : undefined,
+    }, editing)
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${editing}` : 'Monitor a plate'}
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!norm || saving}>
+            {editing ? 'Save changes' : 'Monitor plate'}
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={plate}
+            onChange={(e) => setPlate(e.target.value)}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already monitored — saving replaces that rule.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Alert severity
+          <select
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as NonNullable<Monitor['severity']>)}
+            className={inputCls}
+          >
+            {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Reason / note
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. reported stolen — FIR 42/2026"
+            className={inputCls}
+          />
+        </label>
+        <fieldset className={`${labelCls} sm:col-span-2`}>
+          <legend>Where</legend>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-sm text-[var(--text)]">
+            {options.length === 0 && (
+              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
+            )}
+            {options.map((o) => (
+              <label key={o.handle} className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="accent-[var(--accent)]"
+                  checked={where.includes(o.handle)}
+                  onChange={(e) => toggleWhere(o.handle, e.target.checked)}
+                />
+                {o.name}
+              </label>
+            ))}
+          </div>
+          <span className="mt-1 block">
+            {where.length
+              ? `Alerts only on ${where.length === 1 ? 'this camera' : 'these cameras'}.`
+              : 'None ticked — alerts on every camera.'}
+          </span>
+        </fieldset>
+        <div className="flex items-center gap-3 sm:col-span-2">
+          <Switch checked={armed} onChange={setArmed} label="Armed" />
+          <span className="text-sm">
+            {armed ? 'Armed — alerts when this plate is read' : 'Silenced — the rule is kept without alerting'}
+          </span>
+        </div>
+      </form>
+    </Modal>
   )
 }
 
@@ -2870,7 +3719,7 @@ function VehicleAlarmsTab({ cameraName }: { cameraName: (id: number) => string }
               <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
                 <AlarmsFilters
                   onlyUnacked={onlyUnacked}
-                  onToggleUnacked={() => { setOnlyUnacked((v) => !v); pager.setPage(1) }}
+                  onUnacked={(only) => { setOnlyUnacked(only); pager.setPage(1) }}
                   severity={severityFilter}
                   onSeverity={(sev) => { setSeverityFilter(sev); pager.setPage(1) }}
                 />
@@ -2897,24 +3746,10 @@ function VehicleAlarmsTab({ cameraName }: { cameraName: (id: number) => string }
                     label="alarms"
                     onPageChange={pager.setPage}
                     onPageSizeChange={pager.setPageSize}
-                    announce={false}
                   />
                 </div>
               </div>
             </>
-          }
-          footer={
-            <Pagination
-              page={pager.page}
-              pageSize={pager.pageSize}
-              total={list.total}
-              rowCount={rows.length}
-              hasNext={rows.length === pager.pageSize}
-              isFetching={list.isFetching}
-              label="alarms"
-              onPageChange={pager.setPage}
-              onPageSizeChange={pager.setPageSize}
-            />
           }
       />
     </>
