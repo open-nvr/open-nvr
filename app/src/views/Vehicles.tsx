@@ -72,7 +72,7 @@ import {
 import { cameraService } from '../services/cameraService'
 import {
   Badge, Button, Card, CardContent,
-  EmptyState, PageHeader, Skeleton,
+  EmptyState, PageHeader, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
 
@@ -336,9 +336,10 @@ export function registryFromRows(rows: (string | number | null | undefined)[][])
   return out
 }
 
-/** Minimal CSV parse (quoted fields supported) → registry entries via
- * the shared row parser (header synonyms and all). */
-export function registryFromCsv(text: string): RegistryEntry[] {
+type SheetCell = string | number | null | undefined
+
+/** Minimal CSV parse (quoted fields supported) → rows of cells. */
+function csvRows(text: string): string[][] {
   const rows: string[][] = []
   let field = '', row: string[] = [], inQ = false
   for (let i = 0; i < text.length; i++) {
@@ -358,13 +359,12 @@ export function registryFromCsv(text: string): RegistryEntry[] {
   }
   row.push(field)
   if (row.some((f) => f.trim())) rows.push(row)
-  return registryFromRows(rows)
+  return rows
 }
 
-/** Excel (.xlsx/.xls) → registry entries. SheetJS is lazy-loaded so
- * the page's normal bundle doesn't carry it; the first sheet's rows
- * go through the same header matching as CSV. */
-export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+/** Excel (.xlsx/.xls) → the first sheet's rows. SheetJS is lazy-loaded so
+ * the page's normal bundle doesn't carry it. */
+async function excelRows(buf: ArrayBuffer): Promise<SheetCell[][]> {
   const XLSX = await import('xlsx')
   // cellDates + dateNF: a date-TYPED "Valid Till" cell must land as
   // YYYY-MM-DD (what the app's expiry check parses), not the sheet's
@@ -372,17 +372,36 @@ export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry
   const wb = XLSX.read(buf, { type: 'array', cellDates: true })
   const sheet = wb.Sheets[wb.SheetNames[0]]
   if (!sheet) return []
-  const rows = XLSX.utils.sheet_to_json(sheet, {
+  return XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,   // numbers come back as displayed strings
     dateNF: 'yyyy-mm-dd',
     defval: '',
-  }) as (string | number | null)[][]
-  return registryFromRows(rows)
+  }) as SheetCell[][]
 }
 
+/** A picked CSV or Excel file → rows, by its extension. */
+async function fileRows(file: File): Promise<SheetCell[][]> {
+  return /\.xlsx?$/i.test(file.name)
+    ? excelRows(await file.arrayBuffer())
+    : csvRows(await file.text())
+}
+
+/** CSV → registry entries via the shared row parser (header synonyms and all). */
+export function registryFromCsv(text: string): RegistryEntry[] {
+  return registryFromRows(csvRows(text))
+}
+
+/** Excel → registry entries, through the same header matching as CSV. */
+export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+  return registryFromRows(await excelRows(buf))
+}
+
+/** One CSV cell, always quoted — owner names and notes carry commas. */
+const csvCell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+
 function registryToCsv(entries: RegistryEntry[]): string {
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  const esc = csvCell
   return [
     'plate,owner,unit,type,model,note,expires',
     ...entries.map((e) =>
@@ -474,6 +493,108 @@ export function parseMonitors(cfg: any): Monitor[] {
     if (plate && !out.has(plate)) out.set(plate, { plate, severity: 'high', active: true })
   }
   return [...out.values()]
+}
+
+// ── Monitor import / export ─────────────────────────────────────────
+// The same spreadsheet round trip as the register: a watch list often
+// arrives as a sheet from a security office, and export is the backup
+// before a bulk change.
+
+type MonitorColumn = 'plate' | 'note' | 'severity' | 'camera' | 'armed'
+
+const MONITOR_HEADER_SYNONYMS: Record<string, MonitorColumn> = {
+  // Plate headers are the register's: one vocabulary for "vehicle number".
+  ...(Object.fromEntries(
+    Object.entries(HEADER_SYNONYMS).filter(([, f]) => f === 'plate'),
+  ) as Record<string, 'plate'>),
+  note: 'note', notes: 'note', reason: 'note', remark: 'note', remarks: 'note',
+  description: 'note',
+  severity: 'severity', priority: 'severity', level: 'severity',
+  'alert severity': 'severity',
+  camera: 'camera', cameras: 'camera', where: 'camera', location: 'camera',
+  'camera name': 'camera',
+  armed: 'armed', active: 'armed', enabled: 'armed', status: 'armed',
+}
+
+const MONITOR_COLUMN_ORDER: MonitorColumn[] = ['plate', 'note', 'severity', 'camera', 'armed']
+
+/** A spreadsheet's "armed" cell → on/off. Empty means armed: a list of
+ *  plates to watch is a list of plates to watch. */
+function parseArmed(v: string | undefined): boolean {
+  return !/^(no|n|false|0|off|silenced|inactive|disabled)$/i.test((v ?? '').trim())
+}
+
+/** Rows → monitors. Cameras are matched by NAME (as the Cameras page shows
+ *  it) or by handle (`cam1`), and stored as handles — what the LPR app
+ *  matches reads against. Names that match no camera are returned so the
+ *  caller can say so: they are dropped, and a rule left with no camera
+ *  watches every camera — surveillance over-alerts, never under. */
+export function monitorsFromRows(
+  rows: SheetCell[][],
+  cameras: { id: number; name: string }[],
+): { monitors: Monitor[]; unknownCameras: string[] } {
+  const clean = rows
+    .map((r) => r.map((c) => String(c ?? '').trim()))
+    .filter((r) => r.some(Boolean))
+  if (!clean.length) return { monitors: [], unknownCameras: [] }
+
+  const header = clean[0].map((h) => MONITOR_HEADER_SYNONYMS[h.toLowerCase()] ?? null)
+  const hasHeader = header.includes('plate')
+  const cols: (MonitorColumn | null)[] = hasHeader ? header : MONITOR_COLUMN_ORDER
+  const body = hasHeader ? clean.slice(1) : clean
+
+  const handleOf = (token: string): string | null => {
+    const byName = cameras.find((c) => c.name.trim().toLowerCase() === token.toLowerCase())
+    if (byName) return `cam${byName.id}`
+    const m = /^cam-?(\d+)$/i.exec(token)
+    if (m && cameras.some((c) => c.id === Number(m[1]))) return `cam${Number(m[1])}`
+    return null
+  }
+
+  const unknown = new Set<string>()
+  const out = new Map<string, Monitor>()
+  for (const r of body) {
+    const rec: Partial<Record<MonitorColumn, string>> = {}
+    r.forEach((v, i) => {
+      const k = cols[i]
+      if (k && v) rec[k] = v
+    })
+    const plate = normalizePlate(rec.plate ?? '')
+    if (!plate) continue
+    const sev = (rec.severity ?? '').toLowerCase()
+    const handles: string[] = []
+    for (const token of (rec.camera ?? '').split(/[;|]/).map((s) => s.trim()).filter(Boolean)) {
+      if (/^(any|all|any camera|all cameras)$/i.test(token)) continue
+      const h = handleOf(token)
+      if (!h) unknown.add(token)
+      else if (!handles.includes(h)) handles.push(h)
+    }
+    out.set(plate, {
+      plate,
+      note: rec.note || undefined,
+      severity: (MONITOR_SEVERITIES as readonly string[]).includes(sev)
+        ? (sev as Monitor['severity']) : 'high',
+      active: parseArmed(rec.armed),
+      cameras: handles.length ? handles : undefined,
+    })
+  }
+  return { monitors: [...out.values()], unknownCameras: [...unknown] }
+}
+
+/** Monitors → CSV, cameras by NAME so the file reads like the screen and
+ *  imports straight back. */
+function monitorsToCsv(monitors: Monitor[], cameras: { id: number; name: string }[]): string {
+  const nameOf = (h: string) => cameras.find((c) => `cam${c.id}` === h)?.name ?? h
+  return [
+    MONITOR_COLUMN_ORDER.join(','),
+    ...[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => [
+      m.plate,
+      m.note,
+      m.severity ?? 'high',
+      (m.cameras ?? []).map(nameOf).join('; '),
+      m.active === false ? 'no' : 'yes',
+    ].map(csvCell).join(',')),
+  ].join('\n')
 }
 
 function formatStay(seconds: number): string {
@@ -2481,6 +2602,10 @@ function RegistryTab({
 
       {importOpen && (
         <ImportDialog
+          title="Import vehicles"
+          noun="vehicle"
+          columns={REGISTER_IMPORT_COLUMNS}
+          notes={REGISTER_IMPORT_NOTES}
           onClose={() => setImportOpen(false)}
           onChooseFile={() => fileRef.current?.click()}
           // Header row only, no sample vehicles: a sample plate left in by
@@ -2513,32 +2638,60 @@ function downloadCsv(text: string, filename: string) {
 
 // What an import file must look like, beside the button that takes one. A
 // bare file picker left the operator guessing at column names — and a plate
-// header we don't recognise silently turns the header row into a vehicle.
-const IMPORT_COLUMNS: {
-  field: (typeof REGISTRY_FIELDS)[number] | 'plate'
+// header we don't recognise silently turns the header row into a record.
+type ImportColumn = {
+  field: string
   meaning: string
   example: string
-}[] = [
-  { field: 'plate', meaning: 'Vehicle number', example: 'MH12DE1433' },
-  { field: 'owner', meaning: 'Owner or resident', example: 'A. Sharma' },
-  { field: 'unit', meaning: 'Flat / unit', example: 'B-402' },
-  { field: 'type', meaning: 'Vehicle type', example: 'Car' },
-  { field: 'model', meaning: 'Make / model', example: 'Honda City' },
-  { field: 'note', meaning: 'Anything else', example: 'Second car' },
-  { field: 'expires', meaning: 'Valid till — visitor pass', example: '2026-12-31' },
-]
+  required?: boolean
+  /** Other header names the parser maps to this column. */
+  synonyms: string[]
+}
 
-/** The other header names the importer maps to `field` — read from the
- *  parser's own table, so the dialog can never promise one it ignores. */
-function headerSynonyms(field: string): string[] {
-  return Object.entries(HEADER_SYNONYMS)
+/** The other header names a parser's table maps to `field` — read from the
+ *  table itself, so the dialog can never promise a name the parser ignores. */
+function headerSynonyms(table: Record<string, string>, field: string): string[] {
+  return Object.entries(table)
     .filter(([header, f]) => f === field && header !== field)
     .map(([header]) => header)
 }
 
+const REGISTER_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['owner', 'Owner or resident', 'A. Sharma'],
+  ['unit', 'Flat / unit', 'B-402'],
+  ['type', 'Vehicle type', 'Car'],
+  ['model', 'Make / model', 'Honda City'],
+  ['note', 'Anything else', 'Second car'],
+  ['expires', 'Valid till — visitor pass', '2026-12-31'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(HEADER_SYNONYMS, field),
+}))
+
+const REGISTER_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">expires</span> is a date written YYYY-MM-DD. Leave it
+    empty for a resident; a date makes the row a visitor pass that lapses after that
+    day. Date-formatted Excel cells are converted for you.
+  </>,
+  'A plate already in the register is replaced by the file’s row; every other vehicle stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a vehicle and the columns are taken in the order above.',
+]
+
 function ImportDialog({
-  onClose, onChooseFile, onDownloadTemplate,
+  title, noun, columns, notes, onClose, onChooseFile, onDownloadTemplate,
 }: {
+  title: string
+  /** What one row is, for the intro: "vehicle", "monitored plate". */
+  noun: string
+  columns: ImportColumn[]
+  notes: ReactNode[]
   onClose: () => void
   onChooseFile: () => void
   onDownloadTemplate: () => void
@@ -2547,7 +2700,7 @@ function ImportDialog({
     <Modal
       open
       onClose={onClose}
-      title="Import vehicles"
+      title={title}
       widthClassName="w-full max-w-2xl mx-4"
       footer={
         <div className="flex flex-wrap items-center gap-2">
@@ -2565,7 +2718,7 @@ function ImportDialog({
     >
       <div className="space-y-3 text-sm">
         <p className="text-[var(--text-dim)]">
-          A CSV or Excel file (.csv, .xlsx, .xls) with one vehicle per row and the
+          A CSV or Excel file (.csv, .xlsx, .xls) with one {noun} per row and the
           column names in the first row. From Excel, the first sheet is read.
         </p>
         <div className="overflow-x-auto">
@@ -2578,18 +2731,18 @@ function ImportDialog({
               </tr>
             </thead>
             <tbody>
-              {IMPORT_COLUMNS.map((c) => (
+              {columns.map((c) => (
                 <tr key={c.field} className="border-b border-[var(--border)] last:border-0 align-top">
                   <td className="py-1.5 pr-4 whitespace-nowrap">
                     <span className="font-mono">{c.field}</span>
-                    {c.field === 'plate' && (
+                    {c.required && (
                       <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">required</span>
                     )}
                     <div className="text-xs text-[var(--text-dim)]">{c.meaning}</div>
                   </td>
                   <td className="py-1.5 pr-4 font-mono text-xs whitespace-nowrap">{c.example}</td>
                   <td className="py-1.5 text-xs text-[var(--text-dim)]">
-                    {headerSynonyms(c.field).join(', ') || '—'}
+                    {c.synonyms.join(', ') || '—'}
                   </td>
                 </tr>
               ))}
@@ -2597,20 +2750,7 @@ function ImportDialog({
           </table>
         </div>
         <ul className="list-disc space-y-1 pl-5 text-xs text-[var(--text-dim)]">
-          <li>
-            Only <span className="font-mono">plate</span> is required. Column order doesn’t
-            matter and names aren’t case-sensitive, but each must be one of the names above.
-          </li>
-          <li>
-            <span className="font-mono">expires</span> is a date written YYYY-MM-DD. Leave it
-            empty for a resident; a date makes the row a visitor pass that lapses after that
-            day. Date-formatted Excel cells are converted for you.
-          </li>
-          <li>A plate already in the register is replaced by the file’s row; every other vehicle stays.</li>
-          <li>
-            If the plate column’s name isn’t recognised, the first row is read as a vehicle
-            and the columns are taken in the order above.
-          </li>
+          {notes.map((n, i) => <li key={i}>{n}</li>)}
         </ul>
       </div>
     </Modal>
@@ -2754,6 +2894,40 @@ function VehicleDialog({
 // camera it matters. Edits write through the app's config and apply
 // live — the same path as the register and the watchlists.
 
+const MONITOR_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['note', 'Why it is watched', 'Reported stolen'],
+  ['severity', 'info, low, medium, high or critical', 'high'],
+  ['camera', 'Camera name; several split by ;', 'Gate IN'],
+  ['armed', 'yes or no', 'yes'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(MONITOR_HEADER_SYNONYMS, field),
+}))
+
+const MONITOR_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">severity</span>: anything else, or empty, becomes high.
+  </>,
+  <>
+    <span className="font-mono">camera</span> is the camera’s name as on the Cameras
+    page, or its handle (cam1); separate several with “;”. Empty — or “any” — watches
+    every camera. A name that matches no camera is skipped and reported, and a rule
+    left with none watches every camera.
+  </>,
+  <>
+    <span className="font-mono">armed</span>: empty means armed; no, false, off or
+    silenced keeps the rule without alerting.
+  </>,
+  'A plate already monitored is replaced by the file’s row; every other rule stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a plate and the columns are taken in the order above.',
+]
+
 function MonitoringTab({
   monitors,
   canEdit,
@@ -2767,7 +2941,13 @@ function MonitoringTab({
   cameras: CameraRow[]
   onSave: (next: Monitor[]) => void
 }) {
-  const [adding, setAdding] = useState(false)
+  // The dialog's subject: a new rule to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ monitor: Monitor; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-monitors')
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const { showError, showSuccess } = useSnackbar()
 
   if (!canEdit) {
     return (
@@ -2779,135 +2959,239 @@ function MonitoringTab({
     )
   }
 
-  const upsert = (m: Monitor) => {
-    onSave([...monitors.filter((x) => x.plate !== m.plate), m])
+  const save = (m: Monitor, replaces: string | null = null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSave([...monitors.filter((x) => x.plate !== m.plate && x.plate !== replaces), m])
   }
 
-  // Same shape as the register: the list first, adding behind a button.
+  const cameraLabel = (handle: string) =>
+    cameras.find((c) => `cam${c.id}` === handle)?.name ?? handle
+
+  const importFile = async (file: File) => {
+    try {
+      const { monitors: imported, unknownCameras } = monitorsFromRows(await fileRows(file), cameras)
+      if (!imported.length) {
+        showError('No plates found in that file — the plate column was not recognised.')
+        return
+      }
+      // Imported rows win over existing rules for the same plate.
+      const merged = new Map(monitors.map((m) => [m.plate, m] as const))
+      for (const m of imported) merged.set(m.plate, m)
+      onSave([...merged.values()])
+      showSuccess(
+        `Imported ${imported.length} monitored plate${imported.length === 1 ? '' : 's'} from ${file.name}`
+        + (unknownCameras.length
+          ? ` — no camera named ${unknownCameras.map((c) => `“${c}”`).join(', ')}, skipped`
+          : ''),
+      )
+    } catch (e: any) {
+      showError(e?.message || 'Could not read that file.')
+    }
+  }
+
+  const exportCsv = () => downloadCsv(monitorsToCsv(monitors, cameras), 'monitored-plates.csv')
+
+  const q = query.trim().toLowerCase()
+  const rows = monitors
+    .filter((m) => !q || [m.plate, m.note].some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser, clamped like the register's.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (m: Monitor) => setDialog({ monitor: m, editing: m.plate })
+
+  const columns: Column<Monitor>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap', cell: (m) => m.plate,
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: 'Reason / note', cellClassName: 'truncate',
+      cell: (m) => m.note
+        ? <span title={m.note}>{m.note}</span>
+        : <span className="text-[var(--text-dim)]">—</span>,
+    },
+    {
+      key: 'severity', header: 'Severity', width: 'w-[110px]',
+      cell: (m) => <SeverityBadge severity={m.severity ?? 'high'} />,
+    },
+    {
+      key: 'where', header: 'Where', width: 'w-[180px]', hideBelow: 'md', cellClassName: 'truncate',
+      cell: (m) => m.cameras?.length
+        ? <span title={m.cameras.map(cameraLabel).join(', ')}>{m.cameras.map(cameraLabel).join(', ')}</span>
+        : <span className="text-[var(--text-dim)]">Any camera</span>,
+    },
+    {
+      // A switch in the row: silencing a rule for a while is the everyday
+      // change, and it should not take a dialog.
+      key: 'armed', header: 'Armed', width: 'w-[130px]', className: 'whitespace-nowrap',
+      isAction: true,
+      cell: (m) => (
+        <span className="inline-flex items-center gap-2">
+          <Switch
+            checked={m.active !== false}
+            onChange={(on) => save({ ...m, active: on })}
+            label={`${m.plate} armed`}
+            disabled={saving}
+          />
+          <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? 'Armed' : 'Silenced'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (m) => (
+        <>
+          <button
+            title={`Edit ${m.plate}`}
+            aria-label={`Edit ${m.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(m)}
+            disabled={saving}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title="Stop monitoring this plate"
+            aria-label={`Stop monitoring ${m.plate}`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
+            disabled={saving}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
   const addButton = (
-    <Button variant="primary" size="sm" disabled={saving} onClick={() => setAdding(true)}>
+    <Button
+      variant="primary" size="sm" disabled={saving}
+      onClick={() => setDialog({ monitor: { plate: '', severity: 'high', active: true }, editing: null })}
+    >
       <Plus size={14} /> Monitor a plate
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" disabled={saving} onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> Import CSV / Excel
     </Button>
   )
 
   return (
     <div className="space-y-4">
-      <Card>
-        {monitors.length === 0 ? (
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
+
+      {/* Same table as the register and the plate reads: header pinned,
+          rows scrolling in the height left, pager in the toolbar. */}
+      {monitors.length === 0 ? (
+        <Card>
           <EmptyState
             icon={<ShieldAlert size={28} />}
             title="No plates under monitoring"
             description="Monitor a plate — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
-            action={addButton}
+            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
           />
-        ) : (
-          <>
-            <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2">
-              <span className="text-xs text-[var(--text-dim)]">
-                {monitors.length} plate{monitors.length === 1 ? '' : 's'} under monitoring
-              </span>
-              <div className="ml-auto">{addButton}</div>
+        </Card>
+      ) : (
+        <DataTable<Monitor>
+          caption="Monitored plates"
+          columns={columns}
+          rows={pageRows}
+          rowKey={(m) => m.plate}
+          fillHeight
+          fixed
+          dense
+          minWidth="min-w-[720px]"
+          // The row IS the rule: clicking it opens the rule to edit.
+          onRowClick={editRow}
+          striped={false}
+          // A silenced rule recedes, the way an acknowledged alarm does.
+          rowClassName={(m) => (m.active === false ? 'opacity-70' : '')}
+          empty={
+            <EmptyState
+              icon={<Search size={28} />}
+              title={`No monitored plate matches “${query.trim()}”`}
+              description="Search looks at the plate and the reason."
+            />
+          }
+          toolbar={
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                <input
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                  placeholder="Search plate or reason…"
+                  aria-label="Search monitored plates"
+                  className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                />
+              </div>
+              {importButton}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download size={14} /> Export CSV
+              </Button>
+              {addButton}
+              <div className="ml-auto">
+                <Pagination
+                  page={page}
+                  pageSize={pager.pageSize}
+                  total={rows.length}
+                  rowCount={pageRows.length}
+                  label="plates"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                />
+              </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                    <th className="px-3 py-2">Plate</th>
-                    <th className="px-3 py-2">Reason / note</th>
-                    <th className="px-3 py-2">Severity</th>
-                    <th className="px-3 py-2">Where</th>
-                    <th className="px-3 py-2">Armed</th>
-                    <th className="px-3 py-2 text-right pr-4" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
-                    <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                      <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
-                      <td className="px-3 py-1.5">
-                        <input
-                          defaultValue={m.note ?? ''}
-                          placeholder="add a reason…"
-                          onBlur={(e) => {
-                            const v = e.target.value.trim()
-                            if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
-                          }}
-                          disabled={saving}
-                          className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
-                        />
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <select
-                          value={m.severity ?? 'high'}
-                          onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
-                          disabled={saving}
-                          className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                        >
-                          {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <select
-                          value={(m.cameras ?? [])[0] ?? ''}
-                          onChange={(e) => upsert({
-                            ...m,
-                            cameras: e.target.value ? [e.target.value] : undefined,
-                          })}
-                          disabled={saving}
-                          className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                        >
-                          <option value="">any camera</option>
-                          {cameras.map((c) => (
-                            <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <button
-                          onClick={() => upsert({ ...m, active: m.active === false })}
-                          disabled={saving}
-                          title={m.active !== false
-                            ? 'Armed — click to silence without deleting'
-                            : 'Silenced — click to re-arm'}
-                        >
-                          {m.active !== false
-                            ? <Badge variant="destructive">armed</Badge>
-                            : <Badge variant="neutral">silenced</Badge>}
-                        </button>
-                      </td>
-                      <td className="px-3 py-1.5 text-right pr-4">
-                        <button
-                          title="Stop monitoring this plate"
-                          aria-label={`Stop monitoring ${m.plate}`}
-                          className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                          onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
-                          disabled={saving}
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </Card>
+          }
+        />
+      )}
       <div className="text-xs text-[var(--text-dim)]">
         Monitored plates never trigger the unknown-vehicle alarm — they fire their own
-        alert at the severity set here, and "silenced" keeps the rule without alerting.
+        alert at the severity set here, and a silenced rule is kept without alerting.
       </div>
 
-      {adding && (
+      {importOpen && (
+        <ImportDialog
+          title="Import monitored plates"
+          noun="monitored plate"
+          columns={MONITOR_IMPORT_COLUMNS}
+          notes={MONITOR_IMPORT_NOTES}
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          onDownloadTemplate={() => downloadCsv(monitorsToCsv([], cameras), 'monitored-plates-template.csv')}
+        />
+      )}
+      {dialog && (
         <MonitorDialog
+          initial={dialog.monitor}
+          editing={dialog.editing}
           monitors={monitors}
           cameras={cameras}
           saving={saving}
-          onClose={() => setAdding(false)}
-          onSave={(m) => {
-            upsert(m)
-            setAdding(false)
+          onClose={() => setDialog(null)}
+          onSave={(m, replaces) => {
+            save(m, replaces)
+            setDialog(null)
           }}
         />
       )}
@@ -2916,21 +3200,38 @@ function MonitoringTab({
 }
 
 function MonitorDialog({
-  monitors, cameras, saving, onClose, onSave,
+  initial, editing, monitors, cameras, saving, onClose, onSave,
 }: {
+  initial: Monitor
+  /** The plate being edited, or null when adding. */
+  editing: string | null
   monitors: Monitor[]
   cameras: CameraRow[]
   saving: boolean
   onClose: () => void
-  onSave: (m: Monitor) => void
+  onSave: (m: Monitor, replaces: string | null) => void
 }) {
   const formId = useId()
-  const [plate, setPlate] = useState('')
-  const [note, setNote] = useState('')
-  const [severity, setSeverity] = useState<NonNullable<Monitor['severity']>>('high')
-  const [camera, setCamera] = useState('')
+  const [plate, setPlate] = useState(initial.plate)
+  const [note, setNote] = useState(initial.note ?? '')
+  const [severity, setSeverity] = useState<NonNullable<Monitor['severity']>>(initial.severity ?? 'high')
+  const [where, setWhere] = useState<string[]>(initial.cameras ?? [])
+  const [armed, setArmed] = useState(initial.active !== false)
   const norm = normalizePlate(plate)
-  const clash = Boolean(norm) && monitors.some((m) => m.plate === norm)
+  // Saving over another rule's plate replaces it — say so before, not after.
+  const clash = Boolean(norm) && norm !== editing && monitors.some((m) => m.plate === norm)
+
+  // Checkboxes, not one select: a rule can watch several cameras (imports
+  // carry them), and a single select silently dropped all but the first.
+  // A handle whose camera is gone stays listed, so it can be unticked.
+  const options = [
+    ...cameras.map((c) => ({ handle: `cam${c.id}`, name: c.name })),
+    ...(initial.cameras ?? [])
+      .filter((h) => !cameras.some((c) => `cam${c.id}` === h))
+      .map((h) => ({ handle: h, name: `${h} (not found)` })),
+  ]
+  const toggleWhere = (handle: string, on: boolean) =>
+    setWhere((w) => (on ? [...w, handle] : w.filter((x) => x !== handle)))
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -2939,9 +3240,9 @@ function MonitorDialog({
       plate: norm,
       note: note.trim() || undefined,
       severity,
-      active: true,
-      cameras: camera ? [camera] : undefined,
-    })
+      active: armed,
+      cameras: where.length ? where : undefined,
+    }, editing)
   }
 
   const labelCls = 'text-xs text-[var(--text-dim)]'
@@ -2951,13 +3252,13 @@ function MonitorDialog({
     <Modal
       open
       onClose={onClose}
-      title="Monitor a plate"
+      title={editing ? `Edit ${editing}` : 'Monitor a plate'}
       widthClassName="w-full max-w-lg mx-4"
       footer={
         <div className="flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
           <Button variant="primary" size="sm" type="submit" form={formId} disabled={!norm || saving}>
-            Monitor plate
+            {editing ? 'Save changes' : 'Monitor plate'}
           </Button>
         </div>
       }
@@ -2998,15 +3299,36 @@ function MonitorDialog({
             className={inputCls}
           />
         </label>
-        <label className={`${labelCls} sm:col-span-2`}>
-          Where
-          <select value={camera} onChange={(e) => setCamera(e.target.value)} className={inputCls}>
-            <option value="">Any camera</option>
-            {cameras.map((c) => (
-              <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
+        <fieldset className={`${labelCls} sm:col-span-2`}>
+          <legend>Where</legend>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-sm text-[var(--text)]">
+            {options.length === 0 && (
+              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
+            )}
+            {options.map((o) => (
+              <label key={o.handle} className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="accent-[var(--accent)]"
+                  checked={where.includes(o.handle)}
+                  onChange={(e) => toggleWhere(o.handle, e.target.checked)}
+                />
+                {o.name}
+              </label>
             ))}
-          </select>
-        </label>
+          </div>
+          <span className="mt-1 block">
+            {where.length
+              ? `Alerts only on ${where.length === 1 ? 'this camera' : 'these cameras'}.`
+              : 'None ticked — alerts on every camera.'}
+          </span>
+        </fieldset>
+        <div className="flex items-center gap-3 sm:col-span-2">
+          <Switch checked={armed} onChange={setArmed} label="Armed" />
+          <span className="text-sm">
+            {armed ? 'Armed — alerts when this plate is read' : 'Silenced — the rule is kept without alerting'}
+          </span>
+        </div>
       </form>
     </Modal>
   )
