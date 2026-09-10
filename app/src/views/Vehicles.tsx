@@ -811,6 +811,10 @@ export function Vehicles() {
     },
     retry: 0,
     refetchInterval: 60_000,
+    // Keep the last figures up while a new range loads, as the reads list
+    // does. Without it every first visit to a range blanked the tiles to
+    // "…" and back — a flicker that read as the numbers being unstable.
+    placeholderData: keepPreviousData,
   })
 
   const lprApp = findLprApp(appsQuery.data)
