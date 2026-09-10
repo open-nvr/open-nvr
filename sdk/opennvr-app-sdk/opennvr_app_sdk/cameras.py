@@ -64,10 +64,26 @@ def discover_cameras(
     Never raises: discovery runs at app startup, and an app that refuses
     to boot because core was still starting is worse than one that boots
     with no cameras and says so. Callers should log the empty result.
+
+    ``[]`` deliberately conflates "core said zero cameras" with "core
+    could not be reached" — for a boot-time listing they are the same
+    non-answer. Callers that must tell them apart (assignment, where
+    the two mean opposite things) use :func:`_fetch_cameras`.
     """
+    return _fetch_cameras(opennvr_url, api_key=api_key, timeout=timeout) or []
+
+
+def _fetch_cameras(
+    opennvr_url: str,
+    *,
+    api_key: str | None = None,
+    timeout: float = 5.0,
+) -> list[dict[str, Any]] | None:
+    """As :func:`discover_cameras`, but ``None`` when core could not be
+    asked at all — as opposed to ``[]``, core answering "no cameras"."""
     base = (opennvr_url or "").rstrip("/")
     if not base:
-        return []
+        return None
     key = internal_api_key(api_key)
     headers = {"X-Internal-Api-Key": key} if key else {}
     try:
@@ -80,14 +96,14 @@ def discover_cameras(
                 response.status_code,
                 " (is OPENNVR_INTERNAL_API_KEY set?)" if response.status_code in (401, 403) else "",
             )
-            return []
+            return None
         payload = response.json()
     except Exception as exc:                      # network, JSON, import
         logger.warning("camera discovery failed against %s: %s", base, exc)
-        return []
+        return None
     cameras = payload.get("cameras") if isinstance(payload, dict) else None
     if not isinstance(cameras, list):
-        return []
+        return None
     return [c for c in cameras if isinstance(c, dict) and c.get("camera_id")]
 
 
@@ -98,17 +114,19 @@ def full_frame_polygon(size: int = UNIT_FRAME) -> list[list[int]]:
 
 # ── Per-camera capability assignment (slice 2) ─────────────────────
 #
-# Operators can declare "camera 1 does LPR, cameras 2-3 count people" on
-# the camera settings page; the internal endpoint serves it as an
-# ``assignments`` list on each camera. An assignment is ADDITIVE intent:
-# the camera keeps streaming, recording, and Tier-0 detection regardless
-# — it only tells interested apps WHERE to point their attention.
+# Operators declare "camera 1 does LPR, cameras 2-3 count people" on the
+# camera settings page; the internal endpoint serves it as an
+# ``assignments`` list on each camera. The camera keeps streaming,
+# recording and Tier-0 detection regardless — assignment governs which
+# apps may use it and which SKILL INFERENCE runs on it.
 #
-# The back-compat rule every consumer must honour: restriction exists
-# only once at least one camera carries THIS skill. No camera assigned
-# the skill (or no assignments feature at all — an older core) means
-# "no restriction declared", and the app behaves exactly as before
-# assignments existed: watch everything.
+# CLOSED BY DEFAULT. An app watches the cameras it was pointed at, and
+# no more. This reverses the original additive rule, under which "no
+# camera carries this skill" meant "watch everything": that made the
+# least-configured install the most expensive one, and let an app read
+# cameras nobody had offered it. An app with no assigned cameras now
+# watches nothing — visibly, so an operator fixes it, rather than
+# silently getting the fleet.
 
 
 def filter_cameras_for_skill(
@@ -117,11 +135,14 @@ def filter_cameras_for_skill(
     """Which of ``cameras`` (a :func:`discover_cameras` payload) are
     assigned ``skill``.
 
-    Returns ``None`` when NO camera carries the skill — "no restriction
-    declared": the caller must fall back to watching everything, exactly
-    as before assignments existed. Returns the (possibly empty-labelled)
-    camera-id list once at least one camera is assigned the skill —
-    from then on the operator's declaration is the whole truth.
+    Returns the camera-id list, EMPTY when no camera carries the skill.
+    An empty list means watch nothing: the operator has not pointed this
+    skill at anything yet. It used to return ``None`` there, meaning
+    "watch everything", which is why an unconfigured app saw the fleet.
+
+    The return type stays ``| None`` for callers that still branch on
+    it; ``None`` now only means "could not ask" (an empty skill name),
+    never "no restriction".
 
     Pure — feed it the list you already fetched instead of fetching
     twice (the occupancy example's refresh loop does exactly this).
@@ -137,7 +158,7 @@ def filter_cameras_for_skill(
             if isinstance(a, dict) and str(a.get("skill", "")).lower() == want:
                 out.append(str(cam["camera_id"]))
                 break
-    return out or None
+    return out
 
 
 def cameras_for_skill(
@@ -149,11 +170,16 @@ def cameras_for_skill(
 ) -> list[str] | None:
     """Fetch-and-filter convenience: the camera ids assigned ``skill``.
 
-    ``None`` means "no restriction declared" — either no camera carries
-    the skill, or discovery failed (both cases mean: keep current
-    behaviour, don't narrow). Use :func:`filter_cameras_for_skill` when
-    you already hold a :func:`discover_cameras` result.
+    ``[]`` means core answered and no camera carries the skill: watch
+    nothing. ``None`` means core could not be ASKED — unknown, and
+    unknown must not be acted on in either direction: keep whatever
+    roster you already had rather than dropping to nothing on a restart
+    that raced core, or widening to everything on a network blip.
+
+    Use :func:`filter_cameras_for_skill` when you already hold a
+    :func:`discover_cameras` result.
     """
-    return filter_cameras_for_skill(
-        discover_cameras(opennvr_url, api_key=api_key, timeout=timeout), skill
-    )
+    cameras = _fetch_cameras(opennvr_url, api_key=api_key, timeout=timeout)
+    if cameras is None:
+        return None
+    return filter_cameras_for_skill(cameras, skill)

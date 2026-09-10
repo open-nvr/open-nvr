@@ -45,6 +45,42 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
 
 ### Changed
 
+- **BREAKING — a camera is now used by the apps it is assigned to, and
+  no others.** Assignment used to be advisory: "nothing assigned" meant
+  "no restriction declared", so an app nobody had pointed at a camera
+  watched the entire fleet, and plate OCR ran on every vehicle on every
+  camera whether or not that camera was for LPR — `wants_plate` took no
+  camera argument, so it could not consult an assignment even in
+  principle. The least-configured install was the most expensive one.
+
+  Closed by default now. A camera with no assignments is *eligible*
+  everywhere — it appears in every app's picker — and *adopted* nowhere,
+  so no app inference runs on it and it costs nothing. Streaming,
+  recording and the always-on Tier-0 detection behind the timeline are
+  unchanged on every camera, assigned or not; history and recordings
+  already captured stay exactly where they are.
+
+  **After upgrading, assign your cameras.** Apps that were watching the
+  whole fleet by default now watch nothing until an operator points them
+  somewhere, and plate reads stop on unassigned cameras. The Vehicles
+  page says so in place of an empty table, and giving a camera a gate
+  role there assigns it to LPR as part of the same action. See
+  [CAMERA_ASSIGNMENTS.md](docs/CAMERA_ASSIGNMENTS.md).
+
+  For app authors: `filter_cameras_for_skill()` now returns `[]`, not
+  `None`, when no camera carries the skill — an empty roster means watch
+  nothing. `cameras_for_skill()` still returns `None`, but only when
+  core could not be *asked*: unknown, so keep the roster you had rather
+  than acting on a network blip in either direction.
+
+- **Changing a camera's skill assignment now needs permission to
+  configure that camera.** `PUT`/`DELETE /api/v1/skills/{skill}/cameras/
+  {camera_id}` accepted any active user's JWT while the camera editor
+  they duplicate went through camera-update checks. Since assignment is
+  what turns an app's inference on or off, a viewer could start or stop
+  compute on any camera in the site. `GET .../cameras` is scoped to the
+  caller's visible cameras for the same reason.
+
 - **camera-agent: installed apps no longer speak unless asked.**
   `announce_app_alerts` defaulted to `important`, which speaks
   high/critical — and app alerts are mostly exactly that, so ANPR read

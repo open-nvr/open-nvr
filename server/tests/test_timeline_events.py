@@ -262,10 +262,22 @@ def test_extract_plate_and_wants_plate():
     assert extract_plate({"result": {}}) is None
     assert extract_plate(None) is None
 
-    assert wants_plate("car", "ab/x.jpg") is True
-    assert wants_plate("person", "ab/x.jpg") is False
-    assert wants_plate("car", None) is False
-    assert wants_plate("car", "ab/x.jpg", enabled=False) is False
+    # The assignment gate. A vehicle with evidence is NOT enough — the
+    # camera has to carry the plate skill, or a thirty-camera site pays
+    # OCR thirty times over to watch one gate.
+    lpr = {"license_plate_recognition"}
+    assert wants_plate("car", "ab/x.jpg", True, lpr) is True
+    assert wants_plate("person", "ab/x.jpg", True, lpr) is False
+    assert wants_plate("car", None, True, lpr) is False
+    assert wants_plate("car", "ab/x.jpg", False, lpr) is False
+
+    # Unassigned, or assigned to something else, or the caller could not
+    # resolve the camera at all: no read. Failing CLOSED is deliberate —
+    # a missed read on a misconfigured camera is visible and fixable,
+    # silently reading plates nobody asked for is neither.
+    assert wants_plate("car", "ab/x.jpg", True, set()) is False
+    assert wants_plate("car", "ab/x.jpg", True, {"object_detection"}) is False
+    assert wants_plate("car", "ab/x.jpg", True, None) is False
 
 
 # ── Partial plate reads (fragments) ────────────────────────────────

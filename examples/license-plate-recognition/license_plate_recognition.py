@@ -746,9 +746,11 @@ class PlateAlerter(Detector):
                 )
             except Exception:  # noqa: BLE001 — scope is advisory, never fatal
                 assigned = None
-            # None = "no restriction declared / couldn't tell" — the SDK
-            # helper's contract. On failure keep the previous answer
-            # (advisory scope must never turn a hiccup into a policy).
+            # None means core could not be ASKED — the SDK helper's
+            # contract. Keep the previous answer: an outage must never
+            # turn into a policy. An empty LIST is core answering "no
+            # camera is assigned this skill", which is a real scope of
+            # nothing and is applied.
             if assigned is not None:
                 self._assigned_scope = frozenset(assigned)
         return self._assigned_scope

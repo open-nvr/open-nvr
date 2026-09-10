@@ -30,6 +30,7 @@ from core.logging_config import main_logger
 from models import InstalledApp, User
 from routers.ai_models import _load_tasks_registry
 from services import skill_assignments
+from services.camera_scope import can_manage_camera, in_scope, visible_camera_ids
 from services.kai_c_service import get_kai_c_service
 from services.skills_registry import derive_skills
 
@@ -100,7 +101,33 @@ async def get_skill_cameras(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict[str, Any]:
-    return skill_assignments.skill_view(db, skill_id)
+    # A claim names a camera, so the view is camera data and obeys the
+    # same grants every other camera read does. Superusers scope to None.
+    view = skill_assignments.skill_view(db, skill_id)
+    scope = visible_camera_ids(db, current_user)
+    if scope is not None:
+        view = dict(view)
+        view["cameras"] = [
+            c for c in (view.get("cameras") or [])
+            if in_scope(scope, (c or {}).get("camera_id"))
+        ]
+    return view
+
+
+def _require_camera_manage(db: Session, user: User, camera_id: int) -> None:
+    """A claim changes what a camera is used for, so it needs the same
+    permission editing that camera does.
+
+    These two routes took any active user's JWT while the camera editor
+    they duplicate went through camera-update checks — a viewer could
+    point any camera at any skill (and, since assignment now gates
+    inference, turn its compute on or off).
+    """
+    if not can_manage_camera(db, user, camera_id):
+        raise HTTPException(
+            status_code=403,
+            detail="you do not have permission to configure this camera",
+        )
 
 
 @router.put("/{skill_id}/cameras/{camera_id}")
@@ -119,6 +146,7 @@ async def declare_skill_camera(
     per-camera-assignment design rule); GET /skills is where its status
     shows as missing-dependency.
     """
+    _require_camera_manage(db, current_user, camera_id)
     try:
         skill_assignments.declare(
             db, skill=skill_id, camera_id=camera_id,
@@ -142,6 +170,7 @@ async def release_skill_camera(
 ) -> dict[str, Any]:
     """Release one consumer's claim. The union shrinks by exactly this
     claim; other consumers' assignments survive (decision 8)."""
+    _require_camera_manage(db, current_user, camera_id)
     if not skill_assignments.release(
             db, skill=skill_id, camera_id=camera_id, consumer=consumer):
         raise HTTPException(

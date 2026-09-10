@@ -253,11 +253,13 @@ class Camera(Base):
     # A list of {"skill": "<capability>", "labels": [..]?} entries, e.g.
     # [{"skill": "license_plate_recognition"},
     #  {"skill": "object_detection", "labels": ["person", "truck"]}].
-    # Written ONLY by the camera settings surface; served additively on the
-    # internal camera-agent endpoint so consumers (Tier-0 reconcile, the
-    # App SDK's cameras_for_skill, the catalog UI) can opt in one by one.
-    # NULL/[] = nothing assigned — every consumer must treat that as
-    # "no restriction declared", never as "do nothing" (back-compat).
+    # Written by the camera settings surface and by an app adopting a
+    # camera in its own config; served on the internal camera-agent
+    # endpoint to Tier-0 reconcile, the App SDK's cameras_for_skill and
+    # the catalog UI.
+    # NULL/[] = nothing assigned. That camera is ELIGIBLE for every
+    # skill's picker and ADOPTED by none: it keeps streaming, recording
+    # and Tier-0 detection, and no app inference runs on it.
     # Nullable so the additive column self-heal can add it to old
     # create_all databases.
     assignments = Column(JSON, nullable=True)

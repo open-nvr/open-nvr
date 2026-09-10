@@ -214,9 +214,13 @@ def _write_config(tmp_path, body: str) -> str:
 def test_cameras_are_derived_from_opennvr_when_unlisted(tmp_path, monkeypatch):
     import opennvr_app_sdk.cameras as sdk_cameras
 
+    # Assigned, because assignment is what puts a camera in this app's
+    # scope at all — the mechanics under test here are discovery and the
+    # auto zone, not the scoping rule (that is its own test below).
     monkeypatch.setattr(
         oc, "discover_cameras",
-        lambda url, api_key=None: [{"camera_id": "cam1"}, {"camera_id": "cam2"}],
+        lambda url, api_key=None: _discovered("cam1:occupancy_counting",
+                                              "cam2:occupancy_counting"),
     )
     cfg = oc.load_config(_write_config(tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
     assert sorted(cfg.cameras) == ["cam1", "cam2"]
@@ -271,21 +275,22 @@ def test_core_reachable_but_no_cameras_yet_boots_empty(tmp_path, monkeypatch):
 def test_cameras_added_after_boot_are_picked_up(tmp_path, monkeypatch):
     """A set captured once at boot would silently never watch a camera
     added tomorrow."""
-    live = [{"camera_id": "cam1"}]
-    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    live = _discovered("cam1:occupancy_counting")
+    monkeypatch.setattr(oc, "discover_cameras",
+                        lambda url, api_key=None: [dict(c) for c in live])
     cfg = oc.load_config(_write_config(
         tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
     counter = oc.OccupancyCounter(cfg, _NullDispatcher())
     assert sorted(cfg.cameras) == ["cam1"]
 
-    live.append({"camera_id": "cam2"})                 # operator adds a camera
+    live.extend(_discovered("cam2:occupancy_counting"))  # operator adds one
     added, removed = counter.refresh_cameras()
     assert added == ["cam2"] and removed == []
     # ...and it is counted immediately, with the app-level threshold.
     fired = counter.handle_event(_tier0_event(6, camera_id="cam2"))
     assert len(fired) == 1 and fired[0].evidence["count"] == 6
 
-    live.remove({"camera_id": "cam1"})                 # ...and removes one
+    live[:] = _discovered("cam2:occupancy_counting")    # ...and removes one
     added, removed = counter.refresh_cameras()
     assert added == [] and removed == ["cam1"]
     assert "cam1" not in cfg.cameras
@@ -293,8 +298,9 @@ def test_cameras_added_after_boot_are_picked_up(tmp_path, monkeypatch):
 
 def test_refresh_ignores_an_empty_discovery_blip(tmp_path, monkeypatch):
     """Core answering with nothing mid-poll must not delete every camera."""
-    live = [{"camera_id": "cam1"}]
-    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: list(live))
+    live = _discovered("cam1:occupancy_counting")
+    monkeypatch.setattr(oc, "discover_cameras",
+                        lambda url, api_key=None: [dict(c) for c in live])
     cfg = oc.load_config(_write_config(
         tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
     counter = oc.OccupancyCounter(cfg, _NullDispatcher())
@@ -378,7 +384,7 @@ def test_refresh_accepts_a_prefetched_camera_list(tmp_path, monkeypatch):
 
     def _boot_only(url, api_key=None):
         calls["n"] += 1
-        return [{"camera_id": "cam1"}]
+        return _discovered("cam1:occupancy_counting")
 
     monkeypatch.setattr(oc, "discover_cameras", _boot_only)
     cfg = oc.load_config(_write_config(
@@ -387,7 +393,8 @@ def test_refresh_accepts_a_prefetched_camera_list(tmp_path, monkeypatch):
     assert calls["n"] == 1                              # boot discovery only
 
     added, removed = counter.refresh_cameras(
-        discovered=[{"camera_id": "cam1"}, {"camera_id": "cam2"}]
+        discovered=_discovered("cam1:occupancy_counting",
+                               "cam2:occupancy_counting")
     )
     assert added == ["cam2"] and removed == []
     assert calls["n"] == 1, "a supplied list must not trigger a fetch"
@@ -454,39 +461,45 @@ def test_boot_scopes_to_assigned_cameras(tmp_path, monkeypatch):
     assert len(fired) == 1
 
 
-def test_no_assignments_anywhere_means_watch_everything(tmp_path, monkeypatch):
-    """Back-compat: assignments that exist for OTHER skills only do not
-    restrict this app either way — restriction starts with OUR skill."""
+def test_no_assignments_anywhere_means_count_nowhere(tmp_path, monkeypatch):
+    """Closed by default. Cameras nobody assigned this app are not its
+    cameras — it counts nowhere until an operator points it somewhere.
+
+    This used to assert the opposite ("restriction starts with OUR
+    skill", so an unassigned fleet was watched entirely), which made a
+    fresh install the most expensive configuration there is."""
     monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: _discovered(
-        "cam1:", "cam2:",
+        "cam1:", "cam2:license_plate_recognition",
     ))
     cfg = oc.load_config(_write_config(
         tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
-    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+    assert sorted(cfg.cameras) == []
 
 
 def test_refresh_follows_assignment_changes(tmp_path, monkeypatch):
     """Assigning / un-assigning on the settings page takes effect within
-    one refresh — including un-assigning the LAST camera, which lifts the
-    restriction entirely (back to watch-everything, by the rule)."""
-    live = _discovered("cam1:", "cam2:")
+    one refresh — including un-assigning the LAST camera, which stops the
+    app counting anywhere rather than handing it the fleet."""
+    live = _discovered("cam1:occupancy_counting", "cam2:occupancy_counting")
     monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: [dict(c) for c in live])
     cfg = oc.load_config(_write_config(
         tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
     counter = oc.OccupancyCounter(cfg, _NullDispatcher())
     assert sorted(cfg.cameras) == ["cam1", "cam2"]
 
-    # Operator assigns occupancy to cam2 only → scope narrows.
+    # Operator un-assigns cam1 → scope narrows.
     live[:] = _discovered("cam1:", "cam2:occupancy_counting")
     added, removed = counter.refresh_cameras()
     assert removed == ["cam1"] and added == []
     assert sorted(cfg.cameras) == ["cam2"]
 
-    # Operator removes the assignment again → restriction lifts.
+    # Operator un-assigns the LAST one → the app counts nowhere. The
+    # empty answer is applied, not mistaken for a discovery blip: core
+    # returned two cameras, it just assigned this app neither.
     live[:] = _discovered("cam1:", "cam2:")
     added, removed = counter.refresh_cameras()
-    assert added == ["cam1"] and removed == []
-    assert sorted(cfg.cameras) == ["cam1", "cam2"]
+    assert added == [] and removed == ["cam2"]
+    assert sorted(cfg.cameras) == []
 
 
 def test_explicit_camera_list_ignores_assignments(tmp_path, monkeypatch):

@@ -1394,7 +1394,31 @@ async def enrich_event_plate(
         clear_sweep_pending(event_id)
 
 
+#: The skill a camera must carry before its vehicles are read.
+PLATE_SKILL = "license_plate_recognition"
+
+
 def wants_plate(label: str | None, evidence_path: str | None,
-                enabled: bool = True) -> bool:
-    """Should this freshly-ingested visit be queued for OCR? Pure, tested."""
-    return bool(enabled and evidence_path and (label or "") in VEHICLE_LABELS)
+                enabled: bool = True,
+                camera_skills: set[str] | None = None) -> bool:
+    """Should this freshly-ingested visit be queued for OCR? Pure, tested.
+
+    ``camera_skills`` is the ASSIGNMENT gate, and it is the reason this
+    function grew a fourth argument. Without it there was no camera in
+    scope at all, so every vehicle visit on every camera bought a full
+    OCR inference — a thirty-camera site paid plate recognition thirty
+    times over to watch one gate. Tier-0 has always declined to send
+    plate CANDIDATES for an unassigned camera; core then read the
+    visit's evidence frame instead and OCR'd that, which put the cost
+    straight back.
+
+    ``None`` means "caller could not resolve the camera" and is treated
+    as NOT assigned. Failing closed is right for a privacy-sensitive
+    inference: the cost of a wrong False is a missed read on a
+    misconfigured camera, which the Vehicles page can say out loud; the
+    cost of a wrong True is silently reading plates on cameras nobody
+    asked to have read.
+    """
+    if not (enabled and evidence_path and (label or "") in VEHICLE_LABELS):
+        return False
+    return PLATE_SKILL in (camera_skills or set())

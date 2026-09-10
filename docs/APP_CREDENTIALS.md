@@ -19,11 +19,13 @@ a catalog of third-party apps.
 
 An app's **roster** is the cameras the operator assigned to it on the
 camera settings page (`Camera.assignments[].skill` naming one of the
-app's manifest `provides`, or the app id). When no camera names the app,
-it sees every camera — the additive rule of
-[CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md), the same rule the SDK's
-`cameras_for_skill` applies client-side, now enforced where the frames are
-handed out.
+app's manifest `provides`, or the app id). It is **closed by default**:
+an app sees the cameras it was pointed at and no others, and an app
+nobody has assigned a camera sees nothing
+([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)) — the same rule the
+SDK's `cameras_for_skill` applies client-side, enforced here where the
+frames are actually handed out. This reverses the earlier additive rule,
+under which an unassigned app got the whole fleet.
 
 ## The handshake
 

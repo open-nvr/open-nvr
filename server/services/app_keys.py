@@ -17,10 +17,10 @@ The model here:
   the secret half is what is hashed (SHA-256) and stored.
 * Presenting an app key authenticates AS THAT APP: it may read its own
   config and status, register itself again, and read the platform's
-  internal camera/event routes **for its own roster** (the cameras the
-  operator assigned it — ``Camera.assignments[].skill == app id`` —
-  or every camera when no assignment names it, the additive rule of
-  docs/CAMERA_ASSIGNMENTS.md). Never another app's config, never the
+  internal camera/event routes **for its own roster** — the cameras the
+  operator assigned it (``Camera.assignments[].skill == app id``), and
+  only those: an app pointed at nothing sees nothing
+  (docs/CAMERA_ASSIGNMENTS.md). Never another app's config, never the
   detect-pipeline's write routes.
 * A superuser can rotate or revoke a key from the registry; the site
   key keeps working for platform components and for onboarding.
@@ -117,9 +117,22 @@ def app_skills(row) -> set[str]:
 
 def app_camera_ids(db: Session, row) -> set[int] | None:
     """Cameras the operator assigned to this app (``assignments[].skill``
-    in :func:`app_skills`), or ``None`` = every camera when no assignment
-    names it — the additive rule of docs/CAMERA_ASSIGNMENTS.md, exactly
-    as ``cameras_for_skill`` in the SDK reads it."""
+    in :func:`app_skills`).
+
+    Returns a SET — empty when nothing names this app, which scopes the
+    app to nothing. It used to return ``None`` there, meaning "every
+    camera", on the reasoning that an undeclared restriction is not a
+    restriction. That inverted the incentive: the less an operator
+    configured, the more each app could see and compute on, and a fresh
+    install handed every app the whole fleet.
+
+    Closed by default now. An app sees the cameras it was pointed at,
+    and an operator who has pointed it at nothing gets nothing —
+    visibly, rather than silently getting everything.
+
+    Callers test ``roster is not None``, which still holds: an empty set
+    is not None and correctly filters to zero cameras.
+    """
     from models import Camera
 
     skills = app_skills(row)
@@ -134,4 +147,4 @@ def app_camera_ids(db: Session, row) -> set[int] | None:
             if isinstance(entry, dict) and entry.get("skill") in skills:
                 named.add(int(cam_id))
                 break
-    return named or None
+    return named

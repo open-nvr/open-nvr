@@ -27,6 +27,7 @@ from models import Camera, SecuritySetting
 from services.app_keys import (
     AppPrincipal, app_camera_ids, looks_like_app_key, resolve_app_key,
 )
+from services.skill_assignments import camera_adopted, camera_skills
 from services.stream_service import _build_stream_name
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,11 @@ async def ingest_track_event(
             and wants_plate(
         row.label, evidence_rel or (candidates and "candidates"),
         settings.events_plate_enrichment,
+        # The assignment gate. `camera` is already in hand from the
+        # existence check above, so this costs no extra query on the
+        # hot path — and without it every vehicle on every camera
+        # bought an OCR inference.
+        camera_skills(camera),
     ):
         # Registered BEFORE the task is queued: KAI-C republishes every
         # accepted read this sweep makes as plate.recognized.v1, and the
@@ -479,6 +485,14 @@ async def ingest_plate_attempt(
         raise HTTPException(status_code=404, detail="unknown camera_id")
     if not settings.events_plate_enrichment:
         return {"status": "disabled"}
+    # The same assignment gate the ingest sweep applies. Tier-0 already
+    # declines to POST here for an unassigned camera, so today this is
+    # belt and braces — but the endpoint is reachable by any platform
+    # key, and "no producer currently misuses it" is not a gate.
+    from services.plate_enrichment import PLATE_SKILL
+
+    if not camera_adopted(camera, PLATE_SKILL):
+        return {"status": "unassigned"}
 
     from services.evidence_store import MAX_EVIDENCE_BYTES
 
@@ -703,10 +717,11 @@ def list_camera_agent_sources(
         .order_by(Camera.id.asc())
         .all()
     )
-    # An app key gets the cameras the operator assigned to it (every
-    # camera when none is assigned — the additive rule); the site key
-    # gets the fleet. Same rule the SDK's cameras_for_skill applies
-    # client-side, now enforced where the frames are handed out.
+    # An app key gets the cameras the operator assigned to it, and only
+    # those — an app assigned nothing gets an empty roster rather than
+    # the fleet. The site key (detect-pipeline, KAI-C) still gets every
+    # camera. Same rule the SDK's cameras_for_skill applies client-side,
+    # enforced here where the frames are actually handed out.
     roster = _app_roster(db, principal)
     if roster is not None:
         cameras = [c for c in cameras if int(c.id) in roster]
@@ -791,10 +806,9 @@ def list_camera_agent_sources(
                 "frame_url": frame_url,
                 "role": role,
                 "source": source,
-                # Per-camera capability assignment (slice 1 of
-                # docs/design/per-camera-assignment.md). Additive: existing
-                # consumers ignore it. [] = nothing assigned — consumers must
-                # read that as "no restriction declared", never "do nothing".
+                # Per-camera capability assignment. [] = nothing
+                # assigned: the camera is eligible for any skill's picker
+                # but adopted by none, so no app inference runs on it.
                 "assignments": list(cam.assignments or []),
             }
         )
