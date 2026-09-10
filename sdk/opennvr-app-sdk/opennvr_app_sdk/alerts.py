@@ -547,6 +547,12 @@ class AlertDispatcher:
             raise ValueError("AlertDispatcher requires at least one channel.")
         self._channels = channels
 
+    @property
+    def channels(self) -> tuple[AlertChannel, ...]:
+        """The channels, in delivery order — read-only. Handy in tests
+        and in a ``/state`` view ("where do my alerts go?")."""
+        return tuple(self._channels)
+
     def fire(self, alert: Alert) -> dict[str, bool]:
         results: dict[str, bool] = {}
         for channel in self._channels:

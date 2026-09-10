@@ -63,6 +63,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them without running the app. Every example app in this repository
   generates a document that passes `openapi-spec-validator`.
 
+- **A runnable example per SDK class** —
+  [`sdk/opennvr-app-sdk/cookbook/`](sdk/opennvr-app-sdk/cookbook/), 19
+  files covering `App`, `Detector`, `FrameApp`, `AlertSubscriber`,
+  `DomainEventSubscriber`, `OpenNVR`, `AsyncOpenNVR`, `EventsClient`,
+  `InferStream`, `ContractServer`, `DomainEventPublisher`, Tier-0,
+  `keyed_state` / `Zone` / `Tripwire`, alerts and channels, the
+  manifest's full vocabulary, selling an app, credentials and the
+  roster, egress, and the testing helpers. Each says in its docstring
+  what it demonstrates, and every one is imported and exercised by
+  `tests/test_cookbook.py` — an example that references a name the SDK
+  no longer exports fails in CI rather than misleading a reader.
+
+- `AlertDispatcher.channels` — a read-only view of the delivery chain,
+  for tests and for a "where do my alerts go?" state view.
+
 - **[API_STANDARDS.md](docs/API_STANDARDS.md)** — the map of every API
   surface and the open specification that describes it, including what
   is deliberately *not* adopted and why.

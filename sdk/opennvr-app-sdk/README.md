@@ -53,6 +53,15 @@ Your app self-describes: the contract server it gets for free serves
 is a path with a typed body, a declared param is a schema. Point Swagger
 UI or a client generator at a running app and it works.
 
+## One example per class
+
+[`cookbook/`](cookbook/) is a runnable file per class — how it is
+constructed or subclassed, and which APIs it uses. Every file is
+imported and exercised by the test suite, so an example that references
+a name the SDK no longer exports breaks in CI rather than misleading
+you months later. Start at
+[`01_app_facade.py`](cookbook/01_app_facade.py).
+
 ## …or the class underneath it
 
 `App` compiles to a `Detector`. When a rule outgrows the decorators,

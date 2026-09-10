@@ -41,6 +41,7 @@ Documentation = "https://github.com/open-nvr/open-nvr/blob/main/docs/SDK_REFEREN
 Source = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk"
 Changelog = "https://github.com/open-nvr/open-nvr/blob/main/CHANGELOG.md"
 Licensing = "https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/LICENSING.md"
+Cookbook = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk/cookbook"
 Issues = "https://github.com/open-nvr/open-nvr/issues?q=label%3Asdk"
 
 [project.scripts]

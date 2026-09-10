@@ -15,6 +15,12 @@ pip install opennvr-app-sdk            # or: uv add opennvr-app-sdk
 pip install "opennvr-app-sdk[nats]"    # + NATS client for the subscribe loops
 ```
 
+**One runnable example per class** lives in
+[`sdk/opennvr-app-sdk/cookbook/`](../sdk/opennvr-app-sdk/cookbook/) —
+how each is constructed or subclassed and which APIs it uses, imported
+and exercised by the test suite so it cannot drift from the code. This
+page is the index of names; the cookbook is the index of *uses*.
+
 ## Pick an archetype — the class you subclass
 
 | Archetype | Subclass | Implement | Run with | Source of frames/events |
