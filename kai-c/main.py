@@ -65,7 +65,7 @@ logger = logging.getLogger("kai-c")
 # on the same tag as the core server, so it reports the same version. This is the
 # *release* version, not the AI Adapter Contract version (that's v1, negotiated
 # per adapter via /capabilities).
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 
 # ============================================================

@@ -6,6 +6,42 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-09-10
+
+The largest release since 0.1.0, and the one where the app platform grew
+up: apps stop sharing the deployment's site key, the App Catalog becomes
+a product surface rather than a list, and the camera-agent moves to
+Pipecat 1.8 with a real end-of-turn model.
+
+Each component keeps its own version line, because each is versioned by
+what consumes it: the platform and the adapter images at 0.1.5,
+`opennvr-app-sdk` at **0.5.0** (its first publish since 0.4.0 — see
+below), `opennvr-adapter-sdk` unchanged at 1.2.0, and the app contract's
+own `api_version`.
+
+Upgrading: `.env.example` now pins `CORE_TAG=0.1.5` and
+`ADAPTER_TAG=0.1.5`. There is no migration beyond the usual `docker
+compose pull && docker compose up -d`; the apps-bus and per-app
+credential work below converges on its own at start-up.
+
+The headline work in this release, at a glance — every entry is below:
+
+- **Apps stopped sharing the site key.** Each installed app now holds its
+  own credential, joins its own NATS server with permissions derived
+  from its manifest, and reaches the network only through an enforced
+  egress proxy. Catalog images are signed and verified at install.
+- **The App Catalog became a product surface** — search, category
+  filters, its own `apps.view` permission, detail pages for apps you
+  have not installed, screenshots and editorial rank.
+- **The camera-agent moved to Pipecat 1.8 with Smart Turn v3** —
+  semantic end-of-turn instead of a silence timer, turn-taking sized to
+  the hardware it runs on, interruptions that ignore a cough or a remark
+  to someone else, and it says what it is checking while it checks.
+- **A security sweep** closed cross-camera event disclosure, a blind
+  SSRF on camera create, cloud-metadata access, an anonymous MediaMTX
+  health route and unrestricted integration webhooks.
+
+
 ### Security
 
 Five findings from a coordinated disclosure by Kamal Sentassi (S9S
@@ -542,7 +578,7 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
   `manifest.json` of SHA-256 hashes. Stream URLs and secrets are
   redacted; missing routes are recorded, never fatal.
 
-- **SDK toward 1.0 (on main; no tag until QA signs off 0.5.0).**
+- **SDK toward 1.0.**
   `opennvr_app_sdk.testing` — `RecorderChannel`, `app_config`,
   `detection` / `inference_event` / `tier0_event` / `domain_event`
   builders, `feed(app, *events)` through the real decode → rule →
@@ -666,7 +702,7 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
   must name an `author`) and `featured` (a row at the top of the
   catalog), with validator rules and the review policy in
   CONTRIBUTING_APPS.md. `GET /apps/index` returns both.
-- **SDK 0.5.0 (unreleased): less boilerplate for every app.** The three
+- **Less boilerplate for every app.** The three
   on-ramp gaps the outside-the-repo walk left open, closed:
   `BaseAppConfig` + `load_app_config(path, cls)` replace the config
   block every app re-typed (the template's went from ~70 lines to 12);
@@ -676,7 +712,7 @@ Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
   by default, template moved to `opennvr_app_sdk/templates/app`
   (`scripts/create_opennvr_app.py` is now a wrapper that keeps in-tree
   examples on the editable SDK). Additive; server `api_version` stays
-  1.2. Tag `sdk-v0.5.0` to release.
+  1.2.
 - **The out-of-tree developer path works end to end.** A paid,
   `license_key` app was built in its own repository on nothing but the
   PyPI wheel (`docs/EXTERNAL_APP_WALKTHROUGH.md`); the platform surface
