@@ -1557,23 +1557,9 @@ export function Vehicles() {
                 label="reads"
                 onPageChange={reads.setPage}
                 onPageSizeChange={reads.setPageSize}
-                announce={false}
               />
             </div>
           </div>
-        }
-        footer={
-          <Pagination
-            page={reads.page}
-            pageSize={reads.pageSize}
-            total={eventsTotal}
-            rowCount={events.length}
-            hasNext={events.length === reads.pageSize}
-            isFetching={eventsQuery.isFetching}
-            label="reads"
-            onPageChange={reads.setPage}
-            onPageSizeChange={reads.setPageSize}
-          />
         }
       />
       </>
@@ -2897,24 +2883,10 @@ function VehicleAlarmsTab({ cameraName }: { cameraName: (id: number) => string }
                     label="alarms"
                     onPageChange={pager.setPage}
                     onPageSizeChange={pager.setPageSize}
-                    announce={false}
                   />
                 </div>
               </div>
             </>
-          }
-          footer={
-            <Pagination
-              page={pager.page}
-              pageSize={pager.pageSize}
-              total={list.total}
-              rowCount={rows.length}
-              hasNext={rows.length === pager.pageSize}
-              isFetching={list.isFetching}
-              label="alarms"
-              onPageChange={pager.setPage}
-              onPageSizeChange={pager.setPageSize}
-            />
           }
       />
     </>

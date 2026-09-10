@@ -287,24 +287,10 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
                   label="alarms"
                   onPageChange={pager.setPage}
                   onPageSizeChange={pager.setPageSize}
-                  announce={false}
                 />
               </div>
             </div>
           </>
-        }
-        footer={
-          <Pagination
-            page={pager.page}
-            pageSize={pager.pageSize}
-            total={list.total}
-            rowCount={rows.length}
-            hasNext={rows.length === pager.pageSize}
-            isFetching={list.isFetching}
-            label="alarms"
-            onPageChange={pager.setPage}
-            onPageSizeChange={pager.setPageSize}
-          />
         }
       />
     </div>
