@@ -234,13 +234,27 @@ def test_internal_cameras_and_events_follow_the_apps_assignments(env):
     assert {e["camera_id"] for e in ev} == {ids["gate"], ids["yard"]}
 
 
-def test_unassigned_app_sees_the_fleet_additive_rule(env):
-    """No camera names this app → no restriction declared → everything
+def test_unassigned_app_sees_nothing(env):
+    """No camera names this app → it gets NONE of them.
+
+    This used to be the additive rule: an unnamed app saw the whole
+    fleet, so the least-configured install was the most expensive one
+    and a freshly installed app could read every camera nobody had
+    offered it. Closed by default now — the roster is what an operator
+    pointed at the app, and an app pointed at nothing watches nothing
     (docs/CAMERA_ASSIGNMENTS.md, same as the SDK's cameras_for_skill)."""
     tc, ids, _ = env
     body = {"url": "http://occ:9200", "manifest": _manifest("occupancy-counting", ("occupancy",))}
     key = tc.post("/apps/register", json=body, headers=_site()).json()["api_key"]
     cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert cams == []
+    # And the same for events: no roster, no stream of other people's
+    # cameras leaking through the event route.
+    ev = tc.get("/internal/camera-agent/events", headers=_app(key)).json()["events"]
+    assert ev == []
+    # The site key is unaffected — platform components still see the
+    # fleet, or the detect-pipeline would stop feeding every camera.
+    cams = tc.get("/internal/camera-agent/cameras", headers=_site()).json()["cameras"]
     assert sorted(int(c["open_nvr_camera_id"]) for c in cams) == sorted(ids.values())
 
 

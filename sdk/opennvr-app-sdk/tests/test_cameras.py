@@ -76,12 +76,12 @@ def test_full_frame_polygon_covers_the_unit_space():
     assert poly == [[0, 0], [UNIT_FRAME, 0], [UNIT_FRAME, UNIT_FRAME], [0, UNIT_FRAME]]
 
 
-# ── Per-camera assignment (slice 2) ────────────────────────────────
+# ── Per-camera assignment ──────────────────────────────────────────
 #
-# "Camera 1 does LPR, cameras 2-3 count people." The back-compat rule:
-# restriction exists only once at least one camera carries the skill —
-# no camera assigned (or an older core with no assignments field) means
-# "no restriction declared", and the caller keeps watching everything.
+# "Camera 1 does LPR, cameras 2-3 count people." Closed by default: an
+# app watches the cameras it was pointed at and no more. Nothing
+# assigned means an EMPTY list — watch nothing — not the old additive
+# rule where it meant watch everything.
 
 
 _ASSIGNED = [
@@ -102,14 +102,17 @@ def test_filter_returns_only_cameras_assigned_the_skill():
     assert filter_cameras_for_skill(_ASSIGNED, "license_plate_recognition") == ["cam1"]
 
 
-def test_filter_none_means_no_restriction_declared():
-    # Nobody carries the skill → None, NOT [] — the caller must fall back
-    # to watching everything, exactly as before assignments existed.
-    assert filter_cameras_for_skill(_ASSIGNED, "face_recognition") is None
-    # Older core: cameras with no assignments field at all.
+def test_filter_is_empty_when_nothing_carries_the_skill():
+    # Nobody carries the skill → [], meaning watch NOTHING. It used to
+    # be None ("no restriction declared"), which handed an unconfigured
+    # app the whole fleet.
+    assert filter_cameras_for_skill(_ASSIGNED, "face_recognition") == []
+    # An older core with no assignments field at all is the same case:
+    # nobody pointed this app at anything.
     legacy = [{"camera_id": "cam1"}, {"camera_id": "cam2"}]
-    assert filter_cameras_for_skill(legacy, "occupancy_counting") is None
-    assert filter_cameras_for_skill([], "occupancy_counting") is None
+    assert filter_cameras_for_skill(legacy, "occupancy_counting") == []
+    assert filter_cameras_for_skill([], "occupancy_counting") == []
+    # None survives for one case only: we could not even ask.
     assert filter_cameras_for_skill(_ASSIGNED, "") is None
 
 

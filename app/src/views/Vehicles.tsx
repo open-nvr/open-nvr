@@ -58,6 +58,13 @@ import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
 import { formatSeenAt, seenAtTitle } from '../lib/time'
 import {
+  LPR_SKILL,
+  cameraAdopted,
+  ineligibleReason,
+  type CameraAssignment,
+} from '../lib/cameraAssignments'
+import { cameraService } from '../services/cameraService'
+import {
   Badge, Button, Card, CardContent,
   EmptyState, PageHeader, Skeleton,
 } from '../components/ui'
@@ -180,7 +187,13 @@ type PlateStats = {
   per_day: { day: string; reads: number }[]
 }
 
-type CameraRow = { id: number; name: string }
+type CameraRow = {
+  id: number
+  name: string
+  // Which skills the camera is pointed at. [] / absent = unassigned:
+  // eligible for every picker, adopted by none, computing nothing.
+  assignments?: CameraAssignment[] | null
+}
 
 type PlateSummary = {
   plate: string
@@ -675,6 +688,32 @@ export function Vehicles() {
 
   const lprApp = findLprApp(appsQuery.data)
   const allow: string[] = (lprApp?.config as any)?.allowlist ?? []
+
+  // Giving a camera a gate role is the operator saying "read plates
+  // here", so it is also the moment the camera is CLAIMED for LPR —
+  // one action, not a role here and an assignment on another page.
+  // Without the claim the server reads no plates on that camera at all,
+  // and the role would quietly do nothing.
+  const claimCamera = useMutation({
+    mutationFn: async ({ cameraId, adopt }: { cameraId: number; adopt: boolean }) => {
+      // The installed app's own id when we have it — the claim should
+      // name the thing that holds it, not a constant that happens to
+      // match today.
+      const consumer = `app:${lprApp?.id ?? LPR_SOURCE}`
+      if (adopt) await cameraService.declareSkillCamera(LPR_SKILL, cameraId, consumer)
+      else await cameraService.releaseSkillCamera(LPR_SKILL, cameraId, consumer)
+    },
+    // The picker reads eligibility off `assignments`, so it has to see
+    // the write it just made.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['cameras'] }),
+    onError: (e) => showError(extractApiError(e, 'Could not assign the camera.')),
+  })
+  // Cameras actually reading plates. Empty means the skill is dormant:
+  // reads stop, and the page has to say so rather than look broken.
+  const lprCameras = useMemo(
+    () => (camerasQuery.data ?? []).filter((c) => cameraAdopted(c, LPR_SKILL)),
+    [camerasQuery.data]
+  )
 
   // The society register + alarm mode live in the providing app's
   // config, exactly like the watchlists (live-applied by the app).
@@ -1326,6 +1365,14 @@ export function Vehicles() {
             const next = { ...cameraRoles }
             if (!role) delete next[String(cameraId)]
             else next[String(cameraId)] = label ? { role, label } : { role }
+            // Adopt on set, release on clear. Releasing drops only this
+            // app's claim — an operator who assigned LPR on the Cameras
+            // page keeps their assignment, and the camera keeps reading.
+            const camera = (camerasQuery.data ?? []).find((c) => c.id === cameraId)
+            const adopt = Boolean(role)
+            if (camera && adopt !== cameraAdopted(camera, LPR_SKILL)) {
+              claimCamera.mutate({ cameraId, adopt })
+            }
             // Only declared manifest params may be written — the server
             // rejects unknown config keys. camera_roles is declared;
             // the legacy gate_directions map is read-only fallback.
@@ -1429,7 +1476,9 @@ export function Vehicles() {
             title={debouncedPlate || cameraId !== ''
               ? 'No plate reads match these filters'
               : 'No plate reads in this window'}
-            description="Assign cameras the License Plate Recognition skill (Cameras → edit → Assignments) and vehicle visits will appear here with their evidence photos."
+            description={lprCameras.length === 0
+              ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or assign it the License Plate Recognition skill under Cameras → edit → Assignments) and visits will appear here with their evidence photos.'
+              : 'Vehicle visits appear here with their evidence photos.'}
             action={(debouncedPlate || cameraId !== '') ? (
               <Button variant="outline" onClick={() => {
                 setPlate(''); setCameraId(''); reads.setPage(1)
@@ -2109,6 +2158,19 @@ function RegistryTab({
           {(() => {
             const hasIn = Object.values(cameraRoles).some((r) => r.role === 'gate_in')
             const hasOut = Object.values(cameraRoles).some((r) => r.role === 'gate_out')
+            // Adoption is the switch that costs money, so its absence is
+            // the loudest thing on the card: no camera claimed, no plate
+            // is read anywhere, and nothing else here matters yet.
+            const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
+            if (reading.length === 0) {
+              return (
+                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
+                  No camera is reading plates. Give a camera a role below and this app
+                  starts reading it — until then plate recognition runs nowhere, which
+                  is also why it costs nothing.
+                </div>
+              )
+            }
             if (!hasIn) {
               return (
                 <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
@@ -2130,8 +2192,17 @@ function RegistryTab({
           <div className="flex flex-wrap gap-3">
             {cameras.map((c) => {
               const entry = cameraRoles[String(c.id)]
+              // Ineligible cameras stay on screen, greyed, with the
+              // reason. Hiding them makes an operator hunt for a camera
+              // that is right there — the question is always "why is it
+              // not in the list", so answer it in the list.
+              const blocked = ineligibleReason(c, LPR_SKILL)
               return (
-                <label key={c.id} className="inline-flex items-center gap-2 text-sm">
+                <label
+                  key={c.id}
+                  className={`inline-flex items-center gap-2 text-sm${blocked ? ' opacity-60' : ''}`}
+                  title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
+                >
                   <span>{c.name}</span>
                   <select
                     value={entry?.role ?? ''}
@@ -2139,7 +2210,7 @@ function RegistryTab({
                       const role = e.target.value as CameraRole | ''
                       onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
                     }}
-                    disabled={saving}
+                    disabled={saving || Boolean(blocked)}
                     className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
                   >
                     <option value="">no role</option>
@@ -2159,6 +2230,9 @@ function RegistryTab({
                       disabled={saving}
                       className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
                     />
+                  )}
+                  {blocked && (
+                    <span className="text-xs text-[var(--text-dim)]">{blocked}</span>
                   )}
                 </label>
               )

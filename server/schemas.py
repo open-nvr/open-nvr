@@ -683,8 +683,9 @@ class CameraResponse(CameraBase):
     id: int
     owner_id: int
     is_active: bool
-    # Per-camera capability assignment; None and [] both mean "nothing
-    # assigned" (read as: no restriction declared).
+    # Per-camera capability assignment. None and [] both mean "nothing
+    # assigned": eligible for any skill's picker, adopted by none, so no
+    # app inference runs on it. The UI reads eligibility off this.
     assignments: list[CameraAssignment] | None = None
     deleted_at: datetime | None = None
     created_at: datetime

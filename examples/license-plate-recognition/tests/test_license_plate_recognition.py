@@ -151,12 +151,26 @@ def test_assignment_scope_via_sdk(monkeypatch):
     assert len(alerter.handle_event(_envelope(camera="cam-7"))) == 1
 
 
+def test_no_assigned_camera_means_no_alert_anywhere(monkeypatch):
+    """Closed by default: core answering "nobody carries this skill" is a
+    real scope of nothing, not "no restriction declared". An app nobody
+    pointed at a camera must not alert on the whole fleet."""
+    alerter, _ = _alerter(opennvr_url="http://core:8000")
+    monkeypatch.setattr(lpr, "cameras_for_skill",
+                        lambda url, skill, api_key=None: [])
+    assert alerter.handle_event(_envelope(camera="cam-1")) == []
+    assert alerter.handle_event(_envelope(camera="cam-7")) == []
+
+
 def test_scope_fetch_failure_means_no_restriction(monkeypatch):
     alerter, _ = _alerter(opennvr_url="http://core:8000")
 
     def boom(url, skill, api_key=None):
         raise RuntimeError("core down")
     monkeypatch.setattr(lpr, "cameras_for_skill", boom)
+    # Unknown, not empty: core could not be asked, so the previous
+    # answer stands. There is none yet at boot, so nothing is narrowed —
+    # an outage must not silently mute every alert either.
     assert len(alerter.handle_event(_envelope(camera="anything"))) == 1
 
 

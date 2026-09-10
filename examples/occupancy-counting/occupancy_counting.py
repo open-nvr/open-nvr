@@ -121,9 +121,11 @@ ALERT_COOLDOWN_SECONDS_DEFAULT: int = 120
 def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
     """Narrow a discover_cameras() payload to this app's assigned cameras.
 
-    No camera assigned SKILL -> no restriction declared -> unchanged.
-    Assignments are additive intent: they point THIS app's attention;
-    streaming/recording/Tier-0 on the other cameras are unaffected.
+    Closed by default: no camera assigned SKILL -> this app counts
+    NOWHERE. It used to mean "no restriction declared -> count
+    everywhere", which handed an unconfigured app the whole fleet.
+    Assignment only points THIS app's attention; streaming, recording
+    and Tier-0 on every camera are unaffected either way.
     """
     assigned = filter_cameras_for_skill(discovered, SKILL)
     if assigned is None:
@@ -684,16 +686,20 @@ class OccupancyCounter(Detector):
                 self._config.opennvr_url_for_discovery,
                 api_key=self._config.internal_api_key,
             )
-        # Assignment scoping runs on every refresh, so assigning or
-        # un-assigning a camera on the settings page takes effect within
-        # one refresh interval — no app restart.
-        discovered = _scope_to_assignment(discovered)
-        ids = {c["camera_id"] for c in discovered}
-        if not ids:
-            # Treat "core answered with nothing" as no news rather than
+        if not discovered:
+            # Core answered with NO CAMERAS AT ALL — no news rather than
             # "delete every camera": a transient blip mid-poll must not
             # silently stop the app watching everything it was watching.
+            # This has to be tested BEFORE scoping, or it would swallow
+            # the un-assignment below, which is a real empty answer.
             return [], []
+        # Assignment scoping runs on every refresh, so assigning or
+        # un-assigning a camera on the settings page takes effect within
+        # one refresh interval — no app restart. An empty result here is
+        # the operator saying "count nowhere", and is applied: cameras
+        # this app was watching are dropped.
+        discovered = _scope_to_assignment(discovered)
+        ids = {c["camera_id"] for c in discovered}
         current = set(self._config.cameras)
         added = sorted(ids - current)
         removed = sorted(current - ids)

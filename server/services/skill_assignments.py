@@ -270,3 +270,64 @@ def assignments_by_skill(db: Session) -> dict[str, list[int]]:
     for row in rows:
         out.setdefault(row.skill, set()).add(row.camera_id)
     return {k: sorted(v) for k, v in out.items()}
+
+
+# ── The eligibility rule, in one place ──────────────────────────────
+#
+# Two different questions get asked about a camera and a skill, and
+# conflating them is what made assignments advisory:
+#
+#   ELIGIBLE — may this skill be offered this camera? Open by default:
+#     a camera nobody has claimed can be picked by anyone. This is what
+#     a configuration picker asks.
+#   ADOPTED  — is this camera actually claimed by that skill? This is
+#     what COMPUTE asks, and it is never true by default. An unassigned
+#     camera is eligible everywhere and computes nowhere.
+#
+# Both read the denormalised ``Camera.assignments`` projection rather
+# than the claim table, because the hot path (plate ingest) already has
+# the camera row in hand and must not pay a second query per visit.
+
+
+def camera_skills(camera) -> set[str]:
+    """Skills claimed on a camera, from the JSON projection.
+
+    The projection is NULL when nothing is claimed and a list of
+    ``{"skill": ..., "labels"?: [...]}`` otherwise (see
+    :func:`project_camera`). Malformed entries are ignored rather than
+    raised on: this is read on the ingest path, and a bad row in the
+    column must not cost a visit.
+    """
+    entries = getattr(camera, "assignments", None)
+    if not isinstance(entries, list):
+        return set()
+    out: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, dict):
+            skill = entry.get("skill")
+            if isinstance(skill, str) and skill.strip():
+                out.add(skill.strip().lower())
+    return out
+
+
+def camera_adopted(camera, skill: str) -> bool:
+    """Does this camera actually carry that skill? The COMPUTE gate.
+
+    False for an unassigned camera — that is the point. Inference for a
+    skill runs on the cameras an operator pointed it at, not on every
+    camera that happens to exist.
+    """
+    return skill.strip().lower() in camera_skills(camera)
+
+
+def camera_eligible(camera, skill: str) -> bool:
+    """May this skill be OFFERED this camera? The picker gate.
+
+    Open by default: a camera with no claims at all is fair game for
+    every skill, which is what "nothing assigned = no restriction
+    declared" has always meant in the editor. Once a camera declares
+    anything, that declaration is exhaustive — a camera assigned to
+    object detection stops appearing in the LPR picker.
+    """
+    claimed = camera_skills(camera)
+    return not claimed or skill.strip().lower() in claimed
