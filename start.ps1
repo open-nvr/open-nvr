@@ -641,6 +641,9 @@ function Get-LanIPs {
             }
         } catch {}
     }
+    # Callers MUST wrap this in @(): PowerShell unrolls the returned list, so
+    # on a single-IP host the caller otherwise gets a bare [string] and
+    # $lanIps[0] is the character "1" of "192.168.1.5".
     return $found
 }
 
@@ -650,7 +653,8 @@ function Set-HostIpEnv {
     $lanIpsSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_LAN_IPS) -or
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_LAN_IPS"))
     if ($hostIpSet -and $lanIpsSet) { return }
-    $lanIps = Get-LanIPs
+    # @() so a single detected IP stays an array (see Get-LanIPs).
+    $lanIps = @(Get-LanIPs)
     if ($lanIps.Count -eq 0) { return }
     # Process env feeds compose ${VAR:-} interpolation; operator .env wins.
     if (-not $hostIpSet) {
