@@ -63,6 +63,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them without running the app. Every example app in this repository
   generates a document that passes `openapi-spec-validator`.
 
+- **A published API reference — [opennvr.org/sdk](https://opennvr.org/sdk).**
+  mkdocs-material + mkdocstrings, so the site *is* the docstrings: there
+  is no second copy of the API to keep current. `make sdk-site` builds
+  it, `make sdk-site-serve` serves it with live reload. Alongside the
+  generated reference it carries a quickstart, a concepts page (the four
+  archetypes and how to pick one), six guides (rules, platform,
+  surfaces, events, testing, selling), the cookbook index, the specs
+  page and the licensing statement.
+
+- **The SDK's 98 exports now have a documented front door.**
+  `opennvr_app_sdk.API_TIERS` orders the public surface into seven tiers
+  — front door (six names, the whole of a first app), archetypes, rules,
+  platform, surfaces, events, config — and `__all__` is *assembled from
+  it*, so the tiers cannot fall out of step with the exports. The site's
+  navigation and its reference pages are generated from the same tuples
+  by `scripts/gen_reference.py`. `tests/test_public_api.py` fails on a
+  name in two tiers, in none, reachable but untiered, or exported
+  without a docstring; `tests/test_docs_site.py` fails on a stale
+  generated page, a dead nav link, an orphaned page or a broken code
+  snippet.
+
 - **A runnable example per SDK class** —
   [`sdk/opennvr-app-sdk/cookbook/`](sdk/opennvr-app-sdk/cookbook/), 19
   files covering `App`, `Detector`, `FrameApp`, `AlertSubscriber`,

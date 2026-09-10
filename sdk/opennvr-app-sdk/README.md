@@ -53,6 +53,12 @@ Your app self-describes: the contract server it gets for free serves
 is a path with a typed body, a declared param is a schema. Point Swagger
 UI or a client generator at a running app and it works.
 
+## The reference
+
+**[opennvr.org/sdk](https://opennvr.org/sdk)** — every export, in tiers,
+generated from these docstrings. Start at the front door: six names, and
+most apps need nothing else.
+
 ## One example per class
 
 [`cookbook/`](cookbook/) is a runnable file per class — how it is

@@ -1,0 +1,95 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# The published API reference — https://opennvr.org/sdk
+#
+#   make sdk-site        build to sdk/opennvr-app-sdk/site/
+#   make sdk-site-serve  live-reload at http://127.0.0.1:8001
+#
+# Every reference page is `::: opennvr_app_sdk.<name>`, so the site IS
+# the docstrings: there is no second copy of the API to keep current.
+# The navigation below mirrors `opennvr_app_sdk.API_TIERS`, and
+# tests/test_docs_site.py fails if the two drift apart.
+site_name: OpenNVR App SDK
+site_description: Build vision apps on OpenNVR — the reference for opennvr-app-sdk.
+site_url: https://opennvr.org/sdk/
+repo_url: https://github.com/open-nvr/open-nvr
+repo_name: open-nvr/open-nvr
+edit_uri: edit/main/sdk/opennvr-app-sdk/docs_src/
+copyright: Apache-2.0 — build your app under any licence you choose.
+docs_dir: docs_src
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle: {icon: material/weather-night, name: Dark}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle: {icon: material/weather-sunny, name: Light}
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            heading_level: 2
+            docstring_style: sphinx
+            show_source: true
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc: {permalink: true}
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.snippets: {check_paths: true, base_path: ["."]}
+  - pymdownx.tabbed: {alternate_style: true}
+
+nav:
+  - Start here:
+      - index.md
+      - quickstart.md
+      - concepts.md
+  - Guides:
+      - guides/rules.md
+      - guides/platform.md
+      - guides/surfaces.md
+      - guides/events.md
+      - guides/testing.md
+      - guides/selling.md
+  - Cookbook: cookbook.md
+  - API reference:
+      - reference/front-door.md
+      - reference/archetypes.md
+      - reference/rules.md
+      - reference/platform.md
+      - reference/surfaces.md
+      - reference/events.md
+      - reference/config.md
+  - Specs: specs.md
+  - Licensing: licensing.md
