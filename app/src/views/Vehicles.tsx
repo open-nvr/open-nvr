@@ -35,7 +35,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import {
   ArrowRight, BellRing, BookUser, Car, ChevronRight, Download, FileText, Fingerprint,
   History, Pencil, PhoneCall, Plus, RefreshCw, ScanLine, Search, ShieldAlert,
-  ShieldCheck, Trash2, Upload, Volume2,
+  ShieldCheck, SlidersHorizontal, Trash2, Upload, Volume2,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
@@ -2154,6 +2154,9 @@ function RegistryTab({
   // thing on the tab.
   const [settingsOpen, setSettingsOpen] = useState(() => reading.length === 0)
   const settingsRef = useRef<HTMLDivElement | null>(null)
+  const settingsToggleRef = useRef<HTMLButtonElement | null>(null)
+  const settingsPanelId = useId()
+  const [settingsFlash, setSettingsFlash] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const { showError, showSuccess } = useSnackbar()
 
@@ -2220,10 +2223,22 @@ function RegistryTab({
     if (Number.isFinite(h) && h >= 0 && h !== overstayHours) onSetOverstay(h)
   }
 
-  const openSettings = () => {
+  // Opens the panel AND brings it into view. It sits under a table that
+  // takes every pixel the screen has left, so opening it in place changed
+  // nothing the operator could see. Two frames, not one: the table shrinks
+  // to make room only after the panel renders, and a scroll taken before
+  // that lands short of a panel the shrink then moves.
+  const openSettings = ({ highlight = false }: { highlight?: boolean } = {}) => {
     setSettingsOpen(true)
-    requestAnimationFrame(() =>
-      settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // Focus follows, so a keyboard user lands where the page went.
+      settingsToggleRef.current?.focus({ preventScroll: true })
+      if (highlight) {
+        setSettingsFlash(true)
+        window.setTimeout(() => setSettingsFlash(false), 1500)
+      }
+    }))
   }
 
   const q = query.trim().toLowerCase()
@@ -2349,7 +2364,7 @@ function RegistryTab({
             No camera is reading plates yet — give a camera a role and this app starts reading it.
           </span>
           {cameras.length > 0 && (
-            <Button variant="outline" size="sm" onClick={openSettings}>
+            <Button variant="outline" size="sm" onClick={() => openSettings({ highlight: true })}>
               Assign camera roles
             </Button>
           )}
@@ -2407,6 +2422,15 @@ function RegistryTab({
                 <Download size={14} /> Export CSV
               </Button>
               {addButton}
+              {/* Always opens (never closes) the panel under the table and
+                  takes the page to it — the panel's own header toggles. */}
+              <Button
+                variant="outline" size="sm"
+                aria-controls={settingsPanelId}
+                onClick={() => openSettings({ highlight: true })}
+              >
+                <SlidersHorizontal size={14} /> Gate settings
+              </Button>
               <div className="ml-auto">
                 <Pagination
                   page={page}
@@ -2426,11 +2450,15 @@ function RegistryTab({
       {/* Gate settings — set once, so folded under the list, with a
           summary line that shows their state without opening them. */}
       <div ref={settingsRef} className="scroll-mt-4">
-        <Card>
+        {/* A brief accent ring when opened from elsewhere, so the eye lands
+            on the panel the page just scrolled to. */}
+        <Card className={`transition-shadow duration-300 ${settingsFlash ? 'ring-2 ring-[var(--accent)]' : ''}`}>
           <button
+            ref={settingsToggleRef}
             type="button"
             aria-expanded={settingsOpen}
-            onClick={() => setSettingsOpen((v) => !v)}
+            aria-controls={settingsPanelId}
+            onClick={() => (settingsOpen ? setSettingsOpen(false) : openSettings())}
             className="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             <ChevronRight
@@ -2443,7 +2471,7 @@ function RegistryTab({
             )}
           </button>
           {settingsOpen && (
-            <div className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
+            <div id={settingsPanelId} className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
               <SettingRow
                 icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
                 title="Alarm on unknown vehicles"
