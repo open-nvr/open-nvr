@@ -66,8 +66,13 @@ export function SegmentedControl<V extends string | number | null>({
   if (!showLabel) return group
   return (
     <div className="flex items-center gap-2">
-      {/* Hidden from assistive tech: the group's aria-label says it. */}
-      <span aria-hidden className="text-xs text-[var(--text-dim)]">{label}</span>
+      {/* A caption, not a control: the app's small-caps label style, faded
+          behind the options. Same size and colour as an unselected option,
+          it read as one more button to press. Hidden from assistive tech —
+          the group's aria-label says it. */}
+      <span aria-hidden className="select-none text-[11px] uppercase tracking-wider text-[var(--text-dim)] opacity-80">
+        {label}
+      </span>
       {group}
     </div>
   )
