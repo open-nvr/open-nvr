@@ -25,6 +25,7 @@ Start here. Pick the row that matches what you're doing.
 - **[APP_PLATFORM.md](APP_PLATFORM.md)** — the `OpenNVR` client: cameras, snapshots, recordings, timeline, AI, alerts, durable state, domain-event consumption.
 - **[SDK_REFERENCE.md](SDK_REFERENCE.md)** — index of every public `opennvr_app_sdk` name, by task.
 - **[PLATFORM_API.md](PLATFORM_API.md)** — the operator API: users (incl. superusers + MFA), roles and the permission catalogue, cameras, assignments, per-camera access, apps and licences.
+- **[API_STANDARDS.md](API_STANDARDS.md)** — every surface and the open spec that describes it: OpenAPI 3.1 for HTTP (core, KAI-C, adapters, and each app, generated from its manifest), AsyncAPI 3.0 for the bus, and `opennvr-app spec`.
 
 ## Build on the AI layer
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.

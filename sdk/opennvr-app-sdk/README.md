@@ -7,7 +7,9 @@ per-camera permissions, and a catalog every deployment opens — all
 already running. You write the rule, the model or the workflow; this
 package is the only import you need.
 
-Apache-2.0 — ship your app under any licence, closed included.
+Apache-2.0 — ship your app under any licence, closed included, with no
+fee to OpenNVR. Why that holds even though the platform core is AGPL:
+[LICENSING.md](LICENSING.md).
 
 ```bash
 pip install opennvr-app-sdk
@@ -42,7 +44,14 @@ See it fire before you touch Docker:
 opennvr-app new loitering        # a runnable app + tests
 opennvr-app dev                  # run it against a simulated camera
 opennvr-app validate .           # what a reviewer would check
+opennvr-app spec                 # its OpenAPI 3.1 document
 ```
+
+Your app self-describes: the contract server it gets for free serves
+**OpenAPI 3.1** at `/openapi.json` and **AsyncAPI 3.0** at
+`/asyncapi.json`, both generated from your manifest — a declared action
+is a path with a typed body, a declared param is a schema. Point Swagger
+UI or a client generator at a running app and it works.
 
 ## …or the class underneath it
 

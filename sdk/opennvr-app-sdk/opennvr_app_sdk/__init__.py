@@ -60,6 +60,7 @@ from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
 from .facade import DEFAULT_MIN_CONFIDENCE, App, DetectionEvent
+from .openapi import CONTRACT_API_VERSION, contract_asyncapi, contract_openapi
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
     CameraFrameSource,
@@ -214,8 +215,11 @@ __all__ = [
     "build_frame_source",
     "DictFrameSource",
     "dict_frame_source",
-    # Contract surface (§03)
+    # Contract surface (§03) + its machine-readable specs
     "ContractServer",
+    "contract_openapi",
+    "contract_asyncapi",
+    "CONTRACT_API_VERSION",
     # Tier-0 consumption (answer from the always-on detector; reuse its best frame)
     "Tier0Snapshot",
     "snapshot_from_event",

@@ -361,6 +361,8 @@ class ContractServer:
         health: Callable[[], dict[str, Any]],
         manifest: Callable[[], dict[str, Any]],
         state: Callable[[], dict[str, Any]],
+        openapi: "Callable[[], dict[str, Any]] | None" = None,
+        asyncapi: "Callable[[], dict[str, Any]] | None" = None,
         action: "Callable[[str, dict[str, Any]], Any] | None" = None,
         action_token: "str | None" = None,
         ui: "Callable[[], str] | None" = None,
@@ -373,6 +375,10 @@ class ContractServer:
         self._host = host
         self._requested_port = int(port)
         self._routes = {"/health": health, "/manifest": manifest, "/state": state}
+        if openapi is not None:
+            self._routes["/openapi.json"] = openapi
+        if asyncapi is not None:
+            self._routes["/asyncapi.json"] = asyncapi
         self._action = action
         self._action_token = action_token
         self._ui = ui
@@ -489,6 +495,26 @@ class ContractMixin:
         apps (mid-migration) rather than a 500."""
         return self.manifest.to_dict() if self.manifest is not None else {}
 
+    def openapi_snapshot(self) -> dict[str, Any]:
+        """The ``GET /openapi.json`` payload — an OpenAPI 3.1 document
+        for this app's own contract surface, generated from the manifest
+        so it cannot drift. ``{}`` for manifest-less apps."""
+        if self.manifest is None:
+            return {}
+        from .openapi import contract_openapi, prune
+
+        port = self._contract_server.port if self._contract_server else None
+        return prune(contract_openapi(self.manifest, port=port))
+
+    def asyncapi_snapshot(self) -> dict[str, Any]:
+        """The ``GET /asyncapi.json`` payload — an AsyncAPI 3.0 document
+        for the NATS subjects this app consumes and publishes."""
+        if self.manifest is None:
+            return {}
+        from .openapi import contract_asyncapi, prune
+
+        return prune(contract_asyncapi(self.manifest))
+
     def on_action(self, name: str, params: dict[str, Any]) -> Any:
         """Override to implement the verbs the manifest ``actions``
         declare (search footage, enroll a face, …). Called from the
@@ -578,6 +604,10 @@ class ContractMixin:
             health=self.health_snapshot,
             manifest=self.manifest_snapshot,
             state=self.state_snapshot,
+            # Every app self-describes in the two standards its consumers
+            # already have tooling for (docs/API_STANDARDS.md).
+            openapi=self.openapi_snapshot,
+            asyncapi=self.asyncapi_snapshot,
             action=self._dispatch_action,
             action_token=action_token,
             # Apps opt into the /ui surface by defining ui_html() -> str.
@@ -594,7 +624,8 @@ class ContractMixin:
         server.start()
         self._contract_server = server
         logger.info(
-            "contract server listening on %s:%d (/health /manifest /state)",
+            "contract server listening on %s:%d "
+            "(/health /manifest /state /openapi.json /asyncapi.json)",
             bind_host,
             server.port,
         )

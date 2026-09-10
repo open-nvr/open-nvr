@@ -48,6 +48,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path a real subscription uses, so what fires there fires in
   production. Works for facade apps and for plain `Detector` apps alike.
 
+- **Every app now self-describes in OpenAPI 3.1 and AsyncAPI 3.0.** Core,
+  KAI-C and the AI adapters are FastAPI and have always published
+  OpenAPI at `/openapi.json`; the two surfaces that had no machine-
+  readable spec were the app contract server (a stdlib HTTP server) and
+  the event bus (not HTTP at all). Both are now generated from the app's
+  own `AppManifest`, so they cannot drift from the app: a declared
+  `Action` is a `POST /actions/{name}` path with a typed request body, a
+  declared `Param` is a JSON Schema (with `x-opennvr-ui` for the
+  catalog's geometry types), `has_ui` adds `GET /ui`, and
+  `entitlement: license_key` adds `POST /entitlement/verify`. The
+  contract server serves them at `/openapi.json` and `/asyncapi.json`,
+  and `opennvr-app spec [--format asyncapi] [--yaml] [-o FILE]` prints
+  them without running the app. Every example app in this repository
+  generates a document that passes `openapi-spec-validator`.
+
+- **[API_STANDARDS.md](docs/API_STANDARDS.md)** — the map of every API
+  surface and the open specification that describes it, including what
+  is deliberately *not* adopted and why.
+
+- **Licensing is now legible from inside the SDK package.**
+  `sdk/opennvr-app-sdk/LICENSING.md` and a `NOTICE` state the app
+  boundary — an app talks to the AGPL core over NATS and HTTP and never
+  links it, so a closed app carries no AGPL obligation — and both are
+  installed with the wheel rather than living only on GitHub.
+
 ### Changed
 
 - The scaffold template, its README and its smoke tests lead with the

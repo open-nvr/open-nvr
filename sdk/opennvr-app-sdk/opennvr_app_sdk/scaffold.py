@@ -238,6 +238,7 @@ def print_next_steps(app_id: str, app_dir: Path, *, mode: str) -> None:
     print("  uv run pytest -q        # the smoke test — should be GREEN")
     print("  uv run opennvr-app dev  # watch the rule fire against a simulated camera")
     print("  uv run opennvr-app validate .   # what a reviewer would check")
+    print("  uv run opennvr-app spec         # the app's OpenAPI 3.1 document")
     print(f"  # open {module}.py and edit the @app.on_detection function — that's the rule")
     print("  cp config.example.yml config.yml   # then edit it")
     print(f"  uv run python {module}.py --config config.yml --once")
@@ -267,6 +268,13 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
                           "the App Catalog listing entry. Implies --sdk pypi.")
     val = sub.add_parser("validate", help="check an app's manifest, example config, listing and repository shape")
     val.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
+    spec = sub.add_parser("spec", help="print the app's OpenAPI 3.1 / AsyncAPI 3.0 document")
+    spec.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
+    spec.add_argument("--format", choices=("openapi", "asyncapi"), default="openapi",
+                      help="openapi = the app's HTTP contract surface (default); "
+                           "asyncapi = the NATS subjects it consumes and publishes.")
+    spec.add_argument("--yaml", action="store_true", help="emit YAML instead of JSON.")
+    spec.add_argument("-o", "--output", default=None, help="write to this file instead of stdout.")
     dev = sub.add_parser("dev", help="run the app against a simulated camera — no broker, no Docker")
     dev.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
     dev.add_argument("--config", default=None,
@@ -284,6 +292,12 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
     dev.add_argument("--fast", action="store_true",
                      help="feed every event immediately; timestamps still advance at --rate.")
     args = parser.parse_args(argv)
+
+    if args.command == "spec":
+        from .speccmd import run_spec
+
+        return run_spec(Path(args.path), fmt=args.format, as_yaml=args.yaml,
+                        output=args.output)
 
     if args.command == "dev":
         from .dev import run_dev
