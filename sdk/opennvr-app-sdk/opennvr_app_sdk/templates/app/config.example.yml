@@ -28,12 +28,25 @@ nats_token: null
 # only see one adapter's results.
 subject_pattern: "opennvr.inference.>"
 
-# ── Detection filter ──────────────────────────────────────────────
+# ── The rule's knobs ──────────────────────────────────────────────
 #
-# Only detections with one of these labels (case-folded) count toward
-# the rule. Edit for your app's domain.
-watch_labels:
-  - "person"
+# One entry per ``app.param(...)`` in __APP_MODULE__.py. Detections the
+# model is less sure of than this are ignored.
+min_confidence: 0.5
+
+# Zones, if any rule declares ``zone="..."``. Coordinates are
+# normalized (0–1 of the frame), so they survive a resolution change;
+# the App Catalog's zone editor writes them for you. Either one set for
+# every camera:
+#
+# zones:
+#   driveway: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
+#
+# …or one set per camera:
+#
+# zones:
+#   cam-front:
+#     driveway: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
 
 # ── Webhook (optional) ────────────────────────────────────────────
 #

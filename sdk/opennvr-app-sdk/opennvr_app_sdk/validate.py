@@ -88,7 +88,8 @@ class Report:
 def find_app_module(app_dir: Path) -> str | None:
     """The module that builds the manifest: the ``[project.scripts]``
     target in pyproject.toml, else the one top-level ``*.py`` that
-    mentions ``AppManifest(``."""
+    builds an app — an ``App(`` facade instance or a literal
+    ``AppManifest(``."""
     pyproject = app_dir / "pyproject.toml"
     if pyproject.exists():
         try:
@@ -99,15 +100,30 @@ def find_app_module(app_dir: Path) -> str | None:
             module = str(target).split(":", 1)[0].strip()
             if module and (app_dir / f"{module}.py").exists():
                 return module
-    candidates = [p.stem for p in sorted(app_dir.glob("*.py"))
-                  if "AppManifest(" in p.read_text(encoding="utf-8", errors="ignore")]
+    candidates = [
+        p.stem for p in sorted(app_dir.glob("*.py"))
+        if any(marker in p.read_text(encoding="utf-8", errors="ignore")
+               for marker in ("AppManifest(", "App("))
+    ]
     return candidates[0] if len(candidates) == 1 else (None if not candidates else candidates[0])
+
+
+def facade_app(module: Any) -> Any | None:
+    """The module-level :class:`~.facade.App` instance, if the app is
+    written against the facade rather than an archetype base."""
+    from .facade import App as _App
+
+    for _name, obj in inspect.getmembers(module):
+        if isinstance(obj, _App):
+            return obj
+    return None
 
 
 def load_manifest(app_dir: Path, module_name: str) -> tuple[AppManifest | None, Any]:
     """Import the module from ``app_dir`` and return ``(manifest, module)``:
-    a module-level ``AppManifest`` or the ``manifest`` of an archetype
-    subclass defined there."""
+    the manifest an :class:`~.facade.App` compiles to, a module-level
+    ``AppManifest``, or the ``manifest`` of an archetype subclass
+    defined there."""
     sys.path.insert(0, str(app_dir))
     try:
         sys.modules.pop(module_name, None)
@@ -116,6 +132,15 @@ def load_manifest(app_dir: Path, module_name: str) -> tuple[AppManifest | None, 
         try:
             sys.path.remove(str(app_dir))
         except ValueError:
+            pass
+    facade = facade_app(module)
+    if facade is not None:
+        try:
+            return facade.manifest(), module
+        except (TypeError, ValueError):
+            # A malformed facade manifest is a manifest problem, not a
+            # discovery problem — fall through and let the other
+            # strategies (or the "no manifest" error) report it.
             pass
     for name in ("manifest", "MANIFEST"):
         m = getattr(module, name, None)
@@ -131,6 +156,11 @@ def load_manifest(app_dir: Path, module_name: str) -> tuple[AppManifest | None, 
 
 
 def app_class(module: Any, manifest: AppManifest) -> type | None:
+    facade = facade_app(module)
+    if facade is not None and facade.id == manifest.id:
+        # The facade's compiled Detector is the app class for every
+        # check that reads the class (verify_license, render_ui, …).
+        return facade.detector_class()
     for _name, obj in inspect.getmembers(module, inspect.isclass):
         if getattr(obj, "manifest", None) is manifest and obj.__module__ == module.__name__:
             return obj
@@ -243,7 +273,11 @@ def check_config(app_dir: Path, module: Any, report: Report) -> None:
         return
     from .config import BaseAppConfig, load_app_config
 
+    facade = facade_app(module)
     cfg_cls = getattr(module, "AppConfig", None)
+    if facade is not None and not (isinstance(cfg_cls, type)
+                                   and issubclass(cfg_cls, BaseAppConfig)):
+        cfg_cls = facade.config_class()
     if not (isinstance(cfg_cls, type) and issubclass(cfg_cls, BaseAppConfig)):
         loader = getattr(module, "load_config", None)
         if callable(loader):

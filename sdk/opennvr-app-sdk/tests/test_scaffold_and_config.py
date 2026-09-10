@@ -145,8 +145,9 @@ def test_pypi_mode_is_the_default_and_self_contained(tmp_path):
     import re
     leftovers = {k for k, v in f.items() if re.search(r"__[A-Z_]+__", v)}   # no token left
     assert not leftovers, leftovers
-    assert "class GateWatch(Detector)" in f["gate_watch.py"]
-    assert "load_app_config(path, AppConfig)" in f["gate_watch.py"]
+    assert 'App(\n    "gate-watch"' in f["gate_watch.py"]
+    assert "@app.on_detection(" in f["gate_watch.py"]
+    assert "app.param(" in f["gate_watch.py"]
     assert "__APP" not in f["gate_watch.py"]
 
 
@@ -182,7 +183,7 @@ def test_scaffolded_app_smoke_test_passes(tmp_path):
         env={"PYTHONPATH": f"{app_dir}{__import__('os').pathsep}{Path(scaffold.__file__).parents[1]}",
              "PATH": __import__('os').environ.get("PATH", "")})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "5 passed" in proc.stdout
+    assert "6 passed" in proc.stdout
 
 
 def test_cli_new(tmp_path, capsys):

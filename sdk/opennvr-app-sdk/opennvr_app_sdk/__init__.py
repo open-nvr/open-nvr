@@ -6,8 +6,29 @@ opennvr-app-sdk — the shared base for OpenNVR monitoring apps.
 
 Per the App SDK spec, the SDK folds config loading, §11.5 alert
 dispatch, zone geometry, keyed TTL state, the NATS subscribe loop, the
-CLI, and signal handling behind ``app(Detector).run()`` — what's left
-in an app is the rule plus a declarative :class:`AppManifest`.
+CLI, and signal handling behind one runnable app — what's left to write
+is the rule plus a declarative :class:`AppManifest`.
+
+Start with :class:`App`
+-----------------------
+
+:class:`App` is the front door. It declares the manifest, the config
+and the rules in one place, and compiles down to the :class:`Detector`
+described below — same process, same manifest, same alerts::
+
+    from opennvr_app_sdk import App
+
+    app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+
+    @app.on_detection("person", zone="driveway", dwell=30)
+    def loitering(event):
+        event.alert(f"Person loitering on {event.camera}", severity="high")
+
+    if __name__ == "__main__":
+        raise SystemExit(app.run())
+
+Everything below the facade stays available and unchanged; drop to it
+when a rule outgrows the decorators.
 
 Archetypes (spec §02):
 
@@ -38,6 +59,7 @@ from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
+from .facade import DEFAULT_MIN_CONFIDENCE, App, DetectionEvent
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
     CameraFrameSource,
@@ -88,6 +110,13 @@ from .tier0 import (
 from ._version import __version__  # noqa: E402
 
 __all__ = [
+    # ── The front door ────────────────────────────────────────
+    # Start here: App + DetectionEvent are the whole of a first
+    # app. Everything below is the layer they compile down to,
+    # reachable when a rule outgrows the facade.
+    "App",
+    "DetectionEvent",
+    "DEFAULT_MIN_CONFIDENCE",
     # The stack's egress proxy, for plain-TCP clients (docs/APP_NETWORK.md)
     "proxy_address",
     "connect_via_proxy",
