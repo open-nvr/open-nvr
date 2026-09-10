@@ -2,6 +2,11 @@
 
 /* App theme tokens - modern dark slate + blue accent */
 :root {
+  /* Tells the browser the page is dark, so the controls it draws itself —
+     checkboxes, scrollbars, date pickers — are dark too; without it they
+     stayed light on a dark page. It does NOT fix an open <select> list:
+     see the option rule below. */
+  color-scheme: dark;
   --bg: #0b1220;          /* page background */
   --bg-2: #111827;        /* secondary panels */
   --panel: #0f172a;       /* main content surface */
@@ -34,6 +39,7 @@
 
 /* Light theme overrides */
 [data-theme="light"] {
+  color-scheme: light;
   --bg: #f8fafc;          /* slate-50 */
   --bg-2: #e5e7eb;        /* gray-200 */
   --panel: #ffffff;       /* white */
@@ -71,6 +77,21 @@ body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antial
    not-allowed for disabled ones. */
 button:not(:disabled) { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
+
+/* The OPEN list of a <select> is drawn by the browser, not the page.
+   Chrome paints it with the <select>'s own background — and preflight
+   makes every <select> transparent with inherited text, so the page-size
+   picker opened a white list of light-grey options nobody could read.
+   color-scheme doesn't help: Chrome copies a transparent background
+   as-is, with no themed fallback. What it DOES honour is each option's
+   own background and colour (internal_popup_menu.cc, AddElementStyle),
+   so every select gets a themed list whatever the select itself looks
+   like. */
+select option,
+select optgroup {
+  background-color: var(--panel);
+  color: var(--text);
+}
 
 /* Reusable UI primitives for consistent styling */
 .card {
