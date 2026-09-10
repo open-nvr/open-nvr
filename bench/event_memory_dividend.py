@@ -70,14 +70,30 @@ def summarize_events(events: list[dict], attended: tuple[int, int] = (8, 18)) ->
 
 # ── Fetch (needs a running backend) ────────────────────────────────
 
+#: /events caps `limit` at 500 (it always clamped there; since the paging
+#: work it says so with a 422 instead of silently trimming). This bench
+#: wants the whole window, so it pages.
+_PAGE = 500
+
+
 def fetch_events(url: str, token: str | None, days: int, timeout: float = 30.0) -> list[dict]:
     frm = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    q = f"{url.rstrip('/')}/api/v1/events?from={frm}&limit=100000"
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    req = urllib.request.Request(q, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode())
-    return payload.get("events") or []
+    out: list[dict] = []
+    skip = 0
+    while True:
+        q = (f"{url.rstrip('/')}/api/v1/events?from={frm}"
+             f"&limit={_PAGE}&skip={skip}")
+        req = urllib.request.Request(q, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+        page = payload.get("events") or []
+        out += page
+        # A short page is the end of the set — the same rule the server
+        # uses to answer `total` without a COUNT.
+        if len(page) < _PAGE:
+            return out
+        skip += _PAGE
 
 
 def _report(summary: dict, days: int) -> None:

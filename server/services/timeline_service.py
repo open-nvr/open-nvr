@@ -90,7 +90,7 @@ def record_track_visit(
     return row
 
 
-def query_events(
+def _events_query(
     db: Session,
     *,
     camera_id: int | None = None,
@@ -98,18 +98,23 @@ def query_events(
     source: str | None = None,
     from_: datetime | None = None,
     to: datetime | None = None,
-    limit: int = 100,
     scope: set[int] | None = None,
     plate: str | None = None,
     has_plate: bool = False,
-) -> list[TimelineEvent]:
-    """Newest-first visits/alarms/alerts intersecting [from, to).
+):
+    """Scope + filters, with NO ordering, offset or limit.
 
-    ``scope`` is the caller's visible camera set from
-    ``camera_scope.visible_camera_ids`` — own cameras plus can_view
-    grants. Pass None ONLY for superusers (unrestricted).
+    The one place the /events predicate lives, so a page and its total
+    can never disagree. A total built from a SECOND, similar query is
+    how a row count for a camera the caller cannot see leaks out — the
+    two must be the same query object or the scoping is decorative.
+
+    Deliberately unordered: ``.count()`` wraps this in
+    ``SELECT count(*) FROM (...)``, and an ORDER BY riding along into
+    that subquery makes the database sort rows it is only going to
+    count. Ordering belongs to :func:`query_events`, which is the only
+    caller that returns rows.
     """
-    limit = max(1, min(500, limit))
     q = db.query(TimelineEvent)
     q = scope_query(q, TimelineEvent.camera_id, scope)
     if camera_id is not None:
@@ -136,7 +141,46 @@ def query_events(
             ((TimelineEvent.ended_at.isnot(None)) & (TimelineEvent.ended_at >= from_))
             | ((TimelineEvent.ended_at.is_(None)) & (TimelineEvent.started_at >= from_))
         )
-    return q.order_by(TimelineEvent.started_at.desc()).limit(limit).all()
+    return q
+
+
+def query_events(
+    db: Session,
+    *,
+    limit: int = 100,
+    skip: int = 0,
+    **filters,
+) -> list[TimelineEvent]:
+    """Newest-first visits/alarms/alerts intersecting [from, to).
+
+    ``scope`` (in ``filters``) is the caller's visible camera set from
+    ``camera_scope.visible_camera_ids`` — own cameras plus can_view
+    grants. Pass None ONLY for superusers (unrestricted).
+
+    The ordering carries an ``id`` tiebreaker because ``started_at`` is
+    NOT unique: ``uq_events_visit`` is on the triple (camera, track,
+    start), and Tier-0 emits visits in bursts, so ties cluster exactly
+    when a page boundary is most likely to land in one. Without a total
+    order, paging across a tie set silently repeats or drops rows.
+
+    The clamp stays here even though the router validates: this is a
+    public surface (``internal_camera_agent`` calls it with an
+    unvalidated int), and one line of defence in depth is cheap.
+    """
+    limit = max(1, min(500, limit))
+    skip = max(0, int(skip))
+    return (
+        _events_query(db, **filters)
+        .order_by(TimelineEvent.started_at.desc(), TimelineEvent.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_events(db: Session, **filters) -> int:
+    """How many rows the SAME filters and scope match, ignoring paging."""
+    return _events_query(db, **filters).count()
 
 
 def can_access_event(db: Session, event: TimelineEvent, *, user) -> bool:

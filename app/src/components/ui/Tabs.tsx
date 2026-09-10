@@ -37,7 +37,13 @@ export function Tabs({
   return (
     <div
       role="tablist"
-      className={clsx('flex gap-1 border-b border-[var(--border)] overflow-x-auto', className)}
+      // overflow-y-hidden is load-bearing, not tidiness. `overflow-x: auto`
+      // alone makes the computed overflow-y `auto` too — the CSS overflow
+      // spec says a non-visible value on one axis forces the other off
+      // `visible` — and the tabs' -mb-px then overflows the content box by
+      // exactly 1px. The browser drew a stray vertical scrollbar for it,
+      // floating in the middle of the tab strip.
+      className={clsx('flex gap-1 border-b border-[var(--border)] overflow-x-auto overflow-y-hidden', className)}
     >
       {tabs.map((t) => (
         <button

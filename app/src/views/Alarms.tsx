@@ -18,19 +18,23 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BellRing, CheckCheck, PhoneCall, Volume2 } from 'lucide-react'
+import { BellRing, PhoneCall, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../lib/api'
 import {
-  alarmSeenAt,
-  alarmSeenTitle,
   alertsInboxService,
   type InboxAlert,
   type RingConfig,
   type RingMode,
 } from '../services/alertsInboxService'
+import { Button, SeverityBadge } from '../components/ui'
+import { Pagination } from '../components/ui/Pagination'
+import { AlarmsFilters, AlarmsSelectionBar, AlarmsTable } from '../components/alarms/AlarmsTable'
+import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
+import { usePagination } from '../hooks/usePagination'
+import { useRowSelection } from '../hooks/useRowSelection'
 
 // The Alarms page: every alarm the platform has raised, as a list, plus
 // the controls that decide how alarms SOUND and one-click proof that
@@ -42,13 +46,6 @@ import {
 const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const
 const RING_MODES: RingMode[] = ['none', 'ping', 'continuous']
 
-const SEVERITY_STYLE: Record<string, string> = {
-  critical: 'bg-red-600 text-white',
-  high: 'bg-orange-600 text-white',
-  medium: 'bg-yellow-600 text-black',
-  low: 'bg-neutral-600 text-white',
-}
-
 export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
   // The alarm POLICY (ring modes, actions, test alarms) is a site
@@ -58,18 +55,15 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const isAdmin = !!user?.is_superuser
   const [onlyUnacked, setOnlyUnacked] = useState(false)
   const [severityFilter, setSeverityFilter] = useState<string | null>(null)
+  const pager = usePagination(25, 'alerts-incidents')
 
-  const list = useQuery({
-    queryKey: ['alarms-page', onlyUnacked, severityFilter],
-    queryFn: async () => {
-      const { data } = await alertsInboxService.listInboxAlerts({
-        unacked: onlyUnacked || undefined,
-        severity: severityFilter ?? undefined,
-        limit: 200,
-      })
-      return data as { alerts: InboxAlert[]; unacked_count: number }
-    },
-    refetchInterval: 10_000,
+  const list = useAlarmsList({
+    queryKeyPrefix: 'alarms-page',
+    unacked: onlyUnacked,
+    severity: severityFilter,
+    page: pager.page,
+    pageSize: pager.pageSize,
+    skip: pager.skip,
   })
 
   const ringCfg = useQuery({
@@ -87,9 +81,18 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
     qc.invalidateQueries({ queryKey: ['alerts-inbox-page'] })
   }
 
-  const ack = useMutation({
-    mutationFn: (ids?: number[]) => alertsInboxService.ackInboxAlerts(ids),
-    onSuccess: invalidate,
+  // Ticks drop whenever the view changes — a bulk ack must never reach
+  // rows the operator can no longer see.
+  const sel = useRowSelection<number>({
+    unacked: onlyUnacked, severity: severityFilter,
+    page: pager.page, size: pager.pageSize,
+  })
+
+  const ack = useAckAlarms(() => {
+    sel.clear()
+    // Acking the last row of the last page would otherwise leave the
+    // operator staring at an empty page with no way back.
+    if (list.rows.length <= 1 && pager.page > 1) pager.setPage(pager.page - 1)
   })
 
   const saveRing = useMutation({
@@ -104,8 +107,8 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
     onSuccess: invalidate,
   })
 
-  const rows = list.data?.alerts ?? []
-  const unackedCount = list.data?.unacked_count ?? 0
+  const rows = list.rows
+  const unackedCount = list.unackedCount
   const ring = ringCfg.data?.ring
 
   return (
@@ -114,7 +117,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         <div className="flex items-center gap-2">
           <BellRing size={18} />
           <h1 className="text-xl font-semibold">Alarms</h1>
-          {list.isLoading && (
+          {list.isPending && (
             <span className="text-xs text-[var(--text-dim)]">Loading…</span>
           )}
         </div>
@@ -184,14 +187,14 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
           </div>
           <div className="flex flex-wrap gap-2">
             {SEVERITIES.map((sev) => (
-              <button
+              <Button
                 key={sev}
-                className={`px-2 py-1 rounded text-sm ${SEVERITY_STYLE[sev]}`}
+                variant="outline"
                 disabled={testAlarm.isPending}
                 onClick={() => testAlarm.mutate(sev)}
               >
-                Test {sev}
-              </button>
+                Test <SeverityBadge severity={sev} />
+              </Button>
             ))}
           </div>
           {testAlarm.isError && (
@@ -228,120 +231,82 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         {isAdmin && <AlarmActionsCard />}
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <button
-          className={`px-2 py-1 rounded border ${onlyUnacked ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setOnlyUnacked((s) => !s)}
-        >
-          Unacknowledged only
-        </button>
-        <span className="text-[var(--text-dim)]">Severity:</span>
-        <button
-          className={`px-2 py-1 rounded border ${severityFilter === null ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setSeverityFilter(null)}
-        >
-          All
-        </button>
-        {SEVERITIES.map((sev) => (
-          <button
-            key={sev}
-            className={`px-2 py-1 rounded border capitalize ${severityFilter === sev ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-            onClick={() =>
-              setSeverityFilter((s) => (s === sev ? null : sev))
-            }
-          >
-            {sev}
-          </button>
-        ))}
-        {unackedCount > 0 && (
-          <button
-            className="ml-auto inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
-            onClick={() => ack.mutate(undefined)}
-          >
-            <CheckCheck size={13} /> Acknowledge all ({unackedCount})
-          </button>
-        )}
-      </div>
-
       {/* The list */}
-      <div className="border border-[var(--border)] rounded overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-[var(--panel-2)] text-left">
-            <tr>
-              <th className="px-3 py-2">Severity</th>
-              <th className="px-3 py-2">Alarm</th>
-              <th className="px-3 py-2">Source</th>
-              <th className="px-3 py-2">Camera</th>
-              <th className="px-3 py-2">Seen</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 && (
-              <tr>
-                <td
-                  colSpan={7}
-                  className="px-3 py-6 text-center text-[var(--text-dim)]"
-                >
-                  {list.isLoading
-                    ? 'Loading…'
-                    : 'No alarms yet — arm a watchlist plate in the LPR app, or fire a test above'}
-                </td>
-              </tr>
-            )}
-            {rows.map((a) => (
-              <tr key={a.id} className="border-t border-[var(--border)]">
-                <td className="px-3 py-2">
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${SEVERITY_STYLE[a.severity] ?? SEVERITY_STYLE.low}`}
-                  >
-                    {a.severity}
-                  </span>
-                </td>
-                <td className="px-3 py-2">
-                  <div className="font-medium">{a.title}</div>
-                  {a.description && (
-                    <div className="text-[11px] text-[var(--text-dim)]">
-                      {a.description}
-                    </div>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">
-                  {a.source_name || '—'}
-                </td>
-                <td className="px-3 py-2 text-[var(--text-dim)]">
-                  {a.camera_id || '—'}
-                </td>
-                <td className="px-3 py-2 text-[var(--text-dim)]"
-                    title={alarmSeenTitle(a)}>
-                  {alarmSeenAt(a)}
-                </td>
-                <td className="px-3 py-2">
-                  {a.acknowledged_at ? (
-                    <span className="text-[var(--text-dim)]">
-                      acked {new Date(a.acknowledged_at).toLocaleTimeString()}
-                    </span>
-                  ) : (
-                    <span className="text-red-400">unacked</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {!a.acknowledged_at && (
-                    <button
-                      className="px-2 py-0.5 rounded border border-neutral-700 hover:bg-[var(--panel-2)]"
-                      onClick={() => ack.mutate([a.id])}
-                    >
-                      Ack
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <AlarmsTable
+        caption="Alerts and incidents"
+        rows={rows}
+        showSource
+        selected={sel.selected}
+        onToggle={sel.toggle}
+        onToggleAll={(on) => sel.toggleMany(rows.map((a) => a.id), on)}
+        onAck={(ids) => ack.mutate(ids)}
+        isPending={list.isPending}
+        isFetching={list.isFetching}
+        isError={list.isError}
+        error={list.error}
+        onRetry={() => list.refetch()}
+        emptyTitle={severityFilter || onlyUnacked
+          ? 'No alarms match these filters'
+          : 'No alarms yet'}
+        emptyDescription="Arm a watchlist plate in the LPR app, or fire a test above."
+        emptyAction={(severityFilter || onlyUnacked) ? (
+          <Button variant="outline" onClick={() => {
+            setSeverityFilter(null); setOnlyUnacked(false); pager.setPage(1)
+          }}>Clear filters</Button>
+        ) : undefined}
+        toolbar={
+          <>
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <AlarmsFilters
+                onlyUnacked={onlyUnacked}
+                onToggleUnacked={() => { setOnlyUnacked((v) => !v); pager.setPage(1) }}
+                severity={severityFilter}
+                onSeverity={(sev: string | null) => { setSeverityFilter(sev); pager.setPage(1) }}
+              />
+              <AlarmsSelectionBar
+                count={sel.count}
+                allOnPage={rows.length > 0 && rows.every((a) => sel.has(a.id))}
+                allMatching={sel.allMatching}
+                matchingTotal={list.total}
+                onSelectAllMatching={sel.selectAllMatching}
+                onClear={sel.clear}
+                onAck={() => ack.mutate(
+                  sel.allMatching
+                    ? (severityFilter ? { severity: severityFilter } : {})
+                    : [...sel.selected],
+                )}
+              />
+              <div className="ml-auto">
+                <Pagination
+                  page={pager.page}
+                  pageSize={pager.pageSize}
+                  total={list.total}
+                  rowCount={rows.length}
+                  hasNext={rows.length === pager.pageSize}
+                  isFetching={list.isFetching}
+                  label="alarms"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                  announce={false}
+                />
+              </div>
+            </div>
+          </>
+        }
+        footer={
+          <Pagination
+            page={pager.page}
+            pageSize={pager.pageSize}
+            total={list.total}
+            rowCount={rows.length}
+            hasNext={rows.length === pager.pageSize}
+            isFetching={list.isFetching}
+            label="alarms"
+            onPageChange={pager.setPage}
+            onPageSizeChange={pager.setPageSize}
+          />
+        }
+      />
     </div>
   )
 }

@@ -70,3 +70,40 @@ export function browserTz(): string {
     return 'UTC'
   }
 }
+
+/**
+ * A timestamp for a dense operator table: `10 Sep 06:50:23`, carrying the
+ * year only when it is not the current one.
+ *
+ * Always dated. An earlier version dropped the date for today's rows to
+ * save width, which read fine at a glance and badly in practice — a row
+ * showing `06:50:23` gives no clue whether it is from this morning or
+ * three weeks ago once the range is 7 or 30 days, and this column is
+ * exported as evidence. Pair it with `tabular-nums` so the digits line
+ * up down the column.
+ *
+ * Returns '' for a missing/unparseable value; callers show their own
+ * placeholder. `seenAtTitle` gives the full localised value for the
+ * cell's tooltip.
+ */
+export function formatSeenAt(iso: string | null | undefined, now = new Date()): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const time = d.toLocaleTimeString(undefined, {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+  const date = d.toLocaleDateString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  })
+  return `${date} ${time}`
+}
+
+/** The unabbreviated timestamp, for the tooltip on a compact cell. */
+export function seenAtTitle(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString()
+}

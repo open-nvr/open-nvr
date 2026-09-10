@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from models import AppAlert, SecuritySetting, User
+from core.pagination import resolve_total
 from services.alerts_inbox import (
     DEFAULT_RING_CONFIG,
     RING_CONFIG_KEY,
@@ -119,12 +120,29 @@ async def list_alerts(
     after_id: int | None = Query(
         None, description="Only rows with id > after_id — lets the bell "
         "poll for 'anything new since my last look' cheaply"),
+    before_id: int | None = Query(
+        None, description="Only rows with id <= before_id — pins a paged "
+        "table to the set it first saw, so arrivals cannot shuffle it"),
+    skip: int = Query(0, ge=0, le=100_000),
     limit: int = Query(50, ge=1, le=_MAX_LIMIT),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
     """Inbox listing, newest first. ``unacked=true`` is what the bell
-    polls; the full list backs the Alerts & Incidents page."""
+    polls; the full list backs the Alerts & Incidents page.
+
+    TWO counts come back, and they answer different questions. Reading
+    one as the other is the mistake this docstring exists to prevent:
+
+    ``unacked_count`` is the BELL BADGE — how many unacknowledged alerts
+    exist in the caller's scope, ignoring every filter on this request
+    (including ``unacked`` itself). It is why the bell can show "12"
+    while the page below it shows three rows.
+
+    ``total`` is how many rows THIS request's filters match, for the
+    pager's "1-25 of 312". So ``?severity=critical`` can legitimately
+    return ``unacked_count: 40`` beside ``total: 3``.
+    """
     from services.camera_scope import visible_camera_ids
 
     scope = visible_camera_ids(db, current_user)
@@ -137,20 +155,70 @@ async def list_alerts(
         q = q.filter(AppAlert.source_name == source_name)
     if after_id is not None:
         q = q.filter(AppAlert.id > after_id)
-    rows = q.order_by(AppAlert.id.desc()).limit(limit).all()
-    unacked_count = (
+    if before_id is not None:
+        q = q.filter(AppAlert.id <= before_id)
+    # id is unique, so id DESC is already a total order — unlike /events,
+    # this endpoint needs no tiebreaker. Ordering is applied HERE and not
+    # to `q`, so the counts below do not drag it into their subquery.
+    rows = q.order_by(AppAlert.id.desc()).offset(skip).limit(limit).all()
+    # Same `q` — same scope, same filters. A total assembled from a
+    # separately-written query is how a count for someone else's camera
+    # leaks; reusing the object makes that impossible rather than
+    # merely unlikely.
+    total = resolve_total(len(rows), skip, limit, q.count)
+    unacked_count = _unacked_count(
+        db, scope,
+        # The bell's own request shape answers its badge for free: an
+        # unfiltered first page of unacked rows that came back SHORT is
+        # already the whole unacked set. That deletes a COUNT this
+        # endpoint pays today, on every poll, in every open tab.
+        rows if (unacked and skip == 0 and not severity and not source_name
+                 and after_id is None and before_id is None
+                 and len(rows) < limit) else None,
+    )
+    return {"alerts": [_row_out(a) for a in rows],
+            "unacked_count": unacked_count,
+            "total": total}
+
+
+def _unacked_count(db, scope, proven_rows) -> int:
+    """The bell badge: unacknowledged alerts in scope, filter-blind.
+
+    ``proven_rows`` short-circuits the query when the caller already
+    holds the complete unacked set (see the call site); None means
+    count.
+    """
+    if proven_rows is not None:
+        return len(proven_rows)
+    return (
         _scope_alerts(db.query(AppAlert.id), scope)
         .filter(AppAlert.acknowledged_at.is_(None))
         .count()
     )
-    return {"alerts": [_row_out(a) for a in rows],
-            "unacked_count": unacked_count}
 
 
 class AckIn(BaseModel):
-    """Empty body acks ALL unacknowledged alerts; ``ids`` acks a set."""
+    """What to silence. Three shapes, and the caller must pick one:
+
+    * ``ids`` — exactly these alerts ("acknowledge these 25").
+    * ``source_name`` and/or ``severity`` — every unacknowledged alert in
+      the caller's scope matching them ("acknowledge all 39 vehicle
+      alarms"). Added so a paged table's "all" button can mean the whole
+      filtered set rather than whichever page happens to be loaded.
+    * empty — every unacknowledged alert in scope. Unchanged.
+
+    ``ids`` and the filters are mutually exclusive: a body carrying both
+    reads as two different intentions, and guessing which one an operator
+    meant is not a thing to do with a control that silences alarms.
+    """
 
     ids: list[int] | None = None
+    source_name: str | None = None
+    severity: str | None = None
+
+    def filters(self) -> dict[str, str]:
+        return {k: v for k, v in (("source_name", self.source_name),
+                                  ("severity", self.severity)) if v}
 
 
 @router.post("/ack")
@@ -165,6 +233,13 @@ async def acknowledge(
     inbox, and an id on someone else's camera is simply not found."""
     from services.camera_scope import visible_camera_ids
 
+    filters = payload.filters()
+    if payload.ids is not None and filters:
+        raise HTTPException(
+            status_code=400,
+            detail="Send ids OR a filter, not both — they are two "
+                   "different intentions.",
+        )
     q = _scope_alerts(db.query(AppAlert),
                       visible_camera_ids(db, current_user)).filter(
         AppAlert.acknowledged_at.is_(None))
@@ -172,6 +247,14 @@ async def acknowledge(
         if not payload.ids:
             return {"acknowledged": 0}
         q = q.filter(AppAlert.id.in_(payload.ids))
+    else:
+        # Scope is applied above and is NOT negotiable here: a filtered
+        # "acknowledge all" must still be unable to touch a camera the
+        # caller cannot open.
+        if filters.get("source_name"):
+            q = q.filter(AppAlert.source_name == filters["source_name"])
+        if filters.get("severity"):
+            q = q.filter(AppAlert.severity == filters["severity"])
     now = datetime.now(UTC)
     count = 0
     for row in q.all():

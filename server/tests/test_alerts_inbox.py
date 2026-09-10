@@ -597,3 +597,148 @@ def test_alarm_policy_is_superuser_only(scoped_client):
     assert tc.put("/alerts-inbox/ring-config",
                   json={"ring": {"low": "ping"}}).status_code == 200
     assert tc.get("/alerts-inbox/actions").status_code == 200
+
+
+# ── paging (#451 follow-up) ─────────────────────────────────────────
+
+
+def _src(name):
+    """An envelope from a named app — `source` is a nested dict, so
+    source_name cannot be passed as a flat **extra."""
+    return {"source": {"kind": "app", "name": name, "version": "1.0.0"}}
+
+
+def test_pages_do_not_repeat_or_drop_rows(client):
+    tc, *_ = client
+    for i in range(7):
+        apply_alert(_envelope(f"pg{i}"))
+    whole = [a["alert_id"]
+             for a in tc.get("/alerts-inbox", params={"limit": 50}).json()["alerts"]]
+    paged = []
+    for skip in (0, 3, 6):
+        paged += [a["alert_id"] for a in tc.get(
+            "/alerts-inbox", params={"skip": skip, "limit": 3}).json()["alerts"]]
+    assert paged == whole
+
+
+def test_total_respects_filters_while_unacked_count_does_not(client):
+    """The two numbers answer different questions and sit side by side in
+    one response, so pin the difference — names alone will not stop it."""
+    tc, *_ = client
+    for i in range(3):
+        apply_alert(_envelope(f"crit{i}", severity="critical"))
+    for i in range(5):
+        apply_alert(_envelope(f"low{i}", severity="low"))
+    body = tc.get("/alerts-inbox",
+                  params={"severity": "critical", "limit": 2}).json()
+    assert len(body["alerts"]) == 2      # one page
+    assert body["total"] == 3            # matching THIS filter
+    assert body["unacked_count"] == 8    # the badge, filter-blind
+
+
+def test_a_page_past_the_end_reports_the_true_total(client):
+    """resolve_total's trap through the route: an empty page at skip=100
+    proves total <= 100, never that it IS 100."""
+    tc, *_ = client
+    for i in range(5):
+        apply_alert(_envelope(f"end{i}"))
+    body = tc.get("/alerts-inbox", params={"skip": 100, "limit": 25}).json()
+    assert body["alerts"] == []
+    assert body["total"] == 5
+
+
+def test_before_id_pins_a_page_against_new_arrivals(client):
+    tc, *_ = client
+    for i in range(4):
+        apply_alert(_envelope(f"anchor{i}"))
+    anchor = tc.get("/alerts-inbox",
+                    params={"limit": 50}).json()["alerts"][0]["id"]
+    for i in range(2):
+        apply_alert(_envelope(f"late{i}"))        # arrive mid-read
+    body = tc.get("/alerts-inbox",
+                  params={"before_id": anchor, "limit": 50}).json()
+    assert body["total"] == 4
+    assert all(not a["alert_id"].startswith("late") for a in body["alerts"])
+
+
+@pytest.mark.parametrize("params", [
+    {"limit": 0}, {"limit": 201}, {"skip": -1},
+])
+def test_out_of_range_paging_is_rejected(client, params):
+    tc, *_ = client
+    assert tc.get("/alerts-inbox", params=params).status_code == 422
+
+
+# ── acknowledge by filter ("acknowledge all N", not "this page") ────
+
+
+def test_ack_by_source_leaves_other_sources_alone(client):
+    tc, *_ = client
+    apply_alert(_envelope("lpr1", **_src("license-plate-recognition")))
+    apply_alert(_envelope("lpr2", **_src("license-plate-recognition")))
+    apply_alert(_envelope("other", **_src("intrusion-detection")))
+    r = tc.post("/alerts-inbox/ack",
+                json={"source_name": "license-plate-recognition"})
+    assert r.json()["acknowledged"] == 2
+    left = tc.get("/alerts-inbox",
+                  params={"unacked": True, "limit": 50}).json()
+    assert [a["alert_id"] for a in left["alerts"]] == ["other"]
+
+
+def test_ack_by_severity_matches_what_the_label_would_claim(client):
+    """The point of the filtered ack: the number the button shows and the
+    number it silences must be the same number."""
+    tc, *_ = client
+    for i in range(3):
+        apply_alert(_envelope(f"c{i}", severity="critical"))
+    apply_alert(_envelope("l", severity="low"))
+    shown = tc.get("/alerts-inbox",
+                   params={"severity": "critical", "limit": 50}).json()["total"]
+    acked = tc.post("/alerts-inbox/ack",
+                    json={"severity": "critical"}).json()["acknowledged"]
+    assert acked == shown == 3
+
+
+def test_ack_refuses_ids_and_filters_together(client):
+    tc, *_ = client
+    apply_alert(_envelope("both"))
+    r = tc.post("/alerts-inbox/ack", json={"ids": [1], "source_name": "x"})
+    assert r.status_code == 400
+
+
+def test_total_never_counts_alerts_on_invisible_cameras(scoped_client):
+    """The leak case. A pager total that ignores scope tells an operator
+    exactly how many alarms exist on cameras they cannot open."""
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    for i in range(2):
+        apply_alert(_envelope(f"gate{i}", camera_id=f"cam{gate_id}"))
+    for i in range(5):
+        apply_alert(_envelope(f"yard{i}", camera_id=f"cam{yard_id}"))
+    apply_alert(_envelope("site-wide", camera_id=None))
+
+    # op sees the gate pair and the camera-less notice — and the total
+    # must agree with the rows, not with the table.
+    body = tc.get("/alerts-inbox", params={"limit": 50}).json()
+    assert body["total"] == len(body["alerts"]) == 3
+
+    current["user"] = admin
+    body = tc.get("/alerts-inbox", params={"limit": 50}).json()
+    assert body["total"] == 8
+
+
+def test_a_filtered_ack_cannot_reach_another_operators_camera(scoped_client):
+    """"Acknowledge all" widened what one click does, so pin the limit:
+    a filter still cannot silence an alarm outside the caller's scope."""
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    apply_alert(_envelope("gate-lpr", camera_id=f"cam{gate_id}",
+                          **_src("license-plate-recognition")))
+    apply_alert(_envelope("yard-lpr", camera_id=f"cam{yard_id}",
+                          **_src("license-plate-recognition")))
+
+    acked = tc.post("/alerts-inbox/ack",
+                    json={"source_name": "license-plate-recognition"}).json()
+    assert acked == {"acknowledged": 1}          # the gate one only
+
+    current["user"] = admin
+    left = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert [a["alert_id"] for a in left["alerts"]] == ["yard-lpr"]
