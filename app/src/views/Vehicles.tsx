@@ -915,17 +915,63 @@ export function Vehicles() {
     retry: 0,
   })
 
-  const saveConfig = useMutation({
-    mutationFn: async (patch: Record<string, any>) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the register.')
-      await apiService.updateAppConfig(lprApp.id, {
-        ...((lprApp.config ?? {}) as Record<string, any>),
-        ...patch,
-      })
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
-    onError: (e) => showError(extractApiError(e, 'Could not save the register.')),
-  })
+  // ── Writing the app's config ────────────────────────────────────
+  // Every write sends the WHOLE config, so each has to be built on the
+  // latest one — writes still in flight included. Built from what the page
+  // last fetched, a second quick change (flip one switch, then another)
+  // silently undid the first; the controls were disabled during a save to
+  // stop that, which is what made them flicker, and it still left a gap
+  // between the save returning and the refetch landing.
+  //
+  // So every write: applies its change to the cached config at once (the
+  // page shows it immediately, and the next change builds on it); goes out
+  // in order behind any write before it (one scope); re-applies its change
+  // to the config as it stands when its turn comes, so an earlier write
+  // that failed and rolled back cannot take this one with it; and refetches
+  // only after the last queued write, so the server's older copy never
+  // flashes up in between.
+  function lprConfigWrite<V>(
+    build: (cfg: Record<string, any>, vars: V) => Record<string, any>,
+    errorText: string,
+    onDone?: (vars: V) => void,
+  ) {
+    const cfgOf = (app: RegisteredApp) => ({ ...((app.config ?? {}) as Record<string, any>) })
+    return {
+      mutationKey: ['lpr-config'],
+      scope: { id: 'lpr-config' },
+      mutationFn: async (vars: V) => {
+        const app = findLprApp(queryClient.getQueryData<RegisteredApp[]>(['apps']))
+        if (!app) throw new Error('No enabled LPR app to hold the register.')
+        await apiService.updateAppConfig(app.id, build(cfgOf(app), vars))
+      },
+      onMutate: async (vars: V) => {
+        await queryClient.cancelQueries({ queryKey: ['apps'] })
+        const prev = queryClient.getQueryData<RegisteredApp[]>(['apps'])
+        const app = findLprApp(prev)
+        if (prev && app) {
+          queryClient.setQueryData<RegisteredApp[]>(['apps'], prev.map((a) =>
+            a === app ? { ...a, config: build(cfgOf(a), vars) } : a))
+        }
+        return { prev }
+      },
+      onSuccess: (_data: void, vars: V) => onDone?.(vars),
+      onError: (e: unknown, _vars: V, ctx: { prev?: RegisteredApp[] } | undefined) => {
+        if (ctx?.prev) queryClient.setQueryData(['apps'], ctx.prev)
+        showError(extractApiError(e, errorText))
+      },
+      onSettled: () => {
+        // This write still counts as pending here, so 1 means "the last".
+        if (queryClient.isMutating({ mutationKey: ['lpr-config'] }) <= 1) {
+          void queryClient.invalidateQueries({ queryKey: ['apps'] })
+        }
+      },
+    }
+  }
+
+  const saveConfig = useMutation(lprConfigWrite<Record<string, any>>(
+    (cfg, patch) => ({ ...cfg, ...patch }),
+    'Could not save the register.',
+  ))
 
   // The providing app's live state: the review queue (reads a human
   // should look at) and the inside-visitors count for overstay.
@@ -958,31 +1004,21 @@ export function Vehicles() {
   // Quick actions off the reads table: allowlist stays a plain list;
   // "monitor this plate" writes a monitor rule (the denylist's
   // successor — same live-update path, per-plate alert config).
-  const watchlist = useMutation({
-    mutationFn: async ({ plateText, list }: { plateText: string; list: 'allowlist' | 'monitor' }) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
-      const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
+  const watchlist = useMutation(lprConfigWrite<{ plateText: string; list: 'allowlist' | 'monitor' }>(
+    (cfg, { plateText, list }) => {
       if (list === 'allowlist') {
         const current: string[] = Array.isArray(cfg.allowlist) ? cfg.allowlist : []
-        if (current.includes(plateText)) return
-        cfg.allowlist = [...current, plateText]
-      } else {
-        if (monitoredPlates.has(plateText)) return
-        cfg.monitors = [
-          ...monitors,
-          { plate: plateText, severity: 'high', active: true },
-        ]
+        return current.includes(plateText) ? cfg : { ...cfg, allowlist: [...current, plateText] }
       }
-      await apiService.updateAppConfig(lprApp.id, cfg)
+      const current = parseMonitors(cfg)
+      if (current.some((m) => m.plate === plateText)) return cfg
+      return { ...cfg, monitors: [...current, { plate: plateText, severity: 'high', active: true }] }
     },
-    onSuccess: (_d, vars) => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(vars.list === 'monitor'
-        ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
-        : `${vars.plateText} added to the allowlist`)
-    },
-    onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
-  })
+    'Could not update the watchlist.',
+    (vars) => showSuccess(vars.list === 'monitor'
+      ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
+      : `${vars.plateText} added to the allowlist`),
+  ))
 
   // Register and monitor are SEPARATE lists on the app's config, so they
   // are separate toggles: a resident's car can be registered and also
@@ -994,40 +1030,38 @@ export function Vehicles() {
   // Turning a plate OFF the register discards owner/unit/model details
   // that nothing else on the platform holds, so that direction asks
   // first. Everything else here is retypable.
-  const toggleList = useMutation({
-    mutationFn: async ({ plateText, list, on }: {
-      plateText: string
-      list: 'registry' | 'monitor'
-      on: boolean
-    }) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
-      const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
-      const without = (entries: any[]) => entries.filter((entry) => {
+  const toggleList = useMutation(lprConfigWrite<{
+    plateText: string
+    list: 'registry' | 'monitor'
+    on: boolean
+  }>(
+    (cfg, { plateText, list, on }) => {
+      const without = <T,>(entries: T[]) => entries.filter((entry: any) => {
         const plate = typeof entry === 'string' ? entry : entry?.plate
         return String(plate ?? '').toUpperCase() !== plateText
       })
+      const next = { ...cfg }
       if (list === 'registry') {
-        cfg.registry = on ? [...without(registry), { plate: plateText }] : without(registry)
+        const current = parseRegistry(cfg.registry)
+        next.registry = on ? [...without(current), { plate: plateText }] : without(current)
       } else {
-        cfg.monitors = on
-          ? [...without(monitors), { plate: plateText, severity: 'high', active: true }]
-          : without(monitors)
+        const current = parseMonitors(cfg)
+        next.monitors = on
+          ? [...without(current), { plate: plateText, severity: 'high', active: true }]
+          : without(current)
         // The legacy denylist is monitor shorthand — a plate leaving the
         // monitored state has to leave there too, or it comes straight back.
-        if (Array.isArray(cfg.denylist)) cfg.denylist = without(cfg.denylist)
+        if (Array.isArray(cfg.denylist)) next.denylist = without(cfg.denylist)
       }
-      await apiService.updateAppConfig(lprApp.id, cfg)
+      return next
     },
-    onSuccess: (_d, v) => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(v.list === 'registry'
-        ? (v.on ? `${v.plateText} registered — add owner details in the Vehicle register tab`
-          : `${v.plateText} removed from the vehicle register`)
-        : (v.on ? `${v.plateText} is now monitored — configure its alert in the Monitoring tab`
-          : `${v.plateText} is no longer monitored`))
-    },
-    onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
-  })
+    'Could not update the watchlist.',
+    (v) => showSuccess(v.list === 'registry'
+      ? (v.on ? `${v.plateText} registered — add owner details in the Vehicle register tab`
+        : `${v.plateText} removed from the vehicle register`)
+      : (v.on ? `${v.plateText} is now monitored — configure its alert in the Monitoring tab`
+        : `${v.plateText} is no longer monitored`)),
+  ))
 
   // Replace the whole monitors list (Monitoring tab edits). The tab
   // edits the MERGED view (explicit monitors + denylist shorthand), so
@@ -2248,7 +2282,6 @@ function RegistryTab({
             aria-label={`Edit ${r.plate}`}
             className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
             onClick={() => editRow(r)}
-            disabled={saving}
           >
             <Pencil size={15} />
           </button>
@@ -2257,7 +2290,6 @@ function RegistryTab({
             aria-label={`Remove ${r.plate} from the register`}
             className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
             onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
-            disabled={saving}
           >
             <Trash2 size={15} />
           </button>
@@ -2280,14 +2312,14 @@ function RegistryTab({
 
   const addButton = (
     <Button
-      variant="primary" size="sm" disabled={saving}
+      variant="primary" size="sm"
       onClick={() => setDialog({ entry: { plate: '' }, editing: null })}
     >
       <Plus size={14} /> Add vehicle
     </Button>
   )
   const importButton = (
-    <Button variant="outline" size="sm" disabled={saving} onClick={() => setImportOpen(true)}>
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
       <Upload size={14} /> Import CSV / Excel
     </Button>
   )
@@ -2422,7 +2454,6 @@ function RegistryTab({
                   checked={alarmOnUnknown}
                   onChange={onToggleAlarm}
                   label="Alarm on unknown vehicles"
-                  disabled={saving}
                 />
               </SettingRow>
               <SettingRow
@@ -2448,7 +2479,6 @@ function RegistryTab({
                   checked={barrierMode === 'registered'}
                   onChange={onToggleBarrier}
                   label="Automatic barrier"
-                  disabled={saving}
                 />
               </SettingRow>
               <SettingRow
@@ -2472,7 +2502,6 @@ function RegistryTab({
                         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
                         if (e.key === 'Escape') setOverstayDraft(null)
                       }}
-                      disabled={saving}
                       className="w-16 rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
                     />
                     hours
@@ -2485,7 +2514,6 @@ function RegistryTab({
                     onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
                   }}
                   label="Visitor overstay alert"
-                  disabled={saving}
                 />
               </SettingRow>
 
@@ -2551,7 +2579,7 @@ function RegistryTab({
                                       const role = e.target.value as CameraRole | ''
                                       onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
                                     }}
-                                    disabled={saving || Boolean(blocked)}
+                                    disabled={Boolean(blocked)}
                                     className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
                                   >
                                     <option value="">No role</option>
@@ -2569,7 +2597,6 @@ function RegistryTab({
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
                                       }}
-                                      disabled={saving}
                                       className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
                                     />
                                   )}
@@ -3035,7 +3062,6 @@ function MonitoringTab({
             checked={m.active !== false}
             onChange={(on) => save({ ...m, active: on })}
             label={`${m.plate} armed`}
-            disabled={saving}
           />
           <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? 'Armed' : 'Silenced'}</span>
         </span>
@@ -3051,7 +3077,6 @@ function MonitoringTab({
             aria-label={`Edit ${m.plate}`}
             className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
             onClick={() => editRow(m)}
-            disabled={saving}
           >
             <Pencil size={15} />
           </button>
@@ -3060,7 +3085,6 @@ function MonitoringTab({
             aria-label={`Stop monitoring ${m.plate}`}
             className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
             onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
-            disabled={saving}
           >
             <Trash2 size={15} />
           </button>
@@ -3071,14 +3095,14 @@ function MonitoringTab({
 
   const addButton = (
     <Button
-      variant="primary" size="sm" disabled={saving}
+      variant="primary" size="sm"
       onClick={() => setDialog({ monitor: { plate: '', severity: 'high', active: true }, editing: null })}
     >
       <Plus size={14} /> Monitor a plate
     </Button>
   )
   const importButton = (
-    <Button variant="outline" size="sm" disabled={saving} onClick={() => setImportOpen(true)}>
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
       <Upload size={14} /> Import CSV / Excel
     </Button>
   )
