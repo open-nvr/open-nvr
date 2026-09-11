@@ -136,13 +136,15 @@ pin-apps-index:
 SDK_DOCS_DEPS = --with "mkdocs<2" --with mkdocs-material --with mkdocstrings-python \
 	--with pymdown-extensions --with ruff --python 3.12
 
+# Both steps run inside the SAME uv environment: gen_reference.py imports
+# the SDK to read API_TIERS, so a bare system python3 fails on httpx.
 sdk-site:
-	@cd sdk/opennvr-app-sdk && $(PY) scripts/gen_reference.py \
+	@cd sdk/opennvr-app-sdk && uv run $(SDK_DOCS_DEPS) python scripts/gen_reference.py \
 		&& uv run $(SDK_DOCS_DEPS) mkdocs build --strict
 	@echo "→ sdk/opennvr-app-sdk/site/index.html"
 
 sdk-site-serve:
-	@cd sdk/opennvr-app-sdk && $(PY) scripts/gen_reference.py \
+	@cd sdk/opennvr-app-sdk && uv run $(SDK_DOCS_DEPS) python scripts/gen_reference.py \
 		&& uv run $(SDK_DOCS_DEPS) mkdocs serve -a 127.0.0.1:8001
 
 # The older flat pdoc dump. Kept for a quick local look at one module;
