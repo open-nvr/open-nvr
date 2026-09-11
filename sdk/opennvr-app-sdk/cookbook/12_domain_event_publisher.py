@@ -54,7 +54,14 @@ def what_the_wire_looks_like(camera_id: str) -> tuple[str, dict]:
     """The two helpers underneath both routes — useful in tests, and for
     understanding what a subscriber will actually match."""
     subject = domain_subject("plate.recognized.v1", camera_id)
-    # -> "opennvr.events.plate.recognized.v1.cam-gate"
+    # -> "opennvr.events.plate.recognized.v1.{camera_id}"
+    #
+    # The camera is the LAST token, always, and always substituted at
+    # runtime. That is what makes per-camera wildcards work —
+    # `opennvr.events.plate.recognized.v1.>` for every camera,
+    # `...v1.cam7` for one — so never hard-code a token after the
+    # version segment. server/tests/test_event_contracts.py enforces it
+    # across the repository.
     envelope = domain_envelope(
         "plate.recognized.v1",
         camera_id=camera_id,
