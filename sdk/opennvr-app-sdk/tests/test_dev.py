@@ -26,8 +26,8 @@ def loitering(event):
 
 FACADE_CONFIG = """
 nats_url: "nats://dev:4222"
-zones:
-  driveway: [[0.3, 0.0], [0.8, 0.0], [0.8, 1.0], [0.3, 1.0]]
+driveway:
+  cam-1: [[0.3, 0.0], [0.8, 0.0], [0.8, 1.0], [0.3, 1.0]]
 """
 
 LEGACY_APP = '''
@@ -47,6 +47,22 @@ class LegacyApp(Detector):
 
     def on_detections(self, camera_id, detections, event):
         return [Alert(title="legacy fired", description="d", camera_id=camera_id)]
+'''
+
+#: The shape `validate` has always accepted and `dev` used to reject:
+#: the manifest lives ONLY as a class attribute.
+CLASS_ONLY_APP = '''
+from opennvr_app_sdk import Alert, AppManifest, Detector
+
+
+class ClassOnly(Detector):
+    manifest = AppManifest(id="class-only", name="Class Only", version="1.0.0",
+                           category="analytics", summary="s",
+                           subscribes="opennvr.inference.>")
+
+    def on_detections(self, camera_id, detections, event):
+        return [Alert(title="class-only fired", description="d",
+                      camera_id=camera_id)]
 '''
 
 
@@ -76,8 +92,11 @@ def test_dev_run_reports_zone_entry_and_fires_once(tmp_path, capsys):
     # dwell=3 fires once per presence episode, at HIGH — the rule's severity.
     assert out.count("ALERT [HIGH] Person loitering on cam-1") == 1
     assert "1 alert(s) fired over 12 event(s)." in out
-    # Evidence the facade filled in for free.
-    assert "zone=driveway" in out and "dwell_s=4.0" in out
+    # Evidence the facade filled in for free. The walk enters the zone at
+    # t=4, so dwell is measured from THERE, not from when the person
+    # appeared on camera at t=0 — "loitering in the driveway for 3s".
+    assert "zone=driveway" in out and "dwell_s=3.0" in out
+    assert "t=   7.0s  ALERT" in out
 
 
 def test_still_parks_the_object_in_the_centre(tmp_path, capsys):
@@ -97,13 +116,23 @@ def test_label_and_camera_are_overridable(tmp_path, capsys):
 
 
 def test_runs_without_a_config_file(tmp_path, capsys):
-    """No config.example.yml ⇒ generated defaults, not a crash."""
+    """No config.example.yml ⇒ generated defaults, not a crash — and a
+    stand-in polygon, so the zone rule the app is built around can
+    actually be seen firing."""
     app_dir = write_app(tmp_path, "zone_test", FACADE_APP)
-    assert run_dev(app_dir, fast=True, count=3) == 0
+    assert run_dev(app_dir, fast=True, count=12) == 0
     out = capsys.readouterr().out
-    # No zones configured, so the zone-gated rule stays quiet.
-    assert "zones:" not in out
-    assert "0 alert(s) fired over 3 event(s)." in out
+    assert "drew a stand-in polygon" in out
+    assert "zones: driveway" in out
+    assert "1 alert(s) fired over 12 event(s)." in out
+
+
+def test_no_zones_leaves_an_undrawn_zone_undrawn(tmp_path, capsys):
+    app_dir = write_app(tmp_path, "zone_test", FACADE_APP)
+    assert run_dev(app_dir, fast=True, count=12, no_zones=True) == 0
+    out = capsys.readouterr().out
+    assert "drew a stand-in polygon" not in out
+    assert "0 alert(s) fired over 12 event(s)." in out
 
 
 def test_a_scaffolded_app_runs_out_of_the_box(tmp_path, capsys):
@@ -142,8 +171,18 @@ def test_import_failure_is_reported(tmp_path, capsys):
     assert "importing 'broken' failed: ZeroDivisionError" in capsys.readouterr().err
 
 
+def test_dev_runs_an_app_whose_manifest_is_only_a_class_attribute(tmp_path, capsys):
+    """`validate` accepts this shape, so `dev` must too — the two
+    commands disagreeing about the same app is its own bug."""
+    app_dir = write_app(tmp_path, "class_only", CLASS_ONLY_APP)
+    assert run_dev(app_dir, fast=True, count=2) == 0
+    out = capsys.readouterr().out
+    assert "opennvr-app dev — class-only 1.0.0" in out
+    assert out.count("ALERT [HIGH] class-only fired") == 2
+
+
 def test_bad_config_is_reported(tmp_path, capsys):
-    app_dir = write_app(tmp_path, "zone_test", FACADE_APP, "zones: {}\n")  # no nats_url
+    app_dir = write_app(tmp_path, "zone_test", FACADE_APP, "nats_url: '   '\n")
     assert run_dev(app_dir, fast=True) == 2
     assert "nats_url" in capsys.readouterr().err
 

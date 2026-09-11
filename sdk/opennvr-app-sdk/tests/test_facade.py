@@ -21,6 +21,11 @@ from opennvr_app_sdk.testing import (
 
 ZONE = [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]]  # left half of frame
 
+#: The wire shape the catalog's geometry editor writes and core
+#: validates: each zone is its own per-camera param, whose value maps
+#: camera id → polygon (server/routers/apps.py `_value_matches_type`).
+DRIVEWAY = {"cam-1": ZONE, "cam-2": ZONE}
+
 
 def at(seconds: float) -> str:
     """A ``completed_at`` ISO string ``seconds`` after a fixed epoch."""
@@ -74,16 +79,47 @@ def test_name_is_derived_from_the_id_when_omitted():
     assert App("smart-doorbell").manifest().name == "Smart Doorbell"
 
 
-def test_declaring_a_zone_adds_the_geometry_param():
+def test_declaring_a_zone_adds_a_geometry_param_named_after_it():
+    """One param per zone, named after the zone — which is how the
+    operator learns which polygons this app expects, and the only shape
+    core's config validator accepts for a per-camera geometry param."""
     app = App("demo")
 
     @app.on_detection("person", zone="driveway")
     def rule(event):
         event.alert("x")
 
+    @app.on_detection("car", zone="kerb")
+    def other(event):
+        event.alert("y")
+
     params = {p.name: p for p in app.manifest().params}
-    assert params["zones"].per_camera is True
-    assert params["zones"].to_dict()["type"] == "geometry.polygon"
+    assert set(params) == {"driveway", "kerb"}
+    assert params["driveway"].per_camera is True
+    assert params["driveway"].to_dict()["type"] == "geometry.polygon"
+    assert "driveway" in params["driveway"].description
+
+
+def test_a_zone_can_carry_a_description_for_the_operator():
+    app = App("demo").zone("driveway", "The gravel in front of the garage.")
+
+    @app.on_detection("person", zone="driveway")
+    def rule(event):
+        event.alert("x")
+
+    (param,) = app.manifest().params
+    assert param.description == "The gravel in front of the garage."
+
+
+def test_a_zone_cannot_collide_with_a_param():
+    app = App("demo").param("driveway", float)
+    with pytest.raises(ValueError, match="already declared"):
+        app.zone("driveway")
+
+
+def test_zone_names_must_be_config_keys():
+    with pytest.raises(ValueError, match="snake_case"):
+        App("demo").zone("Front Gate")
 
 
 def test_no_geometry_param_without_a_zone():
@@ -191,7 +227,7 @@ def test_zone_filter_uses_the_box_centre():
     def rule(event):
         seen.append(event.zone)
 
-    det, _ = build(app, zones={"driveway": ZONE})
+    det, _ = build(app, driveway=DRIVEWAY)
     det.handle_event(inference_event(
         detection("person", x=0.1, y=0.1, w=0.1, h=0.1),   # centre 0.15 → inside
         detection("person", x=0.8, y=0.8, w=0.1, h=0.1),   # centre 0.85 → outside
@@ -199,7 +235,7 @@ def test_zone_filter_uses_the_box_centre():
     assert seen == ["driveway"]
 
 
-def test_zones_may_be_declared_per_camera():
+def test_a_zone_applies_only_to_the_cameras_it_is_drawn_on():
     app = App("demo")
     seen = []
 
@@ -207,23 +243,55 @@ def test_zones_may_be_declared_per_camera():
     def rule(event):
         seen.append(event.camera)
 
-    det, _ = build(app, zones={"cam-1": {"driveway": ZONE}})
-    det.handle_event(inference_event(
-        detection("person", x=0.1, y=0.1), camera_id="cam-1"))
-    det.handle_event(inference_event(
-        detection("person", x=0.1, y=0.1), camera_id="cam-9"))
+    det, _ = build(app, driveway={"cam-1": ZONE})
+    for cam in ("cam-1", "cam-9"):
+        det.handle_event(inference_event(
+            detection("person", x=0.1, y=0.1), camera_id=cam))
     assert seen == ["cam-1"]
 
 
-def test_in_zone_with_no_name_means_any_zone():
+def test_a_bare_polygon_means_every_camera():
+    """Hand-written config predating the geometry editor."""
     app = App("demo")
+    seen = []
+
+    @app.on_detection("person", zone="driveway")
+    def rule(event):
+        seen.append(event.camera)
+
+    det, _ = build(app, driveway=ZONE)
+    for cam in ("cam-1", "cam-9"):
+        det.handle_event(inference_event(
+            detection("person", x=0.1, y=0.1), camera_id=cam))
+    assert seen == ["cam-1", "cam-9"]
+
+
+def test_an_undrawn_zone_warns_instead_of_going_silent(caplog):
+    app = App("demo")
+
+    @app.on_detection("person", zone="driveway")
+    def loitering(event):
+        event.alert("x")
+
+    det, _ = build(app)                      # nobody drew the polygon
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            det.handle_event(inference_event(detection("person")))
+    warnings = [r.getMessage() for r in caplog.records]
+    assert len(warnings) == 1, "warn once per rule per camera, not per event"
+    assert "zone 'driveway'" in warnings[0]
+    assert "cam-1" in warnings[0] and "App Catalog" in warnings[0]
+
+
+def test_in_zone_with_no_name_means_any_zone():
+    app = App("demo").zone("driveway")
     answers = []
 
     @app.on_detection("person")
     def rule(event):
         answers.append((event.in_zone(), event.in_zone("nope"), event.zones))
 
-    det, _ = build(app, zones={"driveway": ZONE})
+    det, _ = build(app, driveway=DRIVEWAY)
     det.handle_event(inference_event(detection("person", x=0.1, y=0.1)))
     assert answers == [(True, False, ["driveway"])]
 
@@ -236,7 +304,10 @@ def test_malformed_zones_are_ignored_not_fatal():
     def rule(event):
         calls.append(event.zone)
 
-    det, _ = build(app, zones={"bad": [[0.0, 0.0], [1.0, 1.0]], "ok": ZONE})
+    app.zone("bad")
+    app.zone("ok")
+    det, _ = build(app, bad={"cam-1": [[0.0, 0.0], [1.0, 1.0]]},
+                   ok={"cam-1": ZONE})
     det.handle_event(inference_event(detection("person", x=0.1, y=0.1)))
     assert calls == ["ok"]
 
@@ -313,7 +384,7 @@ def test_alert_fills_in_the_envelope():
     def intruder(event):
         event.alert("Intruder", "Someone is in the driveway.", tags=["night"])
 
-    det, _ = build(app, zones={"driveway": ZONE})
+    det, _ = build(app, driveway={"cam-front": ZONE})
     event = inference_event(
         detection("person", confidence=0.77, track_id="t9", x=0.1, y=0.1),
         camera_id="cam-front", correlation_id="corr-1")
@@ -526,3 +597,216 @@ def test_repr_is_useful():
 
 def test_detection_event_is_exported():
     assert DetectionEvent.__module__.endswith("facade")
+
+
+# ── Regressions ─────────────────────────────────────────────────────
+#
+# Each of these is a defect a review found by reproduction. They are
+# grouped because the failure mode they share is the worst kind: the app
+# looks healthy and quietly does the wrong thing.
+
+
+def test_dwell_measures_time_inside_the_filters_not_time_on_camera():
+    """`zone="driveway", dwell=30` must mean thirty seconds IN the
+    driveway. Starting the clock on first sighting instead turns it into
+    "thirty seconds on camera, then one frame in the driveway"."""
+    app = App("demo")
+
+    @app.on_detection("person", zone="driveway", dwell=30)
+    def loitering(event):
+        event.alert(f"loitering {event.dwell_s:.0f}s")
+
+    det, _ = build(app, driveway=DRIVEWAY)
+    titles = []
+    # 40s outside the zone (centre 0.85), then inside from t=40.
+    for second in (0, 20, 39):
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person", track_id="t1", x=0.8, y=0.8),
+            completed_at=at(second)))]
+    assert titles == [], "dwell accrued while the object was outside the zone"
+    for second in (40, 50, 71):
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person", track_id="t1", x=0.1, y=0.1),
+            completed_at=at(second)))]
+    assert titles == ["loitering 31s"]
+
+
+def test_a_confidence_floor_also_gates_the_dwell_clock():
+    app = App("demo")
+
+    @app.on_detection("person", min_confidence=0.8, dwell=20)
+    def rule(event):
+        event.alert("fired")
+
+    det, _ = build(app)
+    fired = []
+    for second in (0, 10, 25):
+        fired += det.handle_event(inference_event(
+            detection("person", confidence=0.2, track_id="t1"),
+            completed_at=at(second)))
+    assert fired == [], "sub-threshold noise satisfied the dwell"
+    for second in (26, 40, 47):
+        fired += det.handle_event(inference_event(
+            detection("person", confidence=0.9, track_id="t1"),
+            completed_at=at(second)))
+    assert len(fired) == 1
+
+
+def test_two_rules_with_the_same_function_name_do_not_share_a_latch():
+    """Handlers built by a factory, or two lambdas, collide on
+    ``__name__``. Identity must be positional."""
+    app = App("demo")
+
+    def make(threshold, tag):
+        def rule(event):                      # noqa: D401 — same name on purpose
+            event.alert(tag)
+        return rule
+
+    app.on_detection("person", dwell=10, emits="first")(make(10, "first"))
+    app.on_detection("person", dwell=20, emits="second")(make(20, "second"))
+
+    det, _ = build(app)
+    titles = []
+    for second in (0, 11, 21, 30):
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person", track_id="t1"), completed_at=at(second)))]
+    assert sorted(titles) == ["first", "second"]
+    assert {a.name for a in app.manifest().emits} == {"first", "second"}
+
+
+def test_returning_the_alert_you_fired_does_not_dispatch_it_twice():
+    app = App("demo")
+
+    @app.on_detection("person")
+    def rule(event):
+        return event.alert("once")            # both fires AND returns
+
+    det, recorder = build(app)
+    fired = det.handle_event(inference_event(detection("person")))
+    assert [a.title for a in fired] == ["once"]
+    assert len(recorder.alerts) == 1
+
+
+def test_a_new_object_alerts_after_the_previous_one_leaves():
+    """Without a track id the key is (camera, label); the latch must be
+    re-armed by absence, or the second person of the day never alerts."""
+    app = App("demo")
+
+    @app.on_detection("person", dwell=10, forget=15)
+    def rule(event):
+        event.alert(f"person after {event.dwell_s:.0f}s")
+
+    det, _ = build(app)
+    titles = []
+    for second in (0, 5, 10, 12):            # person A: alerts at t=10
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person"), completed_at=at(second)))]
+    for second in (40, 45, 52):              # person B, after a 28s gap
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person"), completed_at=at(second)))]
+    # Both episodes alert, and the second one's dwell is measured from
+    # when person B arrived — not from when person A did.
+    assert titles == ["person after 10s", "person after 12s"], \
+        f"the second episode never alerted: {titles}"
+
+
+def test_an_undated_event_does_not_evict_every_camera():
+    """`parse_event_ts` falls back to the wall clock for a missing
+    timestamp. Mixing that with event time let one malformed event jump
+    the clock forward and garbage-collect every other camera."""
+    app = App("demo")
+
+    @app.on_detection("person", dwell=30, forget=60)
+    def rule(event):
+        event.alert(f"loitering on {event.camera}")
+
+    det, _ = build(app)
+    for camera in ("cam-1", "cam-2"):
+        for second in (0, 20):
+            det.handle_event(inference_event(
+                detection("person"), camera_id=camera, completed_at=at(second)))
+    # A publisher sends an event with no completed_at at all.
+    det.handle_event({"camera_id": "cam-3",
+                      "result": {"detections": [detection("person")]}})
+    titles = []
+    for camera in ("cam-1", "cam-2"):
+        titles += [a.title for a in det.handle_event(inference_event(
+            detection("person"), camera_id=camera, completed_at=at(31)))]
+    assert sorted(titles) == ["loitering on cam-1", "loitering on cam-2"]
+
+
+def test_alert_type_names_stay_valid_whatever_the_function_is_called():
+    """`opennvr-app validate` requires [a-z0-9_-]+. A capitalised
+    handler, or a lambda, must not produce a manifest that fails it."""
+    import re
+
+    app = App("demo")
+    app.on_detection("person")(lambda event: None)
+
+    def Loitering(event):                     # noqa: N802 — the point
+        pass
+
+    app.on_detection("car")(Loitering)
+    for alert_type in app.manifest().emits:
+        assert re.match(r"^[a-z0-9_-]+$", alert_type.name), alert_type.name
+
+
+def test_a_rule_that_raises_still_respects_its_cooldown():
+    app = App("demo")
+    calls = []
+
+    @app.on_detection("person", cooldown=60)
+    def explodes(event):
+        calls.append(event.ts)
+        raise RuntimeError("boom")
+
+    det, _ = build(app)
+    for second in (0, 10, 30, 61, 90):
+        det.handle_event(inference_event(
+            detection("person", track_id="t1"), completed_at=at(second)))
+    assert len(calls) == 2, "a failing rule re-raised on every single event"
+
+
+def test_mutable_param_defaults_are_not_shared_between_configs():
+    app = App("demo").param("regions", list, default=[[0, 0], [1, 1]])
+
+    @app.on_detection("person")
+    def rule(event):
+        pass
+
+    cls = app.config_class()
+    first, second = cls(), cls()
+    first.regions[0].append(999)
+    assert second.regions == [[0, 0], [1, 1]], "a nested default was shared"
+
+
+def test_an_app_id_that_the_platform_cannot_use_is_refused_at_the_source():
+    for bad in ("Gate Watch", "GateWatch", "gate--watch", "gate_watch"):
+        with pytest.raises(ValueError, match="kebab-case"):
+            App(bad)
+    App("gate-watch")                          # the good one still works
+
+
+def test_a_derived_manifest_field_points_at_the_decorator_that_owns_it():
+    with pytest.raises(TypeError, match=r"app\.param"):
+        App("demo", params=[])
+    with pytest.raises(TypeError, match=r"@app\.action"):
+        App("demo", actions=[])
+    with pytest.raises(TypeError, match=r"@app\.on_license"):
+        App("demo", entitlement="license_key")
+
+
+def test_live_config_is_applied_and_the_zone_cache_dropped():
+    app = App("demo")
+    seen = []
+
+    @app.on_detection("person", zone="driveway")
+    def rule(event):
+        seen.append(event.camera)
+
+    det, _ = build(app)                        # no polygon yet
+    det.handle_event(inference_event(detection("person", x=0.1, y=0.1)))
+    assert seen == []
+    det.on_config_update({"driveway": {"cam-1": ZONE}})
+    det.handle_event(inference_event(detection("person", x=0.1, y=0.1)))
+    assert seen == ["cam-1"], "a redrawn zone needed a restart"

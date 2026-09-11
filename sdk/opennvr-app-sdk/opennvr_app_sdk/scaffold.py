@@ -291,6 +291,9 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
                      help="park the object in the centre of the frame instead of walking it across.")
     dev.add_argument("--fast", action="store_true",
                      help="feed every event immediately; timestamps still advance at --rate.")
+    dev.add_argument("--no-zones", action="store_true",
+                     help="do not draw stand-in polygons for zones the app declares "
+                          "but no operator has configured.")
     args = parser.parse_args(argv)
 
     if args.command == "spec":
@@ -305,7 +308,7 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
         return run_dev(
             Path(args.path), config=args.config, label=args.label, camera=args.camera,
             confidence=args.confidence, rate=args.rate, count=args.count,
-            still=args.still, fast=args.fast,
+            still=args.still, fast=args.fast, no_zones=args.no_zones,
         )
 
     if args.command == "validate":

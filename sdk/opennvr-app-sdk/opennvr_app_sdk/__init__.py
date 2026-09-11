@@ -19,8 +19,9 @@ described below — same process, same manifest, same alerts::
     from opennvr_app_sdk import App
 
     app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+    app.param("dwell_s", float, default=30.0)
 
-    @app.on_detection("person", zone="driveway", dwell=30)
+    @app.on_detection("person", zone="driveway", dwell="$dwell_s")
     def loitering(event):
         event.alert(f"Person loitering on {event.camera}", severity="high")
 
@@ -59,7 +60,10 @@ from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
-from .facade import DEFAULT_MIN_CONFIDENCE, App, DetectionEvent
+from .facade import (
+    DEFAULT_ABSENCE_S, DEFAULT_MIN_CONFIDENCE, App, DetectionEvent, Setting,
+    setting,
+)
 from .openapi import CONTRACT_API_VERSION, contract_asyncapi, contract_openapi
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
@@ -124,7 +128,7 @@ FRONT_DOOR: tuple[str, ...] = (
     "Alert",
     "AppManifest",
     "Param",
-    "DEFAULT_MIN_CONFIDENCE",
+    "setting",
 )
 
 #: The classes the facade compiles to, and their runners. Subclass one when a rule outgrows the decorators.
@@ -164,6 +168,9 @@ RULES: tuple[str, ...] = (
     "set_default_source",
     "DEFAULT_ALERT_SUBJECT_PREFIX",
     "DETECTION_LABELS",
+    "Setting",
+    "DEFAULT_ABSENCE_S",
+    "DEFAULT_MIN_CONFIDENCE",
 )
 
 #: Everything an app reads from the running deployment.

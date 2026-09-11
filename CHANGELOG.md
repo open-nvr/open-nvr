@@ -109,8 +109,100 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   links it, so a closed app carries no AGPL obligation — and both are
   installed with the wheel rather than living only on GitHub.
 
+### Fixed
+
+- **A `zone=` rule could never fire once an operator drew the zone.** The
+  facade invented a config shape (`zones: {driveway: [...]}`) that core's
+  config validator rejects and the catalog's geometry editor cannot
+  produce. The platform's shape for a per-camera `geometry.polygon` param
+  is `{camera_id: [[x, y], …]}` — one polygon per param — so each
+  `zone="driveway"` now declares **its own param named `driveway`**,
+  which also tells the operator which zones an app expects and where
+  each one goes. Previously every camera also inherited every other
+  camera's polygon.
+- **`dwell` counted time on camera, not time in the zone.** The presence
+  clock started before the rule's filters ran, so
+  `zone="driveway", dwell=30` meant "thirty seconds on camera, then one
+  frame in the driveway". Presence now accrues per rule, and only while
+  that rule's zone, camera, label and confidence filters all hold.
+- **A presence episode never ended**, so the second person of the day
+  never alerted and `dwell_s` was measured from the first person's
+  arrival. A gap longer than `forget=` (default `max(30s, dwell)`) now
+  ends the episode and re-arms the once-per-episode latch, while the
+  cooldown's memory survives a brief occlusion.
+- **Two handlers sharing a `__name__`** — two lambdas, or two functions
+  a factory built — shared one dwell latch and one cooldown, so the
+  second was suppressed forever, and their alert types collapsed into
+  one. Rule identity is positional now.
+- **`return event.alert(...)` dispatched the alert twice**, which the
+  method's own docstring invited.
+- **One event with a missing `completed_at` wiped every other camera's
+  presence state**: the wall-clock fallback fed the garbage collector.
+  Event time is now per camera and non-decreasing, so cameras with a few
+  seconds of skew no longer read as out-of-order either.
+- **A capitalised or lambda handler produced an alert-type name that
+  `opennvr-app validate` rejects**; names are slugified.
+- **A rule that raised never marked its cooldown**, so it re-raised on
+  every event.
+- **Redrawn zones needed a restart** — the zone cache was never
+  invalidated on a live config update.
+- **`opennvr-app dev` crashed on an app whose manifest is only a class
+  attribute**, a shape `validate` has always accepted. The two commands
+  no longer disagree about the same app, and an archetype `dev` cannot
+  simulate now says so instead of leaking a `TypeError`.
+- Nested mutable param defaults were shallow-copied and therefore shared
+  between config instances.
+- `App("Gate Watch")` was accepted and only failed later at `validate`;
+  the id is checked at the source, with the message the scaffold uses.
+- Passing a manifest field the decorators derive (`params`, `actions`,
+  `entitlement`, …) to `App(...)` silently lost it; it is now refused
+  with a pointer to the decorator that owns it.
+
 ### Changed
 
+- **The facade now covers a whole app, not just its rule.** Every
+  surface that used to be a base-class method override — and so could be
+  *declared* through the facade but never *implemented* — has a
+  decorator that registers the manifest entry and the implementation
+  together: `@app.state` with `app.metric` / `gauge` / `table` / `log` /
+  `gallery` (all fourteen example apps declare a dashboard),
+  `@app.action`, `@app.ui`, `@app.on_license` (so a facade app can be a
+  paid app at all — `validate` errors on a licence gate with no
+  verifier), `@app.on_config`, `@app.on_setup`, `@app.on_shutdown`.
+  `app.store` is a plain dict merged into `GET /state`, so a counter and
+  one `app.metric(...)` are a complete dashboard.
+- **A rule can reach the platform and the bus.** `event.nvr` /
+  `app.nvr` is the `OpenNVR` client, built once from the app's own
+  config and credential and closed at shutdown; `event.snapshot()` is
+  this event's camera; `event.publish(schema, payload)` emits a
+  contracted domain event with the envelope, producer and correlation id
+  filled in, and `app.publishes(...)` puts it in the app's AsyncAPI
+  document.
+- **Rule filters can read operator config.** A decorator argument is
+  fixed at import, which made the config form useless for the one number
+  an app is about. `dwell="$dwell_s"` (or `setting("dwell_s")`) resolves
+  from the declared param at start-up.
+- **The hidden 0.35 confidence floor is gone.** A rule that declares no
+  `min_confidence` now sees every detection, so the only threshold in an
+  app is the one it wrote down.
+- **`config.yml` no longer has to restate what the deployment knows.**
+  `BaseAppConfig` reads `NATS_URL`, `OPENNVR_URL` and
+  `OPENNVR_INTERNAL_API_KEY` — which the app installer already exports
+  into every app container — so `nats_url` is optional and a config file
+  reduces to the app's own params. An explicit value in the file always
+  wins; an empty one is still an error.
+- **A scaffolded app sees events on a stock install.** Tier-0 is the
+  only detection stream on the bus out of the box, so an app that
+  ignored it registered, showed a green dot and fired nothing, forever.
+  `consume_tier0` is a real `BaseAppConfig` field now (setting it in
+  `config.yml` used to do nothing) and the facade turns it on by
+  default; `App(consume_tier0=False)` opts out.
+- **`opennvr-app dev` draws a stand-in polygon** for a zone the app
+  declares but nobody has configured, so the `zone=` example every
+  quickstart leads with is reproducible from `opennvr-app new`
+  (`--no-zones` to skip). A zone with no polygon in a real deployment
+  now logs one actionable warning per rule per camera instead of going
+  silent.
 - The scaffold template, its README and its smoke tests lead with the
   facade, and `opennvr-app validate` discovers a facade app (its
   manifest, compiled class and generated config class) alongside the

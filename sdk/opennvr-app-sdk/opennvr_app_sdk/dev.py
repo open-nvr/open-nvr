@@ -109,6 +109,7 @@ def run_dev(
     count: int = 60,
     still: bool = False,
     fast: bool = False,
+    no_zones: bool = False,
 ) -> int:
     """Drive the app in ``app_dir`` against a simulated camera.
 
@@ -133,16 +134,21 @@ def run_dev(
 
     printer = _Printer()
     try:
-        detector = _build_detector(module, app_dir, config, printer)
+        detector = _build_detector(module, manifest, app_dir, config, printer)
     except (ValueError, OSError, TypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    zones = _zone_names(detector)
+    drawn = [] if no_zones else _draw_stand_in_zones(detector, manifest, camera)
+    zones = _zones_on(detector, camera, manifest)
     motion = "parked in the centre" if still else "walking left → right"
     print(f"opennvr-app dev — {manifest.id} {manifest.version} ({manifest.category})")
     print(f"  camera {camera} · {label} {motion} · {rate:g} event/s"
           + (f" · zones: {', '.join(zones)}" if zones else ""))
+    if drawn:
+        print(f"  drew a stand-in polygon across the middle of the frame for "
+              f"{', '.join(drawn)} — the operator draws the real one in the "
+              f"App Catalog (--no-zones to skip).")
     print("  Ctrl-C to stop.\n")
 
     interval = 0.0 if fast else 1.0 / rate if rate > 0 else 0.0
@@ -164,10 +170,15 @@ def run_dev(
     return 0
 
 
-def _build_detector(module: Any, app_dir: Path, config: str | None,
-                    channel: AlertChannel) -> Any:
+def _build_detector(module: Any, manifest: Any, app_dir: Path,
+                    config: str | None, channel: AlertChannel) -> Any:
     """Construct the app's detector with an in-memory dispatcher, from
-    the given config file or from sensible in-memory defaults."""
+    the given config file or from sensible in-memory defaults.
+
+    ``manifest`` comes from ``validate.load_manifest``, which finds it
+    whether the app declares it at module level or only as a class
+    attribute — so ``dev`` and ``validate`` never disagree about
+    whether an app is runnable."""
     from .validate import app_class, facade_app
 
     facade = facade_app(module)
@@ -175,16 +186,22 @@ def _build_detector(module: Any, app_dir: Path, config: str | None,
     dispatcher = _dispatcher(channel)
     if facade is not None:
         return facade.build(cfg, dispatcher)
-    manifest = None
-    for name in ("manifest", "MANIFEST"):
-        candidate = getattr(module, name, None)
-        if candidate is not None:
-            manifest = candidate
-            break
-    cls = app_class(module, manifest) if manifest is not None else None
+    cls = app_class(module, manifest)
     if cls is None:
-        raise TypeError("could not find the app class to run")
-    return cls(cfg, dispatcher)
+        raise TypeError(
+            f"found the manifest for {manifest.id!r} but no app class carrying "
+            f"it — a Detector/FrameApp/AlertSubscriber subclass in this module "
+            f"must set `manifest = ...`"
+        )
+    try:
+        return cls(cfg, dispatcher)
+    except TypeError as exc:
+        raise TypeError(
+            f"{cls.__name__} is not a Detector-shaped app, so `dev` cannot "
+            f"simulate a camera for it ({exc}). `opennvr-app dev` drives "
+            f"inference events; FrameApp, AlertSubscriber and "
+            f"DomainEventSubscriber apps are not supported yet."
+        ) from exc
 
 
 def _load_config(module: Any, facade: Any, app_dir: Path, config: str | None) -> Any:
@@ -209,17 +226,49 @@ def _load_config(module: Any, facade: Any, app_dir: Path, config: str | None) ->
     return cfg_cls(nats_url="nats://dev:4222", subject_pattern="opennvr.inference.>")
 
 
-def _zone_names(detector: Any) -> list[str]:
-    raw = getattr(getattr(detector, "cfg", None), "zones", None) or {}
-    if not isinstance(raw, dict):
+#: The polygon `dev` draws for a zone the app declares but nobody has
+#: configured — the middle third of the frame, which the simulated walk
+#: crosses. Without it a `zone=` rule can never fire under `dev`, which
+#: is the one example every quickstart leads with.
+STAND_IN_ZONE = [[0.33, 0.0], [0.67, 0.0], [0.67, 1.0], [0.33, 1.0]]
+
+
+def _declared_zones(manifest: Any) -> list[str]:
+    """Zone names the app declares, from its manifest params."""
+    return [p.name for p in getattr(manifest, "params", [])
+            if str(getattr(p, "type", "")) == "geometry.polygon"]
+
+
+def _zones_on(detector: Any, camera: str, manifest: Any) -> list[str]:
+    """Zones actually resolvable for the simulated camera."""
+    resolve = getattr(detector, "_zones_for", None)
+    if callable(resolve):
+        return sorted(resolve(camera))
+    return sorted(_declared_zones(manifest))
+
+
+def _draw_stand_in_zones(detector: Any, manifest: Any, camera: str) -> list[str]:
+    """Give every undrawn zone a stand-in polygon on the simulated
+    camera, and report which ones were filled in."""
+    cfg = getattr(detector, "cfg", None)
+    if cfg is None:
         return []
-    names: list[str] = []
-    for key, value in raw.items():
-        if isinstance(value, dict):          # per-camera mapping
-            names.extend(str(n) for n in value)
-        else:
-            names.append(str(key))
-    return sorted(dict.fromkeys(names))
+    filled: list[str] = []
+    for name in _declared_zones(manifest):
+        current = getattr(cfg, name, None)
+        if isinstance(current, dict) and current.get(camera):
+            continue
+        if isinstance(current, (list, tuple)) and current:
+            continue
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged[camera] = [list(point) for point in STAND_IN_ZONE]
+        setattr(cfg, name, merged)
+        filled.append(name)
+    if filled:
+        cache = getattr(detector, "_facade_zones", None)
+        if isinstance(cache, dict):
+            cache.clear()
+    return filled
 
 
 def _describe_zone(detector: Any, camera: str, x: float, y: float) -> str:

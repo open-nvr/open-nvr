@@ -38,7 +38,7 @@ typed client from the AsyncAPI document.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 from .alerts import DEFAULT_ALERT_SUBJECT_PREFIX
 from .manifest import Action, AppManifest, Param
@@ -458,7 +458,8 @@ def contract_openapi(manifest: AppManifest, *, port: int | None = None) -> dict[
 # ── AsyncAPI — the bus surface ──────────────────────────────────────
 
 
-def contract_asyncapi(manifest: AppManifest) -> dict[str, Any]:
+def contract_asyncapi(manifest: AppManifest,
+                      *, publishes: Sequence[str] = ()) -> dict[str, Any]:
     """The **AsyncAPI 3.0** document for this app's NATS surface.
 
     Three groups of channels, all derived from the manifest: what the
@@ -466,7 +467,11 @@ def contract_asyncapi(manifest: AppManifest) -> dict[str, Any]:
     (``opennvr.alerts.app.<id>.<camera_id>``, one per declared alert
     type), and the contracted domain events its ``requires_scopes``
     grant — scopes are how an app asks for PII-bearing events, so they
-    belong in the spec rather than in prose."""
+    belong in the spec rather than in prose.
+
+    ``publishes`` names contracted domain events the app emits
+    (``app.publishes(...)`` on the facade), so a consumer can generate a
+    client for them."""
     channels: dict[str, Any] = {}
     operations: dict[str, Any] = {}
 
@@ -499,6 +504,26 @@ def contract_asyncapi(manifest: AppManifest) -> dict[str, Any]:
             "summary": "Fire an operator-visible alert.",
             "description": "Declared alert types: "
                            + ", ".join(f"{a.name} ({a.severity})" for a in manifest.emits),
+        }
+
+    for schema in publishes:
+        key = "publish" + _pascal(schema)
+        channels[key] = {
+            "address": f"opennvr.events.{schema}.{{camera_id}}",
+            "title": f"{schema} (published)",
+            "description": (
+                "A contracted domain event this app publishes — how other "
+                "apps consume its output without knowing it exists. Defined "
+                "in EVENT_CONTRACTS.md."
+            ),
+            "parameters": {"camera_id": {"description": "The camera."}},
+            "messages": {"domainEvent": {
+                "$ref": "#/components/messages/DomainEvent"}},
+        }
+        operations["send" + _pascal(schema)] = {
+            "action": "send",
+            "channel": {"$ref": f"#/channels/{key}"},
+            "summary": f"Publish {schema}.",
         }
 
     for scope in manifest.requires_scopes:

@@ -2,6 +2,19 @@
 
 One client, the app's own credential, everything core exposes to apps.
 
+From a facade rule the client is already there, built from the app's own
+config and credential:
+
+```python
+@app.on_detection("person")
+def rule(event):
+    jpeg = event.snapshot()               # this event's camera, right now
+    event.nvr.state.set("last_seen", event.camera)
+```
+
+`app.nvr` is the same object outside a rule (in `@app.on_setup`, an
+action, a state function). Constructed by hand it is:
+
 ```python
 from opennvr_app_sdk import OpenNVR
 

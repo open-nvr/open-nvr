@@ -1,9 +1,25 @@
 # Writing a rule
 
 Almost every rule reduces to one question: *has this object been
-somewhere, for long enough?* Geometry answers the **where**,
-`keyed_state` answers the **how long**, and an `Alert` is what you do
-about it. The facade's `zone=` and `dwell=` wrap exactly these.
+somewhere, for long enough?*
+
+On the facade that is one line, and the two clocks are handled for you:
+
+```python
+@app.on_detection("person", zone="driveway", dwell="$dwell_s", cooldown=60)
+def loitering(event):
+    event.alert(f"Person loitering on {event.camera}", severity="high")
+```
+
+`dwell` measures time spent **satisfying this rule's filters** — with a
+zone, that is time in the zone, not time on camera — and fires once per
+presence episode. `forget=` (default `max(30s, dwell)`) is the gap that
+ends an episode and re-arms it, so the second person of the day alerts
+too.
+
+The rest of this page is what that wraps, for a rule that needs to do it
+by hand: geometry answers the **where**, `keyed_state` the **how long**,
+and an `Alert` is what you do about it.
 
 ## Where — zones and tripwires
 

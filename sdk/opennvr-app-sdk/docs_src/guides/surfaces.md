@@ -4,6 +4,35 @@ Declare a surface and the App Catalog renders it. There is no
 app-specific UI code anywhere in the platform, and there should be none
 in your app either.
 
+On the facade, declaring a surface and implementing it are the same
+line of code:
+
+```python
+app.param("dwell_s", float, default=30.0)     # a config-form field
+app.zone("driveway")                          # a polygon the operator draws
+app.metric("alerted", label="Alerts fired")   # a dashboard tile
+
+@app.action("mute", label="Mute for an hour", confirm=True)
+def mute():
+    app.store["muted"] = True
+    return {"muted": True}
+
+@app.ui()
+def dashboard() -> str:
+    return f"<h3>{app.store['alerted']} alerts</h3>"
+
+@app.on_license()
+def check(key): ...                            # makes this a paid app
+
+@app.on_config()
+def changed(config): ...                       # applied without a restart
+```
+
+On a base class the same things are method overrides — `state_snapshot`,
+`on_action`, `ui_html`, `verify_license`, `on_config_update` — paired
+with manifest entries you write by hand. The rest of this page describes
+what each surface *is*; both paths reach it.
+
 ## The config form
 
 Every `Param` becomes a form field an operator fills in, and a key in
@@ -12,9 +41,18 @@ Every `Param` becomes a form field an operator fills in, and a key in
 
 ```python
 Param("dwell_s", float, default=30.0, description="Seconds before it counts.")
-Param("zones", "geometry.polygon", per_camera=True)
+Param("driveway", "geometry.polygon", per_camera=True)
 Param("watch_labels", list, default=["person"], suggestions=list(DETECTION_LABELS[:8]))
 ```
+
+**Zones are one param each, named after the zone.** A per-camera
+`geometry.polygon` value is `{camera_id: [[x, y], …]}` — one polygon per
+param, per camera, in normalized coordinates. So an app that watches a
+driveway and a kerb declares two params, and the operator sees two
+editors with those names. A single param called `zones` holding a
+mapping of names would not round-trip through the geometry editor and
+core's config validator rejects it. On the facade, `zone="driveway"` in
+a rule declares its param for you.
 
 Config is **live**: core re-delivers it on a poll, so an app that applies
 changes in `on_config_update` follows the operator without a restart.

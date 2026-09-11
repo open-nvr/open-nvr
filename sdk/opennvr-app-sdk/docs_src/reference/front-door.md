@@ -16,4 +16,4 @@ this site is for the app that outgrows them.
 
 ::: opennvr_app_sdk.Param
 
-::: opennvr_app_sdk.DEFAULT_MIN_CONFIDENCE
+::: opennvr_app_sdk.setting

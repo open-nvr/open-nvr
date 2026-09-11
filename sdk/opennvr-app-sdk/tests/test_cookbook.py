@@ -61,15 +61,25 @@ def test_facade_example_builds_a_working_app():
     manifest = module.app.manifest()
     assert manifest.id == "driveway-watch"
     assert {a.name for a in manifest.emits} == {"loitering", "vehicle-left"}
-    assert [p.name for p in manifest.params] == ["zones", "night_only", "dwell_s"]
+    # The zone is a param of its own, named after itself — the shape the
+    # catalog's geometry editor writes.
+    assert [p.name for p in manifest.params] == ["driveway", "night_only", "dwell_s"]
+    assert [v.kind for v in manifest.state_schema] == ["metric", "gauge", "log"]
+    assert [a.name for a in manifest.actions] == ["mute"]
 
     cfg = app_config(
         night_only=False, dwell_s=30.0,
-        zones={"driveway": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]})
+        driveway={"cam-1": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]})
     detector = module.app.build(cfg, RecorderChannel().dispatcher())
     # Five people in one frame trips the whole-frame rule immediately.
     fired = feed(detector, inference_event(*[detection("person") for _ in range(5)]))
     assert any("5 people" in a.title for a in fired)
+    # The declared dashboard resolves against the store the rules keep.
+    snapshot = detector.state_snapshot()
+    for view in manifest.state_schema:
+        assert view.path in snapshot
+    # The declared action dispatches, defaults filled in.
+    assert detector.on_action("mute", {}) == {"muted_for_minutes": 60}
 
 
 def test_detector_example_fires_after_the_dwell():

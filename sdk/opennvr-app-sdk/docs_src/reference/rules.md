@@ -44,3 +44,9 @@ alert; these are those three, unwrapped.
 ::: opennvr_app_sdk.DEFAULT_ALERT_SUBJECT_PREFIX
 
 ::: opennvr_app_sdk.DETECTION_LABELS
+
+::: opennvr_app_sdk.Setting
+
+::: opennvr_app_sdk.DEFAULT_ABSENCE_S
+
+::: opennvr_app_sdk.DEFAULT_MIN_CONFIDENCE

@@ -57,7 +57,9 @@ def test_unwatched_label_is_quiet():
 
 
 def test_low_confidence_is_quiet():
-    """A detection below ``min_confidence`` fires nothing."""
+    """A detection below ``min_confidence`` fires nothing — the filter
+    is the rule's ``min_confidence="$min_confidence"``, so the operator
+    controls it from config.yml with no code change."""
     detector, _ = _build(min_confidence=0.95)
     assert feed(detector, inference_event(detection("person", confidence=0.6))) == []
 
@@ -71,14 +73,14 @@ def test_no_detections_is_quiet():
 def test_config_loader_roundtrips(tmp_path):
     """The YAML loader parses a minimal config and applies defaults."""
     cfg_file = tmp_path / "config.yml"
-    cfg_file.write_text(
-        "nats_url: nats://localhost:4222\n"
-        "min_confidence: 0.7\n"
-    )
+    cfg_file.write_text("min_confidence: 0.7\n")
     cfg = app.load_config(str(cfg_file))
-    assert cfg.nats_url == "nats://localhost:4222"
     assert cfg.min_confidence == 0.7
-    assert cfg.subject_pattern == "opennvr.inference.>"  # default applied
+    # Defaults the SDK supplies: the deployment's NATS endpoint (from
+    # the environment the installer exports) and the detection stream.
+    assert cfg.nats_url
+    assert cfg.subject_pattern == "opennvr.inference.>"
+    assert cfg.consume_tier0 is True
 
 
 def test_manifest_identity_matches_module():
@@ -89,3 +91,4 @@ def test_manifest_identity_matches_module():
     assert manifest.name == "__APP_NAME__"
     assert "__TASK__" in manifest.requires_tasks
     assert manifest.subscribes == "opennvr.inference.>"
+    assert [a.name for a in manifest.emits] == ["__APP_ID__"]

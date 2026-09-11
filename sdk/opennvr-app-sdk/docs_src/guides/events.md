@@ -8,7 +8,20 @@ subscriber picks explicitly. The envelopes are normative and
 CI-enforced:
 [EVENT_CONTRACTS.md](https://github.com/open-nvr/open-nvr/blob/main/docs/EVENT_CONTRACTS.md).
 
-Publish the **typed** payload, not a dict: the class carries the
+From a facade rule, publishing is one call — the envelope, the producer
+(`app:<id>`), the camera and the correlation id are already known:
+
+```python
+app.publishes("occupancy.changed.v1")        # so it appears in the spec
+
+@app.on_detection("person")
+def count(event):
+    event.publish("occupancy.changed.v1",
+                  {"count": event.count("person"), "level": "normal"})
+```
+
+Underneath, and from a base class, it is `DomainEventPublisher`. Publish
+the **typed** payload where you can, not a dict: the class carries the
 contract's required fields, so a malformed event fails at publish time
 rather than in someone else's app.
 

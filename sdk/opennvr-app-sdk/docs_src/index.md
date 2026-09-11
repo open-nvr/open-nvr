@@ -21,8 +21,9 @@ even though the platform core is AGPL.
 from opennvr_app_sdk import App
 
 app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+app.param("dwell_s", float, default=30.0)
 
-@app.on_detection("person", zone="driveway", dwell=30)
+@app.on_detection("person", zone="driveway", dwell="$dwell_s")
 def loitering(event):
     event.alert(f"Person loitering on {event.camera}", severity="high")
 

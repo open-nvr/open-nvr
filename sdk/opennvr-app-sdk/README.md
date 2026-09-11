@@ -21,10 +21,13 @@ pip install opennvr-app-sdk
 from opennvr_app_sdk import App
 
 app = App("loitering", name="Loitering", version="1.0.0", category="perimeter")
+app.param("dwell_s", float, default=30.0)
+app.metric("alerted", label="Alerts fired")
 
-@app.on_detection("person", zone="driveway", dwell=30)
+@app.on_detection("person", zone="driveway", dwell="$dwell_s")
 def loitering(event):
     event.alert(f"Person loitering on {event.camera}", severity="high")
+    app.store["alerted"] = app.store.get("alerted", 0) + 1
 
 if __name__ == "__main__":
     raise SystemExit(app.run())
@@ -34,9 +37,16 @@ That app subscribes to the platform's detections, serves the registry
 contract (`/health`, `/state`, `/manifest`, config form, actions),
 registers itself in the App Catalog, is issued its own credential, and
 fires alerts that reach the operator inbox — none of which you wrote.
-The zone becomes an editor the operator draws on a camera still; the
-dwell timer, the once-per-episode latch, the alert envelope and the
-config file are the SDK's.
+The zone becomes an editor named `driveway` that the operator draws on a
+camera still; `dwell_s` becomes a field in the config form they can
+tune; `alerted` becomes a tile on the app's dashboard. The presence
+timer, the once-per-episode latch, the alert envelope and the config
+file are the SDK's.
+
+Declaring a surface implements it: `@app.action` adds an operator
+button, `@app.ui` an embedded page, `@app.on_license` the gate for a
+paid app, `@app.state` / `app.metric` a dashboard, and inside a rule
+`event.publish()` reaches other apps while `event.nvr` is the platform.
 
 See it fire before you touch Docker:
 
