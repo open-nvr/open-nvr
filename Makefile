@@ -7,7 +7,7 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index pin-apps-index sdk-docs sdk-site sdk-site-serve
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index validate-adapters-index pin-apps-index sdk-docs sdk-site sdk-site-serve
 
 help:
 	@echo "OpenNVR Makefile targets:"
@@ -119,6 +119,9 @@ validate-apps-index:
 # bytes: asks GHCR what each catalog image's tag resolves to, verifies the
 # signature with cosign, and writes image_digest into apps_index.yml
 # (textually — the comments survive). Then validate, commit, tag.
+validate-adapters-index:
+	@$(PY) scripts/validate_adapters_index.py
+
 pin-apps-index:
 	@$(PY) scripts/pin_apps_index.py --verify
 	@$(PY) scripts/validate_apps_index.py

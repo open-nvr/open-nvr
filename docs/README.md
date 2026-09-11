@@ -30,6 +30,7 @@ Start here. Pick the row that matches what you're doing.
 - **[API_STANDARDS.md](API_STANDARDS.md)** — every surface and the open spec that describes it: OpenAPI 3.1 for HTTP (core, KAI-C, adapters, and each app, generated from its manifest), AsyncAPI 3.0 for the bus, and `opennvr-app spec`.
 
 ## Build on the AI layer
+- **[CONTRIBUTING_ADAPTERS.md](CONTRIBUTING_ADAPTERS.md)** — publish a model: the task-convention bargain, the conformance bar, and the adapters-index listing that makes it installable.
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.
 - **[apps-index-entry.template.yml](apps-index-entry.template.yml)** — template for an App Store catalog entry.
 
