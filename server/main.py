@@ -51,6 +51,7 @@ from models import (
 from routers import (
     ai_detection_results,
     ai_model_management,
+    adapters_catalog,
     ai_models,
     alerts_inbox,
     apps,
@@ -848,6 +849,9 @@ app.include_router(cloud_router.router, prefix=settings.api_prefix)
 app.include_router(cloud_streaming.router, prefix=settings.api_prefix)
 app.include_router(firmware_router.router, prefix=settings.api_prefix)
 app.include_router(ai_models.router, prefix=settings.api_prefix)
+# The AI adapter catalog — which models a deployment can install
+# (server/config/adapters_index.yml, docs/CONTRIBUTING_ADAPTERS.md).
+app.include_router(adapters_catalog.router, prefix=settings.api_prefix)
 app.include_router(ai_model_management.router, prefix=settings.api_prefix)
 app.include_router(ai_detection_results.router, prefix=settings.api_prefix)
 app.include_router(apps.router, prefix=settings.api_prefix)
