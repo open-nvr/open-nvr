@@ -25,6 +25,12 @@ That is the whole bargain of the contract, and it cuts both ways:
   silent. `opennvr-adapter validate` and the index validator both check
   this for exactly that reason.
 
+An **alias** counts as a match. `tasks.yml` records the non-canonical
+spellings that mean the same capability — `audio_transcription` for
+`speech_to_text`, `visual_qa` for `vqa` — and the catalog, the routing
+layer and `?task=` all compare canonical names, so advertising either
+spelling reaches the same apps.
+
 If your model genuinely does something no convention covers, propose the
 convention first: open an issue against
 `server/config/tasks.yml`.

@@ -34,6 +34,9 @@ APPS_INDEX = REPO_ROOT / "server" / "config" / "apps_index.yml"
 TASKS = REPO_ROOT / "server" / "config" / "tasks.yml"
 
 REQUIRED = ("id", "name", "summary", "version", "image", "tasks_advertised")
+# Kept in step with ``routers.adapters_catalog.KNOWN_TIERS`` by
+# ``test_known_tiers_match_the_validator`` — this script stays free of
+# the server's dependencies so CI can run it on its own.
 KNOWN_TIERS = {"first_party", "community"}
 
 
@@ -129,11 +132,17 @@ def main() -> int:
 
         permissions = entry.get("permissions") or {}
         if isinstance(permissions, dict) and permissions.get("network_egress"):
-            hosts = ", ".join(permissions["network_egress"])
-            if "summary" in entry and hosts.split(",")[0] not in str(entry["summary"]):
+            declared = [str(h) for h in permissions["network_egress"]]
+            summary = str(entry.get("summary", ""))
+            # EVERY host has to be disclosed, not just the first one: an
+            # adapter listing api.vendor.com plus a telemetry endpoint
+            # was passing on the strength of the one it mentioned.
+            unmentioned = [h for h in declared if h not in summary]
+            if unmentioned:
                 warnings.append(
-                    f"{where}: declares egress to {hosts} — say so in the "
-                    f"summary; the operator is the one being asked to allow it")
+                    f"{where}: declares egress to {', '.join(unmentioned)} "
+                    f"without saying so in the summary; the operator is the "
+                    f"one being asked to allow it")
 
     for required_task in sorted(tasks_apps_require() - advertised):
         warnings.append(

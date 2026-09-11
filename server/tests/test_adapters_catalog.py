@@ -161,3 +161,139 @@ def test_the_shipped_index_passes_its_own_validator():
         capture_output=True, text=True, cwd=REPO_ROOT,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── Task aliases (review fix) ───────────────────────────────────────
+
+
+def _canonical(name: str) -> str:
+    from routers.ai_models import _load_tasks_registry, canonicalize_task
+
+    return canonicalize_task(name, _load_tasks_registry())
+
+
+def test_every_advertised_task_canonicalizes_to_a_known_task(entries):
+    """The catalog compared raw strings, so an adapter advertising
+    `audio_transcription` was invisible to `?task=speech_to_text` even
+    though the routing layer folds the two together — the operator saw
+    an empty page for a capability they had installed."""
+    known = {entry["task"] for entry in yaml.safe_load(TASKS_PATH.read_text())}
+    for entry in entries:
+        for task in entry.tasks_advertised:
+            assert _canonical(task) in known, (
+                f"{entry.id}: advertises {task!r}, which is neither a "
+                f"canonical task nor an alias in tasks.yml — no app can ever "
+                f"route to it")
+
+
+def test_aliases_and_canonical_names_select_the_same_adapters(entries):
+    """`?task=` must accept whichever spelling the caller has."""
+    registry = yaml.safe_load(TASKS_PATH.read_text())
+    for task_entry in registry:
+        for alias in task_entry.get("aliases", []):
+            assert _canonical(alias) == task_entry["task"]
+
+
+def test_known_tiers_match_the_validator():
+    """The router and `scripts/validate_adapters_index.py` each carry a
+    copy — the script stays free of the server's dependencies, so this
+    is what keeps the two from drifting."""
+    source = (REPO_ROOT / "scripts" / "validate_adapters_index.py").read_text()
+    declared = source.split("KNOWN_TIERS = ", 1)[1].split("\n", 1)[0]
+    assert eval(declared) == KNOWN_TIERS  # noqa: S307 — a literal set
+
+
+def test_an_unknown_tier_is_rejected():
+    """A made-up tier used to reach the UI as an unknown badge."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AdapterIndexEntry.model_validate({
+            "id": "x", "name": "X", "summary": "s", "version": "1.0.0",
+            "image": "ghcr.io/x/x:1", "tasks_advertised": ["object_detection"],
+            "tier": "certified",
+        })
+
+
+# ── Egress disclosure (review fix) ──────────────────────────────────
+
+
+def test_the_validator_warns_about_every_undisclosed_egress_host(tmp_path):
+    """It checked only the FIRST declared host, so an adapter that
+    mentioned its vendor API and quietly added a telemetry endpoint
+    passed clean."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "validate_adapters_index_under_test",
+        REPO_ROOT / "scripts" / "validate_adapters_index.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    index = tmp_path / "adapters_index.yml"
+    index.write_text(yaml.safe_dump([{
+        "id": "chatty", "name": "Chatty", "version": "1.0.0",
+        "summary": "Calls api.vendor.com to do the work.",
+        "image": "ghcr.io/x/chatty:1",
+        "tasks_advertised": ["object_detection"],
+        "permissions": {"network_egress": ["api.vendor.com",
+                                           "telemetry.vendor.com"]},
+    }]))
+    module.INDEX = index
+
+    import io
+    import contextlib
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert module.main() == 0          # a warning, not an error
+    printed = out.getvalue()
+    assert "telemetry.vendor.com" in printed, printed
+    # The host it DID disclose must not be nagged about.
+    assert "api.vendor.com" not in printed.split("telemetry.vendor.com")[0]
+
+
+def test_the_route_filters_by_canonical_task(monkeypatch):
+    """`?task=speech_to_text` answered `count=0` while the catalog was
+    listing Whisper under `audio_transcription` — the alias tasks.yml
+    exists to reconcile."""
+    import asyncio
+
+    from routers import adapters_catalog
+
+    monkeypatch.setattr(adapters_catalog, "load_adapters_index", lambda: [
+        AdapterIndexEntry(
+            id="whisper", name="Whisper", summary="ASR.", version="1.0.0",
+            image="ghcr.io/x/whisper:1",
+            tasks_advertised=["audio_transcription"]),
+    ])
+
+    for spelling in ("speech_to_text", "audio_transcription", "SPEECH_TO_TEXT"):
+        body = asyncio.run(adapters_catalog.get_adapters_index(
+            task=spelling, current_user=None, db=None))
+        assert body["count"] == 1, spelling
+        assert body["adapters"][0]["id"] == "whisper"
+
+    # The grouping map is keyed by the canonical name, so the UI shows
+    # one row per capability rather than one per spelling.
+    body = asyncio.run(adapters_catalog.get_adapters_index(
+        task=None, current_user=None, db=None))
+    assert "speech_to_text" in body["tasks"]
+    assert body["tasks"]["speech_to_text"] == ["whisper"]
+
+
+def test_an_unknown_task_still_matches_itself(monkeypatch):
+    """Free-text tasks register and stay as-is (§15.1); the catalog must
+    not lose them by canonicalizing."""
+    import asyncio
+
+    from routers import adapters_catalog
+
+    monkeypatch.setattr(adapters_catalog, "load_adapters_index", lambda: [
+        AdapterIndexEntry(
+            id="odd", name="Odd", summary="s.", version="1.0.0",
+            image="ghcr.io/x/odd:1", tasks_advertised=["bespoke_thing"]),
+    ])
+    body = asyncio.run(adapters_catalog.get_adapters_index(
+        task="bespoke_thing", current_user=None, db=None))
+    assert body["count"] == 1

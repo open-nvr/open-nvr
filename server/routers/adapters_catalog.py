@@ -36,7 +36,7 @@ adapter does not advertise or a permission it does not request.
 """
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from fastapi import APIRouter, Depends
@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_active_user
 from core.database import get_db
 from models import User
+from routers.ai_models import _load_tasks_registry, canonicalize_task
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,10 @@ class AdapterIndexEntry(BaseModel):
     version: str
     image: str
     tasks_advertised: list[str]
-    tier: str = "community"
+    #: Constrained, so an entry with a made-up tier is caught here (and
+    #: skipped with a warning) rather than reaching the UI as an unknown
+    #: badge. ``scripts/validate_adapters_index.py`` fails CI first.
+    tier: Literal["first_party", "community"] = "community"
     model: AdapterModelInfo = AdapterModelInfo()
     permissions: AdapterPermissions = AdapterPermissions()
     scheduling: AdapterScheduling = AdapterScheduling()
@@ -160,15 +164,28 @@ async def get_adapters_index(
     is actually registered and running.
     """
     entries = load_adapters_index()
+
+    # Match on the CANONICAL task, not the raw string. tasks.yml carries
+    # aliases precisely because an adapter may advertise
+    # `audio_transcription` where an app requires `speech_to_text`; the
+    # routing layer folds them together, so a catalog that compared raw
+    # strings answered `count=0` for adapters it was listing.
+    registry = _load_tasks_registry()
+
+    def canonical(names: list[str]) -> list[str]:
+        return [canonicalize_task(name, registry) for name in names]
+
     if task:
-        wanted = task.strip().lower()
-        entries = [e for e in entries if wanted in
-                   [t.lower() for t in e.tasks_advertised]]
+        wanted = canonicalize_task(task.strip(), registry).lower()
+        entries = [e for e in entries
+                   if wanted in [t.lower() for t in canonical(e.tasks_advertised)]]
 
     by_task: dict[str, list[str]] = {}
     for entry in entries:
-        for advertised in entry.tasks_advertised:
-            by_task.setdefault(advertised, []).append(entry.id)
+        for advertised in canonical(entry.tasks_advertised):
+            ids = by_task.setdefault(advertised, [])
+            if entry.id not in ids:
+                ids.append(entry.id)
 
     return {
         "adapters": [entry.model_dump(mode="json") for entry in entries],
