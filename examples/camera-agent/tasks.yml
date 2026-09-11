@@ -109,7 +109,10 @@
   categories: [vision, language]
   tags: [vqa, vlm, question, moondream]
   agent_skill: see
-  aliases: [visual_question_answering]
+  # `visual_qa` is what the shipped moondream adapter advertises in its
+  # /capabilities — an alias, not a second task. Without it the adapter
+  # is invisible to anything asking for VQA.
+  aliases: [visual_question_answering, visual_qa]
   suggested_adapters: [moondream]
   hardware:
     min: 4-core CPU, ~4 GB RAM
@@ -163,7 +166,12 @@
   categories: [audio, language]
   tags: [asr, whisper, transcription, voice]
   agent_skill: null
-  aliases: [asr, stt, transcription]
+  # `audio_transcription` and `audio_translation` are what the shipped
+  # whisper adapter advertises. Translation is still speech in, text
+  # out — the same task with a target language — so it is an alias
+  # rather than a task of its own; the adapter takes the language as a
+  # param. Without these two the whisper adapter is unroutable.
+  aliases: [asr, stt, transcription, audio_transcription, audio_translation]
   suggested_adapters: [whisper]
   hardware:
     min: 4-core CPU (small/base models)
