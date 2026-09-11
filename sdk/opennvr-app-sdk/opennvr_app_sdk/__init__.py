@@ -6,8 +6,30 @@ opennvr-app-sdk — the shared base for OpenNVR monitoring apps.
 
 Per the App SDK spec, the SDK folds config loading, §11.5 alert
 dispatch, zone geometry, keyed TTL state, the NATS subscribe loop, the
-CLI, and signal handling behind ``app(Detector).run()`` — what's left
-in an app is the rule plus a declarative :class:`AppManifest`.
+CLI, and signal handling behind one runnable app — what's left to write
+is the rule plus a declarative :class:`AppManifest`.
+
+Start with :class:`App`
+-----------------------
+
+:class:`App` is the front door. It declares the manifest, the config
+and the rules in one place, and compiles down to the :class:`Detector`
+described below — same process, same manifest, same alerts::
+
+    from opennvr_app_sdk import App
+
+    app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+    app.param("dwell_s", float, default=30.0)
+
+    @app.on_detection("person", zone="driveway", dwell="$dwell_s")
+    def loitering(event):
+        event.alert(f"Person loitering on {event.camera}", severity="high")
+
+    if __name__ == "__main__":
+        raise SystemExit(app.run())
+
+Everything below the facade stays available and unchanged; drop to it
+when a rule outgrows the decorators.
 
 Archetypes (spec §02):
 
@@ -38,6 +60,11 @@ from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
 from .detector import AppRunner, Detector, app
+from .facade import (
+    DEFAULT_ABSENCE_S, DEFAULT_MIN_CONFIDENCE, App, DetectionEvent, Setting,
+    setting,
+)
+from .openapi import CONTRACT_API_VERSION, contract_asyncapi, contract_openapi
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
     CameraFrameSource,
@@ -87,14 +114,120 @@ from .tier0 import (
 
 from ._version import __version__  # noqa: E402
 
-__all__ = [
-    # The stack's egress proxy, for plain-TCP clients (docs/APP_NETWORK.md)
+# ── The public API, in tiers ────────────────────────────────────────
+#
+# ``__all__`` is assembled from these, so the tiers ARE the export
+# list — there is no second place to update, and the documentation
+# site builds its navigation from the same tuples. A name in two
+# tiers, or in none, fails tests/test_public_api.py.
+
+#: Start here — the whole of a first app.
+FRONT_DOOR: tuple[str, ...] = (
+    "App",
+    "DetectionEvent",
+    "Alert",
+    "AppManifest",
+    "Param",
+    "setting",
+)
+
+#: The classes the facade compiles to, and their runners. Subclass one when a rule outgrows the decorators.
+ARCHETYPES: tuple[str, ...] = (
+    "Detector",
+    "FrameApp",
+    "AlertSubscriber",
+    "DomainEventSubscriber",
+    "app",
+    "alert_app",
+    "domain_event_app",
+    "AppRunner",
+    "AlertSubscriberRunner",
+    "BaseAppConfig",
+    "load_app_config",
+)
+
+#: The pieces a rule is built from: where, how long, and what to fire.
+RULES: tuple[str, ...] = (
+    "Zone",
+    "Tripwire",
+    "Point",
+    "bbox_center",
+    "full_frame_polygon",
+    "keyed_state",
+    "KeyedState",
+    "StateRecord",
+    "AlertType",
+    "AlertSource",
+    "AlertChannel",
+    "AlertDispatcher",
+    "StdoutChannel",
+    "WebhookChannel",
+    "NatsAlertChannel",
+    "build_dispatcher",
+    "alert_subject",
+    "set_default_source",
+    "DEFAULT_ALERT_SUBJECT_PREFIX",
+    "DETECTION_LABELS",
+    "Setting",
+    "DEFAULT_ABSENCE_S",
+    "DEFAULT_MIN_CONFIDENCE",
+)
+
+#: Everything an app reads from the running deployment.
+PLATFORM: tuple[str, ...] = (
+    "OpenNVR",
+    "AsyncOpenNVR",
+    "Camera",
+    "Recording",
+    "PlatformError",
+    "EventsClient",
+    "StoredEvent",
+    "KaiCClient",
+    "KaiCError",
+    "InferStream",
+    "discover_cameras",
+    "cameras_for_skill",
+    "filter_cameras_for_skill",
+    "AppCredentials",
+    "auth_headers",
+    "FrameSource",
+    "CameraFrameSource",
+    "FileFrameSource",
+    "HttpSnapshotSource",
+    "DictFrameSource",
+    "build_frame_source",
+    "dict_frame_source",
+    "FrameSourceError",
+)
+
+#: What the app exposes back: the catalog's config form, dashboard, actions, licence gate — and the generated specs.
+SURFACES: tuple[str, ...] = (
+    "StateView",
+    "Action",
+    "ContractServer",
+    "Entitlement",
+    "PRICING_MODELS",
+    "ENTITLEMENT_MODES",
+    "UserContext",
+    "current_user",
+    "verify_call_token",
+    "contract_openapi",
+    "contract_asyncapi",
+    "CONTRACT_API_VERSION",
     "proxy_address",
     "connect_via_proxy",
-    # Typed domain-event payloads (docs/EVENT_CONTRACTS.md as Python)
+)
+
+#: The bus: contracted domain events, and Tier-0.
+EVENTS: tuple[str, ...] = (
+    "DomainEvent",
+    "parse_domain_event",
+    "DomainEventPublisher",
+    "domain_envelope",
+    "domain_subject",
     "TypedPayload",
-    "EVENT_TYPES",
     "typed_payload",
+    "EVENT_TYPES",
     "DetectionObserved",
     "VisitRecorded",
     "PlateRecognized",
@@ -102,99 +235,30 @@ __all__ = [
     "OccupancyChanged",
     "OccupancyHeatmap",
     "OccupancyFootfall",
-    # Domain events (producing side of docs/EVENT_CONTRACTS.md)
-    "DomainEventPublisher",
-    "domain_envelope",
-    "domain_subject",
-    # Archetype bases + runners
-    "Detector",
-    "FrameApp",
-    "AlertSubscriber",
-    "AppRunner",
-    "AlertSubscriberRunner",
-    "app",
-    "alert_app",
-    # Alerts (§11.5)
-    "Alert",
-    "AlertSource",
-    "AlertChannel",
-    "AlertDispatcher",
-    "StdoutChannel",
-    "WebhookChannel",
-    "NatsAlertChannel",
-    "alert_subject",
-    "build_dispatcher",
-    "set_default_source",
-    "DEFAULT_ALERT_SUBJECT_PREFIX",
-    # Manifest
-    "AppManifest",
-    "PRICING_MODELS",
-    "ENTITLEMENT_MODES",
-    "DETECTION_LABELS",
-    "Entitlement",
-    "Param",
-    "AlertType",
-    "StateView",
-    "Action",
-    # Keyed TTL state
-    "keyed_state",
-    "KeyedState",
-    "StateRecord",
-    # Geometry
-    "Point",
-    "Zone",
-    "Tripwire",
-    "bbox_center",
-    # Config helpers
-    "load_yaml",
-    "require",
-    # Cameras (roster + per-camera assignment) and the app's credential
-    "discover_cameras",
-    "cameras_for_skill",
-    "filter_cameras_for_skill",
-    "full_frame_polygon",
-    "AppCredentials",
-    "auth_headers",
-    # The operator behind a /ui view or an action (X-OpenNVR-User)
-    "UserContext",
-    "verify_call_token",
-    "current_user",
-    # The platform client (everything an app reads from core / KAI-C)
-    "OpenNVR",
-    "BaseAppConfig",
-    "load_app_config",
-    "AsyncOpenNVR",
-    "Camera",
-    "Recording",
-    "PlatformError",
-    "InferStream",
-    # Consuming contracted domain events
-    "DomainEvent",
-    "DomainEventSubscriber",
-    "domain_event_app",
-    "parse_domain_event",
-    # Frame-app plumbing
-    "FrameSource",
-    "KaiCClient",
-    "KaiCError",
-    # Per-camera frame sources
-    "CameraFrameSource",
-    "FileFrameSource",
-    "HttpSnapshotSource",
-    "FrameSourceError",
-    "build_frame_source",
-    "DictFrameSource",
-    "dict_frame_source",
-    # Contract surface (§03)
-    "ContractServer",
-    # Tier-0 consumption (answer from the always-on detector; reuse its best frame)
     "Tier0Snapshot",
     "snapshot_from_event",
-    "describe_counts",
-    "EventsClient",
-    "StoredEvent",
-    "is_tier0_subject",
     "tier0_to_detections",
+    "is_tier0_subject",
+    "describe_counts",
     "BestFrameClient",
     "make_best_frame_fetch",
-]
+)
+
+#: Low-level config helpers, for loaders that do their own parsing.
+CONFIG: tuple[str, ...] = (
+    "load_yaml",
+    "require",
+)
+
+#: Tier name → the names it exports, in documentation order.
+API_TIERS: dict[str, tuple[str, ...]] = {
+    "front-door": FRONT_DOOR,
+    "archetypes": ARCHETYPES,
+    "rules": RULES,
+    "platform": PLATFORM,
+    "surfaces": SURFACES,
+    "events": EVENTS,
+    "config": CONFIG,
+}
+
+__all__ = ["API_TIERS", *(name for tier in API_TIERS.values() for name in tier)]

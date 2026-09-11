@@ -6,6 +6,208 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **App SDK: the `App` facade — apps in one function.** Writing a first
+  app required knowing about NATS subjects, inference envelopes,
+  normalized bboxes, alert dispatchers and keyed TTL state before
+  writing a line of the rule. `App` collapses that into a declaration
+  and a decorated function:
+
+  ```python
+  app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+
+  @app.on_detection("person", zone="driveway", dwell=30)
+  def loitering(event):
+      event.alert(f"Person loitering on {event.camera}", severity="high")
+  ```
+
+  The facade owns the manifest (a `zone=` anywhere adds the per-camera
+  zone editor the catalog renders), the config dataclass (from
+  `app.param(...)`, so `config.yml` and `event.config` cannot drift),
+  per-detection fan-out, `dwell=`/`cooldown=` keyed per
+  camera/label/track, and an `event.alert()` that fills in camera,
+  correlation id, label, confidence, track, zone and dwell.
+  `@app.on_event()` is the whole-frame escape hatch; `@app.on_setup()`
+  runs once with the parsed config.
+
+  It is additive: `App.detector_class()` compiles to an ordinary
+  `Detector`, so the process, the manifest, the alerts and the contract
+  surface are unchanged, and `Detector`, `FrameApp`, `AlertSubscriber`
+  and `DomainEventSubscriber` remain the documented path for rules that
+  outgrow the decorators. Every app already in the catalog keeps working
+  without a change.
+
+- **`opennvr-app dev` — run an app against a simulated camera.** Between
+  `opennvr-app new` and a working stack there used to be Docker, a NATS
+  broker, a KAI-C adapter and a real camera, which is a long way to go
+  to find out whether a rule fires. `opennvr-app dev` walks a simulated
+  object across the frame in-process and prints the alerts as they fire,
+  annotating zone entry and exit, with `--label`, `--camera`, `--rate`,
+  `--count`, `--still` and `--fast`. It drives the same `handle_event`
+  path a real subscription uses, so what fires there fires in
+  production. Works for facade apps and for plain `Detector` apps alike.
+
+- **Every app now self-describes in OpenAPI 3.1 and AsyncAPI 3.0.** Core,
+  KAI-C and the AI adapters are FastAPI and have always published
+  OpenAPI at `/openapi.json`; the two surfaces that had no machine-
+  readable spec were the app contract server (a stdlib HTTP server) and
+  the event bus (not HTTP at all). Both are now generated from the app's
+  own `AppManifest`, so they cannot drift from the app: a declared
+  `Action` is a `POST /actions/{name}` path with a typed request body, a
+  declared `Param` is a JSON Schema (with `x-opennvr-ui` for the
+  catalog's geometry types), `has_ui` adds `GET /ui`, and
+  `entitlement: license_key` adds `POST /entitlement/verify`. The
+  contract server serves them at `/openapi.json` and `/asyncapi.json`,
+  and `opennvr-app spec [--format asyncapi] [--yaml] [-o FILE]` prints
+  them without running the app. Every example app in this repository
+  generates a document that passes `openapi-spec-validator`.
+
+- **A published API reference — [opennvr.org/sdk](https://opennvr.org/sdk).**
+  mkdocs-material + mkdocstrings, so the site *is* the docstrings: there
+  is no second copy of the API to keep current. `make sdk-site` builds
+  it, `make sdk-site-serve` serves it with live reload. Alongside the
+  generated reference it carries a quickstart, a concepts page (the four
+  archetypes and how to pick one), six guides (rules, platform,
+  surfaces, events, testing, selling), the cookbook index, the specs
+  page and the licensing statement.
+
+- **The SDK's 98 exports now have a documented front door.**
+  `opennvr_app_sdk.API_TIERS` orders the public surface into seven tiers
+  — front door (six names, the whole of a first app), archetypes, rules,
+  platform, surfaces, events, config — and `__all__` is *assembled from
+  it*, so the tiers cannot fall out of step with the exports. The site's
+  navigation and its reference pages are generated from the same tuples
+  by `scripts/gen_reference.py`. `tests/test_public_api.py` fails on a
+  name in two tiers, in none, reachable but untiered, or exported
+  without a docstring; `tests/test_docs_site.py` fails on a stale
+  generated page, a dead nav link, an orphaned page or a broken code
+  snippet.
+
+- **A runnable example per SDK class** —
+  [`sdk/opennvr-app-sdk/cookbook/`](sdk/opennvr-app-sdk/cookbook/), 19
+  files covering `App`, `Detector`, `FrameApp`, `AlertSubscriber`,
+  `DomainEventSubscriber`, `OpenNVR`, `AsyncOpenNVR`, `EventsClient`,
+  `InferStream`, `ContractServer`, `DomainEventPublisher`, Tier-0,
+  `keyed_state` / `Zone` / `Tripwire`, alerts and channels, the
+  manifest's full vocabulary, selling an app, credentials and the
+  roster, egress, and the testing helpers. Each says in its docstring
+  what it demonstrates, and every one is imported and exercised by
+  `tests/test_cookbook.py` — an example that references a name the SDK
+  no longer exports fails in CI rather than misleading a reader.
+
+- `AlertDispatcher.channels` — a read-only view of the delivery chain,
+  for tests and for a "where do my alerts go?" state view.
+
+- **[API_STANDARDS.md](docs/API_STANDARDS.md)** — the map of every API
+  surface and the open specification that describes it, including what
+  is deliberately *not* adopted and why.
+
+- **Licensing is now legible from inside the SDK package.**
+  `sdk/opennvr-app-sdk/LICENSING.md` and a `NOTICE` state the app
+  boundary — an app talks to the AGPL core over NATS and HTTP and never
+  links it, so a closed app carries no AGPL obligation — and both are
+  installed with the wheel rather than living only on GitHub.
+
+### Fixed
+
+- **A `zone=` rule could never fire once an operator drew the zone.** The
+  facade invented a config shape (`zones: {driveway: [...]}`) that core's
+  config validator rejects and the catalog's geometry editor cannot
+  produce. The platform's shape for a per-camera `geometry.polygon` param
+  is `{camera_id: [[x, y], …]}` — one polygon per param — so each
+  `zone="driveway"` now declares **its own param named `driveway`**,
+  which also tells the operator which zones an app expects and where
+  each one goes. Previously every camera also inherited every other
+  camera's polygon.
+- **`dwell` counted time on camera, not time in the zone.** The presence
+  clock started before the rule's filters ran, so
+  `zone="driveway", dwell=30` meant "thirty seconds on camera, then one
+  frame in the driveway". Presence now accrues per rule, and only while
+  that rule's zone, camera, label and confidence filters all hold.
+- **A presence episode never ended**, so the second person of the day
+  never alerted and `dwell_s` was measured from the first person's
+  arrival. A gap longer than `forget=` (default `max(30s, dwell)`) now
+  ends the episode and re-arms the once-per-episode latch, while the
+  cooldown's memory survives a brief occlusion.
+- **Two handlers sharing a `__name__`** — two lambdas, or two functions
+  a factory built — shared one dwell latch and one cooldown, so the
+  second was suppressed forever, and their alert types collapsed into
+  one. Rule identity is positional now.
+- **`return event.alert(...)` dispatched the alert twice**, which the
+  method's own docstring invited.
+- **One event with a missing `completed_at` wiped every other camera's
+  presence state**: the wall-clock fallback fed the garbage collector.
+  Event time is now per camera and non-decreasing, so cameras with a few
+  seconds of skew no longer read as out-of-order either.
+- **A capitalised or lambda handler produced an alert-type name that
+  `opennvr-app validate` rejects**; names are slugified.
+- **A rule that raised never marked its cooldown**, so it re-raised on
+  every event.
+- **Redrawn zones needed a restart** — the zone cache was never
+  invalidated on a live config update.
+- **`opennvr-app dev` crashed on an app whose manifest is only a class
+  attribute**, a shape `validate` has always accepted. The two commands
+  no longer disagree about the same app, and an archetype `dev` cannot
+  simulate now says so instead of leaking a `TypeError`.
+- Nested mutable param defaults were shallow-copied and therefore shared
+  between config instances.
+- `App("Gate Watch")` was accepted and only failed later at `validate`;
+  the id is checked at the source, with the message the scaffold uses.
+- Passing a manifest field the decorators derive (`params`, `actions`,
+  `entitlement`, …) to `App(...)` silently lost it; it is now refused
+  with a pointer to the decorator that owns it.
+
+### Changed
+
+- **The facade now covers a whole app, not just its rule.** Every
+  surface that used to be a base-class method override — and so could be
+  *declared* through the facade but never *implemented* — has a
+  decorator that registers the manifest entry and the implementation
+  together: `@app.state` with `app.metric` / `gauge` / `table` / `log` /
+  `gallery` (all fourteen example apps declare a dashboard),
+  `@app.action`, `@app.ui`, `@app.on_license` (so a facade app can be a
+  paid app at all — `validate` errors on a licence gate with no
+  verifier), `@app.on_config`, `@app.on_setup`, `@app.on_shutdown`.
+  `app.store` is a plain dict merged into `GET /state`, so a counter and
+  one `app.metric(...)` are a complete dashboard.
+- **A rule can reach the platform and the bus.** `event.nvr` /
+  `app.nvr` is the `OpenNVR` client, built once from the app's own
+  config and credential and closed at shutdown; `event.snapshot()` is
+  this event's camera; `event.publish(schema, payload)` emits a
+  contracted domain event with the envelope, producer and correlation id
+  filled in, and `app.publishes(...)` puts it in the app's AsyncAPI
+  document.
+- **Rule filters can read operator config.** A decorator argument is
+  fixed at import, which made the config form useless for the one number
+  an app is about. `dwell="$dwell_s"` (or `setting("dwell_s")`) resolves
+  from the declared param at start-up.
+- **The hidden 0.35 confidence floor is gone.** A rule that declares no
+  `min_confidence` now sees every detection, so the only threshold in an
+  app is the one it wrote down.
+- **`config.yml` no longer has to restate what the deployment knows.**
+  `BaseAppConfig` reads `NATS_URL`, `OPENNVR_URL` and
+  `OPENNVR_INTERNAL_API_KEY` — which the app installer already exports
+  into every app container — so `nats_url` is optional and a config file
+  reduces to the app's own params. An explicit value in the file always
+  wins; an empty one is still an error.
+- **A scaffolded app sees events on a stock install.** Tier-0 is the
+  only detection stream on the bus out of the box, so an app that
+  ignored it registered, showed a green dot and fired nothing, forever.
+  `consume_tier0` is a real `BaseAppConfig` field now (setting it in
+  `config.yml` used to do nothing) and the facade turns it on by
+  default; `App(consume_tier0=False)` opts out.
+- **`opennvr-app dev` draws a stand-in polygon** for a zone the app
+  declares but nobody has configured, so the `zone=` example every
+  quickstart leads with is reproducible from `opennvr-app new`
+  (`--no-zones` to skip). A zone with no polygon in a real deployment
+  now logs one actionable warning per rule per camera instead of going
+  silent.
+- The scaffold template, its README and its smoke tests lead with the
+  facade, and `opennvr-app validate` discovers a facade app (its
+  manifest, compiled class and generated config class) alongside the
+  existing archetypes.
+
 ## [0.1.5] — 2026-09-10
 
 The largest release since 0.1.0, and the one where the app platform grew

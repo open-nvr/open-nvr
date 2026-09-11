@@ -48,9 +48,42 @@ def test_load_app_config_fills_base_and_extra_fields(tmp_path):
     assert cfg.watch_labels == ["Car", "TRUCK"] and cfg.dwell_s == 12 and cfg.zone == {}
 
 
-def test_load_app_config_errors_are_operator_readable(tmp_path):
+def test_a_config_without_nats_url_uses_what_the_deployment_exports(tmp_path, monkeypatch):
+    """The app installer already exports NATS_URL / OPENNVR_URL /
+    OPENNVR_INTERNAL_API_KEY into every app container, so a config.yml
+    that names none of them is complete — and an explicit value in the
+    file still wins."""
+    from opennvr_app_sdk.config import DEFAULT_NATS_URL
+
     p = tmp_path / "c.yml"
     p.write_text("watch_labels: [x]\n")
+
+    monkeypatch.delenv("NATS_URL", raising=False)
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("OPENNVR_URL", raising=False)
+    bare = load_app_config(p)
+    assert bare.nats_url == DEFAULT_NATS_URL
+    assert bare.nats_token is None
+
+    monkeypatch.setenv("NATS_URL", "nats://elsewhere:4222")
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "k3y")
+    monkeypatch.setenv("OPENNVR_URL", "http://core:8000")
+    from_env = load_app_config(p)
+    assert from_env.nats_url == "nats://elsewhere:4222"
+    assert from_env.nats_token == "k3y"
+    assert from_env.opennvr_token == "k3y"
+    assert from_env.opennvr_url == "http://core:8000"
+
+    (tmp_path / "explicit.yml").write_text("nats_url: nats://in-the-file:4222\n")
+    assert load_app_config(tmp_path / "explicit.yml").nats_url \
+        == "nats://in-the-file:4222"
+
+
+def test_an_empty_nats_url_is_still_an_error(tmp_path):
+    """Omitting the key means "use the deployment's"; writing an empty
+    one is a typo, and typos should be loud."""
+    p = tmp_path / "c.yml"
+    p.write_text("nats_url: '   '\n")
     with pytest.raises(ValueError, match="'nats_url' is required"):
         load_app_config(p, _Cfg)
     p.write_text("nats_url: nats://x\nsubject_pattern: '  '\n")
@@ -145,8 +178,9 @@ def test_pypi_mode_is_the_default_and_self_contained(tmp_path):
     import re
     leftovers = {k for k, v in f.items() if re.search(r"__[A-Z_]+__", v)}   # no token left
     assert not leftovers, leftovers
-    assert "class GateWatch(Detector)" in f["gate_watch.py"]
-    assert "load_app_config(path, AppConfig)" in f["gate_watch.py"]
+    assert 'App(\n    "gate-watch"' in f["gate_watch.py"]
+    assert "@app.on_detection(" in f["gate_watch.py"]
+    assert "app.param(" in f["gate_watch.py"]
     assert "__APP" not in f["gate_watch.py"]
 
 
@@ -182,7 +216,7 @@ def test_scaffolded_app_smoke_test_passes(tmp_path):
         env={"PYTHONPATH": f"{app_dir}{__import__('os').pathsep}{Path(scaffold.__file__).parents[1]}",
              "PATH": __import__('os').environ.get("PATH", "")})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "5 passed" in proc.stdout
+    assert "6 passed" in proc.stdout
 
 
 def test_cli_new(tmp_path, capsys):

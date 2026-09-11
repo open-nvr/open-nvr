@@ -277,3 +277,6 @@ kai-c-state/
 
 # make sdk-docs output (generated, see docs/SDK_REFERENCE.md)
 sdk/opennvr-app-sdk/docs/api/
+
+# make sdk-site output (the published reference; rebuild, never commit)
+sdk/opennvr-app-sdk/site/

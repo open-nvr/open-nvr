@@ -24,7 +24,10 @@ Start here. Pick the row that matches what you're doing.
 - **[APP_NETWORK.md](APP_NETWORK.md)** — enforced egress: the internal apps network, the proxy, declared and allowed hosts, what the operator sees, plain-TCP clients.
 - **[APP_PLATFORM.md](APP_PLATFORM.md)** — the `OpenNVR` client: cameras, snapshots, recordings, timeline, AI, alerts, durable state, domain-event consumption.
 - **[SDK_REFERENCE.md](SDK_REFERENCE.md)** — index of every public `opennvr_app_sdk` name, by task.
+- **[opennvr.org/sdk](https://opennvr.org/sdk)** — the published API reference, generated from the SDK docstrings (`make sdk-site`).
+- **[sdk/opennvr-app-sdk/cookbook/](../sdk/opennvr-app-sdk/cookbook/)** — one runnable example per class: how it is subclassed, which APIs it uses. Exercised by the test suite.
 - **[PLATFORM_API.md](PLATFORM_API.md)** — the operator API: users (incl. superusers + MFA), roles and the permission catalogue, cameras, assignments, per-camera access, apps and licences.
+- **[API_STANDARDS.md](API_STANDARDS.md)** — every surface and the open spec that describes it: OpenAPI 3.1 for HTTP (core, KAI-C, adapters, and each app, generated from its manifest), AsyncAPI 3.0 for the bus, and `opennvr-app spec`.
 
 ## Build on the AI layer
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.

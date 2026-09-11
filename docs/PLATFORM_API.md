@@ -5,7 +5,8 @@ UI does can be scripted: creating users and roles, adding cameras,
 assigning skills, granting per-camera access, installing and licensing
 apps. This page is the map. The full, always-current reference is the
 generated Swagger UI at **`/docs`** on any running stack (`/redoc` for
-the reading version, `/openapi.json` for tooling).
+the reading version, `/openapi.json` for tooling). Every other surface
+is specified too — see [API_STANDARDS.md](API_STANDARDS.md).
 
 Two other doors exist and are *not* this page:
 

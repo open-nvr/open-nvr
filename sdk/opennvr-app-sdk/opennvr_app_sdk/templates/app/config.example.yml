@@ -8,32 +8,42 @@
 #
 #   python __APP_MODULE__.py --config config.yml
 
-# ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
+# ── The deployment (usually leave these out) ───────────────────────
 #
-# This app subscribes to KAI-C's inference broadcast surface instead of
-# driving its own inference. It rides the stream another app (e.g.
-# intrusion-detection) is already pushing — one adapter inference fans
-# out to N consumers; this app pays zero GPU cost on top.
-nats_url: "nats://nats:4222"
-# Bare-metal / host-mode deployment:
-# nats_url: "nats://127.0.0.1:4222"
-
-# Token-auth secret. Must match the INTERNAL_API_KEY the stack's NATS
-# uses. Leave null only in fully-isolated dev deployments where NATS is
-# configured auth-less.
-nats_token: null
-
-# Subject pattern. The wildcard ``opennvr.inference.>`` catches every
-# adapter's events; narrow to e.g. ``opennvr.inference.yolov8.>`` to
-# only see one adapter's results.
-subject_pattern: "opennvr.inference.>"
-
-# ── Detection filter ──────────────────────────────────────────────
+# The app installer exports NATS_URL, OPENNVR_URL and
+# OPENNVR_INTERNAL_API_KEY into every app container, and the SDK reads
+# them — so in a real deployment this whole section is unnecessary.
+# Set a value here only to override what the deployment says.
 #
-# Only detections with one of these labels (case-folded) count toward
-# the rule. Edit for your app's domain.
-watch_labels:
-  - "person"
+# nats_url: "nats://nats:4222"       # "nats://127.0.0.1:4222" host-mode
+# nats_token: null                   # the stack's INTERNAL_API_KEY
+# opennvr_url: "http://opennvr-core:8000"
+#
+# Subject pattern. ``opennvr.inference.>`` catches the always-on Tier-0
+# detector AND every adapter; narrow to e.g. ``opennvr.inference.yolov8.>``
+# to see one adapter only.
+# subject_pattern: "opennvr.inference.>"
+#
+# Tier-0 is the detector every camera runs all the time, and on a stock
+# install it is the ONLY detection stream on the bus. The App facade
+# consumes it by default; set this false if this app also drives a
+# heavy adapter and would otherwise see every object twice.
+# consume_tier0: true
+
+# ── The rule's knobs ──────────────────────────────────────────────
+#
+# One entry per ``app.param(...)`` in __APP_MODULE__.py.
+min_confidence: 0.5
+dwell_s: 0.0
+
+# Zones. Each ``zone="driveway"`` in a rule becomes a config key of
+# that name, mapping camera id → polygon. Coordinates are normalized
+# (0–1 of the frame) so they survive a resolution change, and the App
+# Catalog's geometry editor writes them for you — you rarely type this
+# by hand.
+#
+# driveway:
+#   cam-front: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
 
 # ── Webhook (optional) ────────────────────────────────────────────
 #

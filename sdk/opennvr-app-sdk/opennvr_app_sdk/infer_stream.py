@@ -32,6 +32,25 @@ MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
 class InferStream:
+    """A streaming inference session against one KAI-C adapter.
+
+    ``KaiCClient.infer`` is one HTTP round-trip per frame — fine at one
+    frame every few seconds, wasteful at ten a second. This holds a
+    WebSocket session open instead, so the model stays warm and every
+    frame in the session shares one audit ``correlation_id``, which is
+    what makes a sequence of frames traceable as a single episode.
+
+    Use it as a context manager; the session reopens itself after a
+    failure, so a dropped frame costs one frame::
+
+        with InferStream(url, key, adapter="yolov8", camera_id="cam1") as s:
+            for jpeg in frames:
+                result = s.infer(jpeg)["result"]
+
+    ``nvr.ai.stream(adapter, camera_id=…)`` builds one from the app's own
+    credential, which is usually what you want inside an app.
+    """
+
     def __init__(self, kaic_url: str, api_key: str | None, *, adapter: str,
                  camera_id: str, client_id: str = "opennvr-app",
                  timeout: float = 10.0,

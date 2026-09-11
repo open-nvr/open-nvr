@@ -7,13 +7,82 @@ per-camera permissions, and a catalog every deployment opens — all
 already running. You write the rule, the model or the workflow; this
 package is the only import you need.
 
-Apache-2.0 — ship your app under any licence, closed included.
+Apache-2.0 — ship your app under any licence, closed included, with no
+fee to OpenNVR. Why that holds even though the platform core is AGPL:
+[LICENSING.md](LICENSING.md).
 
 ```bash
 pip install opennvr-app-sdk
 ```
 
-## A detector in one method
+## An app in one function
+
+```python
+from opennvr_app_sdk import App
+
+app = App("loitering", name="Loitering", version="1.0.0", category="perimeter")
+app.param("dwell_s", float, default=30.0)
+app.metric("alerted", label="Alerts fired")
+
+@app.on_detection("person", zone="driveway", dwell="$dwell_s")
+def loitering(event):
+    event.alert(f"Person loitering on {event.camera}", severity="high")
+    app.store["alerted"] = app.store.get("alerted", 0) + 1
+
+if __name__ == "__main__":
+    raise SystemExit(app.run())
+```
+
+That app subscribes to the platform's detections, serves the registry
+contract (`/health`, `/state`, `/manifest`, config form, actions),
+registers itself in the App Catalog, is issued its own credential, and
+fires alerts that reach the operator inbox — none of which you wrote.
+The zone becomes an editor named `driveway` that the operator draws on a
+camera still; `dwell_s` becomes a field in the config form they can
+tune; `alerted` becomes a tile on the app's dashboard. The presence
+timer, the once-per-episode latch, the alert envelope and the config
+file are the SDK's.
+
+Declaring a surface implements it: `@app.action` adds an operator
+button, `@app.ui` an embedded page, `@app.on_license` the gate for a
+paid app, `@app.state` / `app.metric` a dashboard, and inside a rule
+`event.publish()` reaches other apps while `event.nvr` is the platform.
+
+See it fire before you touch Docker:
+
+```bash
+opennvr-app new loitering        # a runnable app + tests
+opennvr-app dev                  # run it against a simulated camera
+opennvr-app validate .           # what a reviewer would check
+opennvr-app spec                 # its OpenAPI 3.1 document
+```
+
+Your app self-describes: the contract server it gets for free serves
+**OpenAPI 3.1** at `/openapi.json` and **AsyncAPI 3.0** at
+`/asyncapi.json`, both generated from your manifest — a declared action
+is a path with a typed body, a declared param is a schema. Point Swagger
+UI or a client generator at a running app and it works.
+
+## The reference
+
+**[opennvr.org/sdk](https://opennvr.org/sdk)** — every export, in tiers,
+generated from these docstrings. Start at the front door: six names, and
+most apps need nothing else.
+
+## One example per class
+
+[`cookbook/`](cookbook/) is a runnable file per class — how it is
+constructed or subclassed, and which APIs it uses. Every file is
+imported and exercised by the test suite, so an example that references
+a name the SDK no longer exports breaks in CI rather than misleading
+you months later. Start at
+[`01_app_facade.py`](cookbook/01_app_facade.py).
+
+## …or the class underneath it
+
+`App` compiles to a `Detector`. When a rule outgrows the decorators,
+write the `Detector` directly — same process, same manifest, same
+alerts:
 
 ```python
 from opennvr_app_sdk import Alert, AppManifest, Detector, Param, app
@@ -42,10 +111,9 @@ if __name__ == "__main__":
     raise SystemExit(app(Loitering).run())
 ```
 
-That app subscribes to the platform's detections, serves the registry
-contract (`/health`, `/state`, `/manifest`, config form, actions),
-registers itself in the App Catalog, is issued its own credential, and
-fires alerts that reach the operator inbox — none of which you wrote.
+`FrameApp` drives its own inference, `AlertSubscriber` consumes the
+alert bus and `DomainEventSubscriber` consumes contracted domain
+events — same shape, different input.
 
 ## The platform, from an app
 
