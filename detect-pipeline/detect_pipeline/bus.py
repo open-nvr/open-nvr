@@ -65,6 +65,10 @@ def build_payload(camera_id: str, result: FrameResult, frame) -> dict:
                 # a best-frame crop is retained + fetchable for this track (a
                 # consumer can pull it instead of grabbing an arbitrary live frame)
                 "best": getattr(t, "best_crop", None) is not None,
+                # Detected in THIS frame, or coasting at its last box?
+                # Additive (EVENT_CONTRACTS.md); a live overlay draws only
+                # matched tracks, presence consumers use both.
+                "matched": bool(getattr(t, "matched_now", True)),
             }
             for t in result.tracks
         ],

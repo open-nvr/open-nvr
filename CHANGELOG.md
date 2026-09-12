@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live overlay drew coasting tracks.** Phantom boxes piled up on a
+  moving scene — dozens of stale outlines on sky and hedges — while the
+  vehicle actually in shot went unboxed. Tier-0's tracker keeps an
+  unmatched track alive at its last box for up to `coast_ttl_seconds`
+  (five minutes) so a visit survives a skipped frame; that is right for
+  presence and wrong to draw. Each published track now carries
+  `matched` — detected in *this* frame — and the overlay bridge drops
+  the rest. `misses == 0` would not have worked: a track coasting
+  because its region was skipped never counts a miss, which is exactly
+  the phantom case. Additive on the bus; an older producer without the
+  field keeps drawing.
+
 ### Added
 
 - **Bounding boxes on the live view.** Tracked objects are outlined over

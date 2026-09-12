@@ -97,6 +97,37 @@ def test_nothing_drawable_returns_none():
     assert tc.to_overlay_payload(_raw([{"id": 1, "label": "x", "score": 0.01, "box": [0, 0, 9, 9]}])) is None
 
 
+def test_coasting_tracks_are_not_drawn():
+    """Reported: phantom boxes pile up on a moving scene while the real
+    vehicle goes unboxed. The tracker coasts an unmatched track for up
+    to five minutes at its last position; the overlay must draw only what
+    was detected THIS frame."""
+    out = tc.to_overlay_payload(_raw([
+        {"id": 1, "label": "car", "score": 0.9, "box": [0, 0, 100, 100], "matched": True},
+        {"id": 2, "label": "car", "score": 0.9, "box": [0, 0, 100, 100], "matched": False},
+        {"id": 3, "label": "car", "score": 0.9, "box": [0, 0, 100, 100], "matched": False},
+    ]))
+    assert [t["id"] for t in out["tracks"]] == [1]
+
+
+def test_a_frame_of_only_coasting_tracks_publishes_nothing():
+    """A calibrating or detect-skipped frame returns every track unmatched.
+    That must be 'nothing to draw', not 'draw last known positions'."""
+    out = tc.to_overlay_payload(_raw([
+        {"id": 1, "label": "car", "score": 0.9, "box": [0, 0, 100, 100], "matched": False},
+    ]))
+    assert out is None
+
+
+def test_missing_matched_field_is_treated_as_matched():
+    """Additive-only contract: a producer that predates `matched` keeps
+    drawing. Going dark on an older Tier-0 would be a regression."""
+    out = tc.to_overlay_payload(_raw([
+        {"id": 1, "label": "car", "score": 0.9, "box": [0, 0, 100, 100]},
+    ]))
+    assert out and [t["id"] for t in out["tracks"]] == [1]
+
+
 def test_non_dict_tracks_are_skipped_not_fatal():
     out = tc.to_overlay_payload(_raw([
         "junk", None, 42,

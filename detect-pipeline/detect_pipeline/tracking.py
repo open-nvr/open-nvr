@@ -101,6 +101,13 @@ class Track:
     # Monotonic timestamp of the last positive match (set at spawn and on
     # every match) — the coast-TTL expiry anchor.
     last_matched: float = 0.0
+    # True for exactly the update() in which this track was matched to a
+    # detection (or spawned from one); False while it COASTS. Not the same
+    # as ``misses == 0``: a track coasting unscanned never counts a miss,
+    # so misses cannot tell "seen this frame" from "not looked for". The
+    # bus ships this so a live overlay draws only what was actually
+    # detected — a coasting track at its last box read as a phantom.
+    matched_now: bool = field(default=False, compare=False)
     # BGR crop of the best frame, retained only when the tracker is fed pixels
     # (the Tier-1 gate dispatches THIS on escalation — see gate/dispatch, PR B #10).
     best_crop: object | None = field(default=None, repr=False, compare=False)
@@ -258,6 +265,9 @@ class Tracker:
         # behavior: every unmatched track counts a miss.
         cfg = self.config
         now = self._clock()
+        # Every track starts this update unmatched; _match/_spawn set it.
+        for tr in self._tracks:
+            tr.matched_now = False
         # This frame's scene memo. Stamped here, cleared before the return:
         # the encode is shared by every track that peaks on this frame, and
         # the frame reference never outlives the call.
@@ -344,6 +354,7 @@ class Tracker:
         tr.hits += 1
         tr.age += 1
         tr.misses = 0
+        tr.matched_now = True
         tr.last_matched = now if now is not None else self._clock()
         if not tr.confirmed and tr.hits >= self.config.initialized():
             tr.confirmed = True
@@ -357,6 +368,7 @@ class Tracker:
             score=det.score,
             stationary_threshold=self.config.stationary_threshold,
             last_matched=now if now is not None else self._clock(),
+            matched_now=True,
         )
         tr.confirmed = self.config.initialized() <= 1
         self._update_best(tr, det, bgr)

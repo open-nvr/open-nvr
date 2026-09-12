@@ -126,7 +126,7 @@ consumers.
 |---|---|---|
 | `frame` | object | `{w, h}` in pixels — lets consumers normalise boxes. |
 | `calibrating` | bool | Tier-0 still calibrating; treat tracks as provisional. |
-| `tracks` | array | Same track shape as `opennvr.tier0.v1` (`id`, `label`, `conf`, `bbox`, motion fields). Normative source: `detect_pipeline/bus.py::build_payload`. |
+| `tracks` | array | Same track shape as `opennvr.tier0.v1` (`id`, `label`, `conf`, `bbox`, motion fields). Normative source: `detect_pipeline/bus.py::build_payload`. Each track also carries `matched` (bool): true when the object was detected in *this* frame, false when the track is **coasting** — kept alive at its last box (up to `coast_ttl_seconds`) because the tracker did not see it leave. Consumers rendering a live picture should draw only `matched` tracks; consumers reasoning about presence (visits, occupancy) want both. Additive: absent means matched. |
 
 ### `overlay.boxes.v1`
 
