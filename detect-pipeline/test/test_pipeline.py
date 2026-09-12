@@ -335,3 +335,66 @@ def test_one_failing_region_does_not_kill_the_frame():
     assert det.n > 1, "pipeline stopped calling the detector after the failure"
     assert any(r.tracks or r.detections for r in results), \
         "later regions must still produce detections"
+
+
+# ── re-verification order under a budget ───────────────────────────
+
+
+def test_budgeted_reverification_goes_to_the_longest_waiting_tracks_first(monkeypatch):
+    """Under a region budget the reserve used to round-robin by
+    `frame_idx % len(track_boxes)`; the candidate count changes every
+    frame, so the modulo aliased and some tracks were skipped again and
+    again — measured 6–11 s between re-checks for present objects on a
+    shed budget. The tracks that have waited longest since their last
+    positive match now go first, so the wait is bounded for everyone."""
+    from detect_pipeline import pipeline as pl
+
+    clock = [100.0]
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1), clock=lambda: clock[0])
+    # Three far-apart tracks spawned at t=100, 101, 102. Each later update
+    # leaves the earlier ones unmatched (coasting, unscanned), so their
+    # last_matched stays at spawn time: ages differ, newest last.
+    boxes = [(10, 10, 60, 60), (150, 10, 200, 60), (10, 150, 60, 200)]
+    for i, b in enumerate(boxes):
+        clock[0] = 100.0 + i
+        tracker.update([Detection("person", b, 0.9)], scanned_regions=[])
+    by_box = {t.box: t for t in tracker.tracks}
+    assert len(by_box) == 3
+
+    captured: dict = {}
+
+    def _spy(motion_boxes, track_boxes, *a, **k):
+        captured["track_boxes"] = list(track_boxes)
+        return [], False
+
+    monkeypatch.setattr(pl, "select_regions", _spy)
+    pipe = DetectPipeline(
+        _FakeSource(1), _FakeMotion(box=(300, 300, 310, 310), calibrating=False),
+        _OneBoxDetector(), tracker, max_regions=2,
+    )
+    clock[0] = 110.0
+    pipe.process_frame(_frame(1))
+
+    order = captured["track_boxes"]
+    assert order == sorted(order, key=lambda b: by_box[b].last_matched), \
+        "re-verification candidates are not oldest-first"
+    assert order[0] == boxes[0] and order[-1] == boxes[2]
+
+
+def test_reverification_order_is_stable_for_equal_ages(monkeypatch):
+    """Ties break on track id, so two tracks matched in the same frame do
+    not swap places from one frame to the next."""
+    from detect_pipeline import pipeline as pl
+
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1), clock=lambda: 100.0)
+    tracker.update([Detection("person", (150, 10, 200, 60), 0.9),
+                    Detection("person", (10, 10, 60, 60), 0.9)], scanned_regions=[])
+    ids = {t.box: t.id for t in tracker.tracks}
+    captured: dict = {}
+    monkeypatch.setattr(pl, "select_regions",
+                        lambda m, tb, *a, **k: (captured.setdefault("tb", list(tb)), (False,))[1] and ([], False) or ([], False))
+    pipe = DetectPipeline(_FakeSource(1), _FakeMotion(box=(300, 300, 310, 310)),
+                          _OneBoxDetector(), tracker, max_regions=2)
+    pipe.process_frame(_frame(1))
+    tb = captured["tb"]
+    assert [ids[b] for b in tb] == sorted(ids[b] for b in tb)

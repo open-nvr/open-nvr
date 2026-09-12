@@ -218,7 +218,8 @@ class DetectPipeline:
 
         frame_shape = (frame.height, frame.width)
         self._frame_idx += 1
-        track_boxes: list[Box] = []
+        # (last_matched, id, box): the order the budget will consider them in.
+        candidates: list[tuple[float, int, Box]] = []
         skipped = 0
         for t in self.tracker.tracks:
             if (
@@ -234,12 +235,20 @@ class DetectPipeline:
             ):
                 skipped += 1
                 continue
-            track_boxes.append(t.box)
-        # Rotate the track-region candidates by frame index so the per-frame
-        # budget round-robins across tracks instead of starving the tail.
-        if self.max_regions > 0 and len(track_boxes) > 1:
-            off = self._frame_idx % len(track_boxes)
-            track_boxes = track_boxes[off:] + track_boxes[:off]
+            candidates.append((getattr(t, "last_matched", 0.0), t.id, t.box))
+        # Under a region budget the reserve goes to the tracks that have
+        # WAITED LONGEST since their last positive match. This used to be a
+        # round-robin by frame index (`frame_idx % len(track_boxes)`), but
+        # the candidate count changes every frame as tracks spawn, expire
+        # and get stationary-skipped, so the modulo aliased and some tracks
+        # were skipped again and again: measured on a busy dashcam scene
+        # with the budget shed to 4 regions, present objects went 6–11 s
+        # between re-verifications while the median was under 3 s. Oldest
+        # first is deterministic and bounds the wait at ~(tracks / reserve)
+        # frames for everyone; the id breaks ties so equal ages stay stable.
+        if self.max_regions > 0 and len(candidates) > 1:
+            candidates.sort(key=lambda c: (c[0], c[1]))
+        track_boxes: list[Box] = [c[2] for c in candidates]
         _t = time.monotonic()
         regions, regions_capped = select_regions(
             motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier,

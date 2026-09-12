@@ -24,6 +24,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tail). A phantom is never re-found, ages past the window, and drops
   out. Coasting itself is unchanged for visits, occupancy and plates.
   Additive on the bus; an older producer keeps drawing matched tracks.
+  Tier-0 also now re-verifies the tracks that have waited *longest*
+  first: the old frame-index round-robin aliased as the candidate count
+  changed frame to frame, and under a shed budget present objects went
+  6–11 s between re-checks. Oldest-first bounds the wait at roughly
+  tracks ÷ reserve frames for every track.
 
 ### Added
 
