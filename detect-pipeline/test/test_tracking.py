@@ -281,3 +281,48 @@ def test_plate_candidates_stay_box_sized_with_scene_retention_on(monkeypatch):
     assert ring is not None
     for cand in ring.ranked():
         assert cand.crop.shape[:2] != frame.shape[:2], "candidate is the whole frame"
+
+
+# ─── matched_now: detected this frame vs coasting ───────────────────────
+#
+# Reported against the live overlay: phantom boxes piling up on a moving
+# scene while the real vehicle went unboxed. The tracker keeps an
+# unmatched track alive at its last box (coasting) — correct for visit
+# continuity, wrong to DRAW. These pin the per-update flag the bus ships
+# so a renderer can tell the two apart.
+
+
+def test_spawn_and_match_set_matched_now():
+    tk = Tracker(FRAME, _cfg(min_initialized=1))
+    (tr,) = tk.update([Detection("car", (100, 100, 200, 200), 0.9)])
+    assert tr.matched_now is True                      # spawned from a detection
+    (tr,) = tk.update([Detection("car", (102, 101, 202, 201), 0.9)])
+    assert tr.matched_now is True                      # matched again
+
+
+def test_a_coasting_track_is_not_matched_now():
+    tk = Tracker(FRAME, _cfg(min_initialized=1))
+    tk.update([Detection("car", (100, 100, 200, 200), 0.9)])
+    (tr,) = tk.update([])                              # confirmed track survives a miss
+    assert tr.matched_now is False
+    assert tr.misses == 1
+
+
+def test_unscanned_coasting_is_not_matched_now_even_with_zero_misses():
+    """THE case that rules out `misses == 0` as the signal: a track whose
+    region was skipped this frame coasts WITHOUT counting a miss, so on
+    misses alone it looks identical to one detected this frame."""
+    tk = Tracker(FRAME, _cfg(min_initialized=1))
+    tk.update([Detection("car", (100, 100, 200, 200), 0.9)])
+    # Scanned a region nowhere near the track → the tracker coasts it.
+    (tr,) = tk.update([], scanned_regions=[(1000, 1000, 1100, 1100)])
+    assert tr.misses == 0
+    assert tr.matched_now is False
+
+
+def test_matched_now_resets_every_update():
+    tk = Tracker(FRAME, _cfg(min_initialized=1))
+    tk.update([Detection("car", (100, 100, 200, 200), 0.9)])
+    tk.update([])
+    (tr,) = tk.update([Detection("car", (101, 101, 201, 201), 0.9)])
+    assert tr.matched_now is True                      # back once re-detected

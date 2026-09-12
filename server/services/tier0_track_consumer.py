@@ -102,6 +102,17 @@ def to_overlay_payload(
     for t in raw.get("tracks") or []:
         if not isinstance(t, dict):
             continue
+        # COASTING tracks are not drawn. The tracker keeps an unmatched
+        # track alive for up to coast_ttl_seconds (five minutes by
+        # default) at its last box — right for visit continuity and
+        # best-frame retention, wrong for a live overlay, where it reads
+        # as a phantom sitting on the sky while the real vehicle goes
+        # unboxed. Tier-0 marks each track `matched` for the frame it was
+        # actually detected in; absent (an older producer) is taken as
+        # matched so a bus without the field keeps drawing rather than
+        # going dark.
+        if t.get("matched") is False:
+            continue
         try:
             score = float(t.get("score", 0.0))
         except (TypeError, ValueError):
