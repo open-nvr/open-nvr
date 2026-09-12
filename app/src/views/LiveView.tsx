@@ -27,7 +27,7 @@ import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { useCameraStatus } from '../hooks/useCameraStatus'
-import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan } from 'lucide-react'
+import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan, ScanEye } from 'lucide-react'
 import { 
   DndContext, 
   DragOverlay, 
@@ -230,6 +230,23 @@ export function LiveView() {
   const toggleFillMode = () => setFillMode(prev => {
     const next = !prev
     try { localStorage.setItem('liveview-grid-mode', next ? 'fill' : 'fit') } catch { /* private mode */ }
+    return next
+  })
+
+  // Detection overlay: boxes + label + score from Tier-0, drawn over every
+  // live tile. Per-browser preference like the grid mode — an operator at
+  // the wall wants a clean picture; the one debugging a zone wants boxes.
+  // Off by default: the picture is the product, the boxes are a tool.
+  const [showDetections, setShowDetections] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('liveview-detections') === 'on'
+    } catch {
+      return false
+    }
+  })
+  const toggleDetections = () => setShowDetections(prev => {
+    const next = !prev
+    try { localStorage.setItem('liveview-detections', next ? 'on' : 'off') } catch { /* private mode */ }
     return next
   })
 
@@ -490,6 +507,8 @@ export function LiveView() {
           onToggleFullscreen={toggleFs}
           fillMode={fillMode}
           onToggleFillMode={toggleFillMode}
+          showDetections={showDetections}
+          onToggleDetections={toggleDetections}
         />
       </header>
 
@@ -540,6 +559,7 @@ export function LiveView() {
                       onCameraAdded={loadCameras}
                       isDragging={activeDragId === `tile-${i}`}
                       canManage={canManageCameras}
+                      showDetections={showDetections}
                     />
                   </DraggableTile>
                 </DroppableTile>
@@ -659,7 +679,8 @@ function Tile({
   onCameraSelected,
   onCameraAdded,
   isDragging = false,
-  canManage = false
+  canManage = false,
+  showDetections = false,
 }: { 
   index: number
   availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>
@@ -667,6 +688,7 @@ function Tile({
   onCameraSelected?: (cameraId: number) => void
   onCameraAdded?: () => void
   isDragging?: boolean
+  showDetections?: boolean
   canManage?: boolean
 }) {
   const [cameraId, setCameraId] = useState<number | null>(null)
@@ -797,6 +819,8 @@ function Tile({
               muted
               onSnapshot={handleSnapshot}
               displayAspectOverride={assignedCamera?.display_aspect_ratio}
+              cameraId={cameraId}
+              showDetections={showDetections}
               onTogglePtz={() => setPtzOpen((s) => !s)}
               ptzActive={ptzOpen}
               overlay={ptzOpen && cameraId ? (
@@ -898,6 +922,8 @@ function ToolbarContents({
   dropUp = false,
   fillMode,
   onToggleFillMode,
+  showDetections,
+  onToggleDetections,
   showFitToggle = true,
 }: {
   currentLayout: string
@@ -909,6 +935,8 @@ function ToolbarContents({
   dropUp?: boolean
   fillMode?: boolean
   onToggleFillMode?: () => void
+  showDetections?: boolean
+  onToggleDetections?: () => void
   showFitToggle?: boolean
 }) {
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
@@ -978,6 +1006,21 @@ function ToolbarContents({
           >
             {fillMode ? <Expand size={14} /> : <Scan size={14} />}
             <span className="hidden sm:inline">{fillMode ? 'Fill' : 'Fit'}</span>
+          </button>
+        )}
+        {/* Detection boxes on/off — same visual grammar as Fit/Fill: lit
+            when on. Reads "Boxes", not "AI", because that is what it does. */}
+        {onToggleDetections && (
+          <button
+            className={`px-2 py-1 border inline-flex items-center gap-1 ${showDetections ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
+            onClick={onToggleDetections}
+            aria-pressed={showDetections}
+            title={showDetections
+              ? 'Boxes on: tracked objects are outlined with label and confidence'
+              : 'Boxes off: show bounding boxes for tracked objects (label + confidence)'}
+          >
+            <ScanEye size={14} />
+            <span className="hidden sm:inline">Boxes</span>
           </button>
         )}
         <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">

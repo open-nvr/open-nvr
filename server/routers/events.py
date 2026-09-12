@@ -150,6 +150,28 @@ async def events_stream(
             "payload": { ...adapter response... }
         }
 
+    Live Tier-0 tracks for the detection overlay arrive as their own type
+    (bridged from NATS by services/tier0_track_consumer.py), boxes already
+    normalized to 0..1 of the frame so the client needs no resolution::
+
+        {
+            "event_type": "tracks",
+            "camera_id": 3,
+            "task": "tier0",
+            "payload": {
+                "schema": "opennvr.overlay.tracks.v1",
+                "calibrating": false,
+                "frame": {"w": 1920, "h": 1080},
+                "tracks": [
+                    {"id": 5, "label": "person", "score": 0.91,
+                     "box": [0.1, 0.1, 0.4, 0.4], "stationary": false}
+                ]
+            }
+        }
+
+    Filter with ``task=tier0`` to receive only these. They are subject to
+    the same per-camera entitlement as every other event on this socket.
+
     The server also sends two control frames:
       * ``{"event_type": "subscribed", "filters": {...}}`` on accept
       * ``{"event_type": "lagged", "dropped": N}`` when the client was too
