@@ -667,6 +667,7 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # Network: what the listing declared, what the operator allowed,
         # what the proxy refused — services/app_egress.py.
         "egress": egress_view(row),
+        "overlay_enabled": bool(getattr(row, "overlay_enabled", False)),
     }
 
 
@@ -941,6 +942,30 @@ def _registry_info() -> dict[str, Any]:
     if settings.nats_apps_url:
         info["bus"] = {"url": settings.nats_apps_url, "auth": "app_key"}
     return info
+
+
+class OverlayToggle(BaseModel):
+    enabled: bool
+
+
+@router.put("/{app_id}/overlay")
+async def set_app_overlay(
+    app_id: str,
+    payload: OverlayToggle,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Allow (or stop allowing) this app's ``overlay.boxes.v1`` events to
+    be drawn over the live video. Superuser: an app painting on every
+    operator's screen is a site decision. The app itself is untouched —
+    it keeps publishing; the bridge just stops forwarding."""
+    row = _get_app_or_404(db, app_id)
+    row.overlay_enabled = bool(payload.enabled)
+    db.commit()
+    logger.info("app overlay %s: %s by %s",
+                "enabled" if payload.enabled else "disabled",
+                app_id, current_user.username)
+    return _serialize_app(row)
 
 
 @router.post("/{app_id}/enable")

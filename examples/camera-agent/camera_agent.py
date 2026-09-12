@@ -85,6 +85,7 @@ from context import (
     camera_scope,
     reset_camera_scope,
     run_app_alert_subscriber,
+    run_tier0_track_subscriber,
     run_event_subscriber,
     scoped_cameras,
     set_camera_scope,
@@ -3533,6 +3534,17 @@ class CameraAgentRuntime:
     def unsubscribe_updates(self, q: "asyncio.Queue") -> None:
         self._update_subscribers.discard(q)
 
+    def _relay_tracks(self, core_camera_id: int, frame: dict[str, Any]) -> None:
+        """Tier-0 tracks for core camera N → the agent camera that maps to
+        it, pushed to the demo as {"tracks": {camera, ...}}. Dropped when
+        no configured camera claims that core id — boxes for a camera this
+        agent does not know are not this agent's to show."""
+        cam = next((c.camera_id for c in self.cfg.cameras
+                    if getattr(c, "opennvr_camera_id", None) == core_camera_id), None)
+        if cam is None:
+            return
+        self.publish_update({"tracks": {"camera": cam, **frame}})
+
     def publish_update(self, payload: dict[str, Any]) -> None:
         for q in list(self._update_subscribers):
             try:
@@ -4993,6 +5005,18 @@ class CameraAgentRuntime:
                 "camera-agent: app-alert subscriber started on %s "
                 "(opennvr.alerts.app.>)",
                 self.cfg.nats_inference_url,
+            )
+            # Live detection overlay for the demo's own player: Tier-0's
+            # tracks, read off the same bus, pushed to the page over the
+            # /updates socket it already holds. Read/draw only.
+            self._tier0_track_task = asyncio.create_task(
+                run_tier0_track_subscriber(
+                    nats_url=self.cfg.nats_inference_url,
+                    nats_token=self.cfg.nats_inference_token,
+                    stop_event=self._stop_event,
+                    on_tracks=self._relay_tracks,
+                ),
+                name="camera-agent-tier0-track-subscriber",
             )
         else:
             logger.info(
@@ -6949,6 +6973,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 except asyncio.TimeoutError:
                     pushed = None
                 if pushed is not None:
+                    # A tracks push names a camera; honour this session's
+                    # per-camera scope exactly as the HTTP gate would, so
+                    # a viewer never receives boxes for a camera they may
+                    # not watch. Everything else is site-wide status.
+                    tr = pushed.get("tracks") if isinstance(pushed, dict) else None
+                    if isinstance(tr, dict):
+                        scope = camera_scope()
+                        if scope is not None and tr.get("camera") not in scope:
+                            continue
                     await websocket.send_text(json.dumps(pushed, default=str))
                     continue
                 alarms = runtime.alarms.list()

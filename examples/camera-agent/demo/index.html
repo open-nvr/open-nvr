@@ -501,6 +501,13 @@
     .rec-seg:hover,.rec-seg.on{border-color:var(--accent); color:var(--accent);}
     .rec-note{font-size:0.7rem; color:var(--faint); padding:0.3rem 0;}
     .player video{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain; background:#000;}
+    /* Detection boxes: a canvas over the whole player; the JS maps boxes
+       onto the video's CONTENT rect (object-fit:contain letterboxes), so
+       a box lands on the object, not on the black bar. */
+    .player canvas.boxes{position:absolute; inset:0; width:100%; height:100%; pointer-events:none; display:none;}
+    .player canvas.boxes.on{display:block;}
+    .player .boxbtn{right:2.6rem;}
+    .player .boxbtn.on{color:var(--accent); border-color:var(--accent);}
 
     /* ── events feed ─────────────────────────────────────────────────── */
     .evt{display:flex; align-items:flex-start; gap:0.45rem; padding:0.4rem 0.5rem; background:var(--glass2);
@@ -681,10 +688,12 @@
             <div class="player" id="camPlayer" title="Click the picture to pin this exact frame into the chat">
               <img id="camImg" alt="camera view" hidden>
               <video id="camVideo" controls playsinline hidden></video>
+              <canvas id="camBoxes" class="boxes" aria-hidden="true"></canvas>
               <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
               <span class="ovl" id="camTs"></span>
               <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
               <button class="fsbtn" id="camFs" type="button" title="Full screen" aria-label="Full screen">⛶</button>
+              <button class="fsbtn boxbtn" id="camBoxesBtn" type="button" title="Boxes: outline tracked objects with label and confidence" aria-label="Toggle detection boxes" aria-pressed="false">▣</button>
             </div>
             <div class="transport">
               <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
@@ -1702,6 +1711,51 @@
     let _viewGen=0;
     let _playback=false;   // a recorded segment is in the player
     let _pc=null, _whepResource=null;   // live WebRTC (WHEP) session
+    // ── Detection boxes over the camera screen's player ──────────────
+    // Same design as OpenNVR's Live View overlay: boxes arrive as data
+    // (Tier-0 tracks, relayed by the agent over /updates), drawn on a
+    // canvas over the video, never burned into the stream. Per-browser
+    // toggle, OFF by default — the picture is the product.
+    let _boxesOn=false; try{ _boxesOn=localStorage.getItem("agent.boxes")==="on"; }catch{}
+    let _lastTracks=null, _boxRaf=null;
+    const BOX_STALE_MS=2000;
+    const LABEL_HUES={person:205,car:30,truck:45,bus:45,motorcycle:15,bicycle:160,dog:290,cat:290,bird:120,license_plate:60,plate:60,face:330};
+    function hueFor(l){ if(l in LABEL_HUES) return LABEL_HUES[l]; let h=0; for(const ch of l) h=(h*31+ch.charCodeAt(0))%360; return h; }
+    function setBoxes(on){ _boxesOn=!!on; try{ localStorage.setItem("agent.boxes",on?"on":"off"); }catch{}
+      const b=$("camBoxesBtn"), c=$("camBoxes");
+      if(b){ b.classList.toggle("on",_boxesOn); b.setAttribute("aria-pressed",_boxesOn?"true":"false"); }
+      if(c){ c.classList.toggle("on",_boxesOn); if(!_boxesOn){ const x=c.getContext("2d"); x&&x.clearRect(0,0,c.width,c.height); } }
+      if(_boxesOn) drawBoxes(); }
+    function onTracks(t){ if(!t||!window._camScreenCam||t.camera!==window._camScreenCam) return;
+      _lastTracks={...t, at:Date.now()}; if(_boxesOn) requestBoxes(); }
+    function requestBoxes(){ if(_boxRaf==null) _boxRaf=requestAnimationFrame(()=>{ _boxRaf=null; drawBoxes(); }); }
+    /* The video is object-fit:contain inside a 16:9 element, so the frame
+       may be letterboxed. Compute the content rect from the coded size so
+       normalized boxes land on the object, not the bars. */
+    function videoContentRect(v,cw,ch){
+      const vw=v.videoWidth, vh=v.videoHeight; if(!vw||!vh) return {x:0,y:0,w:cw,h:ch};
+      const s=Math.min(cw/vw, ch/vh), w=vw*s, h=vh*s; return {x:(cw-w)/2, y:(ch-h)/2, w, h}; }
+    function drawBoxes(){ const c=$("camBoxes"), v=$("camVideo"); if(!c||!_boxesOn) return;
+      const dpr=window.devicePixelRatio||1, cw=c.clientWidth, ch=c.clientHeight;
+      if(!cw||!ch) return;
+      const W=Math.round(cw*dpr), H=Math.round(ch*dpr); if(c.width!==W||c.height!==H){ c.width=W; c.height=H; }
+      const x=c.getContext("2d"); x.clearRect(0,0,W,H);
+      const t=_lastTracks; if(!t || Date.now()-t.at>BOX_STALE_MS || v.hidden) return;
+      const r=videoContentRect(v,W,H), lw=Math.max(1.5,2*dpr), fpx=Math.max(10,Math.round(12*dpr));
+      x.font=`600 ${fpx}px system-ui,-apple-system,sans-serif`; x.textBaseline="top"; x.lineJoin="round";
+      const a=t.calibrating?0.55:1;
+      for(const tr of t.tracks||[]){ const [nx,ny,nw,nh]=tr.box||[]; if(!(nw>0&&nh>0)) continue;
+        const bx=r.x+nx*r.w, by=r.y+ny*r.h, bw=nw*r.w, bh=nh*r.h, hue=hueFor(tr.label||"object");
+        x.lineWidth=lw+2; x.strokeStyle=`rgba(0,0,0,${0.55*a})`; x.strokeRect(bx,by,bw,bh);
+        x.lineWidth=lw; x.strokeStyle=`hsla(${hue},85%,60%,${a})`; x.strokeRect(bx,by,bw,bh);
+        const txt=`${tr.label||"object"}${tr.id!=null?" #"+tr.id:""} ${Math.round((tr.score||0)*100)}%`;
+        const px=Math.round(fpx*0.45), py=Math.round(fpx*0.25), tw=x.measureText(txt).width, cwid=tw+px*2, chh=fpx+py*2;
+        const cx=Math.min(Math.max(0,bx),W-cwid), cy=by-chh>=0?by-chh:by;
+        x.fillStyle=`hsla(${hue},85%,45%,${0.92*a})`; x.fillRect(cx,cy,cwid,chh);
+        x.fillStyle=`rgba(255,255,255,${a})`; x.fillText(txt,cx+px,cy+py); } }
+    setInterval(()=>{ if(_boxesOn&&_lastTracks&&Date.now()-_lastTracks.at>BOX_STALE_MS){ _lastTracks=null; requestBoxes(); } },500);
+    (function(){ const b=$("camBoxesBtn"); if(b) b.addEventListener("click",e=>{ e.stopPropagation(); setBoxes(!_boxesOn); }); setBoxes(_boxesOn); })();
+
     function openCamScreen(cam,push=true){
       if(window._camScreenCam===cam) return;   // already here — no dup history
       window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
@@ -1716,7 +1770,7 @@
       const sr=$("suggestRow"); if(sr) sr.hidden=true;
       addMsg("Focused on "+cam+" — talk or type below, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
-      window._camScreenCam=null;
+      window._camScreenCam=null; _lastTracks=null; requestBoxes();
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
       renderSuggestions();   // chips return on the all-cameras screen
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
@@ -2625,6 +2679,7 @@
       _updWs=ws;
       ws.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch{ return; }
         _updLive=true; _updBackoff=1500;
+        if(d.tracks) onTracks(d.tracks);
         if(d.working) onWorking(d.working);
         if(d.tasks) pollTasks(d.tasks);
         if(d.monitors) pollMonitors(d.monitors);

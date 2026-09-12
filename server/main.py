@@ -120,7 +120,8 @@ async def lifespan(app: FastAPI):
         posture = current_posture()
         main_logger.info(
             f"Boot policy: deployment_mode={posture['deployment_mode']} "
-            f"ai_sovereignty={posture['ai_sovereignty']}"
+            f"ai_sovereignty={posture['ai_sovereignty']} "
+            f"detection_overlay={'on' if settings.detection_overlay_enabled else 'OFF'}"
         )
         audit_boot_posture()
         # Warn loudly if the retired ALLOW_REMOTE_MEDIAMTX env var is still set

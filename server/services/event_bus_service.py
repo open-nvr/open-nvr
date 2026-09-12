@@ -247,6 +247,7 @@ async def publish_tracks(
     *,
     camera_id: int,
     payload: dict[str, Any],
+    task: str = "tier0",
 ) -> None:
     """Publish one frame's worth of Tier-0 tracks (normalized boxes, see
     services/tier0_track_consumer.py) for live overlays. Carries a
@@ -256,7 +257,9 @@ async def publish_tracks(
     await get_event_bus().publish({
         "event_type": EVENT_TRACKS,
         "camera_id": camera_id,
-        "task": "tier0",
+        # "tier0" for the platform detector, "overlay" for an app's boxes —
+        # the WS task filter lets a client take either or both.
+        "task": task,
         "payload": payload,
     })
 

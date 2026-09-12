@@ -344,6 +344,14 @@ class Settings(BaseSettings):
     # when on, the web app never runs Docker: it writes a desired-state row and
     # a separate reconciler applies it. See docs/APPS_INSTALL.md.
     apps_install_enabled: bool = False
+    # Live detection overlay: bridge Tier-0 tracks (and any app that
+    # publishes overlay.boxes.v1) onto the WebSocket so the UI can draw
+    # boxes over the video. ON by default — the picture is unchanged
+    # either way, this only decides whether the DATA flows. Off silences
+    # it for every consumer at once: the Live View, the agent, the API.
+    # Whether a given screen DRAWS it is a per-viewer choice on that
+    # screen. Audit-logged at boot with the rest of the posture.
+    detection_overlay_enabled: bool = True
 
     # Self-service sign-up (``POST /auth/register`` → a viewer account).
     # Off by default: an NVR's users are created by its administrator

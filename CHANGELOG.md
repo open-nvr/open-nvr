@@ -20,6 +20,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   those events are subject to the same per-camera entitlement as the
   video. One shared socket serves every tile on the page.
 
+  Three controls, at three grains. **Viewer:** the Boxes button, per
+  browser. **Site:** `DETECTION_OVERLAY_ENABLED` (default on) gates the
+  bridge for every consumer at once and is logged with the boot posture.
+  **Per app:** apps can publish `overlay.boxes.v1` (SDK
+  `publish_overlay`) — plate outlines, zones — and the catalog shows an
+  Overlay switch for apps that declare it, off by default; the bridge
+  forwards an app's boxes only when that switch is on. The camera-agent
+  demo draws the same boxes over its own player (Boxes button on the
+  camera screen), relayed by the agent from the bus and filtered by the
+  session's camera scope.
+
 ### Added
 
 - **App SDK: the `App` facade — apps in one function.** Writing a first

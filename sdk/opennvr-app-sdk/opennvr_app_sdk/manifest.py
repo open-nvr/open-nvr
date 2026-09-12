@@ -235,6 +235,11 @@ class AppManifest:
     # this app's GET /state payload. Empty ⇒ the catalog shows raw
     # state JSON as before.
     state_schema: list[StateView] = field(default_factory=list)
+    # Declares that this app publishes overlay.boxes.v1 (boxes to draw
+    # over the live video). Informational: the catalog shows an Overlay
+    # switch for apps that declare it. The switch, not the flag, decides
+    # whether anything is drawn — that is the operator's, per app.
+    overlay: bool = False
     # Declarative operator actions (optional) — verbs the catalog can
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
@@ -326,6 +331,7 @@ class AppManifest:
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
+            "overlay": bool(self.overlay),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,
             "ui_url": self.ui_url,

@@ -128,8 +128,10 @@ async function connect() {
   if (totalListeners() === 0) { connecting = false; return }
 
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  // task filter keeps everything the overlay does not draw off the wire.
-  const url = `${proto}://${window.location.host}/api/v1/events/ws?ticket=${encodeURIComponent(ticket)}&task=tier0`
+  // task filter keeps everything the overlay does not draw off the wire:
+  // tier0 = the platform detector, overlay = boxes an app asked to draw
+  // (forwarded only for apps the operator switched on in the catalog).
+  const url = `${proto}://${window.location.host}/api/v1/events/ws?ticket=${encodeURIComponent(ticket)}&task=tier0&task=overlay`
   const sock = new WebSocket(url)
   ws = sock
   connecting = false

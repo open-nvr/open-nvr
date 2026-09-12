@@ -116,5 +116,20 @@ class DomainEventPublisher:
         return self.publish(type(payload).SCHEMA, camera_id=camera_id,
                             payload=payload.to_payload(), correlation_id=correlation_id)
 
+    def publish_overlay(self, camera_id: str, boxes: list[dict[str, Any]], *,
+                        frame: dict[str, int] | None = None,
+                        seq: int | None = None) -> bool:
+        """Ask core to draw ``boxes`` over ``camera_id``'s live video.
+
+        Sugar over ``publish_typed(OverlayBoxes(...))``. Drawn only if the
+        operator enabled this app's overlay in the App Catalog; otherwise
+        the event is published and ignored, so an app can call this
+        unconditionally. Never raises on bus trouble."""
+        from .event_types import OverlayBoxes
+
+        return self.publish_typed(
+            OverlayBoxes(boxes=list(boxes), frame=frame, seq=seq),
+            camera_id=camera_id)
+
     def close(self) -> None:
         self._channel.close()

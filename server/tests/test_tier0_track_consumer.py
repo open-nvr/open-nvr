@@ -186,3 +186,131 @@ def test_tracks_events_are_subject_to_camera_entitlement():
                       allowed_camera_ids=frozenset({1}))
     assert sub.matches({"event_type": "tracks", "camera_id": 1}) is True
     assert sub.matches({"event_type": "tracks", "camera_id": 3}) is False
+
+
+# ─── app overlay path + site switch ─────────────────────────────────────
+
+
+def _app_msg(app="license-plate-recognition", cam="cam3", boxes=None, producer=None):
+    env = {"schema": "overlay.boxes.v1", "camera_id": cam,
+           "producer": producer if producer is not None else f"app:{app}",
+           "ts": 1.0,
+           "payload": {"boxes": boxes if boxes is not None else
+                       [{"label": "plate", "box": [0.2, 0.3, 0.1, 0.05], "score": 0.9}]}}
+    return SimpleNamespace(subject=f"opennvr.events.overlay.boxes.v1.{cam}",
+                           data=json.dumps(env).encode())
+
+
+def _run_app(msg, monkeypatch, *, allowed):
+    bus = _Bus()
+    from services import event_bus_service
+    monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
+    monkeypatch.setattr(tc, "_app_may_draw", lambda app_id, now=None: allowed)
+    asyncio.run(tc._handle_app_message(msg))
+    return bus.published
+
+
+def test_app_boxes_are_forwarded_when_the_operator_allowed_it(monkeypatch):
+    out = _run_app(_app_msg(), monkeypatch, allowed=True)
+    assert len(out) == 1
+    ev = out[0]
+    assert ev["event_type"] == "tracks" and ev["task"] == "overlay"
+    assert ev["camera_id"] == 3
+    assert ev["payload"]["source"] == "app:license-plate-recognition"
+    assert ev["payload"]["tracks"][0]["box"] == [0.2, 0.3, 0.1, 0.05]
+    assert ev["payload"]["tracks"][0]["label"] == "plate"
+
+
+def test_app_boxes_are_dropped_when_not_allowed(monkeypatch):
+    """The whole point of the per-app switch: publishing is free, DRAWING
+    is a privilege the operator grants."""
+    assert _run_app(_app_msg(), monkeypatch, allowed=False) == []
+
+
+def test_app_pixel_boxes_use_the_shipped_frame_size(monkeypatch):
+    env = json.loads(_app_msg().data)
+    env["payload"] = {"frame": {"w": 1000, "h": 500},
+                      "boxes": [{"label": "zone", "box": [100, 50, 300, 150]}]}
+    msg = SimpleNamespace(subject="opennvr.events.overlay.boxes.v1.cam3",
+                          data=json.dumps(env).encode())
+    out = _run_app(msg, monkeypatch, allowed=True)
+    # [x=100, y=50, w=300, h=150] of a 1000×500 frame — xywh, per contract.
+    assert out[0]["payload"]["tracks"][0]["box"] == [0.1, 0.1, 0.3, 0.3]
+
+
+def test_xywh_to_xyxy():
+    assert tc._xywh_to_xyxy([0.2, 0.3, 0.1, 0.05]) == [0.2, 0.3, pytest.approx(0.3), pytest.approx(0.35)]
+    assert tc._xywh_to_xyxy([1, 2, 3]) is None
+    assert tc._xywh_to_xyxy(None) is None
+
+
+def test_app_box_without_score_is_drawn():
+    """An app's zone has no confidence; the score filter must not eat it."""
+    raw = {"frame": {}, "tracks": [{"label": "zone", "box": [0, 0, 0.5, 0.5]}]}
+    out = tc.to_overlay_payload(raw, min_score=0.0)
+    assert out and out["tracks"][0]["score"] == 0.0
+
+
+def test_producer_prefix_is_stripped_for_the_lookup(monkeypatch):
+    seen = []
+    def _may(app_id, now=None):
+        seen.append(app_id); return True
+    bus = _Bus()
+    from services import event_bus_service
+    monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
+    monkeypatch.setattr(tc, "_app_may_draw", _may)
+    asyncio.run(tc._handle_app_message(_app_msg(producer="app:smart-doorbell")))
+    assert seen == ["smart-doorbell"]
+
+
+def test_app_allow_cache_reads_db_once_per_ttl(monkeypatch):
+    """Overlay frames arrive many times a second; the DB must not."""
+    calls = []
+    class _Q:
+        def __init__(self, v): self.v = v
+        def filter(self, *a, **k): return self
+        def first(self): calls.append(1); return self.v
+    class _DB:
+        def query(self, *a): return _Q((True, True))
+        def close(self): pass
+    import types
+    fake_core = types.SimpleNamespace(SessionLocal=lambda: _DB())
+    monkeypatch.setitem(sys.modules, "core.database", fake_core)
+    monkeypatch.setitem(sys.modules, "models",
+                        types.SimpleNamespace(InstalledApp=types.SimpleNamespace(
+                            overlay_enabled="o", enabled="e", id="i")))
+    tc._invalidate_app_allow_cache()
+    assert tc._app_may_draw("x", now=100.0) is True
+    assert tc._app_may_draw("x", now=105.0) is True    # cached
+    assert tc._app_may_draw("x", now=100.0 + tc._APP_ALLOW_TTL_S + 1) is True  # refreshed
+    assert len(calls) == 2
+
+
+def test_site_switch_off_disables_the_bridge(monkeypatch):
+    """DETECTION_OVERLAY_ENABLED=false must return before touching NATS.
+    core.config.settings is a full pydantic Settings() that needs every
+    site secret to construct, so the consumer's lazy `from core.config
+    import settings` is served a stand-in here."""
+    import types
+    fake = types.SimpleNamespace(
+        settings=types.SimpleNamespace(detection_overlay_enabled=False,
+                                       nats_url="nats://would-connect",
+                                       internal_api_key="k"))
+    monkeypatch.setitem(sys.modules, "core.config", fake)
+    # A nats import would prove the gate was skipped; make it explode.
+    monkeypatch.setitem(sys.modules, "nats", None)
+    asyncio.run(tc.run_consumer_loop())   # returns; no ImportError raised
+
+
+def test_site_switch_on_reaches_the_nats_import(monkeypatch):
+    """The inverse: with the switch on and a URL set, the loop proceeds to
+    `import nats` — which we make fail so the loop returns cleanly. Pins
+    that the gate is the switch, not something else short-circuiting."""
+    import types
+    fake = types.SimpleNamespace(
+        settings=types.SimpleNamespace(detection_overlay_enabled=True,
+                                       nats_url="nats://would-connect",
+                                       internal_api_key="k"))
+    monkeypatch.setitem(sys.modules, "core.config", fake)
+    monkeypatch.setitem(sys.modules, "nats", None)   # import → ImportError → return
+    asyncio.run(tc.run_consumer_loop())

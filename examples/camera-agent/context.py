@@ -23,6 +23,7 @@ LLM turn don't trip each other up.
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import time
@@ -759,6 +760,129 @@ def _summarise_event(payload: dict[str, Any]) -> str:
 
 
 # ── App alert relay (subscriber + parser) ──────────────────────────
+
+
+TIER0_TRACK_SUBJECT = "opennvr.inference.tier0.*.completed"
+
+
+def _normalize_track_box(box, frame_w, frame_h):
+    """``[x1,y1,x2,y2]`` (pixels, or already 0..1) → ``[x,y,w,h]`` in 0..1,
+    or None. A local twin of core's tier0_track_consumer.normalize_box —
+    the agent cannot import core, and the maths must agree."""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if any(v != v for v in (x1, y1, x2, y2)):
+        return None
+    if max(x1, y1, x2, y2) > 1.0:
+        try:
+            fw, fh = float(frame_w), float(frame_h)
+        except (TypeError, ValueError):
+            return None
+        if fw <= 0 or fh <= 0:
+            return None
+        x1, x2, y1, y2 = x1 / fw, x2 / fw, y1 / fh, y2 / fh
+    x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
+    c = lambda v: min(1.0, max(0.0, v))  # noqa: E731
+    x1, y1, x2, y2 = c(x1), c(y1), c(x2), c(y2)
+    if x2 - x1 <= 0 or y2 - y1 <= 0:
+        return None
+    return [round(x1, 4), round(y1, 4), round(x2 - x1, 4), round(y2 - y1, 4)]
+
+
+def tier0_tracks_for_overlay(payload: dict, *, min_score: float = 0.25) -> dict | None:
+    """The demo's overlay frame for one Tier-0 payload, or None when
+    nothing is drawable. Pure; tested without a bus."""
+    frame = payload.get("frame") or {}
+    fw, fh = frame.get("w"), frame.get("h")
+    out = []
+    for t in payload.get("tracks") or []:
+        if not isinstance(t, dict):
+            continue
+        try:
+            score = float(t.get("score", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if score < min_score:
+            continue
+        box = _normalize_track_box(t.get("box"), fw, fh)
+        if box is None:
+            continue
+        out.append({"id": t.get("id"), "label": str(t.get("label") or "object"),
+                    "score": round(score, 3), "box": box})
+    if not out:
+        return None
+    return {"calibrating": bool(payload.get("calibrating", False)), "tracks": out}
+
+
+async def run_tier0_track_subscriber(
+    *,
+    nats_url: str,
+    nats_token: str | None,
+    stop_event: asyncio.Event,
+    on_tracks,   # callback(core_camera_id: int, frame: dict) — the demo push
+) -> None:
+    """Subscribe to Tier-0's per-frame tracks so the demo can draw boxes
+    over its own player. READ-ONLY, like the app-alert subscriber: the
+    agent draws what the platform detected, it never runs detection.
+    The subject carries ``cam<N>``; N is core's camera id, and the
+    callback maps it to the agent's camera. Same connect/backoff shape as
+    run_app_alert_subscriber; nats-py missing → quietly no overlay."""
+    try:
+        import nats  # type: ignore
+    except ImportError:
+        logger.warning("nats-py not installed; no live detection overlay")
+        await stop_event.wait()
+        return
+    while not stop_event.is_set():
+        try:
+            options: dict[str, Any] = {"servers": [nats_url]}
+            if nats_token:
+                options["token"] = nats_token
+            nc = await nats.connect(**options)
+        except Exception as exc:
+            logger.warning("tier0 track subscriber: connect failed (%s); retrying in 5s", exc)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            return
+        try:
+            async def _handler(msg) -> None:  # noqa: ANN001
+                try:
+                    payload = json.loads(msg.data.decode("utf-8"))
+                    parts = str(msg.subject).split(".")
+                    handle = parts[3] if len(parts) >= 5 else ""
+                    m = re.match(r"^cam-?(\d+)$", handle, re.IGNORECASE)
+                    if not m:
+                        return
+                    frame = tier0_tracks_for_overlay(payload)
+                    if frame is None:
+                        return
+                    on_tracks(int(m.group(1)), frame)
+                except Exception:
+                    logger.debug("tier0 track subscriber: dropping payload", exc_info=True)
+
+            sub = await nc.subscribe(TIER0_TRACK_SUBJECT, cb=_handler)
+            logger.info("tier0 track subscriber: subscribed to %s", TIER0_TRACK_SUBJECT)
+            await stop_event.wait()
+            try:
+                await sub.unsubscribe()
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning("tier0 track subscriber: subscription error (%s); reconnecting", exc)
+        finally:
+            try:
+                await nc.drain()
+            except Exception:
+                pass
+        if not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
 
 
 async def run_app_alert_subscriber(

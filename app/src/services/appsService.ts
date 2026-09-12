@@ -39,6 +39,9 @@ export const appsService = {
   getAppEgress: (id: string) => api.get(`/api/v1/apps/${id}/egress`),
   setAppEgress: (id: string, allow: string[]) =>
     api.put(`/api/v1/apps/${id}/egress`, { allow }),
+  // May this app's overlay.boxes.v1 be drawn over the live video? (superuser)
+  setAppOverlay: (id: string, enabled: boolean) =>
+    api.put(`/api/v1/apps/${id}/overlay`, { enabled }),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),

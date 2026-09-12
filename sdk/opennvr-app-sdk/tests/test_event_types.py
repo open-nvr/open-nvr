@@ -10,7 +10,7 @@ import pytest
 
 from opennvr_app_sdk import (
     EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
-    OccupancyHeatmap, PlateRecognized, VisitRecorded, typed_payload,
+    OccupancyHeatmap, OverlayBoxes, PlateRecognized, VisitRecorded, typed_payload,
 )
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 from opennvr_app_sdk.domain_subscriber import parse_domain_event
@@ -32,6 +32,8 @@ def test_every_v1_contract_is_typed_and_round_trips():
                            "period_seconds": 60, "labels": ["person"]},
         OccupancyFootfall: {"entries": 3, "exits": 1, "dwell_count": 2, "dwell_seconds": 41.5,
                             "dwell_max_seconds": 30.0, "period_seconds": 60, "labels": ["person"]},
+        OverlayBoxes: {"boxes": [{"label": "plate", "box": [0.1, 0.2, 0.3, 0.1], "score": 0.9}],
+                       "frame": {"w": 1920, "h": 1080}, "seq": 4},
     }
     assert set(EVENT_TYPES) == {c.SCHEMA for c in samples}
     for cls, payload in samples.items():

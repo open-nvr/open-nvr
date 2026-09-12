@@ -35,6 +35,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SUBJECT = "opennvr.inference.tier0.*.completed"
+#: Apps publish their own boxes here (SDK OverlayBoxes / overlay.boxes.v1):
+#: ANPR's plate localisations, occupancy's zones. Same wire shape out —
+#: the browser draws one kind of thing — but forwarded ONLY for apps the
+#: operator switched on in the catalog (installed_apps.overlay_enabled).
+APP_SUBJECT = "opennvr.events.overlay.boxes.v1.>"
+#: How long a "may this app draw?" answer is trusted before the DB is
+#: asked again. Overlay frames arrive many times a second; the toggle
+#: changes a few times a year.
+_APP_ALLOW_TTL_S = 15.0
+_app_allow_cache: dict[str, tuple[float, bool]] = {}
 
 #: Reconnect cadence after a connect/subscribe failure — one warning a
 #: minute for a down bus, not a hot loop.
@@ -148,11 +158,111 @@ async def _handle_message(msg) -> None:
                 "tier0 track consumer: dropped payload #%d (%s)", _dropped, exc)
 
 
+def _app_may_draw(app_id: str, now: float | None = None) -> bool:
+    """installed_apps.overlay_enabled for ``app_id``, cached briefly. A
+    missing row, a DB error, or a blank id all answer False — an app
+    draws only when the operator demonstrably said so."""
+    import time as _time
+
+    key = str(app_id or "").strip().lower()
+    if not key:
+        return False
+    now = _time.monotonic() if now is None else now
+    hit = _app_allow_cache.get(key)
+    if hit and now - hit[0] < _APP_ALLOW_TTL_S:
+        return hit[1]
+    allowed = False
+    try:
+        from core.database import SessionLocal
+        from models import InstalledApp
+
+        db = SessionLocal()
+        try:
+            row = db.query(InstalledApp.overlay_enabled, InstalledApp.enabled).filter(
+                InstalledApp.id == key).first()
+            allowed = bool(row and row[0] and row[1])
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("overlay: could not read overlay_enabled for %s", key,
+                     exc_info=True)
+        allowed = False
+    _app_allow_cache[key] = (now, allowed)
+    return allowed
+
+
+def _invalidate_app_allow_cache() -> None:
+    _app_allow_cache.clear()
+
+
+def _xywh_to_xyxy(box: Any) -> list[float] | None:
+    """``[x, y, w, h]`` → ``[x1, y1, x2, y2]`` in the same units; None if
+    it is not four numbers. Width/height ≤ 0 stays and is rejected by
+    normalize_box as zero-area."""
+    try:
+        x, y, w, h = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    return [x, y, x + w, y + h]
+
+
+async def _handle_app_message(msg) -> None:
+    """An app's overlay.boxes.v1 envelope → the same `tracks` event the
+    Tier-0 path emits, tagged with its source, if the operator allowed
+    that app to draw. Boxes arrive already normalized per the contract;
+    normalize_box still runs so a pixel-space slip is caught, not drawn."""
+    global _dropped
+    try:
+        env = json.loads(msg.data)
+        if not isinstance(env, dict):
+            raise ValueError("envelope is not an object")
+        payload = env.get("payload") if isinstance(env.get("payload"), dict) else env
+        app_id = str(env.get("producer") or payload.get("app_id") or "").strip()
+        # Producer id may arrive as "app:<id>" from the SDK envelope.
+        if app_id.startswith("app:"):
+            app_id = app_id[4:]
+        if not _app_may_draw(app_id):
+            return
+        from services.camera_scope import camera_id_from_handle
+
+        camera_id = camera_id_from_handle(env.get("camera_id") or payload.get("camera_id"))
+        if camera_id is None:
+            parts = str(getattr(msg, "subject", "")).split(".")
+            camera_id = camera_id_from_handle(parts[-1]) if parts else None
+        if camera_id is None:
+            raise ValueError("unmappable camera_id")
+        raw = {"frame": payload.get("frame") or {},
+               "calibrating": False,
+               "seq": payload.get("seq"), "wall_ts": env.get("ts") or payload.get("wall_ts"),
+               # The app contract is [x, y, w, h]; Tier-0's is [x1, y1, x2, y2]
+               # and normalize_box speaks the latter. Convert here — feeding
+               # xywh straight in silently produced boxes of the wrong size.
+               "tracks": [{"id": b.get("id"), "label": b.get("label"),
+                           "score": b.get("score", 1.0),
+                           "box": _xywh_to_xyxy(b.get("box"))}
+                          for b in (payload.get("boxes") or []) if isinstance(b, dict)]}
+        out = to_overlay_payload(raw, min_score=0.0)
+        if out is None:
+            return
+        out["source"] = f"app:{app_id}"
+        from services.event_bus_service import publish_tracks
+
+        await publish_tracks(camera_id=camera_id, payload=out, task="overlay")
+    except Exception as exc:  # noqa: BLE001
+        _dropped += 1
+        if _dropped in (1, 10, 100) or _dropped % 1000 == 0:
+            logger.warning("overlay consumer: dropped app payload #%d (%s)", _dropped, exc)
+
+
 async def run_consumer_loop() -> None:
     """Subscribe to Tier-0 completions for the process lifetime. Returns
     immediately when no NATS URL is configured; retries slowly otherwise."""
     from core.config import settings
 
+    if not bool(getattr(settings, "detection_overlay_enabled", True)):
+        logger.info("detection overlay disabled by DETECTION_OVERLAY_ENABLED "
+                    "— no track data will reach any consumer")
+        return
     url = (getattr(settings, "nats_url", "") or "").strip()
     if not url:
         logger.info("tier0 track consumer disabled (no NATS_URL) — "
@@ -167,16 +277,20 @@ async def run_consumer_loop() -> None:
     token = (getattr(settings, "internal_api_key", "") or "").strip() or None
 
     while True:
-        client = sub = None
+        client = sub = app_sub = None
         try:
             client = await nats.connect(url, connect_timeout=5, token=token)
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
-            logger.info("tier0 track consumer subscribed to %s", SUBJECT)
+            app_sub = await client.subscribe(APP_SUBJECT, cb=_handle_app_message)
+            logger.info("tier0 track consumer subscribed to %s and %s",
+                        SUBJECT, APP_SUBJECT)
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            await _teardown(app_sub, None)
             await _teardown(sub, client)
             raise
         except Exception as exc:  # noqa: BLE001
+            await _teardown(app_sub, None)
             await _teardown(sub, client)
             logger.warning(
                 "tier0 track consumer: connect/subscribe failed (%s); "
