@@ -23,6 +23,7 @@ LLM turn don't trip each other up.
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import time
@@ -759,6 +760,99 @@ def _summarise_event(payload: dict[str, Any]) -> str:
 
 
 # ── App alert relay (subscriber + parser) ──────────────────────────
+
+
+def core_tracks_frame(event: Any) -> tuple[int, dict] | None:
+    """One `tracks` event off core's /events/ws → ``(core_camera_id, frame)``
+    for the demo, or None. Pure, so it is tested without a socket.
+
+    Core has already done the work — the site switch, the per-app
+    permission, the box normalisation — so this only validates shape:
+    the right event type, an integer camera id, at least one track."""
+    if not isinstance(event, dict) or event.get("event_type") != "tracks":
+        return None
+    cam = event.get("camera_id")
+    if isinstance(cam, bool) or not isinstance(cam, int):
+        return None
+    p = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    tracks = [t for t in (p.get("tracks") or []) if isinstance(t, dict)]
+    if not tracks:
+        return None
+    frame: dict[str, Any] = {"calibrating": bool(p.get("calibrating", False)),
+                             "tracks": tracks}
+    if p.get("source"):
+        frame["source"] = str(p["source"])
+    return cam, frame
+
+
+async def run_core_tracks_subscriber(
+    *,
+    base_url: str,
+    api_key: str,
+    stop_event: asyncio.Event,
+    on_tracks,   # callback(core_camera_id: int, frame: dict) — the demo push
+) -> None:
+    """Consume core's overlay tracks over its /events/ws and hand each
+    frame to ``on_tracks``. ONE source of truth: core's bridge decides
+    what is drawable (DETECTION_OVERLAY_ENABLED, each app's overlay
+    permission, the box maths) and this only relays it — the agent
+    never re-derives any of that from the bus.
+
+    Authenticates with the deployment's INTERNAL_API_KEY, which core
+    turns into an unscoped SERVICE ticket; the agent applies its own
+    per-viewer camera scope before anything reaches a page (see the
+    /updates handler). Backs off on failure; a ticket is single-use and
+    30 s, so a fresh one is minted on every (re)connect. `websockets`
+    missing → quietly no overlay, like nats-py for the alert relay.
+    """
+    try:
+        import websockets  # type: ignore
+    except ImportError:
+        logger.warning("websockets not installed; no live detection overlay")
+        await stop_event.wait()
+        return
+    import httpx
+
+    base = base_url.rstrip("/")
+    ws_base = re.sub(r"^http", "ws", base, count=1)
+    backoff = 2.0
+    while not stop_event.is_set():
+        try:
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as hc:
+                r = await hc.post(f"{base}/api/v1/events/ws-ticket",
+                                  headers={"X-Internal-Api-Key": api_key})
+                r.raise_for_status()
+                ticket = r.json()["ticket"]
+            url = (f"{ws_base}/api/v1/events/ws?ticket={ticket}"
+                   f"&task=tier0&task=overlay")
+            async with websockets.connect(url, max_queue=64) as ws:
+                logger.info("core tracks subscriber: connected to %s/api/v1/events/ws", base)
+                backoff = 2.0
+                while not stop_event.is_set():
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    try:
+                        parsed = core_tracks_frame(json.loads(raw))
+                    except Exception:
+                        continue
+                    if parsed is None:
+                        continue
+                    cam, frame = parsed
+                    try:
+                        on_tracks(cam, frame)
+                    except Exception:
+                        logger.debug("core tracks subscriber: on_tracks raised", exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("core tracks subscriber: %s; retrying in %.0fs", exc, backoff)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+        except asyncio.TimeoutError:
+            pass
+        backoff = min(backoff * 2, 30.0)
 
 
 async def run_app_alert_subscriber(

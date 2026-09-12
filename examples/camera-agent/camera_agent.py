@@ -85,6 +85,7 @@ from context import (
     camera_scope,
     reset_camera_scope,
     run_app_alert_subscriber,
+    run_core_tracks_subscriber,
     run_event_subscriber,
     scoped_cameras,
     set_camera_scope,
@@ -3533,6 +3534,17 @@ class CameraAgentRuntime:
     def unsubscribe_updates(self, q: "asyncio.Queue") -> None:
         self._update_subscribers.discard(q)
 
+    def _relay_tracks(self, core_camera_id: int, frame: dict[str, Any]) -> None:
+        """Tier-0 tracks for core camera N → the agent camera that maps to
+        it, pushed to the demo as {"tracks": {camera, ...}}. Dropped when
+        no configured camera claims that core id — boxes for a camera this
+        agent does not know are not this agent's to show."""
+        cam = next((c.camera_id for c in self.cfg.cameras
+                    if getattr(c, "opennvr_camera_id", None) == core_camera_id), None)
+        if cam is None:
+            return
+        self.publish_update({"tracks": {"camera": cam, **frame}})
+
     def publish_update(self, payload: dict[str, Any]) -> None:
         for q in list(self._update_subscribers):
             try:
@@ -5000,6 +5012,33 @@ class CameraAgentRuntime:
                 "recent_app_alerts tools will always report 'no events'"
             )
 
+        # Live detection overlay for the demo's own player. Fed from
+        # CORE's /events/ws, not from the bus: core's bridge is where the
+        # site switch, each app's overlay permission and the box maths are
+        # decided, and the agent must not re-derive any of that. Reads as a
+        # platform service (INTERNAL_API_KEY → unscoped ticket) and
+        # re-scopes every frame per viewer before it reaches a page — see
+        # _tracks_push_visible. Read/draw only.
+        if self.cfg.opennvr_api_url:
+            import os as _os
+
+            _core_key = (
+                self.cfg.opennvr_api_key
+                or self.cfg.kaic_api_key
+                or _os.environ.get("INTERNAL_API_KEY", "")
+            )
+            self._core_tracks_task = asyncio.create_task(
+                run_core_tracks_subscriber(
+                    base_url=self.cfg.opennvr_api_url,
+                    api_key=_core_key,
+                    stop_event=self._stop_event,
+                    on_tracks=self._relay_tracks,
+                ),
+                name="camera-agent-core-tracks-subscriber",
+            )
+            logger.info("camera-agent: overlay tracks subscriber started on %s",
+                        self.cfg.opennvr_api_url)
+
         # Pre-warm the LLM in the background so the FIRST real question
         # doesn't pay the ~80s cold-load (Ollama loads the model into RAM
         # + prefills on first inference). We fire a throwaway one-token
@@ -5643,6 +5682,21 @@ def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
         ui_mode="external",
         ui_url=agent_ui_url(cfg),
     ).to_dict()
+
+
+def _tracks_push_visible(pushed: Any) -> bool:
+    """May THIS session's socket receive ``pushed``?
+
+    A tracks push names a camera; it is honoured against the session's
+    per-camera scope exactly as the HTTP gate would honour a request, so
+    a viewer never receives boxes for a camera they may not watch. This
+    is the re-scoping the unscoped service ticket to core relies on.
+    Everything else on the socket is site-wide status and passes."""
+    tr = pushed.get("tracks") if isinstance(pushed, dict) else None
+    if not isinstance(tr, dict):
+        return True
+    scope = camera_scope()
+    return scope is None or tr.get("camera") in scope
 
 
 def build_app(runtime: CameraAgentRuntime) -> FastAPI:
@@ -6949,6 +7003,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 except asyncio.TimeoutError:
                     pushed = None
                 if pushed is not None:
+                    if not _tracks_push_visible(pushed):
+                        continue
                     await websocket.send_text(json.dumps(pushed, default=str))
                     continue
                 alarms = runtime.alarms.list()

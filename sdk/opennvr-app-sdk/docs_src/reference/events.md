@@ -36,6 +36,8 @@ runs, free to consume.
 
 ::: opennvr_app_sdk.OccupancyFootfall
 
+::: opennvr_app_sdk.OverlayBoxes
+
 ::: opennvr_app_sdk.Tier0Snapshot
 
 ::: opennvr_app_sdk.snapshot_from_event

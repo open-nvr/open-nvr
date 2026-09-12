@@ -128,6 +128,28 @@ consumers.
 | `calibrating` | bool | Tier-0 still calibrating; treat tracks as provisional. |
 | `tracks` | array | Same track shape as `opennvr.tier0.v1` (`id`, `label`, `conf`, `bbox`, motion fields). Normative source: `detect_pipeline/bus.py::build_payload`. |
 
+### `overlay.boxes.v1`
+
+Subject: `opennvr.events.overlay.boxes.v1.<camera_id>`
+Producer: any app (SDK `OverlayBoxes` / `DomainEventPublisher.publish_overlay`).
+
+Boxes an app wants drawn over the operator's live video — plate
+localisations, zones, anything with a rectangle. Core forwards them to
+the browser (`/events/ws`, `task=overlay`) **only for apps the operator
+has switched on in the App Catalog** (`installed_apps.overlay_enabled`,
+off by default); otherwise the event is published and ignored, so an
+app may call `publish_overlay` unconditionally. Whether a given screen
+draws them is that viewer's own toggle. Core never draws an app's
+boxes for a camera the viewer may not watch.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `boxes` | array | Required. `{label, box: [x, y, w, h], score?, id?}`; `box` normalized to 0..1 of the frame. |
+| `frame` | `{w, h}` \| absent | Optional. If `box` is in pixels, ship the frame size and core normalizes. Pixel boxes without it are dropped. |
+| `seq` | int \| absent | Optional producer sequence. |
+
 ### `visit.recorded.v1`
 
 Subject: `opennvr.events.visit.recorded.v1.<camera_id>`

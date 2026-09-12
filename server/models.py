@@ -1131,6 +1131,10 @@ class InstalledApp(Base):
     manifest_json = Column(JSON, nullable=False)
     config_json = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, default=False, nullable=False)
+    # Operator opt-in: may this app's overlay.boxes.v1 events be drawn
+    # over the live video? Off by default — an app drawing on the
+    # operator's screen is a privilege the operator grants, per app.
+    overlay_enabled = Column(Boolean, default=False, nullable=False, server_default="0")
     # registered | ok | unreachable
     status = Column(String(20), nullable=False, default="registered")
     last_seen = Column(DateTime(timezone=True), nullable=True)

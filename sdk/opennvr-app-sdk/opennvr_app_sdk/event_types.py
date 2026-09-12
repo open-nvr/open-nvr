@@ -194,6 +194,27 @@ class OccupancyHeatmap(TypedPayload):
 
 
 @dataclass(frozen=True)
+class OverlayBoxes(TypedPayload):
+    """``overlay.boxes.v1`` — boxes an app wants drawn over the live video.
+
+    ``boxes`` entries are ``{"label", "box": [x, y, w, h], "score"?, "id"?}``
+    with ``box`` normalized to 0..1 of the frame — an app never knows the
+    resolution the operator is watching at, and core draws over streams
+    of every size. Send ``frame: {w, h}`` if your boxes are in pixels and
+    core will normalize; send nothing drawable and nothing is drawn.
+
+    Whether it IS drawn is the operator's call, per app, in the App
+    Catalog (off by default). Publishing costs nothing when it is off.
+    """
+
+    SCHEMA: ClassVar[str] = "overlay.boxes.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("boxes",)
+    boxes: list[dict[str, Any]] = field(default_factory=list)
+    frame: dict[str, int] | None = None
+    seq: int | None = None
+
+
+@dataclass(frozen=True)
 class OccupancyFootfall(TypedPayload):
     """``occupancy.footfall.v1`` — entries, exits and finished stays since the last publish."""
 
@@ -213,7 +234,7 @@ class OccupancyFootfall(TypedPayload):
 EVENT_TYPES: dict[str, type[TypedPayload]] = {
     cls.SCHEMA: cls for cls in (
         DetectionObserved, VisitRecorded, PlateRecognized, AccessDecided,
-        OccupancyChanged, OccupancyHeatmap, OccupancyFootfall,
+        OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
     )
 }
 

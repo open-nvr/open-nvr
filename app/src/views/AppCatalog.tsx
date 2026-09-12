@@ -86,6 +86,8 @@ export type AppManifest = {
   // ("{host}" in it is replaced with the browser's hostname).
   ui_mode?: 'internal' | 'external'
   ui_url?: string
+  // App publishes overlay.boxes.v1 — the catalog shows an Overlay switch.
+  overlay?: boolean
   // Store listing (the Details section): long-form description
   // (blank-line-separated paragraphs), authorship, and the concrete
   // jobs the app solves.
@@ -232,6 +234,8 @@ export type RegisteredApp = {
   config?: Record<string, any> | null
   entitlement?: Entitlement | null
   egress?: AppEgress | null
+  /** Operator allowed this app's overlay.boxes.v1 to draw over live video. */
+  overlay_enabled?: boolean
 }
 
 // GET /apps/{id}/egress — apps live on an internal network and leave it
@@ -1380,6 +1384,49 @@ function LicensePanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
   )
 }
 
+/** Per-app permission to draw on the live video. Shown only for apps
+ *  whose manifest declares `overlay`; off by default because an app
+ *  painting on every operator's screen is a privilege, not a default. */
+function OverlayPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const on = Boolean(app.overlay_enabled)
+  const set = useMutation({
+    mutationFn: (enabled: boolean) => apiService.setAppOverlay(app.id, enabled),
+    onSuccess: (_d, enabled) => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      showSuccess(enabled
+        ? `${app.name} may now draw boxes over the live view (turn on "Boxes" in Live View to see them)`
+        : `${app.name} no longer draws over the live view`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not change the overlay setting.')),
+  })
+  return (
+    <div className="rounded border border-[var(--border)] p-2 space-y-1 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-medium text-[var(--text)]">Overlay</span>
+        <Badge variant={on ? 'success' : 'neutral'}>{on ? 'draws on live view' : 'not drawn'}</Badge>
+        {isAdmin && (
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => set.mutate(!on)}
+            disabled={set.isPending}
+            aria-pressed={on}
+          >
+            {on ? 'Stop drawing' : 'Allow drawing'}
+          </Button>
+        )}
+      </div>
+      <p className="text-[var(--text-dim)] leading-relaxed">
+        This app publishes boxes it wants shown over the live video — plate
+        outlines, zones. They appear only if you allow it here <em>and</em> an
+        operator has Boxes on in Live View. The app keeps running either way.
+      </p>
+    </div>
+  )
+}
+
 function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
@@ -1621,6 +1668,8 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
         )}
 
         <NetworkPanel app={app} isAdmin={isAdmin} />
+
+        {app.manifest?.overlay && <OverlayPanel app={app} isAdmin={isAdmin} />}
 
         {/* RFC-0002 Phase 1: the skill this app provides, as the platform
             registry sees it — same derivation the agent's panel renders,

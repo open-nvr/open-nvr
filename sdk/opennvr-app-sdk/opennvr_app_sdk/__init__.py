@@ -99,7 +99,7 @@ from .domain_subscriber import (
 )
 from .egress import connect_via_proxy, proxy_address
 from .event_types import (
-    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
+    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall, OverlayBoxes,
     OccupancyHeatmap, PlateRecognized, TypedPayload, VisitRecorded, typed_payload,
 )
 from .tier0 import (
@@ -235,6 +235,7 @@ EVENTS: tuple[str, ...] = (
     "OccupancyChanged",
     "OccupancyHeatmap",
     "OccupancyFootfall",
+    "OverlayBoxes",
     "Tier0Snapshot",
     "snapshot_from_event",
     "tier0_to_detections",
