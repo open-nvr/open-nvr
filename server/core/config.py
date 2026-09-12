@@ -352,6 +352,15 @@ class Settings(BaseSettings):
     # Whether a given screen DRAWS it is a per-viewer choice on that
     # screen. Audit-logged at boot with the rest of the posture.
     detection_overlay_enabled: bool = True
+    # How long after its last positive match a coasting track is still
+    # drawn on the live overlay. Tier-0 re-verifies tracks on a per-frame
+    # region budget, so a present object is re-matched every few frames,
+    # not every frame — measured on a busy dashcam scene at DETECT_FPS=2:
+    # median 1.2 s, p90 5.9 s. Below the tail, real objects blink; far
+    # above it, a departed object's box lingers. 8 s clears the measured
+    # tail; a phantom (never re-scanned) ages to minutes and drops out.
+    # Widen on sites with many tracks per camera or a low DETECT_FPS.
+    detection_overlay_draw_window_s: float = 8.0
 
     # Self-service sign-up (``POST /auth/register`` → a viewer account).
     # Off by default: an NVR's users are created by its administrator

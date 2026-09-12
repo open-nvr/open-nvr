@@ -29,6 +29,19 @@ def test_matched_rides_on_every_track():
     assert by_id[2]["matched"] is False
     # The rest of the track shape is untouched.
     assert by_id[2]["box"] == [500, 20, 600, 120] and by_id[2]["score"] == 0.8
+    assert by_id[1]["misses"] == 0 and by_id[2]["misses"] == 0
+
+
+def test_misses_rides_through():
+    t = Track(id=1, label="car", box=(0, 0, 10, 10), score=0.5, misses=3)
+    p = build_payload("cam3", FrameResult(tracks=[t]), _frame())
+    assert p["tracks"][0]["misses"] == 3
+
+
+def test_since_match_s_rides_through():
+    t = Track(id=1, label="car", box=(0, 0, 10, 10), score=0.5, since_match_s=2.345)
+    p = build_payload("cam3", FrameResult(tracks=[t]), _frame())
+    assert p["tracks"][0]["since_match_s"] == 2.345
 
 
 def test_matched_defaults_true_for_a_track_without_the_flag():
