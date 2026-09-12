@@ -108,6 +108,15 @@ class Track:
     # bus ships this so a live overlay draws only what was actually
     # detected — a coasting track at its last box read as a phantom.
     matched_now: bool = field(default=False, compare=False)
+    # Seconds since the last positive match, stamped at the end of every
+    # update() from the tracker's own clock. 0.0 on the frame it was
+    # matched; grows while it coasts. This — not matched_now alone — is
+    # what a live renderer needs: under a detector budget a present object
+    # is re-verified every few frames, not every frame, so "matched this
+    # frame" flickers, while "matched within the last couple of seconds"
+    # is steady for anything real and false for a phantom whose spot is
+    # never scanned again.
+    since_match_s: float = field(default=0.0, compare=False)
     # BGR crop of the best frame, retained only when the tracker is fed pixels
     # (the Tier-1 gate dispatches THIS on escalation — see gate/dispatch, PR B #10).
     best_crop: object | None = field(default=None, repr=False, compare=False)
@@ -336,6 +345,8 @@ class Tracker:
                     continue
             survivors.append(tr)
         self._tracks = survivors
+        for tr in survivors:
+            tr.since_match_s = max(0.0, now - tr.last_matched)
         # Drop the frame reference: holding it would keep 6 MB alive between
         # frames for nothing. (An exception escaping above leaves one frame
         # referenced, and that path already unwinds into the worker's

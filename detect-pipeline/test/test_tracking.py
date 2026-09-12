@@ -326,3 +326,16 @@ def test_matched_now_resets_every_update():
     tk.update([])
     (tr,) = tk.update([Detection("car", (101, 101, 201, 201), 0.9)])
     assert tr.matched_now is True                      # back once re-detected
+
+
+def test_since_match_s_is_zero_on_match_and_grows_while_coasting():
+    t = [100.0]
+    tk = Tracker(FRAME, _cfg(min_initialized=1), clock=lambda: t[0])
+    (tr,) = tk.update([Detection("car", (100, 100, 200, 200), 0.9)])
+    assert tr.since_match_s == 0.0
+    t[0] = 101.5
+    (tr,) = tk.update([], scanned_regions=[(1000, 1000, 1100, 1100)])   # coast, unscanned
+    assert tr.since_match_s == 1.5 and tr.misses == 0
+    t[0] = 102.0
+    (tr,) = tk.update([Detection("car", (101, 101, 201, 201), 0.9)])
+    assert tr.since_match_s == 0.0

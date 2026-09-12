@@ -110,6 +110,82 @@ def test_coasting_tracks_are_not_drawn():
     assert [t["id"] for t in out["tracks"]] == [1]
 
 
+def test_a_budgeted_present_object_is_drawn_between_rescans():
+    """Live probe: the car filling the screen was matched ~1 frame in 5 —
+    the detector budget round-robins re-verification. Unmatched, not
+    stationary, misses 0, matched 0.4 s ago: present, draw it."""
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 0, "since_match_s": 0.4}) is True
+
+
+def test_a_phantom_ages_out_of_the_window():
+    """The original report: a passed vehicle's track coasting on the sky,
+    last matched minutes ago and never re-scanned."""
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 0, "since_match_s": 47.0}) is False
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 0, "since_match_s": 8.01}, window_s=8.0) is False
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 0, "since_match_s": 8.0}, window_s=8.0) is True
+
+
+def test_the_window_clears_the_measured_reverification_tail():
+    """Live probe on a busy dashcam scene at DETECT_FPS=2: median re-match
+    gap 1.2 s, p90 5.9 s. A window below the tail hides real objects for
+    seconds at a time — the second field report."""
+    assert tc.DRAW_WINDOW_S >= 6.0
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 0, "since_match_s": 5.9}) is True
+
+
+def test_a_junk_or_unset_window_falls_back_to_the_default(monkeypatch):
+    import types
+    monkeypatch.setitem(sys.modules, "core.config",
+                        types.SimpleNamespace(settings=types.SimpleNamespace(
+                            detection_overlay_draw_window_s=-1)))
+    assert tc._draw_window_s() == tc.DRAW_WINDOW_S
+    monkeypatch.setitem(sys.modules, "core.config",
+                        types.SimpleNamespace(settings=types.SimpleNamespace(
+                            detection_overlay_draw_window_s=12.5)))
+    assert tc._draw_window_s() == 12.5
+
+
+def test_a_looked_for_and_missed_track_is_hidden_at_once():
+    """Whatever the age: the detector scanned its region and it was not
+    there. Continuity keeps the track; the overlay does not wait."""
+    assert tc.track_is_drawable({"matched": False, "stationary": False,
+                                 "misses": 1, "since_match_s": 0.2}) is False
+
+
+def test_a_stationary_track_that_has_not_missed_is_drawn_between_reverifications():
+    """A parked car is re-verified every Nth frame (2 s at 5 fps with the
+    default interval) — inside the window, so it draws steadily; and on
+    an older producer with no age at all, stationary+no-miss is the one
+    safe case."""
+    assert tc.track_is_drawable({"matched": False, "stationary": True,
+                                 "misses": 0, "since_match_s": 1.9}) is True
+    assert tc.track_is_drawable({"matched": False, "stationary": True, "misses": 0}) is True
+
+
+def test_a_stationary_track_disappears_once_a_reverification_misses():
+    assert tc.track_is_drawable({"matched": False, "stationary": True, "misses": 1}) is False
+
+
+def test_an_older_producer_without_age_or_stationary_is_hidden_when_unmatched():
+    """No age to judge by and not flagged stationary: the only honest
+    answer for an unmatched track is 'not drawn' — the pre-fix ghost."""
+    assert tc.track_is_drawable({"matched": False, "stationary": False, "misses": 0}) is False
+
+
+def test_matched_is_always_drawn():
+    assert tc.track_is_drawable({"matched": True, "stationary": False, "misses": 3}) is True
+
+
+def test_older_producers_without_the_fields_keep_drawing():
+    assert tc.track_is_drawable({}) is True
+    assert tc.track_is_drawable({"stationary": True}) is True   # no matched → permissive
+
+
 def test_a_frame_of_only_coasting_tracks_publishes_nothing():
     """A calibrating or detect-skipped frame returns every track unmatched.
     That must be 'nothing to draw', not 'draw last known positions'."""

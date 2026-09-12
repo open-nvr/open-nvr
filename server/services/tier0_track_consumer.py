@@ -53,6 +53,25 @@ _RETRY_SECONDS = 60.0
 #: Below this the tracker is guessing; the overlay would just flicker.
 DEFAULT_MIN_SCORE = 0.25
 
+#: Default for settings.detection_overlay_draw_window_s — see the
+#: comment there for the measurement behind it (p90 re-match gap 5.9 s
+#: on a busy scene at DETECT_FPS=2). A phantom — a passed vehicle's
+#: track parked on the sky — is never re-matched, so its age climbs to
+#: minutes and drops out regardless.
+DRAW_WINDOW_S = 8.0
+
+
+def _draw_window_s() -> float:
+    """The configured window, falling back to the default when settings
+    cannot be constructed (tests) or the value is junk."""
+    try:
+        from core.config import settings
+
+        v = float(getattr(settings, "detection_overlay_draw_window_s", DRAW_WINDOW_S))
+        return v if v > 0 else DRAW_WINDOW_S
+    except Exception:  # noqa: BLE001
+        return DRAW_WINDOW_S
+
 _dropped = 0
 
 
@@ -91,6 +110,54 @@ def normalize_box(box: Any, frame_w: Any, frame_h: Any) -> list[float] | None:
     return [round(x1, 4), round(y1, 4), round(w, 4), round(h, 4)]
 
 
+def track_is_drawable(t: dict[str, Any], window_s: float | None = None) -> bool:
+    """Should the live overlay draw this track right now?
+
+    The tracker keeps an unmatched track alive at its last box for up to
+    coast_ttl_seconds (five minutes) — right for visit continuity, wrong
+    to draw: on a moving scene every vehicle that passed left a phantom
+    on the sky. So `matched` (detected in THIS frame) is the first test.
+
+    It cannot be the only one. Tier-0 runs the detector on a per-frame
+    region BUDGET and round-robins re-verification across tracks (and
+    skips stationary ones on purpose), so a present object is matched
+    every few frames, not every frame — on a live probe 79% of track
+    instances were unmatched, including the car filling the screen.
+    "Matched this frame" alone made real objects blink or vanish. So:
+    a track that was looked for and missed is hidden at once
+    (`misses > 0`); one not looked for this frame is drawn while its
+    last match is recent (`since_match_s` within DRAW_WINDOW_S). A
+    phantom is never re-found, so its age climbs past the window and it
+    drops out — which is the original report, fixed without hiding
+    anything real.
+
+    Absent fields (an older producer) are read permissively — matched,
+    not coasting — so a bus without them keeps drawing rather than
+    going dark.
+    """
+    if t.get("matched") is not False:
+        return True
+    # Looked for it and did not find it: gone until re-found, whatever
+    # the age. (A confirmed track survives a few misses in the tracker
+    # for continuity; the overlay does not wait.)
+    try:
+        if int(t.get("misses", 0) or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    # Not looked for this frame (budget, or stationary skipping). Present
+    # if it was found recently; a phantom's age only ever grows.
+    age = t.get("since_match_s")
+    if age is None:
+        # Older producer: only `matched`/`stationary` to go on. A skipped
+        # stationary track with no misses is the one case that is safe.
+        return t.get("stationary") is True
+    try:
+        return float(age) <= (window_s if window_s is not None else _draw_window_s())
+    except (TypeError, ValueError):
+        return False
+
+
 def to_overlay_payload(
     raw: dict[str, Any], *, min_score: float = DEFAULT_MIN_SCORE
 ) -> dict[str, Any] | None:
@@ -102,16 +169,7 @@ def to_overlay_payload(
     for t in raw.get("tracks") or []:
         if not isinstance(t, dict):
             continue
-        # COASTING tracks are not drawn. The tracker keeps an unmatched
-        # track alive for up to coast_ttl_seconds (five minutes by
-        # default) at its last box — right for visit continuity and
-        # best-frame retention, wrong for a live overlay, where it reads
-        # as a phantom sitting on the sky while the real vehicle goes
-        # unboxed. Tier-0 marks each track `matched` for the frame it was
-        # actually detected in; absent (an older producer) is taken as
-        # matched so a bus without the field keeps drawing rather than
-        # going dark.
-        if t.get("matched") is False:
+        if not track_is_drawable(t):
             continue
         try:
             score = float(t.get("score", 0.0))

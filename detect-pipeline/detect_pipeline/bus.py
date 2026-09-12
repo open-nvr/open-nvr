@@ -69,6 +69,15 @@ def build_payload(camera_id: str, result: FrameResult, frame) -> dict:
                 # Additive (EVENT_CONTRACTS.md); a live overlay draws only
                 # matched tracks, presence consumers use both.
                 "matched": bool(getattr(t, "matched_now", True)),
+                # Consecutive frames the detector LOOKED for this track and
+                # did not find it. Stays 0 while a stationary track is being
+                # skipped on purpose (re-verified every Nth frame), so a
+                # renderer can keep drawing it — it is present, just not
+                # re-scanned — and drop it the moment a re-verification
+                # misses. Additive (EVENT_CONTRACTS.md).
+                "misses": int(getattr(t, "misses", 0) or 0),
+                # Seconds since this track was last positively matched.
+                "since_match_s": round(float(getattr(t, "since_match_s", 0.0) or 0.0), 3),
             }
             for t in result.tracks
         ],

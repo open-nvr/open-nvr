@@ -8,17 +8,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Live overlay drew coasting tracks.** Phantom boxes piled up on a
-  moving scene — dozens of stale outlines on sky and hedges — while the
-  vehicle actually in shot went unboxed. Tier-0's tracker keeps an
-  unmatched track alive at its last box for up to `coast_ttl_seconds`
-  (five minutes) so a visit survives a skipped frame; that is right for
-  presence and wrong to draw. Each published track now carries
-  `matched` — detected in *this* frame — and the overlay bridge drops
-  the rest. `misses == 0` would not have worked: a track coasting
-  because its region was skipped never counts a miss, which is exactly
-  the phantom case. Additive on the bus; an older producer without the
-  field keeps drawing.
+- **Live overlay: phantoms gone, real objects steady.** Two field
+  reports, one root cause. Tier-0's tracker keeps an unmatched track
+  alive at its last box for up to `DETECT_TRACK_TTL` (five minutes) so a
+  visit survives a skipped frame; the overlay drew every one of them, so
+  a moving scene piled up ghosts on the sky while the car in shot went
+  unboxed. The first fix drew only tracks matched *this frame* — and that
+  made real objects blink or vanish, because Tier-0 re-verifies tracks on
+  a per-frame region budget: measured on a busy scene at `DETECT_FPS=2`,
+  a present car was re-matched every 1.2 s typically and up to 5.9 s. Each
+  published track now carries `matched`, `misses` and `since_match_s`;
+  the overlay hides a track the detector looked for and missed, and
+  otherwise draws it while its last match is within
+  `DETECTION_OVERLAY_DRAW_WINDOW_S` (default 8 s, above the measured
+  tail). A phantom is never re-found, ages past the window, and drops
+  out. Coasting itself is unchanged for visits, occupancy and plates.
+  Additive on the bus; an older producer keeps drawing matched tracks.
+  Tier-0 also now re-verifies the tracks that have waited *longest*
+  first: the old frame-index round-robin aliased as the candidate count
+  changed frame to frame, and under a shed budget present objects went
+  6–11 s between re-checks. Oldest-first bounds the wait at roughly
+  tracks ÷ reserve frames for every track.
 
 ### Added
 
