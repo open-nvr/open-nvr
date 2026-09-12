@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bounding boxes on the live view.** Tracked objects are outlined over
+  the video with their label, confidence and track id, one colour per
+  class, drawn client-side on a canvas over the player — the stream is
+  untouched and the recording stays clean. Toggled with a **Boxes**
+  button in the Live View toolbar (off by default; remembered per
+  browser). Live only. Behind it, Tier-0's per-frame tracks now reach
+  the browser at all: a new `tier0_track_consumer` bridges the NATS
+  `opennvr.inference.tier0.<cam>.completed` subject onto the in-process
+  bus as a `tracks` WebSocket event with boxes normalized to 0..1, and
+  those events are subject to the same per-camera entitlement as the
+  video. One shared socket serves every tile on the page.
+
+### Added
+
 - **App SDK: the `App` facade — apps in one function.** Writing a first
   app required knowing about NATS subjects, inference envelopes,
   normalized bboxes, alert dispatchers and keyed TTL state before

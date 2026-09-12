@@ -32,6 +32,7 @@ import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
+import { DetectionOverlay } from './DetectionOverlay'
 import { AlertCircle } from 'lucide-react'
 
 export type VideoPlayerMode = 'live' | 'playback'
@@ -81,6 +82,11 @@ export interface VideoPlayerProps {
   /** Operator's per-camera display-aspect override ('auto' | 'native' | 'W:H').
       Absent or 'auto' runs the detection in lib/aspect.ts (issue #354). */
   displayAspectOverride?: AspectOverride | null
+  /** Core camera id — needed to subscribe this tile to its live tracks. */
+  cameraId?: number | null
+  /** Draw Tier-0 bounding boxes with label + score over the video.
+      Live mode only; costs nothing when false (no canvas, no socket). */
+  showDetections?: boolean
 }
 
 export interface VideoPlayerHandle {
@@ -115,6 +121,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       ptzActive = false,
       overlay,
       displayAspectOverride,
+      cameraId = null,
+      showDetections = false,
     },
     ref
   ) {
@@ -1080,6 +1088,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           crossOrigin="anonymous"
           preload={mode === 'playback' ? 'metadata' : 'auto'}
         />
+
+        {/* Detection overlay — INSIDE the feed box so its rectangle is the
+            video's rectangle and normalized boxes need no letterbox math.
+            Below the loading/error overlays in the tree, so those still
+            cover it. Live only: recordings carry no live tracks. */}
+        {mode === 'live' && showDetections && cameraId != null && (
+          <DetectionOverlay cameraId={cameraId} />
+        )}
 
         {/* Loading / reconnecting overlay */}
         {(isLoading || isReconnecting) && (

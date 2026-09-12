@@ -59,6 +59,11 @@ EVENT_INFERENCE_ERROR = "inference_error"
 EVENT_CAMERA_EVENT = "camera_event"
 EVENT_CAMERA_STATUS = "camera_status"
 EVENT_SYSTEM_ALERT = "system_alert"
+# Live Tier-0 tracks for the detection overlay. Its own type, not
+# inference_result: that type is keyed on model_id and drives the
+# AI Detection Results table, and 5 fps of tracker output per camera
+# would flood it. Consumers that want boxes opt in by name.
+EVENT_TRACKS = "tracks"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -234,6 +239,24 @@ async def publish_inference_result(
         "camera_id": camera_id,
         "model_id": model_id,
         "task": task,
+        "payload": payload,
+    })
+
+
+async def publish_tracks(
+    *,
+    camera_id: int,
+    payload: dict[str, Any],
+) -> None:
+    """Publish one frame's worth of Tier-0 tracks (normalized boxes, see
+    services/tier0_track_consumer.py) for live overlays. Carries a
+    camera_id, so it is subject to the per-camera entitlement the bus
+    enforces — a viewer never receives boxes for a camera they cannot
+    see, exactly as with the video itself."""
+    await get_event_bus().publish({
+        "event_type": EVENT_TRACKS,
+        "camera_id": camera_id,
+        "task": "tier0",
         "payload": payload,
     })
 

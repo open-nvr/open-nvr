@@ -624,6 +624,21 @@ async def lifespan(app: FastAPI):
     spawn_background(background_occupancy_event_consumer(),
                      name="occupancy-event-consumer")
 
+    # Live detection overlay: bridge Tier-0 tracks (NATS) onto the
+    # in-process bus so /events/ws can stream normalized boxes to the
+    # browser. Same best-effort posture: no bus → no overlay, never a
+    # failed boot.
+    async def background_tier0_track_consumer():
+        async def _loop():
+            from services.tier0_track_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Tier-0 track consumer", _loop)
+
+    spawn_background(background_tier0_track_consumer(),
+                     name="tier0-track-consumer")
+
     # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
     # NatsAlertChannel) into app_alerts so the UI bell can ring and
     # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
