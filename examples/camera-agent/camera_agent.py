@@ -85,7 +85,7 @@ from context import (
     camera_scope,
     reset_camera_scope,
     run_app_alert_subscriber,
-    run_tier0_track_subscriber,
+    run_core_tracks_subscriber,
     run_event_subscriber,
     scoped_cameras,
     set_camera_scope,
@@ -5006,23 +5006,38 @@ class CameraAgentRuntime:
                 "(opennvr.alerts.app.>)",
                 self.cfg.nats_inference_url,
             )
-            # Live detection overlay for the demo's own player: Tier-0's
-            # tracks, read off the same bus, pushed to the page over the
-            # /updates socket it already holds. Read/draw only.
-            self._tier0_track_task = asyncio.create_task(
-                run_tier0_track_subscriber(
-                    nats_url=self.cfg.nats_inference_url,
-                    nats_token=self.cfg.nats_inference_token,
-                    stop_event=self._stop_event,
-                    on_tracks=self._relay_tracks,
-                ),
-                name="camera-agent-tier0-track-subscriber",
-            )
         else:
             logger.info(
                 "camera-agent: NATS not configured; recent_events and "
                 "recent_app_alerts tools will always report 'no events'"
             )
+
+        # Live detection overlay for the demo's own player. Fed from
+        # CORE's /events/ws, not from the bus: core's bridge is where the
+        # site switch, each app's overlay permission and the box maths are
+        # decided, and the agent must not re-derive any of that. Reads as a
+        # platform service (INTERNAL_API_KEY → unscoped ticket) and
+        # re-scopes every frame per viewer before it reaches a page — see
+        # _tracks_push_visible. Read/draw only.
+        if self.cfg.opennvr_api_url:
+            import os as _os
+
+            _core_key = (
+                self.cfg.opennvr_api_key
+                or self.cfg.kaic_api_key
+                or _os.environ.get("INTERNAL_API_KEY", "")
+            )
+            self._core_tracks_task = asyncio.create_task(
+                run_core_tracks_subscriber(
+                    base_url=self.cfg.opennvr_api_url,
+                    api_key=_core_key,
+                    stop_event=self._stop_event,
+                    on_tracks=self._relay_tracks,
+                ),
+                name="camera-agent-core-tracks-subscriber",
+            )
+            logger.info("camera-agent: overlay tracks subscriber started on %s",
+                        self.cfg.opennvr_api_url)
 
         # Pre-warm the LLM in the background so the FIRST real question
         # doesn't pay the ~80s cold-load (Ollama loads the model into RAM
@@ -5667,6 +5682,21 @@ def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
         ui_mode="external",
         ui_url=agent_ui_url(cfg),
     ).to_dict()
+
+
+def _tracks_push_visible(pushed: Any) -> bool:
+    """May THIS session's socket receive ``pushed``?
+
+    A tracks push names a camera; it is honoured against the session's
+    per-camera scope exactly as the HTTP gate would honour a request, so
+    a viewer never receives boxes for a camera they may not watch. This
+    is the re-scoping the unscoped service ticket to core relies on.
+    Everything else on the socket is site-wide status and passes."""
+    tr = pushed.get("tracks") if isinstance(pushed, dict) else None
+    if not isinstance(tr, dict):
+        return True
+    scope = camera_scope()
+    return scope is None or tr.get("camera") in scope
 
 
 def build_app(runtime: CameraAgentRuntime) -> FastAPI:
@@ -6973,15 +7003,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 except asyncio.TimeoutError:
                     pushed = None
                 if pushed is not None:
-                    # A tracks push names a camera; honour this session's
-                    # per-camera scope exactly as the HTTP gate would, so
-                    # a viewer never receives boxes for a camera they may
-                    # not watch. Everything else is site-wide status.
-                    tr = pushed.get("tracks") if isinstance(pushed, dict) else None
-                    if isinstance(tr, dict):
-                        scope = camera_scope()
-                        if scope is not None and tr.get("camera") not in scope:
-                            continue
+                    if not _tracks_push_visible(pushed):
+                        continue
                     await websocket.send_text(json.dumps(pushed, default=str))
                     continue
                 alarms = runtime.alarms.list()

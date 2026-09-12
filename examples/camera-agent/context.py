@@ -762,127 +762,97 @@ def _summarise_event(payload: dict[str, Any]) -> str:
 # ── App alert relay (subscriber + parser) ──────────────────────────
 
 
-TIER0_TRACK_SUBJECT = "opennvr.inference.tier0.*.completed"
+def core_tracks_frame(event: Any) -> tuple[int, dict] | None:
+    """One `tracks` event off core's /events/ws → ``(core_camera_id, frame)``
+    for the demo, or None. Pure, so it is tested without a socket.
 
-
-def _normalize_track_box(box, frame_w, frame_h):
-    """``[x1,y1,x2,y2]`` (pixels, or already 0..1) → ``[x,y,w,h]`` in 0..1,
-    or None. A local twin of core's tier0_track_consumer.normalize_box —
-    the agent cannot import core, and the maths must agree."""
-    try:
-        x1, y1, x2, y2 = (float(v) for v in box)
-    except (TypeError, ValueError):
+    Core has already done the work — the site switch, the per-app
+    permission, the box normalisation — so this only validates shape:
+    the right event type, an integer camera id, at least one track."""
+    if not isinstance(event, dict) or event.get("event_type") != "tracks":
         return None
-    if any(v != v for v in (x1, y1, x2, y2)):
+    cam = event.get("camera_id")
+    if isinstance(cam, bool) or not isinstance(cam, int):
         return None
-    if max(x1, y1, x2, y2) > 1.0:
-        try:
-            fw, fh = float(frame_w), float(frame_h)
-        except (TypeError, ValueError):
-            return None
-        if fw <= 0 or fh <= 0:
-            return None
-        x1, x2, y1, y2 = x1 / fw, x2 / fw, y1 / fh, y2 / fh
-    x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
-    c = lambda v: min(1.0, max(0.0, v))  # noqa: E731
-    x1, y1, x2, y2 = c(x1), c(y1), c(x2), c(y2)
-    if x2 - x1 <= 0 or y2 - y1 <= 0:
+    p = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    tracks = [t for t in (p.get("tracks") or []) if isinstance(t, dict)]
+    if not tracks:
         return None
-    return [round(x1, 4), round(y1, 4), round(x2 - x1, 4), round(y2 - y1, 4)]
+    frame: dict[str, Any] = {"calibrating": bool(p.get("calibrating", False)),
+                             "tracks": tracks}
+    if p.get("source"):
+        frame["source"] = str(p["source"])
+    return cam, frame
 
 
-def tier0_tracks_for_overlay(payload: dict, *, min_score: float = 0.25) -> dict | None:
-    """The demo's overlay frame for one Tier-0 payload, or None when
-    nothing is drawable. Pure; tested without a bus."""
-    frame = payload.get("frame") or {}
-    fw, fh = frame.get("w"), frame.get("h")
-    out = []
-    for t in payload.get("tracks") or []:
-        if not isinstance(t, dict):
-            continue
-        try:
-            score = float(t.get("score", 0.0))
-        except (TypeError, ValueError):
-            continue
-        if score < min_score:
-            continue
-        box = _normalize_track_box(t.get("box"), fw, fh)
-        if box is None:
-            continue
-        out.append({"id": t.get("id"), "label": str(t.get("label") or "object"),
-                    "score": round(score, 3), "box": box})
-    if not out:
-        return None
-    return {"calibrating": bool(payload.get("calibrating", False)), "tracks": out}
-
-
-async def run_tier0_track_subscriber(
+async def run_core_tracks_subscriber(
     *,
-    nats_url: str,
-    nats_token: str | None,
+    base_url: str,
+    api_key: str,
     stop_event: asyncio.Event,
     on_tracks,   # callback(core_camera_id: int, frame: dict) — the demo push
 ) -> None:
-    """Subscribe to Tier-0's per-frame tracks so the demo can draw boxes
-    over its own player. READ-ONLY, like the app-alert subscriber: the
-    agent draws what the platform detected, it never runs detection.
-    The subject carries ``cam<N>``; N is core's camera id, and the
-    callback maps it to the agent's camera. Same connect/backoff shape as
-    run_app_alert_subscriber; nats-py missing → quietly no overlay."""
+    """Consume core's overlay tracks over its /events/ws and hand each
+    frame to ``on_tracks``. ONE source of truth: core's bridge decides
+    what is drawable (DETECTION_OVERLAY_ENABLED, each app's overlay
+    permission, the box maths) and this only relays it — the agent
+    never re-derives any of that from the bus.
+
+    Authenticates with the deployment's INTERNAL_API_KEY, which core
+    turns into an unscoped SERVICE ticket; the agent applies its own
+    per-viewer camera scope before anything reaches a page (see the
+    /updates handler). Backs off on failure; a ticket is single-use and
+    30 s, so a fresh one is minted on every (re)connect. `websockets`
+    missing → quietly no overlay, like nats-py for the alert relay.
+    """
     try:
-        import nats  # type: ignore
+        import websockets  # type: ignore
     except ImportError:
-        logger.warning("nats-py not installed; no live detection overlay")
+        logger.warning("websockets not installed; no live detection overlay")
         await stop_event.wait()
         return
+    import httpx
+
+    base = base_url.rstrip("/")
+    ws_base = re.sub(r"^http", "ws", base, count=1)
+    backoff = 2.0
     while not stop_event.is_set():
         try:
-            options: dict[str, Any] = {"servers": [nats_url]}
-            if nats_token:
-                options["token"] = nats_token
-            nc = await nats.connect(**options)
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as hc:
+                r = await hc.post(f"{base}/api/v1/events/ws-ticket",
+                                  headers={"X-Internal-Api-Key": api_key})
+                r.raise_for_status()
+                ticket = r.json()["ticket"]
+            url = (f"{ws_base}/api/v1/events/ws?ticket={ticket}"
+                   f"&task=tier0&task=overlay")
+            async with websockets.connect(url, max_queue=64) as ws:
+                logger.info("core tracks subscriber: connected to %s/api/v1/events/ws", base)
+                backoff = 2.0
+                while not stop_event.is_set():
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    try:
+                        parsed = core_tracks_frame(json.loads(raw))
+                    except Exception:
+                        continue
+                    if parsed is None:
+                        continue
+                    cam, frame = parsed
+                    try:
+                        on_tracks(cam, frame)
+                    except Exception:
+                        logger.debug("core tracks subscriber: on_tracks raised", exc_info=True)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            logger.warning("tier0 track subscriber: connect failed (%s); retrying in 5s", exc)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                continue
-            return
+            logger.warning("core tracks subscriber: %s; retrying in %.0fs", exc, backoff)
         try:
-            async def _handler(msg) -> None:  # noqa: ANN001
-                try:
-                    payload = json.loads(msg.data.decode("utf-8"))
-                    parts = str(msg.subject).split(".")
-                    handle = parts[3] if len(parts) >= 5 else ""
-                    m = re.match(r"^cam-?(\d+)$", handle, re.IGNORECASE)
-                    if not m:
-                        return
-                    frame = tier0_tracks_for_overlay(payload)
-                    if frame is None:
-                        return
-                    on_tracks(int(m.group(1)), frame)
-                except Exception:
-                    logger.debug("tier0 track subscriber: dropping payload", exc_info=True)
-
-            sub = await nc.subscribe(TIER0_TRACK_SUBJECT, cb=_handler)
-            logger.info("tier0 track subscriber: subscribed to %s", TIER0_TRACK_SUBJECT)
-            await stop_event.wait()
-            try:
-                await sub.unsubscribe()
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.warning("tier0 track subscriber: subscription error (%s); reconnecting", exc)
-        finally:
-            try:
-                await nc.drain()
-            except Exception:
-                pass
-        if not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+        except asyncio.TimeoutError:
+            pass
+        backoff = min(backoff * 2, 30.0)
 
 
 async def run_app_alert_subscriber(

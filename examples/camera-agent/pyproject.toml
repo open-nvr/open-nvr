@@ -24,6 +24,10 @@ dependencies = [
     "uvicorn>=0.27,<1.0",
     "PyYAML>=6.0,<7.0",
     "nats-py>=2.6",
+    # Core's /events/ws for the live detection overlay. Already pulled in
+    # transitively by pipecat and the App SDK; pinned here so the overlay
+    # cannot silently stop working if either of them drops it.
+    "websockets>=12,<18",
     "Pillow>=10.0",
     # App SDK convergence (app-sdk-spec §07): create_monitor's count/
     # crossing watches instantiate SDK detectors (the occupancy-counting
