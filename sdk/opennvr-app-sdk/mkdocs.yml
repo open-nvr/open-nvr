@@ -31,16 +31,20 @@ theme:
     - search.suggest
     - toc.follow
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
+    # No `media:` keys on purpose. With them, Material picks the palette
+    # from prefers-color-scheme, so a reader on a dark-themed OS landed on
+    # the dark site whatever we intended. Without them the FIRST entry is
+    # the default for everyone and the toggle persists the reader's own
+    # choice in localStorage — which is what "light by default, dark if
+    # you want it" actually means.
+    - scheme: default
       primary: black
       accent: indigo
-      toggle: {icon: material/weather-night, name: Dark}
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
+      toggle: {icon: material/weather-night, name: Switch to dark mode}
+    - scheme: slate
       primary: black
       accent: indigo
-      toggle: {icon: material/weather-sunny, name: Light}
+      toggle: {icon: material/weather-sunny, name: Switch to light mode}
 
 plugins:
   - search
@@ -64,6 +68,11 @@ plugins:
 markdown_extensions:
   - admonition
   - attr_list
+  # Required for `<div class="grid cards" markdown>`: without it Python-
+  # Markdown treats the div's contents as raw HTML and the landing page's
+  # "Where to go next" cards rendered as literal `- **[Quickstart](...)**`
+  # bullet source. Material's Grid docs assume this is on.
+  - md_in_html
   - toc: {permalink: true}
   - pymdownx.details
   - pymdownx.superfences
