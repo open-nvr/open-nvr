@@ -1,12 +1,22 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Check } from 'lucide-react'
+import { Check, X } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
 import { DataTable, type Column } from '../ui/DataTable'
 import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
+import { AuthedImage } from '../AuthedImage'
 import {
-  alarmSeenAt, alarmSeenTitle, type InboxAlert,
+  alarmSeenAt, alarmSeenTitle, alertsInboxService, type InboxAlert,
 } from '../../services/alertsInboxService'
+
+/** Which photo best represents an alert in one 32px square: the face if
+ *  the producer sent one, then the body, then the whole scene. */
+const THUMB_ORDER = ['face', 'body', 'subject', 'scene', 'snapshot']
+
+export function bestImageName(images: string[]): string | null {
+  if (!images?.length) return null
+  return THUMB_ORDER.find((n) => images.includes(n)) ?? images[0]
+}
 
 /**
  * The one alarm table. Both surfaces that show alarms render through it.
@@ -76,6 +86,11 @@ export function AlarmsTable({
   isPending, isFetching, isError, error, onRetry, footer, toolbar,
   fillHeight = true,
 }: AlarmsTableProps) {
+  // The alert whose photos are open full size, if any.
+  const [viewing, setViewing] = useState<InboxAlert | null>(null)
+  // No photo column at all unless something on this page has one: an
+  // empty 46px gutter on every vehicle alarm is worse than no column.
+  const anyImages = rows.some((a) => a.images?.length)
   const selectable = !!selected && !!onToggle
   const pageIds = rows.map((a) => a.id)
   const allOnPage = selectable && pageIds.every((id) => selected!.has(id))
@@ -129,6 +144,28 @@ export function AlarmsTable({
         </button>
       ),
     },
+    ...(anyImages ? [{
+      key: 'photo', header: '', srHeader: 'Evidence photo',
+      width: 'w-[46px]',
+      cell: (a: InboxAlert) => {
+        const name = bestImageName(a.images)
+        if (!name) return null
+        return (
+          <AuthedImage
+            queryKey={['alert-image', a.id, name]}
+            fetchBlob={(signal) =>
+              alertsInboxService.getAlertImage(a.id, name, signal)}
+            alt={`Evidence for: ${a.title}`}
+            className={clsx(
+              'h-8 w-8 cursor-zoom-in rounded object-cover',
+              'border border-[var(--border)]',
+              a.acknowledged_at && 'opacity-60',
+            )}
+            onClick={() => setViewing(a)}
+          />
+        )
+      },
+    } as Column<InboxAlert>] : []),
     {
       key: 'severity', header: 'Severity', width: 'w-[92px]',
       cell: (a) => (
@@ -190,6 +227,7 @@ export function AlarmsTable({
   ]
 
   return (
+    <>
     <DataTable<InboxAlert>
       caption={caption}
       columns={columns}
@@ -240,6 +278,10 @@ export function AlarmsTable({
       dense
       minWidth="min-w-[640px]"
     />
+    {viewing && (
+      <AlarmEvidenceViewer alert={viewing} onClose={() => setViewing(null)} />
+    )}
+    </>
   )
 }
 
@@ -294,6 +336,76 @@ export function AlarmsSelectionBar({
               className="text-[var(--text-dim)] hover:text-[var(--text)]">
         Clear
       </button>
+    </div>
+  )
+}
+
+
+/**
+ * Every photo an alert carries, full size.
+ *
+ * The thumbnail answers "is this worth my attention"; this answers "who
+ * was it" — which for a scanner-flag alert is the entire point of the
+ * alarm. Names come from the row, so an alert with a face, a body and a
+ * scene shows three, and one with none never opens.
+ */
+export function AlarmEvidenceViewer({
+  alert, onClose,
+}: { alert: InboxAlert; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Evidence for: ${alert.title}`}
+      // Escape and a click on the backdrop both close it: a photo
+      // overlay that traps the operator is worse than no overlay.
+      onClick={onClose}
+      onKeyDown={(e) => { if (e.key === 'Escape') onClose() }}
+      tabIndex={-1}
+      ref={(el) => el?.focus()}
+    >
+      <div
+        className="max-h-full w-full max-w-3xl overflow-auto rounded-lg border
+                   border-[var(--border)] bg-[var(--panel)] p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-semibold">{alert.title}</div>
+            <div className="text-xs text-[var(--text-dim)]">
+              {alarmSeenAt(alert)}
+              {alert.alert_type && ` · ${alert.alert_type.replace(/_/g, ' ')}`}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--panel-2)]
+                       hover:text-[var(--text)]"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {alert.images.map((name) => (
+            <figure key={name} className="m-0">
+              <AuthedImage
+                queryKey={['alert-image', alert.id, name]}
+                fetchBlob={(signal) =>
+                  alertsInboxService.getAlertImage(alert.id, name, signal)}
+                alt={`${name} for: ${alert.title}`}
+                className="max-h-[60vh] rounded border border-[var(--border)]"
+              />
+              <figcaption className="mt-1 text-center text-[10px] uppercase
+                                     tracking-wide text-[var(--text-dim)]">
+                {name}
+              </figcaption>
+            </figure>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }

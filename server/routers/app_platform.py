@@ -16,6 +16,7 @@ Routes (prefix ``/api/v1/internal/app``):
 * ``GET  /recordings/{id}``                   — recorded segments
 * ``GET  /recordings/{id}/url``               — playback URL for one segment
 * ``GET  /plates/stats|summary|sessions``     — the Vehicles-page aggregates
+* ``POST /evidence``                          — store a JPEG, get its path
 * ``GET  /alerts``                            — the app's own inbox rows
 * ``GET|PUT|DELETE /state[/{key}]``           — durable per-app key/value
 
@@ -30,7 +31,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
+                     status)
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -249,6 +251,42 @@ async def app_alerts(
 def _state_out(row: AppState) -> dict[str, Any]:
     return {"key": row.key, "value": row.value,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+@router.post("/evidence")
+async def app_evidence_upload(
+    request: Request,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Store one JPEG and return its path, for an app to cite in an alert.
+
+    An app that wants a photo on its alert cannot put the photo IN the
+    alert: alerts travel over NATS, whose default payload ceiling is
+    1 MB, and a couple of base64 crops exceed it — the broker drops the
+    publish and the alert is simply never seen. So the picture comes
+    here first and only ``{"path": ...}`` rides along.
+
+    Content-addressed by the store, so re-uploading the same bytes is
+    free and returns the same path.
+    """
+    from services.evidence_store import MAX_EVIDENCE_BYTES, save_evidence_jpeg
+
+    # Refuse on the declared length before reading, so an app cannot
+    # make core hold an arbitrary body in memory.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_EVIDENCE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"evidence must be at most {MAX_EVIDENCE_BYTES} bytes")
+    body = await request.body()
+    try:
+        rel = save_evidence_jpeg(body)
+    except ValueError as exc:
+        # Not a JPEG, empty, or over the cap: the app's bug, not ours.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=str(exc)) from exc
+    return {"path": rel, "bytes": len(body)}
 
 
 @router.get("/state")

@@ -1411,10 +1411,29 @@ The alert shape on the wire:
   },
   "camera_id": "cam-7",
   "correlation_id": "<uuid>",
-  "evidence": { ... },
+  "alert_type": "intrusion",
+  "evidence": { "images": { "face": "ab/<sha>.jpg" }, "...": "..." },
   "tags": ["intrusion", "after-hours"]
 }
 ```
+
+`alert_type` is the producer's own name for WHAT happened, where
+`severity` says only how loudly to ring. The inbox indexes it, so it is
+what an operator filters a month of history by.
+
+**Photos never travel inside an alert.** An alert is a NATS message, and
+the default payload ceiling is 1 MB: a couple of base64 crops exceed it,
+the broker rejects the publish, and the alert is never seen by anyone —
+silently. Upload each JPEG first and cite the paths:
+
+```python
+face = nvr.save_evidence(face_jpeg)        # -> "ab/<sha>.jpg"
+await nvr.alerts.fire(..., alert_type="scanner_flag",
+                      images={"face": face, "scene": scene})
+```
+
+The operator UI shows a thumbnail per alert and opens the full set;
+the bytes are served camera-scoped, so a path is not an authorisation.
 
 **Alert channels** (configured per-deployment by the operator from
 the OpenNVR UI):

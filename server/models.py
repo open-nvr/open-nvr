@@ -844,6 +844,17 @@ class AppAlert(Base):
     correlation_id = Column(String(64), nullable=True)
     evidence = Column(Text, nullable=True)              # JSON, as received
     tags = Column(Text, nullable=True)                  # JSON list
+    # What KIND of alert this is, in the producer's own vocabulary
+    # ("scanner_flag", "no_scan", "package_taken"). Severity says how
+    # loudly to ring; this says what happened, and is what an operator
+    # filters a month of history by. Indexed for exactly that.
+    alert_type = Column(String(40), nullable=True, index=True)
+    # Evidence PHOTOS, as relative paths into the evidence store — never
+    # the image bytes. Apps upload each JPEG first (see the app-platform
+    # evidence endpoint) and send only paths, because the alert itself
+    # travels over NATS, whose default payload ceiling is 1 MB: a couple
+    # of base64 crops exceed it and the broker drops the whole alert.
+    images = Column(Text, nullable=True)                # JSON {name: rel_path}
     # When the thing the alert is ABOUT was seen, as opposed to fired_at,
     # which is when the app got round to deciding. Producers that know it
     # send it in the alert's evidence; NULL for everyone else, and

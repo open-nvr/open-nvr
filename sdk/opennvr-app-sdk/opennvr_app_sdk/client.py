@@ -179,6 +179,18 @@ class _Http:
             raise PlatformError(f"PUT {path} → HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    def post_bytes(self, path: str, body: bytes, content_type: str,
+                   **params) -> Any:
+        url = f"{self.base}{path}{query_string(params)}"
+        headers = {**self.headers(), "Content-Type": content_type}
+        try:
+            r = self._client.post(url, content=body, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            raise PlatformError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise PlatformError(f"POST {path} → HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
     def delete(self, path: str, **params) -> Any:
         url = f"{self.base}{path}{query_string(params)}"
         try:
@@ -398,6 +410,28 @@ class OpenNVR:
         """The camera's current frame as JPEG, or ``None``."""
         return self._http.get_bytes(
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/snapshot")
+
+    def save_evidence(self, jpeg: bytes) -> str | None:
+        """Store a JPEG for an alert to cite; returns its path.
+
+        Put photos HERE, then pass the paths as ``Alert(images=...)``.
+        An alert is a NATS message with a 1 MB ceiling, so a base64 crop
+        inside the alert is not merely wasteful — past the ceiling the
+        broker drops the publish and the alert never reaches anyone.
+
+        ``None`` when the upload fails: an app must still be able to
+        raise its alert without the picture.
+        """
+        if not jpeg:
+            return None
+        try:
+            body = self._http.post_bytes("/api/v1/internal/app/evidence",
+                                         jpeg, "image/jpeg")
+        except PlatformError as exc:
+            logger.warning("evidence upload failed: %s", exc)
+            return None
+        path = (body or {}).get("path")
+        return str(path) if path else None
 
     def recordings(self, camera) -> RecordingsAPI:
         return RecordingsAPI(self._http, _camera_id(camera))
