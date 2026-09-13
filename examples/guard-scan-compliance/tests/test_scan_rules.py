@@ -363,3 +363,53 @@ def test_an_alert_carries_the_guards_face_as_well_as_the_customers():
     images = e.alerts[0]["images"]
     assert "face" in images and "body" in images
     assert "guard_face" in images, images
+
+
+def test_the_last_person_through_the_door_is_still_ruled_on():
+    """The bug that made a perfect scan produce no verdict at all.
+
+    When somebody walks away their screening is parked in the orphan
+    hold, in case the tracker only renamed them — and that hold is
+    checked ONLY while frames keep arriving. So when the feed ends, the
+    last screening of the day sits there finished and unjudged. That is
+    not an edge case: it is the last person through the door, every
+    time. On a looping test clip it was every screening.
+    """
+    e = Engine()
+    now = e.run(FULL[:-1])                       # everything but their exit
+    # They leave; the feed ends a moment later, before the hold expires.
+    now = e.run([(2, None, True, False)], start=now)
+    assert e.screenings == [], "precondition: nothing ruled yet"
+    assert e.engine.orphans or e.engine.sessions, "nobody is waiting"
+
+    e.engine.flush(now + 0.1, reason="left")
+    assert len(e.screenings) == 1
+    assert e.screenings[0]["verdict"] == "compliant"
+    assert e.screenings[0]["score"] == 100.0
+
+
+def test_a_scan_already_finished_survives_the_feed_dying():
+    """Abandoning protects the guard from being blamed for our outage —
+    but a scan that was COMPLETE before the feed died is a real result,
+    and throwing it away loses evidence we actually have."""
+    e = Engine()
+    e.run(FULL[:-1])
+    e.engine.abandon(1e9)
+    assert len(e.screenings) == 1
+    assert e.screenings[0]["verdict"] == "compliant"
+
+
+def test_an_unfinished_scan_is_not_blamed_on_the_guard():
+    e = Engine()
+    now = establish(e)
+    cust = person(2, 560, 300)
+    arm = cust.regions()["left_arm"][0]
+    stop = now + 5.0
+    while now < stop:
+        now += DT
+        bodies = [person(1, 400, 300, wrists=(arm, None)), person(2, 560, 300)]
+        e.engine.guard_id = e.engine.guard.update(bodies, now)
+        e.engine._handle(FRAME, bodies, now)
+    e.engine.abandon(now)
+    assert e.alerts == []
+    assert e.screenings == []

@@ -192,6 +192,9 @@ class CameraWorker:
         self._stop.set()
         if self.stream is not None:
             self.stream.close()
+        if self.engine is not None:
+            # A restart is not a reason to lose the screening in progress.
+            self.engine.flush(time.time(), reason="left")
 
     # ── the loop ──
 
@@ -215,7 +218,9 @@ class CameraWorker:
                                  adapter=POSE_ADAPTER, camera_id=self.handle)
 
         last = time.monotonic()
+        ended_at = None
         for frame in self.stream.frames(timeout=15.0):
+            ended_at = frame.wall_ts
             if self._stop.is_set():
                 return
             if frame.restarted and self.engine is not None:
@@ -229,6 +234,14 @@ class CameraWorker:
             last = now
             if dt > 0:
                 self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+
+        # The stream ended. Rule on whoever was still being screened —
+        # including anyone parked in the orphan hold, whose expiry only
+        # ticks while frames arrive. Skipping this loses the LAST
+        # screening every time a feed ends, which on a looping test clip
+        # is every screening.
+        if self.engine is not None and ended_at is not None:
+            self.engine.flush(ended_at, reason="left")
 
     def _on_frame(self, frame) -> None:
         image = frame.to_ndarray()
@@ -501,11 +514,20 @@ class GuardScanApp(FrameApp):
         return None
 
     def handle_tick(self):
-        """The inherited heartbeat. The workers do the work; this only
-        notices when one has gone quiet, which is what /health is for."""
+        """The inherited heartbeat. The workers do the work; this reports
+        how fast each is actually going.
+
+        The frame rate is the number to watch: every threshold in the
+        rules is in seconds, but a step the wand holds for half a second
+        is only SEEN if frames arrive during it. A camera quietly running
+        at two frames a second loses the short passes and reports a
+        clean scan as incomplete.
+        """
         for handle, worker in self.workers.items():
-            if worker.last_error:
-                log.warning("%s: %s", handle, worker.last_error)
+            log.info("%s: %.1f fps, %d frames, %d tracked%s", handle,
+                     worker.fps, worker.frames, worker.tracker.live,
+                     f", last error: {worker.last_error}"
+                     if worker.last_error else "")
         return []
 
     def stop(self) -> None:

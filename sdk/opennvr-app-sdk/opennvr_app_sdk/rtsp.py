@@ -229,8 +229,12 @@ class RtspFrameStream:
     def _default_spawn(argv: list[str]) -> "subprocess.Popen[bytes]":
         if not shutil.which("ffmpeg"):
             raise FrameStreamError("ffmpeg not found on PATH")
+        # Keep stderr. Sending it to /dev/null makes every stream death
+        # look identical from the outside — "stream ended" — when ffmpeg
+        # was saying exactly what went wrong (401, no route, codec
+        # unsupported) the whole time.
         return subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL)
+                                stderr=subprocess.PIPE)
 
     def start(self) -> "RtspFrameStream":
         if self._thread is not None:
@@ -321,6 +325,8 @@ class RtspFrameStream:
         frame_bytes = width * height * 3
 
         proc = self._spawn(build_command(url, width=self.width, fps=self.fps))
+        errors: deque[str] = deque(maxlen=8)
+        self._drain_stderr(proc, errors)
         first = True
         produced = False
         try:
@@ -344,7 +350,30 @@ class RtspFrameStream:
                 first = False
         finally:
             self._terminate(proc)
+            if not produced and errors:
+                # Died without a single frame: say why, in ffmpeg's own
+                # words, rather than leaving an operator to guess.
+                logger.warning("%s: ffmpeg said: %s", self.name,
+                               " | ".join(errors))
         return produced
+
+    @staticmethod
+    def _drain_stderr(proc, sink) -> None:
+        """Keep ffmpeg's last few complaints without blocking on them."""
+        if proc.stderr is None:
+            return
+
+        def _pump():
+            try:
+                for line in iter(proc.stderr.readline, b""):
+                    text = line.decode("utf-8", "replace").strip()
+                    if text:
+                        sink.append(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_pump, daemon=True,
+                         name="ffmpeg-stderr").start()
 
     @staticmethod
     def _terminate(proc) -> None:

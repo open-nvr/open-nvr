@@ -1103,17 +1103,42 @@ class ScanEngine:
                  old, sub.track_id)
         return sess
 
-    def abandon(self, now, reason="feed_lost"):
-        """Give up on every open screening.
+    def flush(self, now, reason="left"):
+        """Rule on everyone still being screened, then start clean.
 
-        Called when the video feed broke. Whatever was half-scanned, we
-        did not see the rest of it, and ruling "incomplete" on a scan we
-        stopped watching would blame the guard for our own outage. The
-        screenings are closed as abandoned and raise nothing.
+        Nothing else will: a screening whose person has walked away is
+        parked in the orphan hold in case the tracker merely renamed
+        them, and that hold is only checked while FRAMES ARE ARRIVING.
+        When the feed ends — a clip finishing, a camera going away, the
+        app shutting down — the last screening of the day sits in that
+        hold, finished and unjudged, and is never heard of again.
+
+        That is not a rare edge: it is the LAST person through the door
+        every single time.
         """
+        for key in list(self.orphans):
+            self._close_session(self.orphans.pop(key)[0], reason, now)
         for session in list(self.sessions.values()):
-            self.sessions.pop(session.subject_id, None)
-            log.info("session %s abandoned (%s)", session.id, reason)
+            self._close_session(session, reason, now)
+        self.finished.clear()
+
+    def abandon(self, now, reason="feed_lost"):
+        """The feed broke mid-screening.
+
+        A scan we stopped watching must not be ruled incomplete — that
+        blames the guard for our outage. But a scan that was already
+        FINISHED before the feed died is a real result, and throwing it
+        away loses evidence we actually have. So: rule the complete
+        ones, drop the rest.
+        """
+        for holder in (self.sessions, self.orphans):
+            for key in list(holder):
+                value = holder.pop(key)
+                session = value[0] if isinstance(value, tuple) else value
+                if session.complete:
+                    self._close_session(session, "complete", now)
+                else:
+                    log.info("session %s abandoned (%s)", session.id, reason)
         self.guard.reset() if hasattr(self.guard, "reset") else None
         self.light.reset()
 
