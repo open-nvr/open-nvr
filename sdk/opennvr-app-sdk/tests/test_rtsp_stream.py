@@ -32,12 +32,16 @@ def _frame(fill: int) -> bytes:
 
 
 class FakeProc:
-    """A Popen-alike whose stdout is whatever bytes the test supplies."""
+    """A Popen-alike whose stdout is whatever bytes the test supplies.
 
-    def __init__(self, payload: bytes, *, block_after: bool = False):
+    It has a stderr too, because the real one does and the reader reads
+    it — a fake without it hides the crash it would cause.
+    """
+
+    def __init__(self, payload: bytes, *, complaint: bytes = b""):
         self.stdout = io.BytesIO(payload)
+        self.stderr = io.BytesIO(complaint)
         self.terminated = False
-        self._block_after = block_after
 
     def terminate(self):
         self.terminated = True
@@ -201,3 +205,31 @@ def test_a_frame_becomes_an_array_of_the_right_shape():
     arr = frame.to_ndarray()
     assert arr.shape == (H, W, 3)
     assert int(arr[0][0][0]) == 3
+
+
+def test_ffmpeg_is_quoted_when_a_stream_never_starts(caplog):
+    """Its stderr used to go to /dev/null, so every death read as the
+    same shrug — "stream ended" — while ffmpeg had been saying exactly
+    what was wrong the whole time."""
+    proc = FakeProc(b"", complaint=b"Server returned 401 Unauthorized\n")
+    stream = RtspFrameStream("rtsp://x/y", size=(W, H), spawn=lambda argv: proc)
+    with caplog.at_level("WARNING"):
+        stream.start()
+        time.sleep(0.5)
+        stream.close()
+    assert any("401" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_a_bug_in_the_reader_is_not_reported_as_a_camera_fault(caplog):
+    """A missing import once crashed every session instantly, and the
+    only symptom was a stream that reconnected for ever. A fault in our
+    own code must say so."""
+    def exploding_spawn(argv):
+        raise RuntimeError("boom in the reader")
+
+    stream = RtspFrameStream("rtsp://x/y", size=(W, H), spawn=exploding_spawn)
+    with caplog.at_level("ERROR"):
+        stream.start()
+        time.sleep(0.5)
+        stream.close()
+    assert any("bug" in r.getMessage() for r in caplog.records), caplog.text

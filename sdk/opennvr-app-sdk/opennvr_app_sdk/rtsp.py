@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
@@ -299,7 +300,12 @@ class RtspFrameStream:
                 logger.warning("%s: %s", self.name, exc)
                 got_frames = False
             except Exception:  # noqa: BLE001
-                logger.warning("%s: stream failed", self.name, exc_info=True)
+                # A BUG in here must not read as "the camera dropped".
+                # It did once: a missing import crashed every session
+                # instantly and the only symptom was a stream that
+                # reconnected for ever with nothing to show for it.
+                logger.exception("%s: reader crashed (this is a bug, not "
+                                 "a camera fault)", self.name)
                 got_frames = False
             if self._stop.is_set():
                 return
@@ -360,12 +366,13 @@ class RtspFrameStream:
     @staticmethod
     def _drain_stderr(proc, sink) -> None:
         """Keep ffmpeg's last few complaints without blocking on them."""
-        if proc.stderr is None:
+        stderr = getattr(proc, "stderr", None)
+        if stderr is None:
             return
 
         def _pump():
             try:
-                for line in iter(proc.stderr.readline, b""):
+                for line in iter(stderr.readline, b""):
                     text = line.decode("utf-8", "replace").strip()
                     if text:
                         sink.append(text)
