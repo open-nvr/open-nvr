@@ -482,3 +482,32 @@ def test_a_wand_merely_travelling_past_does_not_credit_a_surface():
 
     session = e.engine.sessions[2]
     assert "front" not in session.done, "a passing wand credited the torso"
+
+
+def test_the_three_copies_of_every_default_agree():
+    """A threshold is written down in three places — the engine's
+    settings, the app's config, and the manifest the catalog renders —
+    and nothing keeps them in step. When they drifted, the app ran on a
+    dwell nobody had chosen: tuned to 0.6 in the engine, shipped as 0.4
+    by the manifest, and the clip that had just been made to pass failed
+    again on the live stack.
+    """
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "guard_scan_compliance.py"
+           ).read_text(encoding="utf-8")
+    settings = ScanSettings()
+    for name in ("dwell_s", "dwell_decay", "no_scan_engaged", "step_hold_s",
+                 "min_screen", "session_gap", "led_ratio", "led_window_s"):
+        want = getattr(settings, name)
+        in_manifest = re.search(
+            rf'Param\("{name}",\s*\w+,\s*default=([0-9.]+)', src)
+        assert in_manifest, f"{name} is not offered in the manifest"
+        assert float(in_manifest.group(1)) == want, (
+            f"manifest default for {name} is {in_manifest.group(1)}, "
+            f"engine uses {want}")
+        in_config = re.search(rf"\n    {name}: float = ([0-9.]+)", src)
+        assert in_config, f"{name} missing from the app config"
+        assert float(in_config.group(1)) == want, (
+            f"app config default for {name} is {in_config.group(1)}, "
+            f"engine uses {want}")

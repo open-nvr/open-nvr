@@ -99,8 +99,17 @@ MANIFEST = AppManifest(
               description="Which surfaces must be covered, what each is "
                           "worth, whether the ORDER counts, and the score "
                           "bands. Empty means the shipped default."),
-        Param("dwell_s", float, default=0.4,
-              description="How long the wand must hold on a surface."),
+        Param("dwell_s", float, default=0.6,
+              description="How much time the wand must spend on a surface "
+                          "for it to count. Cumulative across the screening: "
+                          "a wand being swept is never still."),
+        Param("dwell_decay", float, default=0.25,
+              description="How fast that progress drains while the wand is "
+                          "elsewhere, as a fraction of real time."),
+        Param("no_scan_engaged", float, default=1.0,
+              description="How much wand-on-person time is still consistent "
+                          "with 'nobody scanned them'. Above it, we saw part "
+                          "of a real screening and say nothing."),
         Param("step_hold_s", float, default=0.0,
               description="How long a covered surface stays covered before "
                           "it must be re-earned. 0 keeps it for the whole "
@@ -272,7 +281,12 @@ class GuardScanConfig(BaseAppConfig):
     fps: float = 10.0
     frame_width: int = 640
     procedure: dict = field(default_factory=dict)
-    dwell_s: float = 0.4
+    # These mirror ScanSettings. Three places carry a default — the
+    # engine, this config, and the manifest the catalog renders — and
+    # they must agree, or the app runs on numbers nobody chose.
+    dwell_s: float = 0.6
+    dwell_decay: float = 0.25
+    no_scan_engaged: float = 1.0
     step_hold_s: float = 0.0
     min_screen: float = 3.0
     session_gap: float = 8.0
