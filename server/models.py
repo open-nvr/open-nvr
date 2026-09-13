@@ -871,6 +871,63 @@ class AppAlert(Base):
     acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 
+class GuardScreening(Base):
+    """One entry screening, as ruled on by the guard-scan app.
+
+    EVERY screening lands here, the clean ones included. That is the
+    point of the table: compliance is complete scans over all
+    screenings, and a store of only the failures can tell you how many
+    alerts there were but never what share of the day went right.
+
+    Written by ``services/guardscan_event_consumer.py`` from contracted
+    ``guardscan.screening.v1`` events. The app measures; core remembers —
+    so the app can restart, or be reinstalled, without losing the record.
+    Retention: the consumer prunes rows older than RETENTION_DAYS.
+    """
+
+    __tablename__ = "guard_screenings"
+    __table_args__ = (
+        Index("ix_guard_screenings_cam_ts", "camera_id", "ended_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    #: Producer-assigned, and the dedup key: the bus is at-least-once,
+    #: so a redelivered screening must not become a second row and a
+    #: second entry in the day's denominator.
+    session_id = Column(String(40), unique=True, nullable=False, index=True)
+    #: Core camera id, parsed from the platform handle ("cam3" → 3), so
+    #: reads owner-scope through the cameras table like every other
+    #: surface. NULL when the producer used a handle core doesn't know.
+    camera_id = Column(Integer, nullable=True, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    #: compliant | partial | incomplete | no_scan
+    verdict = Column(String(20), nullable=False, index=True)
+    score = Column(Float, nullable=False, default=0.0)
+    coverage = Column(Float, nullable=True)
+    order_score = Column(Float, nullable=True)
+    #: Which surfaces were covered, and which were not (JSON lists).
+    steps_done = Column(Text, nullable=True)
+    steps_missing = Column(Text, nullable=True)
+    #: Whether the wand's indicator lit during this screening.
+    flagged = Column(Boolean, nullable=False, default=False)
+    #: How the screening ended — left, complete, timeout, feed_lost.
+    ended_by = Column(String(30), nullable=True)
+    duration_s = Column(Float, nullable=True)
+    engaged_s = Column(Float, nullable=True)
+    #: Who was on duty. The app supplies a stable key per guard it can
+    #: tell apart; the name is resolved from the roster at write time,
+    #: and stays NULL until someone says who that is.
+    guard_key = Column(String(64), nullable=True, index=True)
+    guard_name = Column(String(100), nullable=True)
+    #: Evidence photos (JSON {name: relative path}), so the screening
+    #: list can show who was scanned without going via the alert.
+    images = Column(Text, nullable=True)
+    #: The alert this screening raised, if it raised one.
+    alert_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class AuditLog(Base):
     """Audit log of significant user and system actions.
 

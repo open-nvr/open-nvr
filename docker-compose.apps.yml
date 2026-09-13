@@ -477,6 +477,86 @@ services:
   # volume keeps that across container recreates (and can be pre-warmed
   # for air-gapped installs — see the adapter's Dockerfile notes).
   # ──────────────────────────────────────────────────────────────
+  # Body keypoints. Rules about what a person is DOING — a hand
+  # scanner sweeping an arm, a fall, a gesture — need joints, not
+  # boxes, and no adapter in the default stack produced them.
+  # ──────────────────────────────────────────────────────────────
+  yolo-pose-adapter:
+    profiles: [apps]
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_yolo_pose_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # Smaller input is the CPU lever: an app watching a doorway wants
+      # frame RATE, and the wrist-to-torso geometry survives the loss.
+      - OPENNVR_POSE_IMGSZ=${OPENNVR_POSE_IMGSZ:-448}
+      # The image ships without weights. Either pre-seed this volume
+      # (``python download_models.py --all`` in the adapter repo) or set
+      # YOLO_POSE_MODEL_URL for a first-boot fetch — an air-gapped
+      # install wants the former.
+      - YOLO_POSE_MODEL_URL=${YOLO_POSE_MODEL_URL:-}
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+      - opennvr_yolo_pose_cache:/root/.cache
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9009/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  yolo-pose-register:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_yolo_pose_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      yolo-pose-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="yolo-pose"
+        url="http://yolo-pose-adapter:9009"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if OCR 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — screening checks will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   fast-plate-ocr-adapter:
     profiles: [apps]
     image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}
@@ -560,6 +640,7 @@ services:
         exit 0
     networks:
       - opennvr_internal
+
 
   # ──────────────────────────────────────────────────────────────
   # License plate recognition — YOLOv8 → crop → fast-plate-ocr chain
@@ -1100,6 +1181,68 @@ services:
     networks:
       - opennvr_apps
 
+  guard-scan-compliance-config-init:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_guard_scan_config_init
+    logging: *svc-logs
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (guard-scan-compliance) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/guard-scan-compliance:/template:ro
+      - opennvr_guard_scan_config:/generated
+
+  guard-scan-compliance:
+    profiles: [apps]
+    build:
+      context: .
+      dockerfile: examples/guard-scan-compliance/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+    container_name: opennvr_guard_scan_compliance
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      guard-scan-compliance-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - KAIC_URL=http://opennvr-core:8100
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9210"
+    volumes:
+      - opennvr_guard_scan_config:/app/config:ro
+      # The per-frame keypoint logs this collects as it runs — the
+      # training set for a learned model later. Its own volume so a
+      # prune can find it: the evidence store's sweep only deletes JPEGs.
+      - opennvr_guard_scan_sessions:/data/sessions
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
 volumes:
   # Generated config.yml files (mounted read-only by each app).
   opennvr_loitering_config:
@@ -1117,3 +1260,7 @@ volumes:
   # footage-search's persistent SQLite index (see its store.py).
   opennvr_footage_search_data:
   opennvr_home_assistant_relay_config:
+  opennvr_guard_scan_config:
+  opennvr_guard_scan_sessions:
+  opennvr_yolo_pose_cache:
+  opennvr_yolo_pose_weights:
