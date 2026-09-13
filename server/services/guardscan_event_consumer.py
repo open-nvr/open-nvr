@@ -243,10 +243,18 @@ async def run_consumer_loop() -> None:
         logger.info("guard screenings: nats-py not installed — no history")
         return
 
+    # The compose broker runs token auth. Connecting without it is an
+    # Authorization Violation, and this loop would retry for ever
+    # without ever subscribing — the app keeps alerting while its
+    # history quietly never accrues. (Same lesson as the plate and
+    # occupancy consumers, which document it too.)
+    token = (getattr(settings, "internal_api_key", "") or "").strip() or None
+
     while True:
         client = sub = None
         try:
-            client = await nats.connect(url, name="opennvr-guardscan-consumer")
+            client = await nats.connect(url, connect_timeout=5, token=token,
+                                        name="opennvr-guardscan-consumer")
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
             logger.info("guard screenings: subscribed to %s", SUBJECT)
             while client.is_connected:

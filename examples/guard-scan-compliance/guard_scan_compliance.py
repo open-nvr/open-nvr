@@ -175,6 +175,7 @@ class CameraWorker:
         self.frames = 0
         self.fps = 0.0
         self.last_error: str | None = None
+        self._infer_failures = 0
 
     # ── lifecycle ──
 
@@ -229,7 +230,14 @@ class CameraWorker:
         image = frame.to_ndarray()
         bodies = self.app.pose(self.infer, image, frame)
         if bodies is None:
+            # Inference is down. Retrying every frame turns one outage
+            # into a hundred connection attempts a second and buries the
+            # reason in its own log spam.
+            self._infer_failures += 1
+            if self._infer_failures >= 3:
+                time.sleep(min(2.0 * self._infer_failures, 30.0))
             return
+        self._infer_failures = 0
         engine = self.engine
         bodies = engine._dedupe(bodies, image)
         engine.guard_id = engine.guard.update(bodies, frame.wall_ts,
@@ -297,16 +305,25 @@ class GuardScanApp(FrameApp):
     # ── config ──
 
     def camera_config(self, handle: str) -> dict:
-        """This camera's settings: the app's, with per-camera overrides."""
-        merged = dict(self.config)
+        """This camera's settings: the app's, with per-camera overrides.
+
+        Zones are drawn per camera in the catalog, so two entrances on
+        one instance each get their own geometry over shared thresholds.
+        """
+        from dataclasses import asdict, is_dataclass
+
+        merged = (asdict(self.config) if is_dataclass(self.config)
+                  else dict(self.config or {}))
         merged.update(self._per_camera.get(handle, {}))
         return merged
 
-    def on_config(self, config: dict) -> None:
+    def on_config_update(self, config: dict) -> None:
         """Live config from the catalog. Workers pick it up on their next
         reconnect rather than mid-screening, so a saved setting cannot
         change the rules half way through ruling on somebody."""
-        self.config.update(config or {})
+        for key, value in (config or {}).items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
         per_camera = {}
         for key in ("scan_zone", "guard_post"):
             drawn = config.get(key)
@@ -380,7 +397,8 @@ class GuardScanApp(FrameApp):
         """The per-frame keypoints: the training set this collects as it
         runs. Written where a prune can find it, not into the evidence
         store, whose sweep only ever deletes JPEGs."""
-        folder = Path(self.config.get("session_log_dir") or "/data/sessions")
+        folder = Path(getattr(self.config, "session_log_dir", None)
+                      or "/data/sessions")
         try:
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{record['session']}.json"

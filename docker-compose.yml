@@ -187,6 +187,14 @@ services:
       - MTX_WEBRTCLOCALTCPADDRESS=:${WEBRTC_ICE_PORT:-8189}
     networks:
       - opennvr_internal
+      # Apps that WATCH (a gesture, a fall, a scan sweep) read the
+      # stream itself, and an app cannot reach a network it is not on.
+      # Reachability is not permission: every RTSP connection still
+      # needs a MediaMTX JWT, and an app gets one only from
+      # GET /internal/app/cameras/{id}/stream, which mints a token
+      # scoped to that one camera's path — so being on this network
+      # lets an app read the cameras it was assigned, and no others.
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 30s

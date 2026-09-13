@@ -29,11 +29,25 @@ branch_labels = None
 depends_on = None
 
 
+def _columns() -> set[str]:
+    return {c["name"] for c in
+            sa.inspect(op.get_bind()).get_columns("app_alerts")}
+
+
 def upgrade() -> None:
+    # Idempotent for the same reason as the table above: create_all may
+    # have added these already on a stack that booted with the new models
+    # before the migration ran.
+    have = _columns()
     with op.batch_alter_table("app_alerts") as batch:
-        batch.add_column(sa.Column("alert_type", sa.String(40), nullable=True))
-        batch.add_column(sa.Column("images", sa.Text(), nullable=True))
-    op.create_index("ix_app_alerts_alert_type", "app_alerts", ["alert_type"])
+        if "alert_type" not in have:
+            batch.add_column(sa.Column("alert_type", sa.String(40), nullable=True))
+        if "images" not in have:
+            batch.add_column(sa.Column("images", sa.Text(), nullable=True))
+    indexes = {i["name"] for i in
+               sa.inspect(op.get_bind()).get_indexes("app_alerts")}
+    if "ix_app_alerts_alert_type" not in indexes:
+        op.create_index("ix_app_alerts_alert_type", "app_alerts", ["alert_type"])
 
 
 def downgrade() -> None:

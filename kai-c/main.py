@@ -1599,6 +1599,10 @@ async def v1_infer_stream(websocket: WebSocket, adapter_name: str):
         # URL configured), in which case the proxy skips the broadcast.
         nats_publisher=_nats_publisher,
         adapter_info=adapter,
+        # The adapter authenticates the upstream upgrade the same way it
+        # authenticates /infer; without this it 403s and the app sees a
+        # 500 it cannot explain.
+        auth_token=INTERNAL_API_KEY or None,
     )
     await proxy.run()
 

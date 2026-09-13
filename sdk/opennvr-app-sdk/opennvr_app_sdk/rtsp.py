@@ -137,11 +137,18 @@ def probe_size(url: str, *, width: int, timeout: float = 15.0) -> tuple[int, int
     """
     if not shutil.which("ffprobe"):
         raise FrameStreamError("ffprobe not found on PATH")
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
-         "-rtsp_transport", "tcp", url],
-        capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
+             "-rtsp_transport", "tcp", url],
+            capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        # A camera that accepts the connection and then says nothing is
+        # a stream problem like any other: reconnect on the usual
+        # backoff rather than tearing down the worker.
+        raise FrameStreamError(
+            f"stream did not answer within {timeout:.0f}s") from exc
     text = (out.stdout or "").strip().splitlines()
     if not text or "x" not in text[0]:
         raise FrameStreamError(

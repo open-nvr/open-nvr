@@ -19,7 +19,20 @@ branch_labels = None
 depends_on = None
 
 
+def _has_table(name: str) -> bool:
+    return sa.inspect(op.get_bind()).has_table(name)
+
+
 def upgrade() -> None:
+    # create_all() runs before migrations at startup and builds any table
+    # whose model exists, so on a stack that has booted once this table is
+    # already here. A bare create_table then raises DuplicateTable, and
+    # because the upgrade is ONE transaction that rollback takes every
+    # other migration in the batch with it — which is how the alert
+    # columns in a3f19c7d2e60 silently failed to apply.
+    if _has_table("guard_screenings"):
+        return
+
     op.create_table(
         "guard_screenings",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -60,4 +73,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table("guard_screenings")
+    if _has_table("guard_screenings"):
+        op.drop_table("guard_screenings")
