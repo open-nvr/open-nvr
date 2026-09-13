@@ -470,22 +470,36 @@ class GuardScanApp(FrameApp):
     def publish_overlay(self, handle, bodies, engine, frame) -> None:
         """Boxes for the operator's live view: who the guard is, who is
         being screened, and which surfaces are done so far."""
+        from guard_scan.core import STEP_LABEL, STEPS
+
         boxes = []
         for body in bodies:
             is_guard = body.track_id == engine.guard_id
             session = engine.sessions.get(body.track_id)
-            label = "Guard" if is_guard else f"Person {body.track_id}"
-            if session is not None and not is_guard:
-                done = len(session.done)
-                label = f"{label} — {done}/4"
+            if is_guard:
+                label = "Guard"
+            elif session is not None:
+                # The checklist, on the person it is about: which
+                # surfaces are done and what the scan is worth so far.
+                done = [STEP_LABEL[s][:1] for s in STEPS if s in session.done]
+                result = session.result()
+                label = (f"Scanning {''.join(done) or '—'} "
+                         f"{round(result['score'])}%")
+            else:
+                label = f"Person {body.track_id}"
+            x1, y1, x2, y2 = body.box
             boxes.append({
-                "x1": body.box[0] / frame.width, "y1": body.box[1] / frame.height,
-                "x2": body.box[2] / frame.width, "y2": body.box[3] / frame.height,
                 "label": label,
-                "colour": "#4da3ff" if is_guard else "#ffffff",
+                # The contract's shape: x, y, w, h as fractions of the
+                # frame, because an app never knows what resolution the
+                # operator is watching at.
+                "box": [x1 / frame.width, y1 / frame.height,
+                        (x2 - x1) / frame.width, (y2 - y1) / frame.height],
+                "id": int(body.track_id),
             })
         try:
-            self.events.publish_overlay(camera_id=handle, boxes=boxes)
+            self.events.publish_overlay(camera_id=handle, boxes=boxes,
+                                        seq=frame.seq)
         except Exception:  # noqa: BLE001
             log.debug("overlay publish failed", exc_info=True)
 
