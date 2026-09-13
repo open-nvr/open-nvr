@@ -52,12 +52,13 @@ from opennvr_app_sdk import (
     Alert, AlertType, AppManifest, BaseAppConfig, FrameApp, InferStream,
     OpenNVR, Param, StateView, load_app_config,
 )
-from opennvr_app_sdk.alerts import build_dispatcher
+from opennvr_app_sdk.alerts import AlertSource, build_dispatcher
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 
 sys.path.insert(0, str(Path(__file__).parent))
 from guard_scan.core import ScanEngine, ScanRules, SiteConfig  # noqa: E402
 from guard_scan.settings import ScanSettings  # noqa: E402
+from guard_scan.tracking import Tracker  # noqa: E402
 
 log = logging.getLogger("guard-scan-compliance")
 
@@ -176,6 +177,9 @@ class CameraWorker:
         self.fps = 0.0
         self.last_error: str | None = None
         self._infer_failures = 0
+        # Identity across frames is the app's job: the adapter detects,
+        # it does not track. One tracker per camera.
+        self.tracker = Tracker()
 
     # ── lifecycle ──
 
@@ -228,7 +232,7 @@ class CameraWorker:
 
     def _on_frame(self, frame) -> None:
         image = frame.to_ndarray()
-        bodies = self.app.pose(self.infer, image, frame)
+        bodies = self.app.pose(self.infer, image, frame, self.tracker)
         if bodies is None:
             # Inference is down. Retrying every frame turns one outage
             # into a hundred connection attempts a second and buries the
@@ -364,6 +368,16 @@ class GuardScanApp(FrameApp):
         kind = record["kind"]
         severity = record["severity"]
         self.dispatcher.fire(Alert(
+            # Named explicitly, not left to the SDK default. The bus
+            # lets an app publish only under its OWN id
+            # (opennvr.alerts.app.<id>.<camera>), and the default source
+            # name is the generic "opennvr-app" — an alert fired under
+            # that is refused as a Publish Violation and reaches nobody
+            # while this app's log says it fired. Not set_default_source
+            # either: that is a ContextVar, and these alerts are raised
+            # on per-camera worker THREADS, which do not inherit it.
+            source=AlertSource(kind="app", name=APP_ID,
+                               version=MANIFEST.version),
             title=record["title"],
             description=record["detail"],
             camera_id=handle,
@@ -408,7 +422,7 @@ class GuardScanApp(FrameApp):
 
     # ── inference ──
 
-    def pose(self, infer, image, frame):
+    def pose(self, infer, image, frame, tracker):
         """Keypoints for one frame, or None when the adapter is unhappy."""
         import cv2
 
@@ -424,7 +438,7 @@ class GuardScanApp(FrameApp):
             log.warning("pose inference failed (%s) — is the %s adapter "
                         "registered with KAI-C?", exc, POSE_ADAPTER)
             return None
-        return _bodies_from(result, frame)
+        return _bodies_from(result, frame, tracker)
 
     def publish_overlay(self, handle, bodies, engine, frame) -> None:
         """Boxes for the operator's live view: who the guard is, who is
@@ -500,26 +514,39 @@ class GuardScanApp(FrameApp):
         super().stop()
 
 
-def _bodies_from(result, frame):
-    """Adapter output → the Body objects the engine reasons about."""
+def _bodies_from(result, frame, tracker):
+    """Adapter output → the Body objects the engine reasons about.
+
+    The adapter answers "where are the people in this picture" and
+    stops there. Numbering them in arrival order would be worse than
+    useless: detections come back ordered by confidence, so that order
+    flips between frames and the guard and the customer trade
+    identities several times a second — which quietly turns a complete
+    scan into an incomplete one. The tracker gives each person an id
+    that survives the next frame.
+    """
     import numpy as np
 
     from guard_scan.core import Body
 
     persons = ((result or {}).get("result") or result or {}).get("persons") or []
-    bodies = []
-    for i, person in enumerate(persons):
+    kept, boxes = [], []
+    for person in persons:
         kps = person.get("keypoints") or []
         if len(kps) < 17:
             continue
-        arr = np.array([[float(p[0]), float(p[1]), float(p[2])] for p in kps[:17]],
-                       dtype=np.float32)
-        box = person.get("bbox") or [0, 0, frame.width, frame.height]
-        # The adapter has no notion of identity across frames, so the
-        # track id is the engine's problem; give it the index and let
-        # the dedupe/adopt machinery do the rest.
-        bodies.append(Body(person.get("track_id", i + 1),
-                           tuple(float(v) for v in box), arr, 0.35))
+        box = tuple(float(v) for v in
+                    (person.get("bbox") or [0, 0, frame.width, frame.height]))
+        kept.append((person, box))
+        boxes.append(box)
+
+    ids = tracker.update(boxes, frame.wall_ts)
+    bodies = []
+    for (person, box), track_id in zip(kept, ids):
+        arr = np.array(
+            [[float(p[0]), float(p[1]), float(p[2])]
+             for p in person["keypoints"][:17]], dtype=np.float32)
+        bodies.append(Body(track_id, box, arr, 0.35))
     return bodies
 
 
