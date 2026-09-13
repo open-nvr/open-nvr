@@ -92,6 +92,48 @@ def _mid(a, b):
     return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
 
 
+def _seg_dist(point, shape):
+    """Distance from a point to a region's shape.
+
+    A shape is either a point (the old circles, still used when the
+    keypoints are too sparse to draw a segment) or a pair of points
+    meaning the segment between them.
+    """
+    if not isinstance(shape[0], (tuple, list)):
+        return _dist(point, shape)
+    a, b = shape
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    if span <= 1e-6:
+        return _dist(point, a)
+    # How far along the segment the closest point lies, clamped to it.
+    t = max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / span))
+    return _dist(point, (ax + t * dx, ay + t * dy))
+
+
+def region_point(shape):
+    """A point squarely on a region — its middle.
+
+    Regions are segments now, so "where is this region" is no longer a
+    single coordinate. Tests and overlays want one anyway.
+    """
+    if isinstance(shape[0], (tuple, list)):
+        return _mid(shape[0], shape[1])
+    return shape
+
+
+def _limb(shoulder, elbow, wrist):
+    """The line a limb occupies, from whichever joints were found."""
+    ends = [p for p in (shoulder, elbow, wrist) if p is not None]
+    if not ends:
+        return None
+    if len(ends) == 1:
+        return ends[0]
+    return (ends[0], ends[-1])
+
+
 def _first(*points):
     for p in points:
         if p is not None:
@@ -116,6 +158,8 @@ class Body:
         self.r_wri = _pt(kps, R_WRI, min_conf)
         self.l_elb = _pt(kps, L_ELB, min_conf)
         self.r_elb = _pt(kps, R_ELB, min_conf)
+        self.l_ank = _pt(kps, L_ANK, min_conf)
+        self.r_ank = _pt(kps, R_ANK, min_conf)
         self.l_ank = _pt(kps, L_ANK, min_conf)
         self.r_ank = _pt(kps, R_ANK, min_conf)
 
@@ -158,15 +202,51 @@ class Body:
         return face_conf >= 0.9 or (face_conf >= 0.5 and face_conf > ear_conf)
 
     def regions(self):
-        """The three places the scanner has to visit, as circles."""
+        """The surfaces a wand has to cover, shaped like the body parts.
+
+        These were three circles — one at each elbow, one at the chest —
+        and a wand sweeping a person spends most of its time outside all
+        three. Measured on entrance footage: during a real back pass the
+        wand was judged ON the person for 14 seconds and inside a region
+        for 0.4 of them. The steps then came down to whether a couple of
+        frames happened to clip a circle, which is exactly as arbitrary
+        as it sounds.
+
+        An arm is a LINE from shoulder to wrist and a torso is the SLAB
+        between the shoulders and the hips, so that is what these are:
+        segments with a thickness, measured by distance to the segment
+        rather than to one point on it.
+        """
         out = {}
-        left = _first(self.l_elb, self.l_wri, self.l_sho)
-        right = _first(self.r_elb, self.r_wri, self.r_sho)
+        # Shoulder to wrist, so the whole arm counts — but it sits
+        # alongside the body region, and "nearest wins" keeps a sweep
+        # down the chest from being credited as an arm.
+        left = _limb(self.l_sho, self.l_elb, self.l_wri)
+        right = _limb(self.r_sho, self.r_elb, self.r_wri)
         if left:
-            out["left_arm"] = (left, self.scale * 0.75)
+            out["left_arm"] = (left, self.scale * 0.55)
         if right:
-            out["right_arm"] = (right, self.scale * 0.75)
-        out["torso"] = (self.torso, self.scale * 0.85)
+            out["right_arm"] = (right, self.scale * 0.55)
+        # The body itself: shoulders all the way DOWN, not just the
+        # chest. "Front" and "back" mean the whole front and back of a
+        # person, and a guard wanding someone spends much of the pass on
+        # their legs — measured on entrance footage, the wand was on the
+        # person but inside no region for 14 seconds of a single back
+        # pass, because the model stopped at the hips. Seen from behind
+        # this same shape is their back.
+        top = (_mid(self.l_sho, self.r_sho) if self.l_sho and self.r_sho
+               else _first(self.l_sho, self.r_sho))
+        bottom = _first(
+            _mid(self.l_ank, self.r_ank) if self.l_ank and self.r_ank else None,
+            self.l_ank, self.r_ank,
+            # No ankles in frame: fall back to the bottom of the box,
+            # which is where the person's feet are anyway.
+            ((self.box[0] + self.box[2]) / 2.0, self.box[3]),
+        )
+        if top and bottom:
+            out["torso"] = ((top, bottom), self.scale * 0.65)
+        else:
+            out["torso"] = (self.torso, self.scale * 0.85)
         return out
 
     def head_box(self):
@@ -273,6 +353,11 @@ class SiteConfig:
             raise SystemExit("site file not found: " + str(path))
         except json.JSONDecodeError as exc:
             raise SystemExit("site file is not valid JSON: " + str(exc))
+
+    @property
+    def zone_configured(self) -> bool:
+        """Has the site told us where the scanned person stands?"""
+        return len(self._unit_zone) >= 3
 
     @property
     def any_cue(self):
@@ -746,6 +831,7 @@ class ScanSession:
         # left long ago can expire instead of latching for good.
         self.seen_at = {}
         self.last_tick = None
+        self.in_zone = False      # were they ever on the scanned spot
         self.anchor = None        # where they were standing
         self.scale = 0.0          # and how big they looked
         self.aliases = []         # track ids this screening has had
@@ -922,10 +1008,29 @@ class ScanEngine:
         # swung past them, and used to raise an alert each. A session
         # that never became a screening is dropped with no ruling -- and
         # no lock either, so a real scan later still counts.
+        # Where the site has said WHERE a screening happens, someone who
+        # never stood there was never being screened — they walked past
+        # the guard, which is not a missed scan and must not be reported
+        # as one. Without this a bystander who lingered three seconds
+        # became "person entered without a scan".
+        if self.site.zone_configured and not session.in_zone:
+            self.sessions.pop(session.subject_id, None)
+            return
         if session.engaged_s < self.args.min_screen and not session.complete:
             self.sessions.pop(session.subject_id, None)
             return
         if verdict == "no_scan" and session.engaged_frames < self.args.min_engaged:
+            self.sessions.pop(session.subject_id, None)
+            return
+        # "They walked in without being scanned" is an accusation, and
+        # it only holds when the wand was never on them. If it WAS on
+        # them and we simply saw too little to credit a surface, that is
+        # a fragment of a screening — on a real clip the same customer
+        # appeared briefly before their screening proper, tracked, lost,
+        # and tracked again, and those three seconds were published as
+        # an unscanned entry while the scan itself was recorded,
+        # correctly, moments later.
+        if verdict == "no_scan" and session.engaged_s > self.args.no_scan_engaged:
             self.sessions.pop(session.subject_id, None)
             return
         self.finished[session.subject_id] = now
@@ -1079,14 +1184,35 @@ class ScanEngine:
                  if now - when <= self.args.subject_reid]
         cands += [(sid, sess) for sid, sess in self.sessions.items()
                   if sid not in seen_ids]
+
+        # THE PLATFORM HOLDS ONE PERSON AT A TIME. Where a site has told
+        # us where the scanned person stands — here a raised platform —
+        # that is worth more than any guess from position and size: a
+        # new id inside it is the person who was being screened there,
+        # renamed. Without this, one customer on a busy clip came out as
+        # three screenings, each ruled on its fragment: "no scan",
+        # "incomplete", and a partial.
+        if self.site.in_scan_zone(sub):
+            in_zone = [(old, sess) for old, sess in cands if sess.in_zone]
+            if in_zone:
+                cands = in_zone
+
         best = None
+        zone_match = self.site.in_scan_zone(sub) and any(
+            sess.in_zone for _o, sess in cands)
         for old, sess in cands:
             if sess.anchor is None:
                 continue
             d = _dist(sub.torso, sess.anchor)
-            if d > sub.scale * self.args.subject_reid_dist:
-                continue
-            if sess.scale and not (0.7 < sub.scale / sess.scale < 1.45):
+            # Both gates below are stand-ins for identity. When the site
+            # has named the spot and both are on it, we have the real
+            # thing and the stand-ins only get in the way.
+            if not zone_match:
+                if d > sub.scale * self.args.subject_reid_dist:
+                    continue
+                if sess.scale and not (0.7 < sub.scale / sess.scale < 1.45):
+                    continue
+            elif not sess.in_zone:
                 continue
             if best is None or d < best[2]:
                 best = (old, sess, d)
@@ -1199,6 +1325,10 @@ class ScanEngine:
             session.last_seen = now
             session.anchor = sub.torso
             session.scale = sub.scale
+            # Once they have stood on the scanned spot, that is the
+            # strongest thing we know about who they are.
+            if self.site.in_scan_zone(sub):
+                session.in_zone = True
             # Standing with the guard is what holds a session open. Wrist
             # contact does not -- it drops out all through a real scan.
             if (guard is None or _dist(guard.torso, sub.torso)
@@ -1284,8 +1414,8 @@ class ScanEngine:
         properly ordered scan would come out as done out of order.
         """
         regions = sub.regions()
-        ranked = sorted((_dist(wrist, centre) / radius, name)
-                        for name, (centre, radius) in regions.items())
+        ranked = sorted((_seg_dist(wrist, shape) / width, name)
+                        for name, (shape, width) in regions.items())
         nearest = ranked[0][1] if ranked and ranked[0][0] <= 1.0 else None
 
         # Dwell is measured in SECONDS, not frames. Counting frames made
@@ -1313,9 +1443,21 @@ class ScanEngine:
                     log.info("step %s done (person %s)",
                              STEP_LABEL[step], session.subject_id)
             elif step not in session.done:
-                # Decay, so a hand passing through on its way somewhere
-                # else does not accumulate a step over a whole screening.
-                session.dwell[step] = max(0.0, session.dwell.get(step, 0.0) - dt)
+                # Decay SLOWLY. A wand being swept is never still: on
+                # real footage the torso is the nearest region in bursts
+                # of a third of a second at a time, adding up to well
+                # over a second across the pass. Decaying at full rate
+                # erased each burst before the next one arrived, so the
+                # front and back never credited at all — and the one
+                # clip where they did credit passed by a single frame.
+                #
+                # What the rule is really asking is "how much of this
+                # surface did the wand cover", not "did it hover on one
+                # spot", so a brief excursion costs a fraction of the
+                # progress rather than all of it.
+                session.dwell[step] = max(
+                    0.0, session.dwell.get(step, 0.0)
+                    - dt * self.args.dwell_decay)
 
         self._expire_steps(session, now)
 

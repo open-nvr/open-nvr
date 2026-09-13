@@ -23,8 +23,17 @@ class ScanSettings:
     """Thresholds for one camera's screening logic."""
 
     # ── what counts as a step ──
-    #: How long the wand must hold on a surface for it to count.
-    dwell_s: float = 0.4
+    #: How much time the wand must spend on a surface for it to count.
+    #: Cumulative across the screening, not one unbroken hold: a wand
+    #: being swept is never still, and on real footage each pass over
+    #: the torso is a third of a second at a time.
+    dwell_s: float = 0.6
+    #: How fast that progress drains while the wand is elsewhere, as a
+    #: fraction of real time. 1.0 is "forget it as fast as it was
+    #: earned", which is what made a genuine pass score zero; 0 never
+    #: forgets, which would let a wand travelling past credit a surface
+    #: it only crossed.
+    dwell_decay: float = 0.25
     #: How long a done step survives without being seen again. A step
     #: used to latch for good, so a wrist that clipped the torso once
     #: credited "front" for the whole screening.
@@ -49,6 +58,11 @@ class ScanSettings:
     #: someone walking past collected a fraction of one.
     min_screen: float = 3.0
     min_engaged: int = 6
+    #: How much wand-on-person time is still consistent with "nobody
+    #: scanned them". Above this the wand WAS on them and we merely saw
+    #: too little to credit a surface — a fragment, not an unscanned
+    #: entry, and reporting it as one accuses a guard who did the job.
+    no_scan_engaged: float = 1.0
 
     # ── identity ──
     dup_iou: float = 0.6

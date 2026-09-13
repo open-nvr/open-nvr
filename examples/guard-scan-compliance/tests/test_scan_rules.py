@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from guard_scan import core as G  # noqa: E402
+from guard_scan.core import region_point  # noqa: E402
 from guard_scan.settings import ScanSettings  # noqa: E402
 
 FRAME = np.zeros((480, 960, 3), dtype=np.uint8)
@@ -90,7 +91,7 @@ class Engine:
                 if target and present:
                     regions = cust.regions()
                     if target in regions:
-                        wrist = regions[target][0]
+                        wrist = region_point(regions[target][0])
                 bodies.insert(0, person(1, 400, 300,
                                         wrists=(wrist, None) if wrist else None))
                 bodies = self.engine._dedupe(bodies, frame)
@@ -110,7 +111,7 @@ def establish(e, *, fps=FPS, seconds=6.0, start=1000.0, region="right_arm"):
     """
     now, dt = start, 1.0 / fps
     cust = person(2, 560, 300)
-    wrist = cust.regions()[region][0]
+    wrist = region_point(cust.regions()[region][0])
     while now < start + seconds:
         now += dt
         bodies = [person(1, 400, 300, wrists=(wrist, None)),
@@ -184,7 +185,7 @@ def test_the_guard_is_not_stolen_by_a_customer_who_stands_still():
     for _ in range(int(120 * FPS)):
         now += DT
         cust = person(2, 560, 300)
-        g = person(1, 400, 300, wrists=(cust.regions()["torso"][0], None))
+        g = person(1, 400, 300, wrists=(region_point(cust.regions()["torso"][0]), None))
         bodies = e.engine._dedupe([g, cust], FRAME)
         e.engine.guard_id = e.engine.guard.update(
             bodies, now, e.engine._being_scanned())
@@ -198,7 +199,7 @@ def test_the_guard_is_rejoined_after_the_tracker_renames_them():
     for _ in range(int(40 * FPS)):
         now += DT
         cust = person(2, 560, 300)
-        g = person(1, 400, 300, wrists=(cust.regions()["torso"][0], None))
+        g = person(1, 400, 300, wrists=(region_point(cust.regions()["torso"][0]), None))
         e.engine.guard_id = e.engine.guard.update([g, cust], now)
     assert e.engine.guard_id == 1
     for _ in range(int(1.0 * FPS)):                 # lost
@@ -207,7 +208,7 @@ def test_the_guard_is_rejoined_after_the_tracker_renames_them():
     for _ in range(int(20 * FPS)):                  # back, as id 7
         now += DT
         cust = person(2, 560, 300)
-        g = person(7, 400, 300, wrists=(cust.regions()["torso"][0], None))
+        g = person(7, 400, 300, wrists=(region_point(cust.regions()["torso"][0]), None))
         e.engine.guard_id = e.engine.guard.update([g, cust], now)
     assert e.engine.guard_id == 7
 
@@ -250,7 +251,7 @@ def test_dwell_is_seconds_so_the_rule_means_the_same_on_any_hardware(fps):
     now = establish(e, fps=fps, region="right_arm")
     dt = 1.0 / fps
     cust = person(2, 560, 300)
-    wrist = cust.regions()["left_arm"][0]
+    wrist = region_point(cust.regions()["left_arm"][0])
     stop = now + 0.6
     while now < stop:
         now += dt
@@ -270,7 +271,7 @@ def test_a_step_can_expire_instead_of_latching_for_ever():
     e = Engine(step_hold_s=2.0, dwell_s=0.2)
     now = establish(e, region="left_arm")
     cust = person(2, 560, 300)
-    torso = cust.regions()["torso"][0]
+    torso = region_point(cust.regions()["torso"][0])
     stop = now + 1.0                                # earn 'front'
     while now < stop:
         now += DT
@@ -280,7 +281,7 @@ def test_a_step_can_expire_instead_of_latching_for_ever():
     assert "front" in e.engine.sessions[2].done
 
     stop = now + 4.0                                # hand goes elsewhere
-    arm = cust.regions()["left_arm"][0]
+    arm = region_point(cust.regions()["left_arm"][0])
     while now < stop:
         now += DT
         bodies = [person(1, 400, 300, wrists=(arm, None)), person(2, 560, 300)]
@@ -338,7 +339,7 @@ def test_a_lost_feed_abandons_rather_than_blaming_the_guard():
     e = Engine()
     now = establish(e)
     cust = person(2, 560, 300)
-    arm = cust.regions()["left_arm"][0]
+    arm = region_point(cust.regions()["left_arm"][0])
     stop = now + 5.0
     while now < stop:
         now += DT
@@ -403,7 +404,7 @@ def test_an_unfinished_scan_is_not_blamed_on_the_guard():
     e = Engine()
     now = establish(e)
     cust = person(2, 560, 300)
-    arm = cust.regions()["left_arm"][0]
+    arm = region_point(cust.regions()["left_arm"][0])
     stop = now + 5.0
     while now < stop:
         now += DT
@@ -413,3 +414,71 @@ def test_an_unfinished_scan_is_not_blamed_on_the_guard():
     e.engine.abandon(now)
     assert e.alerts == []
     assert e.screenings == []
+
+
+def test_a_surface_is_credited_by_time_covered_not_by_hovering():
+    """The rule that made a correct scan read as 50%.
+
+    A wand being swept is never still. On real entrance footage each
+    pass over the torso is the nearest region for about a third of a
+    second at a time, adding up to well over a second across the pass —
+    but the old rule wanted 0.4s UNBROKEN and wiped the progress out
+    between bursts, so front and back never credited. The one clip
+    where they did credit passed by a single frame, which is why it
+    looked like it worked.
+    """
+    e = Engine(dwell_s=0.6, dwell_decay=0.25)
+    now = establish(e)
+    cust = person(2, 560, 300)
+    torso = region_point(cust.regions()["torso"][0])
+    arm = region_point(cust.regions()["right_arm"][0])
+
+    # Four passes over the torso, 0.3s each, with the wand elsewhere
+    # in between — exactly the shape the measurements showed.
+    for _ in range(4):
+        stop = now + 0.3
+        while now < stop:
+            now += DT
+            bodies = [person(1, 400, 300, wrists=(torso, None)),
+                      person(2, 560, 300)]
+            e.engine.guard_id = e.engine.guard.update(bodies, now)
+            e.engine._handle(FRAME, bodies, now)
+        stop = now + 0.4
+        while now < stop:
+            now += DT
+            bodies = [person(1, 400, 300, wrists=(arm, None)),
+                      person(2, 560, 300)]
+            e.engine.guard_id = e.engine.guard.update(bodies, now)
+            e.engine._handle(FRAME, bodies, now)
+
+    session = e.engine.sessions[2]
+    assert "front" in session.done, (
+        f"the torso was covered four times and still did not count: "
+        f"{session.dwell}")
+
+
+def test_a_wand_merely_travelling_past_does_not_credit_a_surface():
+    """The other side of that coin: progress must still drain, or the
+    hand crossing a surface on its way somewhere else would score it."""
+    e = Engine(dwell_s=0.6, dwell_decay=0.25)
+    now = establish(e)
+    cust = person(2, 560, 300)
+    torso = region_point(cust.regions()["torso"][0])
+    arm = region_point(cust.regions()["left_arm"][0])
+
+    # One brief crossing, then a long time elsewhere, repeatedly.
+    for _ in range(3):
+        now += DT                      # a single frame on the torso
+        bodies = [person(1, 400, 300, wrists=(torso, None)), person(2, 560, 300)]
+        e.engine.guard_id = e.engine.guard.update(bodies, now)
+        e.engine._handle(FRAME, bodies, now)
+        stop = now + 3.0
+        while now < stop:
+            now += DT
+            bodies = [person(1, 400, 300, wrists=(arm, None)),
+                      person(2, 560, 300)]
+            e.engine.guard_id = e.engine.guard.update(bodies, now)
+            e.engine._handle(FRAME, bodies, now)
+
+    session = e.engine.sessions[2]
+    assert "front" not in session.done, "a passing wand credited the torso"
