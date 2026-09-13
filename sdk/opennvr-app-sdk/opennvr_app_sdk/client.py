@@ -369,6 +369,10 @@ class AIAPI:
 # ── The client ──────────────────────────────────────────────────────
 
 
+class FrameStreamUnavailable(PlatformError):
+    """Core would not grant a stream for this camera."""
+
+
 class OpenNVR:
     """See the module docstring. All arguments fall back to the
     environment the app overlays already set: ``OPENNVR_URL``,
@@ -432,6 +436,42 @@ class OpenNVR:
             return None
         path = (body or {}).get("path")
         return str(path) if path else None
+
+    def stream_grant(self, camera) -> dict | None:
+        """Core's permission to read this camera's video, plus the URL.
+
+        The token in it is scoped to this one camera's path and expires,
+        so apps sharing a network cannot read each other's cameras.
+        ``None`` when core will not or cannot grant it.
+        """
+        return self._http.get_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/stream")
+
+    def stream(self, camera, *, width: int = 640, fps: float = 10.0):
+        """A live frame stream for one camera, started and self-renewing.
+
+        For rules about a shape in TIME — a scan sweep, a fall, a queue
+        forming — where a snapshot every few seconds has already missed
+        it. Newest frame wins; a camera reboot reconnects on its own.
+
+            with nvr.stream(cam) as video:
+                for frame in video.frames():
+                    ...
+
+        The grant is re-fetched on every reconnect, so an expiring token
+        renews itself rather than failing mid-session.
+        """
+        from .rtsp import RtspFrameStream
+
+        def url_factory() -> str:
+            grant = self.stream_grant(camera)
+            if not grant or not grant.get("url"):
+                raise FrameStreamUnavailable(
+                    f"core granted no stream for camera {_camera_id(camera)}")
+            return str(grant["url"])
+
+        return RtspFrameStream(url_factory=url_factory, width=width, fps=fps,
+                               name=f"cam{_camera_id(camera)}").start()
 
     def recordings(self, camera) -> RecordingsAPI:
         return RecordingsAPI(self._http, _camera_id(camera))

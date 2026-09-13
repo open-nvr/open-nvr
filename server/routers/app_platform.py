@@ -13,6 +13,7 @@ the deployment's site key answers unscoped (and may name an app with
 Routes (prefix ``/api/v1/internal/app``):
 
 * ``GET  /cameras/{id}/snapshot``             — current JPEG
+* ``GET  /cameras/{id}/stream``               — scoped RTSP URL for frames
 * ``GET  /recordings/{id}``                   — recorded segments
 * ``GET  /recordings/{id}/url``               — playback URL for one segment
 * ``GET  /plates/stats|summary|sessions``     — the Vehicles-page aggregates
@@ -27,8 +28,10 @@ routes; per-app roster scoping lives here.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote as urlquote
 from urllib.parse import urlencode
 
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
@@ -43,6 +46,8 @@ from routers.internal_camera_agent import (
     _app_roster, _require_internal_key,
 )
 from services.app_keys import AppPrincipal
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/app", tags=["app-platform"])
 
@@ -102,6 +107,80 @@ async def app_camera_snapshot(
                             detail="Could not capture a frame (camera offline?)")
     return Response(content=jpeg, media_type="image/jpeg",
                     headers={"Cache-Control": "no-store"})
+
+
+#: How long a stream grant lasts. Long enough that an app is not
+#: re-minting every minute, short enough that a leaked URL dies on its
+#: own. The SDK renews well before this.
+STREAM_TOKEN_MINUTES = 60
+
+
+@router.get("/cameras/{camera_id}/stream")
+async def app_camera_stream(
+    camera_id: int,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """An RTSP URL this app may read, for continuous frames.
+
+    Snapshots answer "what is there now"; some apps must WATCH — a
+    gesture, a sweep, a fall is a shape in time, and at one still every
+    few seconds it has already happened. Those apps need the stream.
+
+    The token minted here is scoped to THIS camera's path, not the
+    wildcard the platform's own components carry. That is the whole
+    point of the route: apps sit on a shared network, so handing one a
+    bare ``rtsp://mediamtx:8554/...`` would quietly grant it every
+    camera in the building and undo the per-app roster. A grant an app
+    cannot widen is worth the extra endpoint.
+    """
+    cam = _camera_in_roster(db, principal, camera_id)
+    if not settings.mediamtx_rtsp_url:
+        # No MediaMTX configured: the camera's own URL is all there is,
+        # and it is not ours to hand out scoped.
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="No MediaMTX stream base configured")
+
+    from services.camera_identity import path_name_for_camera
+    from services.stream_service import substream_name
+
+    stream_name = path_name_for_camera(cam)
+    # Prefer the substream when the operator stored one: an app watching
+    # gestures needs frame RATE, not pixels, and the sub costs a
+    # fraction of the CPU to decode.
+    use_sub = bool((cam.substream_url or "").strip())
+    tap_name = substream_name(stream_name) if use_sub else stream_name
+
+    token = None
+    try:
+        from services.mediamtx_jwt_service import MediaMtxJwtService
+
+        token = MediaMtxJwtService.create_stream_token(
+            user_id=0,
+            username=f"app:{getattr(principal, 'app_id', 'platform')}",
+            camera_id=None,
+            # Exactly this path, and read only. Not "~.*".
+            camera_path=tap_name,
+            actions=["read"],
+            expiry_minutes=STREAM_TOKEN_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stream grant: could not mint MediaMTX JWT (%s)", exc)
+
+    base = str(settings.mediamtx_rtsp_url).rstrip("/")
+    url = f"{base}/{tap_name}"
+    if token:
+        url = f"{url}?jwt={urlquote(token, safe='.')}"
+    return {
+        "camera_id": cam.id,
+        "path": tap_name,
+        "url": url,
+        "substream": use_sub,
+        "expires_in": STREAM_TOKEN_MINUTES * 60,
+        # Told, not guessed: the SDK renews on this rather than waiting
+        # for a 401 mid-screening.
+        "renew_after": int(STREAM_TOKEN_MINUTES * 60 * 0.8),
+    }
 
 
 # ── Recordings ──────────────────────────────────────────────────────

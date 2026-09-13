@@ -91,7 +91,10 @@ from .cameras import (
 )
 from .credentials import AppCredentials, auth_headers
 from .usercontext import UserContext, current_user, verify_call_token
-from .client import OpenNVR, Camera, Recording, PlatformError
+from .client import (
+    Camera, FrameStreamUnavailable, OpenNVR, PlatformError, Recording,
+)
+from .rtsp import Frame, FrameStreamError, RtspFrameStream, RtspStillSource
 from .aio import AsyncOpenNVR
 from .infer_stream import InferStream
 from .domain_subscriber import (
@@ -198,6 +201,13 @@ PLATFORM: tuple[str, ...] = (
     "build_frame_source",
     "dict_frame_source",
     "FrameSourceError",
+    # Continuous video, for rules about a shape in time rather than a
+    # moment: nvr.stream(cam) hands back one of these, already running.
+    "RtspFrameStream",
+    "RtspStillSource",
+    "Frame",
+    "FrameStreamError",
+    "FrameStreamUnavailable",
 )
 
 #: What the app exposes back: the catalog's config form, dashboard, actions, licence gate — and the generated specs.

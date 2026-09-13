@@ -38,8 +38,9 @@ from typing import Any, Iterable
 import httpx
 
 from .client import (
-    DEFAULT_TIMEOUT, Camera, PlatformError, Recording, _camera_id, _iso,
-    parse_cameras, parse_recordings, parse_state_items, query_string,
+    DEFAULT_TIMEOUT, Camera, FrameStreamUnavailable, PlatformError, Recording,
+    _camera_id, _iso, parse_cameras, parse_recordings, parse_state_items,
+    query_string,
 )
 from .credentials import AppCredentials
 from .frame_app import KaiCError, build_infer_request
@@ -95,6 +96,18 @@ class _AsyncHttp:
             raise PlatformError(f"PUT {path} failed: {exc}") from exc
         if r.status_code >= 400:
             raise PlatformError(f"PUT {path} → HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    async def post_bytes(self, path: str, body: bytes, content_type: str,
+                         **params) -> Any:
+        url = f"{self.base}{path}{query_string(params)}"
+        headers = {**self.headers(), "Content-Type": content_type}
+        try:
+            r = await self._client.post(url, content=body, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            raise PlatformError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise PlatformError(f"POST {path} → HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
     async def delete(self, path: str, **params) -> Any:
@@ -306,6 +319,69 @@ class AsyncOpenNVR:
     async def snapshot(self, camera) -> bytes | None:
         return await self._http.get_bytes(
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/snapshot")
+
+    async def save_evidence(self, jpeg: bytes) -> str | None:
+        """Store a JPEG for an alert to cite; returns its path.
+
+        Photos go here, not into the alert: an alert is a NATS message
+        with a 1 MB ceiling, and past it the broker drops the publish —
+        the alarm is never seen at all. ``None`` when the upload fails,
+        because an app must still be able to raise its alert.
+        """
+        if not jpeg:
+            return None
+        try:
+            body = await self._http.post_bytes(
+                "/api/v1/internal/app/evidence", jpeg, "image/jpeg")
+        except PlatformError as exc:
+            logger.warning("evidence upload failed: %s", exc)
+            return None
+        path = (body or {}).get("path")
+        return str(path) if path else None
+
+    async def stream_grant(self, camera) -> dict | None:
+        """Core's permission to read this camera's video, plus the URL.
+
+        Scoped to this one camera's path and short-lived, so apps on a
+        shared network cannot read each other's cameras.
+        """
+        return await self._http.get_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/stream")
+
+    def stream(self, camera, *, width: int = 640, fps: float = 10.0):
+        """A live frame stream for one camera, started and self-renewing.
+
+        Deliberately NOT a coroutine: the decoder is a background thread
+        feeding a newest-frame slot, so there is nothing to await. Awaiting
+        frames would only add the queue this design exists to avoid.
+        """
+        from .rtsp import RtspFrameStream
+
+        cam_id = _camera_id(camera)
+        base_headers = self._http.headers
+        base_url = self._http.base
+
+        def url_factory() -> str:
+            # Sync fetch on the decoder thread: this runs at reconnect
+            # time, not per frame, and the stream thread is not the
+            # event loop.
+            import httpx
+
+            r = httpx.get(
+                f"{base_url}/api/v1/internal/app/cameras/{cam_id}/stream",
+                headers=base_headers(), timeout=10.0)
+            if r.status_code >= 400:
+                raise FrameStreamUnavailable(
+                    f"core granted no stream for camera {cam_id} "
+                    f"(HTTP {r.status_code})")
+            url = (r.json() or {}).get("url")
+            if not url:
+                raise FrameStreamUnavailable(
+                    f"core granted no stream for camera {cam_id}")
+            return str(url)
+
+        return RtspFrameStream(url_factory=url_factory, width=width, fps=fps,
+                               name=f"cam{cam_id}").start()
 
     def recordings(self, camera) -> AsyncRecordingsAPI:
         return AsyncRecordingsAPI(self._http, _camera_id(camera))
