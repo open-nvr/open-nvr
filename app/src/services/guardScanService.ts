@@ -79,6 +79,10 @@ export const guardScanService = {
   listScreenings: (params?: {
     camera_id?: number
     verdict?: string
+    // 'problems' is everything that was not a complete scan — the rows
+    // an operator opens this page for.
+    outcome?: 'problems' | 'compliant'
+
     guard?: string
     flagged?: boolean
     from?: string

@@ -57,7 +57,11 @@ function pct(value: number | null): string {
 export default function GuardCompliance() {
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('day')
   const [days, setDays] = useState(7)
-  const [onlyFlagged, setOnlyFlagged] = useState(false)
+  // What the operator is looking for. "Problems" is the reason this
+  // list exists: on a busy door the handful that went wrong sit tens of
+  // rows below everything that went right, and scrolling for them is
+  // not a search.
+  const [show, setShow] = useState<'all' | 'problems' | 'flagged'>('all')
   const tz = useMemo(() => -new Date().getTimezoneOffset(), [])
 
   const report = useQuery({
@@ -69,9 +73,11 @@ export default function GuardCompliance() {
   })
 
   const screenings = useQuery({
-    queryKey: ['guardscan-screenings', onlyFlagged],
+    queryKey: ['guardscan-screenings', show],
     queryFn: async () => (await guardScanService.listScreenings({
-      limit: 50, ...(onlyFlagged ? { flagged: true } : {}),
+      limit: 50,
+      ...(show === 'flagged' ? { flagged: true } : {}),
+      ...(show === 'problems' ? { outcome: 'problems' as const } : {}),
     })).data as { screenings: Screening[]; total: number },
     refetchInterval: 15_000,
   })
@@ -160,17 +166,19 @@ export default function GuardCompliance() {
         <div className="mb-3 flex items-center gap-3">
           <h2 className="text-sm font-semibold">Recent screenings</h2>
           <div className="flex-1" />
-          <label className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
-            <input
-              type="checkbox"
-              className="accent-[var(--accent)]"
-              checked={onlyFlagged}
-              onChange={(e) => setOnlyFlagged(e.target.checked)}
-            />
-            Scanner-flagged only
-          </label>
+          <SegmentedControl
+            label="Show"
+            showLabel={false}
+            value={show}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'problems', label: 'Not complete' },
+              { value: 'flagged', label: 'Scanner flags' },
+            ]}
+            onChange={(v) => setShow(v as 'all' | 'problems' | 'flagged')}
+          />
         </div>
-        <ScreeningTable rows={rows} isPending={screenings.isPending} />
+        <ScreeningTable rows={rows} isPending={screenings.isPending} show={show} />
       </section>
     </div>
   )
@@ -305,9 +313,17 @@ function GuardTable({ guards }: { guards: Tally[] }) {
   )
 }
 
-function ScreeningTable({ rows, isPending }: {
+function ScreeningTable({ rows, isPending, show }: {
   rows: Screening[]; isPending?: boolean
+  show?: 'all' | 'problems' | 'flagged'
 }) {
+  const emptyTitle = show === 'problems' ? 'Every scan was complete'
+    : show === 'flagged' ? 'The scanner flagged nobody'
+    : 'Nothing screened yet'
+  const emptyHint = show === 'all'
+    ? 'Screenings appear here as people are scanned at the entrance.'
+    : 'Over the screenings recorded so far.'
+
   const columns: Column<Screening>[] = [
     {
       key: 'photo', header: '', srHeader: 'Who was scanned', width: 'w-[46px]',
@@ -364,8 +380,8 @@ function ScreeningTable({ rows, isPending }: {
       rowKey={(s) => s.id}
       isPending={isPending}
       empty={<EmptyState
-        title="Nothing screened yet"
-        description="Screenings appear here as people are scanned at the entrance." />}
+        title={emptyTitle}
+        description={emptyHint} />}
       dense
       fixed
       fillHeight={false}

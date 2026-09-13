@@ -114,6 +114,9 @@ def _parse_bound(value: str | None):
 async def list_screenings(
     camera_id: int | None = Query(None),
     verdict: str | None = Query(None, description="compliant|partial|incomplete|no_scan"),
+    outcome: str | None = Query(
+        None, description="'problems' for everything that was not a complete "
+                          "scan, 'compliant' for the clean ones"),
     guard: str | None = Query(None, description="Guard name or key"),
     flagged: bool | None = Query(None, description="Only scanner-flagged"),
     from_: str | None = Query(None, alias="from"),
@@ -131,6 +134,13 @@ async def list_screenings(
         q = q.filter(GuardScreening.camera_id == camera_id)
     if verdict:
         q = q.filter(GuardScreening.verdict == verdict)
+    # The rows an operator came for are the ones that went wrong, and on
+    # a busy door they are a handful among hundreds — findable only by
+    # scrolling past everything that went right.
+    if outcome == "problems":
+        q = q.filter(GuardScreening.verdict != "compliant")
+    elif outcome == "compliant":
+        q = q.filter(GuardScreening.verdict == "compliant")
     if guard:
         like = f"%{guard}%"
         q = q.filter(GuardScreening.guard_name.ilike(like)
