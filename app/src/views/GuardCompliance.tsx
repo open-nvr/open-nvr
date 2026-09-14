@@ -109,7 +109,7 @@ function recallNumber(key: string, fallback: number, lo: number, hi: number): nu
 }
 
 //: Neither pane may be squeezed to uselessness.
-const HEIGHT_MIN = 110
+const HEIGHT_MIN = 124
 const HEIGHT_MAX = 340
 //: Neither pane may be squeezed to uselessness: a table under about
 //: half the row cannot show its columns, and a camera over about half
@@ -331,7 +331,13 @@ export default function GuardCompliance() {
   const resetPage = () => rows.setPage(1)
 
   return (
-    <section className="flex min-h-0 flex-col space-y-4">
+    // Bounded to the window on purpose. `flex-1` only divides a height
+    // that EXISTS, and the app shell's <main> is min-height, not height
+    // — so without this the last row grew to fit its rows and the page
+    // took an outer scrollbar. 3rem is the top bar, 2rem the shell's
+    // own vertical padding.
+    <section className="flex min-h-0 flex-col space-y-4"
+             style={{ height: 'calc(100vh - 5rem)' }}>
       <PageHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -436,7 +442,8 @@ export default function GuardCompliance() {
         />
       </div>
 
-          <div className={`h-full min-h-0 rounded bg-[var(--panel)] p-2 ${
+          <div className={`flex h-full min-h-0 flex-col overflow-hidden rounded
+                           bg-[var(--panel)] p-2 ${
             report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
@@ -445,8 +452,8 @@ export default function GuardCompliance() {
             label-sized and share one row each, and the plot takes
             whatever is left — so the bars grow with the card instead of
             sitting in it. */}
-        <div className="flex h-full flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="flex h-full min-h-0 flex-col gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
             <h3 className="min-w-0 text-xs font-semibold text-[var(--text)]"
                 title="Every screening, by outcome. Hover a bar for the breakdown.">
               How each period went
@@ -463,7 +470,7 @@ export default function GuardCompliance() {
             </div>
           </div>
           {report.isPending ? (
-            <Skeleton className="min-h-[88px] flex-1" />
+            <Skeleton className="min-h-0 flex-1" />
           ) : report.isError ? (
             // Without this a failed request fell through to the empty
             // state and told the operator to install an app they are
@@ -475,7 +482,7 @@ export default function GuardCompliance() {
             />
           ) : report.data && report.data.buckets.length > 0 ? (
             <>
-              <div className="min-h-[88px] flex-1">
+              <div className="min-h-0 flex-1">
                 <BucketChart buckets={report.data.buckets} />
               </div>
               <Legend />
@@ -717,7 +724,7 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
   const [hover, setHover] = useState<number | null>(null)
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 flex-1 items-end gap-1.5"
            role="img" aria-label="Screenings per period, by outcome">
         {ordered.map((bucket, i) => (
@@ -764,7 +771,7 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
       </div>
       {/* The axis mirrors the bars' own widths, so a label always sits
           under the bar it names however many there are. */}
-      <div className="mt-1 flex gap-1.5">
+      <div className="mt-1 flex shrink-0 gap-1.5">
         {ordered.map((bucket, i) => (
           <div key={bucket.key ?? i}
                className="max-w-[46px] flex-1 truncate text-center text-[9px] leading-none text-[var(--text-dim)]">
@@ -824,7 +831,7 @@ function BucketTip({ bucket, align }: { bucket: Tally; align: 'left' | 'right' }
 
 function Legend() {
   return (
-    <div className="flex flex-wrap gap-x-3 gap-y-1">
+    <div className="flex shrink-0 flex-wrap gap-x-3 gap-y-1">
       {VERDICT_ORDER.map((verdict) => (
         <span key={verdict} className="flex items-center gap-1 text-[10px]
                                        text-[var(--text-dim)]">

@@ -26,7 +26,7 @@
 //    remounts against a fresh token instead of retrying a stale one.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { PictureInPicture2, VideoOff, X } from 'lucide-react'
+import { Minimize2, PictureInPicture2, VideoOff } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { useCameraStatus } from '../../hooks/useCameraStatus'
@@ -158,7 +158,8 @@ export function LiveCameraPanel({
             the same thing. A second control beside them would just be
             a third way to do one job. */}
         <div
-          className={`flex items-center gap-2 ${popped ? 'cursor-move' : ''}`}
+          className={`flex shrink-0 items-center gap-2 pb-0.5 ${
+            popped ? 'cursor-move select-none' : ''}`}
           onPointerDown={startDrag}
         >
           <h3 className="min-w-0 truncate text-xs font-semibold" title={cameraName}>
@@ -175,7 +176,10 @@ export function LiveCameraPanel({
               className="ml-auto rounded p-1 text-[var(--text-dim)]
                          hover:bg-[var(--panel)] hover:text-[var(--text)]"
             >
-              {popped ? <X size={13} /> : <PictureInPicture2 size={13} />}
+              {/* Not an ✕. A cross on a floating panel reads as "close
+                  this" — and closing a camera you only wanted back in
+                  its place is not the same thing at all. */}
+              {popped ? <Minimize2 size={13} /> : <PictureInPicture2 size={13} />}
             </button>
           )}
         </div>
