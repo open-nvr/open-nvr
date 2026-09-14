@@ -297,8 +297,8 @@ export default function GuardCompliance() {
             sitting in it. */}
         <CardContent className="flex h-full flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <h3 className="min-w-0 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-dim)]"
-                title="Every screening, by outcome. Hover a band for the count.">
+            <h3 className="min-w-0 text-xs font-semibold text-[var(--text)]"
+                title="Every screening, by outcome. Hover a bar for the breakdown.">
               How each period went
             </h3>
             {/* Grouping stays: it changes nothing but this chart. */}
@@ -473,13 +473,15 @@ function Tile({ label, value, hint, tone }: {
  * Laid out, not drawn. An SVG with a viewBox has a FIXED aspect ratio,
  * so the plot could only ever be as tall as its width allowed — in a
  * card half the page wide that left the bars at a third of the height
- * available to them, with the rest of the card empty. Boxes with
- * percentage heights take whatever the card gives them, at any size,
- * with no second copy of the geometry to keep in step.
+ * available to them. Boxes with percentage heights take whatever the
+ * card gives them, at any size, with no second copy of the geometry to
+ * keep in step.
  *
- * Columns are capped and centred rather than stretched: a bar's WIDTH
- * carries no quantity — only its height does — so two days must not
- * draw as two slabs half the card wide, and thirty days must still fit.
+ * Columns are capped and start at the LEFT: a bar's width carries no
+ * quantity — only its height does — so two days must not draw as two
+ * slabs half the card wide; and time reads left to right, so a series
+ * that grows should extend rightwards rather than creep out from the
+ * middle.
  */
 function BucketChart({ buckets }: { buckets: Tally[] }) {
   const ordered = [...buckets].reverse()          // oldest left, like a calendar
@@ -488,19 +490,34 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
   // Bottom-up, because a flex column stacks its first child at the TOP
   // and the baseline of a bar chart is the bottom.
   const stack = [...VERDICT_ORDER].reverse()
+  const [hover, setHover] = useState<number | null>(null)
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex min-h-0 flex-1 items-end justify-center gap-1.5"
+      <div className="flex min-h-0 flex-1 items-end gap-1.5"
            role="img" aria-label="Screenings per period, by outcome">
         {ordered.map((bucket, i) => (
-          <div key={bucket.key ?? i}
-               className="flex h-full max-w-[46px] flex-1 flex-col justify-end gap-[2px]">
+          <div
+            key={bucket.key ?? i}
+            // The whole column is the target, not just the coloured
+            // part. A native `title` on the segments answered only if
+            // you found the bar itself — and on a quiet day that is a
+            // three-pixel stripe at the bottom of an empty column.
+            className="relative flex h-full max-w-[46px] flex-1 flex-col justify-end gap-[2px]"
+            onMouseEnter={() => setHover(i)}
+            onMouseLeave={() => setHover((h) => (h === i ? null : h))}
+          >
+            {hover === i && (
+              // Anchored to whichever side keeps it on the card: a
+              // centred tooltip on the first column hangs off the left
+              // edge, which is where the series now starts.
+              <BucketTip bucket={bucket}
+                         align={i < ordered.length / 2 ? 'left' : 'right'} />
+            )}
             {bucket.screenings === 0 ? (
               // A period nobody walked through is not a gap in the
               // chart: it is a fact, and it reads as one.
-              <div className="h-[2px] rounded-sm bg-[var(--border)]"
-                   title={`${bucket.label}: nothing screened`} />
+              <div className="h-[2px] rounded-sm bg-[var(--border)]" />
             ) : stack.map((verdict) => {
               const n = (bucket as unknown as Record<string, number>)[verdict] ?? 0
               if (!n) return null
@@ -515,7 +532,6 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
                     minHeight: 3,
                     background: VERDICT_COLOUR[verdict],
                   }}
-                  title={`${bucket.label}: ${n} ${VERDICT_LABEL[verdict].toLowerCase()}`}
                 />
               )
             })}
@@ -524,7 +540,7 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
       </div>
       {/* The axis mirrors the bars' own widths, so a label always sits
           under the bar it names however many there are. */}
-      <div className="mt-1 flex justify-center gap-1.5">
+      <div className="mt-1 flex gap-1.5">
         {ordered.map((bucket, i) => (
           <div key={bucket.key ?? i}
                className="max-w-[46px] flex-1 truncate text-center text-[9px] leading-none text-[var(--text-dim)]">
@@ -532,6 +548,46 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+/**
+ * What one period actually held, on hover.
+ *
+ * Every outcome with a count, not just the one under the pointer: the
+ * question a stacked bar raises is "what is that period made of", and
+ * answering it one band at a time makes the reader do the assembling.
+ */
+function BucketTip({ bucket, align }: { bucket: Tally; align: 'left' | 'right' }) {
+  const rows = VERDICT_ORDER
+    .map((v) => [v, (bucket as unknown as Record<string, number>)[v] ?? 0] as const)
+    .filter(([, n]) => n > 0)
+  return (
+    <div
+      // pointer-events-none so the tooltip can never sit between the
+      // pointer and the column that spawned it, which is how a hover
+      // tooltip ends up flickering.
+      className={`pointer-events-none absolute bottom-full z-20 mb-1
+                  whitespace-nowrap rounded border border-[var(--border)]
+                  bg-[var(--bg-2)] px-2 py-1.5 shadow-lg ${
+        align === 'left' ? 'left-0' : 'right-0'}`}
+    >
+      <div className="mb-0.5 text-[11px] font-medium text-[var(--text)]">
+        {bucket.label}
+      </div>
+      <div className="text-[10px] text-[var(--text-dim)]">
+        {bucket.screenings} screening{bucket.screenings === 1 ? '' : 's'}
+        {bucket.compliance !== null && ` · ${bucket.compliance}% complete`}
+      </div>
+      {rows.map(([verdict, n]) => (
+        <div key={verdict} className="mt-0.5 flex items-center gap-1.5 text-[10px]">
+          <span className="inline-block h-2 w-2 rounded-sm"
+                style={{ background: VERDICT_COLOUR[verdict] }} />
+          <span className="text-[var(--text-dim)]">{VERDICT_LABEL[verdict]}</span>
+          <span className="ml-auto pl-2 tabular-nums text-[var(--text)]">{n}</span>
+        </div>
+      ))}
     </div>
   )
 }
