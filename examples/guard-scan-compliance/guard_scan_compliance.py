@@ -485,6 +485,12 @@ class GuardScanApp(FrameApp):
                 result = session.result()
                 label = (f"Scanning {''.join(done) or '—'} "
                          f"{round(result['score'])}%")
+                # The wand going off is the one thing on this camera an
+                # operator must not miss, and until now it appeared only
+                # in the inbox — never on the picture they are watching.
+                if session.flagged:
+                    label = f"FLAGGED · {label}"
+
             else:
                 label = f"Person {body.track_id}"
             x1, y1, x2, y2 = body.box
