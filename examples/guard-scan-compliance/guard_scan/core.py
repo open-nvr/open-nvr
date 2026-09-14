@@ -52,6 +52,19 @@ L_SHO, R_SHO, L_ELB, R_ELB, L_WRI, R_WRI = 5, 6, 7, 8, 9, 10
 L_HIP, R_HIP = 11, 12
 L_ANK, R_ANK = 15, 16
 
+#: Verdict -> the alert kind the manifest declares and the catalog
+#: documents. A verdict is how a screening SCORED; an alert kind is what
+#: went wrong, and "partial" and "incomplete" are the same problem to
+#: whoever is triaging the inbox — the guard did not scan the person
+#: properly. Publishing the verdict raw is how the inbox came to hold
+#: `partial` and `incomplete` while the manifest promised `improper_scan`,
+#: so filtering by the documented type matched nothing.
+ALERT_KIND = {
+    "partial": "improper_scan",
+    "incomplete": "improper_scan",
+    "no_scan": "no_scan",
+}
+
 STEPS = ("left_arm", "right_arm", "front", "back")
 STEP_LABEL = {
     "left_arm": "Left arm",
@@ -1086,6 +1099,14 @@ class ScanEngine:
             "flagged": session.flagged,
             "ended_by": reason,
             "images": images,
+            # The alarm this screening is about to raise, when it raises
+            # one. The id is deterministic (session + kind, exactly as
+            # _raise_alert builds it), so the ledger carries the link
+            # without either side waiting on the other — otherwise a
+            # flagged screening and the critical alert describing it sit
+            # in two tables with nothing joining them.
+            "alert_id": (None if res["severity"] is None
+                         else session.id + "-" + ALERT_KIND.get(verdict, verdict)),
         }
         self.on_screening(summary)
 
@@ -1102,8 +1123,8 @@ class ScanEngine:
                 bits.append("out of the expected order")
             detail = pct + " of the required scan. " + (
                 "; ".join(bits) if bits else "No scanning steps detected")
-            self._raise_alert(session, verdict, res["severity"],
-                              res["title"], detail, images)
+            self._raise_alert(session, ALERT_KIND.get(verdict, verdict),
+                              res["severity"], res["title"], detail, images)
         self.sessions.pop(session.subject_id, None)
 
     def _being_scanned(self):

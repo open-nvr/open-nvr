@@ -155,6 +155,59 @@ def test_a_skipped_back_is_a_partial_scan():
     assert e.alerts[0]["steps_missing"] == ["Back"]
 
 
+def test_alerts_are_raised_under_the_kinds_the_manifest_declares():
+    """The catalog documents what this app emits, and the inbox filters
+    on it. Publishing the VERDICT as the alert type put `partial` and
+    `incomplete` in the inbox while the manifest promised
+    `improper_scan`, so filtering by the documented type found nothing —
+    and the two spellings never met, because nothing compared them.
+
+    Read out of the source rather than imported, like the defaults-drift
+    test above: this file is deliberately free of the SDK.
+    """
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "guard_scan_compliance.py"
+           ).read_text(encoding="utf-8")
+    declared = set(re.findall(r'AlertType\("([a-z_]+)"', src))
+    assert declared == {"scanner_flag", "improper_scan", "no_scan"}
+
+    # Every kind the engine can raise must be one the manifest declares.
+    assert set(G.ALERT_KIND.values()) | {"scanner_flag"} <= declared
+
+    e = Engine()
+    e.run([(20, "left_arm", True, True), (20, "right_arm", True, True),
+           (20, "torso", True, True), (15, None, True, True),
+           (8, None, True, False)])
+    assert e.screenings[0]["verdict"] == "partial"       # how it scored
+    assert e.alerts[0]["kind"] == "improper_scan"        # what went wrong
+
+    thin = Engine()
+    thin.run([(20, "left_arm", True, True), (15, None, True, True),
+              (8, None, True, False)])
+    assert thin.screenings[0]["verdict"] == "incomplete"
+    assert thin.alerts[0]["kind"] == "improper_scan"
+
+
+def test_a_screening_names_the_alarm_it_raised():
+    """The ledger keeps every screening; the inbox keeps only the ones
+    that went wrong. Without the alarm's id on the screening the two
+    tables cannot be joined, and a manager looking at a critical alert
+    has no way back to the record it came from — or the other way round.
+
+    A clean scan raises nothing, so it names nothing."""
+    bad = Engine()
+    bad.run([(20, "left_arm", True, True), (20, "right_arm", True, True),
+             (20, "torso", True, True), (15, None, True, True),
+             (8, None, True, False)])
+    assert bad.screenings[0]["alert_id"] == bad.alerts[0]["id"]
+
+    good = Engine()
+    good.run(FULL)
+    assert good.alerts == []
+    assert good.screenings[0]["alert_id"] is None
+
+
 def test_one_arm_only_is_incomplete_and_loud():
     e = Engine()
     e.run([(20, "left_arm", True, True), (15, None, True, True),
