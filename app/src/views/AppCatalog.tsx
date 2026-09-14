@@ -584,11 +584,32 @@ function choiceIndex(p: ManifestParam, value: any): string {
   return i < 0 ? '' : String(i)
 }
 
+/**
+ * Params whose VALUE is JSON, whatever editor draws them.
+ *
+ * Distinct from `isJsonParam`, which answers a different question — "is
+ * a raw textarea the right EDITOR". A colour range has its own picker
+ * and so is not a textarea param, but it is still an object on the
+ * wire, and conflating the two sent `[object Object]` to an endpoint
+ * expecting `{low, high}`.
+ */
+function isJsonValued(p: ManifestParam): boolean {
+  return isJsonParam(p) || (p.type || '').toLowerCase() === 'color.hsv_range'
+}
+
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
   const current = config && p.name in config ? config[p.name] : p.default
   if (hasChoices(p)) return choiceIndex(p, current)
-  if (p.type === 'bool' && !isJsonParam(p)) return Boolean(current)
-  if (isJsonParam(p)) return current === undefined ? '' : JSON.stringify(current, null, 2)
+  if (p.type === 'bool' && !isJsonValued(p)) return Boolean(current)
+  // NULL counts as unset, exactly like undefined. A param declared with
+  // no default arrives as null, and stringifying that gave the literal
+  // text "null" — which is not empty, so it was parsed back to null and
+  // SAVED, and the server rightly refused a per-camera param that was
+  // not a dict. Nobody had touched the field.
+  if (isJsonValued(p)) {
+    return current === undefined || current === null
+      ? '' : JSON.stringify(current, null, 2)
+  }
   return current === undefined || current === null ? '' : String(current)
 }
 
@@ -645,7 +666,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
           continue
         }
         config[p.name] = picked.value
-      } else if (isJsonParam(p)) {
+      } else if (isJsonValued(p)) {
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
