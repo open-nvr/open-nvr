@@ -481,9 +481,47 @@ services:
   # scanner sweeping an arm, a fall, a gesture — need joints, not
   # boxes, and no adapter in the default stack produced them.
   # ──────────────────────────────────────────────────────────────
+  # Pose weights init — copies the pre-exported ONNX into the volume the
+  # adapter reads. The pose model is the one weight in the stack with no
+  # download: Ultralytics publishes the .pt, never the ONNX, so somebody
+  # has to export it. Before this existed that somebody was the operator,
+  # and a fresh install got an adapter that started, answered /health and
+  # failed every /infer on a missing file — with nothing anywhere saying
+  # why. Bring your own model by pointing YOLO_POSE_WEIGHTS_IMAGE at it.
+  yolo-pose-weights-init:
+    profiles: [apps]
+    image: ${YOLO_POSE_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolo-pose-weights:v8.3.0}
+    pull_policy: missing
+    container_name: opennvr_yolo_pose_weights_init
+    logging: *svc-logs
+    restart: "no"
+    # List-form command, as yolov8-weights-init explains at length:
+    # compose word-splits a STRING command, so `sh -c set -e ...` would
+    # run only `set`, exit 0, and copy nothing — leaving an empty volume
+    # and an adapter that 503s every request.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/yolo11n-pose.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolo11n-pose.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked yolo11n-pose.onnx into volume..."
+        cp /yolo11n-pose.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+
   yolo-pose-adapter:
     profiles: [apps]
     image: ghcr.io/open-nvr/yolo-pose-adapter:${ADAPTER_TAG:-latest}
+    depends_on:
+      # Start only once the graph is on disk. Without this the adapter
+      # races the copier, loses, and reports itself healthy anyway —
+      # because /health answers before a model is ever loaded.
+      yolo-pose-weights-init:
+        condition: service_completed_successfully
     container_name: opennvr_yolo_pose_adapter
     logging: *svc-logs
     restart: unless-stopped
@@ -492,10 +530,11 @@ services:
       # Smaller input is the CPU lever: an app watching a doorway wants
       # frame RATE, and the wrist-to-torso geometry survives the loss.
       - OPENNVR_POSE_IMGSZ=${OPENNVR_POSE_IMGSZ:-448}
-      # The image ships without weights. Either pre-seed this volume
-      # (``python download_models.py --all`` in the adapter repo) or set
-      # YOLO_POSE_MODEL_URL for a first-boot fetch — an air-gapped
-      # install wants the former.
+      # The image ships without weights; yolo-pose-weights-init above
+      # puts them in the volume, which is why this is normally empty.
+      # Set it only to host the exported .onnx yourself and have the
+      # adapter fetch it at first boot instead. Empty means "never
+      # download" — the sovereignty=local_only posture.
       - YOLO_POSE_MODEL_URL=${YOLO_POSE_MODEL_URL:-}
     volumes:
       - opennvr_yolo_pose_weights:/weights
