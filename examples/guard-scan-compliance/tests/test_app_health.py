@@ -222,3 +222,96 @@ def test_one_camera_down_names_that_camera_and_not_the_others(app_methods):
     assert "cam2" in why
     assert "cam5" not in why
     assert "Nobody is being screened" not in why
+
+
+# ── the camera roster ──────────────────────────────────────────────
+#
+# The fresh-install bug in its final form. The roster was read once, in
+# setup() — the ONE moment a fresh install is guaranteed to have nothing
+# assigned. The app starts with the stack; the operator assigns the
+# entrance camera afterwards; nothing ever looked again. The app polled
+# its config for as long as you left it, screening nobody, having been
+# told everything it needed within seconds of starting.
+
+
+class _Cam:
+    def __init__(self, handle):
+        self.handle = handle
+        self.name = handle
+
+
+@pytest.fixture
+def roster():
+    """``_reconcile_roster`` bound to nothing."""
+    ns = {"log": SimpleNamespace(info=lambda *a, **k: None,
+                                 warning=lambda *a, **k: None)}
+    exec(compile(_slice("def _reconcile_roster(self) -> int:",
+                        "def on_frame(self, camera_id"),
+                 "<roster>", "exec"), ns)  # noqa: S102
+    return ns["_reconcile_roster"]
+
+
+def _site(assigned, workers=None):
+    started = []
+
+    def _start(cam):
+        started.append(cam.handle)
+        app.workers[cam.handle] = SimpleNamespace(
+            stop=lambda: stopped.append(cam.handle))
+
+    stopped = []
+    app = SimpleNamespace(
+        workers=dict(workers or {}),
+        nvr=SimpleNamespace(cameras=lambda: [_Cam(h) for h in assigned]),
+        _start_worker=_start,
+    )
+    return app, started, stopped
+
+
+def test_a_camera_assigned_after_startup_gets_picked_up(roster):
+    """The whole bug: this used to need a container restart."""
+    app, started, _ = _site(assigned=["cam2"])
+    assert roster(app) == 1
+    assert started == ["cam2"]
+
+
+def test_an_already_watched_camera_is_not_restarted(roster):
+    """Reconciling every 30s must not mean reopening the stream every
+    30s — that would drop whoever is mid-screening, forever."""
+    app, started, stopped = _site(assigned=["cam2"],
+                                  workers={"cam2": SimpleNamespace(stop=None)})
+    assert roster(app) == 1
+    assert started == []
+    assert stopped == []
+
+
+def test_unassigning_one_camera_of_several_stops_just_that_one(roster):
+    app, started, stopped = _site(
+        assigned=["cam2"],
+        workers={"cam2": SimpleNamespace(stop=lambda: None),
+                 "cam5": SimpleNamespace(stop=lambda: stopped.append("cam5"))})
+    roster(app)
+    assert "cam5" not in app.workers
+    assert "cam2" in app.workers
+
+
+def test_an_empty_roster_never_tears_down_a_working_site(roster):
+    """`cameras()` returns [] for 'none assigned' AND for 'core could
+    not be reached'. Treating those alike would turn a core restart into
+    an outage, so a removal needs positive evidence."""
+    app, _, stopped = _site(assigned=[],
+                            workers={"cam2": SimpleNamespace(stop=lambda: None)})
+    assert roster(app) == 0
+    assert "cam2" in app.workers
+    assert stopped == []
+
+
+def test_a_roster_that_raises_keeps_what_is_running(roster):
+    """Same reasoning, for the case where core answers with an error
+    rather than an empty list."""
+    app, _, _ = _site(assigned=[],
+                      workers={"cam2": SimpleNamespace(stop=lambda: None)})
+    app.nvr = SimpleNamespace(
+        cameras=lambda: (_ for _ in ()).throw(RuntimeError("core is down")))
+    assert roster(app) == 1
+    assert "cam2" in app.workers

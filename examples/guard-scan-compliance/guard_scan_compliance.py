@@ -901,15 +901,62 @@ class GuardScanApp(FrameApp):
         catalog — there is no camera list in the config, deliberately,
         so adding a camera is a click rather than a file edit.
         """
-        cameras = self.nvr.cameras()
-        if not cameras:
+        if not self._reconcile_roster():
             log.warning("no cameras assigned to this app yet — assign an "
                         "entrance camera in the App Catalog")
-        for cam in cameras:
-            worker = CameraWorker(self, cam)
-            self.workers[cam.handle] = worker
-            worker.start()
-            log.info("watching %s (%s)", cam.handle, cam.name)
+
+    def _start_worker(self, cam) -> None:
+        worker = CameraWorker(self, cam)
+        self.workers[cam.handle] = worker
+        worker.start()
+        log.info("watching %s (%s)", cam.handle, cam.name)
+
+    def _reconcile_roster(self) -> int:
+        """Make the running workers match the cameras assigned to this
+        app. Returns how many cameras are assigned.
+
+        This is re-checked on every tick, and that is the whole point.
+        It used to run once, inside ``setup()``, which is the ONE moment
+        a fresh install is guaranteed to have nothing assigned: the app
+        starts with the stack, the operator assigns the entrance camera
+        afterwards, and nothing ever looked again. The app sat polling
+        its config for as long as you left it, screening nobody, and the
+        operator had done everything right.
+
+        Cameras are only ever ADDED on the strength of an empty answer.
+        ``NVR.cameras()`` returns ``[]`` both for "none assigned" and
+        for "core could not be reached", and those must not be treated
+        alike: tearing down a working site because core restarted, or
+        because of one bad response, would turn a blip into an outage.
+        So a removal needs positive evidence — a roster that came back
+        with cameras in it, and this one not among them.
+        """
+        try:
+            cameras = self.nvr.cameras()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the camera roster (%s) — keeping "
+                        "the %d already running", exc, len(self.workers))
+            return len(self.workers)
+
+        assigned = {c.handle: c for c in cameras}
+        for handle, cam in assigned.items():
+            if handle not in self.workers:
+                self._start_worker(cam)
+
+        if not assigned:
+            if self.workers:
+                # Ambiguous by construction, so say so and change
+                # nothing. An operator who really did unassign every
+                # camera can stop the app.
+                log.warning("the camera roster came back empty while %d "
+                            "worker(s) are running — leaving them alone; "
+                            "core may be unreachable", len(self.workers))
+            return 0
+
+        for handle in [h for h in self.workers if h not in assigned]:
+            log.info("%s is no longer assigned to this app — stopping", handle)
+            self.workers.pop(handle).stop()
+        return len(assigned)
 
     def on_frame(self, camera_id: str, frame_bytes: bytes):
         """Unused: the workers read frames themselves, at video rate."""
@@ -925,6 +972,11 @@ class GuardScanApp(FrameApp):
         at two frames a second loses the short passes and reports a
         clean scan as incomplete.
         """
+        # Pick up a camera the operator assigned since the last tick.
+        # A click in the catalog does not change this app's CONFIG, so
+        # the config poll never hears about it — the roster has to be
+        # asked for.
+        self._reconcile_roster()
         for handle, worker in self.workers.items():
             log.info("%s: %.1f fps, %d frames, %d tracked%s", handle,
                      worker.fps, worker.frames, worker.tracker.live,

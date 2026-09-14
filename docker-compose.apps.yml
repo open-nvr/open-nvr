@@ -491,6 +491,22 @@ services:
   yolo-pose-weights-init:
     profiles: [apps]
     image: ${YOLO_POSE_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolo-pose-weights:v8.3.0}
+    # Build it here if it cannot be pulled. Without this fallback a
+    # fresh install is at the mercy of one registry: an unpublished
+    # image, a private package, a blocked ghcr.io — any of them ends
+    # with "error from registry: denied", no weights, and (because the
+    # adapter waits on this) no pose adapter at all. The build needs
+    # only Docker Hub, so the two failure modes do not overlap.
+    #
+    # It is a LAST resort, not the normal path. The export pulls the
+    # ~7 GB ultralytics base (amd64-only, but a plain manifest rather
+    # than an index, so it still runs under emulation elsewhere) and
+    # then takes ~30 s — against ~5 s to pull the finished 17 MB
+    # image. `pull_policy: missing` keeps the published image first
+    # whenever it can be had.
+    build:
+      context: examples/yolo-pose-weights
+      dockerfile: Dockerfile
     pull_policy: missing
     container_name: opennvr_yolo_pose_weights_init
     logging: *svc-logs
