@@ -35,6 +35,9 @@ import { Card, CardContent } from '../../components/ui'
 
 type Urls = { whep?: string; hls?: string; token?: string }
 
+/** Where the floating panel was last left. */
+const POS_KEY = 'opennvr.guardscan.livePos'
+
 export function LiveCameraPanel({
   cameraId, cameraName, overlayEnabled, popped = false, onTogglePop,
 }: {
@@ -51,11 +54,25 @@ export function LiveCameraPanel({
   // Where the floating panel sits. Only read while popped, and kept
   // here rather than in the page so docking always returns it to the
   // column cleanly.
-  const [pos, setPos] = useState({ x: 0, y: 0 })
+  const [pos, setPos] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(POS_KEY)
+      const v = raw ? JSON.parse(raw) : null
+      return v && typeof v.x === 'number' && typeof v.y === 'number'
+        ? (v as { x: number; y: number })
+        : { x: 0, y: 0 }
+    } catch {
+      return { x: 0, y: 0 }
+    }
+  })
   const dragFrom = useRef<{ x: number; y: number } | null>(null)
 
   const startDrag = (down: React.PointerEvent) => {
     if (!popped) return
+    // The dock button lives on this bar. Capturing the pointer here
+    // redirects every later event to the bar, so the button never saw
+    // its own click and the panel could be floated but never put back.
+    if ((down.target as HTMLElement).closest('button')) return
     const handle = down.currentTarget as HTMLElement
     handle.setPointerCapture(down.pointerId)
     dragFrom.current = { x: down.clientX - pos.x, y: down.clientY - pos.y }
@@ -69,6 +86,14 @@ export function LiveCameraPanel({
       handle.releasePointerCapture(down.pointerId)
       handle.removeEventListener('pointermove', move)
       handle.removeEventListener('pointerup', up)
+      setPos((at) => {
+        try {
+          window.localStorage.setItem(POS_KEY, JSON.stringify(at))
+        } catch {
+          // Not remembering where a panel was put is not an error.
+        }
+        return at
+      })
     }
     handle.addEventListener('pointermove', move)
     handle.addEventListener('pointerup', up)

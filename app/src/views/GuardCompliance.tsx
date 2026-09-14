@@ -76,10 +76,41 @@ const VERDICT_ORDER = ['compliant', 'partial', 'incomplete', 'no_scan'] as const
 // "unidentified" reads as a broken page rather than as missing setup.
 const NO_GUARD = 'unidentified'
 
-/** Where the summary row's folded/unfolded state is remembered. */
+// How this operator left the page: folded or not, how the width is
+// shared, how tall the summary is, whether the camera is floating.
+// Browser-side on purpose — it is one person's view of one page, not
+// something the server has any business knowing.
 const SUMMARY_KEY = 'opennvr.guardscan.summary'
-/** …and how the list and the camera share the width. */
 const SPLIT_KEY = 'opennvr.guardscan.split'
+const HEIGHT_KEY = 'opennvr.guardscan.summaryHeight'
+const POPPED_KEY = 'opennvr.guardscan.livePopped'
+
+/** Read a remembered setting. Private mode THROWS rather than
+ *  returning null, so every read needs the guard. */
+function recall(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function remember(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // Not remembering a preference is not an error.
+  }
+}
+
+function recallNumber(key: string, fallback: number, lo: number, hi: number): number {
+  const n = Number(recall(key))
+  return Number.isFinite(n) && n >= lo && n <= hi ? n : fallback
+}
+
+//: Neither pane may be squeezed to uselessness.
+const HEIGHT_MIN = 110
+const HEIGHT_MAX = 340
 //: Neither pane may be squeezed to uselessness: a table under about
 //: half the row cannot show its columns, and a camera over about half
 //: is no longer a side panel.
@@ -130,23 +161,14 @@ export default function GuardCompliance() {
   // Collapsing the summary hands its height to the list. Remembered,
   // because someone who works from the list all day should not have to
   // fold the figures away again every morning.
-  const [summaryOpen, setSummaryOpen] = useState(() => {
-    try {
-      return window.localStorage.getItem(SUMMARY_KEY) !== 'closed'
-    } catch {
-      return true          // private mode throws rather than returning null
-    }
-  })
+  const [summaryOpen, setSummaryOpen] = useState(() => recall(SUMMARY_KEY) !== 'closed')
+  // …and how much of the screen it is worth to them.
+  const [summaryHeight, setSummaryHeight] = useState(
+    () => recallNumber(HEIGHT_KEY, 150, HEIGHT_MIN, HEIGHT_MAX))
   // How the last row is divided, remembered like the page size is.
-  const [split, setSplit] = useState<number>(() => {
-    try {
-      const raw = Number(window.localStorage.getItem(SPLIT_KEY))
-      return Number.isFinite(raw) && raw >= SPLIT_MIN && raw <= SPLIT_MAX ? raw : 75
-    } catch {
-      return 75
-    }
-  })
-  const [popped, setPopped] = useState(false)
+  const [split, setSplit] = useState(
+    () => recallNumber(SPLIT_KEY, 75, SPLIT_MIN, SPLIT_MAX))
+  const [popped, setPopped] = useState(() => recall(POPPED_KEY) === 'yes')
   const rowRef = useRef<HTMLDivElement>(null)
 
   const startDrag = useCallback((down: React.PointerEvent) => {
@@ -167,14 +189,30 @@ export default function GuardCompliance() {
       handle.releasePointerCapture(down.pointerId)
       handle.removeEventListener('pointermove', move)
       handle.removeEventListener('pointerup', up)
-      setSplit((pct) => {
-        try {
-          window.localStorage.setItem(SPLIT_KEY, String(pct))
-        } catch {
-          // Not remembering a preference is not an error.
-        }
-        return pct
-      })
+      setSplit((pct) => { remember(SPLIT_KEY, String(pct)); return pct })
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', up)
+  }, [])
+
+  // Same gesture as the split, in the other axis: the summary is worth
+  // different amounts of the screen to different people.
+  const startHeightDrag = useCallback((down: React.PointerEvent) => {
+    down.preventDefault()
+    const handle = down.currentTarget as HTMLElement
+    handle.setPointerCapture(down.pointerId)
+    const startY = down.clientY
+    let startH = 0
+    setSummaryHeight((h) => { startH = h; return h })
+    const move = (e: PointerEvent) => {
+      const next = startH + (e.clientY - startY)
+      setSummaryHeight(Math.round(Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, next))))
+    }
+    const up = () => {
+      handle.releasePointerCapture(down.pointerId)
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', up)
+      setSummaryHeight((h) => { remember(HEIGHT_KEY, String(h)); return h })
     }
     handle.addEventListener('pointermove', move)
     handle.addEventListener('pointerup', up)
@@ -182,11 +220,7 @@ export default function GuardCompliance() {
 
   const toggleSummary = () => {
     setSummaryOpen((open) => {
-      try {
-        window.localStorage.setItem(SUMMARY_KEY, open ? 'closed' : 'open')
-      } catch {
-        // Not remembering a preference is not an error.
-      }
+      remember(SUMMARY_KEY, open ? 'closed' : 'open')
       return !open
     })
   }
@@ -369,7 +403,9 @@ export default function GuardCompliance() {
           </button>
 
           {summaryOpen && (
-          <div className="mt-2 grid gap-3 lg:grid-cols-2">
+          <>
+          <div className="mt-2 grid gap-3 lg:grid-cols-2"
+               style={{ height: summaryHeight }}>
           <div
             className={`grid grid-cols-2 gap-2 ${
               report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
@@ -400,7 +436,7 @@ export default function GuardCompliance() {
         />
       </div>
 
-          <div className={`h-full ${
+          <div className={`h-full min-h-0 rounded bg-[var(--panel)] p-2 ${
             report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
@@ -456,6 +492,17 @@ export default function GuardCompliance() {
         </div>
           </div>
           </div>
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize the summary"
+            onPointerDown={startHeightDrag}
+            className="group -mb-1 mt-1 flex h-2 cursor-row-resize items-center justify-center"
+          >
+            <div className="h-[3px] w-10 rounded bg-[var(--border)]
+                            group-hover:bg-[var(--accent)]" />
+          </div>
+          </>
           )}
         </CardContent>
       </Card>
@@ -563,7 +610,10 @@ export default function GuardCompliance() {
         cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
         overlayEnabled={guardApp?.overlay_enabled}
         popped={popped}
-        onTogglePop={() => setPopped((v) => !v)}
+        onTogglePop={() => setPopped((v) => {
+          remember(POPPED_KEY, v ? 'no' : 'yes')
+          return !v
+        })}
       />
       </div>
       </div>
