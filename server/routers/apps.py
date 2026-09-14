@@ -1512,7 +1512,13 @@ async def get_app_status(
     # SDK /health reports `ready` (spec §03); tolerate its absence on
     # a 200 rather than flagging a healthy app unreachable.
     ready = reachable and bool(health.get("ready", True))
-    row.status = "ok" if ready else "unreachable"
+    # Three states, not two. "unreachable" is reserved for an app that
+    # did not answer at all — the catalog paints it red and the
+    # operator goes looking for a dead container. An app that answered
+    # and told us it cannot work is "degraded": amber, still running,
+    # and the reason is in `not_ready`. Collapsing the two would send
+    # somebody hunting a container that is perfectly alive.
+    row.status = "ok" if ready else ("degraded" if reachable else "unreachable")
     # PUBLISH that verdict. The SDK's health_snapshot() speaks `ready`
     # and never sets `status`, so a consumer reading health["status"] saw
     # nothing for every SDK-built app and rendered it "unknown" — only

@@ -66,6 +66,24 @@ APP_ID = "guard-scan-compliance"
 POSE_ADAPTER = "yolo-pose"
 POSE_TASK = "pose_estimation"
 
+#: How many consecutive failed frames before the app stops calling it a
+#: blip and starts calling it an outage — in the log, on /state, and in
+#: the catalog's status dot. Three, because at ten frames a second a
+#: single dropped call means nothing and a third of a second of silence
+#: already means something.
+INFER_FAILURES_BEFORE_UNHEALTHY = 3
+
+
+class PoseUnavailable(RuntimeError):
+    """The pose adapter could not be reached, or refused the frame.
+
+    Raised rather than swallowed so the worker can record WHY. Without
+    this the failure existed only as a log line: every /infer returned
+    404, the app screened nobody, and both /state and /health went on
+    reporting a perfectly well app.
+    """
+
+
 #: The contract for a completed screening, compliant or not. Core keeps
 #: these; the compliance report is built from them, which is why a clean
 #: scan is published too — a compliance rate needs the denominator.
@@ -274,6 +292,10 @@ class CameraWorker:
         self.fps = 0.0
         self.last_error: str | None = None
         self._infer_failures = 0
+        # Held separately from `last_error` so that recovering from an
+        # outage clears the outage and NOT an unrelated config refusal
+        # that is still true.
+        self._infer_error: str | None = None
         # Identity across frames is the app's job: the adapter detects,
         # it does not track. One tracker per camera.
         self.tracker = Tracker()
@@ -320,6 +342,37 @@ class CameraWorker:
         """
         log.info("%s: reopening the stream (%s)", self.handle, why)
         self._reopen.set()
+
+    # ── inference health ──
+
+    def _note_infer_failure(self, reason: str) -> None:
+        """Count a failed frame, back off, and — once it is clearly an
+        outage rather than a blip — say so where an operator will see it.
+
+        Retrying every frame turns one outage into a hundred connection
+        attempts a second and buries the reason in its own log spam, so
+        the backoff stays. What is new is that the reason now leaves the
+        log: `last_error` reaches /state and the catalog, and
+        `not_ready_reason` turns the app's status dot amber.
+        """
+        self._infer_failures += 1
+        if self._infer_failures >= INFER_FAILURES_BEFORE_UNHEALTHY:
+            self._infer_error = f"pose inference failing: {reason}"
+            self.last_error = self._infer_error
+            time.sleep(min(2.0 * self._infer_failures, 30.0))
+
+    def _clear_infer_error(self) -> None:
+        """Inference is answering again. Retire the outage — and only
+        the outage."""
+        if self._infer_error is None:
+            return
+        if self.last_error == self._infer_error:
+            self.last_error = None
+        self._infer_error = None
+
+    @property
+    def inference_down(self) -> bool:
+        return self._infer_error is not None
 
     # ── the loop ──
 
@@ -390,16 +443,19 @@ class CameraWorker:
 
     def _on_frame(self, frame) -> None:
         image = frame.to_ndarray()
-        bodies = self.app.pose(self.infer, image, frame, self.tracker)
-        if bodies is None:
-            # Inference is down. Retrying every frame turns one outage
-            # into a hundred connection attempts a second and buries the
-            # reason in its own log spam.
-            self._infer_failures += 1
-            if self._infer_failures >= 3:
-                time.sleep(min(2.0 * self._infer_failures, 30.0))
+        try:
+            bodies = self.app.pose(self.infer, image, frame, self.tracker)
+        except PoseUnavailable as exc:
+            self._note_infer_failure(str(exc))
             return
+        if bodies is None:
+            # A frame we could not encode. Not an outage — nothing to
+            # report, and no reason to back off.
+            return
+        if self.inference_down:
+            log.info("%s: pose inference recovered", self.handle)
         self._infer_failures = 0
+        self._clear_infer_error()
         engine = self.engine
         bodies = engine._dedupe(bodies, image)
         engine.guard_id = engine.guard.update(bodies, frame.wall_ts,
@@ -732,12 +788,15 @@ class GuardScanApp(FrameApp):
         try:
             result = infer.infer(buf.tobytes())
         except Exception as exc:  # noqa: BLE001
-            # A restart of core silently unregisters adapters, and the
-            # symptom is a 404 per frame with nothing in the log to say
-            # why. Say why.
+            # The symptom of an unreachable or unregistered adapter is a
+            # 404 per frame. Saying why in the log was the first half of
+            # the fix; RAISING is the second, so the worker can put it
+            # somewhere an operator actually looks. Swallowing it here
+            # meant the app screened nobody for hours while /state
+            # reported no error at all.
             log.warning("pose inference failed (%s) — is the %s adapter "
                         "registered with KAI-C?", exc, POSE_ADAPTER)
-            return None
+            raise PoseUnavailable(str(exc) or exc.__class__.__name__) from exc
         return _bodies_from(result, frame, tracker)
 
     def publish_overlay(self, handle, bodies, engine, frame) -> None:
@@ -785,17 +844,53 @@ class GuardScanApp(FrameApp):
     # ── state the catalog shows ──
 
     def state(self) -> dict:
-        rate = (100.0 * self.compliant / self.screenings) if self.screenings else 100.0
+        # No screenings is NOT 100% compliance. It used to read that
+        # way, which meant a completely dead app — no cameras, no
+        # adapter, nothing screened at all — displayed the best number
+        # on the page. An empty denominator has no answer, and saying so
+        # is the honest one.
+        compliance = (
+            f"{100.0 * self.compliant / self.screenings:.0f}%"
+            if self.screenings else "— (nothing screened yet)"
+        )
         return {
             "screenings": self.screenings,
-            "compliance": f"{rate:.0f}%",
+            "compliance": compliance,
             "cameras": [
                 {"camera": handle, "fps": round(w.fps, 1),
+                 # Frames DECODED, which is not the same as frames
+                 # understood: during an adapter outage this number
+                 # keeps climbing while nothing is screened. That is
+                 # why the error column beside it matters.
                  "frames": w.frames, "error": w.last_error or ""}
                 for handle, w in self.workers.items()
             ],
             "recent": list(self.recent),
         }
+
+    def not_ready_reason(self) -> str | None:
+        """Why this app cannot currently do its job, in one sentence.
+
+        The catalog turns this into the status dot (``routers/apps.py``
+        maps it to ``degraded``). Before it existed, every one of the
+        conditions below looked exactly like a healthy app: the
+        container was up, /health said ready, and the only evidence that
+        anything was wrong was that alerts never arrived.
+
+        Ordered by what an operator can act on first.
+        """
+        if not self.workers:
+            return ("No camera is assigned to this app — assign an "
+                    "entrance camera in the App Catalog.")
+        down = [h for h, w in self.workers.items() if w.inference_down]
+        if len(down) == len(self.workers):
+            return (f"Pose inference is failing on every camera — check the "
+                    f"'{POSE_ADAPTER}' adapter is running and registered. "
+                    f"Nobody is being screened.")
+        if down:
+            return (f"Pose inference is failing on {', '.join(sorted(down))} "
+                    f"— those cameras are not being screened.")
+        return None
 
     # ── the FrameApp surface ──
 

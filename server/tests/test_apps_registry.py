@@ -837,7 +837,12 @@ def test_status_not_ready_app_reports_degraded(client, monkeypatch):
 
     body = client.get("/apps/loitering-detection/status").json()
     assert body["health"]["status"] == "degraded"
-    assert client.get("/apps").json()[0]["status"] == "unreachable"
+    # The LIST has to make the same distinction. It used to record
+    # "unreachable" here, which is what this test asserted — the one
+    # place an operator scanning their apps would look, saying "nothing
+    # is listening" about an app that had just answered and explained
+    # itself. Whoever went to check found a perfectly healthy container.
+    assert client.get("/apps").json()[0]["status"] == "degraded"
 
 
 def test_status_app_declaring_its_own_status_is_left_alone(client, monkeypatch):

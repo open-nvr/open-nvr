@@ -12,8 +12,9 @@ app registry (``server/routers/apps.py``). Two pieces live here:
   server on a daemon thread serving the three contract endpoints:
 
   - ``GET /health``   → ``{"ready", "uptime_s", "events_seen",
-    "alerts_fired", "last_event_age_s"}`` — powers the catalog status
-    dot and stall detection;
+    "alerts_fired", "last_event_age_s"}``, plus ``"not_ready"`` when
+    the app says it cannot work (:meth:`ContractMixin.not_ready_reason`)
+    — powers the catalog status dot and stall detection;
   - ``GET /manifest`` → the static ``AppManifest.to_dict()`` — powers
     the catalog card + auto-generated config form;
   - ``GET /state``    → the app-provided live snapshot
@@ -474,6 +475,30 @@ class ContractMixin:
         thread, so keep it a cheap read of existing state."""
         return {}
 
+    def not_ready_reason(self) -> str | None:
+        """Override to say that the app is up but cannot do its job.
+
+        Return ``None`` when all is well (the default, so nothing
+        changes for an app that does not override this), or one short
+        operator-facing sentence when it is not: the adapter it needs is
+        unreachable, no camera has been assigned to it, its model failed
+        to load. The string is shown as-is in the App Catalog, so write
+        it for the person reading it, not for a log.
+
+        This exists because ``ready`` used to be the constant ``True``.
+        Every app on the platform reported itself well no matter what
+        had gone wrong, and since the server derives the catalog's
+        status dot from it (``routers/apps.py``: ``ready`` → ``ok`` /
+        ``degraded``), an app that had been failing every inference for
+        hours was indistinguishable from one doing its job perfectly.
+        The operator's only symptom was that nothing ever happened.
+
+        Keep it cheap and non-blocking: it is called from the contract
+        server's thread on every ``GET /health``, so read state that is
+        already there rather than probing anything.
+        """
+        return None
+
     def health_snapshot(self) -> dict[str, Any]:
         """The ``GET /health`` payload (spec §03)."""
         now = _monotonic()
@@ -482,13 +507,27 @@ class ContractMixin:
             if self._last_event_monotonic is None
             else round(now - self._last_event_monotonic, 3)
         )
-        return {
-            "ready": True,
+        try:
+            problem = self.not_ready_reason()
+        except Exception:  # noqa: BLE001
+            # A readiness check that throws must not take /health with
+            # it: an app that cannot be probed at all reads as
+            # "unreachable", which is a worse and less true answer than
+            # "up, and here is what is wrong".
+            problem = "readiness check failed"
+        payload: dict[str, Any] = {
+            "ready": problem is None,
             "uptime_s": round(now - self._started_monotonic, 3),
             "events_seen": self._events_seen,
             "alerts_fired": self._alerts_fired,
             "last_event_age_s": last_age,
         }
+        if problem is not None:
+            # Additive: `ready` alone says something is wrong, and this
+            # says what. Consumers that never learned the key still get
+            # a correct verdict from `ready`.
+            payload["not_ready"] = problem
+        return payload
 
     def manifest_snapshot(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload — ``{}`` for manifest-less
