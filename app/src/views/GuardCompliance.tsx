@@ -19,7 +19,7 @@
 
 import { useMemo, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Download, Settings2, ShieldCheck } from 'lucide-react'
+import { Download, FileText, Settings2, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -36,6 +36,9 @@ import { SegmentedControl } from '../components/ui/SegmentedControl'
 import { usePagination } from '../hooks/usePagination'
 import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
+import { ScreeningClip } from './guardscan/ScreeningClip'
+import { ScreeningReport } from './guardscan/ScreeningReport'
 import {
   guardScanService, VERDICT_LABEL,
   type ComplianceReport, type Screening, type Tally,
@@ -111,6 +114,7 @@ export default function GuardCompliance() {
   const [viewing, setViewing] = useState<Screening | null>(null)
   const [exporting, setExporting] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [reportOpen, setReportOpen] = useState(false)
   const rows = usePagination(25, 'guard-screenings')
   const tz = useMemo(() => -new Date().getTimezoneOffset(), [])
 
@@ -188,6 +192,13 @@ export default function GuardCompliance() {
   // row names a real person.
   const guards = (report.data?.guards ?? []).filter((g) => g.label !== NO_GUARD)
 
+  // The door being watched: whichever camera the operator filtered to,
+  // and otherwise the one the most recent screening came from — that is
+  // the entrance with people walking through it.
+  const liveCameraId = cameraId !== ''
+    ? cameraId
+    : list.find((s) => s.camera_id != null)?.camera_id ?? null
+
   const download = async () => {
     setExporting(true)
     try {
@@ -239,6 +250,9 @@ export default function GuardCompliance() {
                 <Settings2 size={13} /> Configure
               </Button>
             )}
+            <Button variant="outline" size="sm" onClick={() => setReportOpen(true)}>
+              <FileText size={13} /> Report
+            </Button>
             <Button variant="outline" size="sm" onClick={download} disabled={exporting}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'CSV'}
             </Button>
@@ -251,17 +265,22 @@ export default function GuardCompliance() {
           information, roughly half the height, and what it buys is the
           screenings table being on screen when the page opens — which
           is what an operator came here to read. */}
+      {/* Three equal columns: the figures, the trend, and the door
+          itself. The live panel is deliberately OUTSIDE the dimming
+          below — it is not report data, and fading live video every
+          time someone changes the range would read as the camera
+          dropping out. */}
+      <div className="grid gap-3 lg:grid-cols-3">
       {/* Dimmed only while the figures on screen belong to a DIFFERENT
           query than the one now selected — `isPlaceholderData`, not
           `isFetching`. Keying it off isFetching would dim the summary
           every thirty seconds on the background poll, which is a worse
           distraction than the flicker this replaced. */}
       <div
-        className={`grid gap-3 lg:grid-cols-2 ${
+        className={`grid grid-cols-2 gap-3 ${
           report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
         aria-busy={report.isPlaceholderData || undefined}
       >
-      <div className="grid grid-cols-2 gap-3">
         <Tile
           label="Compliance"
           value={pct(totals?.compliance ?? null)}
@@ -287,7 +306,8 @@ export default function GuardCompliance() {
         />
       </div>
 
-      <Card className="h-full">
+      <Card className={`h-full ${
+        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
             prose, a legend at 11px and a fixed-aspect plot left the
@@ -341,6 +361,12 @@ export default function GuardCompliance() {
           )}
         </CardContent>
       </Card>
+
+      <LiveCameraPanel
+        cameraId={liveCameraId}
+        cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
+        overlayEnabled={guardApp?.overlay_enabled}
+      />
       </div>
 
       {guards.length > 0 && (
@@ -421,12 +447,17 @@ export default function GuardCompliance() {
           queryKeyPrefix={['screening-image', viewing.id]}
           fetchBlob={(name, signal) =>
             guardScanService.screeningImage(viewing.id, name, signal)}
+          extra={<ScreeningClip screening={viewing} />}
           onClose={() => setViewing(null)}
         />
       )}
 
       {configOpen && guardApp && (
         <AppConfigModal app={guardApp} onClose={() => setConfigOpen(false)} />
+      )}
+
+      {reportOpen && (
+        <ScreeningReport days={days} onClose={() => setReportOpen(false)} />
       )}
     </section>
   )

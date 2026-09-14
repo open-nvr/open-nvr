@@ -20,6 +20,7 @@
 // `/guardscan/screenings/{id}/images/{name}`); everything else about
 // showing a photograph is the same on both.
 
+import type { ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { AuthedImage } from './AuthedImage'
 
@@ -33,6 +34,15 @@ export type EvidenceViewerProps = {
   /** Stable prefix for the per-image react-query key. */
   queryKeyPrefix: (string | number)[]
   fetchBlob: (name: string, signal?: AbortSignal) => Promise<{ data: any }>
+  /**
+   * Rendered under the photographs.
+   *
+   * "What happened here" should have ONE answer, not a photo overlay
+   * and a video somewhere else — so the footage of a record goes in the
+   * same place its stills do. Callers with nothing to add pass nothing
+   * and get exactly what they had.
+   */
+  extra?: ReactNode
   onClose: () => void
 }
 
@@ -43,7 +53,7 @@ function caption(name: string): string {
 }
 
 export function EvidenceViewer({
-  title, subtitle, images, queryKeyPrefix, fetchBlob, onClose,
+  title, subtitle, images, queryKeyPrefix, fetchBlob, extra, onClose,
 }: EvidenceViewerProps) {
   return (
     <div
@@ -96,6 +106,7 @@ export function EvidenceViewer({
             </figure>
           ))}
         </div>
+        {extra}
       </div>
     </div>
   )
