@@ -260,24 +260,18 @@ export default function GuardCompliance() {
         }
       />
 
-      {/* The summary reads across, not down: four tiles in a 2x2 block
-          beside the chart rather than a full-width band above it. Same
-          information, roughly half the height, and what it buys is the
-          screenings table being on screen when the page opens — which
-          is what an operator came here to read. */}
-      {/* Three equal columns: the figures, the trend, and the door
-          itself. The live panel is deliberately OUTSIDE the dimming
-          below — it is not report data, and fading live video every
-          time someone changes the range would read as the camera
-          dropping out. */}
-      <div className="grid gap-3 lg:grid-cols-3">
-      {/* Dimmed only while the figures on screen belong to a DIFFERENT
+      {/* Four strips across the top. A figure and its name need one
+          line, not a card with a paragraph of air beside them — the
+          space those tiles were holding is the space the table and the
+          camera wanted.
+
+          Dimmed only while the figures on screen belong to a DIFFERENT
           query than the one now selected — `isPlaceholderData`, not
-          `isFetching`. Keying it off isFetching would dim the summary
-          every thirty seconds on the background poll, which is a worse
+          `isFetching`. Keying it off isFetching would dim them every
+          thirty seconds on the background poll, which is a worse
           distraction than the flicker this replaced. */}
       <div
-        className={`grid grid-cols-2 gap-3 ${
+        className={`grid grid-cols-2 gap-3 lg:grid-cols-4 ${
           report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
         aria-busy={report.isPlaceholderData || undefined}
       >
@@ -306,8 +300,8 @@ export default function GuardCompliance() {
         />
       </div>
 
-      <Card className={`h-full ${
-        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
+      <Card className={
+        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
             prose, a legend at 11px and a fixed-aspect plot left the
@@ -315,7 +309,7 @@ export default function GuardCompliance() {
             label-sized and share one row each, and the plot takes
             whatever is left — so the bars grow with the card instead of
             sitting in it. */}
-        <CardContent className="flex h-full flex-col gap-2 p-3">
+        <CardContent className="flex flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h3 className="min-w-0 text-xs font-semibold text-[var(--text)]"
                 title="Every screening, by outcome. Hover a bar for the breakdown.">
@@ -362,13 +356,6 @@ export default function GuardCompliance() {
         </CardContent>
       </Card>
 
-      <LiveCameraPanel
-        cameraId={liveCameraId}
-        cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
-        overlayEnabled={guardApp?.overlay_enabled}
-      />
-      </div>
-
       {guards.length > 0 && (
         <Card>
           <CardContent>
@@ -377,7 +364,13 @@ export default function GuardCompliance() {
           </CardContent>
         </Card>
       )}
-      <div className="flex min-h-0 flex-col">
+      {/* The list and the door, side by side, taking whatever height is
+          left. Three quarters to the list because that is what an
+          operator reads; a quarter is enough to see who is at the
+          entrance, and the panel is tall enough there to be worth
+          looking at. */}
+      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-4">
+      <div className="flex min-h-0 flex-col lg:col-span-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
         <ScreeningTable
             rows={list}
@@ -433,6 +426,16 @@ export default function GuardCompliance() {
         />
       </div>
 
+      {/* Outside the dimming above, deliberately: live video is not
+          report data, and fading it whenever someone changes the range
+          reads as the camera dropping out. */}
+      <LiveCameraPanel
+        cameraId={liveCameraId}
+        cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
+        overlayEnabled={guardApp?.overlay_enabled}
+      />
+      </div>
+
       {viewing && (
         <EvidenceViewer
           title={`${VERDICT_LABEL[viewing.verdict] ?? viewing.verdict} · ${Math.round(viewing.score)}%`}
@@ -478,20 +481,20 @@ function Tile({ label, value, hint, tone }: {
     : tone === 'warn' ? 'var(--warn)'
     : tone === 'bad' ? 'var(--danger)'
     : undefined
-  // Label above figure, and the explanation on hover rather than on a
-  // third line: four tiles at three lines each pushed the screenings
-  // table off the bottom of the screen, and the table is what an
-  // operator came for.
+  // A strip, not a tile: figure and name on ONE line. A number and its
+  // label do not need a card of air around them, and the height those
+  // four tiles were holding is the height the table and the camera
+  // wanted. The explanation stays on hover.
   return (
-    <Card className="h-full">
-      <CardContent className="flex h-full flex-col justify-center px-3 py-2">
-        <div className="truncate text-[11px] text-[var(--text-dim)]"
-             title={hint} style={hint ? { cursor: 'help' } : undefined}>
-          {label}
-        </div>
-        <div className="text-xl font-semibold leading-tight tabular-nums"
+    <Card>
+      <CardContent className="flex items-baseline gap-2 px-3 py-2">
+        <div className="text-xl font-semibold leading-none tabular-nums"
              style={{ color: colour }}>
           {value}
+        </div>
+        <div className="min-w-0 truncate text-[11px] text-[var(--text-dim)]"
+             title={hint} style={hint ? { cursor: 'help' } : undefined}>
+          {label}
         </div>
       </CardContent>
     </Card>
@@ -724,14 +727,18 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
     { key: 'score', header: 'Score', width: 'w-[72px]',
       cellClassName: 'tabular-nums', cell: (s) => `${Math.round(s.score)}%` },
     {
-      key: 'missing', header: 'Missed', className: 'truncate',
+      // Fixed, and no longer the column that absorbs the slack: it is
+      // a dash on most rows, and it was taking a third of the table to
+      // say so while the camera name was clipped to "fake-showroom-…".
+      key: 'missing', header: 'Missed', width: 'w-[150px]', className: 'truncate',
       cell: (s) => s.steps_missing.length
         ? <span className="text-[var(--text-dim)]">{s.steps_missing.join(', ')}</span>
         : <span className="text-[var(--text-dim)]">—</span>,
     },
     // The requirement names "camera location" on every record, and on a
     // multi-camera site a screening without its door is unattributable.
-    { key: 'camera', header: 'Camera', width: 'w-[140px]', hideBelow: 'sm',
+    { key: 'camera', header: 'Camera', hideBelow: 'sm',
+      className: 'truncate',
       cellClassName: 'truncate text-[var(--text-dim)]',
       cell: (s) => cameraName(s.camera_id) },
     {
@@ -777,7 +784,7 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
       dense
       fixed
       fillHeight
-      minWidth="min-w-[860px]"
+      minWidth="min-w-[760px]"
     />
   )
 }
