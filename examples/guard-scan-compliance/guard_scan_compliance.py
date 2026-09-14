@@ -56,7 +56,7 @@ from opennvr_app_sdk.alerts import AlertSource, build_dispatcher
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 
 sys.path.insert(0, str(Path(__file__).parent))
-from guard_scan.core import ScanEngine, ScanRules, SiteConfig  # noqa: E402
+from guard_scan.core import ConfigError, ScanEngine, ScanRules, SiteConfig  # noqa: E402
 from guard_scan.settings import ScanSettings  # noqa: E402
 from guard_scan.tracking import Tracker  # noqa: E402
 
@@ -277,6 +277,10 @@ class CameraWorker:
         # Identity across frames is the app's job: the adapter detects,
         # it does not track. One tracker per camera.
         self.tracker = Tracker()
+        # What the current stream was opened with, and the flag that
+        # asks the run loop for a fresh one.
+        self._stream_settings: tuple | None = None
+        self._reopen = threading.Event()
 
     # ── lifecycle ──
 
@@ -292,6 +296,30 @@ class CameraWorker:
         if self.engine is not None:
             # A restart is not a reason to lose the screening in progress.
             self.engine.flush(time.time(), reason="left")
+
+    # ── configuration ──
+
+    def stream_settings_changed(self, cfg: dict) -> bool:
+        """Would this config need a different STREAM?
+
+        Frame rate and decode width are properties of the decode, fixed
+        when the stream was opened. Everything else about a screening —
+        the procedure, the thresholds, the zone, the uniform — is read
+        per frame and can simply be swapped underneath.
+        """
+        if self._stream_settings is None:
+            return False
+        return self._stream_settings != _stream_settings(cfg)
+
+    def reopen(self, why: str) -> None:
+        """End the current session so the run loop opens a fresh one.
+
+        Deliberately NOT a thread restart: `_run` already reopens after
+        `_session` returns, and going through it keeps one path for
+        "start a session" rather than two that can drift.
+        """
+        log.info("%s: reopening the stream (%s)", self.handle, why)
+        self._reopen.set()
 
     # ── the loop ──
 
@@ -317,6 +345,8 @@ class CameraWorker:
 
     def _session(self) -> None:
         cfg = self.app.camera_config(self.handle)
+        self._reopen.clear()
+        self._stream_settings = _stream_settings(cfg)
         self.engine = self.app.build_engine(self.handle, cfg)
         self.stream = self.app.nvr.stream(
             self.camera, width=int(cfg.get("frame_width", 640)),
@@ -329,6 +359,14 @@ class CameraWorker:
         for frame in self.stream.frames(timeout=15.0):
             ended_at = frame.wall_ts
             if self._stop.is_set():
+                return
+            if self._reopen.is_set():
+                # Rule on whoever is mid-screening before the stream
+                # goes: they were really scanned, and the new frame rate
+                # is no reason to throw that away.
+                if self.engine is not None:
+                    self.engine.flush(frame.wall_ts, reason="left")
+                self.stream.close()
                 return
             if frame.restarted and self.engine is not None:
                 # The feed broke. Whatever was half-scanned, we did not
@@ -407,6 +445,12 @@ class GuardScanConfig(BaseAppConfig):
     uniform_hsv_low: list = field(default_factory=list)
     uniform_hsv_high: list = field(default_factory=list)
     session_log_dir: str = "/data/sessions"
+
+
+def _stream_settings(cfg: dict) -> tuple:
+    """The parts of the config that decide how the STREAM is opened."""
+    return (float(cfg.get("fps", 10.0) or 10.0),
+            int(cfg.get("frame_width", 640) or 640))
 
 
 def _uniform_bounds(cfg: dict) -> tuple[list, list]:
@@ -521,9 +565,26 @@ class GuardScanApp(FrameApp):
         return merged
 
     def on_config_update(self, config: dict) -> None:
-        """Live config from the catalog. Workers pick it up on their next
-        reconnect rather than mid-screening, so a saved setting cannot
-        change the rules half way through ruling on somebody."""
+        """Apply a saved setting to the running engines.
+
+        This used to stop at the dataclass, on the reasoning that
+        workers would pick changes up "on their next reconnect rather
+        than mid-screening". The instinct was right and the delivery was
+        not: a worker's stream ends only when the app shuts down — a
+        camera drop is repaired inside the stream itself, which keeps
+        yielding to the SAME engine — so "next reconnect" meant a
+        container restart, and an operator's change sat in the database
+        doing nothing with nothing on screen to say so.
+
+        The care survives, in a better place: `ScanEngine.retune` leaves
+        a screening already in progress under the rules it began with,
+        so nobody is re-judged half way through being wanded. It is the
+        NEXT screening that gets the new procedure.
+
+        Zones arrive here too, and until now they were never read at
+        all: workers are built before the config poll starts, so the
+        engines were created without the polygons an operator had drawn.
+        """
         for key, value in (config or {}).items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
@@ -534,6 +595,46 @@ class GuardScanApp(FrameApp):
                 for handle, value in drawn.items():
                     per_camera.setdefault(handle, {})[key] = value
         self._per_camera = per_camera
+        self._retune_workers()
+
+    def _retune_workers(self) -> None:
+        """Push the new settings into every running engine."""
+        for handle, worker in self.workers.items():
+            cfg = self.camera_config(handle)
+            # Frame rate and decode width belong to the STREAM, not the
+            # rules, and cannot be changed under a live one. Ask the
+            # worker to reopen instead — and only when they actually
+            # changed, so an unrelated save never drops the picture.
+            if worker.stream_settings_changed(cfg):
+                worker.reopen("frame rate or width changed")
+                continue
+            engine = worker.engine
+            if engine is None:
+                continue          # not started yet; it will read this config
+            try:
+                low, high = _uniform_bounds(cfg)
+                engine.retune(
+                    ScanSettings.from_config(cfg),
+                    site=SiteConfig({
+                        "uniform": {"hsv_low": low, "hsv_high": high},
+                        "scan_zone": {"polygon": cfg.get("scan_zone") or []},
+                    }),
+                    rules=ScanRules(_procedure(cfg)),
+                )
+            except ConfigError as exc:
+                # A procedure that will not parse must not stop the
+                # camera. Keep what was working, and say why — on the
+                # app's health line as well as in the log, because an
+                # operator who just pressed Save is owed an answer.
+                worker.last_error = f"config refused: {exc}"
+                log.warning("%s: new config refused (%s) — keeping the "
+                            "previous settings", handle, exc)
+            else:
+                worker.last_error = None
+                log.info("%s: settings applied live (order_weight=%s, "
+                         "surfaces=%s, zone=%s)", handle,
+                         engine.rules.order_weight, engine.rules.steps,
+                         "set" if (cfg.get("scan_zone") or []) else "none")
 
     def build_engine(self, handle: str, cfg: dict) -> ScanEngine:
         low, high = _uniform_bounds(cfg)

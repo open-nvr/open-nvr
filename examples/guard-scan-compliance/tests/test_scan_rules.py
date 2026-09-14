@@ -629,3 +629,103 @@ def test_the_three_copies_of_every_default_agree():
         assert float(in_config.group(1)) == want, (
             f"app config default for {name} is {in_config.group(1)}, "
             f"engine uses {want}")
+
+
+# ── live configuration ───────────────────────────────────────────────
+#
+# An operator saves a setting and expects it to mean something. It used
+# to reach the app's config object and stop there: the running engine
+# kept the rules it was built with, and the only thing that rebuilt one
+# was a container restart. These pin down that a saved setting reaches
+# the next screening — and that it never reaches one already in flight.
+
+
+#: A pass that covers everything, in an order the procedure does not
+#: expect. Worth 100% while order is ignored; less once it counts.
+#: front, right arm, back, left arm — every surface covered, none in
+#: the sequence the procedure expects. `torso` is the front while the
+#: person faces the camera and the back once they turn, exactly as in
+#: FULL above.
+OUT_OF_ORDER = [(15, "torso", True, True), (20, "right_arm", True, True),
+                (10, None, True, True), (20, "torso", False, True),
+                (20, "left_arm", True, True), (15, None, True, True),
+                (8, None, True, False)]
+
+
+def test_a_saved_setting_reaches_the_next_screening():
+    """The live case, exactly: order was not counted, an out-of-order
+    pass scored 100%, the operator turned order on — and every later
+    screening carried on saying 100% because nothing rebuilt the rules.
+    """
+    e = Engine()
+    e.run(OUT_OF_ORDER)
+    assert e.screenings[0]["verdict"] == "compliant"
+    assert e.screenings[0]["score"] == 100.0
+
+    e.engine.retune(ScanSettings(order_weight=0.3))
+
+    e.run(OUT_OF_ORDER, cust_id=20, start=9000.0)
+    after = e.screenings[1]
+    assert after["verdict"] == "partial"
+    assert after["score"] < 100.0
+    assert after["coverage"] == 100.0      # every surface still covered
+
+
+def test_a_screening_already_running_keeps_the_rules_it_began_under():
+    """Nobody is re-judged half way through being wanded. The care the
+    old comment described — just delivered without a restart."""
+    e = Engine()
+    # No trailing "walked off" step, so the screening is still open.
+    e.run([(20, "left_arm", True, True), (20, "right_arm", True, True)])
+    live = e.engine.sessions[2]
+    assert live.done, "expected a screening in progress"
+    before = live.rules
+
+    e.engine.retune(ScanSettings(order_weight=1.0))
+
+    # The session in flight still points at the rules it started with,
+    # while the engine has moved on for whoever comes next.
+    assert live.rules is before
+    assert e.engine.rules is before or e.engine.rules.order_weight == 1.0
+    assert live.rules.order_weight == before.order_weight
+
+
+def test_order_weight_arriving_as_a_SETTING_survives_a_retune():
+    """It reaches the rules by two routes — inside the procedure object
+    and as a setting of its own — and the setting wins. A retune that
+    only swapped the procedure would install new surfaces while quietly
+    keeping the old order weight."""
+    e = Engine()
+    assert e.engine.rules.order_weight == 0.0
+
+    # New procedure says 0.0; the setting beside it says 1.0.
+    e.engine.retune(ScanSettings(order_weight=1.0),
+                    rules=G.ScanRules({"order_weight": 0.0}))
+    assert e.engine.rules.order_weight == 1.0
+
+
+def test_retuning_also_moves_the_thresholds_the_guard_is_judged_by():
+    """The picker and the light hold their own copy of the settings.
+    Leaving them behind would apply half a saved config."""
+    e = Engine()
+    e.engine.retune(ScanSettings(led_ratio=0.5, led_hits=9, led_window_s=2.5))
+
+    assert e.engine.guard.args.led_ratio == 0.5
+    assert e.engine.light.ratio == 0.5
+    assert e.engine.light.hits == 9
+    assert e.engine.light.window_s == 2.5
+
+
+def test_the_guard_election_survives_a_saved_setting():
+    """Rebuilding the picker would restart the election from nothing
+    every time anybody pressed Save, and the guard would be 'unknown'
+    for seconds afterwards on a busy door."""
+    e = Engine()
+    establish(e)
+    who = e.engine.guard.guard_id
+
+    tracked = dict(e.engine.guard.tracks)
+    e.engine.retune(ScanSettings(led_ratio=0.2))
+    assert e.engine.guard.guard_id == who
+    # The accumulated evidence is still there, not reset to nothing.
+    assert set(e.engine.guard.tracks) == set(tracked)

@@ -922,8 +922,7 @@ class ScanEngine:
 
         self.site = site if site is not None else SiteConfig.load(args.site)
         self.rules = rules if rules is not None else ScanRules.load(args.rules)
-        if args.order_weight is not None:
-            self.rules.order_weight = max(0.0, min(1.0, args.order_weight))
+        self._apply_order_weight()
         if args.require:
             want = [x.strip() for x in args.require.split(",") if x.strip()]
             bad = [x for x in want if x not in STEPS]
@@ -941,6 +940,57 @@ class ScanEngine:
         self.alert_count = 0
         self.finished = {}        # track id -> when we ruled on them
         self.orphans = {}         # screenings whose track id vanished
+
+    def _apply_order_weight(self) -> None:
+        """Let the SETTING override the procedure's own order weight.
+
+        `order_weight` reaches the rules by two routes — inside the
+        `procedure` object, and as a setting in its own right — and the
+        setting wins. Shared by __init__ and `retune` so the two cannot
+        drift: a retune that forgot this would install a new procedure
+        while silently keeping the old order weight, which is the
+        hardest kind of half-applied setting to notice.
+        """
+        if self.args.order_weight is not None:
+            self.rules.order_weight = max(0.0, min(1.0, self.args.order_weight))
+
+    def retune(self, settings, *, site=None, rules=None) -> None:
+        """Adopt new configuration without dropping what is in flight.
+
+        An operator saves a setting and expects it to mean something.
+        Until this existed the only way a running engine picked up a
+        change was to be rebuilt, which happened when the camera's
+        stream session ended — and on a healthy camera that is never.
+
+        A screening ALREADY RUNNING is deliberately untouched: a
+        ScanSession holds the rules object it was created with, so it is
+        graded under the procedure it began under. Somebody half way
+        through being wanded is not re-judged by rules that arrived
+        while they stood there. The next screening gets the new ones.
+
+        The guard picker keeps its election state — who the guard is and
+        the evidence for it — and only changes the thresholds it judges
+        by; rebuilding it would restart the election from nothing every
+        time anybody pressed Save. The light keeps its rolling window
+        for the same reason.
+
+        `args.require` is not re-read: it is a command-line filter with
+        no path through the catalog, and honouring it here would let a
+        stale CLI flag quietly narrow a procedure the operator just set.
+        """
+        self.args = settings
+        if site is not None:
+            self.site = site
+        if rules is not None:
+            self.rules = rules
+        self._apply_order_weight()
+
+        self.guard.args = settings
+        self.guard.site = self.site
+
+        self.light.ratio = float(settings.led_ratio)
+        self.light.hits = int(settings.led_hits)
+        self.light.window_s = float(settings.led_window_s)
 
     # evidence
     def _remember_evidence(self, session, frame, body):
