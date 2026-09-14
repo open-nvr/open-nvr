@@ -1277,6 +1277,19 @@ services:
         condition: service_healthy
       egress-proxy:
         condition: service_started
+      # RFC-0002 decision 7, the same as license-plate-recognition and
+      # its OCR adapter: the app starts only once the adapter it cannot
+      # work without is up, and its (best-effort) registration has run.
+      #
+      # This app is the pose adapter's only consumer, and it never said
+      # so. Starting guard-scan therefore did not start the adapter —
+      # so a one-click install, or `up -d guard-scan-compliance`,
+      # brought up an app whose every inference call was going to fail,
+      # with no pose container anywhere on the box to hint at why.
+      yolo-pose-adapter:
+        condition: service_healthy
+      yolo-pose-register:
+        condition: service_completed_successfully
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - OPENNVR_URL=http://opennvr-core:8000
