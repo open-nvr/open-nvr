@@ -198,7 +198,7 @@ export default function GuardCompliance() {
   const resetPage = () => rows.setPage(1)
 
   return (
-    <section className="space-y-4">
+    <section className="flex min-h-0 flex-col space-y-4">
       <PageHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -220,7 +220,13 @@ export default function GuardCompliance() {
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {/* The summary reads across, not down: four tiles in a 2x2 block
+          beside the chart rather than a full-width band above it. Same
+          information, roughly half the height, and what it buys is the
+          screenings table being on screen when the page opens — which
+          is what an operator came here to read. */}
+      <div className="grid gap-3 lg:grid-cols-[minmax(260px,340px)_1fr]">
+      <div className="grid grid-cols-2 gap-3 content-start">
         <Tile
           label="Compliance"
           value={pct(totals?.compliance ?? null)}
@@ -303,6 +309,7 @@ export default function GuardCompliance() {
           )}
         </CardContent>
       </Card>
+      </div>
 
       {guards.length > 0 && (
         <Card>
@@ -325,12 +332,9 @@ export default function GuardCompliance() {
         </Card>
       )}
 
-      <Card>
-        <CardContent className="pb-3">
-          <h3 className="text-sm font-semibold">Recent screenings</h3>
-        </CardContent>
-        <div className="px-4 pb-4">
-          <ScreeningTable
+      <div className="flex min-h-0 flex-col">
+        <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
+        <ScreeningTable
             rows={list}
             query={screenings}
             show={show}
@@ -381,9 +385,8 @@ export default function GuardCompliance() {
                 </div>
               </div>
             }
-          />
-        </div>
-      </Card>
+        />
+      </div>
 
       {viewing && (
         <EvidenceViewer
@@ -641,7 +644,7 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
       empty={<EmptyState title={emptyTitle} description={emptyHint} />}
       dense
       fixed
-      fillHeight={false}
+      fillHeight
       minWidth="min-w-[860px]"
     />
   )
