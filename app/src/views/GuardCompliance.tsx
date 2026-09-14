@@ -18,7 +18,7 @@
 // over an empty day is a number someone would act on.
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Download, Settings2, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
@@ -148,6 +148,17 @@ export default function GuardCompliance() {
       ...(cameraId === '' ? {} : { camera_id: cameraId }),
     })).data as ComplianceReport,
     refetchInterval: 30_000,
+    // Every one of those values is part of the query KEY, so switching
+    // Weekly or a camera asks react-query for a series it has never
+    // fetched — and an unseen key has no cached data. Without this the
+    // page renders its own empty state while the request is in flight:
+    // the tiles fall back to "—" and 0, the chart is replaced by a
+    // skeleton, and a moment later everything snaps back. Nothing was
+    // wrong with the numbers; the page just threw them away first.
+    //
+    // Keeping the previous answer on screen means the figures change
+    // once, from old to new, which is what the operator asked for.
+    placeholderData: keepPreviousData,
   })
 
   const screenings = useQuery({
@@ -164,6 +175,10 @@ export default function GuardCompliance() {
       ...(show === 'problems' ? { outcome: 'problems' as const } : {}),
     })).data as { screenings: Screening[]; total: number },
     refetchInterval: 15_000,
+    // Same reason, and the same fix the alarm list already uses
+    // (useAlarmsList.ts): without it the table empties to skeleton rows
+    // on every page turn, filter and camera change.
+    placeholderData: keepPreviousData,
   })
 
   const totals = report.data?.totals
@@ -236,7 +251,16 @@ export default function GuardCompliance() {
           information, roughly half the height, and what it buys is the
           screenings table being on screen when the page opens — which
           is what an operator came here to read. */}
-      <div className="grid gap-3 lg:grid-cols-2">
+      {/* Dimmed only while the figures on screen belong to a DIFFERENT
+          query than the one now selected — `isPlaceholderData`, not
+          `isFetching`. Keying it off isFetching would dim the summary
+          every thirty seconds on the background poll, which is a worse
+          distraction than the flicker this replaced. */}
+      <div
+        className={`grid gap-3 lg:grid-cols-2 ${
+          report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
+        aria-busy={report.isPlaceholderData || undefined}
+      >
       <div className="grid grid-cols-2 gap-3">
         <Tile
           label="Compliance"
