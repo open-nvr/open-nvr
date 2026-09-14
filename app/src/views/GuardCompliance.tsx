@@ -260,18 +260,19 @@ export default function GuardCompliance() {
         }
       />
 
-      {/* Four strips across the top. A figure and its name need one
-          line, not a card with a paragraph of air beside them — the
-          space those tiles were holding is the space the table and the
-          camera wanted.
+      {/* Row one: the figures on the left half, the trend on the right.
+          Two rows of two strips rather than four across, so the block
+          is the same height as the chart beside it and neither leaves a
+          band of empty card.
 
           Dimmed only while the figures on screen belong to a DIFFERENT
           query than the one now selected — `isPlaceholderData`, not
           `isFetching`. Keying it off isFetching would dim them every
           thirty seconds on the background poll, which is a worse
           distraction than the flicker this replaced. */}
+      <div className="grid gap-3 lg:grid-cols-2">
       <div
-        className={`grid grid-cols-2 gap-3 lg:grid-cols-4 ${
+        className={`grid grid-cols-2 gap-3 ${
           report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
         aria-busy={report.isPlaceholderData || undefined}
       >
@@ -300,8 +301,8 @@ export default function GuardCompliance() {
         />
       </div>
 
-      <Card className={
-        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}>
+      <Card className={`h-full ${
+        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
             prose, a legend at 11px and a fixed-aspect plot left the
@@ -309,7 +310,7 @@ export default function GuardCompliance() {
             label-sized and share one row each, and the plot takes
             whatever is left — so the bars grow with the card instead of
             sitting in it. */}
-        <CardContent className="flex flex-col gap-2 p-3">
+        <CardContent className="flex h-full flex-col gap-2 p-3">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h3 className="min-w-0 text-xs font-semibold text-[var(--text)]"
                 title="Every screening, by outcome. Hover a bar for the breakdown.">
@@ -355,6 +356,7 @@ export default function GuardCompliance() {
           )}
         </CardContent>
       </Card>
+      </div>
 
       {guards.length > 0 && (
         <Card>
@@ -486,15 +488,20 @@ function Tile({ label, value, hint, tone }: {
   // four tiles were holding is the height the table and the camera
   // wanted. The explanation stays on hover.
   return (
-    <Card>
-      <CardContent className="flex items-baseline gap-2 px-3 py-2">
-        <div className="text-xl font-semibold leading-none tabular-nums"
-             style={{ color: colour }}>
-          {value}
-        </div>
-        <div className="min-w-0 truncate text-[11px] text-[var(--text-dim)]"
-             title={hint} style={hint ? { cursor: 'help' } : undefined}>
-          {label}
+    <Card className="h-full">
+      {/* Centred in the strip, and the two texts share a baseline —
+          a 20px figure and an 11px label aligned any other way read as
+          a mistake. */}
+      <CardContent className="flex h-full flex-col justify-center px-3 py-2">
+        <div className="flex items-baseline gap-2">
+          <div className="text-xl font-semibold leading-none tabular-nums"
+               style={{ color: colour }}>
+            {value}
+          </div>
+          <div className="min-w-0 truncate text-[11px] text-[var(--text-dim)]"
+               title={hint} style={hint ? { cursor: 'help' } : undefined}>
+            {label}
+          </div>
         </div>
       </CardContent>
     </Card>
