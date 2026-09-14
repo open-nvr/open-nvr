@@ -206,6 +206,19 @@ export default function GuardCompliance() {
         description="Did the guard scan every person, properly? Every screening is recorded — the clean ones included — because that is what makes the compliance figure mean something."
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {/* This one really is page-wide: it moves the tiles, the
+                chart AND the list. It briefly lived on the chart, back
+                when it only drove the chart — then the list was wired
+                to it too, and a control that changes three things while
+                sitting inside one of them is a control in the wrong
+                place. */}
+            <SegmentedControl
+              label="Range"
+              showLabel={false}
+              value={String(days)}
+              options={RANGES}
+              onChange={(v) => { setDays(Number(v)); resetPage() }}
+            />
             {guardApp && canConfigure && (
               <Button variant="outline" size="sm" onClick={() => setConfigOpen(true)}>
                 <Settings2 size={13} /> Configure
@@ -250,29 +263,22 @@ export default function GuardCompliance() {
         />
       </div>
 
-      <Card>
-        <CardContent>
-          {/* The range and the grouping only ever governed this chart
-              and the figures above it, so they live on it. In the page
-              header they read as page-wide controls and cost a whole
-              band of vertical space that the table below needed. */}
-          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
-            {/* One row, and the explanation moved to the tooltip: the
-                card has to come down to the height of the four tiles
-                beside it, and a second line of prose is the easiest
-                thing in it to give up. */}
-            <h3 className="min-w-0 text-sm font-semibold"
+      <Card className="h-full">
+        {/* Everything that is not a bar is chrome, and chrome here was
+            eating the height the bars needed: a 14px heading, a line of
+            prose, a legend at 11px and a fixed-aspect plot left the
+            bars at about a third of the card. Title and legend are now
+            label-sized and share one row each, and the plot takes
+            whatever is left — so the bars grow with the card instead of
+            sitting in it. */}
+        <CardContent className="flex h-full flex-col gap-2 p-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <h3 className="min-w-0 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-dim)]"
                 title="Every screening, by outcome. Hover a band for the count.">
               How each period went
             </h3>
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              <SegmentedControl
-                label="Range"
-                showLabel={false}
-                value={String(days)}
-                options={RANGES}
-                onChange={(v) => { setDays(Number(v)); resetPage() }}
-              />
+            {/* Grouping stays: it changes nothing but this chart. */}
+            <div className="ml-auto">
               <SegmentedControl
                 label="Group by"
                 showLabel={false}
@@ -283,7 +289,7 @@ export default function GuardCompliance() {
             </div>
           </div>
           {report.isPending ? (
-            <Skeleton className="h-[86px]" />
+            <Skeleton className="min-h-[112px] flex-1" />
           ) : report.isError ? (
             // Without this a failed request fell through to the empty
             // state and told the operator to install an app they are
@@ -295,7 +301,9 @@ export default function GuardCompliance() {
             />
           ) : report.data && report.data.buckets.length > 0 ? (
             <>
-              <BucketChart buckets={report.data.buckets} />
+              <div className="min-h-[112px] flex-1">
+                <BucketChart buckets={report.data.buckets} />
+              </div>
               <Legend />
             </>
           ) : (
@@ -435,70 +443,78 @@ function Tile({ label, value, hint, tone }: {
   )
 }
 
-/** One stacked bar per period: how many screenings, and how they went. */
+/**
+ * One stacked bar per period: how many screenings, and how they went.
+ *
+ * Laid out, not drawn. An SVG with a viewBox has a FIXED aspect ratio,
+ * so the plot could only ever be as tall as its width allowed — in a
+ * card half the page wide that left the bars at a third of the height
+ * available to them, with the rest of the card empty. Boxes with
+ * percentage heights take whatever the card gives them, at any size,
+ * with no second copy of the geometry to keep in step.
+ *
+ * Columns are capped and centred rather than stretched: a bar's WIDTH
+ * carries no quantity — only its height does — so two days must not
+ * draw as two slabs half the card wide, and thirty days must still fit.
+ */
 function BucketChart({ buckets }: { buckets: Tally[] }) {
   const ordered = [...buckets].reverse()          // oldest left, like a calendar
   const top = Math.max(...ordered.map((b) => b.screenings), 1)
-  const W = 720, H = 86, PAD = 4, LABEL_H = 14
-  const plot = H - LABEL_H - PAD
-  // A bar is a QUANTITY, and its width carries none of it — only its
-  // height does. Two days of data divided across the full width gave
-  // two 350px slabs that read as a colour-blocked background rather
-  // than a chart. Cap the width and pin the series to the left, so one
-  // day and thirty days are drawn in the same units and a week's
-  // history does not change shape as it fills up.
-  const SLOT = 44
-  const slot = Math.min(SLOT, (W - 2 * PAD) / Math.max(ordered.length, 1))
-  const bw = slot * 0.72                          // a gap between bars
   const every = Math.ceil(ordered.length / 8)     // keep the axis readable
+  // Bottom-up, because a flex column stacks its first child at the TOP
+  // and the baseline of a bar chart is the bottom.
+  const stack = [...VERDICT_ORDER].reverse()
 
   return (
-    <div className="overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full"
-           style={{ minWidth: 420, height: H }} role="img"
-           aria-label="Screenings per period, by outcome">
-        {ordered.map((bucket, i) => {
-          const x = PAD + i * slot + (slot - bw) / 2
-          let y = plot + PAD
-          return (
-            <g key={bucket.key ?? i}>
-              {VERDICT_ORDER.map((verdict) => {
-                const n = (bucket as unknown as Record<string, number>)[verdict] ?? 0
-                if (!n) return null
-                // 2px of surface between segments, so adjacent bands
-                // read as separate quantities rather than one block.
-                const h = Math.max((n / top) * plot - 2, 2)
-                y -= h + 2
-                return (
-                  <rect key={verdict} x={x} y={y} width={Math.max(bw, 1)}
-                        height={h} rx="2" fill={VERDICT_COLOUR[verdict]}>
-                    <title>{`${bucket.label}: ${n} ${VERDICT_LABEL[verdict].toLowerCase()}`}</title>
-                  </rect>
-                )
-              })}
-              {bucket.screenings === 0 && (
-                <rect x={x} y={plot + PAD - 2} width={Math.max(bw, 1)}
-                      height={2} rx="1" fill="var(--border)">
-                  <title>{`${bucket.label}: nothing screened`}</title>
-                </rect>
-              )}
-              {i % every === 0 && (
-                <text x={x + bw / 2} y={H - 4} textAnchor="middle" fontSize="9"
-                      fill="var(--text-dim)">
-                  {(bucket.label ?? '').split(' ').slice(0, 2).join(' ')}
-                </text>
-              )}
-            </g>
-          )
-        })}
-      </svg>
+    <div className="flex h-full flex-col">
+      <div className="flex min-h-0 flex-1 items-end justify-center gap-1.5"
+           role="img" aria-label="Screenings per period, by outcome">
+        {ordered.map((bucket, i) => (
+          <div key={bucket.key ?? i}
+               className="flex h-full max-w-[46px] flex-1 flex-col justify-end gap-[2px]">
+            {bucket.screenings === 0 ? (
+              // A period nobody walked through is not a gap in the
+              // chart: it is a fact, and it reads as one.
+              <div className="h-[2px] rounded-sm bg-[var(--border)]"
+                   title={`${bucket.label}: nothing screened`} />
+            ) : stack.map((verdict) => {
+              const n = (bucket as unknown as Record<string, number>)[verdict] ?? 0
+              if (!n) return null
+              return (
+                <div
+                  key={verdict}
+                  className="rounded-sm"
+                  // A single screening in a busy period still has to be
+                  // visible, hence the floor.
+                  style={{
+                    height: `${(n / top) * 100}%`,
+                    minHeight: 3,
+                    background: VERDICT_COLOUR[verdict],
+                  }}
+                  title={`${bucket.label}: ${n} ${VERDICT_LABEL[verdict].toLowerCase()}`}
+                />
+              )
+            })}
+          </div>
+        ))}
+      </div>
+      {/* The axis mirrors the bars' own widths, so a label always sits
+          under the bar it names however many there are. */}
+      <div className="mt-1 flex justify-center gap-1.5">
+        {ordered.map((bucket, i) => (
+          <div key={bucket.key ?? i}
+               className="max-w-[46px] flex-1 truncate text-center text-[9px] leading-none text-[var(--text-dim)]">
+            {i % every === 0 ? (bucket.label ?? '').split(' ').slice(0, 2).join(' ') : ''}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
 
 function Legend() {
   return (
-    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+    <div className="flex flex-wrap gap-x-3 gap-y-1">
       {VERDICT_ORDER.map((verdict) => (
         <span key={verdict} className="flex items-center gap-1 text-[10px]
                                        text-[var(--text-dim)]">
