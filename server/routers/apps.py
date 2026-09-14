@@ -255,6 +255,22 @@ def _is_point(p: Any) -> bool:
             and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in p))
 
 
+def _is_hsv(value: Any) -> bool:
+    """One HSV bound on OpenCV's 8-bit scale.
+
+    Hue is 0-179 there, not 0-360 — the halved-degree convention of
+    ``cv2.cvtColor(..., COLOR_BGR2HSV)`` on a uint8 image. A range
+    written in degrees would pass any looser check and then silently
+    match nothing at all.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in value):
+        return False
+    h, sat, val = value
+    return 0 <= h <= 179 and 0 <= sat <= 255 and 0 <= val <= 255
+
+
 def _value_matches_type(value: Any, type_name: str) -> bool:
     """True when ``value`` is acceptable for a manifest param ``type``.
 
@@ -267,6 +283,9 @@ def _value_matches_type(value: Any, type_name: str) -> bool:
     * ``geometry.tripwire`` — ``{"a": [x, y], "b": [x, y],
       "count_direction": both|a_to_b|b_to_a}`` (``Tripwire.from_config``);
       ``null`` clears it.
+    * ``color.hsv_range`` — ``{"low": [h, s, v], "high": [h, s, v]}`` as
+      the catalog's colour picker writes it, on OpenCV's 8-bit scale
+      (hue 0-179, NOT 0-360). ``{}`` or ``null`` means unset.
 
     Other dotted types are list-shaped by convention. Unknown plain
     type names are not blocked.
@@ -279,6 +298,12 @@ def _value_matches_type(value: Any, type_name: str) -> bool:
                 and value.get("count_direction", "both") in ("both", "a_to_b", "b_to_a"))
     if type_name == "geometry.polygon":
         return isinstance(value, list) and all(_is_point(p) for p in value)
+    if type_name == "color.hsv_range":
+        if value is None or value == {}:
+            return True         # unset: fall back to whatever else is configured
+        if not isinstance(value, dict):
+            return False
+        return all(_is_hsv(value.get(k)) for k in ("low", "high"))
     if "." in type_name:
         return isinstance(value, list)
     expected = _PRIMITIVE_TYPES.get(type_name)
@@ -297,6 +322,7 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
     - config keys not declared in the manifest;
     - params with ``required=True`` and no default that are absent;
     - values whose type doesn't match the param ``type`` name;
+    - values outside a declared ``choices`` set;
     - ``per_camera=True`` params must be a dict keyed by camera id
       whose values each pass the type check.
     """
@@ -337,8 +363,36 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
 
         if not _value_matches_type(value, type_name):
             errors.append(f"param '{name}' must be of type {type_name}")
+            continue
+
+        if (bad := _not_a_choice(value, param)) is not None:
+            errors.append(bad)
 
     return errors
+
+
+def _not_a_choice(value, param: dict) -> str | None:
+    """Reject a value the app said it would never accept.
+
+    A ``choices`` param is a closed set — the form offers a select, but
+    the API is the real boundary, and an app that receives a value it
+    never declared will at best ignore it and at worst fall over on a
+    thread where nobody sees it.
+    """
+    choices = param.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    allowed = [c.get("value") if isinstance(c, dict) else c for c in choices]
+    # Numbers compare across int/float (0 and 0.0 are the same choice);
+    # bool is excluded because in Python `True == 1`, and a boolean
+    # sneaking past an integer choice set is the kind of thing that
+    # only shows up in production.
+    for candidate in allowed:
+        if candidate == value and isinstance(candidate, bool) == isinstance(value, bool):
+            return None
+    shown = ", ".join(repr(c) for c in allowed)
+    return f"param '{param['name']}' must be one of: {shown}"
+
 
 
 def _per_camera_param_names(manifest: dict) -> set[str]:
