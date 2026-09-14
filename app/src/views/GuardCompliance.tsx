@@ -19,7 +19,9 @@
 
 import { useMemo, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Download, FileText, Settings2, ShieldCheck } from 'lucide-react'
+import {
+  ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
+} from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -74,6 +76,9 @@ const VERDICT_ORDER = ['compliant', 'partial', 'incomplete', 'no_scan'] as const
 // "unidentified" reads as a broken page rather than as missing setup.
 const NO_GUARD = 'unidentified'
 
+/** Where the summary row's folded/unfolded state is remembered. */
+const SUMMARY_KEY = 'opennvr.guardscan.summary'
+
 const PERIODS = [
   { value: 'day', label: 'Daily' },
   { value: 'week', label: 'Weekly' },
@@ -115,6 +120,26 @@ export default function GuardCompliance() {
   const [exporting, setExporting] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [reportOpen, setReportOpen] = useState(false)
+  // Collapsing the summary hands its height to the list. Remembered,
+  // because someone who works from the list all day should not have to
+  // fold the figures away again every morning.
+  const [summaryOpen, setSummaryOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem(SUMMARY_KEY) !== 'closed'
+    } catch {
+      return true          // private mode throws rather than returning null
+    }
+  })
+  const toggleSummary = () => {
+    setSummaryOpen((open) => {
+      try {
+        window.localStorage.setItem(SUMMARY_KEY, open ? 'closed' : 'open')
+      } catch {
+        // Not remembering a preference is not an error.
+      }
+      return !open
+    })
+  }
   const rows = usePagination(25, 'guard-screenings')
   const tz = useMemo(() => -new Date().getTimezoneOffset(), [])
 
@@ -250,6 +275,18 @@ export default function GuardCompliance() {
                 <Settings2 size={13} /> Configure
               </Button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={toggleSummary}
+              aria-expanded={summaryOpen}
+              title={summaryOpen
+                ? 'Hide the figures and give the height to the list'
+                : 'Show the figures and the trend'}
+            >
+              {summaryOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              Summary
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setReportOpen(true)}>
               <FileText size={13} /> Report
             </Button>
@@ -270,6 +307,7 @@ export default function GuardCompliance() {
           `isFetching`. Keying it off isFetching would dim them every
           thirty seconds on the background poll, which is a worse
           distraction than the flicker this replaced. */}
+      {summaryOpen && (
       <div className="grid gap-3 lg:grid-cols-2">
       <div
         className={`grid grid-cols-2 gap-3 ${
@@ -357,6 +395,7 @@ export default function GuardCompliance() {
         </CardContent>
       </Card>
       </div>
+      )}
 
       {guards.length > 0 && (
         <Card>
@@ -372,7 +411,8 @@ export default function GuardCompliance() {
           entrance, and the panel is tall enough there to be worth
           looking at. */}
       <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-4">
-      <div className="flex min-h-0 flex-col lg:col-span-3">
+      <Card className="flex min-h-0 flex-col lg:col-span-3">
+        <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
         <ScreeningTable
             rows={list}
@@ -426,7 +466,8 @@ export default function GuardCompliance() {
               </div>
             }
         />
-      </div>
+        </CardContent>
+      </Card>
 
       {/* Outside the dimming above, deliberately: live video is not
           report data, and fading it whenever someone changes the range

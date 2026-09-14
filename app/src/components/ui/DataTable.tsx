@@ -203,15 +203,28 @@ function useAvailableHeight(
  *
  * Out-of-flow elements are skipped — a portalled modal or a fixed
  * toolbar takes no space in the page and must not steal any from rows.
+ *
+ * So are siblings that sit BESIDE the table rather than under it. A
+ * later sibling is only "below" in a column; put the table in one cell
+ * of a grid row and the cell next to it is still a `nextElementSibling`
+ * while occupying none of the table's vertical space. Counting it
+ * subtracted a whole live-video panel from the rows' height, which
+ * clamped the table to its minimum and left it showing four rows on a
+ * screen with room for twenty.
  */
 function heightBelow(start: Element): number {
   let total = 0
   let node: Element | null = start
   while (node && node !== document.body) {
+    const nodeTop = node.getBoundingClientRect().top
     for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) {
       const cs = window.getComputedStyle(sib)
       if (cs.position === 'fixed' || cs.position === 'absolute') continue
-      total += sib.getBoundingClientRect().height
+      const rect = sib.getBoundingClientRect()
+      // Starts level with us (or higher) ⇒ alongside, not underneath.
+      // A genuinely-below sibling begins past our own top edge.
+      if (rect.top <= nodeTop + 1) continue
+      total += rect.height
         + (parseFloat(cs.marginTop) || 0)
         + (parseFloat(cs.marginBottom) || 0)
     }
