@@ -544,7 +544,13 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
         {ordered.map((bucket, i) => (
           <div key={bucket.key ?? i}
                className="max-w-[46px] flex-1 truncate text-center text-[9px] leading-none text-[var(--text-dim)]">
-            {i % every === 0 ? (bucket.label ?? '').split(' ').slice(0, 2).join(' ') : ''}
+            {/* The server sends an axis-sized label. The fallback is
+                for a core older than that field, and is the crude thing
+                this replaced: taking two words turned "Week 37, 2026"
+                into "Week 37," and "September 2026" into an ellipsis. */}
+            {i % every === 0
+              ? bucket.short ?? (bucket.label ?? '').split(' ').slice(0, 2).join(' ')
+              : ''}
           </div>
         ))}
       </div>

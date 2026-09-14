@@ -186,3 +186,22 @@ def test_buckets_are_day_week_and_month():
     assert _bucket(when, "day")[0] == "2026-09-13"
     assert _bucket(when, "week")[0] == "2026-W37"
     assert _bucket(when, "month")[0] == "2026-09"
+
+
+def test_a_bucket_carries_a_label_for_a_tooltip_and_one_for_an_axis():
+    """A chart axis gives a bucket about forty pixels; a tooltip has the
+    whole line. "September 2026" is an ellipsis in the first and the
+    right answer in the second, so the server sends both — the client
+    used to clip to two words, which left "Week 37," with the comma
+    still attached."""
+    from routers.guardscan import _bucket
+
+    when = datetime(2026, 9, 13, 15, 30, tzinfo=UTC)
+    assert _bucket(when, "day")[1:] == ("Sun 13 Sep 2026", "Sun 13")
+    assert _bucket(when, "week")[1:] == ("Week 37, 2026", "W37")
+    assert _bucket(when, "month")[1:] == ("September 2026", "Sep")
+
+    # Short forms have to survive an axis: no ellipsis, no stray comma.
+    for period in ("day", "week", "month"):
+        short = _bucket(when, period)[2]
+        assert len(short) <= 6 and not short.endswith(",")

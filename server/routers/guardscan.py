@@ -200,8 +200,9 @@ async def compliance_report(
         when = row.ended_at
         if when is None:
             continue
-        key, label = _bucket(when.astimezone(local), period)
-        _count(buckets.setdefault(key, _tally(label=label, key=key)), row)
+        key, label, short = _bucket(when.astimezone(local), period)
+        _count(buckets.setdefault(key, _tally(label=label, key=key, short=short)),
+               row)
         who = row.guard_name or row.guard_key or "unidentified"
         _count(guards.setdefault(who, _tally(label=who)), row)
         cam = row.camera_id
@@ -253,13 +254,26 @@ def _finish(tally: dict) -> dict:
     return out
 
 
-def _bucket(when: datetime, period: str) -> tuple[str, str]:
+def _bucket(when: datetime, period: str) -> tuple[str, str, str]:
+    """Sort key, full label, and a label short enough for an axis.
+
+    Two labels because they answer in different amounts of room. A
+    chart's axis gives a bucket about forty pixels, where "September
+    2026" is an ellipsis; a tooltip has the whole line and should say
+    which September. The short form is built HERE rather than clipped in
+    the browser — the client used to take the first two words, which
+    turned "Week 37, 2026" into "Week 37," with the comma still on.
+
+    A short month needs no year: this report spans at most 92 days, so
+    two months in one chart are never the same month.
+    """
     if period == "month":
-        return when.strftime("%Y-%m"), when.strftime("%B %Y")
+        return when.strftime("%Y-%m"), when.strftime("%B %Y"), when.strftime("%b")
     if period == "week":
         year, week, _ = when.isocalendar()
-        return f"{year:04d}-W{week:02d}", f"Week {week}, {year}"
-    return when.strftime("%Y-%m-%d"), when.strftime("%a %d %b %Y")
+        return (f"{year:04d}-W{week:02d}", f"Week {week}, {year}", f"W{week:02d}")
+    return (when.strftime("%Y-%m-%d"), when.strftime("%a %d %b %Y"),
+            when.strftime("%a %d"))
 
 
 @router.get("/export")

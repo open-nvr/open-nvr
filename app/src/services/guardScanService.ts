@@ -38,6 +38,9 @@ export type Screening = {
 
 export type Tally = {
   label?: string
+  /** Axis-sized form of `label` ("Sep", "W37", "Sun 13"); the server
+   *  builds it, because only it knows what the period means. */
+  short?: string
   key?: string
   camera_id?: number
   screenings: number
