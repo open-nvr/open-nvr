@@ -390,7 +390,7 @@ export default function GuardCompliance() {
           as a page-wide switch, next to Report and CSV which are
           nothing of the kind. */}
       <Card>
-        <CardContent className="p-3">
+        <CardContent className={summaryOpen ? 'p-3' : 'px-3 py-1.5'}>
           <button
             type="button"
             onClick={toggleSummary}
@@ -399,11 +399,11 @@ export default function GuardCompliance() {
               ? 'Hide the figures and give the height to the list'
               : 'Show the figures and the trend'}
             className="flex w-full items-center gap-2 text-left text-xs
-                       font-semibold text-[var(--text-dim)]
+                       font-semibold leading-none text-[var(--text-dim)]
                        hover:text-[var(--text)]"
           >
             Summary
-            <span className="ml-auto">
+            <span className="ml-auto flex items-center">
               {summaryOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </span>
           </button>
@@ -528,7 +528,7 @@ export default function GuardCompliance() {
           entrance, and the panel is tall enough there to be worth
           looking at. */}
       <div ref={rowRef} className="flex min-h-0 flex-1 gap-0">
-      <Card className="flex min-h-0 flex-col"
+      <Card className="flex min-h-0 flex-col overflow-hidden"
             style={{ width: popped ? '100%' : `${split}%` }}>
         <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
@@ -916,28 +916,54 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
     {
       key: 'verdict', header: 'Outcome', width: 'w-[120px]',
       cell: (s) => (
-        <Badge variant={VERDICT_BADGE[s.verdict] ?? 'neutral'}>
+        <Badge variant={VERDICT_BADGE[s.verdict] ?? 'neutral'}
+               title={[
+                 s.ended_by ? `Ended: ${s.ended_by}` : null,
+                 s.duration_s ? `lasted ${Math.round(s.duration_s)}s` : null,
+                 s.engaged_s ? `wand on them ${Math.round(s.engaged_s)}s` : null,
+               ].filter(Boolean).join(' · ') || undefined}>
           {VERDICT_LABEL[s.verdict] ?? s.verdict}
         </Badge>
       ),
     },
     { key: 'score', header: 'Score', width: 'w-[72px]',
-      cellClassName: 'tabular-nums', cell: (s) => `${Math.round(s.score)}%` },
+      cellClassName: 'tabular-nums',
+      // The rounded figure is what fits; the parts behind it answer
+      // "why 85?" — coverage and order are scored separately.
+      cell: (s) => (
+        <span title={[
+          `Score ${s.score}%`,
+          s.coverage === null ? null : `surfaces covered ${s.coverage}%`,
+          s.order_score === null ? null : `order ${s.order_score}%`,
+        ].filter(Boolean).join(' · ')}>
+          {Math.round(s.score)}%
+        </span>
+      ) },
     {
       // Fixed, and no longer the column that absorbs the slack: it is
       // a dash on most rows, and it was taking a third of the table to
       // say so while the camera name was clipped to "fake-showroom-…".
+      // Every value that can be clipped carries its full text on hover.
+      // "Left arm, Back" fits; "Left arm, Right arm, Front" does not,
+      // and a column that silently shortens the one thing the row is
+      // about is worse than a narrow column.
       key: 'missing', header: 'Missed', width: 'w-[150px]', className: 'truncate',
       cell: (s) => s.steps_missing.length
-        ? <span className="text-[var(--text-dim)]">{s.steps_missing.join(', ')}</span>
-        : <span className="text-[var(--text-dim)]">—</span>,
+        ? <span className="text-[var(--text-dim)]"
+                title={`Not covered: ${s.steps_missing.join(', ')}`}>
+            {s.steps_missing.join(', ')}
+          </span>
+        : <span className="text-[var(--text-dim)]"
+                title="Every surface was covered">—</span>,
     },
     // The requirement names "camera location" on every record, and on a
     // multi-camera site a screening without its door is unattributable.
     { key: 'camera', header: 'Camera', hideBelow: 'sm',
       className: 'truncate',
       cellClassName: 'truncate text-[var(--text-dim)]',
-      cell: (s) => cameraName(s.camera_id) },
+      cell: (s) => <span title={cameraName(s.camera_id)}>
+        {cameraName(s.camera_id)}
+      </span> },
     {
       key: 'guard', width: 'w-[120px]', hideBelow: 'lg',
       cellClassName: 'truncate text-[var(--text-dim)]',
@@ -951,17 +977,33 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
           Guard
         </span>
       ),
-      cell: (s) => s.guard_name || s.guard_key || '—',
+      cell: (s) => {
+        const who = s.guard_name || s.guard_key
+        return (
+          <span title={who || 'No duty roster yet, so screenings are '
+                            + 'recorded against nobody'}>
+            {who || '—'}
+          </span>
+        )
+      },
     },
     {
       key: 'flagged', header: 'Scanner', width: 'w-[96px]',
       cell: (s) => s.flagged
-        ? <Badge variant="critical">Flagged</Badge>
-        : <span className="text-[var(--text-dim)]">—</span>,
+        ? <Badge variant="critical"
+                 title="The wand's red indicator lit on this person">Flagged</Badge>
+        : <span className="text-[var(--text-dim)]"
+                title="The wand's indicator stayed dark">—</span>,
     },
     { key: 'when', header: 'Date & time', width: 'w-[164px]',
       cellClassName: 'whitespace-nowrap text-[var(--text-dim)] tabular-nums',
-      cell: (s) => s.ended_at ? new Date(s.ended_at).toLocaleString() : '—' },
+      cell: (s) => s.ended_at
+        ? <span title={`Ended ${new Date(s.ended_at).toLocaleString()}`
+            + (s.started_at
+              ? ` · started ${new Date(s.started_at).toLocaleTimeString()}` : '')}>
+            {new Date(s.ended_at).toLocaleString()}
+          </span>
+        : '—' },
   ]
   return (
     <DataTable<Screening>
@@ -980,7 +1022,7 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
       empty={<EmptyState title={emptyTitle} description={emptyHint} />}
       dense
       fixed
-      fillHeight
+      fillParent
       minWidth="min-w-[760px]"
     />
   )
