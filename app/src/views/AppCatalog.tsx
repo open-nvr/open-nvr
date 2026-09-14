@@ -694,10 +694,24 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       open
       title={`Configure ${app.name}`}
       onClose={onClose}
+      // A side panel, not a centred dialog: configuring an app is work
+      // you do AGAINST the page you came from — the screening list, the
+      // occupancy zones — and a centred box behind a dark backdrop hides
+      // the very thing you are tuning. Full height also suits a form
+      // that is now grouped into sections.
+      //
+      // It stays WIDE on purpose. The scan zone and the uniform colour
+      // are drawn on a 16:9 camera snapshot, and a conventional 400px
+      // drawer would make the most important part of setup worse, not
+      // better. Forms with nothing to draw get a narrower one.
+      placement="side"
       widthClassName={
-        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
-          ? 'w-[720px]'
-          : 'w-[560px]'
+        params.some((p) => {
+          const t = (p.type || '').toLowerCase()
+          return t.startsWith('geometry.') || t === 'color.hsv_range'
+        })
+          ? 'w-[780px]'
+          : 'w-[520px]'
       }
     >
       {params.length === 0 ? (

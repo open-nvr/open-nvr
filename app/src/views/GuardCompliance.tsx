@@ -171,9 +171,7 @@ export default function GuardCompliance() {
   // Every screening is attributed to nobody until a duty roster exists,
   // so the per-guard breakdown is only worth a table once at least one
   // row names a real person.
-  const allGuards = report.data?.guards ?? []
-  const guards = allGuards.filter((g) => g.label !== NO_GUARD)
-  const guardsPending = allGuards.length > 0 && guards.length === 0
+  const guards = (report.data?.guards ?? []).filter((g) => g.label !== NO_GUARD)
 
   const download = async () => {
     setExporting(true)
@@ -225,8 +223,8 @@ export default function GuardCompliance() {
           information, roughly half the height, and what it buys is the
           screenings table being on screen when the page opens — which
           is what an operator came here to read. */}
-      <div className="grid gap-3 lg:grid-cols-[minmax(260px,340px)_1fr]">
-      <div className="grid grid-cols-2 gap-3 content-start">
+      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid grid-cols-2 gap-3">
         <Tile
           label="Compliance"
           value={pct(totals?.compliance ?? null)}
@@ -258,13 +256,15 @@ export default function GuardCompliance() {
               and the figures above it, so they live on it. In the page
               header they read as page-wide controls and cost a whole
               band of vertical space that the table below needed. */}
-          <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-            <div className="min-w-0">
-              <h3 className="text-sm font-semibold">How each period went</h3>
-              <p className="text-xs text-[var(--text-dim)]">
-                Every screening, by outcome. Hover a band for the count.
-              </p>
-            </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+            {/* One row, and the explanation moved to the tooltip: the
+                card has to come down to the height of the four tiles
+                beside it, and a second line of prose is the easiest
+                thing in it to give up. */}
+            <h3 className="min-w-0 text-sm font-semibold"
+                title="Every screening, by outcome. Hover a band for the count.">
+              How each period went
+            </h3>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <SegmentedControl
                 label="Range"
@@ -283,7 +283,7 @@ export default function GuardCompliance() {
             </div>
           </div>
           {report.isPending ? (
-            <Skeleton className="h-[104px]" />
+            <Skeleton className="h-[86px]" />
           ) : report.isError ? (
             // Without this a failed request fell through to the empty
             // state and told the operator to install an app they are
@@ -319,19 +319,6 @@ export default function GuardCompliance() {
           </CardContent>
         </Card>
       )}
-      {guardsPending && (
-        <Card>
-          <CardContent className="py-3 text-xs text-[var(--text-dim)]">
-            <span className="font-medium text-[var(--text)]">
-              By guard: not yet available.
-            </span>{' '}
-            The app can tell one guard from another within a run but cannot learn their
-            name — that comes from a duty roster, which is not set up. Until then every
-            screening is recorded against nobody.
-          </CardContent>
-        </Card>
-      )}
-
       <div className="flex min-h-0 flex-col">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
         <ScreeningTable
@@ -433,8 +420,8 @@ function Tile({ label, value, hint, tone }: {
   // table off the bottom of the screen, and the table is what an
   // operator came for.
   return (
-    <Card>
-      <CardContent className="px-3 py-2">
+    <Card className="h-full">
+      <CardContent className="flex h-full flex-col justify-center px-3 py-2">
         <div className="truncate text-[11px] text-[var(--text-dim)]"
              title={hint} style={hint ? { cursor: 'help' } : undefined}>
           {label}
@@ -452,7 +439,7 @@ function Tile({ label, value, hint, tone }: {
 function BucketChart({ buckets }: { buckets: Tally[] }) {
   const ordered = [...buckets].reverse()          // oldest left, like a calendar
   const top = Math.max(...ordered.map((b) => b.screenings), 1)
-  const W = 720, H = 110, PAD = 4, LABEL_H = 15
+  const W = 720, H = 86, PAD = 4, LABEL_H = 14
   const plot = H - LABEL_H - PAD
   // A bar is a QUANTITY, and its width carries none of it — only its
   // height does. Two days of data divided across the full width gave
@@ -511,11 +498,11 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
 
 function Legend() {
   return (
-    <div className="mt-2 flex flex-wrap gap-4">
+    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
       {VERDICT_ORDER.map((verdict) => (
-        <span key={verdict} className="flex items-center gap-1.5 text-[11px]
+        <span key={verdict} className="flex items-center gap-1 text-[10px]
                                        text-[var(--text-dim)]">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm"
+          <span className="inline-block h-2 w-2 rounded-sm"
                 style={{ background: VERDICT_COLOUR[verdict] }} />
           {VERDICT_LABEL[verdict]}
         </span>
@@ -614,9 +601,21 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
     { key: 'camera', header: 'Camera', width: 'w-[140px]', hideBelow: 'sm',
       cellClassName: 'truncate text-[var(--text-dim)]',
       cell: (s) => cameraName(s.camera_id) },
-    { key: 'guard', header: 'Guard', width: 'w-[120px]', hideBelow: 'lg',
+    {
+      key: 'guard', width: 'w-[120px]', hideBelow: 'lg',
       cellClassName: 'truncate text-[var(--text-dim)]',
-      cell: (s) => s.guard_name || s.guard_key || '—' },
+      // Every row reads "—" until a duty roster exists, and the obvious
+      // question is why. Answering it on the header costs no space; the
+      // standing banner that used to answer it cost a band of the screen
+      // and said the same thing every day.
+      header: (
+        <span title="The app tells guards apart within a run but cannot learn their names — that comes from a duty roster, which is not set up yet."
+              style={{ cursor: 'help' }}>
+          Guard
+        </span>
+      ),
+      cell: (s) => s.guard_name || s.guard_key || '—',
+    },
     {
       key: 'flagged', header: 'Scanner', width: 'w-[96px]',
       cell: (s) => s.flagged
