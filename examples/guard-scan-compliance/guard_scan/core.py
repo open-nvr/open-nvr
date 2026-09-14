@@ -727,6 +727,19 @@ def _lcs(a, b):
     return m[-1][-1]
 
 
+class ConfigError(ValueError):
+    """The operator's configuration cannot be honoured.
+
+    A real exception rather than SystemExit, because this is raised
+    while BUILDING an engine from config the operator just saved — on a
+    per-camera worker thread. SystemExit derives from BaseException, so
+    `except Exception` does not catch it: a single typo in the procedure
+    (``back_arm`` for ``back``) killed that camera's thread outright,
+    with no log line, no health change and no screening on that
+    entrance, while the app went on reporting itself well.
+    """
+
+
 class ScanRules:
     """What counts as a proper scan, and how a scan is graded.
 
@@ -775,10 +788,10 @@ class ScanRules:
         self.grades = sorted(d["grades"], key=lambda g: -g["min"])
         bad = [x for x in self.steps if x not in STEPS]
         if bad:
-            raise SystemExit("rules: unknown step(s) " + ", ".join(bad)
-                             + "; known steps are " + ", ".join(STEPS))
+            raise ConfigError("unknown surface(s) " + ", ".join(bad)
+                              + "; known surfaces are " + ", ".join(STEPS))
         if not self.grades:
-            raise SystemExit("rules: need at least one grade")
+            raise ConfigError("the procedure needs at least one grade band")
 
     @classmethod
     def load(cls, path):
@@ -786,6 +799,11 @@ class ScanRules:
             return cls()
         try:
             return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+        except ConfigError as exc:
+            # Reading a rules file is a command-line act: a clean message
+            # beats a traceback. In the app the same error propagates as
+            # a ConfigError and is reported on the camera instead.
+            raise SystemExit("rules: " + str(exc)) from exc
         except FileNotFoundError:
             raise SystemExit("rules file not found: " + str(path))
         except json.JSONDecodeError as exc:

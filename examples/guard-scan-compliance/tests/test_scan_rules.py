@@ -286,9 +286,74 @@ def test_order_weight_required_steps_and_weights_all_bite():
     assert heavy.score(["front"])["score"] == 75.0
 
 
-def test_an_unknown_step_in_the_rules_is_refused():
-    with pytest.raises(SystemExit):
+def test_an_unknown_surface_is_refused_without_killing_the_camera():
+    """It must raise something `except Exception` can catch.
+
+    This used to be SystemExit, which derives from BaseException — so
+    the per-camera worker's handler did not catch it, the thread died
+    on a typo in the procedure, that entrance silently stopped being
+    screened, and the app went on reporting itself healthy.
+    """
+    with pytest.raises(G.ConfigError):
         G.ScanRules({"steps": [{"name": "elbows"}]})
+    assert issubclass(G.ConfigError, Exception)
+
+
+def test_a_bad_procedure_is_reported_not_fatal():
+    """The whole point of the exception change, from the worker's side."""
+    caught = None
+    try:
+        G.ScanRules({"steps": [{"name": "elbows"}]})
+    except Exception as exc:        # exactly what CameraWorker._run does
+        caught = exc
+    assert caught is not None, "a config error must be catchable as Exception"
+    assert "elbows" in str(caught)
+
+
+def test_the_procedure_is_assembled_from_the_fields_the_form_collects():
+    """`procedure` stays the engine's contract; the form no longer asks
+    an operator to hand-write it. Read out of the app module's source is
+    not possible here — this is the assembly itself, so it is exercised
+    directly."""
+    import importlib.util
+
+    app_path = Path(__file__).resolve().parents[1] / "guard_scan_compliance.py"
+    src = app_path.read_text(encoding="utf-8")
+    # Pull the two helpers out without importing the module, which would
+    # drag in the SDK this file is deliberately free of.
+    ns = {"ScanRules": G.ScanRules}
+    start = src.index("def _uniform_bounds(")
+    end = src.index("class GuardScanApp(")
+    exec(compile(src[start:end], "<helpers>", "exec"), ns)  # noqa: S102
+    procedure, uniform = ns["_procedure"], ns["_uniform_bounds"]
+
+    # Nothing configured -> the engine's own defaults, not an empty shell.
+    assert procedure({}) is None
+
+    # The surfaces an operator ticked, with the order switch they chose.
+    built = procedure({"required_surfaces": ["front", "back"],
+                       "order_weight": 0.3})
+    rules = G.ScanRules(built)
+    assert rules.steps == ["front", "back"]
+    assert rules.order_weight == 0.3
+
+    # Weights alone re-weight the shipped surfaces rather than doing nothing.
+    weighted = G.ScanRules(procedure({"surface_weights": {"back": 3}}))
+    assert weighted.weights["back"] == 3.0
+    assert weighted.weights["front"] == 1.0
+
+    # A whole `procedure` still wins outright — an install that set it
+    # before the split must not change meaning.
+    whole = {"steps": [{"name": "back", "weight": 2.0}], "order_weight": 1.0}
+    assert procedure({"procedure": whole, "required_surfaces": ["front"]}) is whole
+
+    # The picked colour wins over the two bare lists it replaced, and
+    # the old lists still work on an install that never re-picked.
+    assert uniform({"uniform_hsv": {"low": [1, 2, 3], "high": [4, 5, 6]},
+                    "uniform_hsv_low": [9, 9, 9]}) == ([1, 2, 3], [4, 5, 6])
+    assert uniform({"uniform_hsv_low": [1, 2, 3],
+                    "uniform_hsv_high": [4, 5, 6]}) == ([1, 2, 3], [4, 5, 6])
+    assert uniform({}) == ([], [])
 
 
 # ── what the port changed ────────────────────────────────────────────

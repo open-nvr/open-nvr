@@ -83,52 +83,140 @@ MANIFEST = AppManifest(
     requires_tasks=[POSE_TASK],
     subscribes=None,          # drives its own frames, at video rate
     params=[
-        # ── the room ──
+        # Ordered and grouped the way a room is actually set up: where
+        # people stand first, then what a proper scan is, then the knobs
+        # nobody should touch until they have watched it for a day.
+        # Everything past the first five is `advanced` — present,
+        # reachable, and out of the way of whoever installs this.
+        # ── Where people stand ──
         Param("scan_zone", "geometry.polygon", per_camera=True,
-              description="Where the person being screened stands. Anyone "
-                          "inside it is being scanned, so is not the guard."),
+              label="Where the person being scanned stands",
+              group="Where people stand",
+              description="Draw the spot at the door a customer stands on to be "
+                          "wanded. Anyone inside it is being scanned, so is not "
+                          "the guard. The single most useful thing to set."),
         Param("guard_post", "geometry.polygon", per_camera=True,
-              description="Where the guard stands. Optional — the guard is "
-                          "found by behaviour when this is left empty."),
-        Param("uniform_hsv_low", list, default=[],
-              description="Guard uniform colour, low HSV bound. Optional, "
-                          "and worth more than any behavioural guess."),
-        Param("uniform_hsv_high", list, default=[]),
-        # ── the procedure ──
-        Param("procedure", dict, default={},
-              description="Which surfaces must be covered, what each is "
-                          "worth, whether the ORDER counts, and the score "
-                          "bands. Empty means the shipped default."),
-        Param("dwell_s", float, default=0.6,
-              description="How much time the wand must spend on a surface "
-                          "for it to count. Cumulative across the screening: "
-                          "a wand being swept is never still."),
-        Param("dwell_decay", float, default=0.25,
-              description="How fast that progress drains while the wand is "
-                          "elsewhere, as a fraction of real time."),
-        Param("no_scan_engaged", float, default=1.0,
-              description="How much wand-on-person time is still consistent "
-                          "with 'nobody scanned them'. Above it, we saw part "
-                          "of a real screening and say nothing."),
-        Param("step_hold_s", float, default=0.0,
-              description="How long a covered surface stays covered before "
-                          "it must be re-earned. 0 keeps it for the whole "
-                          "screening."),
-        Param("min_screen", float, default=3.0,
-              description="Seconds of wand-on-person before this counts as "
-                          "a screening at all. Keeps passers-by out."),
-        Param("session_gap", float, default=8.0,
-              description="Quiet seconds before a screening is ruled on."),
-        # ── the scanner's light ──
-        Param("led_ratio", float, default=0.08,
-              description="How much of the area around the wand must be lit "
+              label="Where the guard stands (optional)",
+              group="Where people stand",
+              description="Optional. Leave it empty and the guard is found by "
+                          "behaviour — whoever reaches toward people."),
+        Param("uniform_hsv", "color.hsv_range", default={},
+              label="Guard's uniform colour (optional)",
+              group="Where people stand",
+              description="Optional, and worth more than any behavioural guess: "
+                          "drag a box over the guard's shirt in the snapshot. On "
+                          "the reference footage the uniform matched 75-100% of "
+                          "the guard's frames and none of any customer's."),
+
+        # Superseded by the picker above, and still declared: PUT
+        # /config REPLACES the stored config with the declared params
+        # only, so dropping these from the manifest would delete a
+        # colour an existing install had configured, the first time
+        # anyone pressed Save.
+        Param("uniform_hsv_low", list, default=[], advanced=True,
+              label="Uniform colour, low HSV bound (older format)",
+              group="Where people stand",
+              description="Only read when no colour has been picked above."),
+        Param("uniform_hsv_high", list, default=[], advanced=True,
+              label="Uniform colour, high HSV bound (older format)",
+              group="Where people stand",
+              description="Only read when no colour has been picked above."),
+
+        # ── What counts as a proper scan ──
+        Param("required_surfaces", list, default=[],
+              label="Surfaces that must be covered",
+              group="What counts as a proper scan",
+              suggestions=["left_arm", "right_arm", "front", "back"],
+              description="Leave empty for all four: left arm, right arm, front, "
+                          "back."),
+        Param("order_weight", float, default=0.0,
+              label="Does the ORDER of the scan count?",
+              group="What counts as a proper scan",
+              choices=[(0.0, "No - only that every surface was covered"),
+                       (0.3, "A little - a wrong order makes it a partial scan"),
+                       (1.0, "Fully - the sequence counts as much as coverage")],
+              description="Off by default, deliberately. On real entrance footage "
+                          "guards covered every surface but worked round whichever "
+                          "side they were standing on, so scoring the sequence "
+                          "would alarm on scans that were perfectly good. Decide "
+                          "it with the site after watching a day of their own."),
+
+        # ── Timing ──
+        Param("min_screen", float, default=3.0, advanced=True,
+              label="Shortest thing that counts as a screening (seconds)",
+              group="Timing",
+              description="Seconds of wand-on-person before this is treated as a "
+                          "screening at all. Keeps passers-by out of the record."),
+        Param("session_gap", float, default=8.0, advanced=True,
+              label="Quiet seconds before a screening is ruled on",
+              group="Timing",
+              description="How long the wand may be away from someone before "
+                          "their screening is considered over."),
+        Param("dwell_s", float, default=0.6, advanced=True,
+              label="Time the wand must spend on a surface (seconds)",
+              group="Timing",
+              description="Cumulative across the screening, not continuous: a "
+                          "wand being swept is never still."),
+        Param("dwell_decay", float, default=0.25, advanced=True,
+              label="How fast that progress drains while the wand is elsewhere",
+              group="Timing",
+              description="A fraction of real time. Higher forgets faster."),
+        Param("no_scan_engaged", float, default=1.0, advanced=True,
+              label="Wand time that still counts as 'nobody scanned them'",
+              group="Timing",
+              description="Above this we saw part of a real screening and say "
+                          "nothing, rather than accusing the guard over someone "
+                          "we only glimpsed."),
+        Param("step_hold_s", float, default=0.0, advanced=True,
+              label="How long a covered surface stays covered (seconds)",
+              group="Timing",
+              description="0 keeps it for the whole screening."),
+
+        # ── The scanner's light ──
+        Param("led_ratio", float, default=0.08, advanced=True,
+              label="How much red counts as the indicator being lit",
+              group="The scanner's light",
+              description="The share of the area around the wand that must be "
                           "red. Raise it if red clothing sets it off."),
-        Param("led_hits", int, default=3),
-        Param("led_window_s", float, default=0.8),
-        # ── the video ──
-        Param("fps", float, default=10.0,
-              description="Frames per second per camera. The dominant cost."),
-        Param("frame_width", int, default=640),
+        Param("led_hits", int, default=3, advanced=True,
+              label="Sightings needed before the light is believed",
+              group="The scanner's light",
+              description="Guards against one red frame from compression or a "
+                          "passing reflection."),
+        Param("led_window_s", float, default=0.8, advanced=True,
+              label="Seconds those sightings must fall within",
+              group="The scanner's light",
+              description="Keeps the count meaningful at any frame rate."),
+
+        # ── Video ──
+        Param("fps", float, default=10.0, advanced=True,
+              label="Frames per second, per camera",
+              group="Video",
+              description="The dominant cost. Lower it before adding cameras."),
+        Param("frame_width", int, default=640, advanced=True,
+              label="Width frames are decoded at (pixels)",
+              group="Video",
+              description="Smaller is cheaper, and the wrist-to-torso geometry "
+                          "survives the loss well."),
+
+        # ── The full rule set ──
+        Param("surface_weights", dict, default={}, advanced=True,
+              label="Weight per surface",
+              group="The full rule set",
+              description="How much each surface is worth. Setting back to 3 "
+                          "makes a missed back far more serious than a missed "
+                          "arm. Empty means all equal."),
+        Param("grades", list, default=[], advanced=True,
+              label="Score bands, and what each one is called",
+              group="The full rule set",
+              description="Empty means the shipped bands: 100% complete, 75% or "
+                          "more partial, 1% or more incomplete, 0 no scan."),
+        Param("procedure", dict, default={}, advanced=True,
+              label="Whole rule set as JSON (overrides everything above)",
+              group="The full rule set",
+              description="The escape hatch, and the original format. When it is "
+                          "set it wins outright and the fields above are ignored. "
+                          "Leave it empty unless you have a reason."),
     ],
     emits=[
         AlertType("scanner_flag", severity="critical",
@@ -211,10 +299,20 @@ class CameraWorker:
         while not self._stop.is_set():
             try:
                 self._session()
-            except Exception as exc:  # noqa: BLE001
-                self.last_error = str(exc)
+            except BaseException as exc:  # noqa: BLE001
+                # BaseException, not Exception, and deliberately: a bad
+                # `procedure` used to raise SystemExit while the engine
+                # was being built, which `except Exception` does not
+                # catch. The thread died silently, that camera stopped
+                # being screened, and the app stayed green. Whatever
+                # comes out of a worker gets recorded and retried.
+                self.last_error = str(exc) or exc.__class__.__name__
                 log.warning("%s: worker failed (%s), retrying", self.handle,
                             exc, exc_info=True)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    # Shutdown still has to be able to stop this thread.
+                    if self._stop.is_set():
+                        return
                 self._stop.wait(10.0)
 
     def _session(self) -> None:
@@ -280,7 +378,16 @@ class GuardScanConfig(BaseAppConfig):
     kaic_api_key: str | None = None
     fps: float = 10.0
     frame_width: int = 640
+    # What a proper scan is. `procedure` is the whole declarative rule
+    # set and stays the engine's contract; the three fields under it are
+    # the parts an operator actually decides, assembled into it below.
+    # An install that already set `procedure` keeps winning, so nothing
+    # configured before this split changes meaning.
     procedure: dict = field(default_factory=dict)
+    required_surfaces: list = field(default_factory=list)
+    order_weight: float = 0.0
+    surface_weights: dict = field(default_factory=dict)
+    grades: list = field(default_factory=list)
     # These mirror ScanSettings. Three places carry a default — the
     # engine, this config, and the manifest the catalog renders — and
     # they must agree, or the app runs on numbers nobody chose.
@@ -293,9 +400,74 @@ class GuardScanConfig(BaseAppConfig):
     led_ratio: float = 0.08
     led_hits: int = 3
     led_window_s: float = 0.8
+    # Picked off a camera snapshot: {"low": [h,s,v], "high": [h,s,v]},
+    # h on OpenCV's 0-179 scale. The two bare lists below are what this
+    # replaced; they are still read when no picked range is stored.
+    uniform_hsv: dict = field(default_factory=dict)
     uniform_hsv_low: list = field(default_factory=list)
     uniform_hsv_high: list = field(default_factory=list)
     session_log_dir: str = "/data/sessions"
+
+
+def _uniform_bounds(cfg: dict) -> tuple[list, list]:
+    """The guard's uniform colour, however it was configured.
+
+    A range picked off a camera snapshot wins. The two bare HSV lists
+    are what the operator used to have to type, and an install that
+    still holds them keeps working — nobody has to re-pick a colour
+    because we improved the form.
+    """
+    picked = cfg.get("uniform_hsv")
+    if isinstance(picked, dict):
+        low, high = picked.get("low"), picked.get("high")
+        if isinstance(low, list) and isinstance(high, list)                 and len(low) == 3 and len(high) == 3:
+            return list(low), list(high)
+    return list(cfg.get("uniform_hsv_low") or []),         list(cfg.get("uniform_hsv_high") or [])
+
+
+def _procedure(cfg: dict) -> dict | None:
+    """The rule set, assembled from the parts the form now collects.
+
+    `procedure` remains the engine's contract and the escape hatch: an
+    operator (or an install predating the split) who set the whole
+    object keeps it, untouched. Otherwise the surfaces, their weights,
+    whether order counts and the grade bands are each their own field,
+    because one JSON blob in a textarea is not a thing a showroom
+    manager can edit — and a typo in it used to take the camera down.
+
+    Returns None when nothing was configured, so ScanRules uses its own
+    defaults rather than being handed an empty shell.
+    """
+    whole = cfg.get("procedure")
+    if isinstance(whole, dict) and whole:
+        return whole
+
+    out: dict = {}
+    weights = cfg.get("surface_weights")
+    weights = weights if isinstance(weights, dict) else {}
+    surfaces = [s for s in (cfg.get("required_surfaces") or []) if isinstance(s, str)]
+    if surfaces:
+        out["steps"] = [{"name": s, "weight": float(weights.get(s, 1.0))}
+                        for s in surfaces]
+    elif weights:
+        # Weights alone re-weight the shipped surfaces rather than
+        # silently doing nothing.
+        out["steps"] = [{"name": s["name"],
+                         "weight": float(weights.get(s["name"], s["weight"]))}
+                        for s in ScanRules.DEFAULT["steps"]]
+    if "order_weight" in cfg:
+        # Only when the operator actually chose: writing it
+        # unconditionally made `out` non-empty for an app nobody has
+        # configured, so this never returned None and the engine was
+        # always handed a shell instead of using its own defaults.
+        try:
+            out["order_weight"] = max(0.0, min(1.0, float(cfg["order_weight"])))
+        except (TypeError, ValueError):
+            out["order_weight"] = 0.0
+    grades = cfg.get("grades")
+    if isinstance(grades, list) and grades:
+        out["grades"] = grades
+    return out or None
 
 
 class GuardScanApp(FrameApp):
@@ -364,12 +536,12 @@ class GuardScanApp(FrameApp):
         self._per_camera = per_camera
 
     def build_engine(self, handle: str, cfg: dict) -> ScanEngine:
+        low, high = _uniform_bounds(cfg)
         site = SiteConfig({
-            "uniform": {"hsv_low": cfg.get("uniform_hsv_low") or [],
-                        "hsv_high": cfg.get("uniform_hsv_high") or []},
+            "uniform": {"hsv_low": low, "hsv_high": high},
             "scan_zone": {"polygon": cfg.get("scan_zone") or []},
         })
-        rules = ScanRules(cfg.get("procedure") or None)
+        rules = ScanRules(_procedure(cfg))
         return ScanEngine(
             ScanSettings.from_config(cfg),
             site=site, rules=rules, camera=handle,
