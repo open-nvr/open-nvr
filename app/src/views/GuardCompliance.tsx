@@ -208,20 +208,6 @@ export default function GuardCompliance() {
         description="Did the guard scan every person, properly? Every screening is recorded — the clean ones included — because that is what makes the compliance figure mean something."
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <SegmentedControl
-              label="Range"
-              showLabel={false}
-              value={String(days)}
-              options={RANGES}
-              onChange={(v) => { setDays(Number(v)); resetPage() }}
-            />
-            <SegmentedControl
-              label="Group by"
-              showLabel={false}
-              value={period}
-              options={PERIODS}
-              onChange={(v) => setPeriod(v as 'day' | 'week' | 'month')}
-            />
             {guardApp && canConfigure && (
               <Button variant="outline" size="sm" onClick={() => setConfigOpen(true)}>
                 <Settings2 size={13} /> Configure
@@ -262,12 +248,36 @@ export default function GuardCompliance() {
 
       <Card>
         <CardContent>
-          <h3 className="mb-1 text-sm font-semibold">How each period went</h3>
-          <p className="mb-3 text-xs text-[var(--text-dim)]">
-            Every screening, by outcome. Hover a band for the count.
-          </p>
+          {/* The range and the grouping only ever governed this chart
+              and the figures above it, so they live on it. In the page
+              header they read as page-wide controls and cost a whole
+              band of vertical space that the table below needed. */}
+          <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold">How each period went</h3>
+              <p className="text-xs text-[var(--text-dim)]">
+                Every screening, by outcome. Hover a band for the count.
+              </p>
+            </div>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <SegmentedControl
+                label="Range"
+                showLabel={false}
+                value={String(days)}
+                options={RANGES}
+                onChange={(v) => { setDays(Number(v)); resetPage() }}
+              />
+              <SegmentedControl
+                label="Group by"
+                showLabel={false}
+                value={period}
+                options={PERIODS}
+                onChange={(v) => setPeriod(v as 'day' | 'week' | 'month')}
+              />
+            </div>
+          </div>
           {report.isPending ? (
-            <Skeleton className="h-[132px]" />
+            <Skeleton className="h-[104px]" />
           ) : report.isError ? (
             // Without this a failed request fell through to the empty
             // state and told the operator to install an app they are
@@ -415,14 +425,21 @@ function Tile({ label, value, hint, tone }: {
     : tone === 'warn' ? 'var(--warn)'
     : tone === 'bad' ? 'var(--danger)'
     : undefined
+  // Label above figure, and the explanation on hover rather than on a
+  // third line: four tiles at three lines each pushed the screenings
+  // table off the bottom of the screen, and the table is what an
+  // operator came for.
   return (
     <Card>
-      <CardContent className="py-3">
-        <div className="text-2xl font-semibold tabular-nums" style={{ color: colour }}>
+      <CardContent className="px-3 py-2">
+        <div className="truncate text-[11px] text-[var(--text-dim)]"
+             title={hint} style={hint ? { cursor: 'help' } : undefined}>
+          {label}
+        </div>
+        <div className="text-xl font-semibold leading-tight tabular-nums"
+             style={{ color: colour }}>
           {value}
         </div>
-        <div className="text-xs text-[var(--text-dim)]">{label}</div>
-        {hint && <div className="mt-0.5 text-[10px] text-[var(--text-dim)]">{hint}</div>}
       </CardContent>
     </Card>
   )
@@ -432,9 +449,17 @@ function Tile({ label, value, hint, tone }: {
 function BucketChart({ buckets }: { buckets: Tally[] }) {
   const ordered = [...buckets].reverse()          // oldest left, like a calendar
   const top = Math.max(...ordered.map((b) => b.screenings), 1)
-  const W = 720, H = 132, PAD = 4, LABEL_H = 16
+  const W = 720, H = 110, PAD = 4, LABEL_H = 15
   const plot = H - LABEL_H - PAD
-  const bw = (W - 2 * PAD) / Math.max(ordered.length, 1)
+  // A bar is a QUANTITY, and its width carries none of it — only its
+  // height does. Two days of data divided across the full width gave
+  // two 350px slabs that read as a colour-blocked background rather
+  // than a chart. Cap the width and pin the series to the left, so one
+  // day and thirty days are drawn in the same units and a week's
+  // history does not change shape as it fills up.
+  const SLOT = 44
+  const slot = Math.min(SLOT, (W - 2 * PAD) / Math.max(ordered.length, 1))
+  const bw = slot * 0.72                          // a gap between bars
   const every = Math.ceil(ordered.length / 8)     // keep the axis readable
 
   return (
@@ -443,7 +468,7 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
            style={{ minWidth: 420, height: H }} role="img"
            aria-label="Screenings per period, by outcome">
         {ordered.map((bucket, i) => {
-          const x = PAD + i * bw
+          const x = PAD + i * slot + (slot - bw) / 2
           let y = plot + PAD
           return (
             <g key={bucket.key ?? i}>
@@ -455,14 +480,14 @@ function BucketChart({ buckets }: { buckets: Tally[] }) {
                 const h = Math.max((n / top) * plot - 2, 2)
                 y -= h + 2
                 return (
-                  <rect key={verdict} x={x + 1} y={y} width={Math.max(bw - 2, 1)}
-                        height={h} rx="3" fill={VERDICT_COLOUR[verdict]}>
+                  <rect key={verdict} x={x} y={y} width={Math.max(bw, 1)}
+                        height={h} rx="2" fill={VERDICT_COLOUR[verdict]}>
                     <title>{`${bucket.label}: ${n} ${VERDICT_LABEL[verdict].toLowerCase()}`}</title>
                   </rect>
                 )
               })}
               {bucket.screenings === 0 && (
-                <rect x={x + 1} y={plot + PAD - 2} width={Math.max(bw - 2, 1)}
+                <rect x={x} y={plot + PAD - 2} width={Math.max(bw, 1)}
                       height={2} rx="1" fill="var(--border)">
                   <title>{`${bucket.label}: nothing screened`}</title>
                 </rect>
