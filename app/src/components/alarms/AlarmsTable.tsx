@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Check, X } from 'lucide-react'
+import { Check } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
 import { DataTable, type Column } from '../ui/DataTable'
 import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
 import { AuthedImage } from '../AuthedImage'
+import { EvidenceViewer } from '../EvidenceViewer'
 import {
   alarmSeenAt, alarmSeenTitle, alertsInboxService, type InboxAlert,
 } from '../../services/alertsInboxService'
@@ -298,6 +299,7 @@ export function AlarmsTable({
 export function AlarmsSelectionBar({
   count, allOnPage, allMatching, matchingTotal, label,
   onSelectAllMatching, onClear, onAck, ackPending,
+  canSelectAllMatching = true,
 }: {
   count: number
   allOnPage: boolean
@@ -308,6 +310,14 @@ export function AlarmsSelectionBar({
   onClear: () => void
   onAck: () => void
   ackPending?: boolean
+  /**
+   * Whether the CURRENT filter can be expressed to the ack endpoint,
+   * which understands only source_name and severity. With a type,
+   * camera or text filter active it cannot, and escalating would ack
+   * every row the coarser filter matches — including rows the operator
+   * filtered away and never saw. Ticking rows by hand still works.
+   */
+  canSelectAllMatching?: boolean
 }) {
   if (!count && !allMatching) return null
   const noun = label ?? 'alarms'
@@ -323,7 +333,7 @@ export function AlarmsSelectionBar({
           ? `All ${matchingTotal ?? ''} ${noun} selected`
           : `${count} selected`}
       </span>
-      {!allMatching && allOnPage && typeof matchingTotal === 'number' && matchingTotal > count && (
+      {!allMatching && canSelectAllMatching && allOnPage && typeof matchingTotal === 'number' && matchingTotal > count && (
         <button type="button" onClick={onSelectAllMatching}
                 className="underline text-[var(--accent)] hover:brightness-110">
           Select all {matchingTotal} {noun}
@@ -344,69 +354,26 @@ export function AlarmsSelectionBar({
 /**
  * Every photo an alert carries, full size.
  *
- * The thumbnail answers "is this worth my attention"; this answers "who
- * was it" — which for a scanner-flag alert is the entire point of the
- * alarm. Names come from the row, so an alert with a face, a body and a
- * scene shows three, and one with none never opens.
+ * A thin binding over the shared `EvidenceViewer` — the same photographs
+ * reach the screening ledger by a differently-scoped route, and the two
+ * must not drift into showing them differently. Names come from the row,
+ * so an alert with a face, a body and a scene shows three, and one with
+ * none never opens.
  */
 export function AlarmEvidenceViewer({
   alert, onClose,
 }: { alert: InboxAlert; onClose: () => void }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Evidence for: ${alert.title}`}
-      // Escape and a click on the backdrop both close it: a photo
-      // overlay that traps the operator is worse than no overlay.
-      onClick={onClose}
-      onKeyDown={(e) => { if (e.key === 'Escape') onClose() }}
-      tabIndex={-1}
-      ref={(el) => el?.focus()}
-    >
-      <div
-        className="max-h-full w-full max-w-3xl overflow-auto rounded-lg border
-                   border-[var(--border)] bg-[var(--panel)] p-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-3 flex items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-semibold">{alert.title}</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              {alarmSeenAt(alert)}
-              {alert.alert_type && ` · ${alert.alert_type.replace(/_/g, ' ')}`}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--panel-2)]
-                       hover:text-[var(--text)]"
-          >
-            <X size={16} />
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-3">
-          {alert.images.map((name) => (
-            <figure key={name} className="m-0">
-              <AuthedImage
-                queryKey={['alert-image', alert.id, name]}
-                fetchBlob={(signal) =>
-                  alertsInboxService.getAlertImage(alert.id, name, signal)}
-                alt={`${name} for: ${alert.title}`}
-                className="max-h-[60vh] rounded border border-[var(--border)]"
-              />
-              <figcaption className="mt-1 text-center text-[10px] uppercase
-                                     tracking-wide text-[var(--text-dim)]">
-                {name}
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </div>
-    </div>
+    <EvidenceViewer
+      title={alert.title}
+      subtitle={`${alarmSeenAt(alert)}${
+        alert.alert_type ? ` · ${alert.alert_type.replace(/_/g, ' ')}` : ''}`}
+      images={alert.images}
+      queryKeyPrefix={['alert-image', alert.id]}
+      fetchBlob={(name, signal) =>
+        alertsInboxService.getAlertImage(alert.id, name, signal)}
+      onClose={onClose}
+    />
   )
 }
 
@@ -435,12 +402,22 @@ const STATUS_OPTIONS: SegmentOption<'all' | 'unacked'>[] = [
 
 export function AlarmsFilters({
   onlyUnacked, onUnacked, severity, onSeverity, children,
+  alertType, onAlertType, alertTypes = [],
+  cameraId, onCameraId, cameras = [],
 }: {
   onlyUnacked: boolean
   onUnacked: (only: boolean) => void
   severity: string | null
   onSeverity: (s: string | null) => void
   children?: ReactNode
+  /** Producer's kind of alert — `scanner_flag`, `no_scan`, `unknown_plate`. */
+  alertType?: string | null
+  onAlertType?: (t: string | null) => void
+  /** What the installed apps say they can emit; empty hides the control. */
+  alertTypes?: string[]
+  cameraId?: number | null
+  onCameraId?: (id: number | null) => void
+  cameras?: { id: number; name: string }[]
 }) {
   return (
     <>
@@ -459,6 +436,42 @@ export function AlarmsFilters({
           value={severity}
           onChange={onSeverity}
         />
+        {/* Severity says how loud an alarm is; TYPE says what happened.
+            "A guard skipped the back pass" and "the wand went off on
+            someone" are both high-or-above and are not the same job, so
+            triaging the inbox needs this and not only the volume knob. */}
+        {onAlertType && alertTypes.length > 0 && (
+          <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+            Type
+            <select
+              value={alertType ?? ''}
+              onChange={(e) => onAlertType(e.target.value || null)}
+              aria-label="Filter by alert type"
+              className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs text-[var(--text)]"
+            >
+              <option value="">All types</option>
+              {alertTypes.map((t) => (
+                <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {onCameraId && cameras.length > 0 && (
+          <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+            Camera
+            <select
+              value={cameraId ?? ''}
+              onChange={(e) => onCameraId(e.target.value === '' ? null : Number(e.target.value))}
+              aria-label="Filter by camera"
+              className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs text-[var(--text)]"
+            >
+              <option value="">All cameras</option>
+              {cameras.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {children}
     </>

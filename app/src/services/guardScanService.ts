@@ -29,6 +29,8 @@ export type Screening = {
   engaged_s: number | null
   guard_key: string | null
   guard_name: string | null
+  /** The alarm this screening raised, when it raised one. */
+  alert_id: string | null
   // Names of the photos on this screening ('face', 'body', 'scene',
   // 'guard_face'); the bytes come from screeningImage() below.
   images: string[]

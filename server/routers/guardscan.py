@@ -95,6 +95,11 @@ def _row_out(row: GuardScreening) -> dict:
         "engaged_s": row.engaged_s,
         "guard_key": row.guard_key,
         "guard_name": row.guard_name,
+        # The alarm this screening raised, when it raised one. Stored
+        # since the ledger was added and returned by nothing, so a
+        # flagged screening and the critical alert about it could not be
+        # joined by anyone reading either surface.
+        "alert_id": row.alert_id,
         # Names only; the bytes come from the image route below.
         "images": sorted((_load(row.images) or {}).keys()),
     }
@@ -276,7 +281,7 @@ async def export_screenings(
     writer = csv.writer(buf)
     writer.writerow(["ended_at", "camera_id", "guard", "verdict", "score",
                      "steps_done", "steps_missing", "flagged", "duration_s",
-                     "ended_by", "session_id"])
+                     "ended_by", "session_id", "alert_id"])
     for row in q.order_by(GuardScreening.ended_at.desc()).limit(20_000):
         writer.writerow([
             row.ended_at.isoformat() if row.ended_at else "",
@@ -290,6 +295,7 @@ async def export_screenings(
             row.duration_s or "",
             row.ended_by or "",
             row.session_id,
+            row.alert_id or "",
         ])
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     return Response(
