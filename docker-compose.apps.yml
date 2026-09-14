@@ -531,7 +531,15 @@ services:
 
   yolo-pose-adapter:
     profiles: [apps]
-    image: ghcr.io/open-nvr/yolo-pose-adapter:${ADAPTER_TAG:-latest}
+    # YOLO_POSE_ADAPTER_TAG lets the pose image ride a different tag
+    # than the rest, exactly as CAPTION_ADAPTER_TAG does for captions
+    # and for the same reason: ADAPTER_TAG is ONE tag applied to every
+    # adapter, and the pose adapter is not in the releases it names.
+    # There is no yolo-pose-adapter:0.1.5 — the only tags that image has
+    # are a branch and two shas — so a fresh install pinned to the
+    # tested release could not pull it at all, and the whole app died on
+    # a tag that never existed.
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
     depends_on:
       # Start only once the graph is on disk. Without this the adapter
       # races the copier, loses, and reports itself healthy anyway —
