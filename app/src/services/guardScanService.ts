@@ -64,6 +64,10 @@ export type ComplianceReport = {
   buckets: Tally[]
   guards: Tally[]
   cameras: Tally[]
+  /** How often each surface was skipped, worst first. */
+  missed: { step: string; count: number }[]
+  /** Hour of the operator's local day; only hours that saw somebody. */
+  hours: (Tally & { hour: number })[]
 }
 
 export const VERDICT_LABEL: Record<string, string> = {

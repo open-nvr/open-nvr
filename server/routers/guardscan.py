@@ -194,13 +194,16 @@ async def compliance_report(
     buckets: dict[str, dict] = {}
     guards: dict[str, dict] = {}
     cameras: dict[int, dict] = {}
+    hours: dict[int, dict] = {}
+    missed: dict[str, int] = {}
     totals = _tally()
 
     for row in rows:
         when = row.ended_at
         if when is None:
             continue
-        key, label, short = _bucket(when.astimezone(local), period)
+        here = _utc(when).astimezone(local)
+        key, label, short = _bucket(here, period)
         _count(buckets.setdefault(key, _tally(label=label, key=key, short=short)),
                row)
         who = row.guard_name or row.guard_key or "unidentified"
@@ -209,6 +212,19 @@ async def compliance_report(
         if cam is not None:
             _count(cameras.setdefault(cam, _tally(label=f"cam{cam}",
                                                   camera_id=cam)), row)
+        # Hour of the working day, in the operator's OWN time — a
+        # compliance rate that collapses at closing is a staffing fact,
+        # and "closing" is a local idea. The same reason the day buckets
+        # use `local`.
+        _count(hours.setdefault(here.hour, _tally(label=f"{here.hour:02d}:00",
+                                                  hour=here.hour)), row)
+        # Which surfaces actually get skipped. The rows have carried this
+        # since the ledger landed and nothing ever counted it, yet it is
+        # the most actionable number here: "the back is missed four times
+        # more than anything else" is a training instruction, where a
+        # compliance percentage is only a score.
+        for step in _steps(row.steps_missing):
+            missed[step] = missed.get(step, 0) + 1
         _count(totals, row)
 
     return {
@@ -223,7 +239,46 @@ async def compliance_report(
                    sorted(guards.values(), key=lambda g: -g["screenings"])],
         "cameras": [_finish(c) for c in
                     sorted(cameras.values(), key=lambda c: -c["screenings"])],
+        # Worst first: the report reads top-down and the top line is the
+        # one to act on.
+        "missed": [{"step": step, "count": n} for step, n in
+                   sorted(missed.items(), key=lambda kv: (-kv[1], kv[0]))],
+        # Chronological, and only the hours that saw anybody — a table of
+        # twenty-four rows, twenty of them zero, hides the four that matter.
+        "hours": [_finish(h) for h in
+                  sorted(hours.values(), key=lambda h: h["hour"])],
     }
+
+
+def _utc(when: datetime) -> datetime:
+    """Read a stored timestamp as UTC when it carries no zone.
+
+    ``ended_at`` is documented tz-aware UTC and Postgres returns it that
+    way, but a backend that drops the zone (SQLite does) hands back a
+    NAIVE datetime — and `.astimezone()` then reads it as the SERVER's
+    local time, not UTC. On a machine in Delhi that silently moves every
+    screening five and a half hours, which lands them in the wrong day
+    bucket and the wrong hour of the working day.
+
+    The same assumption `_parse_bound` already makes for query bounds.
+    """
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+def _steps(text: str | None) -> list[str]:
+    """The step labels stored on a screening, or nothing.
+
+    Bad JSON is treated as no steps rather than raised: one malformed
+    row written by some future producer must not take the whole report
+    down with it.
+    """
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return []
+    return [s for s in parsed if isinstance(s, str)] if isinstance(parsed, list) else []
 
 
 def _tally(**extra) -> dict:

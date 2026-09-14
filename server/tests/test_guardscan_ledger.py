@@ -205,3 +205,108 @@ def test_a_bucket_carries_a_label_for_a_tooltip_and_one_for_an_axis():
     for period in ("day", "week", "month"):
         short = _bucket(when, period)[2]
         assert len(short) <= 6 and not short.endswith(",")
+
+
+# ── the report's two new aggregates ──────────────────────────────────
+
+
+class _Super:
+    """A superuser, which `visible_camera_ids` answers None for — i.e.
+    every camera. Enough to drive the report without building an auth
+    fixture for arithmetic that has nothing to do with auth."""
+
+    id = 1
+    is_superuser = True
+
+
+def _report(db, **kw):
+    import asyncio
+
+    from routers.guardscan import compliance_report
+
+    return asyncio.run(compliance_report(current_user=_Super(), db=db, **kw))
+
+
+def _screened(db, *, at, verdict="compliant", missing=None, cam=3):
+    """One screening in the ledger, at a given instant."""
+    import json
+
+    row = models.GuardScreening(
+        session_id=secrets.token_hex(8),
+        camera_id=cam,
+        ended_at=at,
+        verdict=verdict,
+        score=100.0 if verdict == "compliant" else 50.0,
+        flagged=False,
+        steps_missing=json.dumps(missing or []),
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_the_report_counts_which_surfaces_get_missed(db):
+    """The rows have carried steps_missing since the ledger landed and
+    nothing ever counted it — yet "the back is missed four times more
+    than anything else" is a training instruction, where a compliance
+    percentage is only a score."""
+    now = datetime.now(UTC)
+    for _ in range(3):
+        _screened(db, at=now, verdict="partial", missing=["Back"])
+    _screened(db, at=now, verdict="partial", missing=["Left arm"])
+    _screened(db, at=now, verdict="incomplete", missing=["Back", "Front"])
+    _screened(db, at=now)                       # complete: misses nothing
+
+    missed = _report(db, days=7, period="day", camera_id=None,
+                     tz_offset_minutes=0)["missed"]
+
+    # Worst first — the report reads top-down.
+    assert missed[0] == {"step": "Back", "count": 4}
+    assert {m["step"]: m["count"] for m in missed} == {
+        "Back": 4, "Left arm": 1, "Front": 1}
+
+
+def test_missing_surfaces_survive_a_row_with_unreadable_json(db):
+    """One malformed row must not take the whole report down."""
+    now = datetime.now(UTC)
+    _screened(db, at=now, verdict="partial", missing=["Back"])
+    broken = _screened(db, at=now, verdict="partial")
+    broken.steps_missing = "{not json"
+    db.commit()
+
+    missed = _report(db, days=7, period="day", camera_id=None,
+                     tz_offset_minutes=0)["missed"]
+    assert missed == [{"step": "Back", "count": 1}]
+
+
+def test_the_hour_of_day_is_the_operators_hour_not_utc(db):
+    """A compliance rate that collapses at closing time is a staffing
+    fact, and "closing" is a local idea. Reporting 18:30 IST as 13:00
+    would point a manager at the wrong shift."""
+    # 13:00 UTC is 18:30 in Delhi (+05:30).
+    _screened(db, at=datetime(2026, 9, 13, 13, 0, tzinfo=UTC))
+
+    utc = _report(db, days=90, period="day", camera_id=None,
+                  tz_offset_minutes=0)["hours"]
+    assert [h["hour"] for h in utc] == [13]
+    assert utc[0]["label"] == "13:00"
+
+    delhi = _report(db, days=90, period="day", camera_id=None,
+                    tz_offset_minutes=330)["hours"]
+    assert [h["hour"] for h in delhi] == [18]
+    assert delhi[0]["screenings"] == 1
+
+
+def test_only_the_hours_that_saw_somebody_are_reported(db):
+    """Twenty-four rows, twenty of them zero, hide the four that matter."""
+    day = datetime(2026, 9, 13, tzinfo=UTC)
+    _screened(db, at=day.replace(hour=9))
+    _screened(db, at=day.replace(hour=9), verdict="partial", missing=["Back"])
+    _screened(db, at=day.replace(hour=17))
+
+    hours = _report(db, days=90, period="day", camera_id=None,
+                    tz_offset_minutes=0)["hours"]
+    assert [h["hour"] for h in hours] == [9, 17]          # chronological
+    assert hours[0]["screenings"] == 2
+    assert hours[0]["compliance"] == 50.0
+    assert hours[1]["compliance"] == 100.0
