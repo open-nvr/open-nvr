@@ -17,7 +17,7 @@
 // dash, never 100%: nobody walked past that camera, and a green tile
 // over an empty day is a number someone would act on.
 
-import { useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
   ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
@@ -78,6 +78,13 @@ const NO_GUARD = 'unidentified'
 
 /** Where the summary row's folded/unfolded state is remembered. */
 const SUMMARY_KEY = 'opennvr.guardscan.summary'
+/** …and how the list and the camera share the width. */
+const SPLIT_KEY = 'opennvr.guardscan.split'
+//: Neither pane may be squeezed to uselessness: a table under about
+//: half the row cannot show its columns, and a camera over about half
+//: is no longer a side panel.
+const SPLIT_MIN = 45
+const SPLIT_MAX = 85
 
 const PERIODS = [
   { value: 'day', label: 'Daily' },
@@ -130,6 +137,49 @@ export default function GuardCompliance() {
       return true          // private mode throws rather than returning null
     }
   })
+  // How the last row is divided, remembered like the page size is.
+  const [split, setSplit] = useState<number>(() => {
+    try {
+      const raw = Number(window.localStorage.getItem(SPLIT_KEY))
+      return Number.isFinite(raw) && raw >= SPLIT_MIN && raw <= SPLIT_MAX ? raw : 75
+    } catch {
+      return 75
+    }
+  })
+  const [popped, setPopped] = useState(false)
+  const rowRef = useRef<HTMLDivElement>(null)
+
+  const startDrag = useCallback((down: React.PointerEvent) => {
+    const row = rowRef.current
+    if (!row) return
+    down.preventDefault()
+    // Capture on the handle, so a fast drag that outruns the pointer
+    // keeps resizing instead of dropping the gesture over the table.
+    const handle = down.currentTarget as HTMLElement
+    handle.setPointerCapture(down.pointerId)
+    const move = (e: PointerEvent) => {
+      const box = row.getBoundingClientRect()
+      if (box.width <= 0) return
+      const pct = ((e.clientX - box.left) / box.width) * 100
+      setSplit(Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct))))
+    }
+    const up = () => {
+      handle.releasePointerCapture(down.pointerId)
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', up)
+      setSplit((pct) => {
+        try {
+          window.localStorage.setItem(SPLIT_KEY, String(pct))
+        } catch {
+          // Not remembering a preference is not an error.
+        }
+        return pct
+      })
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', up)
+  }, [])
+
   const toggleSummary = () => {
     setSummaryOpen((open) => {
       try {
@@ -254,7 +304,7 @@ export default function GuardCompliance() {
             <ShieldCheck size={18} className="text-[var(--accent)]" /> Entry Screening
           </span>
         }
-        description="Did the guard scan every person, properly? Every screening is recorded — the clean ones included — because that is what makes the compliance figure mean something."
+        description="Did the guard scan every person, properly?"
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {/* This one really is page-wide: it moves the tiles, the
@@ -275,18 +325,6 @@ export default function GuardCompliance() {
                 <Settings2 size={13} /> Configure
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={toggleSummary}
-              aria-expanded={summaryOpen}
-              title={summaryOpen
-                ? 'Hide the figures and give the height to the list'
-                : 'Show the figures and the trend'}
-            >
-              {summaryOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-              Summary
-            </Button>
             <Button variant="outline" size="sm" onClick={() => setReportOpen(true)}>
               <FileText size={13} /> Report
             </Button>
@@ -307,13 +345,36 @@ export default function GuardCompliance() {
           `isFetching`. Keying it off isFetching would dim them every
           thirty seconds on the background poll, which is a worse
           distraction than the flicker this replaced. */}
-      {summaryOpen && (
-      <div className="grid gap-3 lg:grid-cols-2">
-      <div
-        className={`grid grid-cols-2 gap-3 ${
-          report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
-        aria-busy={report.isPlaceholderData || undefined}
-      >
+      {/* Row one is ONE card, and the toggle sits on it. A control that
+          folds a card belongs to that card — in the page header it read
+          as a page-wide switch, next to Report and CSV which are
+          nothing of the kind. */}
+      <Card>
+        <CardContent className="p-3">
+          <button
+            type="button"
+            onClick={toggleSummary}
+            aria-expanded={summaryOpen}
+            title={summaryOpen
+              ? 'Hide the figures and give the height to the list'
+              : 'Show the figures and the trend'}
+            className="flex w-full items-center gap-2 text-left text-xs
+                       font-semibold text-[var(--text-dim)]
+                       hover:text-[var(--text)]"
+          >
+            Summary
+            <span className="ml-auto">
+              {summaryOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </span>
+          </button>
+
+          {summaryOpen && (
+          <div className="mt-2 grid gap-3 lg:grid-cols-2">
+          <div
+            className={`grid grid-cols-2 gap-2 ${
+              report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}
+            aria-busy={report.isPlaceholderData || undefined}
+          >
         <Tile
           label="Compliance"
           value={pct(totals?.compliance ?? null)}
@@ -339,8 +400,8 @@ export default function GuardCompliance() {
         />
       </div>
 
-      <Card className={`h-full ${
-        report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
+          <div className={`h-full ${
+            report.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
         {/* Everything that is not a bar is chrome, and chrome here was
             eating the height the bars needed: a 14px heading, a line of
             prose, a legend at 11px and a fixed-aspect plot left the
@@ -348,7 +409,7 @@ export default function GuardCompliance() {
             label-sized and share one row each, and the plot takes
             whatever is left — so the bars grow with the card instead of
             sitting in it. */}
-        <CardContent className="flex h-full flex-col gap-2 p-3">
+        <div className="flex h-full flex-col gap-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h3 className="min-w-0 text-xs font-semibold text-[var(--text)]"
                 title="Every screening, by outcome. Hover a bar for the breakdown.">
@@ -366,7 +427,7 @@ export default function GuardCompliance() {
             </div>
           </div>
           {report.isPending ? (
-            <Skeleton className="min-h-[112px] flex-1" />
+            <Skeleton className="min-h-[88px] flex-1" />
           ) : report.isError ? (
             // Without this a failed request fell through to the empty
             // state and told the operator to install an app they are
@@ -378,7 +439,7 @@ export default function GuardCompliance() {
             />
           ) : report.data && report.data.buckets.length > 0 ? (
             <>
-              <div className="min-h-[112px] flex-1">
+              <div className="min-h-[88px] flex-1">
                 <BucketChart buckets={report.data.buckets} />
               </div>
               <Legend />
@@ -392,10 +453,12 @@ export default function GuardCompliance() {
                 : 'Install the Guard Scan Compliance app from the App Catalog and assign it an entrance camera.'}
             />
           )}
+        </div>
+          </div>
+          </div>
+          )}
         </CardContent>
       </Card>
-      </div>
-      )}
 
       {guards.length > 0 && (
         <Card>
@@ -410,8 +473,9 @@ export default function GuardCompliance() {
           operator reads; a quarter is enough to see who is at the
           entrance, and the panel is tall enough there to be worth
           looking at. */}
-      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-4">
-      <Card className="flex min-h-0 flex-col lg:col-span-3">
+      <div ref={rowRef} className="flex min-h-0 flex-1 gap-0">
+      <Card className="flex min-h-0 flex-col"
+            style={{ width: popped ? '100%' : `${split}%` }}>
         <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
         <ScreeningTable
@@ -469,6 +533,28 @@ export default function GuardCompliance() {
         </CardContent>
       </Card>
 
+      {/* The handle between them. Whoever is watching the door wants a
+          bigger picture; whoever is auditing wants more rows — and it
+          is not our place to decide which, so it drags. */}
+      {!popped && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the list and the camera"
+          onPointerDown={startDrag}
+          className="group flex w-3 shrink-0 cursor-col-resize items-center justify-center"
+        >
+          <div className="h-10 w-[3px] rounded bg-[var(--border)]
+                          group-hover:bg-[var(--accent)]" />
+        </div>
+      )}
+
+      {/* Width collapses when the panel pops out, but the panel itself
+          stays exactly here in the tree — moving it would unmount the
+          player and drop the stream, which is the one thing a pop-out
+          must not do. */}
+      <div className="min-w-0 shrink-0"
+           style={{ width: popped ? 0 : `calc(${100 - split}% - 0.75rem)` }}>
       {/* Outside the dimming above, deliberately: live video is not
           report data, and fading it whenever someone changes the range
           reads as the camera dropping out. */}
@@ -476,7 +562,10 @@ export default function GuardCompliance() {
         cameraId={liveCameraId}
         cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
         overlayEnabled={guardApp?.overlay_enabled}
+        popped={popped}
+        onTogglePop={() => setPopped((v) => !v)}
       />
+      </div>
       </div>
 
       {viewing && (
@@ -528,24 +617,27 @@ function Tile({ label, value, hint, tone }: {
   // label do not need a card of air around them, and the height those
   // four tiles were holding is the height the table and the camera
   // wanted. The explanation stays on hover.
+  // Inset, not a card: these sit INSIDE the summary card now, and a
+  // bordered box inside a bordered box reads as two panels where there
+  // is one. `--panel` under the card's `--panel-2` recesses them just
+  // enough to separate four figures from each other.
+  //
+  // The figure and its name share a baseline — a 20px number and an
+  // 11px label aligned any other way read as a mistake.
   return (
-    <Card className="h-full">
-      {/* Centred in the strip, and the two texts share a baseline —
-          a 20px figure and an 11px label aligned any other way read as
-          a mistake. */}
-      <CardContent className="flex h-full flex-col justify-center px-3 py-2">
-        <div className="flex items-baseline gap-2">
-          <div className="text-xl font-semibold leading-none tabular-nums"
-               style={{ color: colour }}>
-            {value}
-          </div>
-          <div className="min-w-0 truncate text-[11px] text-[var(--text-dim)]"
-               title={hint} style={hint ? { cursor: 'help' } : undefined}>
-            {label}
-          </div>
+    <div className="flex h-full flex-col justify-center rounded
+                    bg-[var(--panel)] px-3 py-2">
+      <div className="flex items-baseline gap-2">
+        <div className="text-xl font-semibold leading-none tabular-nums"
+             style={{ color: colour }}>
+          {value}
         </div>
-      </CardContent>
-    </Card>
+        <div className="min-w-0 truncate text-[11px] text-[var(--text-dim)]"
+             title={hint} style={hint ? { cursor: 'help' } : undefined}>
+          {label}
+        </div>
+      </div>
+    </div>
   )
 }
 
