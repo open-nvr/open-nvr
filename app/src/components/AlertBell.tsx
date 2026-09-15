@@ -27,6 +27,7 @@ import {
   type RingMode,
 } from '../services/alertsInboxService'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { useTranslation } from '../i18n'
 
 const POLL_MS = 10_000
 
@@ -194,6 +195,7 @@ function timeAgo(iso: string | null): string {
 }
 
 export function AlertBell() {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
   useClickOutside(panelRef, open, () => setOpen(false))
@@ -296,18 +298,18 @@ export function AlertBell() {
   return (
     <div className="relative" ref={panelRef}>
       <button
-        aria-label="Alarms"
+        aria-label={t('alerts.alarms')}
         className={`relative inline-flex items-center gap-1 px-2 py-1 rounded ${
           sirenActive
             ? 'bg-red-600 text-white animate-pulse'
             : 'bg-[var(--panel)] hover:bg-[var(--panel-2)]'
         }`}
         onClick={() => setOpen((s) => !s)}
-        title="Alarms"
+        title={t('alerts.alarms')}
       >
         <Bell size={14} />
         <span className="hidden md:inline">
-          Alarms{audioBlocked ? ' 🔇' : ''}
+          {t('alerts.alarms')}{audioBlocked ? ' 🔇' : ''}
         </span>
         {unackedCount > 0 && (
           <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] leading-4 text-center normal-case">
@@ -329,7 +331,7 @@ export function AlertBell() {
           )}
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
             <span className="font-semibold">
-              Alarms{unackedCount ? ` (${unackedCount})` : ''}
+              {t('alerts.alarms')}{unackedCount ? ` (${unackedCount})` : ''}
             </span>
             <div className="flex items-center gap-2">
               {unackedCount > 0 && (
@@ -338,7 +340,7 @@ export function AlertBell() {
                   onClick={() => ack.mutate(undefined)}
                   title="Acknowledge all"
                 >
-                  <CheckCheck size={13} /> Ack all
+                  <CheckCheck size={13} /> {t('alerts.ackAll')}
                 </button>
               )}
             </div>
@@ -349,7 +351,7 @@ export function AlertBell() {
             {alerts.length === 0 ? (
               <div className="px-3 py-6 text-center text-[var(--text-dim)]">
                 <BellOff size={18} className="mx-auto mb-1" />
-                No unacknowledged alerts
+                {t('alerts.noUnacknowledged')}
               </div>
             ) : (
               alerts.map((a) => (
@@ -391,7 +393,7 @@ export function AlertBell() {
               className="block w-full text-center px-3 py-1.5 rounded bg-[var(--panel-2)] hover:bg-[var(--border)] font-medium"
               onClick={() => setOpen(false)}
             >
-              Open Alarms — history, sound &amp; call settings →
+              {t('alerts.openHistory')}
             </Link>
           </div>
         </div>

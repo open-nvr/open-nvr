@@ -34,6 +34,7 @@ import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
 import { DetectionOverlay } from './DetectionOverlay'
 import { AlertCircle } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
@@ -126,6 +127,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     },
     ref
   ) {
+    const { t } = useTranslation()
     const containerRef = useRef<HTMLDivElement>(null)
     const videoRef = useRef<HTMLVideoElement>(null)
     const hlsInstanceRef = useRef<Hls | null>(null)
@@ -1102,7 +1104,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
             <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             {isReconnecting && (
-              <div className="text-xs text-white/80">Reconnecting…</div>
+              <div className="text-xs text-white/80">{t('video.reconnecting')}</div>
             )}
           </div>
         )}
@@ -1135,12 +1137,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             <div className="relative z-10 flex flex-col items-center">
               <AlertCircle size={48} className="text-blue-200 mb-3" />
               <div className="text-lg font-medium text-white mb-1">{error}</div>
-              <div className="text-xs text-blue-200 mb-4">No signal detected</div>
+              <div className="text-xs text-blue-200 mb-4">{t('video.noSignal')}</div>
               <button
                 onClick={handleRefresh}
                 className="px-4 py-2 bg-blue-800/60 hover:bg-blue-700/60 border border-blue-500/50 rounded text-sm transition-colors"
               >
-                Retry Connection
+                {t('common.refresh')}
               </button>
             </div>
           </div>

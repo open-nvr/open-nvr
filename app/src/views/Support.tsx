@@ -19,6 +19,7 @@
 import React, { useCallback, useMemo, useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
 
 type DiagItem = {
   key: string
@@ -29,6 +30,7 @@ type DiagItem = {
 }
 
 export function Support() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const [health, setHealth] = useState<any | null>(null)
@@ -190,15 +192,15 @@ export function Support() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Support</h1>
-          <p className="text-[var(--text-dim)]">Diagnostics, environment info, and tools to help troubleshoot.</p>
+          <h1 className="text-xl font-semibold">{t('support.title')}</h1>
+          <p className="text-[var(--text-dim)]">{t('support.description')}</p>
         </div>
         <div className="text-xs text-[var(--text-dim)]">{health?.version ? <>API v{health.version}</> : '—'}</div>
       </div>
 
       {!canAdmin && (
         <div className="p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm">
-          Limited access. Ask an administrator to run full diagnostics.
+          {t('support.limited')}
         </div>
       )}
 
@@ -211,30 +213,30 @@ export function Support() {
 
       {/* System info */}
   <div className="card">
-        <h2 className="font-medium mb-2">System Information</h2>
+        <h2 className="font-medium mb-2">{t('support.systemInfo')}</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">API Base</span>
+            <span className="text-[var(--text-dim)]">{t('support.apiBase')}</span>
             <span className="font-mono text-xs">{envApiBase || appOrigin}</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">Service</span>
+            <span className="text-[var(--text-dim)]">{t('support.service')}</span>
             <span className="font-mono text-xs">{health?.service || '-'}</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">Version</span>
+            <span className="text-[var(--text-dim)]">{t('support.version')}</span>
             <span className="font-mono text-xs">{health?.version || '-'}</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">User</span>
+            <span className="text-[var(--text-dim)]">{t('support.user')}</span>
             <span className="font-mono text-xs">{user ? `${user.username} (${user.is_superuser ? 'admin' : 'user'})` : '-'}</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">Browser</span>
+            <span className="text-[var(--text-dim)]">{t('support.browser')}</span>
             <span className="font-mono text-xs truncate max-w-[60%]" title={browserUa}>{browserUa}</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
-            <span className="text-[var(--text-dim)]">Time</span>
+            <span className="text-[var(--text-dim)]">{t('support.time')}</span>
             <span className="font-mono text-xs">{new Date().toLocaleString()}</span>
           </div>
         </div>
@@ -243,15 +245,15 @@ export function Support() {
       {/* Diagnostics */}
   <div className="card">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="font-medium">Quick Diagnostics</h2>
+          <h2 className="font-medium">{t('support.quickDiagnostics')}</h2>
           <div className="flex items-center gap-2">
             <button className="btn" onClick={() => setHealth(null)}>Reset</button>
-            <button className="btn btn-primary" onClick={runDiagnostics}>Run</button>
+            <button className="btn btn-primary" onClick={runDiagnostics}>{t('support.run')}</button>
           </div>
         </div>
         <div className="space-y-2 text-sm">
           {Object.values(diag).length === 0 && (
-            <div className="text-[var(--text-dim)]">No tests run yet.</div>
+            <div className="text-[var(--text-dim)]">{t('support.noTests')}</div>
           )}
           {Object.values(diag).map((d) => (
             <div key={d.key} className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
@@ -269,8 +271,8 @@ export function Support() {
       {canAdmin && (
         <div className="card">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="font-medium">Media Server Snapshot</h2>
-            <button className="btn" onClick={runDiagnostics}>Refresh</button>
+            <h2 className="font-medium">{t('support.snapshot')}</h2>
+            <button className="btn" onClick={runDiagnostics}>{t('support.refresh')}</button>
           </div>
           <div className="text-xs grid grid-cols-1 md:grid-cols-3 gap-2">
             <div className="p-2 bg-[var(--bg)] rounded border border-[var(--border)]">

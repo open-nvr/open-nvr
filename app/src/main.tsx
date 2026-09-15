@@ -30,6 +30,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { Login } from './views/Login'
 import { MFASetup } from './views/MFASetup'
 import { MFAVerify } from './views/MFAVerify'
+import { I18nProvider } from './i18n'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
 // monolithic bundle. Auth/MFA stay eager: they gate first paint.
@@ -203,15 +204,17 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary title="OpenNVR hit an unexpected error">
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <PermissionsProvider>
-          <SnackbarProvider>
-            <RouterProvider router={router} />
-          </SnackbarProvider>
-        </PermissionsProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <PermissionsProvider>
+            <SnackbarProvider>
+              <RouterProvider router={router} />
+            </SnackbarProvider>
+          </PermissionsProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </I18nProvider>
   </ErrorBoundary>
 )
 

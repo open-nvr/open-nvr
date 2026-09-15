@@ -19,6 +19,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { usePushNotification } from '../components/usePushNotification';
+import { useTranslation } from '../i18n';
 
 // Robust parser for Suricata fast.log lines
 function parseFastLog(line: string) {
@@ -58,6 +59,7 @@ function parseFastLog(line: string) {
 }
 
 export function SuricataAlertStream() {
+  const { t } = useTranslation();
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -157,9 +159,9 @@ export function SuricataAlertStream() {
   return (
     <div className="mb-4">
       <div className="flex items-center gap-2 mb-1">
-        <h2 className="text-base font-semibold">Detected Anomalies</h2>
+        <h2 className="text-base font-semibold">{t('anomalies.title')}</h2>
         <button className="btn btn-primary text-xs py-1 px-2" style={{marginLeft: 8}} onClick={markAllAsRead} disabled={alerts.length === 0 || lastReadIdx === alerts.length - 1}>
-          Mark all as read
+          {t('anomalies.markRead')}
         </button>
         {error && <span className="text-red-400 text-xs">{error}</span>}
       </div>
@@ -167,13 +169,13 @@ export function SuricataAlertStream() {
         <table className="w-full text-xs font-mono table-fixed">
           <thead className="bg-[var(--panel-2)] text-left sticky top-0">
             <tr>
-              <th className="p-2 w-[140px]">Time</th>
-              <th className="p-2 w-[220px]">Message</th>
-              <th className="p-2 w-[120px]">Class</th>
-              <th className="p-2 w-[80px]">Priority</th>
-              <th className="p-2 w-[80px]">Proto</th>
-              <th className="p-2 w-[160px]">Source</th>
-              <th className="p-2 w-[160px]">Dest</th>
+              <th className="p-2 w-[140px]">{t('anomalies.time')}</th>
+              <th className="p-2 w-[220px]">{t('anomalies.message')}</th>
+              <th className="p-2 w-[120px]">{t('anomalies.class')}</th>
+              <th className="p-2 w-[80px]">{t('anomalies.priority')}</th>
+              <th className="p-2 w-[80px]">{t('anomalies.proto')}</th>
+              <th className="p-2 w-[160px]">{t('anomalies.source')}</th>
+              <th className="p-2 w-[160px]">{t('anomalies.dest')}</th>
             </tr>
           </thead>
           <tbody>

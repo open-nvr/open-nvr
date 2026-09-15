@@ -20,13 +20,34 @@ RTSP, pinned to OpenNVR's internal Docker network. Never expose it to a LAN.
 ## How it works
 
 One container (`opennvr_fakecams`) runs MediaMTX plus one supervised `ffmpeg`
-per video file, each looping its file forever and publishing it as its own
-path. File name becomes stream name:
+per stream, each looping its source forever and publishing it as its own path.
+There are two ways to spell a camera, and you can mix them freely:
+
+**A loose file is one camera**, named after the file:
 
 ```
 ./data/fake-cameras/gate-entry.mp4   ->   rtsp://172.28.90.10:8554/gate-entry
 ./data/fake-cameras/lobby.mp4        ->   rtsp://172.28.90.10:8554/lobby
 ```
+
+**A folder is one camera**, named after the *folder*, playing every clip inside
+it back to back and then starting over:
+
+```
+./data/fake-cameras/parking/morning.mp4  \
+./data/fake-cameras/parking/noon.mp4      >-> rtsp://172.28.90.10:8554/parking
+./data/fake-cameras/parking/night.mp4    /
+```
+
+Clips play in sorted filename order, so prefix them (`01-`, `02-`, …) when the
+sequence matters. It is one continuous RTSP session — the path never goes
+not-ready between clips, so recording and detection see a single unbroken feed,
+exactly as they would from a real camera whose scene happens to change.
+
+**The folder is rescanned while the rig runs** (every `FAKECAM_SCAN_INTERVAL`
+seconds, default 5). Drop in a new clip or a whole new folder and its stream
+appears on its own; delete one and its stream goes away. No restart, no
+`docker compose` — see [Adding clips while it runs](#adding-clips-while-it-runs).
 
 Those URLs are ordinary RTSP, so OpenNVR treats them like any other camera:
 provisioned into the stack's own MediaMTX, recorded, and analysed.
@@ -80,9 +101,25 @@ already have by setting `FAKECAM_VIDEO_DIR` in `.env`:
 FAKECAM_VIDEO_DIR=D:/footage/samples
 ```
 
-`.mp4 .m4v .mkv .mov .avi .ts .webm` are picked up, including one level of
-subfolders. **One file = one camera**, and the file name becomes the camera
-name — so name them how you want them to appear.
+`.mp4 .m4v .mkv .mov .avi .ts .webm` are picked up. Lay them out whichever way
+suits the test:
+
+```
+data/fake-cameras/
+├── gate-entry.mp4        -> camera "gate-entry", that one clip on a loop
+├── lobby.mp4             -> camera "lobby"
+└── parking/              -> camera "parking", all three clips in a row,
+    ├── 01-morning.mp4       then back to the first, forever
+    ├── 02-noon.mp4
+    └── 03-night.mp4
+```
+
+The **file name** (loose file) or **folder name** (folder) becomes the camera
+name, so name them how you want them to appear. Names are lowercased and
+anything exotic becomes `_`, so `Back Yard/` serves as `back_yard`.
+
+Set `FAKECAM_GROUP=file` in `.env` if you want the older behaviour instead,
+where every file is its own camera no matter which folder it sits in.
 
 Pick clips that suit what you're testing. Detection and app testing want a
 scene where something actually happens; a static clip is fine for checking
@@ -161,7 +198,8 @@ docker exec -i opennvr_core python - < scripts/fakecams/register_fake_cameras.py
 ```
 
 It asks the rig which streams are live and creates one camera per stream.
-Re-running it is safe — streams that already have a camera are skipped.
+Re-running it is safe — streams that already have a camera are skipped, so
+re-run it after adding clips.
 
 Knobs (pass with `docker exec -e VAR=…`):
 
@@ -169,6 +207,8 @@ Knobs (pass with `docker exec -e VAR=…`):
 |---|---|---|
 | `FAKECAM_PREFIX` | `fake-` | Camera-name prefix |
 | `FAKECAM_SKILL` | *(none)* | Skill to assign to every new camera — see below |
+| `FAKECAM_WATCH` | *(off)* | Keep running and register new streams as they appear |
+| `FAKECAM_WATCH_INTERVAL` | `10` | Seconds between checks, watch mode only |
 | `FAKECAM_IP` | `172.28.90.10` | Address stored on the camera records |
 | `FAKECAM_PORT` | `8554` | RTSP port |
 
@@ -198,12 +238,53 @@ docker logs -f opennvr_detect_pipeline     # "tier0 camN: started (WxH)"
 
 The cameras should now appear in Live View and start recording.
 
+## Adding clips while it runs
+
+The rig rescans its video folder every `FAKECAM_SCAN_INTERVAL` seconds (default
+5) and reconciles what it is publishing against what it finds. Nothing needs
+restarting:
+
+| You do this | The rig does this |
+|---|---|
+| drop `alley.mp4` at the top level | starts publishing `alley` |
+| create `loading-bay/` with clips in it | starts publishing `loading-bay` |
+| add a clip to a folder already streaming | restarts *that* stream so the new clip is in the rotation — a few seconds of downtime on that one path, nothing else touched |
+| delete a clip or a folder | stops that publisher; the path disappears |
+| rename a folder | old stream stops, new one starts under the new name |
+
+A new stream has to look identical on two consecutive scans before it goes
+live, so a large file still being copied in is never published half-written.
+That means up to **2 × `FAKECAM_SCAN_INTERVAL`** between dropping a file and
+seeing its stream — about 10 seconds by default. Watch it happen:
+
+```bash
+docker logs -f opennvr_fakecams
+# [fakecams] new stream 'loading-bay' detected — waiting for its files to settle
+# [fakecams] publishing 'loading-bay' (3 clip(s), ffmpeg: -c:v copy)
+```
+
+Lower `FAKECAM_SCAN_INTERVAL` in `.env` if you want it snappier; raise it if the
+folder is huge or lives on a slow network share (every scan stats every file).
+
+**OpenNVR cameras are not created automatically.** The rig serves the new RTSP
+stream, but nothing has told OpenNVR to record it yet — re-run the register
+script, or leave it running so it picks up new streams by itself:
+
+```bash
+docker exec -e FAKECAM_WATCH=1 -i opennvr_core \
+    python - < scripts/fakecams/register_fake_cameras.py
+```
+
 ## Encoding modes
 
 `FAKECAM_MODE` in `.env`:
 
 * `auto` (default) — H.264 sources are stream-copied untouched; anything else
-  (HEVC, VP9, …) is re-encoded to H.264.
+  (HEVC, VP9, …) is re-encoded to H.264. For a folder this needs *every* clip
+  in it to agree on codec **and** frame size, because clips are spliced with
+  ffmpeg's concat demuxer, which cannot join mismatched streams without
+  re-encoding; a folder that mixes 1080p and 720p is transcoded whole. The
+  `publishing …` log line says which it chose.
 * `copy` — always stream-copy. Cheapest, and fails outright on non-H.264 input.
 * `transcode` — always re-encode. **Prefer this if detection isn't firing**:
   stream-copy looping emits corrupt packets at each loop seam ("Invalid NAL
@@ -237,6 +318,12 @@ recording and frees the disk their segments took.
   `?force=true` — the duplicate guard would otherwise reject everything after
   the first camera. Adding by hand in the UI hits the same "already added"
   prompt; confirm past it.
+* **A folder is one camera, not several.** Three clips in `parking/` give you
+  *one* camera that plays all three in a row — not three cameras. Use loose
+  files (or `FAKECAM_GROUP=file`) when you want one camera per clip.
+* **Adding a clip to a live folder interrupts that stream.** The publisher has
+  to restart to pick the clip up, so that camera drops for a few seconds and
+  its recording has a seam. Other streams are untouched.
 * **Never delete `scripts/fakecams/entrypoint.sh` while the overlay exists.**
   It is bind-mounted, and Docker silently creates an empty *directory* in place
   of a missing bind source — the container then dies with exit 127.
@@ -255,8 +342,10 @@ recording and frees the disk their segments took.
 ### The stream isn't reaching OpenNVR
 
 1. **Is the rig publishing?** `docker logs opennvr_fakecams` — expect one
-   `publishing …` line per file. No lines means no video files were found in
-   the folder bound to `/videos`.
+   `publishing …` line per stream, with the clip count it found. No lines means
+   no video files were found in the folder bound to `/videos`.
+   A stream stuck at `waiting for its files to settle` means the file keeps
+   changing between scans — still being copied, or being written by something.
 2. **Is the camera's path live in the stack's MediaMTX?**
    ```bash
    docker exec opennvr_mediamtx sh -c 'curl -s http://127.0.0.1:9997/v3/paths/list'

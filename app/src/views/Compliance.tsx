@@ -23,6 +23,8 @@ import { toDataURL } from 'qrcode'
 // Where a phone that scans the panel's QR lands. `ref` tags the lead source.
 const ASSESSMENT_URL = 'https://opennvr.org/contact?ref=nvr-889'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
+import { extractApiError } from '../lib/apiError'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
 interface ComplianceSummary {
@@ -296,6 +298,7 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
 }
 
 export function Compliance() {
+  const { t } = useTranslation()
   const [summary, setSummary] = useState<ComplianceSummary | null>(null)
   const [coverage, setCoverage] = useState<RecordingCoverage | null>(null)
   const [accessAudit, setAccessAudit] = useState<AccessAudit | null>(null)
@@ -329,7 +332,7 @@ export function Compliance() {
       }
     } catch (error: any) {
       console.error('Error fetching compliance data:', error)
-      setError(error?.response?.data?.detail || error?.message || 'Failed to load compliance data')
+      setError(extractApiError(error, t('compliance.failedLoad')))
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -366,7 +369,7 @@ export function Compliance() {
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold text-[var(--text)]">Compliance & Reports</h1>
+          <h1 className="text-2xl font-semibold text-[var(--text)]">{t('compliance.title')}</h1>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[...Array(8)].map((_, i) => (
@@ -382,19 +385,19 @@ export function Compliance() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-[var(--text)]">Compliance & Reports</h1>
+          <h1 className="text-2xl font-semibold text-[var(--text)]">{t('compliance.title')}</h1>
           <p className="text-sm text-[var(--text-dim)] mt-1">
-            System compliance status and audit reports
+            {t('compliance.description')}
           </p>
         </div>
         <div className="flex gap-2">
           <Button onClick={fetchData} disabled={refreshing}>
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
-            Refresh
+            {t('compliance.refresh')}
           </Button>
           <Button onClick={handleExport} disabled={exportLoading}>
             <Download size={16} />
-            {exportLoading ? 'Exporting...' : 'Export CSV'}
+            {exportLoading ? 'Exporting...' : t('compliance.export')}
           </Button>
         </div>
       </div>
@@ -402,7 +405,7 @@ export function Compliance() {
       {/* Error Message */}
       {error && (
         <div className="bg-red-900/20 border border-red-500/50 rounded p-4 text-red-400 text-sm">
-          <strong>Error:</strong> {error}
+          <strong>{t('compliance.error')}</strong> {error}
         </div>
       )}
 
@@ -467,9 +470,9 @@ export function Compliance() {
       <Card>
         <CardHeader>
           <FileText size={18} />
-          <CardTitle>Recording Coverage</CardTitle>
+          <CardTitle>{t('compliance.recordingCoverage')}</CardTitle>
           <div className="ml-auto flex items-center gap-2">
-            <label className="text-xs text-[var(--text-dim)]">Days:</label>
+            <label className="text-xs text-[var(--text-dim)]">{t('compliance.days')}</label>
             <select 
               value={coverageDays}
               onChange={(e) => setCoverageDays(Number(e.target.value))}
@@ -489,10 +492,10 @@ export function Compliance() {
               <table className="w-full text-sm">
                 <thead className="border-b border-neutral-700">
                   <tr className="text-left text-xs uppercase text-[var(--text-dim)]">
-                    <th className="pb-2">Camera</th>
-                    <th className="pb-2">Date</th>
-                    <th className="pb-2 text-right">Recordings</th>
-                    <th className="pb-2 text-right">Duration (hrs)</th>
+                    <th className="pb-2">{t('compliance.camera')}</th>
+                    <th className="pb-2">{t('compliance.date')}</th>
+                    <th className="pb-2 text-right">{t('compliance.recordings')}</th>
+                    <th className="pb-2 text-right">{t('compliance.duration')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
@@ -521,7 +524,7 @@ export function Compliance() {
             </div>
           ) : (
             <div className="text-center py-8 text-[var(--text-dim)]">
-              No recording coverage data available
+              {t('compliance.noCoverage')}
             </div>
           )}
         </CardContent>
@@ -531,9 +534,9 @@ export function Compliance() {
       <Card>
         <CardHeader>
           <Activity size={18} />
-          <CardTitle>Access Audit Log</CardTitle>
+          <CardTitle>{t('compliance.auditLog')}</CardTitle>
           <div className="ml-auto flex items-center gap-2">
-            <label className="text-xs text-[var(--text-dim)]">Days:</label>
+            <label className="text-xs text-[var(--text-dim)]">{t('compliance.days')}</label>
             <select 
               value={auditDays}
               onChange={(e) => setAuditDays(Number(e.target.value))}
@@ -552,11 +555,11 @@ export function Compliance() {
               <table className="w-full text-sm">
                 <thead className="border-b border-neutral-700">
                   <tr className="text-left text-xs uppercase text-[var(--text-dim)]">
-                    <th className="pb-2">Timestamp</th>
-                    <th className="pb-2">User</th>
-                    <th className="pb-2">Action</th>
-                    <th className="pb-2">Entity</th>
-                    <th className="pb-2">IP Address</th>
+                    <th className="pb-2">{t('compliance.timestamp')}</th>
+                    <th className="pb-2">{t('compliance.user')}</th>
+                    <th className="pb-2">{t('compliance.action')}</th>
+                    <th className="pb-2">{t('compliance.entity')}</th>
+                    <th className="pb-2">{t('compliance.ip')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
@@ -598,7 +601,7 @@ export function Compliance() {
             </div>
           ) : (
             <div className="text-center py-8 text-[var(--text-dim)]">
-              No audit logs available
+              {t('compliance.noAudit')}
             </div>
           )}
         </CardContent>

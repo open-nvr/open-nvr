@@ -17,6 +17,7 @@
  */
 
 import { ReactNode, useEffect } from 'react'
+import { useTranslation } from '../i18n'
 
 type ModalProps = {
   open: boolean
@@ -52,6 +53,8 @@ export function Modal({
   open, title, onClose, children, widthClassName, footer, bodyClassName,
   placement = 'center',
 }: ModalProps) {
+  const { t } = useTranslation()
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose()
@@ -77,7 +80,7 @@ export function Modal({
           : `max-h-[85vh] border ${widthClassName || 'w-[720px]'}`}`}>
         <div className="flex items-center justify-between gap-2 border-b border-neutral-700 px-4 py-2">
           <h2 className="text-sm font-semibold flex items-center gap-2">{title}</h2>
-          <button className="text-[var(--text-dim)] hover:text-white" onClick={onClose} aria-label="Close">✕</button>
+          <button className="text-[var(--text-dim)] hover:text-white" onClick={onClose} aria-label={t('shared.close')}>✕</button>
         </div>
         <div className={`flex-1 min-h-0 overflow-auto thin-scroll ${bodyClassName || 'p-4'}`}>
           {children}

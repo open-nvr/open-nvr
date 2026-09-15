@@ -32,6 +32,7 @@ import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
 import {
   Badge, Button, Card, CardContent,
   EmptyState, ErrorCard, PageHeader, Skeleton,
@@ -158,6 +159,7 @@ function levelBadge(level: string | undefined) {
 }
 
 export function Occupancy() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
 
@@ -324,12 +326,12 @@ export function Occupancy() {
     return (
       <section className="space-y-4">
         <PageHeader
-          title="Occupancy"
-          description="Live head-counts per watched zone, with over/under-occupancy alerts."
+          title={t('occupancy.title')}
+          description={t('occupancy.description')}
         />
         <EmptyState
           icon={<Users size={28} />}
-          title="No occupancy app enabled"
+          title={t('occupancy.noApp')}
           description="Install and enable Occupancy Counting from the App Catalog — it rides the detection stream the platform already produces, so it adds zero inference cost."
         />
       </section>

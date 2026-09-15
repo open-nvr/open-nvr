@@ -22,6 +22,7 @@ import { BellRing, PhoneCall, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
 import {
@@ -51,6 +52,7 @@ const RING_MODES: RingMode[] = ['none', 'ping', 'continuous']
 
 export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
+  const { t } = useTranslation()
   // The alarm POLICY (ring modes, actions, test alarms) is a site
   // decision — superuser-only on the server; everyone else gets their
   // cameras' alarms and a read-only view of how the site rings.
@@ -179,9 +181,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
       {!embedded && (
         <div className="flex items-center gap-2">
           <BellRing size={18} />
-          <h1 className="text-xl font-semibold">Alarms</h1>
+          <h1 className="text-xl font-semibold">{t('alerts.title')}</h1>
           {list.isPending && (
-            <span className="text-xs text-[var(--text-dim)]">Loading…</span>
+            <span className="text-xs text-[var(--text-dim)]">{t('common.loading')}</span>
           )}
         </div>
       )}
@@ -190,23 +192,19 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
       <div className="grid md:grid-cols-2 gap-3">
         <div className="border border-[var(--border)] rounded p-3 space-y-2">
           <div className="flex items-center gap-2 font-medium">
-            <Volume2 size={14} /> Alarm sound (site-wide)
+            <Volume2 size={14} /> {t('alerts.soundPolicy')}
           </div>
           <div className="text-[12px] text-[var(--text-dim)]">
-            none = badge only · ping = one chime on arrival · continuous =
-            rings in every open browser until acknowledged. Critical rings
-            a siren wail; other severities a two-tone beep — and an
-            unacknowledged critical always overrides the beep.
+            {t('alerts.soundPolicyHelp')}
           </div>
           <button
             className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)] text-sm"
             onClick={playTestSound}
           >
-            🔊 Play test sound
+            🔊 {t('alerts.playTest')}
           </button>
           <div className="text-[11px] text-[var(--text-dim)]">
-            Hear nothing? Check the tab isn't muted and system volume is
-            up — this button bypasses every other layer.
+            {t('alerts.noSound')}
           </div>
           {ring && (
             <div className="grid grid-cols-2 gap-2 text-sm">
@@ -296,7 +294,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
 
       {/* The list */}
       <AlarmsTable
-        caption="Alerts and incidents"
+        caption={t('alerts.tableTitle')}
         rows={rows}
         showSource
         cameraLabel={cameraLabel}
@@ -318,7 +316,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
             setSeverityFilter(null); setOnlyUnacked(false)
             setTypeFilter(null); setCameraFilter(null)
             pager.setPage(1)
-          }}>Clear filters</Button>
+          }}>{t('events.clearFilters')}</Button>
         ) : undefined}
         toolbar={
           <>

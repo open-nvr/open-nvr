@@ -19,6 +19,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiService } from '../lib/apiService';
 import { RecordingTimeline } from './RecordingTimeline';
+import { useTranslation } from '../i18n';
 
 interface RecordingSegment {
   path: string;
@@ -77,6 +78,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
   onSelect,
   onClose
 }) => {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [cameraRecordings, setCameraRecordings] = useState<CameraRecordings[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<number | null>(null);
@@ -179,7 +181,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
                 ←
               </button>
               <div>
-                <h3 className="text-lg font-semibold text-white">Recording Timeline</h3>
+                <h3 className="text-lg font-semibold text-white">{t('shared.recordingTimeline')}</h3>
                 <p className="text-sm text-slate-400">
                   {cameraData?.camera_name} • {new Date(selectedSession.start_time).toLocaleDateString()}
                 </p>
@@ -197,15 +199,15 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
           <div className="p-4 bg-slate-800/50 border-b border-slate-700">
             <div className="grid grid-cols-4 gap-4 text-sm">
               <div>
-                <div className="text-slate-400">Duration</div>
+                <div className="text-slate-400">{t('shared.duration')}</div>
                 <div className="text-white font-medium">{selectedSession.complete_duration_formatted}</div>
               </div>
               <div>
-                <div className="text-slate-400">Size</div>
+                <div className="text-slate-400">{t('shared.size')}</div>
                 <div className="text-white font-medium">{selectedSession.size_formatted}</div>
               </div>
               <div>
-                <div className="text-slate-400">Segments</div>
+                <div className="text-slate-400">{t('shared.segments')}</div>
                 <div className="text-white font-medium">
                   {selectedSession.complete_segment_count} complete
                   {selectedSession.incomplete_segment_count > 0 && (
@@ -216,7 +218,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
                 </div>
               </div>
               <div>
-                <div className="text-slate-400">Time Range</div>
+                <div className="text-slate-400">{t('shared.timeRange')}</div>
                 <div className="text-white font-medium text-xs">
                   {new Date(selectedSession.start_time).toLocaleTimeString()} - {new Date(selectedSession.end_time).toLocaleTimeString()}
                 </div>
@@ -252,7 +254,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
       <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-5xl w-full max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-700">
-          <h3 className="text-lg font-semibold text-white">Select Recording</h3>
+          <h3 className="text-lg font-semibold text-white">{t('shared.selectRecording')}</h3>
           <button
             onClick={onClose}
             className="text-slate-400 hover:text-white text-xl"
@@ -274,7 +276,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
                 loadRecordingSessions(cameraId || undefined);
               }}
             >
-              <option value="">All Cameras</option>
+              <option value="">{t('shared.allCameras')}</option>
               {cameras.map((cam) => (
                 <option key={cam.id} value={cam.id}>
                   {cam.name}
@@ -301,7 +303,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
           ) : cameraRecordings.length === 0 ? (
             <div className="text-center py-12 text-slate-400">
               <div className="text-4xl mb-2">📹</div>
-              <div>No recordings found</div>
+              <div>{t('shared.noRecordings')}</div>
               <div className="text-sm mt-2">Record some videos first to use them for AI processing</div>
             </div>
           ) : (

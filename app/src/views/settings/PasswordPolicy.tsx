@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { useTranslation } from '../../i18n'
 
 type Policy = {
   min_length: number
@@ -50,6 +51,7 @@ const defaultPolicy: Policy = {
 }
 
 export function PasswordPolicy() {
+  const { t } = useTranslation()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -79,7 +81,7 @@ export function PasswordPolicy() {
           require_mfa_for_privileged: data.require_mfa_for_privileged,
         })
       } catch (e: any) {
-        setError(extractApiError(e, 'Failed to load policy'))
+        setError(extractApiError(e, t('admin.failedLoadPolicy')))
       } finally {
         setLoading(false)
       }
@@ -95,68 +97,68 @@ export function PasswordPolicy() {
         expiration_days: policy.expiration_days ?? null,
       })
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to save policy'))
+      setError(extractApiError(e, t('admin.failedSavePolicy')))
     } finally {
       setLoading(false)
     }
   }
 
   if (!canAdmin) {
-    return <div className="text-sm text-amber-400">Admin only: you don’t have permission to modify password policy.</div>
+    return <div className="text-sm text-amber-400">{t('admin.only')}</div>
   }
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-base font-semibold">Password Policy</h2>
-        <button className="ml-auto px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading}>Save</button>
+        <h2 className="text-base font-semibold">{t('admin.passwordPolicy')}</h2>
+        <button className="ml-auto px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading}>{t('admin.save')}</button>
       </div>
       {error && <div className="text-sm text-red-400">{error}</div>}
       <div className="grid grid-cols-2 gap-3 text-sm">
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Minimum length</span>
+          <span>{t('admin.minimumLength')}</span>
           <input type="number" min={4} max={128} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.min_length} onChange={(e) => setPolicy({ ...policy, min_length: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Required character classes</span>
+          <span>{t('admin.characterClasses')}</span>
           <select className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.min_classes} onChange={(e) => setPolicy({ ...policy, min_classes: Number(e.target.value) })}>
             {[1,2,3,4].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Disallow username/email in password</span>
+          <span>{t('admin.disallowIdentity')}</span>
           <input type="checkbox" className="accent-[var(--accent)]" checked={policy.disallow_username_email} onChange={(e) => setPolicy({ ...policy, disallow_username_email: e.target.checked })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Enable passphrase mode</span>
+          <span>{t('admin.enablePassphrase')}</span>
           <input type="checkbox" className="accent-[var(--accent)]" checked={policy.passphrase_enabled} onChange={(e) => setPolicy({ ...policy, passphrase_enabled: e.target.checked })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Passphrase min length</span>
+          <span>{t('admin.passphraseMinLength')}</span>
           <input type="number" min={8} max={256} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.passphrase_min_length} onChange={(e) => setPolicy({ ...policy, passphrase_min_length: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Password history (disallow last N)</span>
+          <span>{t('admin.passwordHistory')}</span>
           <input type="number" min={0} max={50} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.history_count} onChange={(e) => setPolicy({ ...policy, history_count: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Expiration (days, 0 = off)</span>
+          <span>{t('admin.expirationDays')}</span>
           <input type="number" min={0} max={3650} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.expiration_days ?? 0} onChange={(e) => setPolicy({ ...policy, expiration_days: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Max failed attempts</span>
+          <span>{t('admin.maxFailedAttempts')}</span>
           <input type="number" min={0} max={50} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.max_failed_attempts} onChange={(e) => setPolicy({ ...policy, max_failed_attempts: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Lockout (minutes)</span>
+          <span>{t('admin.lockoutMinutes')}</span>
           <input type="number" min={0} max={1440} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.lockout_minutes} onChange={(e) => setPolicy({ ...policy, lockout_minutes: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Reset token TTL (minutes)</span>
+          <span>{t('admin.resetTokenTtl')}</span>
           <input type="number" min={1} max={1440} className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={policy.reset_token_ttl_minutes} onChange={(e) => setPolicy({ ...policy, reset_token_ttl_minutes: Number(e.target.value) })} />
         </label>
         <label className="flex items-center justify-between gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
-          <span>Require MFA for admin/operator</span>
+          <span>{t('admin.requireMfa')}</span>
           <input type="checkbox" className="accent-[var(--accent)]" checked={policy.require_mfa_for_privileged} onChange={(e) => setPolicy({ ...policy, require_mfa_for_privileged: e.target.checked })} />
         </label>
       </div>

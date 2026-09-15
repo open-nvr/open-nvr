@@ -15,14 +15,18 @@
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-ONVIF service with HTTP Digest authentication support.
+ONVIF service using raw SOAP requests over httpx.
 
-This module provides ONVIF functionality using raw SOAP requests with HTTP Digest auth,
-which is more compatible with Hikvision and other devices that don't properly support
-WS-Security (UsernameToken).
-
-The standard onvif-zeep library uses WS-Security which many devices reject.
-This implementation uses HTTP Digest authentication which is more widely supported.
+Authentication is HTTP Digest first — the most widely honoured scheme
+(Hikvision, Dahua, Axis, most OEM firmware) and the one the standard
+onvif-zeep library cannot do, since it only speaks WS-Security. Devices
+that answer a Digest-authenticated request with an ONVIF ``NotAuthorized``
+SOAP fault instead of an HTTP challenge (TP-Link Tapo, some Reolink
+firmware) are retried once with a WS-Security UsernameToken
+PasswordDigest header; a host that needed the retry is remembered for the
+rest of the process so later calls to it (PTZ in particular) go straight
+to WS-Security instead of paying the rejected Digest round trip every
+time. See ``_onvif_request``.
 """
 
 from __future__ import annotations
@@ -116,16 +120,41 @@ def _soap_envelope_wsse(body: str, username: str, password: str) -> str:
 </soap:Envelope>'''
 
 
-def _is_wsse_auth_fault(status_code: int, response_text: str) -> bool:
-    """Return whether a non-success SOAP response is an ONVIF auth fault."""
-    if status_code == 200 or not re.search(
-        r"<(?:[\w.-]+:)?Fault\b", response_text, re.IGNORECASE
-    ):
-        return False
+#: Hosts (``scheme://netloc``) that rejected HTTP Digest with an auth fault
+#: and accepted WS-Security instead. Process-local and never persisted: a
+#: wrong entry costs one WS-Security-first request that would have worked
+#: anyway, and a camera whose firmware changes its mind is corrected on
+#: the next auth fault (see ``_onvif_request``). Keyed by scheme+netloc,
+#: not URL, because the device, media and PTZ services of one camera share
+#: the same authentication behaviour.
+_WSSE_PREFERRED_HOSTS: set[str] = set()
+
+
+def _auth_key(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+_SOAP_FAULT_RE = re.compile(r"<(?:[\w.-]+:)?Fault\b", re.IGNORECASE)
+#: ``ter:NotAuthorized`` is the ONVIF code; ``wsse:FailedAuthentication`` /
+#: ``wsse:InvalidSecurityToken`` are the WS-Security ones devices that
+#: implement that profile literally return; "Authority failure" is the
+#: Tapo reason text.
+_AUTH_FAULT_RE = re.compile(
+    r"(?:NotAuthorized|FailedAuthentication|InvalidSecurityToken|Authority\s+failure)",
+    re.IGNORECASE,
+)
+
+
+def _is_auth_fault(response_text: str) -> bool:
+    """Return whether a SOAP response body is an ONVIF authentication fault.
+
+    Decided on the body alone: SOAP 1.2 says a fault is an HTTP 400/500,
+    but some firmware returns faults with HTTP 200, and a ``<Fault>``
+    carrying ``NotAuthorized`` is unambiguous whatever the status code.
+    """
     return bool(
-        re.search(
-            r"(?:NotAuthorized|Authority\s+failure)", response_text, re.IGNORECASE
-        )
+        _SOAP_FAULT_RE.search(response_text) and _AUTH_FAULT_RE.search(response_text)
     )
 
 
@@ -137,7 +166,16 @@ async def _onvif_request(
     timeout: float = 10.0,
 ) -> tuple[int, str]:
     """
-    Make an ONVIF SOAP request, preferring HTTP Digest authentication.
+    Make an ONVIF SOAP request, authenticating with HTTP Digest or WS-Security.
+
+    Digest is tried first. A response that is an ONVIF auth fault
+    (``_is_auth_fault``) is retried once with a WS-Security UsernameToken,
+    and a host that accepts the retry is remembered in
+    ``_WSSE_PREFERRED_HOSTS`` so its later requests start with WS-Security.
+    The mirror case is handled too: a remembered host that returns an auth
+    fault to WS-Security is retried with Digest and forgotten. Either way
+    at most two requests are made, and a second auth fault is returned to
+    the caller as-is.
 
     Args:
         url: Full URL to the ONVIF service endpoint
@@ -149,45 +187,75 @@ async def _onvif_request(
     Returns:
         Tuple of (status_code, response_text)
     """
-    envelope = _soap_envelope(body_xml)
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
+    has_credentials = bool(username and password)
+    auth_key = _auth_key(url)
+    wsse_first = has_credentials and auth_key in _WSSE_PREFERRED_HOSTS
 
-    auth = None
-    if username and password:
-        auth = httpx.DigestAuth(username, password)
+    def _digest_request():
+        return {
+            "content": _soap_envelope(body_xml),
+            "headers": headers,
+            "auth": httpx.DigestAuth(username, password) if has_credentials else None,
+        }
+
+    def _wsse_request():
+        return {
+            "content": _soap_envelope_wsse(body_xml, username, password),
+            "headers": headers,
+        }
 
     # verify=False: cameras use self-signed certs on the LAN; the whole point of
     # supporting https here is reaching devices whose control API is TLS-only.
     async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
-            response = await client.post(
-                url, content=envelope, headers=headers, auth=auth
-            )
-            if (
-                username
-                and password
-                and _is_wsse_auth_fault(response.status_code, response.text)
-            ):
+            first = _wsse_request() if wsse_first else _digest_request()
+            response = await client.post(url, **first)
+            if not (has_credentials and _is_auth_fault(response.text)):
+                return response.status_code, response.text
+
+            if wsse_first:
+                main_logger.info(
+                    "ONVIF WS-Security authentication rejected by %s; retrying with HTTP Digest",
+                    auth_key,
+                )
+                _WSSE_PREFERRED_HOSTS.discard(auth_key)
+                response = await client.post(url, **_digest_request())
+            else:
                 main_logger.info(
                     "ONVIF Digest authentication rejected by %s; retrying with WS-Security",
-                    url,
+                    auth_key,
                 )
-                response = await client.post(
-                    url,
-                    content=_soap_envelope_wsse(body_xml, username, password),
-                    headers=headers,
+                response = await client.post(url, **_wsse_request())
+                if not _is_auth_fault(response.text):
+                    _WSSE_PREFERRED_HOSTS.add(auth_key)
+
+            if _is_auth_fault(response.text):
+                # Both schemes refused the same credentials. A WS-Security
+                # PasswordDigest also fails when the camera clock is outside
+                # its tolerance window (typically ±5 min), which looks
+                # exactly like a wrong password to the operator.
+                main_logger.warning(
+                    "ONVIF authentication failed for %s with both HTTP Digest and "
+                    "WS-Security: check the credentials, then the camera clock "
+                    "(the ONVIF camera time endpoint, or POST .../time/sync) — "
+                    "WS-Security rejects a Created timestamp outside the "
+                    "device's tolerance window",
+                    auth_key,
                 )
             return response.status_code, response.text
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             raise HTTPException(
                 status_code=504, detail=f"ONVIF request timeout to {url}"
-            )
+            ) from e
         except httpx.ConnectError as e:
             raise HTTPException(
                 status_code=503, detail=f"Cannot connect to ONVIF device: {e}"
-            )
+            ) from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"ONVIF request failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"ONVIF request failed: {e}"
+            ) from e
 
 
 def _extract_xaddr(capabilities_xml: str, service_tag: str) -> str | None:

@@ -21,6 +21,8 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../../auth/AuthContext'
 import { Badge, EmptyState, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
+import { useTranslation } from '../../i18n'
 import { CameraSettingsPanel } from './CameraSettings'
 
 type Cam = {
@@ -45,6 +47,7 @@ type Cam = {
  * camera the common baseline. Mixed-vendor fleets are the normal case.
  */
 export function CameraDeviceConfig() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   // Device settings are write-gated server-side (camera_device.write; superusers
   // implicitly). For everyone else this console is READ-ONLY and the direct
@@ -73,7 +76,7 @@ export function CameraDeviceConfig() {
       })
       .catch(
         (e: any) =>
-          alive && setError(e?.data?.detail || e?.message || 'Failed to load cameras')
+          alive && setError(extractApiError(e, t('settings.failedLoadCameras')))
       )
       .finally(() => alive && setLoading(false))
     return () => {
@@ -86,8 +89,8 @@ export function CameraDeviceConfig() {
   if (!cameras.length)
     return (
       <EmptyState
-        title="No cameras yet"
-        description="Add a camera first — its available settings are detected from the device."
+        title={t('camera.noCameras')}
+        description={t('settings.addCameraFirst')}
       />
     )
 
@@ -99,7 +102,7 @@ export function CameraDeviceConfig() {
           onClick={() => setSelected(null)}
           className="flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
         >
-          <ChevronLeft size={16} /> All cameras
+          <ChevronLeft size={16} /> {t('nav.cameras')}
         </button>
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -120,17 +123,17 @@ export function CameraDeviceConfig() {
               href={`http://${selected.ip_address}`}
               target="_blank"
               rel="noopener noreferrer"
-              title="Open the camera's own web page (full vendor settings) in a new tab"
+              title={t('settings.openCameraPortal')}
               className="flex shrink-0 items-center gap-1 text-sm text-[var(--accent)] hover:underline"
             >
-              <ExternalLink size={14} /> Camera web page
+              <ExternalLink size={14} /> {t('camera.viewLive')}
             </a>
           )}
         </div>
         {!canWrite && (
           <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--panel-2)]/40 px-3 py-2 text-xs text-[var(--text-dim)]">
             <Eye size={14} className="shrink-0" />
-            Read-only view — changing device settings requires an administrator.
+            {t('settings.readOnlyDevice')}
           </div>
         )}
         {/* fieldset[disabled] blankets every input/button in the panel; the
@@ -146,9 +149,7 @@ export function CameraDeviceConfig() {
   return (
     <div className="space-y-3">
       <p className="text-xs text-[var(--text-dim)]">
-        Select a camera to configure the device itself. Available settings are
-        detected per camera, so vendor-specific features appear only where the
-        hardware supports them.
+        {t('settings.selectCameraDevice')}
       </p>
       <div className="space-y-2">
         {cameras.map((c) => (
@@ -167,9 +168,9 @@ export function CameraDeviceConfig() {
             </div>
             <div className="shrink-0">
               {c.is_active === false ? (
-                <Badge variant="neutral">Inactive</Badge>
+                <Badge variant="neutral">{t('common.inactive')}</Badge>
               ) : (
-                <Badge variant="success">Active</Badge>
+                <Badge variant="success">{t('common.online')}</Badge>
               )}
             </div>
           </button>

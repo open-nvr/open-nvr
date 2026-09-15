@@ -70,6 +70,7 @@ export type DataTableProps<T> = {
   isError?: boolean
   error?: unknown
   errorTitle?: string
+  errorMessage?: string
   onRetry?: () => void
   /** Shown in place of rows when there are none. */
   empty?: ReactNode
@@ -266,7 +267,7 @@ function heightBelow(start: Element): number {
 export function DataTable<T>({
   columns, rows, rowKey, caption,
   isPending = false, isFetching = false, isError = false, error,
-  errorTitle = 'Could not load this list', onRetry,
+  errorTitle = 'Could not load this list', errorMessage = 'Please try again.', onRetry,
   empty, skeletonRows = 8, striped = true, rowClassName, footer, toolbar,
   fillHeight = false, fillParent = false,
   minBodyHeight = 220, fixed = false, minWidth,
@@ -296,7 +297,7 @@ export function DataTable<T>({
     return (
       <ErrorCard
         title={errorTitle}
-        message={extractApiError(error, 'Please try again.')}
+        message={extractApiError(error, errorMessage)}
         onRetry={onRetry}
       />
     )

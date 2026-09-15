@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useTranslation } from '../i18n'
 import { apiService } from '../lib/apiService'
 import { queryClient, useCameras, useMediaMtxHealth } from '../lib/queries'
 import { useCameraStatusConnected } from '../hooks/useCameraStatus'
@@ -133,6 +134,7 @@ type CameraForm = {
 
 export function Cameras() {
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
   const { showError, showSuccess, showInfo, showWarning } = useSnackbar()
@@ -174,9 +176,9 @@ export function Cameras() {
 
   useEffect(() => {
     if (camsQuery.isError) {
-      showError(extractApiError(camsQuery.error, 'Failed to load cameras'))
+      showError(extractApiError(camsQuery.error, t('dashboard.failedCameras')))
     }
-  }, [camsQuery.isError, camsQuery.error, showError])
+  }, [camsQuery.isError, camsQuery.error, showError, t])
 
   // A selection is scoped to what is currently listed, so changing the listing
   // drops it. Deliberately keyed on the view parameters and not on the data:
@@ -418,7 +420,7 @@ export function Cameras() {
         showSuccess('Camera updated')
       }
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to update camera')
+      showError(extractApiError(e, 'Failed to update camera'))
     } finally {
       setSaving(false)
     }
@@ -437,7 +439,7 @@ export function Cameras() {
       await refreshCameras()
       showSuccess('Camera deleted')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to delete camera')
+      showError(extractApiError(e, 'Failed to delete camera'))
     } finally {
       setMutating(false)
     }
@@ -461,7 +463,7 @@ export function Cameras() {
       setSelected(new Set())
       showSuccess('Bulk delete completed')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Bulk delete failed')
+      showError(extractApiError(e, 'Bulk delete failed'))
     } finally {
       setMutating(false)
     }
@@ -481,7 +483,7 @@ export function Cameras() {
       setSelected(new Set())
       showSuccess('Bulk assign completed')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Bulk assign failed')
+      showError(extractApiError(e, 'Bulk assign failed'))
     } finally {
       setMutating(false)
     }
@@ -532,8 +534,8 @@ export function Cameras() {
     <section className="space-y-4">
       {/* Header */}
       <PageHeader
-        title="Cameras"
-        description="Every camera registered with this recorder, with its live stream and recording state."
+        title={t('nav.cameras')}
+        description={t('camera.description')}
         actions={
           <div className="flex items-center gap-3">
             {/* Say so when pushed updates have stopped. The list still
@@ -542,12 +544,12 @@ export function Cameras() {
                 hides that is worse than one that admits it. */}
             {!liveUpdates && (
               <span className="text-xs text-[var(--text-dim)]" title="Reconnecting to the live event stream; status may lag by up to a minute">
-                Live updates reconnecting…
+                {t('dashboard.reconnecting')}
               </span>
             )}
             {canManageCameras && (
               <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
-                Add Camera
+                {t('camera.add')}
               </Button>
             )}
           </div>
@@ -559,12 +561,12 @@ export function Cameras() {
       <div className="flex items-center gap-2 text-sm flex-wrap">
         <input
           className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1 rounded"
-          placeholder="Search name or IP"
+          placeholder={t('camera.search')}
           value={query}
           onChange={(e) => { setPage(1); setQuery(e.target.value) }}
         />
         <label className="inline-flex items-center gap-1">
-          <input type="checkbox" className="accent-[var(--accent)]" checked={activeOnly} onChange={(e) => { setPage(1); setActiveOnly(e.target.checked) }} /> Active only
+          <input type="checkbox" className="accent-[var(--accent)]" checked={activeOnly} onChange={(e) => { setPage(1); setActiveOnly(e.target.checked) }} /> {t('camera.activeOnly')}
         </label>
         <select className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1 rounded" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
           {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
@@ -650,13 +652,13 @@ export function Cameras() {
       ) : cameras.length === 0 ? (
         <EmptyState
           icon={<CameraOff size={28} />}
-          title="No cameras"
+          title={t('camera.noCamerasTitle')}
           description={query || activeOnly
-            ? 'No cameras match the current search or filter. Try clearing them.'
-            : 'Add a camera to start recording.'}
+            ? t('camera.noMatch')
+            : t('camera.addAction')}
           action={canManageCameras ? (
             <Button variant="primary" onClick={() => { setShowCreateDialog(true); setEditing(null); resetForm() }}>
-              Add Camera
+              {t('camera.addAction')}
             </Button>
           ) : undefined}
         />
@@ -683,11 +685,11 @@ export function Cameras() {
                   }}
                 />
               </TH>
-              <TH>Camera</TH>
-              <TH className="w-[170px]">Address</TH>
-              <TH className="w-[150px]">Stream</TH>
-              <TH className="w-[150px]">Recording</TH>
-              <TH className="w-[110px]">Actions</TH>
+              <TH>{t('nav.cameras')}</TH>
+              <TH className="w-[170px]">{t('camera.address')}</TH>
+              <TH className="w-[150px]">{t('camera.stream')}</TH>
+              <TH className="w-[150px]">{t('camera.recording')}</TH>
+              <TH className="w-[110px]">{t('camera.actions')}</TH>
             </TR>
           </THead>
           <TBody striped>
@@ -720,7 +722,7 @@ export function Cameras() {
                       {/* The Active column is gone, so with "Active only"
                           unticked this badge is the only thing distinguishing
                           a deactivated camera. */}
-                      {!c.is_active && <Badge variant="neutral" className="shrink-0">Inactive</Badge>}
+                      {!c.is_active && <Badge variant="neutral" className="shrink-0">{t('common.inactive')}</Badge>}
                     </div>
                     <div className="text-xs text-[var(--text-dim)] truncate" title={deviceTitle || undefined}>
                       {deviceLine || '—'}
@@ -741,7 +743,7 @@ export function Cameras() {
                   <TD>
                     <div className="flex items-center justify-end gap-1">
                       {canManageCameras && (
-                        <button className={ICON_BTN} onClick={() => startEdit(c)} title="Edit camera" aria-label={`Edit ${c.name}`}>
+                        <button className={ICON_BTN} onClick={() => startEdit(c)} title={t('camera.edit')} aria-label={`${t('camera.edit')} ${c.name}`}>
                           <Pencil size={15} />
                         </button>
                       )}
@@ -753,7 +755,7 @@ export function Cameras() {
                         <button
                           className={`${ICON_BTN} border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)]/10`}
                           onClick={() => navigate(`/live?camera=${c.id}`)}
-                          title="View live"
+                          title={t('camera.viewLive')}
                           aria-label={`View ${c.name} live`}
                         >
                           <Video size={15} />
@@ -763,7 +765,7 @@ export function Cameras() {
                         <button
                           className={`${ICON_BTN} hover:border-red-600 hover:bg-red-900/30 hover:text-red-400`}
                           onClick={() => onDelete(c)}
-                          title="Delete camera"
+                          title={t('camera.delete')}
                           aria-label={`Delete ${c.name}`}
                         >
                           <Trash2 size={15} />
@@ -780,7 +782,7 @@ export function Cameras() {
 
       {/* Pagination */}
       <div className="flex items-center gap-2 text-sm">
-        <Button disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
+        <Button disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>{t('camera.prev')}</Button>
         {/* activeOnly filters client-side of the count the backend returns, so
             totalPages would lie — fall back to the hasNext probe there. */}
         {activeOnly ? (
@@ -788,7 +790,7 @@ export function Cameras() {
         ) : (
           <span>Page {page} / {totalPages}</span>
         )}
-        <Button disabled={activeOnly ? !hasNext : page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+        <Button disabled={activeOnly ? !hasNext : page >= totalPages} onClick={() => setPage((p) => p + 1)}>{t('camera.next')}</Button>
       </div>
 
       {/* Edit Camera Dialog */}

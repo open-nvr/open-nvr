@@ -19,6 +19,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 
 type LocationState = {
   username?: string
@@ -26,6 +27,7 @@ type LocationState = {
 }
 
 export function MFAVerify() {
+  const { t } = useTranslation()
   const { state } = useLocation()
   const navigate = useNavigate()
   const { login, loading, error } = useAuth()
@@ -89,7 +91,7 @@ export function MFAVerify() {
         <img src="/opennvr-logo.svg" alt="OpenNVR" className="w-[35vw] h-auto" style={{ minWidth: '280px', maxWidth: '500px' }} />
         
         <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-        <h1 className="text-lg font-semibold tracking-wide text-gray-100">Two‑factor verification</h1>
+        <h1 className="text-lg font-semibold tracking-wide text-gray-100">{t('mfa.setup')}</h1>
         <div className="text-xs text-gray-400">Enter the 6‑digit code from your authenticator app.</div>
         {retryAfterSeconds > 0 && (
           <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">

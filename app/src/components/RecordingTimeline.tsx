@@ -17,6 +17,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
+import { useTranslation } from '../i18n';
 
 interface TimelineSegment {
   path: string;
@@ -36,6 +37,7 @@ export const RecordingTimeline: React.FC<RecordingTimelineProps> = ({
   onSelectionChange,
   onAnalyze
 }) => {
+  const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -192,7 +194,7 @@ export const RecordingTimeline: React.FC<RecordingTimelineProps> = ({
   return (
     <div className="bg-slate-800 p-4 rounded-lg">
       <div className="mb-3">
-        <h4 className="text-sm font-medium text-white mb-1">Recording Timeline</h4>
+        <h4 className="text-sm font-medium text-white mb-1">{t('shared.recordingTimeline')}</h4>
         <p className="text-xs text-slate-400">
           Drag on the timeline to select a time range to analyze
         </p>
@@ -212,7 +214,7 @@ export const RecordingTimeline: React.FC<RecordingTimelineProps> = ({
       {selectedRange && (
         <div className="mt-3 p-3 bg-slate-700 rounded text-sm space-y-1">
           <div className="flex justify-between items-center">
-            <span className="text-slate-300">Selected Range:</span>
+            <span className="text-slate-300">{t('shared.selectedRange')}</span>
             <button
               onClick={handleClearSelection}
               className="text-xs text-slate-400 hover:text-white"

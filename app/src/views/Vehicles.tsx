@@ -39,6 +39,7 @@ import {
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   alarmSeenAt,
@@ -704,6 +705,7 @@ function toCsv(rows: PlateEvent[], cameraName: (id: number) => string): string {
 }
 
 export function Vehicles() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
   const navigate = useNavigate()
@@ -1197,7 +1199,7 @@ export function Vehicles() {
         return (
           <button
             className="hover:underline inline-flex items-center gap-1"
-            title="Vehicle history — every time this plate was seen"
+            title={t('vehicles.historyTooltip')}
             onClick={() => setHistoryPlate(p)}
           >
             {p} <History size={12} className="text-[var(--text-dim)]" />
@@ -1278,8 +1280,8 @@ export function Vehicles() {
             note, not something an operator needs on every visit, and it
             cost a second line. */}
         <PageHeader
-          title="Vehicles (ANPR)"
-          description="License plate reads across your cameras. Watchlists apply live."
+          title={t('vehicles.title')}
+          description={t('vehicles.description')}
           actions={
             <>
               {/* A settings destination, not a filter — it belongs with
@@ -1293,21 +1295,21 @@ export function Vehicles() {
                 variant="outline"
                 size="sm"
                 onClick={() => navigate('/alerts-incidents')}
-                title="Sound, phone-call and hooter settings apply site-wide, across every app's alarms"
+                title={t('vehicles.soundTooltip')}
               >
-                <Volume2 size={13} /> Sound &amp; hooter
+                <Volume2 size={13} /> {t('vehicles.sound')}
               </Button>
               <Button variant="outline" size="sm" onClick={() => setReportOpen(true)}>
-                <FileText size={13} /> Monthly report
+                <FileText size={13} /> {t('vehicles.report')}
               </Button>
               {/* An empty PAGE is not an empty result set, so the guard is
                   the export's own state, not the row count. */}
               <Button variant="outline" size="sm" onClick={exportCsv} disabled={exporting}>
                 <Download size={13} className={exporting ? 'animate-pulse' : ''} />
-                {exporting ? 'Exporting…' : 'Export CSV'}
+                {exporting ? 'Exporting…' : t('vehicles.export')}
               </Button>
               <Button size="sm" onClick={() => eventsQuery.refetch()} disabled={eventsQuery.isFetching}>
-                <RefreshCw size={13} className={eventsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+                <RefreshCw size={13} className={eventsQuery.isFetching ? 'animate-spin' : ''} /> {t('vehicles.refresh')}
               </Button>
             </>
           }
@@ -1341,7 +1343,7 @@ export function Vehicles() {
               className="shrink-0 self-center font-medium"
               onClick={() => window.open(CONTACT_URL, '_blank', 'noopener,noreferrer')}
             >
-              Contact us <ArrowRight size={13} />
+              {t('vehicles.contact')} <ArrowRight size={13} />
             </Button>
         </div>
 
@@ -1351,8 +1353,8 @@ export function Vehicles() {
           // together before they wrap.
           <div className="mb-3 flex flex-wrap items-stretch gap-2">
             <StatChip
-              icon={ScanLine} value={stats?.total_reads} label="reads"
-              onClick={() => setTab('reads')} title="Show the plate reads"
+              icon={ScanLine} value={stats?.total_reads} label={t('vehicles.plateReads')}
+              onClick={() => setTab('reads')} title={t('vehicles.showReadsTooltip')}
             />
             <StatChip
               icon={Fingerprint} value={stats?.unique_plates} label="unique plates"
@@ -1367,14 +1369,14 @@ export function Vehicles() {
                 monthly report breaks down properly. */}
             {canConfigure && (
               <StatChip
-                icon={BookUser} value={registry.length} label="registered"
-                onClick={() => setTab('registry')} title="Open the vehicle register"
+                icon={BookUser} value={registry.length} label={t('vehicles.register')}
+                onClick={() => setTab('registry')} title={t('vehicles.openRegister')}
               />
             )}
             {canConfigure && (
               <StatChip
-                icon={ShieldAlert} value={monitors.length} label="monitored"
-                onClick={() => setTab('monitoring')} title="Open the monitoring list"
+                icon={ShieldAlert} value={monitors.length} label={t('vehicles.monitoring')}
+                onClick={() => setTab('monitoring')} title={t('vehicles.openMonitoring')}
               />
             )}
           </div>
@@ -1391,9 +1393,9 @@ export function Vehicles() {
             Vehicle register, where they do nothing. */}
         <Tabs
           tabs={([
-            { key: 'reads', label: 'Plate reads' },
-            { key: 'registry', label: `Vehicle register (${registry.length})` },
-            { key: 'monitoring', label: `Monitoring (${monitors.length})` },
+            { key: 'reads', label: t('vehicles.plateReads') },
+            { key: 'registry', label: `${t('vehicles.register')} (${registry.length})` },
+            { key: 'monitoring', label: `${t('vehicles.monitoring')} (${monitors.length})` },
             {
             key: 'alarms',
             // "(119/1358)" — unacknowledged over total, in the same
@@ -1405,7 +1407,7 @@ export function Vehicles() {
             // nothing to highlight.
             label: (
               <span className="inline-flex items-center gap-1.5">
-                Alarms
+                {t('vehicles.alarms')}
                 {typeof alarmCounts.data?.total === 'number' && (
                   <span className="text-[var(--text-dim)]">
                     (
@@ -1445,7 +1447,7 @@ export function Vehicles() {
           <Card className="mb-3">
             <CardContent className="p-3 space-y-2">
               <div className="flex items-center gap-2 font-medium text-sm">
-                <ShieldCheck size={14} /> Expected vehicles (legacy allowlist)
+                <ShieldCheck size={14} /> {t('vehicles.legacyAllowlist')}
               </div>
               <div className="text-[12px] text-[var(--text-dim)]">
                 These plates were marked "expected" before the register
@@ -1463,7 +1465,7 @@ export function Vehicles() {
                     <span className="font-mono">{plate}</span>
                     {!registryPlates.has(plate.toUpperCase()) && (
                       <button
-                        title="Move to register"
+                        title={t('vehicles.moveRegister')}
                         className="text-[var(--text-dim)] hover:text-[var(--text)]"
                         onClick={() =>
                           saveConfig.mutate(
@@ -1482,7 +1484,7 @@ export function Vehicles() {
                       </button>
                     )}
                     <button
-                      title="Remove from expected"
+                      title={t('vehicles.removeExpected')}
                       className="text-[var(--text-dim)] hover:text-red-400"
                       onClick={() =>
                         saveConfig.mutate(
@@ -1639,15 +1641,15 @@ export function Vehicles() {
           <EmptyState
             icon={<Car size={28} />}
             title={debouncedPlate || cameraId !== ''
-              ? 'No plate reads match these filters'
-              : 'No plate reads in this window'}
+              ? t('vehicles.noMatch')
+              : t('vehicles.noReads')}
             description={lprCameras.length === 0
               ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or assign it the License Plate Recognition skill under Cameras → edit → Assignments) and visits will appear here with their evidence photos.'
               : 'Vehicle visits appear here with their evidence photos.'}
             action={(debouncedPlate || cameraId !== '') ? (
               <Button variant="outline" onClick={() => {
                 setPlate(''); setCameraId(''); reads.setPage(1)
-              }}>Clear filters</Button>
+              }}>{t('vehicles.clearFilters')}</Button>
             ) : undefined}
           />
         }
@@ -1677,13 +1679,13 @@ export function Vehicles() {
               aria-label="Filter by camera"
               className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
             >
-              <option value="">All cameras</option>
+              <option value="">{t('vehicles.allCameras')}</option>
               {(camerasQuery.data ?? []).map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
             <SegmentedControl
-              label="Time range"
+              label={t('vehicles.timeRange')}
               options={RANGE_PRESETS.map((r) => ({ value: r.key, label: r.label }))}
               value={range.key}
               onChange={(key) => {
@@ -1692,13 +1694,13 @@ export function Vehicles() {
               }}
             />
             {alarmOnUnknown && (
-              <Badge variant="warning" title="Any plate not in the vehicle register raises a high-severity alert">
-                <BellRing size={12} /> Unknown-vehicle alarm ON
+              <Badge variant="warning" title={t('vehicles.unknownHighAlert')}>
+                <BellRing size={12} /> {t('vehicles.unknownAlarm')}
               </Badge>
             )}
             {!lprApp && (
               <span className="text-xs text-[var(--text-dim)]">
-                No enabled LPR app — reads still collect; watchlists need the app.
+                {t('vehicles.noLpr')}
               </span>
             )}
             <div className="ml-auto">
@@ -1733,7 +1735,7 @@ export function Vehicles() {
 
       {/* ── Per-plate history (all-time) ──────────────────────────── */}
       {historyPlate && (
-        <Modal open onClose={() => setHistoryPlate(null)} title={`${historyPlate} — vehicle history`}>
+      <Modal open onClose={() => setHistoryPlate(null)} title={`${historyPlate} — ${t('vehicles.history')}`}>
           {historyQuery.isPending ? (
             <Skeleton className="h-24" />
           ) : historyQuery.isError ? (
@@ -1758,21 +1760,21 @@ export function Vehicles() {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <div className="text-xl font-semibold">{historyQuery.data?.total_reads ?? 0}</div>
-                  <div className="text-xs text-[var(--text-dim)]">total reads</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.totalReads')}</div>
                 </div>
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.first_seen
                       ? new Date(historyQuery.data.first_seen).toLocaleString() : '—'}
                   </div>
-                  <div className="text-xs text-[var(--text-dim)]">first seen</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.firstSeen')}</div>
                 </div>
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.last_seen
                       ? new Date(historyQuery.data.last_seen).toLocaleString() : '—'}
                   </div>
-                  <div className="text-xs text-[var(--text-dim)]">last seen</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.lastSeen')}</div>
                 </div>
               </div>
               {gatesConfigured && sessionsQuery.data && (
@@ -1780,11 +1782,11 @@ export function Vehicles() {
                   <div className="text-xs text-[var(--text-dim)] mb-1 flex items-center gap-2">
                     Gate in / gate out
                     {sessionsQuery.data.inside_now && (
-                      <Badge variant="success">inside now</Badge>
+                      <Badge variant="success">{t('vehicles.insideNow')}</Badge>
                     )}
                   </div>
                   {sessionsQuery.data.sessions.length === 0 ? (
-                    <div className="text-xs text-[var(--text-dim)]">No gate passages yet.</div>
+                    <div className="text-xs text-[var(--text-dim)]">{t('vehicles.noGatePassages')}</div>
                   ) : (
                     <div className="max-h-48 overflow-y-auto">
                       <table className="w-full text-xs">
@@ -1821,7 +1823,7 @@ export function Vehicles() {
               )}
               {(historyQuery.data?.per_camera ?? []).length > 0 && (
                 <div>
-                  <div className="text-xs text-[var(--text-dim)] mb-1">By camera</div>
+                  <div className="text-xs text-[var(--text-dim)] mb-1">{t('vehicles.byCamera')}</div>
                   {(historyQuery.data?.per_camera ?? []).map((c) => (
                     <div key={c.camera_id} className="flex justify-between border-b border-[var(--border)] last:border-0 py-1">
                       <span>{cameraName(c.camera_id)}</span>
@@ -1838,7 +1840,7 @@ export function Vehicles() {
                   setHistoryPlate(null)
                 }}
               >
-                <Search size={14} /> Show these reads
+                <Search size={14} /> {t('vehicles.showReads')}
               </Button>
             </div>
           )}
@@ -1878,6 +1880,7 @@ function RowThumb({ e, plate, onOpen }: {
   plate: string
   onOpen: () => void
 }) {
+  const { t } = useTranslation()
   const [ref, seen] = useInView<HTMLDivElement>()
   if (readFrameIsMissing(e)) {
     // No read frame: the only image available is from a different
@@ -1887,7 +1890,7 @@ function RowThumb({ e, plate, onOpen }: {
       <button
         type="button"
         onClick={onOpen}
-        title="The frame this plate was read from was not stored"
+        title={t('vehicles.readFrameMissing')}
         className="h-8 w-14 rounded bg-[var(--bg-2)] grid place-items-center text-[9px] leading-tight text-[var(--text-dim)] cursor-zoom-in"
       >
         no read
@@ -1942,6 +1945,7 @@ function EvidenceDialog({
   cameraLabel: string
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   const plate = (e.plate_text ?? '').toUpperCase()
   const hasRead = !!e.has_plate_frame
   const hasFrame = hasRead || !!e.has_evidence
@@ -2039,7 +2043,7 @@ function EvidenceDialog({
         // and offer the (unrelated-moment) vehicle photo on request.
         <div className="relative border border-[var(--border)] bg-[var(--bg-2)] min-h-[220px] grid place-items-center text-center px-6 py-10">
           <div className="max-w-md space-y-3">
-            <div className="text-sm font-medium">Read frame not stored</div>
+            <div className="text-sm font-medium">{t('vehicles.frameMissing')}</div>
             <div className="text-xs text-[var(--text-dim)]">
               This number was written without the frame it was read from,
               so there is no photo that is guaranteed to show the car it
@@ -2146,6 +2150,7 @@ function RegistryTab({
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
 }) {
+  const { t } = useTranslation()
   // The dialog's subject: a new entry to add, or an existing plate to edit.
   const [dialog, setDialog] = useState<{ entry: RegistryEntry; editing: string | null } | null>(null)
   const [query, setQuery] = useState('')
@@ -2334,12 +2339,12 @@ function RegistryTab({
       variant="primary" size="sm"
       onClick={() => setDialog({ entry: { plate: '' }, editing: null })}
     >
-      <Plus size={14} /> Add vehicle
+      <Plus size={14} /> {t('vehicles.add')}
     </Button>
   )
   const importButton = (
     <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-      <Upload size={14} /> Import CSV / Excel
+      <Upload size={14} /> {t('vehicles.import')}
     </Button>
   )
 
@@ -2383,14 +2388,14 @@ function RegistryTab({
         <Card>
           <EmptyState
             icon={<Car size={28} />}
-            title="No vehicles registered yet"
-            description="Add each resident vehicle, or import the whole list from a spreadsheet — Import shows the columns it reads and has a template. Then switch on the unknown-vehicle alarm and any stranger raises an alert."
+            title={t('vehicles.noRegistered')}
+            description={t('vehicles.registerDescription')}
             action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
           />
         </Card>
       ) : (
         <DataTable<RegistryEntry>
-          caption="Vehicle register"
+          caption={t('vehicles.vehicleRegister')}
           columns={registerColumns}
           rows={pageRows}
           rowKey={(r) => r.plate}
@@ -2405,8 +2410,8 @@ function RegistryTab({
           empty={
             <EmptyState
               icon={<Search size={28} />}
-              title={`No vehicle matches “${query.trim()}”`}
-              description="Search looks at the plate, owner, flat, model and note."
+              title={`${t('vehicles.noMatchRegister')} “${query.trim()}”`}
+              description={t('vehicles.searchFields')}
             />
           }
           toolbar={
@@ -2417,13 +2422,13 @@ function RegistryTab({
                   value={query}
                   onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
                   placeholder="Search plate, owner, flat…"
-                  aria-label="Search the register"
+                  aria-label={t('vehicles.searchRegister')}
                   className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
                 />
               </div>
               {importButton}
               <Button variant="outline" size="sm" onClick={exportCsv}>
-                <Download size={14} /> Export CSV
+                <Download size={14} /> {t('vehicles.export')}
               </Button>
               {addButton}
               {/* Always opens (never closes) the panel under the table and
@@ -2433,7 +2438,7 @@ function RegistryTab({
                 aria-controls={settingsPanelId}
                 onClick={() => openSettings({ highlight: true })}
               >
-                <SlidersHorizontal size={14} /> Gate settings
+                <SlidersHorizontal size={14} /> {t('vehicles.gateSettings')}
               </Button>
               <div className="ml-auto">
                 <Pagination
@@ -2469,7 +2474,7 @@ function RegistryTab({
               size={16}
               className={`shrink-0 text-[var(--text-dim)] transition-transform ${settingsOpen ? 'rotate-90' : ''}`}
             />
-            <span className="shrink-0 text-sm font-medium">Gate settings</span>
+            <span className="shrink-0 text-sm font-medium">{t('vehicles.gateSettings')}</span>
             {!settingsOpen && (
               <span className="min-w-0 truncate text-xs text-[var(--text-dim)]">{settingsSummary}</span>
             )}
@@ -2478,19 +2483,19 @@ function RegistryTab({
             <div id={settingsPanelId} className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
               <SettingRow
                 icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
-                title="Alarm on unknown vehicles"
-                summary="A high-severity alert for any plate not in this register."
-                info="One alarm per stranger, across all gate cameras. Allowlisted plates count as known; monitored plates keep their own alarm."
+                title={t('vehicles.alarmUnknown')}
+                summary={t('vehicles.alarmSummary')}
+                info={t('vehicles.alarmInfo')}
               >
                 <Switch
                   checked={alarmOnUnknown}
                   onChange={onToggleAlarm}
-                  label="Alarm on unknown vehicles"
+                  label={t('vehicles.alarmUnknown')}
                 />
               </SettingRow>
               <SettingRow
                 icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
-                title="Automatic barrier"
+                title={t('vehicles.automaticBarrier')}
                 summary={hasIn
                   ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
                   : (
@@ -2510,14 +2515,14 @@ function RegistryTab({
                 <Switch
                   checked={barrierMode === 'registered'}
                   onChange={onToggleBarrier}
-                  label="Automatic barrier"
+                  label={t('vehicles.automaticBarrier')}
                 />
               </SettingRow>
               <SettingRow
                 icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
-                title="Visitor overstay alert"
-                summary="Alert when a visitor stays inside longer than a set time."
-                info="One alert per visit, checked as reads arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit."
+                title={t('vehicles.overstay')}
+                summary={t('vehicles.overstaySummary')}
+                info={t('vehicles.overstayInfo')}
               >
                 {overstayHours > 0 && (
                   <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
@@ -2545,15 +2550,15 @@ function RegistryTab({
                     setOverstayDraft(null)
                     onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
                   }}
-                  label="Visitor overstay alert"
+                  label={t('vehicles.overstay')}
                 />
               </SettingRow>
 
               {/* Camera roles — the site's layout in the vehicle story */}
               <div className="space-y-2 px-4 py-3">
                 <div className="flex items-center gap-1.5 text-sm font-medium">
-                  Camera roles
-                  <InfoTip label="About camera roles">
+                  {t('vehicles.cameraRoles')}
+                  <InfoTip label={t('vehicles.aboutRoles')}>
                     <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
                     unlocks exit times, stay durations and “inside now”.{' '}
                     <b>Parking</b>, or a named location of your own, enriches each
@@ -2576,7 +2581,7 @@ function RegistryTab({
                   </div>
                 )}
                 {cameras.length === 0 ? (
-                  <div className="text-xs text-[var(--text-dim)]">No cameras yet.</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.noCameras')}</div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -2614,7 +2619,7 @@ function RegistryTab({
                                     disabled={Boolean(blocked)}
                                     className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
                                   >
-                                    <option value="">No role</option>
+                                    <option value="">{t('vehicles.noRole')}</option>
                                     <option value="gate_in">Gate IN</option>
                                     <option value="gate_out">Gate OUT</option>
                                     <option value="parking">Parking</option>
@@ -2640,10 +2645,10 @@ function RegistryTab({
                                 ) : cameraAdopted(c, LPR_SKILL) ? (
                                   <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
                                     <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
-                                    Reading plates
+                                    {t('vehicles.reading')}
                                   </span>
                                 ) : (
-                                  <span className="text-[var(--text-dim)]">Not reading</span>
+                                  <span className="text-[var(--text-dim)]">{t('vehicles.notReading')}</span>
                                 )}
                               </td>
                             </tr>
@@ -2755,6 +2760,7 @@ function ImportDialog({
   onChooseFile: () => void
   onDownloadTemplate: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <Modal
       open
@@ -2764,12 +2770,12 @@ function ImportDialog({
       footer={
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={onDownloadTemplate}>
-            <Download size={14} /> Download template
+            <Download size={14} /> {t('vehicles.downloadTemplate')}
           </Button>
           <div className="ml-auto flex gap-2">
-            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="outline" size="sm" onClick={onClose}>{t('vehicles.close')}</Button>
             <Button variant="primary" size="sm" onClick={onChooseFile}>
-              <Upload size={14} /> Choose file…
+              <Upload size={14} /> {t('vehicles.chooseFile')}
             </Button>
           </div>
         </div>
@@ -2784,9 +2790,9 @@ function ImportDialog({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                <th className="py-1.5 pr-4 font-normal">Column</th>
-                <th className="py-1.5 pr-4 font-normal">Example</th>
-                <th className="py-1.5 font-normal">Also accepted as</th>
+                <th className="py-1.5 pr-4 font-normal">{t('vehicles.column')}</th>
+                <th className="py-1.5 pr-4 font-normal">{t('vehicles.example')}</th>
+                <th className="py-1.5 font-normal">{t('vehicles.acceptedAs')}</th>
               </tr>
             </thead>
             <tbody>
@@ -2795,7 +2801,7 @@ function ImportDialog({
                   <td className="py-1.5 pr-4 whitespace-nowrap">
                     <span className="font-mono">{c.field}</span>
                     {c.required && (
-                      <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">required</span>
+                      <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">{t('vehicles.required')}</span>
                     )}
                     <div className="text-xs text-[var(--text-dim)]">{c.meaning}</div>
                   </td>
@@ -3000,6 +3006,7 @@ function MonitoringTab({
   cameras: CameraRow[]
   onSave: (next: Monitor[]) => void
 }) {
+  const { t } = useTranslation()
   // The dialog's subject: a new rule to add, or an existing plate to edit.
   const [dialog, setDialog] = useState<{ monitor: Monitor; editing: string | null } | null>(null)
   const [query, setQuery] = useState('')
@@ -3012,7 +3019,7 @@ function MonitoringTab({
     return (
       <EmptyState
         icon={<ShieldAlert size={28} />}
-        title="Monitoring needs an enabled LPR app"
+        title={t('vehicles.monitorNeedsLpr')}
         description="Install and enable an ANPR — License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
       />
     )
@@ -3068,7 +3075,7 @@ function MonitoringTab({
     },
     // The flexible column — no width, so it takes the slack.
     {
-      key: 'note', header: 'Reason / note', cellClassName: 'truncate',
+      key: 'note', header: t('vehicles.reason'), cellClassName: 'truncate',
       cell: (m) => m.note
         ? <span title={m.note}>{m.note}</span>
         : <span className="text-[var(--text-dim)]">—</span>,
@@ -3081,7 +3088,7 @@ function MonitoringTab({
       key: 'where', header: 'Where', width: 'w-[180px]', hideBelow: 'md', cellClassName: 'truncate',
       cell: (m) => m.cameras?.length
         ? <span title={m.cameras.map(cameraLabel).join(', ')}>{m.cameras.map(cameraLabel).join(', ')}</span>
-        : <span className="text-[var(--text-dim)]">Any camera</span>,
+        : <span className="text-[var(--text-dim)]">{t('vehicles.anyCamera')}</span>,
     },
     {
       // A switch in the row: silencing a rule for a while is the everyday
@@ -3095,7 +3102,7 @@ function MonitoringTab({
             onChange={(on) => save({ ...m, active: on })}
             label={`${m.plate} armed`}
           />
-          <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? 'Armed' : 'Silenced'}</span>
+          <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? t('vehicles.armed') : t('vehicles.silenced')}</span>
         </span>
       ),
     },
@@ -3113,7 +3120,7 @@ function MonitoringTab({
             <Pencil size={15} />
           </button>
           <button
-            title="Stop monitoring this plate"
+            title={t('vehicles.stopMonitoring')}
             aria-label={`Stop monitoring ${m.plate}`}
             className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
             onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
@@ -3130,7 +3137,7 @@ function MonitoringTab({
       variant="primary" size="sm"
       onClick={() => setDialog({ monitor: { plate: '', severity: 'high', active: true }, editing: null })}
     >
-      <Plus size={14} /> Monitor a plate
+      <Plus size={14} /> {t('vehicles.monitorAdd')}
     </Button>
   )
   const importButton = (
@@ -3162,14 +3169,14 @@ function MonitoringTab({
         <Card>
           <EmptyState
             icon={<ShieldAlert size={28} />}
-            title="No plates under monitoring"
+            title={t('vehicles.noMonitored')}
             description="Monitor a plate — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
             action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
           />
         </Card>
       ) : (
         <DataTable<Monitor>
-          caption="Monitored plates"
+          caption={t('vehicles.monitored')}
           columns={columns}
           rows={pageRows}
           rowKey={(m) => m.plate}
@@ -3197,7 +3204,7 @@ function MonitoringTab({
                   value={query}
                   onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
                   placeholder="Search plate or reason…"
-                  aria-label="Search monitored plates"
+                  aria-label={t('vehicles.searchMonitored')}
                   className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
                 />
               </div>
@@ -3426,6 +3433,7 @@ function ReportOverlay({
   cameraName: (id: number) => string
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   const months = useMemo(() => lastMonths(12), [])
   const [sel, setSel] = useState(months[0])
 
@@ -3509,13 +3517,13 @@ function ReportOverlay({
             ))}
           </select>
           <Button onClick={() => window.print()} disabled={!report}>
-            <FileText size={14} /> Print / Save as PDF
+            <FileText size={14} /> {t('vehicles.printPdf')}
           </Button>
           <button
             className="ml-auto text-neutral-500 hover:text-neutral-900 text-sm"
             onClick={onClose}
           >
-            ✕ Close
+            ✕ {t('vehicles.close')}
           </button>
         </div>
 
@@ -3529,7 +3537,7 @@ function ReportOverlay({
           <div className="text-sm leading-relaxed">
             {/* header */}
             <div className="mb-6">
-              <div className="text-2xl font-semibold">Vehicle Movement Report</div>
+              <div className="text-2xl font-semibold">{t('vehicles.reportTitle')}</div>
               <div className="text-neutral-500">
                 {monthLabel(report.year, report.month)} · generated {new Date().toLocaleDateString()} · OpenNVR
               </div>
@@ -3538,10 +3546,10 @@ function ReportOverlay({
             {/* summary */}
             <div className="grid grid-cols-4 gap-3 mb-6">
               {[
-                ['Total reads', report.total_reads],
-                ['Unique vehicles', report.unique_plates],
-                ['Registered seen', registered.length],
-                ['Visitors / unknown', visitors.length],
+                [t('vehicles.total'), report.total_reads],
+                [t('vehicles.unique'), report.unique_plates],
+                [t('vehicles.registeredSeen'), registered.length],
+                [t('vehicles.visitorsUnknown'), visitors.length],
               ].map(([label, value]) => (
                 <div key={String(label)} className="border border-neutral-200 rounded p-3">
                   <div className="text-xl font-semibold">{value}</div>
@@ -3558,7 +3566,7 @@ function ReportOverlay({
             </div>
 
             {/* registered by unit */}
-            <div className="text-base font-semibold mb-1 mt-6">Registered vehicles</div>
+            <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.registeredVehicles')}</div>
             {registered.length === 0 ? (
               <div className="text-neutral-500">No registered vehicle was seen this month.</div>
             ) : (
@@ -3589,7 +3597,7 @@ function ReportOverlay({
             )}
 
             {/* visitors */}
-            <div className="text-base font-semibold mb-1 mt-6">Visitors &amp; unknown vehicles</div>
+            <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.visitorsVehicles')}</div>
             {visitors.length === 0 ? (
               <div className="text-neutral-500">No unregistered vehicle was seen this month.</div>
             ) : (
@@ -3618,7 +3626,7 @@ function ReportOverlay({
             {/* monitored */}
             {monitored.length > 0 && (
               <>
-                <div className="text-base font-semibold mb-1 mt-6">Monitored plate sightings</div>
+                <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.monitoredSightings')}</div>
                 <table className="w-full border-collapse mb-2">
                   <thead>
                     <tr className="text-left text-xs text-neutral-500 border-b border-neutral-300">

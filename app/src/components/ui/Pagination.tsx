@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react'
 import { Button } from './index'
+import { useTranslation } from '../../i18n'
 
 export type PaginationProps = {
   page: number
@@ -26,6 +27,7 @@ export function Pagination({
   onPageChange, onPageSizeChange, isFetching = false, label,
   announce = true,
 }: PaginationProps) {
+  const { t } = useTranslation()
   const knownTotal = typeof total === 'number'
   const shown = rowCount ?? 0
   const from = shown ? (page - 1) * pageSize + 1 : 0
@@ -39,7 +41,7 @@ export function Pagination({
   const canNext = !isFetching && (totalPages ? page < totalPages : Boolean(hasNext))
 
   const rangeText = !knownTotal
-    ? (shown ? `Showing ${from}–${to}` : 'No results')
+    ? (shown ? `Showing ${from}–${to}` : t('shared.noRecordings'))
     : total === 0
       ? `No${noun ? noun : ' results'}`
       : `${from}–${to} of ${total}${noun}`
@@ -53,7 +55,7 @@ export function Pagination({
     // the count says where you are and the chevrons move you. It also
     // ends the strip growing wider as the result set does.
     <nav
-      aria-label="Pagination"
+      aria-label={t('shared.pagination')}
       className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 px-3 py-1.5 text-xs"
     >
       {/* Only ONE of the two instances announces, or a screen reader
@@ -72,19 +74,19 @@ export function Pagination({
             hence aria-label. Doubled chevrons jump to the ends, which is
             what the numbered strip was really being used for. */}
         <Button
-          variant="ghost" size="sm" aria-label="First page" title="First page"
+          variant="ghost" size="sm" aria-label={t('shared.firstPage')} title={t('shared.firstPage')}
           className="px-1.5" disabled={!canPrev} onClick={() => onPageChange(1)}
         >
           <ChevronsLeft size={16} />
         </Button>
         <Button
-          variant="ghost" size="sm" aria-label="Previous page" title="Previous page"
+          variant="ghost" size="sm" aria-label={t('shared.previousPage')} title={t('shared.previousPage')}
           className="px-1.5" disabled={!canPrev} onClick={() => onPageChange(page - 1)}
         >
           <ChevronLeft size={16} />
         </Button>
         <Button
-          variant="ghost" size="sm" aria-label="Next page" title="Next page"
+          variant="ghost" size="sm" aria-label={t('shared.nextPage')} title={t('shared.nextPage')}
           className="px-1.5" disabled={!canNext} onClick={() => onPageChange(page + 1)}
         >
           <ChevronRight size={16} />
@@ -94,7 +96,7 @@ export function Pagination({
             be worse than none. */}
         {totalPages !== undefined && (
           <Button
-            variant="ghost" size="sm" aria-label="Last page" title={`Last page (${totalPages})`}
+            variant="ghost" size="sm" aria-label={t('shared.lastPage')} title={`${t('shared.lastPage')} (${totalPages})`}
             className="px-1.5" disabled={!canNext} onClick={() => onPageChange(totalPages)}
           >
             <ChevronsRight size={16} />
@@ -104,7 +106,7 @@ export function Pagination({
 
       {/* Borderless too — it is a preference, not a field to fill in. */}
       <label className="flex items-center text-[var(--text-dim)]">
-        <span className="sr-only">Rows per page</span>
+        <span className="sr-only">{t('shared.rowsPerPage')}</span>
         <select
           className="cursor-pointer rounded border-0 bg-transparent py-0.5 pl-1 pr-0 text-xs text-[var(--text-dim)] hover:text-[var(--text)]"
           value={pageSize}

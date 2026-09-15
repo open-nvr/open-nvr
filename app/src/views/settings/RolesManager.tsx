@@ -21,6 +21,7 @@ import { Shield, ShieldPlus, X } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { useTranslation } from '../../i18n'
 
 type Role = {
   id: number
@@ -36,6 +37,7 @@ type RoleForm = {
 }
 
 export function RolesManager() {
+  const { t } = useTranslation()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +65,7 @@ export function RolesManager() {
         setRoles(list)
         setTotal((res.data && (res.data as any).total) ? (res.data as any).total : list.length)
       } catch (e: any) {
-        setError(extractApiError(e, 'Failed to load roles'))
+        setError(extractApiError(e, t('admin.failedLoadRoles')))
       } finally {
         setLoading(false)
       }
@@ -107,7 +109,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to create role'))
+      setError(extractApiError(e, t('admin.failedCreateRole')))
     } finally {
       setLoading(false)
     }
@@ -125,39 +127,39 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to update role'))
+      setError(extractApiError(e, t('admin.failedUpdateRole')))
     } finally {
       setLoading(false)
     }
   }
 
   const onDelete = async (r: Role) => {
-    if (!confirm(`Delete role "${r.name}"?`)) return
+    if (!confirm(`${t('admin.confirmDeleteRole')} "${r.name}" ?`)) return
     try {
       setLoading(true)
       setError(null)
       await apiService.deleteRole(r.id)
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to delete role'))
+      setError(extractApiError(e, t('admin.failedDeleteRole')))
     } finally {
       setLoading(false)
     }
   }
 
   if (!canAdmin) {
-    return <div className="text-sm text-amber-400">Admin only: you don’t have permission to manage roles.</div>
+    return <div className="text-sm text-amber-400">{t('admin.only')}</div>
   }
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-base font-semibold">Roles</h2>
+        <h2 className="text-base font-semibold">{t('admin.roles')}</h2>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
             {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
           </select>
-          <button className="px-2 py-1 bg-[var(--accent)] text-white rounded" onClick={startCreate}>Add Role</button>
+          <button className="px-2 py-1 bg-[var(--accent)] text-white rounded" onClick={startCreate}>{t('admin.addRole')}</button>
         </div>
       </div>
 
@@ -170,7 +172,7 @@ export function RolesManager() {
             <div className="flex items-center justify-between p-4 border-b border-neutral-700">
               <h3 className="font-semibold flex items-center gap-2">
                 <ShieldPlus size={18} />
-                Add New Role
+                {t('admin.addNewRole')}
               </h3>
               <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>
                 <X size={18} />
@@ -182,17 +184,17 @@ export function RolesManager() {
                   <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
                 )}
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('admin.name')} *</span>
                   <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" placeholder="e.g., operator" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Description</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('admin.description')}</span>
                   <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
                 </label>
               </div>
               <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Creating...' : 'Create Role'}</button>
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? `${t('common.loading')}` : t('admin.createRole')}</button>
               </div>
             </form>
           </div>
@@ -206,7 +208,7 @@ export function RolesManager() {
             <div className="flex items-center justify-between p-4 border-b border-neutral-700">
               <h3 className="font-semibold flex items-center gap-2">
                 <Shield size={18} />
-                Edit Role: {editing.name}
+                {t('admin.editRole')}: {editing.name}
               </h3>
               <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>
                 <X size={18} />
@@ -218,17 +220,17 @@ export function RolesManager() {
                   <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
                 )}
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('admin.name')} *</span>
                   <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Description</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('admin.description')}</span>
                   <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
                 </label>
               </div>
               <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Updating...' : 'Update Role'}</button>
+                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
+                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? `${t('common.loading')}` : t('admin.updateRole')}</button>
               </div>
             </form>
           </div>
@@ -239,9 +241,9 @@ export function RolesManager() {
         <table className="w-full text-sm">
           <thead className="bg-[var(--panel-2)] text-left">
             <tr>
-              <th className="p-2">Name</th>
-              <th className="p-2">Description</th>
-              <th className="p-2">Actions</th>
+              <th className="p-2">{t('admin.name')}</th>
+              <th className="p-2">{t('admin.description')}</th>
+              <th className="p-2">{t('admin.actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -250,14 +252,14 @@ export function RolesManager() {
                 <td className="p-2">{r.name}</td>
                 <td className="p-2">{r.description || ''}</td>
                 <td className="p-2 space-x-2">
-                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => startEdit(r)}>Edit</button>
-                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => onDelete(r)}>Delete</button>
+                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => startEdit(r)}>{t('admin.edit')}</button>
+                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => onDelete(r)}>{t('admin.delete')}</button>
                 </td>
               </tr>
             ))}
             {paged.length === 0 && (
               <tr>
-                <td colSpan={3} className="p-3 text-center text-[var(--text-dim)]">No roles</td>
+                <td colSpan={3} className="p-3 text-center text-[var(--text-dim)]">{t('admin.noRoles')}</td>
               </tr>
             )}
           </tbody>
@@ -265,9 +267,9 @@ export function RolesManager() {
       </div>
 
       <div className="flex items-center gap-2 text-sm">
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
-        <span>Page {page} / {totalPages}</span>
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
+        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>{t('admin.previous')}</button>
+        <span>{t('admin.page')} {page} / {totalPages}</span>
+        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>{t('admin.next')}</button>
       </div>
     </div>
   )

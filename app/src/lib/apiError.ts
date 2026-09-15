@@ -38,5 +38,6 @@ function toStringSafe(v: unknown): string {
 export function extractApiError(e: any, fallback: string): string {
   const detail = e?.data?.detail ?? e?.response?.data?.detail
   const msg = toStringSafe(detail) || (typeof e?.message === 'string' ? e.message : '')
+  if (e?.code === 'API_NETWORK_ERROR' || /^(failed to fetch|api_network_error)$/i.test(msg.trim())) return fallback
   return msg || fallback
 }

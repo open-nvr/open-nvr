@@ -31,6 +31,7 @@ import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
@@ -2057,26 +2058,25 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
  *  rather than on every card: repeated twelve times down a grid it stops
  *  being an invitation and becomes chrome competing with Install. */
 function ContributeNote({ appName }: { appName?: string }) {
+  const { t } = useTranslation()
   return (
     <p className="text-xs text-[var(--text-dim)] leading-relaxed">
-      Your feedback shapes this catalog
-      {appName ? <> — including what {appName} should do next</> : null}. Tell us
-      what is missing or broken at{' '}
+      {t('catalog.feedback')}
+      {appName ? <> — {t('catalog.contributeNext')}</> : null}. {t('catalog.missingBroken')}{' '}
       <a
         className="text-[var(--accent)] hover:underline"
         href="mailto:contact@opennvr.org?subject=OpenNVR%20App%20Catalog%20feedback"
       >
         contact@opennvr.org
       </a>
-      , or send the improvement yourself — apps are one entry in a curated
-      index and the PR is five steps:{' '}
+      , {t('catalog.orSend')}{' '}
       <a
         className="text-[var(--accent)] hover:underline"
         href="https://github.com/open-nvr/open-nvr/blob/main/docs/CONTRIBUTING_APPS.md"
         target="_blank"
         rel="noreferrer"
       >
-        How to contribute an app
+        {t('catalog.howContribute')}
       </a>
       .
     </p>
@@ -2318,6 +2318,7 @@ function CatalogFilters({
    *  hidden rather than offered as a no-op. */
   allowPopular: boolean
 }) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative flex-1 min-w-[14rem]">
@@ -2329,7 +2330,7 @@ function CatalogFilters({
           type="search"
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search apps by name, category or what they do"
+          placeholder={t('catalog.search')}
           aria-label="Search apps"
           className="w-full pl-7 pr-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
         />
@@ -2361,16 +2362,16 @@ function CatalogFilters({
       </div>
       <label className="flex items-center gap-1 text-xs text-[var(--text-dim)]">
         <ArrowDownWideNarrow size={14} />
-        <span className="sr-only sm:not-sr-only">Sort</span>
+        <span className="sr-only sm:not-sr-only">{t('catalog.sort')}</span>
         <select
           value={sort}
           onChange={(e) => onSort(e.target.value as CatalogSort)}
           aria-label="Sort apps"
           className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
         >
-          <option value="recommended">Recommended</option>
-          <option value="name">Name (A–Z)</option>
-          {allowPopular && <option value="popular">Most popular</option>}
+          <option value="recommended">{t('catalog.recommended')}</option>
+          <option value="name">{t('catalog.nameAZ')}</option>
+          {allowPopular && <option value="popular">{t('catalog.mostPopular')}</option>}
         </select>
       </label>
       {resultCount !== null && (
@@ -2433,6 +2434,7 @@ function GroupHeader({ title, count }: { title: string; count?: number }) {
 }
 
 export function AppCatalog() {
+  const { t } = useTranslation()
   const appsQuery = useApps()
   const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
@@ -2549,11 +2551,11 @@ export function AppCatalog() {
           while the nav said "App Catalog" — the same two-names-for-one-
           thing that made the plate app hard to place. */}
       <PageHeader
-        title="App Catalog"
-        description="Apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C and the platform's Tier-0 detection."
+        title={t('catalog.title')}
+        description={t('catalog.description')}
         actions={
           <Button onClick={refresh} disabled={refreshing}>
-            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> {t('catalog.refresh')}
           </Button>
         }
       />
@@ -2572,19 +2574,19 @@ export function AppCatalog() {
 
       {/* --------------------------- Installed --------------------------- */}
       <div className="space-y-3">
-        <GroupHeader title="Installed" count={shownInstalled.length} />
+        <GroupHeader title={t('catalog.installed')} count={shownInstalled.length} />
         {appsQuery.isPending ? (
           <SkeletonGrid count={6} />
         ) : appsQuery.isError ? (
           <ErrorCard
-            title="App registry unavailable"
-            message={extractApiError(appsQuery.error, 'Could not load the app registry.')}
+            title={t('catalog.registryUnavailable')}
+            message={extractApiError(appsQuery.error, t('catalog.loadRegistry'))}
             onRetry={() => appsQuery.refetch()}
           />
         ) : apps.length === 0 ? (
           <EmptyState
             icon={<Boxes size={28} />}
-            title="No apps installed yet"
+            title={t('catalog.noInstalled')}
             description="Apps self-register on boot; install one from the index below or see sdk/opennvr-app-sdk to build your own."
           />
         ) : shownInstalled.length === 0 ? (
@@ -2608,8 +2610,8 @@ export function AppCatalog() {
           "there is nothing to install". Say which it is. */}
       {indexQuery.isError && (
         <ErrorCard
-          title="App index unavailable"
-          message={extractApiError(indexQuery.error, 'Could not load the list of apps available to install. Installed apps above are unaffected.')}
+          title={t('catalog.indexUnavailable')}
+          message={extractApiError(indexQuery.error, t('catalog.loadIndex'))}
           onRetry={() => indexQuery.refetch()}
         />
       )}

@@ -19,8 +19,10 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 
 export function Login() {
+  const { t } = useTranslation()
   const { login, loading, error, setupRequired } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -93,27 +95,27 @@ export function Login() {
         <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
         {setupRequired && (
           <div className="text-sm text-orange-300 bg-orange-900/30 border border-orange-500/30 rounded p-3">
-            First-time setup required. Please complete setup before logging in.
+            {t('login.setupRequired')}
           </div>
         )}
         {retryAfterSeconds > 0 && (
           <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">
-            Too many failed attempts. Try again in {formatRetryTime(retryAfterSeconds)}.
+            {t('login.tooManyAttempts')} {formatRetryTime(retryAfterSeconds)}.
           </div>
         )}
         {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-2">{error}</div>}
         {msg && <div className="text-sm text-emerald-300 bg-emerald-900/30 border border-emerald-500/30 rounded p-2">{msg}</div>}
         <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Username</span>
+          <span className="block mb-2 text-gray-400 font-medium">{t('login.username')}</span>
           <input className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" required />
         </label>
         <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Password</span>
+          <span className="block mb-2 text-gray-400 font-medium">{t('login.password')}</span>
           <input type="password" className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="●●●●●●●●" required />
         </label>
         {/* MFA input moved to dedicated page */}
         <button disabled={loading || retryAfterSeconds > 0} className="w-full px-3 py-2 rounded bg-[var(--accent)]/90 text-white disabled:opacity-60 shadow-md hover:bg-[var(--accent)]">
-          {loading ? 'Signing in…' : retryAfterSeconds > 0 ? `Try again in ${formatRetryTime(retryAfterSeconds)}` : 'Sign in'}
+          {loading ? t('login.signingIn') : retryAfterSeconds > 0 ? `${t('login.tryAgainIn')} ${formatRetryTime(retryAfterSeconds)}` : t('login.signIn')}
         </button>
         <div className="flex items-center justify-between text-xs text-gray-500">
           {/* <span>Tip: default admin is admin / admin123</span> */}

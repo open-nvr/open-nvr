@@ -23,6 +23,7 @@
 import { clsx } from 'clsx'
 import { CircleAlert, Inbox, RefreshCw } from 'lucide-react'
 import type { ReactNode, ButtonHTMLAttributes, CSSProperties, TableHTMLAttributes, HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from 'react'
+import { useTranslation } from '../../i18n'
 
 /* ----------------------------- Card ----------------------------- */
 
@@ -201,6 +202,7 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
 /* -------------------------- ErrorCard --------------------------- */
 
 export function ErrorCard({ title = 'Error', message, onRetry }: { title?: string; message: string; onRetry?: () => void }) {
+  const { t } = useTranslation()
   return (
     <Card className="border-red-700/40">
       <CardHeader>
@@ -209,7 +211,7 @@ export function ErrorCard({ title = 'Error', message, onRetry }: { title?: strin
         {onRetry && (
           <div className="ml-auto">
             <Button onClick={onRetry}>
-              <RefreshCw size={14} /> Retry
+              <RefreshCw size={14} /> {t('shared.retry')}
             </Button>
           </div>
         )}

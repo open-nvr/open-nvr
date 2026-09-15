@@ -21,8 +21,10 @@ import { useNavigate } from 'react-router-dom'
 import { toDataURL } from 'qrcode'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 
 export function MFASetup() {
+  const { t } = useTranslation()
   const { user, refreshUser } = useAuth()
   const [otpauthUrl, setOtpauthUrl] = useState<string>('')
   const [secret, setSecret] = useState<string>('')
@@ -78,7 +80,7 @@ export function MFASetup() {
   return (
     <div className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4">
       <div className="w-full max-w-lg bg-[var(--panel)] border border-neutral-700 p-4">
-        <h1 className="text-lg font-semibold mb-1">Set up Multi‑Factor Authentication</h1>
+        <h1 className="text-lg font-semibold mb-1">{t('mfa.setup')}</h1>
         <p className="text-sm text-[var(--text-dim)] mb-3">Scan the QR code with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6‑digit code to verify.</p>
         {loading ? (
           <div className="text-sm">Loading…</div>

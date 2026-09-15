@@ -41,6 +41,7 @@ import { warmHls } from '../lib/loadHls'
 import { useCameraAspects, useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
 import { localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
 import { RecordingCalendar } from '../components/RecordingCalendar'
 import { MultiCamTimeline, type TimelineRow } from '../components/MultiCamTimeline'
 import { SyncPlaybackTile } from '../components/SyncPlaybackTile'
@@ -118,6 +119,7 @@ function formatDateLong(date: string) {
  * checklist, and one multi-track timeline driving every tile.
  */
 export function SyncPlayback() {
+  const { t } = useTranslation()
   const { showError } = useSnackbar()
   const stageRef = useRef<HTMLDivElement>(null)
   // Per-camera display-aspect settings for the grid tiles (#354).
@@ -136,7 +138,9 @@ export function SyncPlayback() {
   const overview = (overviewQuery.data?.cameras as OverviewCamera[] | undefined) ?? null
   const overviewLoading = overviewQuery.isPending
   const overviewError = overviewQuery.error
-    ? (overviewQuery.error as any)?.message || 'Failed to load recordings'
+    ? ((overviewQuery.error as any)?.message === 'API_NETWORK_ERROR'
+      ? t('dashboard.failedRecordings')
+      : (overviewQuery.error as any)?.message || t('dashboard.failedRecordings'))
     : null
   const mediamtxAvailable = overviewQuery.data?.mediamtx_available !== false
   const loadOverview = overviewQuery.refetch
@@ -474,12 +478,16 @@ export function SyncPlayback() {
         <PageTitle />
         <div className="bg-[var(--panel-2)] border border-[var(--border)] p-12 text-center">
           <Film size={48} className="mx-auto mb-4 opacity-30" />
-          <p className="text-[var(--text-dim)]">{overviewError || 'No recordings found'}</p>
+          <p className="text-[var(--text-dim)]">
+            {overviewError && (overviewError as any)?.message === 'API_NETWORK_ERROR'
+              ? t('dashboard.failedRecordings')
+              : overviewError || t('playback.noRecordings')}
+          </p>
           <p className="text-sm text-[var(--text-dim)] mt-1">
-            {overviewError ? 'Try refreshing.' : 'Recordings will appear here once cameras start recording.'}
+            {overviewError ? t('playback.tryRefreshing') : t('playback.recordingsAppear')}
           </p>
           <button onClick={() => loadOverview()} className="btn-primary btn mt-4">
-            Refresh
+            {t('playback.refresh')}
           </button>
         </div>
       </div>
@@ -502,7 +510,7 @@ export function SyncPlayback() {
             </span>
           )}
           <span className="text-sm text-[var(--text-dim)]">
-            {selectedCams.length} camera{selectedCams.length !== 1 ? 's' : ''}
+            {selectedCams.length} {t('playback.cameraCount')}
           </span>
           {selectedDate && dayTotal.cams > 0 && (
             <span
@@ -510,7 +518,7 @@ export function SyncPlayback() {
               title={`Recorded on this day across ${dayTotal.cams} camera${dayTotal.cams !== 1 ? 's' : ''}`}
             >
               <Film size={14} className="text-[var(--accent)]" />
-              {formatDuration(dayTotal.seconds)} recorded
+              {formatDuration(dayTotal.seconds)} {t('playback.recorded')}
             </span>
           )}
           {!mediamtxAvailable && (
@@ -538,12 +546,12 @@ export function SyncPlayback() {
           {overviewLoading ? (
             <div className="border border-[var(--border)] bg-[var(--panel-2)] animate-pulse flex flex-col items-center justify-center gap-2 py-16 text-[var(--text-dim)]">
               <Loader2 size={22} className="animate-spin text-[var(--accent)]" />
-              <span className="text-sm">Loading recordings…</span>
+              <span className="text-sm">{t('playback.loadingRecordings')}</span>
             </div>
           ) : selectedCams.length === 0 ? (
             <div className="border border-dashed border-[var(--border)] flex flex-col items-center justify-center gap-2 py-16 text-[var(--text-dim)]">
               <Video size={28} className="opacity-50" />
-              <span className="text-sm">Select cameras from the panel to start playback</span>
+              <span className="text-sm">{t('playback.selectCameras')}</span>
             </div>
           ) : (
             selectedCams.map((cam) => (
@@ -652,7 +660,7 @@ export function SyncPlayback() {
             aria-expanded={calOpen}
           >
             <CalendarDays size={15} className="text-[var(--accent)]" />
-            <span className="font-medium">{selectedDate ? formatDateLong(selectedDate) : 'Pick a date'}</span>
+            <span className="font-medium">{selectedDate ? formatDateLong(selectedDate) : t('playback.selectDate')}</span>
             <ChevronDown size={15} className={`ml-auto transition-transform ${calOpen ? '' : '-rotate-90'}`} />
           </button>
           {calOpen && (
@@ -666,7 +674,7 @@ export function SyncPlayback() {
         <div className="bg-[var(--panel-2)] border border-[var(--border)] flex flex-col min-h-0 lg:flex-1">
           <div className="shrink-0 flex items-center gap-2 px-2.5 py-1.5 border-b border-[var(--border)]">
             <Video size={15} className="text-[var(--accent)]" />
-            <span className="text-sm font-medium">Cameras</span>
+            <span className="text-sm font-medium">{t('playback.cameras')}</span>
             <span className="ml-auto text-xs text-[var(--text-dim)]">
               {selectedIds.length}/{MAX_TILES}
             </span>
@@ -688,10 +696,11 @@ export function SyncPlayback() {
 }
 
 function PageTitle() {
+  const { t } = useTranslation()
   return (
     <h1 className="text-lg font-semibold flex items-center gap-2">
       <MonitorPlay size={20} className="text-[var(--accent)]" />
-      Playback
+      {t('playback.pageTitle')}
     </h1>
   )
 }

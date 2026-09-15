@@ -22,9 +22,15 @@
 
 import { Component, type ReactNode } from 'react'
 import { CircleAlert, RefreshCw } from 'lucide-react'
+import { useTranslation } from '../i18n'
 
 type Props = { children: ReactNode; title?: string }
 type State = { error: Error | null }
+
+function TryAgainLabel() {
+  const { t } = useTranslation()
+  return <>{t('shared.tryAgain')}</>
+}
 
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null }
@@ -57,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
               className="inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm border border-[var(--border)] bg-[var(--panel)] hover:bg-[var(--panel-2)] text-[var(--text)]"
               onClick={() => this.setState({ error: null })}
             >
-              <RefreshCw size={14} /> Try again
+              <RefreshCw size={14} /> <TryAgainLabel />
             </button>
           </div>
         </div>

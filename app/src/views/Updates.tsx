@@ -18,6 +18,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
 import { useAuth } from '../auth/AuthContext'
 import { ChevronDown, Check, X, RotateCcw, AlertTriangle, FileText, Settings } from 'lucide-react'
 
@@ -234,6 +235,7 @@ function GlobalForm({ config, onChange, disabled }: { config: any; onChange: (ne
 }
 
 export function Updates() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const [loading, setLoading] = useState(true)
@@ -377,12 +379,12 @@ export function Updates() {
     <div className="space-y-6 max-w-5xl mx-auto pb-10">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Media Server Configuration</h1>
-          <p className="text-[var(--text-dim)] mt-1">Manage core settings, protocols, and stream behaviors.</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t('updates.title')}</h1>
+          <p className="text-[var(--text-dim)] mt-1">{t('updates.description')}</p>
         </div>
         <div className="text-xs text-[var(--text-dim)] bg-white/5 px-3 py-1.5 rounded-full border border-white/10 flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${health ? 'bg-green-500' : 'bg-amber-500'}`}></span>
-            {health?.version ? <>Server v{health.version}</> : 'Connecting...'}
+            {health?.version ? <>Server v{health.version}</> : t('updates.connecting')}
         </div>
       </div>
 
@@ -409,16 +411,16 @@ export function Updates() {
       {/* Control Bar */}
       <div className="flex items-center gap-4 bg-[var(--card-bg)] p-4 rounded-xl border border-[var(--border)] shadow-sm flex-wrap">
         <div className="flex-1 min-w-[200px]">
-        <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">Configuration Section</label>
+        <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">{t('updates.section')}</label>
         <div className="relative">
           <select 
             className="w-full appearance-none bg-[var(--bg)] border border-[var(--border)] rounded-lg py-2 pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
             value={activeSection}
             onChange={(e) => setActiveSection(e.target.value as ConfigSection)}
           >
-            <option value="defaults">Path Defaults (Recording & Streams)</option>
-            <option value="global">Global Settings (Protocols & Logging)</option>
-            <option value="streams">Active Streams Monitor</option>
+            <option value="defaults">{t('updates.defaults')}</option>
+            <option value="global">{t('updates.global')}</option>
+            <option value="streams">{t('updates.streams')}</option>
           </select>
           <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-dim)]">
              <ChevronDown size={14} />
@@ -428,19 +430,19 @@ export function Updates() {
 
         {activeSection !== 'streams' && (
              <div className="min-w-[150px]">
-                <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">Edit Mode</label>
+                <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">{t('updates.editMode')}</label>
                  <div className="flex bg-[var(--bg)] rounded-lg p-1 border border-[var(--border)]">
                     <button 
                         className={`flex-1 flex items-center justify-center py-1 px-3 text-xs rounded-md transition-colors ${viewMode === 'form' ? 'bg-[var(--panel-2)] text-white shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
                         onClick={() => setViewMode('form')}
                     >
-                        <Settings size={12} className="mr-1" /> Easy
+                        <Settings size={12} className="mr-1" /> {t('updates.easy')}
                     </button>
                     <button 
                         className={`flex-1 flex items-center justify-center py-1 px-3 text-xs rounded-md transition-colors ${viewMode === 'json' ? 'bg-[var(--panel-2)] text-white shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
                         onClick={() => setViewMode('json')}
                     >
-                         <FileText size={12} className="mr-1" /> JSON
+                         <FileText size={12} className="mr-1" /> {t('updates.json')}
                     </button>
                  </div>
              </div>
@@ -453,7 +455,7 @@ export function Updates() {
           <div className="card p-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-center justify-between mb-6 pb-4 border-b border-[var(--border)]">
               <div>
-                <h2 className="text-lg font-medium">Global Settings</h2>
+                <h2 className="text-lg font-medium">{t('updates.globalTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">Configure protocols, logging, and system timeouts.</p>
               </div>
               <div className="flex items-center gap-3">
@@ -461,12 +463,12 @@ export function Updates() {
                   className="btn bg-[var(--bg)] hover:bg-[var(--bg-hover)] border border-[var(--border)]"
                   onClick={() => setGlobalDraft(JSON.stringify(globalCfg ?? {}, null, 2))}
                   disabled={loading}
-                ><RotateCcw size={14} className="mr-2" /> Revert</button>
+                ><RotateCcw size={14} className="mr-2" /> {t('updates.revert')}</button>
                 <button
                   className="btn btn-primary min-w-[100px]"
                   disabled={!canAdmin || !globalValid || globalSaving}
                   onClick={saveGlobal}
-                >{globalSaving ? 'Saving…' : 'Save Changes'}</button>
+                >{globalSaving ? 'Saving…' : t('updates.save')}</button>
               </div>
             </div>
             
@@ -491,7 +493,7 @@ export function Updates() {
           <div className="card p-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
              <div className="flex items-center justify-between mb-6 pb-4 border-b border-[var(--border)]">
               <div>
-                <h2 className="text-lg font-medium">Path Defaults</h2>
+                <h2 className="text-lg font-medium">{t('updates.pathTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">These settings apply to all cameras unless specifically overridden in the camera configuration.</p>
               </div>
               <div className="flex items-center gap-3">
@@ -499,12 +501,12 @@ export function Updates() {
                   className="btn bg-[var(--bg)] hover:bg-[var(--bg-hover)] border border-[var(--border)]"
                   onClick={() => setPdDraft(JSON.stringify(pdCfg ?? {}, null, 2))}
                   disabled={loading}
-                ><RotateCcw size={14} className="mr-2" /> Revert</button>
+                ><RotateCcw size={14} className="mr-2" /> {t('updates.revert')}</button>
                 <button
                   className="btn btn-primary min-w-[100px]"
                   disabled={!canAdmin || !pdValid || pdSaving}
                   onClick={savePathDefaults}
-                >{pdSaving ? 'Saving…' : 'Save Changes'}</button>
+                >{pdSaving ? 'Saving…' : t('updates.save')}</button>
               </div>
             </div>
 
@@ -528,7 +530,7 @@ export function Updates() {
           <div className="card p-0 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-center justify-between p-4 border-b border-[var(--border)] bg-[var(--bg-sub)]">
               <div>
-                <h2 className="text-lg font-medium">Active Streams</h2>
+                <h2 className="text-lg font-medium">{t('updates.activeTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">Real-time status of all active media paths.</p>
               </div>
               <button 
@@ -537,22 +539,22 @@ export function Updates() {
                 disabled={pathsLoading}
               >
                 <RotateCcw className={`w-3.5 h-3.5 mr-2 ${pathsLoading ? 'animate-spin' : ''}`} />
-                {pathsLoading ? 'Refreshing…' : 'Refresh List'}
+                {pathsLoading ? 'Refreshing…' : t('updates.refresh')}
               </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[var(--text-dim)] bg-[var(--bg)] border-b border-[var(--border)]">
-                    <th className="py-3 pl-4 pr-2 font-medium">Path Name</th>
-                    <th className="py-3 px-2 font-medium">Active Readers</th>
-                    <th className="py-3 px-2 font-medium">Recording Status</th>
-                    <th className="py-3 px-2 font-medium text-right pr-4">Actions</th>
+                    <th className="py-3 pl-4 pr-2 font-medium">{t('updates.pathName')}</th>
+                    <th className="py-3 px-2 font-medium">{t('updates.activeReaders')}</th>
+                    <th className="py-3 px-2 font-medium">{t('updates.recordingStatus')}</th>
+                    <th className="py-3 px-2 font-medium text-right pr-4">{t('updates.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]/50">
                   {paths.length === 0 && (
-                    <tr><td className="py-8 text-center text-[var(--text-dim)]" colSpan={4}>No active streams found.</td></tr>
+                    <tr><td className="py-8 text-center text-[var(--text-dim)]" colSpan={4}>{t('updates.noStreams')}</td></tr>
                   )}
                   {paths.map((p: any) => {
                     const name = p?.name || p?.path || '-'

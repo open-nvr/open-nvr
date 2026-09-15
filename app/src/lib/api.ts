@@ -130,13 +130,27 @@ function buildUrl(base: string, path: string, params?: Record<string, any>) {
 }
 
 async function doFetch(method: string, fullUrl: string, headers: Record<string, string>, body: BodyInit | undefined, options: RequestOptions) {
-  const resp = await fetch(fullUrl, {
-    method,
-    headers,
-    body: method === 'GET' ? undefined : body,
-    signal: options.signal,
-    credentials: 'omit',
-  })
+  let resp: Response
+  try {
+    resp = await fetch(fullUrl, {
+      method,
+      headers,
+      body: method === 'GET' ? undefined : body,
+      signal: options.signal,
+      credentials: 'omit',
+    })
+  } catch (cause) {
+    // Browsers expose every transport/CORS/backend-down failure as the same
+    // unhelpful "Failed to fetch" message. Use a stable internal marker so
+    // extractApiError can fall back to the translated, endpoint-specific text.
+    // Keep the technical code out of user-facing `error.message` values.
+    // Several legacy views still display the message directly; exposing the
+    // internal sentinel there made the UI show `API_NETWORK_ERROR`.
+    const error = new Error('') as Error & { code?: string }
+    error.code = 'API_NETWORK_ERROR'
+    ;(error as Error & { cause?: unknown }).cause = cause
+    throw error
+  }
 
   const rtype = options.responseType || 'json'
   let payload: any = null

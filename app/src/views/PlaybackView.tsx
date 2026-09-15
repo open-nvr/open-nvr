@@ -42,6 +42,7 @@ import {
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
 import { PlaybackConsole } from '../components/PlaybackConsole'
+import { useTranslation } from '../i18n'
 
 // Daily recording - one entry per camera per day
 interface DailyRecording {
@@ -92,6 +93,7 @@ interface CloudUploadStatus {
 }
 
 export function PlaybackView() {
+  const { t } = useTranslation()
   const { token, loading: authLoading, user } = useAuth()
   const { showError, showSuccess } = useSnackbar()
   // Recordings hold the camera's coded frames untouched, so an anamorphic
@@ -368,7 +370,7 @@ export function PlaybackView() {
       <header className="flex items-center gap-4 flex-wrap">
         <h1 className="text-lg font-semibold flex items-center gap-2">
           <Film size={20} className="text-[var(--accent)]" />
-          Recordings
+          {t('playback.title')}
         </h1>
         
         {/* Stats summary */}
@@ -406,10 +408,10 @@ export function PlaybackView() {
             {loading ? (
               <>
                 <Loader2 size={14} className="animate-spin" />
-                Loading...
+                {t('playback.loading')}
               </>
             ) : (
-              'Refresh'
+              t('common.refresh')
             )}
           </button>
         </div>
@@ -428,7 +430,7 @@ export function PlaybackView() {
         <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 p-3 text-sm flex items-center gap-2">
           <Unplug size={16} />
           <span>
-            <strong>Playback server offline.</strong>
+            <strong>{t('playback.serverOffline')}</strong>
           </span>
         </div>
       )}
@@ -437,7 +439,7 @@ export function PlaybackView() {
       {user?.is_superuser && cloudUploadConfigured && cloudUploadStatus && (cloudUploadStatus.worker_running || cloudUploadStatus.queue_size > 0) && (
         <div className="bg-[var(--panel)] border border-neutral-700 p-3">
           <div className="flex items-center justify-between text-sm">
-            <div className="font-medium">Cloud Upload Status</div>
+            <div className="font-medium">{t('playback.cloudStatus')}</div>
             <div className="text-[var(--text-dim)]">
               Queue: {cloudUploadStatus.queue_size} | Completed: {cloudUploadStatus.stats?.completed_total || 0} | Failed: {cloudUploadStatus.stats?.failed_total || 0}
             </div>
@@ -461,12 +463,12 @@ export function PlaybackView() {
         {loading ? (
           <div className="bg-[var(--panel)] border border-neutral-700 p-8 text-center">
             <Loader2 size={24} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
-            <p className="text-[var(--text-dim)]">Loading recordings...</p>
+            <p className="text-[var(--text-dim)]">{t('playback.loading')}</p>
           </div>
         ) : cameras.length === 0 ? (
           <div className="bg-[var(--panel)] border border-neutral-700 p-12 text-center">
             <Film size={48} className="mx-auto mb-4 opacity-30" />
-            <p className="text-[var(--text-dim)]">No recordings found</p>
+            <p className="text-[var(--text-dim)]">{t('playback.noRecordings')}</p>
             <p className="text-sm text-[var(--text-dim)] mt-1">
               Recordings will appear here once cameras start recording
             </p>

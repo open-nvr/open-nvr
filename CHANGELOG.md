@@ -30,6 +30,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Digest challenge are retried once with WS-Security UsernameToken
   PasswordDigest. HTTP Digest remains the primary authentication method, and
   unrelated HTTP and SOAP failures are returned without a retry.
+  Follow-up: a host that accepted the WS-Security retry is remembered for
+  the rest of the process, so later calls to it — PTZ moves above all —
+  are one request instead of a rejected Digest round trip plus a retry
+  (and a remembered host that later rejects WS-Security is retried with
+  Digest and forgotten). The auth-fault check now reads the SOAP body
+  alone, so firmware that returns faults with HTTP 200 is retried too, and
+  the WS-Security fault codes (`FailedAuthentication`,
+  `InvalidSecurityToken`) count alongside `NotAuthorized`. When both
+  schemes refuse the credentials the log now points at the camera clock,
+  which WS-Security also rejects when it drifts.
 
 - **Live overlay: phantoms gone, real objects steady.** Two field
   reports, one root cause. Tier-0's tracker keeps an unmatched track

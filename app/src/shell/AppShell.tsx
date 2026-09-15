@@ -32,6 +32,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
 import { AlertBell } from '../components/AlertBell'
+import { useTranslation } from '../i18n'
 
 type NavItem = {
   to: string
@@ -113,6 +114,17 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
+const NAV_LABEL_KEYS: Record<string, string> = {
+  Dashboard: 'nav.dashboard', 'Live View': 'nav.liveView', Recordings: 'nav.recordings', Cameras: 'nav.cameras',
+  'AI & Detections': 'nav.aiDetections', 'AI Engine': 'nav.aiEngine', 'AI Models (BYOM)': 'nav.aiModels',
+  'Detection Results': 'nav.detectionResults', 'AI Adapters': 'nav.aiAdapters', 'Security & Network': 'nav.securityNetwork',
+  Network: 'nav.network', 'Logs & Forensics': 'nav.logsForensics', Governance: 'nav.governance', 'Audit Logs': 'nav.auditLogs',
+  'Compliance & Reports': 'nav.complianceReports', 'Alerts & Incidents': 'nav.alertsIncidents', 'Access Control (RBAC)': 'nav.accessControl',
+  'Customer Keys (BYOK)': 'nav.customerKeys', Administration: 'nav.administration', Configuration: 'nav.configuration',
+  'Media Server Config': 'nav.mediaServerConfig', Integrations: 'nav.integrations', Cloud: 'nav.cloud', Firmware: 'nav.firmware',
+  Support: 'nav.support', Applications: 'nav.applications', 'App Catalog': 'nav.appCatalog',
+}
+
 // Accordion: at most one group is open at a time; its key is persisted.
 const OPEN_GROUP_KEY = 'opennvr.sidebar.openGroup'
 
@@ -125,6 +137,7 @@ function loadOpenGroup(): string | null {
 }
 
 export function AppShell() {
+  const { language, setLanguage, t } = useTranslation()
   const rootRef = useRef<HTMLDivElement>(null)
   const { isFullscreen, toggle } = useFullscreen(rootRef as React.RefObject<HTMLDivElement>)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -282,20 +295,32 @@ export function AppShell() {
         </Link>
         <div className="ml-auto flex items-center gap-3">
           <AlertBell />
+          <label className="inline-flex items-center gap-1 text-xs normal-case tracking-normal text-[var(--text-dim)]">
+            <span className="sr-only">{t('language.label')}</span>
+            <select
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as typeof language)}
+              aria-label={t('language.label')}
+              className="bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] rounded px-1.5 py-1"
+            >
+              <option value="en">{t('language.english')}</option>
+              <option value="fr">{t('language.french')}</option>
+            </select>
+          </label>
           <button
-            aria-label="Toggle Theme"
+            aria-label={t('header.toggleTheme')}
             className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
             onClick={toggleTheme}
-            title={theme === 'light' ? 'Switch to dark' : 'Switch to light'}
+            title={theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}
           >
             {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
-            <span className="hidden md:inline">{theme === 'light' ? 'Dark' : 'Light'}</span>
+            <span className="hidden md:inline">{theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}</span>
           </button>
           {canView('/live') && (
             <Link
               to="/live"
               className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-              title="Open Live View"
+              title={t('header.openLiveView')}
             >
               <Camera size={14} />
               <span className="hidden md:inline">Live</span>
@@ -305,28 +330,28 @@ export function AppShell() {
             <button
               className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
               onClick={() => setMenuOpen((s) => !s)}
-              title={user ? user.username : 'Account'}
+              title={user ? user.username : t('header.account')}
             >
               <UserIcon size={14} />
-              <span className="hidden md:inline">{user?.username ?? 'Account'}</span>
+              <span className="hidden md:inline">{user?.username ?? t('header.account')}</span>
             </button>
             {menuOpen && (
               <div className="absolute right-0 mt-1 bg-[var(--panel)] border border-[var(--border)] text-sm min-w-40 z-50">
-                <div className="px-3 py-2 text-[var(--text-dim)]">Signed in as <span className="text-[var(--text)]">{user?.username}</span></div>
+                <div className="px-3 py-2 text-[var(--text-dim)]">{t('header.signedInAs')} <span className="text-[var(--text)]">{user?.username}</span></div>
                 <button className="w-full text-left px-3 py-2 hover:bg-[var(--panel-2)] inline-flex items-center gap-2" onClick={logout}>
-                  <LogOut size={14} /> Logout
+                  <LogOut size={14} /> {t('header.logout')}
                 </button>
               </div>
             )}
           </div>
           <button
-            aria-label="Toggle Fullscreen"
+            aria-label={t('header.toggleFullscreen')}
             className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
             onClick={toggle}
-            title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+            title={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
           >
             {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
-            <span className="hidden md:inline">Fullscreen</span>
+            <span className="hidden md:inline">{isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}</span>
           </button>
           <LiveClock />
         </div>
@@ -341,15 +366,15 @@ export function AppShell() {
             <button
               className="inline-flex items-center justify-center p-2 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
               onClick={() => setSidebarOpen((s) => !s)}
-              aria-label="Toggle Sidebar"
-              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+              aria-label={t('sidebar.toggle')}
+              title={sidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
             >
               <Menu size={16} />
             </button>
             {pinnedGroups.map((group) => (
               <div key={group.key} className="mt-2 space-y-0.5">
                 {group.items.map((item) => (
-                  <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                  <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} collapsed={!sidebarOpen} />
                 ))}
               </div>
             ))}
@@ -363,7 +388,7 @@ export function AppShell() {
                 return (
                   <div key={group.key} className="mb-2 pb-2 border-b border-[var(--border)] last:border-b-0 space-y-0.5">
                     {group.items.map((item) => (
-                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed />
+                      <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} collapsed />
                     ))}
                   </div>
                 )
@@ -374,7 +399,7 @@ export function AppShell() {
                 return (
                   <div key={group.key} className="py-1 space-y-0.5">
                     {group.items.map((item) => (
-                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
+                      <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} />
                     ))}
                   </div>
                 )
@@ -391,13 +416,13 @@ export function AppShell() {
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!collapsed}
                   >
-                    <span className="truncate whitespace-nowrap">{group.label}</span>
+                    <span className="truncate whitespace-nowrap">{t(NAV_LABEL_KEYS[group.label] ?? group.label)}</span>
                     <ChevronDown size={16} className={`flex-shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
                   </button>
                   {!collapsed && (
                     <div className="pl-3 py-1 space-y-0.5">
                       {group.items.map((item) => (
-                        <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
+                        <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} />
                       ))}
                     </div>
                   )}
