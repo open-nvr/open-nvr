@@ -446,7 +446,19 @@ class CameraWorker:
         try:
             bodies = self.app.pose(self.infer, image, frame, self.tracker)
         except PoseUnavailable as exc:
+            was_down = self.inference_down
             self._note_infer_failure(str(exc))
+            if self.inference_down and not was_down and self.engine is not None:
+                # The moment this stops being a blip and becomes an
+                # outage, let go of whatever was mid-screening. Nothing
+                # ticks while we are not receiving keypoints — not
+                # orphan expiry, not _session_over — so on recovery the
+                # first frame sees a huge gap, calls it "left", and
+                # publishes a screening that had two of four surfaces
+                # when WE went blind as improper_scan against the guard.
+                # abandon() is exactly the right verb: rule the ones
+                # that had already finished, drop the rest.
+                self.engine.abandon(frame.wall_ts, reason="inference_down")
             return
         if bodies is None:
             # A frame we could not encode. Not an outage — nothing to
@@ -1005,7 +1017,25 @@ def _bodies_from(result, frame, tracker):
 
     from guard_scan.core import Body
 
-    persons = ((result or {}).get("result") or result or {}).get("persons") or []
+    body = (result or {}).get("result") or result or {}
+
+    # A §7 FailureEnvelope travels in the SAME "result" slot as a real
+    # result — that is deliberate on the adapter's side, so one parser
+    # handles both — and the old expression turned it into an empty
+    # persons list. An error then looked exactly like a frame with
+    # nobody in it: _on_frame reset _infer_failures, cleared the outage,
+    # and left /health green while the app screened nobody for as long
+    # as the adapter kept failing. The whole PoseUnavailable apparatus
+    # exists for this case; it was being walked around.
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) or body.get("status") == "error":
+            detail = ""
+            if isinstance(error, dict):
+                detail = str(error.get("code") or error.get("message") or "")
+            raise PoseUnavailable(detail or "adapter returned an error envelope")
+
+    persons = body.get("persons") or []
     kept, boxes = [], []
     for person in persons:
         kps = person.get("keypoints") or []

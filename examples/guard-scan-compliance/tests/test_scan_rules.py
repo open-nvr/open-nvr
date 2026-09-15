@@ -729,3 +729,163 @@ def test_the_guard_election_survives_a_saved_setting():
     assert e.engine.guard.guard_id == who
     # The accumulated evidence is still there, not reset to nothing.
     assert set(e.engine.guard.tracks) == set(tracked)
+
+
+# ── the confidence floor on front/back ─────────────────────────────
+#
+# The pose adapter NEVER omits an occluded keypoint: all 17 come back,
+# every frame, each with its own confidence. `person()` above emits only
+# 0.9 or 0.0, which is a shape real output never has — so these build
+# their keypoints by hand at the confidences a real back-turned person
+# produces.
+
+
+def _head(nose=0.0, eyes=0.0, ears=0.0, cx=560.0, cy=300.0, min_conf=0.35):
+    """A body whose head joints carry exactly the given confidences."""
+    kp = np.zeros((17, 3), dtype=np.float32)
+    kp[G.L_SHO] = (cx - 30, cy - 40, 0.9)
+    kp[G.R_SHO] = (cx + 30, cy - 40, 0.9)
+    kp[G.NOSE] = (cx, cy - 70, nose)
+    kp[G.L_EYE] = (cx - 8, cy - 75, eyes)
+    kp[G.R_EYE] = (cx + 8, cy - 75, eyes)
+    kp[G.L_EAR] = (cx - 14, cy - 72, ears)
+    kp[G.R_EAR] = (cx + 14, cy - 72, ears)
+    return G.Body(1, (cx - 60, cy - 90, cx + 60, cy + 90), kp, min_conf)
+
+
+def test_a_back_turned_person_is_not_facing_the_camera():
+    """Nose and both eyes at 0.30 is the model saying it CANNOT see a
+    face. Summed raw they reach 0.90 and used to clear the gate outright
+    — before the ears, which the model can see perfectly well, were
+    compared at all. The front then got credit for a pass down the back.
+    """
+    assert _head(nose=0.30, eyes=0.30, ears=0.88).facing_camera is False
+
+
+def test_a_face_the_model_can_see_still_counts():
+    assert _head(nose=0.95, eyes=0.90, ears=0.10).facing_camera is True
+
+
+def test_a_half_seen_face_beats_unseen_ears():
+    """Two confident face joints and no visible ears is still a front."""
+    assert _head(nose=0.60, eyes=0.30, ears=0.10).facing_camera is True
+
+
+def test_every_head_joint_below_the_floor_is_a_back():
+    """Nothing visible at all must not read as a face."""
+    assert _head(nose=0.2, eyes=0.2, ears=0.2).facing_camera is False
+
+
+# ── the scanner light belongs to one person ────────────────────────
+
+
+class _AlwaysLit:
+    """Stands in for RedLightWatch: the wand's lamp is on, always.
+
+    Real detection is HSV over a patch around the wrist; what is under
+    test here is WHOSE session the reading is applied to, so the optics
+    are replaced by a constant.
+    """
+
+    def __init__(self):
+        self.resets = 0
+        self.ratio = 0.08
+        self.hits = 3
+        self.window_s = 0.8
+
+    def reset(self):
+        self.resets += 1
+
+    def update(self, frame, wrist, scale, now):
+        return wrist is not None
+
+
+def test_the_scanner_flag_does_not_leak_to_the_next_person():
+    """A critical alert naming the wrong person is worse than no alert.
+
+    One RedLightWatch serves the whole engine and `lit` used to be
+    applied to every engaged subject in the frame, so with two people
+    engaged at once both were flagged for one person's metal.
+    """
+    e = Engine(dwell_s=0.4)
+    e.engine.light = _AlwaysLit()
+    now = establish(e)
+
+    # Two customers, the wand on the first one's torso.
+    first = person(2, 560, 300)
+    wrist = region_point(first.regions()["torso"][0])
+    for _ in range(int(3.0 * FPS)):
+        now += DT
+        bodies = [person(1, 400, 300, wrists=(wrist, None)),
+                  person(2, 560, 300), person(3, 760, 300)]
+        e.engine.guard_id = e.engine.guard.update(bodies, now)
+        e.engine._handle(FRAME, bodies, now)
+
+    flagged = [a for a in e.alerts if a.get("kind") == "scanner_flag"]
+    assert flagged, "the person the wand was on should have been flagged"
+    subjects = {a["subject_track"] for a in flagged}
+    assert subjects == {2}, f"the flag reached someone else too: {subjects}"
+
+
+def test_the_light_window_is_cleared_when_the_wand_changes_person():
+    """window_s outlives a person stepping aside: without a reset, the
+    hits collected on A are still inside the window when B steps up."""
+    e = Engine(dwell_s=0.4)
+    watch = _AlwaysLit()
+    e.engine.light = watch
+    now = establish(e)
+
+    first = person(2, 560, 300)
+    second = person(3, 760, 300)
+    for target, cid in ((first, 2), (second, 3)):
+        wrist = region_point(target.regions()["torso"][0])
+        for _ in range(int(1.5 * FPS)):
+            now += DT
+            bodies = [person(1, 400, 300, wrists=(wrist, None)),
+                      person(2, 560, 300), person(3, 760, 300)]
+            e.engine.guard_id = e.engine.guard.update(bodies, now)
+            e.engine._handle(FRAME, bodies, now)
+
+    assert watch.resets >= 1, "the window was carried from one person to the next"
+
+
+# ── abandon() actually lets go ─────────────────────────────────────
+
+
+def test_abandon_resets_the_guard_election():
+    """abandon() has always called guard.reset() behind a hasattr guard
+    and GuardPicker never had the method, so a feed break kept an
+    election — and a lost_anchor — for a track that is never coming
+    back."""
+    e = Engine()
+    now = establish(e)
+    assert e.engine.guard_id == 1
+    assert e.engine.guard.tracks
+
+    e.engine.abandon(now, reason="inference_down")
+
+    assert e.engine.guard.guard_id is None
+    assert e.engine.guard.tracks == {}
+    assert e.engine.guard.lost_anchor is None
+
+
+def test_abandon_drops_an_unfinished_screening_but_keeps_a_complete_one():
+    """The point of abandon: our outage must not be graded as the
+    guard's incomplete scan."""
+    e = Engine(dwell_s=0.4, min_screen=0.0)
+    now = establish(e)
+    cust = person(2, 560, 300)
+    wrist = region_point(cust.regions()["left_arm"][0])
+    for _ in range(int(2.0 * FPS)):
+        now += DT
+        bodies = [person(1, 400, 300, wrists=(wrist, None)), person(2, 560, 300)]
+        e.engine.guard_id = e.engine.guard.update(bodies, now)
+        e.engine._handle(FRAME, bodies, now)
+
+    assert e.engine.sessions, "expected a screening in flight"
+    before = len(e.screenings)
+    e.engine.abandon(now, reason="inference_down")
+
+    assert not e.engine.sessions
+    assert len(e.screenings) == before, (
+        "an unfinished screening was published as a result")

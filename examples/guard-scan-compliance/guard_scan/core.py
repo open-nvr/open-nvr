@@ -209,9 +209,31 @@ class Body:
 
     @property
     def facing_camera(self):
-        """True when we can see the face, i.e. the person's front is to us."""
-        face_conf = sum(float(self.kps[i][2]) for i in (NOSE, L_EYE, R_EYE))
-        ear_conf = sum(float(self.kps[i][2]) for i in (L_EAR, R_EAR))
+        """True when we can see the face, i.e. the person's front is to us.
+
+        Every confidence here goes through the same ``min_conf`` floor
+        that ``_pt`` applies to every other joint, and for the same
+        reason: the pose adapter NEVER omits an occluded keypoint, it
+        returns all 17 with a low confidence. Summing them raw made a
+        back-turned person read as front-facing — nose and both eyes at
+        0.30, which is the model saying "I cannot see a face", sum to
+        0.90 and cleared the old ``face_conf >= 0.9`` gate, which
+        short-circuited before the ears (0.88 each, the model saying it
+        CAN see the back of a head) were ever compared.
+
+        That is not a cosmetic mis-read: front/back is the one
+        attribution the whole grade rests on. It credited the front for
+        a pass down the back, left the back uncovered, and raised
+        improper_scan against a guard who had done the job correctly.
+        """
+        def _conf(idx):
+            c = float(self.kps[idx][2])
+            return c if c >= self.min_conf else 0.0
+
+        face_conf = sum(_conf(i) for i in (NOSE, L_EYE, R_EYE))
+        ear_conf = sum(_conf(i) for i in (L_EAR, R_EAR))
+        # With the floor applied, three CONFIDENT face joints are needed
+        # to clear 0.9 outright; anything less has to also beat the ears.
         return face_conf >= 0.9 or (face_conf >= 0.5 and face_conf > ear_conf)
 
     def regions(self):
@@ -474,6 +496,26 @@ class GuardPicker:
         self.manual = None
         self.challenger = None
         self.challenge = 0
+        self.lost_anchor = None
+        self.lost_at = 0.0
+        self.lost_scale = 0.0
+        self.last_at = None
+
+    def reset(self) -> None:
+        """Forget the election.
+
+        ``abandon()`` has always called ``self.guard.reset()`` behind a
+        ``hasattr`` guard, and this class never had the method — so after
+        a feed break the picker kept the whole election, including a
+        ``lost_anchor`` and a ``guard_id`` for a track that is never
+        coming back. The next person to walk in inherits a decision made
+        about somebody else. A manual ``g``-key pick is deliberately
+        kept: an operator saying "that one is the guard" outlives an
+        outage.
+        """
+        self.tracks = {}
+        self.guard_id = None
+        self.challenger, self.challenge = None, 0
         self.lost_anchor = None
         self.lost_at = 0.0
         self.lost_scale = 0.0
@@ -934,6 +976,8 @@ class ScanEngine:
         self.guard = GuardPicker(args, self.site)
         self.guard_id = None
         self.sessions = {}        # subject track id -> ScanSession
+        #: Whose scanner-light window self.light currently holds.
+        self._light_subject = None
         self.light = RedLightWatch(
             ratio=args.led_ratio, hits=args.led_hits,
             window_s=args.led_window_s)
@@ -1354,8 +1398,9 @@ class ScanEngine:
                     self._close_session(session, "complete", now)
                 else:
                     log.info("session %s abandoned (%s)", session.id, reason)
-        self.guard.reset() if hasattr(self.guard, "reset") else None
+        self.guard.reset()
         self.light.reset()
+        self._light_subject = None
 
     # per-frame logic
     def _handle(self, frame, bodies, now):
@@ -1377,6 +1422,16 @@ class ScanEngine:
             elif cands:
                 wrist = cands[0]
 
+        # The rolling window belongs to ONE person. It is fed from the
+        # guard's wrist, so when the wand moves to the next visitor the
+        # hits from the last one are still inside window_s — and `lit`
+        # was applied to every engaged subject in the frame, so A's metal
+        # raised a critical scanner_flag against B. Clear the window when
+        # the wand changes target, and below, flag only the target.
+        target_id = target.track_id if target is not None else None
+        if target_id != getattr(self, "_light_subject", None):
+            self.light.reset()
+            self._light_subject = target_id
         lit = self.light.update(frame, wrist,
                                 guard.scale if guard else 60.0, now)
 
@@ -1443,7 +1498,11 @@ class ScanEngine:
                 if target is not None and sub.track_id == target.track_id:
                     engaged_now = sub.track_id
                 self._check_steps(session, sub, wrist, now)
-                if lit and not session.flagged:
+                # Only the person the wand is actually on: `lit` is one
+                # reading from one hand, not a property of the frame.
+                if (lit and not session.flagged
+                        and target is not None
+                        and sub.track_id == target.track_id):
                     session.flagged = True
                     self._raise_alert(
                         session, "scanner_flag", "critical",

@@ -315,3 +315,85 @@ def test_a_roster_that_raises_keeps_what_is_running(roster):
         cameras=lambda: (_ for _ in ()).throw(RuntimeError("core is down")))
     assert roster(app) == 1
     assert "cam2" in app.workers
+
+
+# ── an error envelope is an outage, not an empty frame ─────────────
+#
+# The adapter puts a §7 FailureEnvelope in the SAME "result" slot a real
+# result travels in — deliberately, so one parser handles both. The app
+# used to read that as "persons: []", i.e. a frame with nobody in it,
+# which is the worst possible reading: _on_frame then RESETS the failure
+# count and clears the outage, so /health, /state and not_ready_reason
+# all stay green while the app screens nobody for as long as the adapter
+# keeps failing. Every signal this file exists to protect goes back to
+# lying, through a door nobody had closed.
+
+
+@pytest.fixture
+def bodies_from():
+    """``_bodies_from`` bound to a stub PoseUnavailable, SDK-free."""
+    ns: dict = {}
+    src = _slice("def _bodies_from(result, frame, tracker):", "def _json_dumps")
+
+    class PoseUnavailable(RuntimeError):
+        pass
+
+    ns["PoseUnavailable"] = PoseUnavailable
+    exec(compile(src, "guard_scan_compliance.py", "exec"), ns)
+    ns["_bodies_from"].PoseUnavailable = PoseUnavailable
+    return ns["_bodies_from"], PoseUnavailable
+
+
+FRAME = SimpleNamespace(width=1280, height=720, wall_ts=1000.0)
+
+
+class _Tracker:
+    def update(self, boxes, now):
+        return list(range(len(boxes)))
+
+
+def _person():
+    return {"bbox": [10.0, 20.0, 110.0, 220.0], "score": 0.9,
+            "keypoints": [[1.0, 2.0, 0.9]] * 17}
+
+
+def test_an_error_envelope_is_raised_not_read_as_an_empty_frame(bodies_from):
+    fn, PoseUnavailable = bodies_from
+    envelope = {"status": "error",
+                "error": {"category": "model_error", "code": "weights_missing",
+                          "message": "not found", "transient": False}}
+    with pytest.raises(PoseUnavailable):
+        fn(envelope, FRAME, _Tracker())
+
+
+def test_an_envelope_nested_in_result_is_also_raised(bodies_from):
+    """The streaming path embeds the envelope one level down, in the
+    result message's own `result` field."""
+    fn, PoseUnavailable = bodies_from
+    message = {"result": {"status": "error",
+                          "error": {"code": "inference_runtime_crash"}}}
+    with pytest.raises(PoseUnavailable):
+        fn(message, FRAME, _Tracker())
+
+
+def test_the_envelope_code_reaches_the_operator(bodies_from):
+    """Whatever ends up on /state should name the adapter's own code,
+    not a generic 'inference failed'."""
+    fn, PoseUnavailable = bodies_from
+    with pytest.raises(PoseUnavailable, match="weights_missing"):
+        fn({"error": {"code": "weights_missing"}}, FRAME, _Tracker())
+
+
+def test_a_genuinely_empty_frame_is_still_an_empty_frame(bodies_from):
+    """The other half: nobody in shot is a normal answer, not an outage.
+    Confusing these in the other direction would put a camera watching an
+    empty corridor permanently amber."""
+    fn, _ = bodies_from
+    assert fn({"result": {"persons": []}}, FRAME, _Tracker()) == []
+
+
+def test_a_real_result_still_parses(bodies_from):
+    fn, _ = bodies_from
+    bodies = fn({"result": {"persons": [_person()]}}, FRAME, _Tracker())
+    assert len(bodies) == 1
+    assert bodies[0].box == (10.0, 20.0, 110.0, 220.0)
