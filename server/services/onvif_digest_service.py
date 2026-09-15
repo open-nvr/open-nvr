@@ -27,8 +27,11 @@ This implementation uses HTTP Digest authentication which is more widely support
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import re
+import secrets
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -47,6 +50,7 @@ def _xml_text(raw: str) -> str:
     strings — ``?transmode=unicast&amp;profile=va`` was stored and handed to
     MediaMTX verbatim."""
     return html.unescape(raw)
+
 
 # ONVIF XML namespaces
 SOAP_NS = "http://www.w3.org/2003/05/soap-envelope"
@@ -76,6 +80,55 @@ def _soap_envelope(body: str) -> str:
 </soap:Envelope>'''
 
 
+def _soap_envelope_wsse(body: str, username: str, password: str) -> str:
+    """Wrap a request in a WS-Security UsernameToken PasswordDigest header."""
+    nonce_raw = secrets.token_bytes(20)
+    nonce = base64.b64encode(nonce_raw).decode("ascii")
+    created = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    password_digest = base64.b64encode(
+        hashlib.sha1(
+            nonce_raw + created.encode("utf-8") + password.encode("utf-8")
+        ).digest()
+    ).decode("ascii")
+
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="{SOAP_NS}"
+               xmlns:tds="{TDS_NS}"
+               xmlns:trt="{TRT_NS}"
+               xmlns:tt="{TT_NS}"
+               xmlns:tptz="{TPT_NS}"
+               xmlns:timg="{TIMG_NS}"
+               xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+               xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <soap:Header>
+    <wsse:Security soap:mustUnderstand="1">
+      <wsse:UsernameToken>
+        <wsse:Username>{html.escape(username)}</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{password_digest}</wsse:Password>
+        <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{nonce}</wsse:Nonce>
+        <wsu:Created>{created}</wsu:Created>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </soap:Header>
+  <soap:Body>
+    {body}
+  </soap:Body>
+</soap:Envelope>'''
+
+
+def _is_wsse_auth_fault(status_code: int, response_text: str) -> bool:
+    """Return whether a non-success SOAP response is an ONVIF auth fault."""
+    if status_code == 200 or not re.search(
+        r"<(?:[\w.-]+:)?Fault\b", response_text, re.IGNORECASE
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?:NotAuthorized|Authority\s+failure)", response_text, re.IGNORECASE
+        )
+    )
+
+
 async def _onvif_request(
     url: str,
     body_xml: str,
@@ -84,7 +137,7 @@ async def _onvif_request(
     timeout: float = 10.0,
 ) -> tuple[int, str]:
     """
-    Make an ONVIF SOAP request using HTTP Digest authentication.
+    Make an ONVIF SOAP request, preferring HTTP Digest authentication.
 
     Args:
         url: Full URL to the ONVIF service endpoint
@@ -110,6 +163,20 @@ async def _onvif_request(
             response = await client.post(
                 url, content=envelope, headers=headers, auth=auth
             )
+            if (
+                username
+                and password
+                and _is_wsse_auth_fault(response.status_code, response.text)
+            ):
+                main_logger.info(
+                    "ONVIF Digest authentication rejected by %s; retrying with WS-Security",
+                    url,
+                )
+                response = await client.post(
+                    url,
+                    content=_soap_envelope_wsse(body_xml, username, password),
+                    headers=headers,
+                )
             return response.status_code, response.text
         except httpx.TimeoutException:
             raise HTTPException(

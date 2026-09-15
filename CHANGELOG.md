@@ -8,6 +8,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo
+  C520WS that return an ONVIF `NotAuthorized` SOAP fault instead of an HTTP
+  Digest challenge are retried once with WS-Security UsernameToken
+  PasswordDigest. HTTP Digest remains the primary authentication method, and
+  unrelated HTTP and SOAP failures are returned without a retry.
+
 - **Live overlay: phantoms gone, real objects steady.** Two field
   reports, one root cause. Tier-0's tracker keeps an unmatched track
   alive at its last box for up to `DETECT_TRACK_TTL` (five minutes) so a
