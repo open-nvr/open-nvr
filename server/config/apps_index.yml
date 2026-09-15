@@ -234,6 +234,9 @@
   image: ghcr.io/open-nvr/guard-scan-compliance:latest
   build_context: examples/guard-scan-compliance
   requires_tasks: [pose_estimation]
+  # Provisioned with the app and refcounted on uninstall (RFC-0002
+  # decision 7). yolo-pose is not part of the standard stack.
+  requires_adapters: [yolo_pose]
   emits: [scanner_flag, improper_scan, no_scan]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/guard-scan-compliance/README.md
   author: OpenNVR
