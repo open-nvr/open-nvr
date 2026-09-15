@@ -6,6 +6,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **App SDK 0.6.0.** Not a patch: `rtsp.py` is a new module, `PLATFORM`
+  gained five names, `OpenNVR` gained `save_evidence` / `stream` /
+  `stream_grant` (and their async twins), `Alert` gained `alert_type`
+  and `images`, `Param` gained `label` / `group` / `advanced` /
+  `choices`, and `ContractMixin` gained `not_ready_reason`. Two wheels
+  claiming 0.5.0 with different public surfaces is what leaves an app
+  that calls `nvr.stream()` with an AttributeError and no way to say
+  what it needed — `scaffold.sdk_requirement()` pins the floor from this
+  string, and `installed_apps.sdk_version` records it per app.
+- **`build_frame_source("rtsp://…")` now returns a source instead of
+  raising.** Behavioural change on a public function: an app that caught
+  `FrameSourceError` to fall back to a snapshot URL now silently takes
+  the RTSP path, which needs **ffmpeg on PATH in its image**. Older app
+  images have no reason to have it.
+
 ### Fixed
 
 - **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo

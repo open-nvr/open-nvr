@@ -1428,8 +1428,9 @@ silently. Upload each JPEG first and cite the paths:
 
 ```python
 face = nvr.save_evidence(face_jpeg)        # -> "ab/<sha>.jpg"
-await nvr.alerts.fire(..., alert_type="scanner_flag",
-                      images={"face": face, "scene": scene})
+scene = nvr.save_evidence(scene_jpeg)
+dispatcher.fire(Alert(..., alert_type="scanner_flag",
+                      images={"face": face, "scene": scene}))
 ```
 
 The operator UI shows a thumbnail per alert and opens the full set;
