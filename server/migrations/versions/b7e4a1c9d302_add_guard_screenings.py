@@ -46,8 +46,14 @@ def upgrade() -> None:
         sa.Column("order_score", sa.Float(), nullable=True),
         sa.Column("steps_done", sa.Text(), nullable=True),
         sa.Column("steps_missing", sa.Text(), nullable=True),
+        # sa.false(), not text("0"): Postgres refuses an integer default
+        # on a boolean column (42804), and this file's own docstring
+        # explains what a failed migration costs here — env.py runs the
+        # whole batch in ONE transaction, so aborting takes the alerts
+        # migration down with it, app_alerts never gains alert_type /
+        # images, and every query against it errors until the next boot.
         sa.Column("flagged", sa.Boolean(), nullable=False,
-                  server_default=sa.text("0")),
+                  server_default=sa.false()),
         sa.Column("ended_by", sa.String(30), nullable=True),
         sa.Column("duration_s", sa.Float(), nullable=True),
         sa.Column("engaged_s", sa.Float(), nullable=True),
