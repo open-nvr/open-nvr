@@ -60,6 +60,7 @@ import httpx
 
 from core.config import settings
 from core.logging_config import recording_logger
+from services.mediamtx_client import playback_auth
 
 
 @dataclass
@@ -377,7 +378,8 @@ class HlsPlaybackService:
             end_str = end_time.isoformat()
 
             url = f"{settings.mediamtx_playback_url}/list"
-            params = {"path": camera_path, "start": start_str, "end": end_str}
+            params = {"path": camera_path, "start": start_str, "end": end_str,
+                      **playback_auth()}
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, params=params)
@@ -903,6 +905,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": "0.1",
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -948,6 +951,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": str(segment_duration),
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -992,6 +996,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": str(segment_duration),
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=120.0) as client:

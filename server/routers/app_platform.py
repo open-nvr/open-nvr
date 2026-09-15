@@ -228,9 +228,34 @@ async def app_recordings_url(
     cam = _camera_in_roster(db, principal, camera_id)
     path = _playback_path(cam)
     base = settings.mediamtx_playback_url or "http://127.0.0.1:9996"
+
+    # Scoped to THIS path, playback only. The roster check above decides
+    # which camera the app may ask about, but the URL it was handed used
+    # to carry no credential at all — so an app could take the answer,
+    # edit `path=` to a camera it was never assigned, and the playback
+    # server, which was excluded from auth entirely, would serve it. The
+    # check and the capability now agree.
+    token = None
+    try:
+        from services.mediamtx_jwt_service import MediaMtxJwtService
+
+        token = MediaMtxJwtService.create_stream_token(
+            user_id=0,
+            username=f"app:{getattr(principal, 'app_id', 'platform')}",
+            camera_id=None,
+            camera_path=path,
+            actions=["playback"],
+            expiry_minutes=STREAM_TOKEN_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playback grant: could not mint MediaMTX JWT (%s)", exc)
+
     params = {"path": path, "start": start, "duration": str(duration)}
+    if token:
+        params["jwt"] = token
     return {"camera_id": cam.id, "path": path, "start": start,
             "duration": duration,
+            "expires_in": STREAM_TOKEN_MINUTES * 60,
             "url": f"{base.rstrip('/')}/get?{urlencode(params)}"}
 
 

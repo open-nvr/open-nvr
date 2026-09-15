@@ -196,7 +196,16 @@ services:
       # lets an app read the cameras it was assigned, and no others.
       - opennvr_apps
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      # 401 counts as healthy. The Control API requires a JWT now
+      # (mediamtx.docker.yml: authJWTExclude is empty), and this probe
+      # cannot hold one: the signing key is written by core at runtime,
+      # and core waits on THIS healthcheck via depends_on — while
+      # mediamtx fetches its JWKS from core. A probe that demanded a
+      # valid token would deadlock the stack on first boot. What is
+      # being asserted here is the same thing it always was: the
+      # listener is up and answering. Same reasoning, in the same words,
+      # as services/mediamtx_client.check_available().
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9997/v3/paths/list | grep -qE '200|401'"]
       interval: 30s
       timeout: 10s
       start_period: 10s
