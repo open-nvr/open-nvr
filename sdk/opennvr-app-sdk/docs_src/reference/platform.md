@@ -52,3 +52,13 @@ accident.
 ::: opennvr_app_sdk.dict_frame_source
 
 ::: opennvr_app_sdk.FrameSourceError
+
+::: opennvr_app_sdk.RtspFrameStream
+
+::: opennvr_app_sdk.RtspStillSource
+
+::: opennvr_app_sdk.Frame
+
+::: opennvr_app_sdk.FrameStreamError
+
+::: opennvr_app_sdk.FrameStreamUnavailable

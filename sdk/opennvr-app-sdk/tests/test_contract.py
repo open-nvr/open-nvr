@@ -789,3 +789,78 @@ def test_a_raising_ui_renderer_is_a_500_never_a_crash():
         assert _get(server.port, "/health").status_code == 200
     finally:
         det.stop_contract_server()
+
+
+# ── readiness: an app that is up but cannot work ───────────────────
+#
+# `ready` was the constant True. Every app on the platform reported
+# itself well no matter what had gone wrong — and because the server
+# derives the catalog's status dot from exactly this field
+# (routers/apps.py: ready → "ok" / "degraded"), an app that had been
+# failing every inference for hours looked identical to one doing its
+# job. The operator's only symptom was that nothing ever happened.
+
+
+def test_an_app_says_nothing_is_wrong_by_default():
+    """The default must not change: an app that never heard of this
+    hook keeps reporting ready, and carries no extra key."""
+    det = _detector()
+    health = det.health_snapshot()
+    assert health["ready"] is True
+    assert "not_ready" not in health
+
+
+def test_an_app_that_cannot_work_says_so_and_says_why():
+    det = _detector()
+    det.not_ready_reason = lambda: "the pose adapter is unreachable"
+
+    health = det.health_snapshot()
+    assert health["ready"] is False
+    assert health["not_ready"] == "the pose adapter is unreachable"
+    # Still a full health payload — a degraded app is not an excuse to
+    # stop reporting the vitals that say HOW degraded.
+    assert health["uptime_s"] >= 0
+    assert "events_seen" in health
+
+
+def test_the_verdict_reaches_the_wire():
+    """Over real HTTP, because /health is what the server probes."""
+    det = _detector()
+    det.not_ready_reason = lambda: "no camera assigned"
+    server = det.start_contract_server()
+    assert server is not None
+    try:
+        health = _get(server.port, "/health").json()
+        assert health["ready"] is False
+        assert health["not_ready"] == "no camera assigned"
+    finally:
+        det.stop_contract_server()
+
+
+def test_a_readiness_check_that_throws_does_not_take_health_with_it():
+    """An app that cannot be probed AT ALL reads as 'unreachable',
+    which is both less true and less useful than 'up, and here is what
+    is wrong'. So a broken check degrades, it does not 500."""
+    def _boom():
+        raise RuntimeError("nope")
+
+    det = _detector()
+    det.not_ready_reason = _boom
+
+    health = det.health_snapshot()
+    assert health["ready"] is False
+    assert health["not_ready"] == "readiness check failed"
+
+
+def test_recovering_clears_the_verdict():
+    """Not a latch: an app that comes back must be able to say so, or
+    the dot stays amber until somebody restarts the container."""
+    det = _detector()
+    problem = {"why": "adapter down"}
+    det.not_ready_reason = lambda: problem["why"]
+    assert det.health_snapshot()["ready"] is False
+
+    problem["why"] = None
+    health = det.health_snapshot()
+    assert health["ready"] is True
+    assert "not_ready" not in health

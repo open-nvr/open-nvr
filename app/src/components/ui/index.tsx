@@ -22,12 +22,16 @@
 
 import { clsx } from 'clsx'
 import { CircleAlert, Inbox, RefreshCw } from 'lucide-react'
-import type { ReactNode, ButtonHTMLAttributes, TableHTMLAttributes, HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from 'react'
+import type { ReactNode, ButtonHTMLAttributes, CSSProperties, TableHTMLAttributes, HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from 'react'
 
 /* ----------------------------- Card ----------------------------- */
 
-export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={clsx('rounded border border-[var(--border)] bg-[var(--panel-2)]', className)}>{children}</div>
+// `style` is passed through because some layouts size a card from a
+// number rather than a class — a pane the operator drags to resize, a
+// panel they drag around the page. Tailwind cannot express a value that
+// only exists at runtime.
+export function Card({ children, className = '', style }: { children: ReactNode; className?: string; style?: CSSProperties }) {
+  return <div className={clsx('rounded border border-[var(--border)] bg-[var(--panel-2)]', className)} style={style}>{children}</div>
 }
 
 export function CardHeader({ children, className = '' }: { children: ReactNode; className?: string }) {

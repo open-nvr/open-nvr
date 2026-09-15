@@ -139,6 +139,12 @@ def apply_alert(envelope: object, db=None) -> str:
         source_kind = _clip(source.get("kind"), 30)
         source_name = _clip(source.get("name"), 100)
 
+    # Photos come out of the evidence dict and into their own column, so
+    # that what remains is small enough to survive _json_or_none.
+    evidence, images = _split_images(evidence)
+    alert_type = _clip(envelope.get("alert_type"), 40) or _type_from_tags(
+        envelope.get("tags"))
+
     from datetime import datetime
 
     from models import AppAlert
@@ -166,8 +172,10 @@ def apply_alert(envelope: object, db=None) -> str:
             source_name=source_name,
             camera_id=_clip(envelope.get("camera_id"), 60),
             correlation_id=_clip(envelope.get("correlation_id"), 64),
-            evidence=_json_or_none(envelope.get("evidence")),
+            evidence=_json_or_none(evidence),
             tags=_json_or_none(envelope.get("tags")),
+            alert_type=alert_type,
+            images=_json_or_none(images) if images else None,
             observed_at=observed_at,
         )
         # Snapshot BEFORE commit: commit expires the instance, and every
@@ -208,13 +216,100 @@ def _clip(value: object, limit: int) -> str | None:
     return value[:limit] if value else None
 
 
+#: Evidence keys an app may hang a photo on. ``images`` is the shape to
+#: use; the rest are what the apps written before this column existed
+#: send, kept working rather than broken.
+_IMAGE_KEYS = ("images", "snapshot_b64", "face_b64", "body_b64", "scene_b64")
+_JSON_MAX = 8000
+
+
+def _split_images(evidence: object) -> tuple[object, dict[str, str]]:
+    """Pull photos out of an evidence dict into ``{name: rel_path}``.
+
+    Two forms arrive here. Apps on the current SDK upload their JPEGs to
+    the evidence store first and send ``images: {name: rel_path}`` —
+    nothing to do but lift it out. Older apps inline base64 (the
+    doorbell's ``snapshot_b64``), which is what made the whole evidence
+    field unreadable; those are written to the store HERE so they behave
+    like the new shape instead of being lost.
+    """
+    if not isinstance(evidence, dict):
+        return evidence, {}
+    rest = {k: v for k, v in evidence.items() if k not in _IMAGE_KEYS}
+    images: dict[str, str] = {}
+
+    declared = evidence.get("images")
+    if isinstance(declared, dict):
+        for name, rel in declared.items():
+            if isinstance(rel, str) and rel.strip():
+                images[str(name)[:32]] = rel.strip()[:200]
+
+    for key in _IMAGE_KEYS[1:]:
+        raw = evidence.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        name = key.removesuffix("_b64")
+        if name in images:
+            continue
+        rel = _store_b64_jpeg(raw)
+        if rel:
+            images[name] = rel
+    return rest, images
+
+
+def _store_b64_jpeg(raw: str) -> str | None:
+    """A base64 JPEG into the evidence store; None if it isn't one.
+
+    Never raises: an app sending a truncated or non-JPEG string must
+    lose its photo, not its alert.
+    """
+    import base64
+
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        payload = raw.split(",", 1)[1] if raw.startswith("data:") else raw
+        return save_evidence_jpeg(base64.b64decode(payload, validate=False))
+    except Exception:  # noqa: BLE001
+        logger.debug("alert evidence image rejected", exc_info=True)
+        return None
+
+
+def _type_from_tags(tags: object) -> str | None:
+    """``tags: ["type:no_scan"]`` as an alert_type, for producers that
+    tagged a kind before the column existed."""
+    if not isinstance(tags, list):
+        return None
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith("type:") and tag[5:].strip():
+            return tag[5:].strip()[:40]
+    return None
+
+
 def _json_or_none(value: object) -> str | None:
     if value in (None, {}, []):
         return None
     try:
-        return json.dumps(value)[:8000]
+        text = json.dumps(value)
     except (TypeError, ValueError):
         return None
+    if len(text) <= _JSON_MAX:
+        return text
+    # Over the ceiling. Slicing the string here is what lost evidence
+    # entirely: a cut in the middle of JSON does not parse, so a single
+    # oversized field took every other field down with it. Drop the
+    # offending values instead and keep the rest readable.
+    if isinstance(value, dict):
+        kept = {k: v for k, v in value.items()
+                if len(json.dumps({k: v}, default=str)) <= _JSON_MAX // 4}
+        kept["_dropped"] = sorted(set(value) - set(kept))
+        try:
+            text = json.dumps(kept, default=str)
+            if len(text) <= _JSON_MAX:
+                return text
+        except (TypeError, ValueError):
+            pass
+    return json.dumps({"_dropped": "oversized"})
 
 
 def _parse_fired_at(value: object):
@@ -246,8 +341,38 @@ async def _handle_message(msg) -> None:
         status = await asyncio.to_thread(apply_alert, envelope)
         if status != "stored":
             logger.debug("alert inbox: %s for %s", status, msg.subject)
+            return
     except Exception:
         logger.warning("alert inbox: apply failed", exc_info=True)
+        return
+    # Stored. Nudge the open browsers rather than leaving them to notice
+    # on the next 10s poll — and never let a socket problem undo a row
+    # that is already committed.
+    try:
+        from services.event_bus_service import publish_app_alert
+
+        await publish_app_alert(
+            camera_id=_camera_num(envelope.get("camera_id")),
+            severity=str(envelope.get("severity") or "high"),
+            alert_type=envelope.get("alert_type"),
+            payload={"title": envelope.get("title"),
+                     "alert_id": envelope.get("alert_id")},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("alert inbox: live push failed", exc_info=True)
+
+
+def _camera_num(handle: object) -> int | None:
+    """``"cam3"`` / ``"cam-3"`` / ``"3"`` → ``3``; anything else None.
+
+    The inbox stores the producer's handle verbatim (alerts must survive
+    producers core doesn't know), but the event bus scopes on numeric
+    camera ids, so the push needs the number or nothing.
+    """
+    text = str(handle or "").strip().lower()
+    if text.startswith("cam"):
+        text = text[3:].lstrip("-")
+    return int(text) if text.isdigit() else None
 
 
 async def run_consumer_loop() -> None:

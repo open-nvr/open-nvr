@@ -197,6 +197,7 @@ _EXPECTED_IDS = {
     "package-delivery",
     "footage-search",
     "home-assistant-relay",
+    "guard-scan-compliance",
 }
 
 

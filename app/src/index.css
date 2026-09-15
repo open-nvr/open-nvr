@@ -15,6 +15,18 @@
   --text-dim: #9ca3af;    /* secondary text */
   --accent: #3b82f6;      /* blue-500 */
   --border: #293241;      /* subtle border color */
+  /* Status inks. Distinct from the --badge-* PAIRS above: those are a
+     background+foreground pair for a pill, these are a single ink for a
+     chart band, a tile figure or a word of inline status sitting
+     directly on the page. Matched to the badge text colours so one
+     status looks like itself in either form.
+     These were referenced by four views before they existed, so every
+     `var(--ok, #hex)` silently fell back to a hard-coded dark-theme hex
+     that did not flip in light mode. */
+  --ok: #4ade80;          /* green-400  */
+  --warn: #facc15;        /* yellow-400 */
+  --danger: #f87171;      /* red-400    */
+  --critical: #dc2626;    /* red-600, solid in both themes */
   --radius: 0px;          /* global corner radius for sharp UI */
   --radius-card: 0px;
   --radius-input: 0px;
@@ -48,6 +60,12 @@
   --text-dim: #334155;    /* slate-700 */
   --accent: #2563eb;      /* blue-600 */
   --border: #d1d5db;      /* gray-300 */
+  /* Status inks — light theme: darkened so they stay legible on white.
+     The dark-theme green/amber would fail contrast here. */
+  --ok: #15803d;          /* green-700  */
+  --warn: #a16207;        /* yellow-700 */
+  --danger: #b91c1c;      /* red-700    */
+  --critical: #dc2626;    /* red-600    */
   --radius: 0px;
   --radius-card: 0px;
   --radius-input: 0px;

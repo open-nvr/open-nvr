@@ -13,9 +13,11 @@ the deployment's site key answers unscoped (and may name an app with
 Routes (prefix ``/api/v1/internal/app``):
 
 * ``GET  /cameras/{id}/snapshot``             — current JPEG
+* ``GET  /cameras/{id}/stream``               — scoped RTSP URL for frames
 * ``GET  /recordings/{id}``                   — recorded segments
 * ``GET  /recordings/{id}/url``               — playback URL for one segment
 * ``GET  /plates/stats|summary|sessions``     — the Vehicles-page aggregates
+* ``POST /evidence``                          — store a JPEG, get its path
 * ``GET  /alerts``                            — the app's own inbox rows
 * ``GET|PUT|DELETE /state[/{key}]``           — durable per-app key/value
 
@@ -26,11 +28,14 @@ routes; per-app roster scoping lives here.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote as urlquote
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
+                     status)
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -41,6 +46,8 @@ from routers.internal_camera_agent import (
     _app_roster, _require_internal_key,
 )
 from services.app_keys import AppPrincipal
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/app", tags=["app-platform"])
 
@@ -102,6 +109,80 @@ async def app_camera_snapshot(
                     headers={"Cache-Control": "no-store"})
 
 
+#: How long a stream grant lasts. Long enough that an app is not
+#: re-minting every minute, short enough that a leaked URL dies on its
+#: own. The SDK renews well before this.
+STREAM_TOKEN_MINUTES = 60
+
+
+@router.get("/cameras/{camera_id}/stream")
+async def app_camera_stream(
+    camera_id: int,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """An RTSP URL this app may read, for continuous frames.
+
+    Snapshots answer "what is there now"; some apps must WATCH — a
+    gesture, a sweep, a fall is a shape in time, and at one still every
+    few seconds it has already happened. Those apps need the stream.
+
+    The token minted here is scoped to THIS camera's path, not the
+    wildcard the platform's own components carry. That is the whole
+    point of the route: apps sit on a shared network, so handing one a
+    bare ``rtsp://mediamtx:8554/...`` would quietly grant it every
+    camera in the building and undo the per-app roster. A grant an app
+    cannot widen is worth the extra endpoint.
+    """
+    cam = _camera_in_roster(db, principal, camera_id)
+    if not settings.mediamtx_rtsp_url:
+        # No MediaMTX configured: the camera's own URL is all there is,
+        # and it is not ours to hand out scoped.
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="No MediaMTX stream base configured")
+
+    from services.camera_identity import path_name_for_camera
+    from services.stream_service import substream_name
+
+    stream_name = path_name_for_camera(cam)
+    # Prefer the substream when the operator stored one: an app watching
+    # gestures needs frame RATE, not pixels, and the sub costs a
+    # fraction of the CPU to decode.
+    use_sub = bool((cam.substream_url or "").strip())
+    tap_name = substream_name(stream_name) if use_sub else stream_name
+
+    token = None
+    try:
+        from services.mediamtx_jwt_service import MediaMtxJwtService
+
+        token = MediaMtxJwtService.create_stream_token(
+            user_id=0,
+            username=f"app:{getattr(principal, 'app_id', 'platform')}",
+            camera_id=None,
+            # Exactly this path, and read only. Not "~.*".
+            camera_path=tap_name,
+            actions=["read"],
+            expiry_minutes=STREAM_TOKEN_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stream grant: could not mint MediaMTX JWT (%s)", exc)
+
+    base = str(settings.mediamtx_rtsp_url).rstrip("/")
+    url = f"{base}/{tap_name}"
+    if token:
+        url = f"{url}?jwt={urlquote(token, safe='.')}"
+    return {
+        "camera_id": cam.id,
+        "path": tap_name,
+        "url": url,
+        "substream": use_sub,
+        "expires_in": STREAM_TOKEN_MINUTES * 60,
+        # Told, not guessed: the SDK renews on this rather than waiting
+        # for a 401 mid-screening.
+        "renew_after": int(STREAM_TOKEN_MINUTES * 60 * 0.8),
+    }
+
+
 # ── Recordings ──────────────────────────────────────────────────────
 
 
@@ -147,9 +228,34 @@ async def app_recordings_url(
     cam = _camera_in_roster(db, principal, camera_id)
     path = _playback_path(cam)
     base = settings.mediamtx_playback_url or "http://127.0.0.1:9996"
+
+    # Scoped to THIS path, playback only. The roster check above decides
+    # which camera the app may ask about, but the URL it was handed used
+    # to carry no credential at all — so an app could take the answer,
+    # edit `path=` to a camera it was never assigned, and the playback
+    # server, which was excluded from auth entirely, would serve it. The
+    # check and the capability now agree.
+    token = None
+    try:
+        from services.mediamtx_jwt_service import MediaMtxJwtService
+
+        token = MediaMtxJwtService.create_stream_token(
+            user_id=0,
+            username=f"app:{getattr(principal, 'app_id', 'platform')}",
+            camera_id=None,
+            camera_path=path,
+            actions=["playback"],
+            expiry_minutes=STREAM_TOKEN_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playback grant: could not mint MediaMTX JWT (%s)", exc)
+
     params = {"path": path, "start": start, "duration": str(duration)}
+    if token:
+        params["jwt"] = token
     return {"camera_id": cam.id, "path": path, "start": start,
             "duration": duration,
+            "expires_in": STREAM_TOKEN_MINUTES * 60,
             "url": f"{base.rstrip('/')}/get?{urlencode(params)}"}
 
 
@@ -249,6 +355,42 @@ async def app_alerts(
 def _state_out(row: AppState) -> dict[str, Any]:
     return {"key": row.key, "value": row.value,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+@router.post("/evidence")
+async def app_evidence_upload(
+    request: Request,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Store one JPEG and return its path, for an app to cite in an alert.
+
+    An app that wants a photo on its alert cannot put the photo IN the
+    alert: alerts travel over NATS, whose default payload ceiling is
+    1 MB, and a couple of base64 crops exceed it — the broker drops the
+    publish and the alert is simply never seen. So the picture comes
+    here first and only ``{"path": ...}`` rides along.
+
+    Content-addressed by the store, so re-uploading the same bytes is
+    free and returns the same path.
+    """
+    from services.evidence_store import MAX_EVIDENCE_BYTES, save_evidence_jpeg
+
+    # Refuse on the declared length before reading, so an app cannot
+    # make core hold an arbitrary body in memory.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_EVIDENCE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"evidence must be at most {MAX_EVIDENCE_BYTES} bytes")
+    body = await request.body()
+    try:
+        rel = save_evidence_jpeg(body)
+    except ValueError as exc:
+        # Not a JPEG, empty, or over the cap: the app's bug, not ours.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=str(exc)) from exc
+    return {"path": rel, "bytes": len(body)}
 
 
 @router.get("/state")

@@ -241,6 +241,28 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    // An app alert reached the inbox: refresh what shows alarms, and
+    // say so once. The row itself is already stored — this only makes
+    // the browser notice now rather than on its next poll.
+    const handleAppAlert = (evt: CameraStatusEvent) => {
+      const p = (evt.payload ?? {}) as Record<string, unknown>
+      const severity = String(p.severity ?? 'high')
+      const title = String(p.title ?? 'New alert')
+
+      queryClient.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
+      queryClient.invalidateQueries({ queryKey: ['alarms-page'] })
+
+      // Same cooldown discipline as host alerts: a burst of screenings
+      // must not become a wall of toasts.
+      const key = `app_alert:${String(p.alert_type ?? '')}:${evt.camera_id ?? ''}`
+      const nowMs = Date.now()
+      if (nowMs - (lastToastAt.current[key] || 0) < TOAST_COOLDOWN_MS) return
+      lastToastAt.current[key] = nowMs
+
+      if (severity === 'critical') toastRef.current.showError(title)
+      else toastRef.current.showWarning(title)
+    }
+
     const connect = async () => {
       let ticket: string
       try {
@@ -276,7 +298,12 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
         if (evt.event_type === 'system_alert' ||
             (evt.event_type === 'camera_event' && evt.task === 'recording_stalled')) {
           handleSystemAlert(evt)
+          return
         }
+        // An app alert just landed in the inbox. The bell polls every
+        // 10s and would find it eventually; "someone walked in
+        // unscanned" is not a fact worth sitting on for ten seconds.
+        if (evt.event_type === 'app_alert') { handleAppAlert(evt); return }
       }
 
       ws.onclose = () => {

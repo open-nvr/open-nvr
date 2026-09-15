@@ -35,7 +35,9 @@ EXAMPLES = REPO_ROOT / "examples"
 BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber"})
 
 # Not apps at all: build-support directories with no Python entrypoint.
-EXCLUDED = frozenset({"yolov8-weights"})
+# Both are one Dockerfile that exports an ONNX graph and ships it, so
+# there is no base class for them to ride.
+EXCLUDED = frozenset({"yolov8-weights", "yolo-pose-weights"})
 
 # Gap 8's VISIBILITY debt is retired: the agent now serves /manifest and
 # /state and self-registers with the App Catalog (Phase 1 contract

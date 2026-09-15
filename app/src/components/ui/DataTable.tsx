@@ -90,6 +90,22 @@ export type DataTableProps<T> = {
    * header stays put and the page does not grow a long outer scrollbar.
    */
   fillHeight?: boolean
+  /**
+   * Fill a parent that is ALREADY bounded, instead of measuring the
+   * viewport.
+   *
+   * `fillHeight` works out its own height from the window, which is
+   * right on a page that flows. On a page laid out as a bounded flex
+   * column — a fixed-height section, a row that takes what is left —
+   * the two disagree: the measurement cannot see a parent that has
+   * already decided, and the rows end up short, leaving dead space
+   * inside a card that had room for them.
+   *
+   * Here the parent decides and the table simply fills it. Requires an
+   * ancestor chain with a real height and `min-h-0`; nothing measures,
+   * nothing to get out of step on a resize.
+   */
+  fillParent?: boolean
   /** Never shrink the scroller below this (px). */
   minBodyHeight?: number
   /**
@@ -203,15 +219,28 @@ function useAvailableHeight(
  *
  * Out-of-flow elements are skipped — a portalled modal or a fixed
  * toolbar takes no space in the page and must not steal any from rows.
+ *
+ * So are siblings that sit BESIDE the table rather than under it. A
+ * later sibling is only "below" in a column; put the table in one cell
+ * of a grid row and the cell next to it is still a `nextElementSibling`
+ * while occupying none of the table's vertical space. Counting it
+ * subtracted a whole live-video panel from the rows' height, which
+ * clamped the table to its minimum and left it showing four rows on a
+ * screen with room for twenty.
  */
 function heightBelow(start: Element): number {
   let total = 0
   let node: Element | null = start
   while (node && node !== document.body) {
+    const nodeTop = node.getBoundingClientRect().top
     for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) {
       const cs = window.getComputedStyle(sib)
       if (cs.position === 'fixed' || cs.position === 'absolute') continue
-      total += sib.getBoundingClientRect().height
+      const rect = sib.getBoundingClientRect()
+      // Starts level with us (or higher) ⇒ alongside, not underneath.
+      // A genuinely-below sibling begins past our own top edge.
+      if (rect.top <= nodeTop + 1) continue
+      total += rect.height
         + (parseFloat(cs.marginTop) || 0)
         + (parseFloat(cs.marginBottom) || 0)
     }
@@ -239,12 +268,18 @@ export function DataTable<T>({
   isPending = false, isFetching = false, isError = false, error,
   errorTitle = 'Could not load this list', onRetry,
   empty, skeletonRows = 8, striped = true, rowClassName, footer, toolbar,
-  fillHeight = false, minBodyHeight = 220, fixed = false, minWidth,
+  fillHeight = false, fillParent = false,
+  minBodyHeight = 220, fixed = false, minWidth,
   onRowClick, dense = false,
 }: DataTableProps<T>) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
-  const maxHeight = useAvailableHeight(fillHeight, scrollerRef, footerRef, minBodyHeight)
+  // Measuring is for fillHeight only: under fillParent the layout has
+  // already answered the question.
+  const maxHeight = useAvailableHeight(
+    fillHeight && !fillParent, scrollerRef, footerRef, minBodyHeight)
+  // Either mode scrolls the rows, so either needs the header pinned.
+  const scrolls = fillHeight || fillParent
   // `width` belongs on BOTH cells. It used to be spread into the <TH>
   // only, so nothing constrained the body and `table-layout: auto`
   // sprayed the surplus into whichever columns had the longest content —
@@ -291,7 +326,7 @@ export function DataTable<T>({
               // scroll UNDER this, and a transparent header would show
               // them through. The inset shadow keeps a divider visible
               // where a collapsed border would be painted away.
-              fillHeight && 'sticky top-0 z-10 bg-[var(--bg-2)] shadow-[inset_0_-1px_0_var(--border)]',
+              scrolls && 'sticky top-0 z-10 bg-[var(--bg-2)] shadow-[inset_0_-1px_0_var(--border)]',
             )}
           >
             {c.srHeader ? <span className="sr-only">{c.srHeader}</span> : c.header}
@@ -308,9 +343,10 @@ export function DataTable<T>({
     // Deliberately no `overflow-hidden` on the shell: it would clip the
     // scroller it contains, which is the exact bug the Alerts &
     // Incidents table shipped with.
-    <div className="border border-[var(--border)] rounded">
+    <div className={clsx('border border-[var(--border)] rounded',
+                         fillParent && 'flex min-h-0 flex-1 flex-col')}>
       {toolbar && (
-        <div className="border-b border-[var(--border)]">{toolbar}</div>
+        <div className="shrink-0 border-b border-[var(--border)]">{toolbar}</div>
       )}
       <div
         ref={scrollerRef}
@@ -319,8 +355,10 @@ export function DataTable<T>({
         // for an always-on thumb — content with no hover affordance to
         // tell you it scrolls — is exactly a table's situation, and the
         // default chrome scrollbar looked bolted on next to it.
-        className={clsx('overflow-x-auto thin-scroll', fillHeight && 'overflow-y-auto')}
-        style={fillHeight && maxHeight ? { maxHeight } : undefined}
+        className={clsx('overflow-x-auto thin-scroll',
+                        scrolls && 'overflow-y-auto',
+                        fillParent && 'min-h-0 flex-1')}
+        style={fillHeight && !fillParent && maxHeight ? { maxHeight } : undefined}
       >
         <table className={clsx(
           'w-full text-sm', fixed && 'table-fixed', minWidth,
@@ -376,7 +414,8 @@ export function DataTable<T>({
         </TBody>
         </table>
       </div>
-      <div ref={footerRef} className={clsx(footer && 'border-t border-[var(--border)]')}>
+      <div ref={footerRef}
+           className={clsx('shrink-0', footer && 'border-t border-[var(--border)]')}>
         {footer}
       </div>
     </div>

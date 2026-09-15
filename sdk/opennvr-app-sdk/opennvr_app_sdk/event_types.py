@@ -230,11 +230,51 @@ class OccupancyFootfall(TypedPayload):
     labels: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ScreeningCompleted(TypedPayload):
+    """``screening.completed.v1`` — one entry screening, ruled on.
+
+    Published when an app finishes judging whether a person was scanned
+    properly at an entrance. Every screening is published, the clean ones
+    included: compliance is complete scans over ALL screenings, and a
+    stream of only the failures can count complaints but never state a
+    rate.
+
+    ``steps_done`` / ``steps_missing`` are human labels ("Left arm"), not
+    ids — the set of surfaces is the operator's configuration, not a
+    fixed enum. ``images`` maps a role to an evidence path already
+    uploaded through the platform, never to bytes: an alert is a NATS
+    message and a couple of base64 crops exceed the default 1 MB ceiling,
+    which the broker refuses silently.
+    """
+
+    SCHEMA: ClassVar[str] = "screening.completed.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("session", "verdict", "score")
+    session: str = ""
+    verdict: str = ""
+    score: float = 0.0
+    at: str | None = None
+    ts: float | None = None
+    coverage: float | None = None
+    order_score: float | None = None
+    steps_done: list[str] = field(default_factory=list)
+    steps_missing: list[str] = field(default_factory=list)
+    flagged: bool = False
+    duration_s: float | None = None
+    engaged_s: float | None = None
+    ended_by: str | None = None
+    guard_key: str | None = None
+    guard_name: str | None = None
+    images: dict[str, str] = field(default_factory=dict)
+    alert_id: str | None = None
+
+
 #: schema → typed payload class, for every contract this SDK knows.
 EVENT_TYPES: dict[str, type[TypedPayload]] = {
     cls.SCHEMA: cls for cls in (
         DetectionObserved, VisitRecorded, PlateRecognized, AccessDecided,
         OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
+        ScreeningCompleted,
     )
 }
 

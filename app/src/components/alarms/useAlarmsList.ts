@@ -9,18 +9,30 @@ export function useAlarmsList(params: {
   sourceName?: string
   unacked?: boolean
   severity?: string | null
+  /** Producer's kind of alert, e.g. `scanner_flag`. */
+  alertType?: string | null
+  /** Core camera id; sent as the wire handle the producer writes. */
+  cameraId?: number | null
   page: number
   pageSize: number
   skip: number
 }) {
-  const { queryKeyPrefix, sourceName, unacked, severity, page, pageSize, skip } = params
+  const {
+    queryKeyPrefix, sourceName, unacked, severity, alertType, cameraId,
+    page, pageSize, skip,
+  } = params
   const query = useQuery({
-    queryKey: [queryKeyPrefix, sourceName, unacked, severity, page, pageSize],
+    queryKey: [queryKeyPrefix, sourceName, unacked, severity, alertType, cameraId,
+               page, pageSize],
     queryFn: async () => {
       const { data } = await alertsInboxService.listInboxAlerts({
         source_name: sourceName,
         unacked: unacked || undefined,
         severity: severity || undefined,
+        alert_type: alertType || undefined,
+        // The column is the producer-supplied handle, not a foreign key,
+        // so the filter is spelled the way an app writes it.
+        camera_id: cameraId == null ? undefined : `cam${cameraId}`,
         skip,
         limit: pageSize,
       })

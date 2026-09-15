@@ -477,6 +477,158 @@ services:
   # volume keeps that across container recreates (and can be pre-warmed
   # for air-gapped installs — see the adapter's Dockerfile notes).
   # ──────────────────────────────────────────────────────────────
+  # Body keypoints. Rules about what a person is DOING — a hand
+  # scanner sweeping an arm, a fall, a gesture — need joints, not
+  # boxes, and no adapter in the default stack produced them.
+  # ──────────────────────────────────────────────────────────────
+  # Pose weights init — copies the pre-exported ONNX into the volume the
+  # adapter reads. The pose model is the one weight in the stack with no
+  # download: Ultralytics publishes the .pt, never the ONNX, so somebody
+  # has to export it. Before this existed that somebody was the operator,
+  # and a fresh install got an adapter that started, answered /health and
+  # failed every /infer on a missing file — with nothing anywhere saying
+  # why. Bring your own model by pointing YOLO_POSE_WEIGHTS_IMAGE at it.
+  yolo-pose-weights-init:
+    profiles: [apps]
+    image: ${YOLO_POSE_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolo-pose-weights:v8.3.0}
+    # Build it here if it cannot be pulled. Without this fallback a
+    # fresh install is at the mercy of one registry: an unpublished
+    # image, a private package, a blocked ghcr.io — any of them ends
+    # with "error from registry: denied", no weights, and (because the
+    # adapter waits on this) no pose adapter at all. The build needs
+    # only Docker Hub, so the two failure modes do not overlap.
+    #
+    # It is a LAST resort, not the normal path. The export pulls the
+    # ~7 GB ultralytics base (amd64-only, but a plain manifest rather
+    # than an index, so it still runs under emulation elsewhere) and
+    # then takes ~30 s — against ~5 s to pull the finished 17 MB
+    # image. `pull_policy: missing` keeps the published image first
+    # whenever it can be had.
+    build:
+      context: examples/yolo-pose-weights
+      dockerfile: Dockerfile
+    pull_policy: missing
+    container_name: opennvr_yolo_pose_weights_init
+    logging: *svc-logs
+    restart: "no"
+    # List-form command, as yolov8-weights-init explains at length:
+    # compose word-splits a STRING command, so `sh -c set -e ...` would
+    # run only `set`, exit 0, and copy nothing — leaving an empty volume
+    # and an adapter that 503s every request.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/yolo11n-pose.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolo11n-pose.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked yolo11n-pose.onnx into volume..."
+        cp /yolo11n-pose.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+
+  yolo-pose-adapter:
+    profiles: [apps]
+    # YOLO_POSE_ADAPTER_TAG lets the pose image ride a different tag
+    # than the rest, exactly as CAPTION_ADAPTER_TAG does for captions
+    # and for the same reason: ADAPTER_TAG is ONE tag applied to every
+    # adapter, and the pose adapter is not in the releases it names.
+    # There is no yolo-pose-adapter:0.1.5 — the only tags that image has
+    # are a branch and two shas — so a fresh install pinned to the
+    # tested release could not pull it at all, and the whole app died on
+    # a tag that never existed.
+    # ...which is also why ADAPTER_TAG is NOT the fallback here. An
+    # operator upgrading into this branch has ADAPTER_TAG=0.1.5 already
+    # in their .env and no YOLO_POSE_ADAPTER_TAG, so the chain resolved
+    # to exactly the tag the paragraph above says does not exist — and
+    # unlike yolo-pose-weights-init this service has no build context to
+    # fall back to (the image is built in the ai-adapter repo), so the
+    # pull fails and takes the whole `--profile apps up` down with it,
+    # including the loitering / intrusion / LPR apps that were running
+    # perfectly well before.
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}
+    depends_on:
+      # Start only once the graph is on disk. Without this the adapter
+      # races the copier, loses, and reports itself healthy anyway —
+      # because /health answers before a model is ever loaded.
+      yolo-pose-weights-init:
+        condition: service_completed_successfully
+    container_name: opennvr_yolo_pose_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # Smaller input is the CPU lever: an app watching a doorway wants
+      # frame RATE, and the wrist-to-torso geometry survives the loss.
+      - OPENNVR_POSE_IMGSZ=${OPENNVR_POSE_IMGSZ:-448}
+      # The image ships without weights; yolo-pose-weights-init above
+      # puts them in the volume, which is why this is normally empty.
+      # Set it only to host the exported .onnx yourself and have the
+      # adapter fetch it at first boot instead. Empty means "never
+      # download" — the sovereignty=local_only posture.
+      - YOLO_POSE_MODEL_URL=${YOLO_POSE_MODEL_URL:-}
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+      - opennvr_yolo_pose_cache:/root/.cache
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9009/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  yolo-pose-register:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_yolo_pose_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      yolo-pose-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="yolo-pose"
+        url="http://yolo-pose-adapter:9009"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if OCR 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — screening checks will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   fast-plate-ocr-adapter:
     profiles: [apps]
     image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}
@@ -560,6 +712,7 @@ services:
         exit 0
     networks:
       - opennvr_internal
+
 
   # ──────────────────────────────────────────────────────────────
   # License plate recognition — YOLOv8 → crop → fast-plate-ocr chain
@@ -1100,6 +1253,81 @@ services:
     networks:
       - opennvr_apps
 
+  guard-scan-compliance-config-init:
+    profiles: [apps]
+    image: alpine:3.20
+    container_name: opennvr_guard_scan_config_init
+    logging: *svc-logs
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (guard-scan-compliance) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/guard-scan-compliance:/template:ro
+      - opennvr_guard_scan_config:/generated
+
+  guard-scan-compliance:
+    profiles: [apps]
+    build:
+      context: .
+      dockerfile: examples/guard-scan-compliance/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+    container_name: opennvr_guard_scan_compliance
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      guard-scan-compliance-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+      # RFC-0002 decision 7, the same as license-plate-recognition and
+      # its OCR adapter: the app starts only once the adapter it cannot
+      # work without is up, and its (best-effort) registration has run.
+      #
+      # This app is the pose adapter's only consumer, and it never said
+      # so. Starting guard-scan therefore did not start the adapter —
+      # so a one-click install, or `up -d guard-scan-compliance`,
+      # brought up an app whose every inference call was going to fail,
+      # with no pose container anywhere on the box to hint at why.
+      yolo-pose-adapter:
+        condition: service_healthy
+      yolo-pose-register:
+        condition: service_completed_successfully
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - KAIC_URL=http://opennvr-core:8100
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9210"
+    volumes:
+      - opennvr_guard_scan_config:/app/config:ro
+      # The per-frame keypoint logs this collects as it runs — the
+      # training set for a learned model later. Its own volume so a
+      # prune can find it: the evidence store's sweep only deletes JPEGs.
+      - opennvr_guard_scan_sessions:/data/sessions
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
 volumes:
   # Generated config.yml files (mounted read-only by each app).
   opennvr_loitering_config:
@@ -1117,3 +1345,7 @@ volumes:
   # footage-search's persistent SQLite index (see its store.py).
   opennvr_footage_search_data:
   opennvr_home_assistant_relay_config:
+  opennvr_guard_scan_config:
+  opennvr_guard_scan_sessions:
+  opennvr_yolo_pose_cache:
+  opennvr_yolo_pose_weights:

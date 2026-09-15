@@ -91,7 +91,10 @@ from .cameras import (
 )
 from .credentials import AppCredentials, auth_headers
 from .usercontext import UserContext, current_user, verify_call_token
-from .client import OpenNVR, Camera, Recording, PlatformError
+from .client import (
+    Camera, FrameStreamUnavailable, OpenNVR, PlatformError, Recording,
+)
+from .rtsp import Frame, FrameStreamError, RtspFrameStream, RtspStillSource
 from .aio import AsyncOpenNVR
 from .infer_stream import InferStream
 from .domain_subscriber import (
@@ -100,7 +103,8 @@ from .domain_subscriber import (
 from .egress import connect_via_proxy, proxy_address
 from .event_types import (
     EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall, OverlayBoxes,
-    OccupancyHeatmap, PlateRecognized, TypedPayload, VisitRecorded, typed_payload,
+    OccupancyHeatmap, PlateRecognized, ScreeningCompleted, TypedPayload, VisitRecorded,
+    typed_payload,
 )
 from .tier0 import (
     BestFrameClient,
@@ -198,6 +202,13 @@ PLATFORM: tuple[str, ...] = (
     "build_frame_source",
     "dict_frame_source",
     "FrameSourceError",
+    # Continuous video, for rules about a shape in time rather than a
+    # moment: nvr.stream(cam) hands back one of these, already running.
+    "RtspFrameStream",
+    "RtspStillSource",
+    "Frame",
+    "FrameStreamError",
+    "FrameStreamUnavailable",
 )
 
 #: What the app exposes back: the catalog's config form, dashboard, actions, licence gate — and the generated specs.
@@ -234,6 +245,7 @@ EVENTS: tuple[str, ...] = (
     "AccessDecided",
     "OccupancyChanged",
     "OccupancyHeatmap",
+    "ScreeningCompleted",
     "OccupancyFootfall",
     "OverlayBoxes",
     "Tier0Snapshot",

@@ -78,15 +78,59 @@ def substitute(ref: str, pins: dict[str, str]) -> str:
     return ref
 
 
-def collect_image_refs() -> list[str]:
+def collect_image_refs() -> tuple[list[str], set[str]]:
+    """Every ``image:`` in the compose files, plus the subset that a
+    service can BUILD if the pull fails.
+
+    The buildable set matters because this script's whole premise is
+    "a fresh install would die on ``docker pull``" — and for a service
+    carrying a ``build:`` section that premise is false. Compose builds
+    it instead, which is exactly why the fallback is there. Failing the
+    release on such an image would block publishing the very first
+    version of an image that is designed to survive not being published.
+
+    Parsed with an indentation walk rather than a YAML load on purpose:
+    this script is stdlib-only so CI can run it with bare python3, and
+    adding PyYAML to make a release gate work is a worse trade than
+    twenty lines of scanning.
+    """
     refs: set[str] = set()
+    buildable: set[str] = set()
     for pattern in COMPOSE_GLOBS:
         for f in sorted(REPO_ROOT.glob(pattern)):
-            for line in f.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("image:"):
-                    refs.add(line.split("image:", 1)[1].strip().strip('"').strip("'"))
-    return sorted(refs)
+            in_services = False
+            svc_image: str | None = None
+            svc_builds = False
+
+            def flush() -> None:
+                if svc_image is not None:
+                    refs.add(svc_image)
+                    if svc_builds:
+                        buildable.add(svc_image)
+
+            for raw in f.read_text().splitlines():
+                if not raw.strip() or raw.lstrip().startswith("#"):
+                    continue
+                indent = len(raw) - len(raw.lstrip())
+                if indent == 0:
+                    flush()
+                    svc_image, svc_builds = None, False
+                    in_services = raw.split(":", 1)[0].strip() == "services"
+                    continue
+                if not in_services:
+                    continue
+                if indent == 2 and raw.rstrip().endswith(":"):
+                    # Next service block begins.
+                    flush()
+                    svc_image, svc_builds = None, False
+                    continue
+                stripped = raw.strip()
+                if stripped.startswith("image:"):
+                    svc_image = stripped.split("image:", 1)[1].strip().strip('"').strip("'")
+                elif stripped.startswith("build:") or stripped == "build:":
+                    svc_builds = True
+            flush()
+    return sorted(refs), buildable
 
 
 def ghcr_manifest_exists(image: str, tag: str) -> bool:
@@ -120,7 +164,8 @@ def main() -> int:
     pins = load_env_pins(ENV_EXAMPLE)
     failures: list[str] = []
     checked = 0
-    for raw in collect_image_refs():
+    all_refs, buildable = collect_image_refs()
+    for raw in all_refs:
         resolved = substitute(raw, pins)
         if not resolved.startswith(GHCR_PREFIX):
             continue  # upstream image; not this release's job
@@ -136,9 +181,19 @@ def main() -> int:
         tag = tag or "latest"
         checked += 1
         exists = ghcr_manifest_exists(image, tag)
-        status = "ok " if exists else "MISSING"
+        if exists:
+            status = "ok "
+        elif raw in buildable:
+            # Not a release blocker: this service declares a `build:`,
+            # so compose builds the image when the pull fails and the
+            # install still comes up. Reported, not failed — the pull is
+            # still the fast path we WANT published, so a missing one is
+            # worth seeing on every run.
+            status = "build"
+        else:
+            status = "MISSING"
         print(f"  [{status}] {image}:{tag}    (from {raw})")
-        if not exists:
+        if status == "MISSING":
             failures.append(f"{image}:{tag}")
     if failures:
         print(

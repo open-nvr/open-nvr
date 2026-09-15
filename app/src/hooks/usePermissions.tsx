@@ -125,6 +125,10 @@ export const NAV_PERMISSIONS = {
   '/live': 'live.view',
   '/vehicles': 'live.view', // plate reads are camera history — same tier as live view
   '/occupancy': 'live.view', // live head-counts — same tier as live view
+  // Screening records carry photographs of customers, so they sit
+  // behind the same permission as the alert inbox — and the API is
+  // gated on the same name, so the two cannot drift apart.
+  '/guard-compliance': 'alerts.view',
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',

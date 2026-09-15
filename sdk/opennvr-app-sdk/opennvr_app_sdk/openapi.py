@@ -150,7 +150,9 @@ def _components(manifest: AppManifest) -> dict[str, Any]:
             "description": (
                 "Liveness plus pipeline vitals. ``last_event_age_s`` is stall "
                 "detection: null before the first event, and a value that keeps "
-                "growing means the app is up but its input is not."
+                "growing means the app is up but its input is not. ``ready`` "
+                "false means the app is running but cannot do its job, and "
+                "``not_ready`` says why."
             ),
             "properties": {
                 "ready": {"type": "boolean"},
@@ -158,6 +160,9 @@ def _components(manifest: AppManifest) -> dict[str, Any]:
                 "events_seen": {"type": "integer"},
                 "alerts_fired": {"type": "integer"},
                 "last_event_age_s": {"type": ["number", "null"]},
+                # Present only when ``ready`` is false: one
+                # operator-facing sentence saying what is wrong.
+                "not_ready": {"type": "string"},
             },
             "required": ["ready", "uptime_s", "events_seen", "alerts_fired"],
         },
