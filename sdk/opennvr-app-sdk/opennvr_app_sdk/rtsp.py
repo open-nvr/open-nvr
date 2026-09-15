@@ -180,6 +180,30 @@ def read_frames(stream, frame_bytes: int) -> Iterator[bytes]:
         yield buf
 
 
+class _StallWatch:
+    """Last-frame clock for one ffmpeg session.
+
+    ``beat()`` on every frame; ``silent_for()`` is how long since the
+    last one. ``done`` ends the watching thread when the session does.
+    """
+
+    __slots__ = ("done", "_last", "_timeout")
+
+    def __init__(self, timeout: float) -> None:
+        self._timeout = timeout
+        self._last = time.monotonic()
+        self.done = threading.Event()
+
+    def beat(self) -> None:
+        self._last = time.monotonic()
+
+    def silent_for(self) -> float:
+        return time.monotonic() - self._last
+
+    def cancel(self) -> None:
+        self.done.set()
+
+
 class RtspFrameStream:
     """Newest-frame-wins reader for one RTSP URL.
 
@@ -217,6 +241,11 @@ class RtspFrameStream:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        #: The ffmpeg process of the session running right now. close()
+        #: and the stall watchdog both need to reach it: the reader is
+        #: parked in a blocking read on its stdout, and killing the
+        #: process is the only thing that unblocks it.
+        self._proc = None
         self._seq = 0
         self.restarts = 0
         #: Frames the app never asked for before the next arrived. Not a
@@ -240,6 +269,11 @@ class RtspFrameStream:
     def start(self) -> "RtspFrameStream":
         if self._thread is not None:
             return self
+        # Clear the stop flag: close() sets it, and it used to stay set
+        # for the life of the object. A caller that closed and reopened
+        # a stream — one per screening, say — got a fresh thread that
+        # returned immediately and no frames at all, for ever.
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name=f"frames-{self.name}",
                                         daemon=True)
         self._thread.start()
@@ -248,9 +282,20 @@ class RtspFrameStream:
     def close(self) -> None:
         self._stop.set()
         self._new.set()
+        # Kill ffmpeg FIRST. The reader thread is blocked in
+        # stream.read() on its stdout and checks _stop only between
+        # frames, so on a stalled stream it never checks again: the join
+        # below just burned its five seconds and returned with the
+        # thread still parked and ffmpeg still decoding. An app that
+        # reopens per screening leaked one of those per cycle.
+        self._terminate(self._proc)
+        self._proc = None
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)
+            if thread.is_alive():
+                logger.warning("%s: reader thread did not stop within 5s",
+                               self.name)
 
     def __enter__(self) -> "RtspFrameStream":
         return self.start()
@@ -331,12 +376,22 @@ class RtspFrameStream:
         frame_bytes = width * height * 3
 
         proc = self._spawn(build_command(url, width=self.width, fps=self.fps))
+        self._proc = proc
         errors: deque[str] = deque(maxlen=8)
         self._drain_stderr(proc, errors)
+        # STALL_TIMEOUT_S has been defined since this file was written and
+        # nothing enforced it: `healthy` reported the stall and the
+        # supervisor only ever restarted when read_frames RETURNED, which
+        # a wedged stream never does — ffmpeg sits open on a camera that
+        # accepted the connection and stopped sending, and the blocking
+        # read never comes back. The watchdog kills the process, which
+        # ends the read, which ends the session, which reconnects.
+        stall = self._watch_for_stall(proc)
         first = True
         produced = False
         try:
             for data in read_frames(proc.stdout, frame_bytes):
+                stall.beat()
                 if self._stop.is_set():
                     return produced
                 mono = time.monotonic()
@@ -355,13 +410,39 @@ class RtspFrameStream:
                 produced = True
                 first = False
         finally:
+            stall.cancel()
             self._terminate(proc)
+            if self._proc is proc:
+                self._proc = None
             if not produced and errors:
                 # Died without a single frame: say why, in ffmpeg's own
                 # words, rather than leaving an operator to guess.
                 logger.warning("%s: ffmpeg said: %s", self.name,
                                " | ".join(errors))
         return produced
+
+    def _watch_for_stall(self, proc) -> "_StallWatch":
+        """Kill ``proc`` if no frame arrives for STALL_TIMEOUT_S.
+
+        A separate thread because the reader is inside a blocking read
+        and cannot notice its own silence.
+        """
+        watch = _StallWatch(STALL_TIMEOUT_S)
+
+        def _guard() -> None:
+            while not watch.done.wait(1.0):
+                if self._stop.is_set():
+                    return
+                if watch.silent_for() >= STALL_TIMEOUT_S:
+                    logger.warning(
+                        "%s: no frame for %.0fs — the stream is wedged, "
+                        "restarting it", self.name, STALL_TIMEOUT_S)
+                    self._terminate(proc)
+                    return
+
+        threading.Thread(target=_guard, daemon=True,
+                         name=f"stall-{self.name}").start()
+        return watch
 
     @staticmethod
     def _drain_stderr(proc, sink) -> None:
@@ -384,6 +465,8 @@ class RtspFrameStream:
 
     @staticmethod
     def _terminate(proc) -> None:
+        if proc is None:
+            return
         try:
             proc.terminate()
             proc.wait(timeout=3)

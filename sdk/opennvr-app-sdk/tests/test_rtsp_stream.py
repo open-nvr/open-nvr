@@ -233,3 +233,144 @@ def test_a_bug_in_the_reader_is_not_reported_as_a_camera_fault(caplog):
         time.sleep(0.5)
         stream.close()
     assert any("bug" in r.getMessage() for r in caplog.records), caplog.text
+
+
+# ── a wedged stream ──────────────────────────────────────────────────
+#
+# The failure these cover is the one STALL_TIMEOUT_S was written for and
+# nothing enforced: a camera that accepts the TCP connection and then
+# stops sending. ffmpeg stays up, the reader stays parked in a blocking
+# read on its stdout, and read_frames never returns — so the supervisor,
+# which only restarts when a session ENDS, never restarts. `healthy`
+# reported the stall to anyone who asked and nothing acted on it.
+
+
+class BlockingProc:
+    """A Popen-alike whose stdout blocks until the process is killed.
+
+    This is what a wedged camera looks like from inside the reader: the
+    connection is open, the pipe is open, and nothing ever arrives.
+    """
+
+    def __init__(self, payload: bytes = b""):
+        self.stderr = io.BytesIO(b"")
+        self.terminated = threading.Event()
+        self.stdout = self._Stdout(self.terminated, payload)
+        self.kills = 0
+
+    class _Stdout:
+        def __init__(self, gate, payload):
+            self._gate = gate
+            self._pending = payload
+
+        def read(self, n):
+            if self._pending:
+                out, self._pending = self._pending[:n], self._pending[n:]
+                return out
+            # Blocks exactly as a real pipe does, and returns EOF only
+            # when the process is killed.
+            self._gate.wait(timeout=30)
+            return b""
+
+    def terminate(self):
+        self.kills += 1
+        self.terminated.set()
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.terminate()
+
+
+def _stalling_stream(monkeypatch, proc, *, timeout=0.3):
+    monkeypatch.setattr("opennvr_app_sdk.rtsp.STALL_TIMEOUT_S", timeout)
+    return RtspFrameStream(url="rtsp://camera/stalls", size=(W, H),
+                           spawn=lambda argv: proc, name="stall-test")
+
+
+def test_a_stalled_stream_is_killed_and_restarted(monkeypatch):
+    """One frame, then silence for longer than the stall timeout: the
+    watchdog kills ffmpeg, which ends the read, which ends the session,
+    which reconnects. Before this the stream sat there for ever."""
+    procs = []
+
+    def spawn(argv):
+        proc = BlockingProc(_frame(1) if not procs else b"")
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr("opennvr_app_sdk.rtsp.STALL_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("opennvr_app_sdk.rtsp.FIRST_BACKOFF_S", 0.05)
+    stream = RtspFrameStream(url="rtsp://camera/stalls", size=(W, H),
+                             spawn=spawn, name="stall-test")
+    stream.start()
+    try:
+        assert stream.latest(timeout=5.0) is not None, "the first frame never arrived"
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and len(procs) < 2:
+            time.sleep(0.05)
+        assert len(procs) >= 2, "the wedged session was never restarted"
+        assert procs[0].kills >= 1, "the wedged ffmpeg was never killed"
+    finally:
+        stream.close()
+
+
+def test_a_stream_that_is_delivering_is_left_alone(monkeypatch):
+    """The other half: the watchdog must not kill a slow-but-live feed.
+    A camera at 1 fps is a camera, not a fault."""
+    proc = BlockingProc(_frame(1) * 6)
+    stream = _stalling_stream(monkeypatch, proc, timeout=5.0)
+    stream.start()
+    try:
+        assert stream.latest(timeout=5.0) is not None
+        time.sleep(0.5)
+        assert proc.kills == 0, "a live stream was killed by the stall watchdog"
+    finally:
+        stream.close()
+
+
+def test_close_kills_ffmpeg_and_stops_the_thread(monkeypatch):
+    """close() used to join a thread that was parked in a blocking read
+    and could not see the stop flag, so it burned its five seconds and
+    returned with ffmpeg still decoding. An app that reopens a stream per
+    screening leaked one process per cycle."""
+    proc = BlockingProc(_frame(1))
+    stream = _stalling_stream(monkeypatch, proc, timeout=30.0)
+    stream.start()
+    assert stream.latest(timeout=5.0) is not None
+
+    started = time.monotonic()
+    stream.close()
+    elapsed = time.monotonic() - started
+
+    assert proc.kills >= 1, "ffmpeg was left running"
+    assert elapsed < 4.0, f"close() blocked for {elapsed:.1f}s on the join"
+    assert stream._thread is None
+
+
+def test_a_closed_stream_can_be_started_again(monkeypatch):
+    """close() sets the stop flag and it used to stay set for the life of
+    the object, so a later start() spawned a thread that returned at once
+    and delivered nothing — for ever, silently."""
+    procs = []
+
+    def spawn(argv):
+        proc = BlockingProc(_frame(len(procs) + 1))
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr("opennvr_app_sdk.rtsp.STALL_TIMEOUT_S", 30.0)
+    stream = RtspFrameStream(url="rtsp://camera/x", size=(W, H),
+                             spawn=spawn, name="reopen-test")
+    stream.start()
+    assert stream.latest(timeout=5.0) is not None
+    stream.close()
+
+    stream.start()
+    try:
+        assert stream.latest(timeout=5.0) is not None, (
+            "a reopened stream delivered no frames")
+        assert len(procs) >= 2
+    finally:
+        stream.close()
