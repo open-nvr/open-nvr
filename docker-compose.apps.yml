@@ -539,7 +539,16 @@ services:
     # are a branch and two shas — so a fresh install pinned to the
     # tested release could not pull it at all, and the whole app died on
     # a tag that never existed.
-    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    # ...which is also why ADAPTER_TAG is NOT the fallback here. An
+    # operator upgrading into this branch has ADAPTER_TAG=0.1.5 already
+    # in their .env and no YOLO_POSE_ADAPTER_TAG, so the chain resolved
+    # to exactly the tag the paragraph above says does not exist — and
+    # unlike yolo-pose-weights-init this service has no build context to
+    # fall back to (the image is built in the ai-adapter repo), so the
+    # pull fails and takes the whole `--profile apps up` down with it,
+    # including the loitering / intrusion / LPR apps that were running
+    # perfectly well before.
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}
     depends_on:
       # Start only once the graph is on disk. Without this the adapter
       # races the copier, loses, and reports itself healthy anyway —
