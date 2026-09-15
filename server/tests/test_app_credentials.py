@@ -448,8 +448,12 @@ def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
     assigned, and the playback server — which was excluded from auth
     entirely — would serve it. The token is scoped to this path.
     """
-    import jwt as _jwt
     from urllib.parse import parse_qs, urlparse
+
+    # python-jose, which is what this codebase signs with
+    # (services/mediamtx_jwt_service.py: `from jose import jwt`). PyJWT
+    # is not a dependency here.
+    from jose import jwt as _jwt
 
     tc, ids, _, key = platform
     body = tc.get(f"/internal/app/recordings/{ids['gate']}/url", headers=_app(key),
@@ -457,7 +461,7 @@ def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
     query = parse_qs(urlparse(body["url"]).query)
 
     assert "jwt" in query, "the playback URL was handed out with no credential"
-    claims = _jwt.decode(query["jwt"][0], options={"verify_signature": False})
+    claims = _jwt.get_unverified_claims(query["jwt"][0])
     perms = claims["mediamtx_permissions"]
     assert [p["action"] for p in perms] == ["playback"], (
         f"an app was given more than playback: {perms}")
