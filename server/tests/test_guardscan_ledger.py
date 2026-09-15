@@ -48,7 +48,7 @@ def db():
 def envelope(session_id="s1", *, verdict="compliant", score=100.0,
              camera="cam1", ts=None, **payload):
     return {
-        "schema": "guardscan.screening.v1",
+        "schema": "screening.completed.v1",
         "camera_id": camera,
         "ts": ts if ts is not None else datetime.now(UTC).timestamp(),
         "producer": "guard-scan-compliance",

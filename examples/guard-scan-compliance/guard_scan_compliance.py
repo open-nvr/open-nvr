@@ -87,7 +87,12 @@ class PoseUnavailable(RuntimeError):
 #: The contract for a completed screening, compliant or not. Core keeps
 #: these; the compliance report is built from them, which is why a clean
 #: scan is published too — a compliance rate needs the denominator.
-SCREENING_EVENT = "guardscan.screening.v1"
+#: EVENT_CONTRACTS.md: `<domain>.<event>` is noun.verb-in-past-tense,
+#: and the domain is the subject matter — "never the producer or the
+#: adapter". A screening is the noun; completing is what happened to
+#: it. (It was guardscan.screening.v1, which named this app and left
+#: the verb out.)
+SCREENING_EVENT = "screening.completed.v1"
 
 
 MANIFEST = AppManifest(
@@ -603,7 +608,10 @@ class GuardScanApp(FrameApp):
         self.kaic_key = getattr(config, "kaic_api_key", "") or ""
         self.events = DomainEventPublisher(
             getattr(config, "nats_alerts_url", "") or "",
-            token=getattr(config, "nats_alerts_token", None), producer=APP_ID)
+            token=getattr(config, "nats_alerts_token", None),
+            # `app:<name>`, per the envelope table — the same shape
+            # license-plate-recognition and occupancy-counting send.
+            producer=f"app:{APP_ID}")
         self.workers: dict[str, CameraWorker] = {}
         self.screenings = 0
         self.compliant = 0

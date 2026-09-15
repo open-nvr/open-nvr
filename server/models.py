@@ -880,7 +880,7 @@ class GuardScreening(Base):
     alerts there were but never what share of the day went right.
 
     Written by ``services/guardscan_event_consumer.py`` from contracted
-    ``guardscan.screening.v1`` events. The app measures; core remembers —
+    ``screening.completed.v1`` events. The app measures; core remembers —
     so the app can restart, or be reinstalled, without losing the record.
     Retention: the consumer prunes rows older than RETENTION_DAYS.
     """

@@ -626,7 +626,7 @@ async def lifespan(app: FastAPI):
     spawn_background(background_occupancy_event_consumer(),
                      name="occupancy-event-consumer")
 
-    # Entry screenings: consume guardscan.screening.v1 into the
+    # Entry screenings: consume screening.completed.v1 into the
     # compliance ledger. Every screening, not only the ones that
     # alerted — a compliance rate needs its denominator.
     async def background_guardscan_event_consumer():

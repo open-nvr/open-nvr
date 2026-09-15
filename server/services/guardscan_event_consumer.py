@@ -5,7 +5,7 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-"""Core consumes ``guardscan.screening.v1`` into the screening ledger.
+"""Core consumes ``screening.completed.v1`` into the screening ledger.
 
 The guard-scan app measures; core remembers. Every completed screening —
 the clean ones included — lands as a ``guard_screenings`` row, which is
@@ -35,7 +35,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SUBJECT = "opennvr.events.guardscan.screening.v1.>"
+SUBJECT = "opennvr.events.screening.completed.v1.>"
 
 RETENTION_DAYS = 90
 _PRUNE_EVERY = 200
@@ -72,7 +72,7 @@ def _when(value: object, fallback: datetime | None = None) -> datetime | None:
 
 
 def apply_screening_event(envelope: object, db=None) -> str:
-    """Apply one ``guardscan.screening.v1`` envelope to the ledger.
+    """Apply one ``screening.completed.v1`` envelope to the ledger.
 
     Pure-decision core, unit-testable without a bus. Status tokens:
 

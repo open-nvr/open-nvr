@@ -361,7 +361,7 @@ behind the Occupancy page's flow chart and stay figures.
    subscribe on an `opennvr.events.*` subject that this document does
    not list — that failure is the review prompt, not an obstacle.
 
-## `guardscan.screening.v1` — one entry screening, ruled on
+## `screening.completed.v1` — one entry screening, ruled on
 
 Published by the guard-scan-compliance app when it finishes ruling on a
 person at the entrance. Core consumes it into `guard_screenings`
@@ -372,14 +372,14 @@ and its reports are built from.
 complete scans over all screenings, and an event stream of only the
 failures gives a page that can count complaints but never state a rate.
 
-Subject: `opennvr.events.guardscan.screening.v1.<camera_id>`
+Subject: `opennvr.events.screening.completed.v1.<camera_id>`
 
 ```json
 {
-  "schema": "guardscan.screening.v1",
+  "schema": "screening.completed.v1",
   "camera_id": "cam3",
   "ts": 1789251600.0,
-  "producer": "guard-scan-compliance",
+  "producer": "app:guard-scan-compliance",
   "payload": {
     "session": "7c3c36c02d",
     "at": "2026-09-13T09:31:00+00:00",
