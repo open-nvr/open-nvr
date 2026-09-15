@@ -26,8 +26,12 @@ install.
 """
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
+import threading
+import time as _time
+from pathlib import Path
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,8 +174,17 @@ def app_methods():
 
 
 def _app(screenings=0, compliant=0, workers=None):
-    return SimpleNamespace(screenings=screenings, compliant=compliant,
-                           workers=workers or {}, recent=[])
+    app = SimpleNamespace(screenings=screenings, compliant=compliant,
+                          workers=workers or {}, recent=[])
+    # state() and not_ready_reason() read through the snapshot helper
+    # rather than the live dict — they run on the contract HTTP thread,
+    # which must not iterate something the tick thread is mutating.
+    app._workers_lock = threading.Lock()
+    ns: dict = {}
+    exec(compile(_slice("def _workers(self)", "def _start_worker"),
+                 "<app>", "exec"), ns)  # noqa: S102
+    app._workers = ns["_workers"].__get__(app)
+    return app
 
 
 def test_nothing_screened_is_not_a_perfect_score(app_methods):
@@ -264,7 +277,18 @@ def _site(assigned, workers=None):
         workers=dict(workers or {}),
         nvr=SimpleNamespace(cameras=lambda: [_Cam(h) for h in assigned]),
         _start_worker=_start,
+        # `workers` is shared by the tick, config-poll and HTTP threads,
+        # so the real object guards it with a lock and hands readers a
+        # snapshot. The stub has to carry both or it is modelling an
+        # object that no longer exists.
+        _workers_lock=threading.Lock(),
     )
+    # The REAL snapshot helper, read out of the app source — a stub that
+    # just listed the dict would make the lock untestable.
+    ns: dict = {}
+    exec(compile(_slice("def _workers(self)", "def _start_worker"),
+                 "<app>", "exec"), ns)  # noqa: S102
+    app._workers = ns["_workers"].__get__(app)
     return app, started, stopped
 
 
@@ -397,3 +421,156 @@ def test_a_real_result_still_parses(bodies_from):
     bodies = fn({"result": {"persons": [_person()]}}, FRAME, _Tracker())
     assert len(bodies) == 1
     assert bodies[0].box == (10.0, 20.0, 110.0, 220.0)
+
+
+# ── the workers dict is shared by three threads ────────────────────
+#
+# _reconcile_roster runs on the tick thread, on_config_update ->
+# _retune_workers on the config-poll thread, state() and
+# not_ready_reason() on the contract HTTP thread. Iterating the live
+# dict while another thread adds or pops raises "dictionary changed size
+# during iteration" — on /state that is the operator's status page
+# failing at exactly the moment they assign or unassign a camera.
+
+
+def test_reading_the_roster_takes_the_lock():
+    """The contract, asserted directly rather than by racing.
+
+    A timing test here is worthless: the window between "iterate" and
+    "another thread pops" is microseconds, so an unlocked read passes a
+    churn loop almost every time and fails in production once a week.
+    What actually matters is that the reader and the mutators take the
+    same lock, so that is what this checks.
+    """
+    app, _, _ = _site(assigned=["cam1"], workers={
+        "cam1": SimpleNamespace(stop=lambda: None)})
+
+    taken = []
+    real = app._workers_lock
+
+    class _Watched:
+        def __enter__(self):
+            taken.append("acquired")
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    app._workers_lock = _Watched()
+    assert app._workers() == [("cam1", app.workers["cam1"])]
+    assert taken == ["acquired"], (
+        "_workers() read the live dict without taking the lock")
+
+
+def test_the_roster_snapshot_is_a_copy():
+    """A snapshot that aliased the dict would defeat the point: the
+    caller iterates it after the lock is released."""
+    app, _, _ = _site(assigned=["cam1"], workers={
+        "cam1": SimpleNamespace(stop=lambda: None)})
+
+    snapshot = app._workers()
+    with app._workers_lock:
+        app.workers["cam9"] = SimpleNamespace(stop=lambda: None)
+        app.workers.pop("cam1")
+
+    assert [h for h, _ in snapshot] == ["cam1"], (
+        "the snapshot changed when the roster did")
+
+
+def test_a_departing_worker_is_popped_before_it_is_stopped(roster):
+    """stop() joins the reader thread, so it must not be called with the
+    lock held — and the worker must already be out of the dict, or a
+    reader can hand out a worker that is being torn down."""
+    seen_during_stop = []
+
+    app, _, stopped = _site(assigned=["cam2"], workers={"cam2": SimpleNamespace(stop=lambda: None)})
+
+    def _stop_and_look():
+        seen_during_stop.append(dict(app.workers))
+        stopped.append("cam5")
+
+    app.workers["cam5"] = SimpleNamespace(stop=_stop_and_look)
+    roster(app)
+
+    assert stopped == ["cam5"]
+    assert "cam5" not in seen_during_stop[0], (
+        "the worker was still reachable while it was being stopped")
+
+
+# ── the app prunes its own session logs ────────────────────────────
+
+
+def _log_writer(tmp_path, days=90):
+    """``on_session_log`` + ``_prune_session_logs``, bound to a stub."""
+    ns = {"Path": Path, "log": _Log(), "time": _time,
+          "_json_dumps": lambda v: "{}"}
+    exec(compile(_slice("def on_session_log(self, handle: str, record: dict)",
+                        "# \u2500\u2500 inference \u2500\u2500"),
+                 "<app>", "exec"), ns)  # noqa: S102
+    app = SimpleNamespace(
+        config=SimpleNamespace(session_log_dir=str(tmp_path),
+                               session_log_days=days),
+        _session_logs_swept=0.0,
+    )
+    app.on_session_log = ns["on_session_log"].__get__(app)
+    app._prune_session_logs = ns["_prune_session_logs"].__get__(app)
+    return app
+
+
+class _Log:
+    def warning(self, *a, **k): pass
+    def info(self, *a, **k): pass
+
+
+def test_old_session_logs_are_deleted(tmp_path):
+    """Core prunes the LEDGER after 90 days and cannot reach this
+    directory — it is on the app's own volume. If the app does not sweep
+    it, nothing does, and a busy door fills the volume in weeks."""
+    old = tmp_path / "old.json"
+    old.write_text("{}")
+    os.utime(old, (_time.time() - 200 * 86400,) * 2)
+
+    app = _log_writer(tmp_path, days=90)
+    app.on_session_log("cam1", {"session": "fresh"})
+
+    assert not old.exists(), "a log past the retention window survived"
+    assert (tmp_path / "fresh.json").exists(), "the new log was not written"
+
+
+def test_a_recent_session_log_is_kept(tmp_path):
+    recent = tmp_path / "recent.json"
+    recent.write_text("{}")
+
+    app = _log_writer(tmp_path, days=90)
+    app.on_session_log("cam1", {"session": "fresh"})
+
+    assert recent.exists(), "a log inside the window was deleted"
+
+
+def test_zero_days_keeps_everything(tmp_path):
+    """For an operator shipping these somewhere themselves."""
+    old = tmp_path / "old.json"
+    old.write_text("{}")
+    os.utime(old, (_time.time() - 500 * 86400,) * 2)
+
+    app = _log_writer(tmp_path, days=0)
+    app.on_session_log("cam1", {"session": "fresh"})
+
+    assert old.exists(), "session_log_days=0 should disable the prune"
+
+
+def test_the_sweep_is_not_run_on_every_screening(tmp_path):
+    """A screening ends every minute or two on a busy door; this is a
+    directory scan, so it is hourly."""
+    app = _log_writer(tmp_path, days=90)
+    app.on_session_log("cam1", {"session": "a"})
+    first = app._session_logs_swept
+    assert first > 0
+
+    old = tmp_path / "old.json"
+    old.write_text("{}")
+    os.utime(old, (_time.time() - 200 * 86400,) * 2)
+    app.on_session_log("cam1", {"session": "b"})
+
+    assert app._session_logs_swept == first, "swept twice within the hour"
+    assert old.exists(), "the second write should not have swept"

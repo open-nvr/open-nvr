@@ -104,6 +104,16 @@ MANIFEST = AppManifest(
              "arm, right arm, front, back — and flags what the scanner "
              "finds."),
     requires_tasks=[POSE_TASK],
+    # RFC-0002 decision 7. requires_tasks says what capability this app
+    # needs; this says WHICH adapter must be provisioned with it, and it
+    # matters here because yolo-pose is not in the standard stack (yolov8
+    # is, which is why nothing lists that one). Without it the one-click
+    # installer ups the app alone and every /infer 404s — compose
+    # depends_on covers the `docker compose up` path and nothing else.
+    # Underscored, like license-plate-recognition's fast_plate_ocr: the
+    # installer maps it to the compose service by
+    # adapter_service_name() -> "yolo-pose-adapter".
+    requires_adapters=["yolo_pose"],
     subscribes=None,          # drives its own frames, at video rate
     params=[
         # Ordered and grouped the way a room is actually set up: where
@@ -308,6 +318,8 @@ class CameraWorker:
         # asks the run loop for a fresh one.
         self._stream_settings: tuple | None = None
         self._reopen = threading.Event()
+        #: The reader thread, once start() has run. stop() joins it.
+        self._thread: threading.Thread | None = None
 
     # ── lifecycle ──
 
@@ -317,9 +329,38 @@ class CameraWorker:
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop this camera's worker, in an order that is safe to call
+        from another thread.
+
+        It always was called from another thread — `_reconcile_roster`
+        runs on the tick thread, shutdown on the signal handler's — and
+        it used to close the stream and flush the engine straight away,
+        while the worker thread was still inside `_handle` iterating and
+        popping the same `self.sessions`. Two threads mutating one
+        engine, with the flush firing alerts and writing files for
+        sessions the other thread was still updating. It also never
+        joined, so the worker could outlive the object that owned it.
+
+        So: set the flag, close the stream (the only thing that unblocks
+        a reader parked on a frame), JOIN, and only then flush — by
+        which point this is the only thread left holding the engine. The
+        run loop flushes on a clean stream end too; a second flush finds
+        no sessions and does nothing.
+        """
         self._stop.set()
+        self._reopen.set()          # wake a loop waiting to reopen
         if self.stream is not None:
             self.stream.close()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10.0)
+            if thread.is_alive():
+                # Say so rather than flushing underneath it — a
+                # half-stopped worker is worth a log line, and flushing
+                # now would recreate exactly the race this method fixes.
+                log.warning("%s: worker did not stop within 10s; leaving "
+                            "its screening in place", self.handle)
+                return
         if self.engine is not None:
             # A restart is not a reason to lose the screening in progress.
             self.engine.flush(time.time(), reason="left")
@@ -518,6 +559,14 @@ class GuardScanConfig(BaseAppConfig):
     uniform_hsv_low: list = field(default_factory=list)
     uniform_hsv_high: list = field(default_factory=list)
     session_log_dir: str = "/data/sessions"
+    #: How long to keep those per-frame keypoint logs, in days. They are
+    #: the training data this app collects as it runs, ~700KB-1MB per
+    #: screening at 10fps, on a volume nothing else sweeps: core prunes
+    #: the LEDGER after 90 days but cannot touch this directory, which
+    #: lives in this container. Unbounded, a busy entrance fills the
+    #: volume in weeks. 0 disables the prune for anyone who is shipping
+    #: these somewhere themselves.
+    session_log_days: int = 90
 
 
 def _stream_settings(cfg: dict) -> tuple:
@@ -613,10 +662,23 @@ class GuardScanApp(FrameApp):
             # license-plate-recognition and occupancy-counting send.
             producer=f"app:{APP_ID}")
         self.workers: dict[str, CameraWorker] = {}
+        #: `workers` is touched by three threads — the tick thread
+        #: (_reconcile_roster), the config-poll thread (on_config_update
+        #: -> _retune_workers) and the contract HTTP thread (state,
+        #: not_ready_reason). Iterating it while another thread adds or
+        #: pops raises "dictionary changed size during iteration", which
+        #: on /state means the operator's status page 500s at exactly
+        #: the moment they assign or unassign a camera. Mutations take
+        #: this lock; readers take a snapshot through _workers().
+        self._workers_lock = threading.Lock()
         self.screenings = 0
         self.compliant = 0
         self.recent: list[str] = []
         self._per_camera: dict[str, dict] = {}
+        #: Monotonic-ish stamp of the last session-log sweep. 0.0 so the
+        #: first screening after a boot sweeps, which is when a volume
+        #: that filled while the app was down gets dealt with.
+        self._session_logs_swept = 0.0
         dispatcher = build_dispatcher(
             webhook_url=getattr(config, "webhook_url", None),
             nats_alerts_url=getattr(config, "nats_alerts_url", None),
@@ -675,7 +737,7 @@ class GuardScanApp(FrameApp):
 
     def _retune_workers(self) -> None:
         """Push the new settings into every running engine."""
-        for handle, worker in self.workers.items():
+        for handle, worker in self._workers():
             cfg = self.camera_config(handle)
             # Frame rate and decode width belong to the STREAM, not the
             # rules, and cannot be changed under a live one. Ask the
@@ -785,7 +847,7 @@ class GuardScanApp(FrameApp):
 
     def on_session_log(self, handle: str, record: dict) -> None:
         """The per-frame keypoints: the training set this collects as it
-        runs. Written where a prune can find it, not into the evidence
+        runs. Written into this app's own volume, not the evidence
         store, whose sweep only ever deletes JPEGs."""
         folder = Path(getattr(self.config, "session_log_dir", None)
                       or "/data/sessions")
@@ -795,6 +857,47 @@ class GuardScanApp(FrameApp):
             path.write_text(_json_dumps(record), encoding="utf-8")
         except OSError as exc:
             log.warning("could not write session log: %s", exc)
+            return
+        self._prune_session_logs(folder)
+
+    def _prune_session_logs(self, folder: Path) -> None:
+        """Drop keypoint logs past `session_log_days`.
+
+        This has to happen HERE. Core prunes the screening ledger after
+        90 days and used to believe it pruned these too, by unlinking
+        `<recordings>/.guardscan/<session>.json` — a path nothing has
+        ever written. These live on this container's own volume, so core
+        cannot reach them, and nothing was being deleted while two
+        comments said otherwise. At roughly 700KB-1MB per screening, a
+        busy door fills the volume in weeks.
+
+        Swept at most once an hour rather than on every write: a
+        screening ends every minute or two on a busy door and this is a
+        directory scan.
+        """
+        days = int(getattr(self.config, "session_log_days", 90) or 0)
+        if days <= 0:
+            return
+        now = time.time()
+        if now - self._session_logs_swept < 3600:
+            return
+        self._session_logs_swept = now
+        cutoff = now - days * 86400
+        dropped = 0
+        try:
+            for entry in folder.glob("*.json"):
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                        dropped += 1
+                except OSError:
+                    continue        # vanished under us, or not ours to delete
+        except OSError as exc:
+            log.warning("could not sweep session logs: %s", exc)
+            return
+        if dropped:
+            log.info("pruned %d session log(s) older than %d days",
+                     dropped, days)
 
     # ── inference ──
 
@@ -883,7 +986,7 @@ class GuardScanApp(FrameApp):
                  # keeps climbing while nothing is screened. That is
                  # why the error column beside it matters.
                  "frames": w.frames, "error": w.last_error or ""}
-                for handle, w in self.workers.items()
+                for handle, w in self._workers()
             ],
             "recent": list(self.recent),
         }
@@ -899,11 +1002,12 @@ class GuardScanApp(FrameApp):
 
         Ordered by what an operator can act on first.
         """
-        if not self.workers:
+        workers = self._workers()
+        if not workers:
             return ("No camera is assigned to this app — assign an "
                     "entrance camera in the App Catalog.")
-        down = [h for h, w in self.workers.items() if w.inference_down]
-        if len(down) == len(self.workers):
+        down = [h for h, w in workers if w.inference_down]
+        if len(down) == len(workers):
             return (f"Pose inference is failing on every camera — check the "
                     f"'{POSE_ADAPTER}' adapter is running and registered. "
                     f"Nobody is being screened.")
@@ -925,9 +1029,20 @@ class GuardScanApp(FrameApp):
             log.warning("no cameras assigned to this app yet — assign an "
                         "entrance camera in the App Catalog")
 
+    def _workers(self) -> list[tuple[str, "CameraWorker"]]:
+        """A stable list of (handle, worker) to iterate outside the lock.
+
+        Cheap — a handful of cameras — and it keeps every reader off the
+        live dict, so a roster change during a /state render cannot
+        raise.
+        """
+        with self._workers_lock:
+            return list(self.workers.items())
+
     def _start_worker(self, cam) -> None:
         worker = CameraWorker(self, cam)
-        self.workers[cam.handle] = worker
+        with self._workers_lock:
+            self.workers[cam.handle] = worker
         worker.start()
         log.info("watching %s (%s)", cam.handle, cam.name)
 
@@ -973,9 +1088,15 @@ class GuardScanApp(FrameApp):
                             "core may be unreachable", len(self.workers))
             return 0
 
-        for handle in [h for h in self.workers if h not in assigned]:
+        # Pop under the lock, stop outside it: stop() joins the reader
+        # thread, and holding the lock across a join would block /state
+        # for as long as a wedged worker takes to notice.
+        with self._workers_lock:
+            gone = [h for h in self.workers if h not in assigned]
+            departed = [(h, self.workers.pop(h)) for h in gone]
+        for handle, worker in departed:
             log.info("%s is no longer assigned to this app — stopping", handle)
-            self.workers.pop(handle).stop()
+            worker.stop()
         return len(assigned)
 
     def on_frame(self, camera_id: str, frame_bytes: bytes):
@@ -997,7 +1118,7 @@ class GuardScanApp(FrameApp):
         # the config poll never hears about it — the roster has to be
         # asked for.
         self._reconcile_roster()
-        for handle, worker in self.workers.items():
+        for handle, worker in self._workers():
             log.info("%s: %.1f fps, %d frames, %d tracked%s", handle,
                      worker.fps, worker.frames, worker.tracker.live,
                      f", last error: {worker.last_error}"
@@ -1005,7 +1126,7 @@ class GuardScanApp(FrameApp):
         return []
 
     def stop(self) -> None:
-        for worker in self.workers.values():
+        for _, worker in self._workers():
             worker.stop()
         super().stop()
 
