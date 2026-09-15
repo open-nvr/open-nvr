@@ -48,6 +48,7 @@ webhook_url: null
 nats_alerts_url: "nats://localhost:4222"
 nats_alerts_token: "changeme"
 session_log_dir: "./sessions"
+session_log_days: 90
 
 # ── App contract (spec §03) ────────────────────────────────────────
 contract_port: 9210

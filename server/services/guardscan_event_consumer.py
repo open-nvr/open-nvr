@@ -31,7 +31,6 @@ import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -188,29 +187,19 @@ def prune_screenings(db) -> int:
      .filter(GuardScreening.ended_at < cutoff)
      .delete(synchronize_session=False))
     db.commit()
-    _prune_session_logs(ids)
     logger.info("guard screenings: pruned %d rows older than %d days",
                 len(ids), RETENTION_DAYS)
     return len(ids)
 
 
-def _prune_session_logs(session_ids: list[str]) -> None:
-    """Delete the per-frame keypoint blobs for pruned screenings.
-
-    These are the training data the app collects as it runs, and they
-    are NOT in the evidence store — that sweep only ever deletes .jpg,
-    so left there they would accumulate for ever.
-    """
-    from core.config import settings
-
-    folder = Path(settings.recordings_base_path) / ".guardscan"
-    if not folder.is_dir():
-        return
-    for session_id in session_ids:
-        try:
-            (folder / f"{session_id}.json").unlink(missing_ok=True)
-        except OSError:
-            continue
+# The per-frame keypoint logs are NOT pruned from here, and cannot be.
+# This used to unlink <recordings>/.guardscan/<session>.json, a path
+# nothing has ever written: the app writes them to its own session_log_dir
+# (/data/sessions), on the app container's own named volume. Core cannot
+# reach another container's volume, so the sweep silently deleted nothing
+# while both this module and the compose comment claimed the growth was
+# handled. The app prunes its own directory now — it is the only process
+# that can — and this is left as a note so the claim is not reinvented.
 
 
 async def _handle_message(msg) -> None:

@@ -48,6 +48,10 @@ webhook_url: null
 nats_alerts_url: "nats://nats-apps:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 session_log_dir: "/data/sessions"
+# Keep the per-frame keypoint logs this long. Core's 90-day ledger prune
+# cannot touch them — they are on this container's volume — so this is
+# the only thing bounding that volume. 0 keeps them for ever.
+session_log_days: 90
 
 # ── App contract (spec §03) ────────────────────────────────────────
 contract_port: 9210

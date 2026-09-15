@@ -131,23 +131,44 @@ def test_a_camera_handle_core_does_not_know_still_records(db):
 # ── retention ────────────────────────────────────────────────────────
 
 
-def test_old_screenings_are_pruned(db, tmp_path, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "recordings_base_path", str(tmp_path))
-    keypoints = tmp_path / ".guardscan"
-    keypoints.mkdir()
-    (keypoints / "old.json").write_text("{}", encoding="utf-8")
-
+def test_old_screenings_are_pruned(db):
     old = (datetime.now(UTC) - timedelta(days=200)).timestamp()
     apply_screening_event(envelope("old", ts=old), db=db)
     apply_screening_event(envelope("new"), db=db)
 
     assert prune_screenings(db) == 1
     assert [r.session_id for r in rows(db)] == ["new"]
-    # The keypoint blob goes with it: it is not in the evidence store,
-    # whose sweep only deletes JPEGs, so nothing else would ever remove it.
-    assert not (keypoints / "old.json").exists()
+
+
+def test_pruning_the_ledger_does_not_pretend_to_touch_the_keypoint_logs(
+    db, tmp_path, monkeypatch
+):
+    """Core prunes ROWS. The per-frame keypoint logs are the app's, on
+    the app container's own volume, and core cannot reach them.
+
+    This test used to assert the opposite — and passed, because it
+    created `<recordings>/.guardscan/old.json` itself. Nothing has ever
+    written that path: the app writes to its own `session_log_dir`
+    (/data/sessions). So the sweep deleted nothing in production while
+    this test, the consumer's docstring and the compose comment all said
+    the growth was handled. The app prunes its own directory now; the
+    assertion here is that core no longer claims to.
+    """
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "recordings_base_path", str(tmp_path))
+    stray = tmp_path / ".guardscan"
+    stray.mkdir()
+    (stray / "old.json").write_text("{}", encoding="utf-8")
+
+    old = (datetime.now(UTC) - timedelta(days=200)).timestamp()
+    apply_screening_event(envelope("old", ts=old), db=db)
+    assert prune_screenings(db) == 1
+
+    assert (stray / "old.json").exists(), (
+        "core reached into a path it does not own — the app's logs are "
+        "on the app's volume, and a sweep here can only ever be a no-op "
+        "that looks like a fix")
 
 
 # ── the arithmetic the page shows ────────────────────────────────────
