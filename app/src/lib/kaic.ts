@@ -30,8 +30,13 @@ export type Tier0Like = {
   health?: { workers_up?: number } | null
 } | undefined | null
 
-/** The task the platform's Tier-0 detector provides on the bus. */
+/** The tasks the platform's Tier-0 detector provides on the bus. It
+ *  detects AND tracks — every Tier-0 event carries stable `track_id`s
+ *  (docs/tier0-consumption.md) — so a tripwire or abandoned-object app
+ *  that declares multi_object_tracking is satisfied by it without a
+ *  separate bytetrack adapter. */
 export const TIER0_TASK = 'object_detection'
+export const TIER0_TASKS = ['object_detection', 'multi_object_tracking'] as const
 
 function asStringList(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : []
@@ -64,7 +69,7 @@ export function availableTasks(caps: CapabilitiesLike, t0?: Tier0Like): Set<stri
   for (const entry of Object.values(caps?.adapters ?? {})) {
     for (const t of adapterTasks(entry)) out.add(t)
   }
-  if (tier0Running(t0)) out.add(TIER0_TASK)
+  if (tier0Running(t0)) for (const t of TIER0_TASKS) out.add(t)
   return out
 }
 
@@ -73,6 +78,6 @@ export function taskProvider(task: string, caps: CapabilitiesLike, t0?: Tier0Lik
   for (const entry of Object.values(caps?.adapters ?? {})) {
     if (adapterTasks(entry).includes(task)) return 'adapter'
   }
-  if (task === TIER0_TASK && tier0Running(t0)) return 'tier0'
+  if ((TIER0_TASKS as readonly string[]).includes(task) && tier0Running(t0)) return 'tier0'
   return null
 }

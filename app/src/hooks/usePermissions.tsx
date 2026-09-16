@@ -132,6 +132,7 @@ export const NAV_PERMISSIONS = {
   // The face directory holds photographs of named people, so it sits
   // with the alert inbox, like screening records do.
   '/people': 'alerts.view',
+  '/tripwires': 'live.view', // counts are camera history — same tier as live view
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',
