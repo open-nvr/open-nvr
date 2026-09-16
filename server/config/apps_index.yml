@@ -123,13 +123,13 @@
 
 - id: line-crossing
   name: Line Crossing
-  summary: Alerts when a tracked object crosses an oriented tripwire in a counted direction.
+  summary: Tripwire counting and alerts — tallies every tracked object crossing a drawn line per direction and hour, and alarms on each crossing, on a count threshold, or only at night.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/line-crossing:latest
   build_context: examples/line-crossing
   requires_tasks: [object_detection, multi_object_tracking]
-  emits: [line-crossing]
+  emits: [line-crossing, passthrough]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/line-crossing/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

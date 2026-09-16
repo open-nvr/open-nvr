@@ -6,10 +6,10 @@ one-way corridor enforcement, loading-dock gate traffic.
 
 A NATS-subscribing monitoring app. Unlike the zone-based examples, a
 tripwire needs **per-object identity** — it has to know the *same* object
-moved from one side of the line to the other. It therefore consumes
-detections that carry a `track_id` (chain the `bytetrack` adapter after
-your detector, or use a detector that tracks natively). It pays zero
-adapter/GPU cost on top of the tracked stream that's already running.
+moved from one side of the line to the other. The stack's always-on
+Tier-0 detector tracks natively, so the compose config rides it
+(`consume_tier0: true`) at zero extra inference cost; a chained
+`bytetrack` adapter is the alternative for a custom detector.
 
 | | |
 |---|---|
@@ -46,15 +46,67 @@ python line_crossing.py --config config.yml
 > untracked detections. Chain the `bytetrack` adapter after your detector
 > so events carry stable track IDs.
 
-## Configure
+## Counting
 
-See [`config.example.yml`](config.example.yml). The key knobs:
+Every crossing is tallied — per camera, per direction, since start,
+for **today** (which starts over at `daily_reset_hour`), and per hour
+for the last 24 h. Call the directions what they mean with
+`label_a_to_b` / `label_b_to_a` (`in` / `out` by default; `north` /
+`south`, `entering` / `leaving` — whatever the guard says).
 
-- **`line.a` / `line.b`** — the two endpoints of the tripwire, in pixel
-  coordinates.
-- **`line.count_direction`** — `a_to_b`, `b_to_a`, or `both`.
-- **`watch_labels`** — which labels to track across the line.
-- **`track_ttl_seconds`** — how long to remember an idle track.
+Counts are published every `footfall_period_seconds` as
+`occupancy.footfall.v1` domain events (a→b as entries, b→a as exits),
+which core already sums into 90-day per-camera-hour history and serves
+at `GET /api/v1/occupancy/footfall`. The **Tripwires** page charts last
+week from that; this app never has to remember it. Turn
+`publish_footfall` off if the occupancy app has an entry line on the
+same camera, or the two will be summed.
+
+## Alerting
+
+Counting always runs; `alert_mode` says what a crossing does beyond it:
+
+| `alert_mode` | Behaviour | Use it for |
+|---|---|---|
+| `every` | one alert per crossing | a perimeter, a fence line |
+| `threshold` | an alert each time today's count reaches a multiple of `passthrough_threshold` | "tell me at the 100th visitor" |
+| `off` | count only | a footfall counter |
+
+On top of that: `active_hours` (alerts only inside a daily window, e.g.
+`22:00`–`06:00`; counting is unaffected), `alert_cooldown_seconds` per
+camera (a group at the gate is one alert, every person is still
+counted), `alert_severity`, and `attach_snapshot` — a still from the
+camera stored as evidence and cited by the alert.
+
+## Filters
+
+A tripwire on a real camera sees more than what you want to count:
+
+- **`watch_labels`** — `person`, or `car`/`truck` for a vehicle gate.
+- **`min_track_age_seconds`** — a track that flickered into existence
+  on the line a moment ago is not a crossing.
+- **`min_bbox_height`** — objects shorter than this fraction of the
+  frame (birds, far traffic) do not count.
+
+## Cameras and lines
+
+With no `cameras:` in the config the app asks OpenNVR which cameras
+carry the **`line_crossing`** assignment (Settings → Cameras →
+Assignments), re-checks every five minutes, and takes each camera's
+line from the App Catalog's tripwire editor — drawn on the real scene,
+applied live. A camera assigned but without a line is shown as *not
+drawn* on the dashboard rather than counting nothing in silence.
+Listing cameras explicitly (see `config.example.yml`) pins the set.
+
+Every knob above is a manifest param: edit it in the catalog's config
+form and it applies without a restart.
+
+## The Tripwires page
+
+Enabling the app lights **Applications → Tripwires**: per camera, today's
+in / out / net with a 24-hour bar strip, last week from the platform's
+footfall history, the recent crossings with their snapshots, and the
+cameras still waiting for a line.
 
 ## How alerts flow
 
@@ -66,9 +118,9 @@ webhook and NATS publish to
 
 ## What it does NOT do (yet)
 
-- **No running totals.** It fires per crossing; it doesn't keep an
-  in/out tally. A small [`alerts-subscriber`](../alerts-subscriber) that
-  increments counters by `direction` closes that loop.
+- **One line per camera.** The catalog's editor draws one tripwire per
+  camera per app. Two counted doors on one camera means two cameras
+  today, or one line placed to cut both paths.
 - **No multi-segment polylines.** One straight segment per wire. Model a
   jagged boundary as several cameras/wires, or extend `line.py`.
 - **No re-identification across cameras.** Track IDs are per camera; a
