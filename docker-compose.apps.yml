@@ -942,11 +942,98 @@ services:
       - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
+  # InsightFace adapter — the face-recognition capability behind the
+  # Smart Doorbell. The listing declares requires_adapters: [insightface]
+  # (RFC-0002 decision 7) and the app's config.docker.yml already named
+  # http://insightface-adapter:9005, but no service existed: the
+  # validator warned "installs but that capability stays degraded", and
+  # a one-click install produced a doorbell that could recognise nobody.
+  # Same shape as the fast-plate-ocr pair above. The ~280 MB buffalo_l
+  # weights download on first start into a named cache volume; the
+  # enrolled-faces DB lives on its own volume so re-pulling the image
+  # never forgets a family member.
+  # ──────────────────────────────────────────────────────────────
+  insightface-adapter:
+    profiles: [apps, smart-doorbell]
+    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_insightface_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - OPENNVR_INSIGHTFACE_FACE_DB=/data/faces.json
+    volumes:
+      - opennvr_insightface_faces:/data
+      - opennvr_insightface_cache:/root/.insightface
+    networks:
+      # opennvr_internal for KAI-C's /infer calls; opennvr_apps because
+      # the doorbell's enrol / list / delete actions call the adapter's
+      # /faces/* routes directly — KAI-C does not proxy those.
+      - opennvr_internal
+      - opennvr_apps
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9005/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  # One-shot KAI-C registration, name MUST be ``insightface``: it becomes
+  # the route /api/v1/infer/insightface, which the app's
+  # ``recognition_adapter`` config names. Always exits 0 (see
+  # fast-plate-ocr-register).
+  insightface-register:
+    profiles: [apps, smart-doorbell]
+    image: alpine:3.20
+    container_name: opennvr_insightface_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      insightface-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="insightface"
+        url="http://insightface-adapter:9005"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if face recognition 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — face recognition will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Smart doorbell — face recognition at the door via InsightFace
   # through KAI-C (FrameApp); known visitors low-severity, strangers
   # high with a snapshot. Contract surface on :9206.
-  # NOTE: needs an InsightFace adapter registered with KAI-C under
-  # name=insightface — the standard stack ships only yolov8.
+  # The insightface-adapter pair above is provisioned with it.
   # ──────────────────────────────────────────────────────────────
   smart-doorbell-config-init:
     profiles: [apps, smart-doorbell]
@@ -991,6 +1078,10 @@ services:
         condition: service_healthy
       egress-proxy:
         condition: service_started
+      insightface-adapter:
+        condition: service_healthy
+      insightface-register:
+        condition: service_completed_successfully
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
@@ -1003,7 +1094,7 @@ services:
       # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
       - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
       - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
-      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,insightface-adapter,localhost,127.0.0.1
     expose:
       - "9206"
     volumes:
@@ -1347,6 +1438,8 @@ volumes:
   opennvr_gate_controller_config:
   opennvr_alert_notifier_config:
   opennvr_fast_plate_ocr_cache:
+  opennvr_insightface_faces:
+  opennvr_insightface_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
   opennvr_footage_search_config:
