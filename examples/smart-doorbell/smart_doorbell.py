@@ -197,6 +197,9 @@ MANIFEST = AppManifest(
                                   "raises an expired-pass alert instead of a greeting."),
                 Param("person_id", str, default="",
                       description="Leave blank to derive from the name; set to re-enrol an existing person."),
+                Param("append", bool, default=False,
+                      description="Add this photo to the person's existing samples instead of replacing "
+                                  "them. More angles and lighting = fewer false strangers."),
             ],
             description="Register a known face so the doorbell greets them "
                         "instead of flagging a stranger.",
@@ -206,13 +209,18 @@ MANIFEST = AppManifest(
             params=[
                 Param("stranger_id", str, required=True,
                       description="The id of a snapshot on the strangers wall."),
-                Param("name", str, required=True),
+                Param("name", str, default="",
+                      description="For a new person. Leave blank when adding to an existing one."),
                 Param("category", str, default="visitor", choices=list(PERSON_CATEGORIES)),
                 Param("notes", str, default=""),
                 Param("valid_until", str, default=""),
+                Param("person_id", str, default="",
+                      description="An enrolled person this face belongs to — the capture is added "
+                                  "to their samples (the door learns its own angle and light)."),
             ],
-            description="Turn a face the camera already saw into an enrolled person — "
-                        "no photo to find, the door just took it.",
+            description="Turn a face the camera already saw into an enrolled person, or "
+                        "add it to someone already enrolled — no photo to find, the door "
+                        "just took it.",
         ),
         Action(
             "update_face", "Edit a person",
@@ -910,6 +918,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
                     "valid_until": meta.get("valid_until", ""),
                     "expired": _pass_expired(meta.get("valid_until")),
                     "thumbnail": meta.get("thumbnail"),
+                    "samples": f.get("samples", 1),
                     "registered_at": f.get("registered_at"),
                     "last_seen": self._last_seen.get(pid) if pid else None,
                 })
@@ -928,7 +937,14 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             crop = self._stranger_crops.get(sid)
             if crop is None:
                 raise KeyError(sid or "stranger_id")
-            return self._enroll(image_bytes=crop, params=params)
+            # A capture assigned to someone already enrolled is an added
+            # sample; the wall tile then disappears (it is no longer a stranger).
+            add_to = bool(str(params.get("person_id") or "").strip()) and not str(params.get("name") or "").strip()
+            out = self._enroll(image_bytes=crop, params=params, append=add_to or bool(params.get("append")))
+            self._stranger_crops.pop(sid, None)
+            self._stranger_gallery = deque((g for g in self._stranger_gallery if g.get("id") != sid),
+                                           maxlen=self._stranger_gallery.maxlen)
+            return out
 
         if name == "update_face":
             person_id = str(params.get("person_id") or "").strip()
@@ -962,7 +978,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             return {"deleted": person_id}
 
         if name == "enroll_face":
-            if not str(params.get("name") or "").strip():
+            if not params.get("append") and not str(params.get("name") or "").strip():
                 raise ValueError("'name' is required")
             image_b64 = str(params.get("image") or "").strip()
             if not image_b64:
@@ -981,36 +997,69 @@ page. Threshold and re-fire window are edited in the config form and apply live.
 
         raise KeyError(name)
 
-    def _enroll(self, *, image_bytes: bytes, params: dict[str, Any]) -> dict[str, Any]:
+    def _enroll(self, *, image_bytes: bytes, params: dict[str, Any],
+                append: bool | None = None) -> dict[str, Any]:
         """Shared by enroll_face (a photo the operator supplied) and
-        enroll_stranger (a crop the door camera took)."""
+        enroll_stranger (a crop the door camera took).
+
+        Two shapes. A NEW person needs a name; the id derives from it
+        unless pinned. ADDING to a person (``append``, or a stranger
+        capture with a ``person_id``) needs only the id: the sample joins
+        their set and the adapter matches against the best of them —
+        which is how the porch camera's own angle and light get learnt,
+        one "this is Alice" at a time. Name / category / notes / expiry
+        are then optional and only change what is given."""
         display = str(params.get("name") or "").strip()
-        if not display:
+        pinned = str(params.get("person_id") or "").strip()
+        if append is None:
+            append = bool(params.get("append"))
+        if append and not pinned:
+            raise ValueError("'person_id' is required when adding a photo to an existing person")
+        if not append and not display:
             raise ValueError("'name' is required")
-        category = str(params.get("category") or "family").strip().lower() or "family"
-        if category not in PERSON_CATEGORIES:
+        category = str(params.get("category") or "").strip().lower()
+        if not append and not category:
+            category = "family"
+        if category and category not in PERSON_CATEGORIES:
             raise ValueError(f"'category' must be one of {', '.join(PERSON_CATEGORIES)}")
-        # Deterministic id from the name unless the caller pins one (re-enrol
-        # after a haircut); the adapter upserts on person_id.
-        person_id = str(params.get("person_id") or "").strip() or _slug(display)
-        metadata: dict[str, Any] = {
-            "notes": str(params.get("notes") or "").strip(),
-            "valid_until": _parse_date(str(params.get("valid_until") or "")),
-            "enrolled_at": time.time(),
-        }
-        thumb = _thumbnail_data_uri(image_bytes)
-        if thumb is not None:
-            metadata["thumbnail"] = thumb
+        person_id = pinned or _slug(display)
+        metadata: dict[str, Any]
+        if append:
+            # Adding a sample never wipes what was written about the person:
+            # blank notes / expiry mean "unchanged", and the avatar stays.
+            metadata = {}
+            if str(params.get("notes") or "").strip():
+                metadata["notes"] = str(params["notes"]).strip()
+            if str(params.get("valid_until") or "").strip():
+                metadata["valid_until"] = _parse_date(str(params["valid_until"]))
+        else:
+            metadata = {
+                "notes": str(params.get("notes") or "").strip(),
+                "valid_until": _parse_date(str(params.get("valid_until") or "")),
+                "enrolled_at": time.time(),
+            }
+            thumb = _thumbnail_data_uri(image_bytes)
+            if thumb is not None:
+                metadata["thumbnail"] = thumb
         result = self._face_admin().register(
             image_bytes=image_bytes,
             person_id=person_id,
             name=display,
             category=category,
             metadata=metadata,
+            append=append,
         )
+        face = result.get("face") if isinstance(result, dict) else None
         return {
-            "enrolled": {"person_id": person_id, "name": display, "category": category,
-                         "notes": metadata["notes"], "valid_until": metadata["valid_until"]},
+            "enrolled": {
+                "person_id": person_id,
+                "name": display or (face or {}).get("name"),
+                "category": category or (face or {}).get("category"),
+                "notes": metadata.get("notes", ((face or {}).get("metadata") or {}).get("notes", "")),
+                "valid_until": metadata.get("valid_until", ((face or {}).get("metadata") or {}).get("valid_until", "")),
+                "samples": (face or {}).get("samples"),
+                "appended": append,
+            },
             "adapter": result,
         }
 
@@ -1107,6 +1156,7 @@ class _FaceAdminClient:
         name: str,
         category: str,
         metadata: dict[str, Any] | None = None,
+        append: bool = False,
     ) -> dict[str, Any]:
         files = {"frame": ("face.jpg", image_bytes, "image/jpeg")}
         data = {
@@ -1115,6 +1165,8 @@ class _FaceAdminClient:
             "category": category,
             "metadata": json.dumps(metadata or {}),
         }
+        if append:
+            data["append"] = "true"
         resp = httpx.post(
             f"{self._base}/faces/register",
             files=files, data=data,

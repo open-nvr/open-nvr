@@ -33,7 +33,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Camera, Clock, Pencil, RefreshCw, Search, ShieldAlert, Trash2, Upload, UserPlus, UserRound, Users,
+  Camera, Clock, ImagePlus, Pencil, RefreshCw, Search, ShieldAlert, Trash2, Upload, UserPlus, UserRound, Users,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -66,6 +66,8 @@ type Person = {
   valid_until?: string
   expired?: boolean
   thumbnail?: string | null
+  /** Face samples the adapter holds for them — more angles, fewer false strangers. */
+  samples?: number
   registered_at?: number | null
   last_seen?: number | null
 }
@@ -215,6 +217,7 @@ export function People() {
   const [editor, setEditor] = useState<
     | { mode: 'add' }
     | { mode: 'edit'; person: Person }
+    | { mode: 'add-photo'; person: Person }
     | { mode: 'stranger'; stranger: Stranger }
     | null
   >(null)
@@ -352,9 +355,13 @@ export function People() {
                       <div className="text-xs text-[var(--text-dim)] truncate">
                         {p.notes ? <span>{p.notes} · </span> : null}
                         <span title={p.person_id}>last seen {ago(p.last_seen)}</span>
+                        <span title="Face samples on file. Five or more, from the door camera itself, is where recognition gets reliable."> · {p.samples ?? 1} {(p.samples ?? 1) === 1 ? 'photo' : 'photos'}</span>
                       </div>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
+                      <Button size="sm" variant="ghost" title="Add a photo" onClick={() => setEditor({ mode: 'add-photo', person: p })}>
+                        <ImagePlus size={14} />
+                      </Button>
                       <Button size="sm" variant="ghost" title="Edit" onClick={() => setEditor({ mode: 'edit', person: p })}>
                         <Pencil size={14} />
                       </Button>
@@ -474,8 +481,10 @@ export function People() {
         <StrangerDialog
           appId={app.id}
           stranger={viewing}
+          people={people}
           onClose={() => setViewing(null)}
           onEnrol={() => { const s = viewing; setViewing(null); setEditor({ mode: 'stranger', stranger: s }) }}
+          onAssigned={(msg) => { showSuccess(msg); setViewing(null); refreshDirectory(); statusQuery.refetch() }}
         />
       )}
 
@@ -554,9 +563,23 @@ function Avatar({ src, name, size = 'md' }: { src?: string | null; name: string;
 
 /* ----------------------- Stranger review ------------------------ */
 
-function StrangerDialog({ appId, stranger, onClose, onEnrol }: {
-  appId: string; stranger: Stranger; onClose: () => void; onEnrol: () => void
+function StrangerDialog({ appId, stranger, people, onClose, onEnrol, onAssigned }: {
+  appId: string; stranger: Stranger; people: Person[]
+  onClose: () => void; onEnrol: () => void; onAssigned: (message: string) => void
 }) {
+  // "This is Alice": the capture joins Alice's samples — the door learns
+  // its own angle and light — and the tile leaves the wall.
+  const [assignTo, setAssignTo] = useState<string>('')
+  const assign = useMutation({
+    mutationFn: async () => {
+      if (!assignTo) throw new Error('Pick who this is.')
+      await apiService.invokeAppAction(appId, 'enroll_stranger', { stranger_id: stranger.id, person_id: assignTo })
+      const who = people.find((p) => p.person_id === assignTo)?.name ?? assignTo
+      return `Added this capture to ${who}`
+    },
+    onSuccess: (msg) => onAssigned(msg),
+  })
+  const sorted = [...people].sort((a, b) => a.name.localeCompare(b.name))
   // The wall carries a small thumbnail; the action returns the real crop.
   const crop = useQuery({
     queryKey: ['stranger-image', appId, stranger.id],
@@ -579,19 +602,43 @@ function StrangerDialog({ appId, stranger, onClose, onEnrol }: {
           <span className="text-xs text-[var(--text-dim)] self-center">{ago(stranger.time)}</span>
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose}>Close</Button>
-            <Button variant="primary" onClick={onEnrol}><UserPlus size={14} /> Enrol this person</Button>
+            <Button variant="primary" onClick={onEnrol}><UserPlus size={14} /> New person</Button>
           </div>
         </div>
       }
     >
-      <div className="space-y-2">
+      <div className="space-y-3">
         <img
           src={crop.data ?? stranger.image}
           alt="unrecognised face"
-          className="w-full max-h-80 object-contain rounded border border-[var(--border)] bg-black"
+          className="w-full max-h-72 object-contain rounded border border-[var(--border)] bg-black"
         />
+        {sorted.length > 0 && (
+          <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] p-2 space-y-1.5">
+            <div className="text-xs font-medium">Someone already enrolled?</div>
+            <div className="flex gap-1">
+              <select
+                className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]"
+                value={assignTo}
+                onChange={(e) => setAssignTo(e.target.value)}
+              >
+                <option value="">This is…</option>
+                {sorted.map((p) => (
+                  <option key={p.person_id} value={p.person_id}>{p.name} · {p.category} · {p.samples ?? 1} {(p.samples ?? 1) === 1 ? 'photo' : 'photos'}</option>
+                ))}
+              </select>
+              <Button size="sm" variant="primary" disabled={!assignTo || assign.isPending} onClick={() => assign.mutate()}>
+                <ImagePlus size={14} /> {assign.isPending ? 'Adding…' : 'Add to them'}
+              </Button>
+            </div>
+            <p className="text-[11px] text-[var(--text-dim)]">
+              The door missed them — so this capture is exactly the angle and light it needs. Adding it makes the next visit a match.
+              {assign.isError && <span className="text-[var(--danger)]"> {extractApiError(assign.error, 'Could not add.')}</span>}
+            </p>
+          </div>
+        )}
         <p className="text-xs text-[var(--text-dim)]">
-          If this is someone who should be greeted — a resident, a regular courier, a contractor on site this week — enrol them and the next visit is a known one. If not, nothing to do: the snapshot is only kept until it scrolls off the wall.
+          Not enrolled yet? <b>New person</b> starts them from this photo. If they are a genuine stranger, nothing to do: the snapshot is only kept until it scrolls off the wall.
         </p>
       </div>
     </Modal>
@@ -603,6 +650,7 @@ function StrangerDialog({ appId, stranger, onClose, onEnrol }: {
 type EditorInitial =
   | { mode: 'add' }
   | { mode: 'edit'; person: Person }
+  | { mode: 'add-photo'; person: Person }
   | { mode: 'stranger'; stranger: Stranger }
 
 function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }: {
@@ -613,7 +661,11 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
   onClose: () => void
   onSaved: (message: string) => void
 }) {
-  const editing = initial.mode === 'edit' ? initial.person : null
+  const editing = initial.mode === 'edit' || initial.mode === 'add-photo' ? initial.person : null
+  const photoOnly = initial.mode === 'add-photo'
+  // A new photo on an existing person ADDS a sample by default; "start
+  // over" replaces their set (the haircut case, or a bad first enrolment).
+  const [replace, setReplace] = useState(false)
   const [name, setName] = useState(editing?.name ?? '')
   const [category, setCategory] = useState(editing?.category ?? (initial.mode === 'stranger' ? 'visitor' : categories[0] ?? 'family'))
   const [notes, setNotes] = useState(editing?.notes ?? '')
@@ -665,13 +717,21 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
   const save = useMutation({
     mutationFn: async () => {
       const trimmed = name.trim()
-      if (!trimmed) throw new Error('A name is required.')
+      if (!trimmed && initial.mode !== 'add-photo') throw new Error('A name is required.')
       if (validUntil && !/^\d{4}-\d{2}-\d{2}$/.test(validUntil)) throw new Error('Valid until must be a date.')
       if (initial.mode === 'stranger') {
         await apiService.invokeAppAction(appId, 'enroll_stranger', {
           stranger_id: initial.stranger.id, name: trimmed, category, notes, valid_until: validUntil,
         })
         return `Enrolled ${trimmed} from the door snapshot`
+      }
+      if (initial.mode === 'add-photo') {
+        if (!photoB64) throw new Error('Add a photo — upload one or take it from a camera.')
+        await apiService.invokeAppAction(appId, 'enroll_face', {
+          person_id: initial.person.person_id, image: photoB64, append: !replace,
+          name: replace ? trimmed : '', category: replace ? category : '',
+        })
+        return replace ? `Replaced ${initial.person.name}'s photos` : `Added a photo to ${initial.person.name}`
       }
       if (initial.mode === 'edit' && photoB64 === null) {
         await apiService.invokeAppAction(appId, 'update_face', {
@@ -680,11 +740,20 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
         return `Updated ${trimmed}`
       }
       if (!photoB64) throw new Error('Add a photo — upload one or take it from a camera.')
+      if (initial.mode === 'edit') {
+        await apiService.invokeAppAction(appId, 'update_face', {
+          person_id: initial.person.person_id, name: trimmed, category, notes, valid_until: validUntil,
+        })
+        await apiService.invokeAppAction(appId, 'enroll_face', {
+          person_id: initial.person.person_id, image: photoB64, append: !replace,
+          name: trimmed, category, notes, valid_until: validUntil,
+        })
+        return replace ? `Re-enrolled ${trimmed} from a fresh photo` : `Updated ${trimmed} and added a photo`
+      }
       await apiService.invokeAppAction(appId, 'enroll_face', {
-        name: trimmed, image: photoB64, category, notes, valid_until: validUntil,
-        person_id: initial.mode === 'edit' ? initial.person.person_id : '',
+        name: trimmed, image: photoB64, category, notes, valid_until: validUntil, person_id: '',
       })
-      return initial.mode === 'edit' ? `Re-enrolled ${trimmed} with a new photo` : `Enrolled ${trimmed}`
+      return `Enrolled ${trimmed}`
     },
     onSuccess: (msg) => onSaved(msg),
     onError: (e) => setErr(extractApiError(e, 'Could not save.')),
@@ -692,6 +761,7 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
 
   const title = initial.mode === 'add' ? 'Add a person'
     : initial.mode === 'edit' ? `Edit ${initial.person.name}`
+    : initial.mode === 'add-photo' ? `Add a photo of ${initial.person.name}`
     : `Enrol from ${initial.stranger.label}`
 
   return (
@@ -706,7 +776,7 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose}>Cancel</Button>
             <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? 'Saving…' : initial.mode === 'edit' ? 'Save' : 'Enrol'}
+              {save.isPending ? 'Saving…' : initial.mode === 'edit' ? 'Save' : initial.mode === 'add-photo' ? 'Add photo' : 'Enrol'}
             </Button>
           </div>
         </div>
@@ -751,7 +821,13 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
                 </div>
               )}
               {initial.mode === 'edit' && photoB64 === null && (
-                <p className="text-[11px] text-[var(--text-dim)]">Keeping the current face. Add a photo only to re-enrol (new glasses, a beard).</p>
+                <p className="text-[11px] text-[var(--text-dim)]">Keeping their {editing?.samples ?? 1} {(editing?.samples ?? 1) === 1 ? 'photo' : 'photos'}. Add one to cover a new angle, glasses, a beard.</p>
+              )}
+              {editing && photoB64 !== null && (
+                <label className="flex items-start gap-2 text-[11px] text-[var(--text-dim)]">
+                  <input type="checkbox" className="mt-0.5" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
+                  <span>Start over — replace their existing {editing.samples ?? 1} {(editing.samples ?? 1) === 1 ? 'photo' : 'photos'} with this one. Off: this photo is added to them.</span>
+                </label>
               )}
             </>
           )}
@@ -761,6 +837,23 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
         </div>
 
         {/* ── Details ── */}
+        {photoOnly && editing ? (
+          <div className="md:col-span-3 space-y-3">
+            <div className="flex items-center gap-3">
+              <Avatar src={editing.thumbnail} name={editing.name} size="lg" />
+              <div>
+                <div className="font-medium">{editing.name}</div>
+                <div className="text-xs text-[var(--text-dim)]">{editing.category} · {editing.samples ?? 1} {(editing.samples ?? 1) === 1 ? 'photo' : 'photos'} on file</div>
+              </div>
+            </div>
+            <p className="text-sm text-[var(--text-dim)]">
+              Each photo is another view the door can match against. The most useful ones are the ones this camera actually sees: from the door camera, at the usual angle, in evening light, with and without glasses. Five is where recognition gets reliable; twenty covers most conditions.
+            </p>
+            <p className="text-xs text-[var(--text-dim)]">
+              Tip: the fastest way to build this up is the strangers wall — when the door misses them, click the capture and choose their name.
+            </p>
+          </div>
+        ) : (
         <div className="md:col-span-3 space-y-3">
           <Field label="Name">
             <input
@@ -811,6 +904,7 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
             <p className="text-xs text-[var(--text-dim)]">A photo is required to enrol.</p>
           )}
         </div>
+        )}
       </div>
     </Modal>
   )
