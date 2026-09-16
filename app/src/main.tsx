@@ -82,6 +82,7 @@ const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.S
 const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
 const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
+const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
 const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
@@ -168,6 +169,7 @@ const router = createBrowserRouter([
           { path: 'cameras', element: <Cameras /> },
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
+          { path: 'people', element: <People /> },
           { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },

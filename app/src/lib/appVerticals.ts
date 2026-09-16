@@ -59,6 +59,15 @@ export const APP_VERTICALS: AppVertical[] = [
   },
   { capability: 'occupancy', to: '/occupancy', label: 'Occupancy' },
   {
+    capability: 'people',
+    to: '/people',
+    // The face directory: who is enrolled, who the door just saw, and
+    // enrolling a person from a snapshot the camera already took. Named
+    // for what the operator manages, not for the model.
+    label: 'People (Faces)',
+    legacy: (m) => (m.requires_tasks ?? []).includes('face_recognition'),
+  },
+  {
     capability: 'guard_scan',
     to: '/guard-compliance',
     label: 'Entry Screening',
