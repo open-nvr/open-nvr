@@ -17,26 +17,24 @@
  */
 
 /**
- * Which cameras an app may be offered, and which it actually runs on.
+ * What a camera computes — the browser mirror of
+ * `server/services/skill_assignments.py`.
  *
- * The browser mirror of `server/services/skill_assignments.py`. Keep the
- * two in step: this decides what a picker shows, the server decides what
- * computes, and a picker that offers a camera the server will refuse is
- * worse than no picker at all.
+ *   adopted — this skill is among the camera's claims. What COSTS money:
+ *             skill inference runs only on adopted cameras. An app's
+ *             pick of a camera is a claim, so a picked camera is adopted
+ *             for that app's skill.
  *
- *   eligible — no camera is claimed by anyone, or this skill is among
- *              its claims. What a picker may OFFER.
- *   adopted  — this skill is among the camera's claims. What COSTS
- *              money: skill inference runs only on adopted cameras.
- *
- * An unassigned camera is eligible everywhere and adopted nowhere, so a
- * fresh install shows a full picker and pays for nothing until an
- * operator points a skill at something.
+ * There is no "eligible" any more. Every camera is available to every
+ * app, and any number of apps may pick the same one; the helper that used
+ * to grey out a camera another skill had claimed is gone with that rule.
  */
 
 export const LPR_SKILL = 'license_plate_recognition'
 
-export type CameraAssignment = { skill?: string | null; label?: string | null }
+/** One entry of a camera's projected assignments (the server sends
+ *  `labels`, a list, when a claim narrows detection). */
+export type CameraAssignment = { skill?: string | null; labels?: string[] | null }
 
 /** The skills a camera carries, lower-cased and trimmed. */
 export function cameraSkills(camera: { assignments?: CameraAssignment[] | null }): string[] {
@@ -56,28 +54,6 @@ export function cameraAdopted(
   skill: string
 ): boolean {
   return cameraSkills(camera).includes(skill.trim().toLowerCase())
-}
-
-/** May this skill be offered this camera? Unclaimed cameras are open. */
-export function cameraEligible(
-  camera: { assignments?: CameraAssignment[] | null },
-  skill: string
-): boolean {
-  const claimed = cameraSkills(camera)
-  return claimed.length === 0 || claimed.includes(skill.trim().toLowerCase())
-}
-
-/**
- * Why a camera is not on offer, phrased for an operator who is looking
- * for it and cannot find it. Null when it is eligible.
- */
-export function ineligibleReason(
-  camera: { assignments?: CameraAssignment[] | null },
-  skill: string
-): string | null {
-  if (cameraEligible(camera, skill)) return null
-  const other = cameraSkills(camera).map(prettySkill).join(', ')
-  return `assigned to ${other}`
 }
 
 export function prettySkill(skill: string): string {

@@ -21,6 +21,7 @@ import { apiService } from '../../lib/apiService'
 import { displayAspect } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { Button } from '../../components/ui'
+import { usePickedCameraIds } from './CameraPicker'
 
 type Pt = [number, number]
 type Dir = 'both' | 'a_to_b' | 'b_to_a'
@@ -93,15 +94,24 @@ export function GeometryEditor({
     },
     retry: 0,
   })
-  const cameras = camerasQuery.data ?? []
+  // Inside an app's configuration, only the cameras picked for that app:
+  // a zone drawn on a camera the app doesn't use would never apply.
+  const pickedIds = usePickedCameraIds()
+  const cameras = (camerasQuery.data ?? []).filter(
+    (c) => !pickedIds || pickedIds.has(Number(c.id)),
+  )
+  const nothingPicked = pickedIds !== null && pickedIds.size === 0
 
-  // Active camera: first stored, else first in the roster, else "1".
+  // Active camera: first stored (still picked), else the first picked.
   const [cam, setCam] = useState<string>('')
   useEffect(() => {
-    if (cam) return
-    const first = Object.keys(perCam)[0] ?? (cameras[0] && String(cameras[0].id))
-    if (first) setCam(first)
-  }, [cam, perCam, cameras])
+    if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
+    const stored = Object.keys(perCam).find((k) => !pickedIds || pickedIds.has(Number(k)))
+    // Nothing left to offer (the last camera was unpicked) clears the
+    // selection, so the editor stops showing that camera's snapshot.
+    const first = stored ?? (cameras[0] ? String(cameras[0].id) : '')
+    if (first !== cam) setCam(first)
+  }, [cam, perCam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   // Natural size of the still. The snapshot comes off the camera at its CODED
@@ -189,7 +199,9 @@ export function GeometryEditor({
       {/* Camera selector (per-camera geometry) */}
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-[var(--text-dim)]">Camera:</span>
-        {cameras.length === 0 ? (
+        {nothingPicked ? (
+          <span className="text-[var(--text-dim)]">Pick a camera for this app first — Cameras, above.</span>
+        ) : cameras.length === 0 ? (
           <input
             className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)] w-24"
             placeholder="camera id"

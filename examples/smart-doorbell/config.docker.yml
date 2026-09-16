@@ -34,13 +34,14 @@ recognition_adapter: "insightface"
 adapter_url: "http://insightface-adapter:9005"
 adapter_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras — EDIT: frame_url must be a JPEG snapshot endpoint ──────
-# file:// http:// https:// are supported. Point frame_url at your
-# doorbell camera's snapshot URL on the LAN — never localhost (that
-# would resolve inside this container).
-cameras:
-  - camera_id: "front-door"
-    frame_url: "http://192.168.1.50/snapshot.jpg"
+# ── Cameras ──────────────────────────────────────────────────────
+# None listed here, on purpose. Pick the cameras this app works on in
+# the App Catalog → Configure → Cameras; Frames come
+# from OpenNVR itself, so there is no camera URL to copy, and nothing
+# picked means the app does nothing and uses no compute.
+#
+# (A `cameras:` list still works when running this app standalone,
+# without opennvr_url — see config.example.yml.)
 
 # ── Polling / recognition tuning ───────────────────────────────────
 poll_interval_seconds: 1.0

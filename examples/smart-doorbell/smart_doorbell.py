@@ -57,6 +57,7 @@ import signal
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,7 +84,7 @@ from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from opennvr_app_sdk import (
     Action, AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView,
 )
-from opennvr_app_sdk.frame_sources import DictFrameSource
+from opennvr_app_sdk.frame_sources import CoreSnapshotSource, DictFrameSource
 
 logger = logging.getLogger("smart-doorbell")
 
@@ -508,13 +509,19 @@ class _TrackedFrameSource(DictFrameSource):
     def __init__(self, sources, health: dict[str, dict[str, Any]]) -> None:
         super().__init__(sources)
         self._health = health
+        # A camera picked in the catalog has no YAML frame_url: its frames
+        # come from core's snapshot route, which serves only this app's picks.
+        self._core = CoreSnapshotSource()
 
     def get_frame(self, camera_id: str) -> bytes | None:
         rec = self._health.setdefault(camera_id, {
             "last_frame": None, "last_error": None, "error": None, "frames": 0,
         })
         try:
-            frame = super().get_frame(camera_id)
+            if camera_id in self._sources:
+                frame = super().get_frame(camera_id)
+            else:
+                frame = self._core.get_frame(camera_id)
         except Exception as exc:
             rec["last_error"] = time.time()
             rec["error"] = f"{type(exc).__name__}: {exc}"[:200]
@@ -635,7 +642,10 @@ class SmartDoorbell(FrameApp):
     def on_frame(
         self, camera_id: str, frame_bytes: bytes
     ) -> Iterable[Alert] | None:
-        cam = self._cameras_by_id[camera_id]
+        # A YAML camera, or — connected to OpenNVR — a camera picked for
+        # this app in the catalog, which needs no YAML entry at all.
+        cam = self._cameras_by_id.get(camera_id) or CameraConfig(
+            camera_id=camera_id, frame_url="opennvr:core")
         correlation_id = uuid.uuid4().hex
 
         read = self.pipeline.process_frame(frame_bytes, correlation_id=correlation_id)
@@ -739,7 +749,10 @@ class SmartDoorbell(FrameApp):
         now = time.time()
         stall_after = max(30.0, 10 * float(self.config.poll_interval_seconds or 1.0))
         rows = []
-        for cam in self.config.cameras:
+        # The cameras actually being polled: the YAML list standalone, the
+        # cameras picked in the catalog when connected.
+        for camera_id in list(self._cameras):
+            cam = SimpleNamespace(camera_id=camera_id)
             rec = self._camera_health.get(cam.camera_id) or {}
             last = rec.get("last_frame")
             age = int(now - last) if last else None
@@ -764,7 +777,7 @@ class SmartDoorbell(FrameApp):
         dashboard render: counters, per-camera health, the stranger wall
         and the recent-visitor feed."""
         return {
-            "cameras": [cam.camera_id for cam in self.config.cameras],
+            "cameras": list(self._cameras),
             "camera_health": self._camera_rows(),
             "deduped_visitors_tracked": len(self._last_fired),
             "enrolled_faces": self._enrolled_count(),
@@ -1341,9 +1354,13 @@ def _cmd_daemon(config: AppConfig, args: argparse.Namespace) -> int:
             dispatcher.close()
         return 0
 
-    if not config.cameras:
+    if not config.cameras and not config.opennvr_url:
+        # Connected to OpenNVR the cameras are PICKED in the App Catalog,
+        # so an empty YAML list is normal. Standalone there is nowhere
+        # else to get them from.
         raise SystemExit(
-            "config: at least one camera is required for the daemon"
+            "config: at least one camera is required for the daemon "
+            "(or set opennvr_url and pick cameras in the App Catalog)"
         )
 
     # The SDK FrameApp loop is async; drive it the same way the SDK

@@ -58,7 +58,8 @@ from alerts import (
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from opennvr_app_sdk import AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView
-from opennvr_app_sdk.frame_sources import DictFrameSource
+from opennvr_app_sdk.cameras import per_camera_value
+from opennvr_app_sdk.frame_sources import CoreSnapshotSource, DictFrameSource
 from package_pipeline import (
     DEFAULT_DETECTION_CONFIDENCE,
     DEFAULT_IOU_THRESHOLD,
@@ -344,6 +345,21 @@ class _PersonSighting:
 # ── The orchestrator ───────────────────────────────────────────────
 
 
+class _YamlOrCoreFrames:
+    """Frames for the poll loop: a YAML camera's own ``frame_url`` when it
+    has one, else core's snapshot of a camera picked for this app."""
+
+    def __init__(self, yaml_sources: dict[str, FrameSource]) -> None:
+        self._yaml = DictFrameSource(yaml_sources)
+        self._yaml_ids = yaml_sources
+        self._core = CoreSnapshotSource()
+
+    def get_frame(self, camera_id: str) -> bytes | None:
+        if camera_id in self._yaml_ids:
+            return self._yaml.get_frame(camera_id)
+        return self._core.get_frame(camera_id)
+
+
 class PackageDelivery(FrameApp):
     """Polls all configured cameras (via the SDK FrameApp loop), runs
     detection + tracking, dispatches alerts based on per-track state
@@ -380,7 +396,7 @@ class PackageDelivery(FrameApp):
             # By-reference bridge: swapping an entry in
             # ``self._frame_sources`` (test stubs, camera reconfig) is
             # picked up on the next tick.
-            frame_source=DictFrameSource(self._frame_sources),
+            frame_source=_YamlOrCoreFrames(self._frame_sources),
             cameras=[cam.camera_id for cam in config.cameras],
             poll_interval_seconds=(
                 config.poll_interval_seconds
@@ -416,6 +432,37 @@ class PackageDelivery(FrameApp):
         # "gone" event (the package isn't in the current frame anymore).
         self._last_frame_jpeg: dict[str, bytes] = {}
 
+    # ── Cameras picked in the catalog ──────────────────────────────
+    #
+    # Connected to OpenNVR, the SDK loop polls exactly the cameras picked
+    # for this app (FrameApp.on_cameras_update), frames come from core's
+    # snapshot route, and the porch ROI is the one drawn in the catalog
+    # (none drawn = the whole frame). A YAML camera entry still wins for
+    # its own camera id.
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Pick up ROIs drawn in the catalog, live."""
+        drawn = (config or {}).get("roi")
+        self._drawn_roi = drawn if isinstance(drawn, dict) else {}
+        self._catalog_cameras: dict[str, CameraConfig] = {}
+
+    def _camera_for(self, camera_id: str) -> CameraConfig | None:
+        cam = self._cameras_by_id.get(camera_id)
+        if cam is not None:
+            return cam
+        if self._config_poll_thread is None:
+            return None
+        cache = getattr(self, "_catalog_cameras", {})
+        if camera_id not in cache:
+            try:
+                roi = Roi.parse(per_camera_value(getattr(self, "_drawn_roi", {}), camera_id))
+            except ValueError as exc:
+                logger.warning("ignoring malformed catalog roi for %s: %s", camera_id, exc)
+                roi = None
+            built = CameraConfig(camera_id=camera_id, frame_url="opennvr:core", roi=roi)
+            self._catalog_cameras = {**cache, camera_id: built}
+        return self._catalog_cameras[camera_id]
+
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
         self.stop()
@@ -429,7 +476,9 @@ class PackageDelivery(FrameApp):
     def on_frame(
         self, camera_id: str, frame_bytes: bytes
     ) -> Iterable[Alert] | None:
-        cam = self._cameras_by_id[camera_id]
+        cam = self._camera_for(camera_id)
+        if cam is None:
+            return None
         correlation_id = uuid.uuid4().hex
 
         reads = self.pipeline.process_frame(
@@ -442,7 +491,10 @@ class PackageDelivery(FrameApp):
         self._record_persons(cam.camera_id, reads.persons, now)
         self._last_frame_jpeg[cam.camera_id] = frame_bytes
 
-        tracker = self._trackers[cam.camera_id]
+        tracker = self._trackers.get(cam.camera_id)
+        if tracker is None:
+            tracker = IouTracker(iou_threshold=self.config.iou_threshold)
+            self._trackers = {**self._trackers, cam.camera_id: tracker}
         matched_ids, missed_ids = tracker.update(reads.packages, now=now)
 
         # ── State-machine transitions ──
@@ -674,7 +726,10 @@ class PackageDelivery(FrameApp):
         if not persons:
             self._prune_persons(camera_id, now)
             return
-        sightings = self._person_sightings[camera_id]
+        # setdefault, not get: a camera picked in the catalog has no
+        # entry yet, and appending to a throwaway list would forget every
+        # person seen there — every pickup would then read as a stranger.
+        sightings = self._person_sightings.setdefault(camera_id, [])
         for det in persons:
             sightings.append(_PersonSighting(seen_at=now, bbox=det.bbox))
         self._prune_persons(camera_id, now)
@@ -686,7 +741,7 @@ class PackageDelivery(FrameApp):
         cutoff = now - max(
             self.config.pickup_person_lookback_seconds * 2.0, 30.0
         )
-        sightings = self._person_sightings[camera_id]
+        sightings = self._person_sightings.get(camera_id, [])
         self._person_sightings[camera_id] = [
             s for s in sightings if s.seen_at >= cutoff
         ]
@@ -842,8 +897,12 @@ def main(argv: list[str] | None = None) -> int:
             logger.exception("dispatcher.close() failed")
         return 0
 
-    if not cfg.cameras:
-        raise SystemExit("config: at least one camera is required for the daemon")
+    if not cfg.cameras and not cfg.opennvr_url:
+        # Connected to OpenNVR the cameras are PICKED in the App Catalog,
+        # so an empty YAML list is normal. Standalone there is nowhere
+        # else to get them from.
+        raise SystemExit("config: at least one camera is required for the daemon "
+                         "(or set opennvr_url and pick cameras in the App Catalog)")
 
     # The SDK FrameApp loop is async; drive it the same way the SDK
     # AppRunner drives a Detector. SIGINT / SIGTERM trigger a clean exit.

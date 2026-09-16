@@ -23,7 +23,7 @@ it wraps [`fast-plate-ocr`](https://github.com/ankandrew/fast-plate-ocr)
                        │  gate escalation → Tier-1 dispatch          │
                        │  best-frame crop → KAI-C → fast_plate_ocr   │
                        │  (once per vehicle VISIT, on cameras        │
-                       │   assigned the LPR skill; core's per-visit  │
+                       │   picked for ANPR; core's per-visit         │
                        │   enrichment is the fallback producer)      │
                        │  KAI-C publishes:                           │
                        │  opennvr.events.plate.recognized.v1.<cam>   │
@@ -32,7 +32,7 @@ it wraps [`fast-plate-ocr`](https://github.com/ankandrew/fast-plate-ocr)
                                           ▼
                        ┌─────────────────────────────────────────────┐
                        │ THIS APP (PlateAlerter, ~100 lines of rule) │
-                       │  camera scope (assignment table) →          │
+                       │  camera scope (this app's picks) →          │
                        │  min_confidence → dedup window →            │
                        │  watchlist severity → AlertDispatcher       │
                        │  (stdout / webhook / NATS)                  │
@@ -54,8 +54,8 @@ inference cost, and two plate-consuming apps cost the same as one.
 * **No events, no alerts.** Plates flow only where the platform chain
   can run: the `fast_plate_ocr` adapter registered (ships with this
   app's compose overlay), and either core's plate enrichment on
-  vehicle visits (default-on) or Tier-1 dispatch on cameras assigned
-  the LPR skill (gate `enforce` + dispatch URL, off by default).
+  vehicle visits (default-on) or Tier-1 dispatch on cameras picked
+  for this app (gate `enforce` + dispatch URL, off by default).
 * **Dedup is per-plate-per-camera, time-windowed**, exactly as before:
   a plate re-read within `dedup_window_seconds` fires once; a
   one-character misread is a different plate (no fuzzy matching).
@@ -72,9 +72,10 @@ docker compose -f docker-compose.yml -f docker-compose.apps.yml \
   --profile apps up -d license-plate-recognition
 ```
 
-Then assign cameras the **License Plate Recognition** skill (Cameras →
-edit → Assignments). No camera URLs to configure — the app scopes
-itself to assigned cameras via the assignment table. Results:
+Then pick its cameras: App Catalog → License Plate Recognition →
+Configure → **Cameras** (or give a camera a gate role on the Vehicles
+page, which is the same pick). No camera URLs to configure, and nothing
+picked = no plates. Results:
 `docker compose logs -f license-plate-recognition` plus the alerts
 inbox; watchlists are editable live from the App Catalog config form.
 

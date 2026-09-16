@@ -205,11 +205,13 @@ def test_a_real_rate_is_still_a_percentage(app_methods):
 
 
 def test_an_app_with_no_camera_says_so(app_methods):
-    """Closed-by-default camera assignment means this is the FIRST
-    thing a new install hits, and it used to be invisible."""
+    """Every freshly installed app has picked nothing, so this is the
+    FIRST thing a new install hits — and it used to be invisible. The
+    message has to say where to fix it."""
     why = app_methods["not_ready_reason"](_app())
     assert why is not None
-    assert "assign" in why.lower()
+    assert "pick" in why.lower()
+    assert "configuration" in why.lower()
 
 
 def test_a_working_app_reports_nothing(app_methods):
@@ -264,18 +266,20 @@ def roster():
     return ns["_reconcile_roster"]
 
 
-def _site(assigned, workers=None):
+def _site(assigned, workers=None, reachable=True):
     started = []
 
     def _start(cam):
         started.append(cam.handle)
         app.workers[cam.handle] = SimpleNamespace(
-            stop=lambda: stopped.append(cam.handle))
+            stop=lambda **kw: stopped.append(cam.handle))
 
     stopped = []
     app = SimpleNamespace(
         workers=dict(workers or {}),
-        nvr=SimpleNamespace(cameras=lambda: [_Cam(h) for h in assigned]),
+        # roster(): the picked cameras, or None when core can't be asked.
+        nvr=SimpleNamespace(
+            roster=lambda: [_Cam(h) for h in assigned] if reachable else None),
         _start_worker=_start,
         # `workers` is shared by the tick, config-poll and HTTP threads,
         # so the real object guards it with a lock and hands readers a
@@ -312,31 +316,80 @@ def test_an_already_watched_camera_is_not_restarted(roster):
 def test_unassigning_one_camera_of_several_stops_just_that_one(roster):
     app, started, stopped = _site(
         assigned=["cam2"],
-        workers={"cam2": SimpleNamespace(stop=lambda: None),
-                 "cam5": SimpleNamespace(stop=lambda: stopped.append("cam5"))})
+        workers={"cam2": SimpleNamespace(stop=lambda **kw: None),
+                 "cam5": SimpleNamespace(stop=lambda **kw: stopped.append("cam5"))})
     roster(app)
     assert "cam5" not in app.workers
     assert "cam2" in app.workers
 
 
-def test_an_empty_roster_never_tears_down_a_working_site(roster):
-    """`cameras()` returns [] for 'none assigned' AND for 'core could
-    not be reached'. Treating those alike would turn a core restart into
-    an outage, so a removal needs positive evidence."""
-    app, _, stopped = _site(assigned=[],
-                            workers={"cam2": SimpleNamespace(stop=lambda: None)})
-    assert roster(app) == 0
+def test_an_unreachable_core_never_tears_down_a_working_site(roster):
+    """`roster()` is None when core can't be asked. A core restart or one
+    bad response must not stop screening that was working."""
+    app, _, stopped = _site(assigned=[], reachable=False,
+                            workers={"cam2": SimpleNamespace(stop=lambda **kw: None)})
+    assert roster(app) == 1
     assert "cam2" in app.workers
     assert stopped == []
+
+
+def test_unpicking_the_last_camera_stops_all_screening(roster):
+    """`roster()` is [] when nothing is picked — the operator's instruction
+    that this app should do nothing and use no compute. It used to be
+    indistinguishable from an outage, so the app kept every worker
+    running on cameras nobody had asked it to watch any more."""
+    stopped_names = []
+    app, _, _ = _site(assigned=[], workers={
+        "cam2": SimpleNamespace(stop=lambda **kw: stopped_names.append(("cam2", kw))),
+        "cam5": SimpleNamespace(stop=lambda **kw: stopped_names.append(("cam5", kw))),
+    })
+    assert roster(app) == 0
+    assert app.workers == {}
+    # Unpicked is abandoned, not flushed: see the next test.
+    assert sorted(stopped_names) == [("cam2", {"abandon": True}),
+                                     ("cam5", {"abandon": True})]
+
+
+def _worker_stop():
+    ns = {"time": _time, "threading": threading,
+          "log": SimpleNamespace(info=lambda *a, **k: None,
+                                 warning=lambda *a, **k: None)}
+    exec(compile(_slice("def stop(self, *, abandon: bool = False)",
+                        "# ── configuration ──"),
+                 "<stop>", "exec"), ns)  # noqa: S102
+    calls = []
+    worker = SimpleNamespace(
+        _stop=threading.Event(), _reopen=threading.Event(), stream=None,
+        _thread=None, handle="cam1",
+        engine=SimpleNamespace(flush=lambda now, reason: calls.append(("flush", reason)),
+                               abandon=lambda now, reason: calls.append(("abandon", reason))))
+    return ns["stop"], worker, calls
+
+
+def test_unpicking_a_camera_mid_screening_raises_no_incomplete_scan_alert():
+    """Found live: unticking the camera in the catalog stopped the worker
+    with a flush, which ruled the person being wanded at that moment as
+    "Incomplete scan procedure" — an alert against the guard for OUR
+    decision to stop watching. Unpick abandons: finished screenings are
+    still ruled, half-watched ones are dropped."""
+    stop, worker, calls = _worker_stop()
+    stop(worker, abandon=True)
+    assert calls == [("abandon", "unpicked")]
+
+
+def test_a_restart_still_rules_on_the_screening_in_progress():
+    stop, worker, calls = _worker_stop()
+    stop(worker)
+    assert calls == [("flush", "left")]
 
 
 def test_a_roster_that_raises_keeps_what_is_running(roster):
     """Same reasoning, for the case where core answers with an error
     rather than an empty list."""
     app, _, _ = _site(assigned=[],
-                      workers={"cam2": SimpleNamespace(stop=lambda: None)})
+                      workers={"cam2": SimpleNamespace(stop=lambda **kw: None)})
     app.nvr = SimpleNamespace(
-        cameras=lambda: (_ for _ in ()).throw(RuntimeError("core is down")))
+        roster=lambda: (_ for _ in ()).throw(RuntimeError("core is down")))
     assert roster(app) == 1
     assert "cam2" in app.workers
 
@@ -485,7 +538,7 @@ def test_a_departing_worker_is_popped_before_it_is_stopped(roster):
 
     app, _, stopped = _site(assigned=["cam2"], workers={"cam2": SimpleNamespace(stop=lambda: None)})
 
-    def _stop_and_look():
+    def _stop_and_look(**kw):
         seen_during_stop.append(dict(app.workers))
         stopped.append("cam5")
 
@@ -574,3 +627,40 @@ def test_the_sweep_is_not_run_on_every_screening(tmp_path):
 
     assert app._session_logs_swept == first, "swept twice within the hour"
     assert old.exists(), "the second write should not have swept"
+
+
+# ── zones drawn in the catalog reach the engine ────────────────────
+
+
+def test_a_zone_saved_under_the_numeric_id_reaches_the_camera():
+    """The catalog's zone editor saves a zone under the camera id ("3").
+    The worker asks for its settings by handle ("cam3"). Looking one up
+    by the other found nothing, so a drawn scan zone silently never
+    applied — the screening ran on the whole frame and looked fine."""
+    from dataclasses import dataclass
+
+    ns = {"camera_key": _camera_key()}
+    exec(compile(_slice("def camera_config(self, handle: str) -> dict:",
+                        "def _retune_workers(self)"),
+                 "<cfg>", "exec"), ns)  # noqa: S102
+
+    @dataclass
+    class _Cfg:
+        scan_zone: object = None
+        guard_post: object = None
+        order_weight: float = 0.0
+
+    zone = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]]
+    app = SimpleNamespace(config=_Cfg(), _per_camera={}, _retune_workers=lambda: None)
+    ns["on_config_update"](app, {"scan_zone": {"3": zone}})
+    assert ns["camera_config"](app, "cam3")["scan_zone"] == zone
+    assert ns["camera_config"](app, "cam4")["scan_zone"] != zone
+
+
+def _camera_key():
+    sdk = Path(__file__).resolve().parents[3] / "sdk" / "opennvr-app-sdk"
+    if str(sdk) not in sys.path:
+        sys.path.insert(0, str(sdk))
+    from opennvr_app_sdk.cameras import camera_key
+
+    return camera_key

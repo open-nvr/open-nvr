@@ -67,7 +67,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | Name | Purpose |
 |---|---|
 | `OpenNVR(url=None, *, token=None, kaic_url=None, timeout=…)` | The client; everything below hangs off it |
-| `.cameras() -> list[Camera]`, `.camera(x)` | The app's roster (only cameras assigned to it) |
+| `.cameras() -> list[Camera]`, `.camera(x)` | The app's roster (only cameras picked for it); `.roster()` returns `None` when core is unreachable, `[]` when nothing is picked |
 | `.snapshot(camera) -> bytes \| None` | Current JPEG |
 | `.recordings(camera)` → `RecordingsAPI` | `.list(start, end)`, `.url(start, duration)`, `.frame_at(at)` |
 | `.timeline` → `TimelineAPI` | `.search(camera=, label=, …)`, `.evidence(event_id)`, `.plate_stats()`, `.plate_summary()`, `.plate_sessions()` |
@@ -81,7 +81,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | `AsyncOpenNVR` (`opennvr_app_sdk.aio`) | The same client `await`-ed, for FastAPI/agent loops: `await nvr.cameras()`, `await nvr.state.set(...)`, `async with`; `http_client=` shares a pool; `async with nvr.ai.stream(...) as s: await s.infer(jpeg)` (`AsyncInferStream`) |
 
 Lower-level helpers that predate the client and remain public:
-`discover_cameras(url)`, `cameras_for_skill(...)`,
+`discover_cameras(url)`, `cameras_for_skill(...)` (superseded by `OpenNVR().roster()` — the cameras picked for the app),
 `filter_cameras_for_skill(...)`, `full_frame_polygon()`, `EventsClient`
 / `StoredEvent` (async event search), `KaiCClient` / `KaiCError`
 (direct KAI-C HTTP), and the Tier-0 helpers `Tier0Snapshot`,

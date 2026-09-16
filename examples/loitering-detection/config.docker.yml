@@ -34,17 +34,14 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras — EDIT: camera_id must match KAI-C's event subjects ────
-cameras:
-  - camera_id: "cam-1"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "full-frame"
-    zone:
-      - [0, 0]
-      - [1920, 0]
-      - [1920, 1080]
-      - [0, 1080]
+# ── Cameras ──────────────────────────────────────────────────────
+# None listed here, on purpose. Pick the cameras this app works on in
+# the App Catalog → Configure → Cameras; Zones are drawn there too. Frames come
+# from OpenNVR itself, so there is no camera URL to copy, and nothing
+# picked means the app does nothing and uses no compute.
+#
+# (A `cameras:` list still works when running this app standalone,
+# without opennvr_url — see config.example.yml.)
 
 # ── App contract (spec §03) — powers the App Catalog ───────────────
 # The SDK serves /health /manifest /state on contract_port and

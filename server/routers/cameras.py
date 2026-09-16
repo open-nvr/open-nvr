@@ -852,8 +852,7 @@ def get_deleted_cameras(
 #     adapter-shaped capability, available when a registered adapter
 #     advertises the task (or an alias). object_detection is special:
 #     the always-on Tier-0 detector provides it on every install.
-#   * the installed-apps registry — every registered catalog app is a
-#     skill (id with '-' -> '_'), available when enabled.
+#   (Installed apps are not listed: apps pick cameras in their own config.)
 # ``available`` is a TRI-STATE: true / false / null, where null means
 # "couldn't tell" (KAI-C unreachable) — the UI must never grey a skill
 # on null, the same advisory rule the agent's skills panel follows.
@@ -924,27 +923,38 @@ async def assignable_skills(
 
     skills = _assignable_task_entries(tasks_advertised)
 
-    # Installed catalog apps — each is a skill; available when enabled.
-    from models import InstalledApp
-
-    for app_row in db.query(InstalledApp).all():
-        skill = str(app_row.id).replace("-", "_")
-        skills.append({
-            "skill": skill,
-            "label": str(app_row.name or skill),
-            "source": "app",
-            "available": bool(app_row.enabled),
-            "hint": (
-                "App installed and enabled." if app_row.enabled
-                else "App installed but disabled — enable it in the App Catalog."
-            ),
-        })
-
-    # One entry per skill; a later (app) entry wins over a task twin.
+    # Installed apps are deliberately NOT offered. An app is pointed at a
+    # camera from the app's own configuration (a pick), and naming one
+    # here is refused on save — see
+    # services.skill_assignments.operator_rows_naming_apps.
     merged: dict[str, dict] = {}
     for entry in skills:
         merged[entry["skill"]] = entry
     return {"skills": sorted(merged.values(), key=lambda e: e["skill"])}
+
+
+@router.get("/{camera_id}/used-by")
+def camera_used_by(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The apps that picked this camera — read-only, for the camera page.
+
+    Picks are made in each app's configuration; this only answers "what
+    is this camera being used for" from the camera's side."""
+    from models import InstalledApp
+    from services.camera_scope import in_scope, visible_camera_ids
+    from services.skill_assignments import apps_using_camera
+
+    if not in_scope(visible_camera_ids(db, current_user), camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    app_ids = apps_using_camera(db, camera_id)
+    names = {
+        row.id: row.name
+        for row in db.query(InstalledApp).filter(InstalledApp.id.in_(app_ids)).all()
+    } if app_ids else {}
+    return {"apps": [{"app_id": a, "name": names.get(a) or a} for a in app_ids]}
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -1102,7 +1112,14 @@ async def update_camera(
         if operator_assignments is not None:
             from services.skill_assignments import set_operator_assignments
 
-            set_operator_assignments(db, camera, operator_assignments)
+            try:
+                set_operator_assignments(db, camera, operator_assignments)
+            except ValueError as exc:
+                # An app named here: apps pick their cameras in their own
+                # configuration now. Refuse before any other field of
+                # this edit is applied.
+                db.rollback()
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         for field, value in update_fields.items():
             setattr(camera, field, value)
 

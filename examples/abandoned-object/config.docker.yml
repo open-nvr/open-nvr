@@ -45,28 +45,14 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras / zones — EDIT: camera_id must match KAI-C's event
-# subjects; objects are only candidates while their center is inside
-# the zone polygon. ─────────────────────────────────────────────────
-cameras:
-  - camera_id: "cam-1"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "full-frame"
-    zone:
-      - [0, 0]
-      - [1920, 0]
-      - [1920, 1080]
-      - [0, 1080]
-
-# ── App contract (spec §03) ─────────────────────────────────────────
-# NOTE: unlike loitering-detection, this app's AppConfig does not parse
-# contract_port / contract_bind_host / contract_host / opennvr_url, so
-# no /health /manifest /state server is started and no registry
-# self-registration happens. The OPENNVR_INTERNAL_API_KEY / OPENNVR_URL
-# environment variables set by the overlay are therefore inert for this
-# app today; the overlay still sets them so the app picks them up the
-# moment contract support lands here.
+# ── Cameras ──────────────────────────────────────────────────────
+# None listed here, on purpose. Pick the cameras this app works on in
+# the App Catalog → Configure → Cameras; Zones are drawn there too. Frames come
+# from OpenNVR itself, so there is no camera URL to copy, and nothing
+# picked means the app does nothing and uses no compute.
+#
+# (A `cameras:` list still works when running this app standalone,
+# without opennvr_url — see config.example.yml.)
 
 # ── App contract (spec §03) — serves /health /manifest /state on
 # :9203; self-registers with the app registry so the catalog shows a

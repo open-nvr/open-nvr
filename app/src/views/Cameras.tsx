@@ -896,13 +896,14 @@ export function Cameras() {
             <Field label="Assignments">
               <div className="space-y-2">
                 <p className="text-xs text-[var(--muted)]">
-                  What this camera is <em>for</em> — e.g. skill{' '}
-                  <code>license_plate_recognition</code>, or{' '}
+                  Tunes platform detection for this camera — e.g.{' '}
                   <code>object_detection</code> narrowed to labels{' '}
-                  <code>person, truck</code>. Nothing assigned = no
-                  restriction declared. Consumers (Tier-0, apps) adopt these
-                  incrementally.
+                  <code>person, truck</code>, or{' '}
+                  <code>license_plate_recognition</code>. To use this camera
+                  in an app, pick it in that app's configuration (App
+                  Catalog → Configure → Cameras).
                 </p>
+                <CameraUsedBy cameraId={editing.id} />
                 <datalist id="assignable-skills">
                   {assignableSkills.map(k => (
                     <option key={k.skill} value={k.skill}>
@@ -1027,5 +1028,29 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[var(--text-dim)]">{label}</span>
       {children}
     </label>
+  )
+}
+
+
+/** Read-only: the apps that picked this camera. Picks are made in each
+ *  app's own configuration; this answers "what is this camera used for"
+ *  from the camera's side. */
+function CameraUsedBy({ cameraId }: { cameraId: number }) {
+  const [apps, setApps] = useState<{ app_id: string; name: string }[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    apiService.getCameraUsedBy(cameraId)
+      .then(({ data }) => { if (alive) setApps(data?.apps ?? []) })
+      .catch(() => { if (alive) setApps(null) })
+    return () => { alive = false }
+  }, [cameraId])
+  if (apps === null) return null
+  return (
+    <p className="text-xs text-[var(--muted)]">
+      Used by:{' '}
+      {apps.length === 0
+        ? 'no app yet'
+        : apps.map((a) => a.name).join(', ')}
+    </p>
   )
 }

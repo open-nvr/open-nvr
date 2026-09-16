@@ -308,9 +308,16 @@ class AsyncOpenNVR:
     def url(self) -> str:
         return self._http.base
 
+    async def roster(self) -> list[Camera] | None:
+        """Picked cameras; ``[]`` = nothing picked, ``None`` = core could
+        not be asked. See :meth:`opennvr_app_sdk.client.OpenNVR.roster`."""
+        body = await self._http.get_json("/api/v1/internal/camera-agent/cameras")
+        if not isinstance(body, dict):
+            return None
+        return parse_cameras(body)
+
     async def cameras(self) -> list[Camera]:
-        return parse_cameras(await self._http.get_json(
-            "/api/v1/internal/camera-agent/cameras"))
+        return (await self.roster()) or []
 
     async def camera(self, camera) -> Camera | None:
         want = _camera_id(camera)

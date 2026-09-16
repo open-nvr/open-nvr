@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
+import { usePickedCameraIds } from './CameraPicker'
 
 type Camera = { id: number; name: string }
 type Hsv = [number, number, number]
@@ -157,11 +158,20 @@ export function ColorRangeEditor({ value, onChange }: {
     },
     retry: 0,
   })
-  const cameras = camerasQuery.data ?? []
+  // Inside an app's configuration, sample only from cameras the app uses.
+  const pickedIds = usePickedCameraIds()
+  const cameras = (camerasQuery.data ?? []).filter(
+    (c) => !pickedIds || pickedIds.has(Number(c.id)),
+  )
+  const nothingPicked = pickedIds !== null && pickedIds.size === 0
   const [cam, setCam] = useState<string>('')
   useEffect(() => {
-    if (!cam && cameras[0]) setCam(String(cameras[0].id))
-  }, [cam, cameras])
+    if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
+    // Nothing left to offer (the last camera was unpicked) clears the
+    // selection, so the editor stops showing that camera's snapshot.
+    const first = cameras[0] ? String(cameras[0].id) : ''
+    if (first !== cam) setCam(first)
+  }, [cam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   const imgRef = useRef<HTMLImageElement | null>(null)
@@ -253,7 +263,9 @@ export function ColorRangeEditor({ value, onChange }: {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        {cameras.length === 0 ? (
+        {nothingPicked ? (
+          <span className="text-xs text-[var(--text-dim)]">Pick a camera for this app first — Cameras, above.</span>
+        ) : cameras.length === 0 ? (
           <input
             value={cam}
             onChange={(e) => setCam(e.target.value)}

@@ -67,7 +67,6 @@ import { formatSeenAt, seenAtTitle } from '../lib/time'
 import {
   LPR_SKILL,
   cameraAdopted,
-  ineligibleReason,
   type CameraAssignment,
 } from '../lib/cameraAssignments'
 import { cameraService } from '../services/cameraService'
@@ -2594,17 +2593,14 @@ function RegistryTab({
                       </thead>
                       <tbody>
                         {cameras.map((c) => {
+                          // Every camera is on offer: any number of apps may use
+                          // the same one. A role here is ANPR's pick of the
+                          // camera — the same pick its Cameras section shows.
                           const entry = cameraRoles[String(c.id)]
-                          // Ineligible cameras stay on screen, greyed, with the
-                          // reason. Hiding them makes an operator hunt for a
-                          // camera that is right there — the question is always
-                          // "why is it not in the list", so answer it in the list.
-                          const blocked = ineligibleReason(c, LPR_SKILL)
                           return (
                             <tr
                               key={c.id}
-                              className={`border-b border-[var(--border)] last:border-0${blocked ? ' opacity-60' : ''}`}
-                              title={blocked ? `${c.name} is ${blocked} — release it there to use it here` : undefined}
+                              className="border-b border-[var(--border)] last:border-0"
                             >
                               <td className="py-1.5 pr-4">{c.name}</td>
                               <td className="py-1.5 pr-4">
@@ -2616,7 +2612,6 @@ function RegistryTab({
                                       const role = e.target.value as CameraRole | ''
                                       onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
                                     }}
-                                    disabled={Boolean(blocked)}
                                     className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
                                   >
                                     <option value="">{t('vehicles.noRole')}</option>
@@ -2640,9 +2635,7 @@ function RegistryTab({
                                 </div>
                               </td>
                               <td className="py-1.5 text-xs">
-                                {blocked ? (
-                                  <span className="text-[var(--text-dim)]">{blocked}</span>
-                                ) : cameraAdopted(c, LPR_SKILL) ? (
+                                {cameraAdopted(c, LPR_SKILL) ? (
                                   <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
                                     <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
                                     {t('vehicles.reading')}

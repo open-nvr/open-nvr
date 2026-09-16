@@ -29,6 +29,10 @@ accident.
 
 ::: opennvr_app_sdk.discover_cameras
 
+::: opennvr_app_sdk.camera_key
+
+::: opennvr_app_sdk.per_camera_value
+
 ::: opennvr_app_sdk.cameras_for_skill
 
 ::: opennvr_app_sdk.filter_cameras_for_skill
@@ -44,6 +48,8 @@ accident.
 ::: opennvr_app_sdk.FileFrameSource
 
 ::: opennvr_app_sdk.HttpSnapshotSource
+
+::: opennvr_app_sdk.CoreSnapshotSource
 
 ::: opennvr_app_sdk.DictFrameSource
 

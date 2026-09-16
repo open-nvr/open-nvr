@@ -206,6 +206,22 @@ class FrameApp(ContractMixin):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def on_cameras_update(self, camera_ids: frozenset[int]) -> None:
+        """Follow the cameras picked for this app: the poll loop fetches
+        frames for exactly those, as ``cam<id>`` handles.
+
+        Only runs when the app is connected (the live config poll is
+        what delivers picks). A standalone run keeps the camera list it
+        was constructed with. Nothing picked → an empty list → the loop
+        ticks and does nothing, which is the point.
+        """
+        if getattr(self.manifest, "camera_picker", True) is False:
+            return
+        self._cameras = [f"cam{i}" for i in sorted(camera_ids)]
+        logger.info("%s: cameras now %s",
+                    self.manifest.id if self.manifest else type(self).__name__,
+                    ", ".join(self._cameras) or "none (nothing picked)")
+
     # ── Poll loop (tick is testable without asyncio) ───────────────
 
     def handle_tick(self) -> list[Alert]:

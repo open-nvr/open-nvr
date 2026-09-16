@@ -346,3 +346,30 @@ def test_coalescing_can_be_disabled(tmp_path):
     _kf(store, ts=base + 1)
     assert store.count() == 2
     store.close()
+
+
+# ── Picked cameras ─────────────────────────────────────────────────
+
+
+def test_only_picked_cameras_are_indexed():
+    """Connected to core, the indexer works on the cameras picked for it
+    in its configuration. Nothing picked = nothing indexed."""
+    from footage_search import AppConfig, Indexer, OllamaConfig
+
+    cfg = AppConfig(
+        db_path=":memory:", nats_url="nats://x", nats_token=None,
+        subject_pattern="s", extra_labels=[], camera_aliases={},
+        ollama=OllamaConfig(), result_limit=25,
+    )
+    store = FootageStore(":memory:")
+    indexer = Indexer(cfg, store)
+    indexer._config_poll_thread = object()   # connected
+    indexer.picked_cameras = frozenset({2})
+
+    indexer.handle_event(_tier0_event(["person"], camera_id="cam1"))
+    indexer.handle_event(_tier0_event(["person"], camera_id="cam2"))
+    assert store.count() == 1
+
+    indexer.picked_cameras = frozenset()
+    indexer.handle_event(_tier0_event(["car"], camera_id="cam2"))
+    assert store.count() == 1

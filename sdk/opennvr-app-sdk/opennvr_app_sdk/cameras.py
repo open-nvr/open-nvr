@@ -112,21 +112,61 @@ def full_frame_polygon(size: int = UNIT_FRAME) -> list[list[int]]:
     return [[0, 0], [size, 0], [size, size], [0, size]]
 
 
+# ── One camera, three spellings ────────────────────────────────────
+#
+# The same camera is ``3`` in the database, ``"3"`` as a JSON object key
+# (the catalog's zone editor saves per-camera params that way) and
+# ``"cam3"`` on the bus and in an app's roster. Looking a zone up by one
+# spelling when it was saved under another finds nothing, silently — a
+# drawn scan zone that never applies looks exactly like a zone that
+# works and simply saw nobody.
+
+
+def camera_key(value: Any) -> int | None:
+    """``3`` / ``"3"`` / ``"cam3"`` / ``"cam-3"`` → ``3``; anything else → None.
+
+    Never raises: it is used to look things up, and an unparseable key
+    should simply match nothing."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    cam_id = getattr(value, "id", None)
+    if isinstance(cam_id, int) and not isinstance(cam_id, bool):
+        return cam_id
+    text = str(value).strip().lower()
+    if text.startswith("cam-"):
+        text = text[4:]
+    elif text.startswith("cam"):
+        text = text[3:]
+    return int(text) if text.isdigit() else None
+
+
+def per_camera_value(mapping: Any, camera: Any, default: Any = None) -> Any:
+    """``mapping[camera]`` for a per-camera config value, whichever
+    spelling of the camera either side used."""
+    if not isinstance(mapping, dict):
+        return default
+    want = camera_key(camera)
+    if want is None:
+        return mapping.get(camera, default)
+    for key, value in mapping.items():
+        if camera_key(key) == want:
+            return value
+    return default
+
+
 # ── Per-camera capability assignment (slice 2) ─────────────────────
 #
-# Operators declare "camera 1 does LPR, cameras 2-3 count people" on the
-# camera settings page; the internal endpoint serves it as an
-# ``assignments`` list on each camera. The camera keeps streaming,
-# recording and Tier-0 detection regardless — assignment governs which
-# apps may use it and which SKILL INFERENCE runs on it.
+# SUPERSEDED for choosing an app's cameras. Cameras are picked in each
+# app's own configuration now, and core serves an app key exactly its
+# picks — use ``OpenNVR.roster()`` (``[]`` = nothing picked, ``None`` =
+# core unreachable) or react to ``on_cameras_update``. The helpers below
+# still work, because every pick is stored as a claim whose skill is the
+# app id with underscores, but new apps should not start from them.
 #
-# CLOSED BY DEFAULT. An app watches the cameras it was pointed at, and
-# no more. This reverses the original additive rule, under which "no
-# camera carries this skill" meant "watch everything": that made the
-# least-configured install the most expensive one, and let an app read
-# cameras nobody had offered it. An app with no assigned cameras now
-# watches nothing — visibly, so an operator fixes it, rather than
-# silently getting the fleet.
+# Assignments on the camera page remain, for tuning PLATFORM compute
+# (Tier-0 labels, plate OCR) — not for pointing apps at cameras.
 
 
 def filter_cameras_for_skill(

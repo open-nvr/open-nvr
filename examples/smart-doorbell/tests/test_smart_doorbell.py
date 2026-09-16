@@ -732,3 +732,33 @@ def test_list_faces_reports_sample_counts(monkeypatch):
     monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
     rows = doorbell.on_action("list_faces", {})["results"]
     assert [r["samples"] for r in rows] == [4, 1]
+
+
+# ── Connected: cameras picked in the catalog ───────────────────────
+
+
+def test_a_picked_camera_is_watched_through_core_and_reported_on_the_dashboard():
+    doorbell, pipeline, _ = _build_doorbell([_known_read()], _app_config(cameras=[]))
+    doorbell._config_poll_thread = object()   # picks arrive on the config poll
+
+    class _Core:
+        def get_frame(self, camera_id):
+            return b"\xff\xd8jpeg"
+
+    doorbell._source._core = _Core()
+    doorbell.on_cameras_update(frozenset({5}))
+    doorbell.step()
+    assert pipeline.process_frame.call_count == 1
+    state = doorbell.state_snapshot()
+    assert state["cameras"] == ["cam5"]
+    assert [row["camera_id"] for row in state["camera_health"]] == ["cam5"]
+    assert state["camera_health"][0]["status"] == "ok"
+
+
+def test_nothing_picked_watches_nothing():
+    doorbell, pipeline, _ = _build_doorbell([_known_read()], _app_config(cameras=[]))
+    doorbell._config_poll_thread = object()
+    doorbell.on_cameras_update(frozenset())
+    doorbell.step()
+    assert pipeline.process_frame.call_count == 0
+    assert doorbell.state_snapshot()["cameras"] == []

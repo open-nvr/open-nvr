@@ -45,6 +45,10 @@ export const appsService = {
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),
+  // The camera picker: every camera the user can see, whether this app
+  // picked it, and the skill/consumer a pick is written under (picks go
+  // through cameraService.declareSkillCamera / releaseSkillCamera).
+  getAppCameras: (id: string) => api.get(`/api/v1/apps/${id}/cameras`),
   getAppStatus: (id: string) => api.get(`/api/v1/apps/${id}/status`),
   // RFC-0002 Phase 4 app-surface convention: the app's self-contained
   // HTML dashboard, proxied off its contract port. Rendered in a
