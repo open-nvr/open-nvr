@@ -129,6 +129,9 @@ export const NAV_PERMISSIONS = {
   // behind the same permission as the alert inbox — and the API is
   // gated on the same name, so the two cannot drift apart.
   '/guard-compliance': 'alerts.view',
+  // The face directory holds photographs of named people, so it sits
+  // with the alert inbox, like screening records do.
+  '/people': 'alerts.view',
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',

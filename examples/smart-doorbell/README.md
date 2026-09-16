@@ -176,6 +176,46 @@ faces carry a base64 JPEG snapshot in `evidence.snapshot_b64`, so:
 SIGINT / SIGTERM stops cleanly — the in-flight cycle finishes,
 dispatcher drains.
 
+### The People page
+
+Enabling the app lights **Applications → People (Faces)** in the main
+navigation (the manifest `provides: ["people"]`). That page is the face
+directory for a home, a gated premises or an office:
+
+* **Directory** — everyone enrolled, with photo, category, notes, an
+  optional *valid until* date, and when the door last saw them. Search
+  by name, id or notes; filter by category.
+* **Add person** — name, category, notes, expiry, and a photo either
+  uploaded or snapped from any camera in the system.
+* **Strangers at the door** — every unrecognised face the camera took,
+  newest first. Click one, and *Enrol this person* turns that snapshot
+  into a known face: no photo to go and find.
+* **Edit / Remove** — rename, move to another category, set or clear an
+  expiry, add a note, or re-enrol with a new photo.
+
+Categories and what the door does with them: `family`, `resident`,
+`friend` are greeted (low); `staff`, `contractor`, `visitor` are noted
+(info); `watchlist` alarms (high) on every sighting; anyone whose
+`valid_until` has passed raises `expired_pass` (high) instead of a
+greeting. Notes and expiry live in the adapter's face DB as metadata,
+so they survive app restarts and image upgrades.
+
+### In the App Catalog
+
+The app page (Settings → App Catalog → Smart Doorbell) carries the same
+surfaces in their generic form:
+
+* **Live** — enrolled-face count, known visitors vs strangers since
+  start, a per-camera table (ok / waiting / stalled / error, with the
+  fetch error spelled out), a thumbnail wall of the latest strangers,
+  and the recent-visitor feed.
+* **Dashboard** — the same, as one page (`GET /ui`, proxied and
+  sandboxed by core).
+* **Quick actions** — *Enroll a face* (name + photo + category),
+  *Enrolled faces*, *Remove a face*.
+* **Config form** — `recognition_threshold`, `dedup_window_seconds` and
+  the snapshot knobs apply live; cameras still need a restart.
+
 ## Layout
 
 ```
