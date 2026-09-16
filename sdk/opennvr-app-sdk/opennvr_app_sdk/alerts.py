@@ -173,12 +173,27 @@ class Alert:
     correlation_id: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    #: What KIND of alert this is, in your own vocabulary
+    #: ("scanner_flag", "package_taken"). Severity says how loudly the
+    #: inbox rings; this says what happened, and is what an operator
+    #: filters history by.
+    alert_type: str | None = None
+    #: Evidence photos as ``{name: rel_path}`` — paths from
+    #: ``nvr.save_evidence()``, never image bytes. An alert is a NATS
+    #: message with a 1 MB ceiling; base64 crops blow past it and the
+    #: whole alert is dropped by the broker.
+    images: dict[str, str] = field(default_factory=dict)
     alert_id: str = field(default_factory=lambda: f"alrt_{uuid.uuid4().hex[:12]}")
     fired_at: str = field(default_factory=lambda: _utcnow_iso())
 
     def to_wire(self) -> dict[str, Any]:
         """Serialize to the §11.5 JSON shape."""
-        return {
+        evidence = dict(self.evidence)
+        if self.images:
+            # Inside evidence, so an inbox that predates the images
+            # column still receives the paths rather than nothing.
+            evidence["images"] = dict(self.images)
+        wire = {
             "alert_id": self.alert_id,
             "fired_at": self.fired_at,
             "title": self.title,
@@ -187,9 +202,12 @@ class Alert:
             "source": asdict(self.source),
             "camera_id": self.camera_id,
             "correlation_id": self.correlation_id,
-            "evidence": dict(self.evidence),
+            "evidence": evidence,
             "tags": list(self.tags),
         }
+        if self.alert_type:
+            wire["alert_type"] = self.alert_type
+        return wire
 
 
 def _utcnow_iso() -> str:

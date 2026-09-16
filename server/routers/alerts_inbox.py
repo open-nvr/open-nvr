@@ -37,12 +37,13 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
-from core.database import get_db
+from core.database import get_db, release
 from models import AppAlert, SecuritySetting, User
 from core.pagination import resolve_total
 from services.alerts_inbox import (
@@ -80,6 +81,19 @@ def _scope_alerts(q, scope: set[int] | None):
                         func.lower(AppAlert.camera_id).in_(handles)))
 
 
+def _parse_bound(value: str) -> datetime | None:
+    """An ISO-8601 filter bound as an aware datetime, or None.
+
+    A bound we cannot read is dropped rather than rejected: a filter
+    typo must not 500 the alert list an operator is trying to read.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def _row_out(a: AppAlert) -> dict:
     def _load(text):
         if not text:
@@ -106,6 +120,11 @@ def _row_out(a: AppAlert) -> dict:
         "correlation_id": a.correlation_id,
         "evidence": _load(a.evidence),
         "tags": _load(a.tags) or [],
+        "alert_type": a.alert_type,
+        # Names only. The bytes come from the image route below, which
+        # applies the caller's camera scope the same way this listing
+        # does — a path in this list is not itself an authorisation.
+        "images": sorted((_load(a.images) or {}).keys()),
         "acknowledged_at": (a.acknowledged_at.isoformat()
                             if a.acknowledged_at else None),
         "acknowledged_by": a.acknowledged_by,
@@ -117,6 +136,16 @@ async def list_alerts(
     unacked: bool = Query(False, description="Only unacknowledged alerts"),
     severity: str | None = Query(None),
     source_name: str | None = Query(None),
+    alert_type: str | None = Query(
+        None, description="The producer's kind of alert, e.g. scanner_flag"),
+    camera_id: str | None = Query(
+        None, description="Camera handle as the producer sent it (cam3)"),
+    from_: str | None = Query(
+        None, alias="from", description="ISO-8601 lower bound on fired_at"),
+    to: str | None = Query(None, description="ISO-8601 upper bound on fired_at"),
+    q_text: str | None = Query(
+        None, alias="q",
+        description="Substring of the title or description"),
     after_id: int | None = Query(
         None, description="Only rows with id > after_id — lets the bell "
         "poll for 'anything new since my last look' cheaply"),
@@ -153,6 +182,18 @@ async def list_alerts(
         q = q.filter(AppAlert.severity == severity)
     if source_name:
         q = q.filter(AppAlert.source_name == source_name)
+    if alert_type:
+        q = q.filter(AppAlert.alert_type == alert_type)
+    if camera_id:
+        q = q.filter(func.lower(AppAlert.camera_id) == camera_id.strip().lower())
+    if from_ and (lower := _parse_bound(from_)) is not None:
+        q = q.filter(AppAlert.fired_at >= lower)
+    if to and (upper := _parse_bound(to)) is not None:
+        q = q.filter(AppAlert.fired_at <= upper)
+    if text := (q_text or "").strip():
+        like = f"%{text}%"
+        q = q.filter(or_(AppAlert.title.ilike(like),
+                         AppAlert.description.ilike(like)))
     if after_id is not None:
         q = q.filter(AppAlert.id > after_id)
     if before_id is not None:
@@ -179,6 +220,46 @@ async def list_alerts(
     return {"alerts": [_row_out(a) for a in rows],
             "unacked_count": unacked_count,
             "total": total}
+
+
+@router.get("/{alert_id}/images/{name}")
+async def get_alert_image(
+    alert_id: int,
+    name: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """One evidence photo off an alert — the face, the body, the scene.
+
+    ``name`` is the key the producer used, not a path: the path comes
+    from the row, so a caller cannot ask for a file the alert does not
+    reference.
+    """
+    from services.camera_scope import visible_camera_ids
+
+    scope = visible_camera_ids(db, current_user)
+    row = (_scope_alerts(db.query(AppAlert), scope)
+           .filter(AppAlert.id == alert_id).first())
+    if row is None or not row.images:
+        # 404 rather than 403 throughout this router: whether an alert
+        # exists on a camera you cannot see is itself not your business.
+        raise HTTPException(status_code=404, detail="no such alert image")
+    try:
+        rel = (json.loads(row.images) or {}).get(name)
+    except ValueError:
+        rel = None
+    if not isinstance(rel, str) or not rel:
+        raise HTTPException(status_code=404, detail="no such alert image")
+
+    from services.evidence_store import resolve_evidence
+
+    path = resolve_evidence(rel)
+    if path is None:
+        raise HTTPException(status_code=404, detail="evidence file missing")
+    # Don't hold a pooled connection for a client-paced JPEG transfer.
+    release(db)
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "max-age=86400"})
 
 
 def _unacked_count(db, scope, proven_rows) -> int:

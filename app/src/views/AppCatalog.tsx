@@ -35,6 +35,7 @@ import { useTranslation } from '../i18n'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
+import { ColorRangeEditor } from './apps/ColorRangeEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
@@ -49,6 +50,14 @@ export type ManifestParam = {
   description?: string
   // One-click values the catalog offers for list params (SDK Param.suggestions).
   suggestions?: string[]
+  /** What to CALL this. Falls back to `name` — apps adopt it one at a time. */
+  label?: string
+  /** Heading to file this under. Ungrouped params stay at the top. */
+  group?: string
+  /** Real but rarely touched: collapsed behind a disclosure, never dropped. */
+  advanced?: boolean
+  /** A closed set — rendered as a select, and enforced by the server. */
+  choices?: { value: any; label: string }[]
 }
 
 export type AppManifest = {
@@ -551,13 +560,57 @@ export function statusVariant(status?: string): BadgeVariant {
 /** Params whose values aren't scalar edit as JSON in the generated form. */
 function isJsonParam(p: ManifestParam): boolean {
   const t = (p.type || '').toLowerCase()
+  // A closed set is a picker whatever its values are made of, so it
+  // never becomes a JSON textarea.
+  if (hasChoices(p)) return false
   return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json' || t === 'time_range'
+}
+
+function hasChoices(p: ManifestParam): boolean {
+  return Array.isArray(p.choices) && p.choices.length > 0
+}
+
+/** What the operator should see as this param's name. */
+function paramLabel(p: ManifestParam): string {
+  return p.label || p.name
+}
+
+/**
+ * Choice values survive the round trip through a <select>, whose value
+ * is always a string. The index is the key, so 0 and 0.0 and "0" stay
+ * distinct and a value never has to be parsed back out of its label.
+ */
+function choiceIndex(p: ManifestParam, value: any): string {
+  const i = (p.choices ?? []).findIndex((c) => c.value === value)
+  return i < 0 ? '' : String(i)
+}
+
+/**
+ * Params whose VALUE is JSON, whatever editor draws them.
+ *
+ * Distinct from `isJsonParam`, which answers a different question — "is
+ * a raw textarea the right EDITOR". A colour range has its own picker
+ * and so is not a textarea param, but it is still an object on the
+ * wire, and conflating the two sent `[object Object]` to an endpoint
+ * expecting `{low, high}`.
+ */
+function isJsonValued(p: ManifestParam): boolean {
+  return isJsonParam(p) || (p.type || '').toLowerCase() === 'color.hsv_range'
 }
 
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
   const current = config && p.name in config ? config[p.name] : p.default
-  if (p.type === 'bool' && !isJsonParam(p)) return Boolean(current)
-  if (isJsonParam(p)) return current === undefined ? '' : JSON.stringify(current, null, 2)
+  if (hasChoices(p)) return choiceIndex(p, current)
+  if (p.type === 'bool' && !isJsonValued(p)) return Boolean(current)
+  // NULL counts as unset, exactly like undefined. A param declared with
+  // no default arrives as null, and stringifying that gave the literal
+  // text "null" — which is not empty, so it was parsed back to null and
+  // SAVED, and the server rightly refused a per-camera param that was
+  // not a dict. Nobody had touched the field.
+  if (isJsonValued(p)) {
+    return current === undefined || current === null
+      ? '' : JSON.stringify(current, null, 2)
+  }
   return current === undefined || current === null ? '' : String(current)
 }
 
@@ -604,11 +657,21 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       if (!canEditParam(p)) continue   // untouched site-wide keys stay as stored
       const raw = values[p.name]
       const t = (p.type || '').toLowerCase()
-      if (isJsonParam(p)) {
+      if (hasChoices(p)) {
+        const picked = (p.choices ?? [])[Number(raw)]
+        if (!picked) {
+          if (p.required) {
+            setError(`"${paramLabel(p)}" is required.`)
+            return
+          }
+          continue
+        }
+        config[p.name] = picked.value
+      } else if (isJsonValued(p)) {
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
@@ -616,7 +679,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         try {
           config[p.name] = JSON.parse(text)
         } catch {
-          setError(`"${p.name}" is not valid JSON.`)
+          setError(`"${paramLabel(p)}" is not valid JSON.`)
           return
         }
       } else if (t === 'bool') {
@@ -625,21 +688,21 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
           return
         }
         config[p.name] = num
       } else {
         const text = String(raw ?? '')
         if (!text && p.required) {
-          setError(`"${p.name}" is required.`)
+          setError(`"${paramLabel(p)}" is required.`)
           return
         }
         if (text || !p.required) config[p.name] = text
@@ -653,86 +716,36 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       open
       title={`Configure ${app.name}`}
       onClose={onClose}
+      // A side panel, not a centred dialog: configuring an app is work
+      // you do AGAINST the page you came from — the screening list, the
+      // occupancy zones — and a centred box behind a dark backdrop hides
+      // the very thing you are tuning. Full height also suits a form
+      // that is now grouped into sections.
+      //
+      // It stays WIDE on purpose. The scan zone and the uniform colour
+      // are drawn on a 16:9 camera snapshot, and a conventional 400px
+      // drawer would make the most important part of setup worse, not
+      // better. Forms with nothing to draw get a narrower one.
+      placement="side"
       widthClassName={
-        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
-          ? 'w-[720px]'
-          : 'w-[560px]'
+        params.some((p) => {
+          const t = (p.type || '').toLowerCase()
+          return t.startsWith('geometry.') || t === 'color.hsv_range'
+        })
+          ? 'w-[780px]'
+          : 'w-[520px]'
       }
     >
       {params.length === 0 ? (
         <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
       ) : (
-        <div className="space-y-4">
-          {params.map((p) => {
-            const t = (p.type || '').toLowerCase()
-            const value = values[p.name]
-            return (
-              <div key={p.name}>
-                <label className="block text-sm mb-1">
-                  <span className="font-medium">{p.name}</span>
-                  <span className="ml-2 text-xs text-[var(--text-dim)]">
-                    {p.type}
-                    {p.per_camera ? ' · per camera' : ''}
-                    {p.required ? ' · required' : ''}
-                  </span>
-                </label>
-                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {!canEditParam(p) ? (
-                  <div
-                    className="w-full px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
-                    title="Site-wide setting — only an administrator can change it"
-                  >
-                    {String(value ?? '') || '—'}
-                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
-                  </div>
-                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
-                  <GeometryEditor
-                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
-                    value={String(value ?? '')}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                  />
-                ) : t === 'list' && !p.per_camera ? (
-                  <ChipListEditor
-                    value={String(value ?? '')}
-                    placeholder={`add ${p.name} value, Enter`}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                    suggestions={suggestionsFor(p, seenLabels)}
-                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
-                  />
-                ) : t === 'time_range' ? (
-                  <TimeWindowEditor
-                    value={String(value ?? '')}
-                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
-                  />
-                ) : isJsonParam(p) ? (
-                  <textarea
-                    className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                ) : t === 'bool' ? (
-                  <label className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(value)}
-                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
-                    />
-                    Enabled
-                  </label>
-                ) : (
-                  <input
-                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
-                    step={t === 'float' ? 'any' : undefined}
-                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                )}
-              </div>
-            )
-          })}
-        </div>
+        <ParamForm
+          params={params}
+          values={values}
+          setValues={setValues}
+          canEditParam={canEditParam}
+          seenLabels={seenLabels}
+        />
       )}
 
       {error && <div className="mt-3 text-sm text-red-400">{error}</div>}
@@ -846,26 +859,26 @@ export function AppActionModal({
         payload[p.name] = Boolean(raw)
       } else if (t === 'int' || t === 'float') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          return setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          return setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
         }
         payload[p.name] = num
       } else if (t === 'list' || t === 'dict') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         try {
           payload[p.name] = JSON.parse(text)
         } catch {
-          return setError(`"${p.name}" is not valid JSON.`)
+          return setError(`"${paramLabel(p)}" is not valid JSON.`)
         }
       } else {
-        if (!text && p.required) return setError(`"${p.name}" is required.`)
+        if (!text && p.required) return setError(`"${paramLabel(p)}" is required.`)
         if (text || !p.required) payload[p.name] = text
       }
     }
@@ -2664,5 +2677,181 @@ export function AppCatalog() {
         />
       ))}
     </section>
+  )
+}
+
+
+/**
+ * The generated config form.
+ *
+ * Params are shown under their declared `group`, in manifest order, and
+ * anything marked `advanced` is collapsed behind one disclosure. The
+ * point is not tidiness: this app declares sixteen knobs, of which an
+ * operator setting up a room touches about five, and a flat list of
+ * sixteen makes the five impossible to find. Nothing is ever dropped —
+ * a knob nobody should turn is still one somebody may need to reach.
+ */
+function ParamForm({
+  params, values, setValues, canEditParam, seenLabels,
+}: {
+  params: ManifestParam[]
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const basic = params.filter((p) => !p.advanced)
+  const advanced = params.filter((p) => p.advanced)
+
+  const render = (list: ManifestParam[]) => {
+    // Manifest order decides both the groups and the params inside them.
+    const groups: { name: string; items: ManifestParam[] }[] = []
+    for (const p of list) {
+      const name = p.group || ''
+      const last = groups[groups.length - 1]
+      if (last && last.name === name) last.items.push(p)
+      else groups.push({ name, items: [p] })
+    }
+    return groups.map((g, i) => (
+      <div key={`${g.name}-${i}`} className="space-y-4">
+        {g.name && (
+          <div className="border-b border-[var(--border)] pb-1 text-xs font-semibold uppercase tracking-wide text-[var(--text-dim)]">
+            {g.name}
+          </div>
+        )}
+        {g.items.map((p) => (
+          <ParamField
+            key={p.name}
+            p={p}
+            values={values}
+            setValues={setValues}
+            canEditParam={canEditParam}
+            seenLabels={seenLabels}
+          />
+        ))}
+      </div>
+    ))
+  }
+
+  return (
+    <div className="space-y-4">
+      {render(basic)}
+      {advanced.length > 0 && (
+        <div className="space-y-4 pt-1">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            aria-expanded={showAdvanced}
+            className="text-xs text-[var(--accent)] hover:brightness-110"
+          >
+            {showAdvanced ? 'Hide' : 'Show'} advanced settings ({advanced.length})
+          </button>
+          {showAdvanced && render(advanced)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ParamField({
+  p, values, setValues, canEditParam, seenLabels,
+}: {
+  p: ManifestParam
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const t = (p.type || '').toLowerCase()
+  const value = values[p.name]
+  return (
+              <div key={p.name}>
+                <label className="block text-sm mb-1">
+                  <span className="font-medium">{paramLabel(p)}</span>
+                  {/* The wire name earns its place only when it is not
+                      already the label — it is what the API and the docs
+                      call this, so it is worth keeping, quietly. The
+                      TYPE is not shown beside a labelled param: "float"
+                      tells an operator nothing the input does not. */}
+                  <span className="ml-2 text-xs text-[var(--text-dim)]">
+                    {p.label ? p.name : p.type}
+                    {p.per_camera ? ' · per camera' : ''}
+                    {p.required ? ' · required' : ''}
+                  </span>
+                </label>
+                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
+                {!canEditParam(p) ? (
+                  <div
+                    className="w-full px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
+                    title="Site-wide setting — only an administrator can change it"
+                  >
+                    {String(value ?? '') || '—'}
+                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
+                  </div>
+                ) : hasChoices(p) ? (
+                  <select
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                    aria-label={paramLabel(p)}
+                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  >
+                    {/* No blank option: a closed set with a default is
+                        always on one of its own values, and an empty row
+                        only offers a way to mean nothing. */}
+                    {(p.choices ?? []).map((c, i) => (
+                      <option key={i} value={String(i)}>{c.label}</option>
+                    ))}
+                  </select>
+                ) : t === 'color.hsv_range' ? (
+                  <ColorRangeEditor
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                  <GeometryEditor
+                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'list' && !p.per_camera ? (
+                  <ChipListEditor
+                    value={String(value ?? '')}
+                    placeholder={`add ${p.name} value, Enter`}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                    suggestions={suggestionsFor(p, seenLabels)}
+                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
+                  />
+                ) : t === 'time_range' ? (
+                  <TimeWindowEditor
+                    value={String(value ?? '')}
+                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
+                  />
+                ) : isJsonParam(p) ? (
+                  <textarea
+                    className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                ) : t === 'bool' ? (
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(value)}
+                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
+                    />
+                    Enabled
+                  </label>
+                ) : (
+                  <input
+                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                    step={t === 'float' ? 'any' : undefined}
+                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                )}
+              </div>
   )
 }

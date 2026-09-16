@@ -36,10 +36,13 @@ Auth (current state):
              HTTP path's middleware would enforce, but FastAPI doesn't
              run BaseHTTPMiddleware on WS upgrades so we check
              explicitly.
-* Outbound : Bearer-token auth to adapters is NOT yet wired — adapters
-             run in "dev mode" today. When that gap is closed in a
-             follow-up slice, pass the token via the upstream
-             ``Authorization`` header here.
+* Outbound : ``Authorization: Bearer`` on the upstream upgrade, the
+             same token the HTTP ``/infer`` path and the registry's
+             probes already send. Without it the adapter closes the
+             upgrade with 403 once its registration grace window
+             expires — and because a rejected upgrade surfaces to the
+             app as a bare 500, "my streaming adapter stopped working
+             after five minutes" was indistinguishable from a crash.
 
 Streaming-related items intentionally NOT in this slice:
 
@@ -49,7 +52,7 @@ Streaming-related items intentionally NOT in this slice:
 * Per-camera fair queuing at the proxy layer — adapters do this
   themselves via ``scheduling.fair_queuing="per_camera"`` (§9).
   KAI-C is a transparent pipe.
-* Adapter-side bearer-token auth — see above.
+* Shared-memory transport — see above.
 """
 from __future__ import annotations
 
@@ -147,8 +150,12 @@ class StreamProxy:
         connect_timeout_seconds: float = 5.0,
         nats_publisher: Any = None,
         adapter_info: Any = None,
+        auth_token: str | None = None,
     ) -> None:
         self._client = client_ws
+        #: Presented to the ADAPTER on the upstream upgrade. None only
+        #: in dev stacks with no key configured.
+        self._auth_token = auth_token
         self._adapter_name = adapter_name
         self._adapter_url = adapter_url
         self._correlation_id = correlation_id
@@ -191,6 +198,9 @@ class StreamProxy:
         # we reject the client upgrade with a typed close code rather
         # than letting them dangle.
         upstream_headers = [("X-Correlation-Id", self._correlation_id)]
+        if self._auth_token:
+            upstream_headers.append(
+                ("Authorization", f"Bearer {self._auth_token}"))
         try:
             upstream = await asyncio.wait_for(
                 websockets.connect(

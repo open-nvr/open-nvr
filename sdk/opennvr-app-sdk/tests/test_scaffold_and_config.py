@@ -226,6 +226,61 @@ def test_cli_new(tmp_path, capsys):
     assert scaffold.main(["new", "gate-watch", "--dest", str(tmp_path)]) == 2   # exists
 
 
+def test_a_param_can_say_what_to_call_it_and_where_to_file_it():
+    """Without these the catalog form has nothing to show but the wire
+    name, so an operator configures a system through `no_scan_engaged`
+    and `led_window_s`.
+
+    All four are omitted when unset, so an app that adopts none of them
+    puts exactly the same bytes on the wire as before.
+    """
+    from opennvr_app_sdk import AppManifest, Param
+
+    m = AppManifest(
+        id="a", name="A", version="1.0.0", category="analytics",
+        params=[
+            Param("no_scan_engaged", float, default=1.0,
+                  label="Wand time that still counts as no scan",
+                  group="Timing", advanced=True),
+            Param("plain", float, default=1.0),
+        ])
+    ps = {p["name"]: p for p in m.to_dict()["params"]}
+
+    assert ps["no_scan_engaged"]["label"] == "Wand time that still counts as no scan"
+    assert ps["no_scan_engaged"]["group"] == "Timing"
+    assert ps["no_scan_engaged"]["advanced"] is True
+
+    # The unadorned param is byte-for-byte what it always was.
+    assert set(ps["plain"]) == {"name", "required", "type", "default",
+                                "per_camera", "description"}
+
+
+def test_choices_turn_a_number_into_the_decision_it_encodes():
+    """`order_weight` 0 / 0.3 / 1.0 is really "doesn't count / counts a
+    little / counts fully", and no operator derives that from a float."""
+    from opennvr_app_sdk import AppManifest, Param
+
+    m = AppManifest(
+        id="a", name="A", version="1.0.0", category="analytics",
+        params=[
+            Param("order_weight", float, default=0.0,
+                  choices=[(0.0, "No"), (0.3, "A little"), (1.0, "Fully")]),
+            Param("mode", str, default="fast", choices=["fast", "accurate"]),
+        ])
+    ps = {p["name"]: p for p in m.to_dict()["params"]}
+
+    assert ps["order_weight"]["choices"] == [
+        {"value": 0.0, "label": "No"},
+        {"value": 0.3, "label": "A little"},
+        {"value": 1.0, "label": "Fully"},
+    ]
+    # A bare value labels itself, so the common case stays short.
+    assert ps["mode"]["choices"] == [
+        {"value": "fast", "label": "fast"},
+        {"value": "accurate", "label": "accurate"},
+    ]
+
+
 def test_param_suggestions_ride_the_manifest():
     from opennvr_app_sdk import DETECTION_LABELS, AppManifest, Param
 

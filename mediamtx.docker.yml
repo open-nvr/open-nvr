@@ -52,10 +52,21 @@ authJWTJWKS: http://127.0.0.1:8000/.well-known/jwks.json
 authJWTJWKSFingerprint:
 # Claim containing MediaMTX permissions
 authJWTClaimKey: mediamtx_permissions
-# Exclude Admin API and Playback from JWT (already protected by localhost binding)
-authJWTExclude:
-  - action: api
-  - action: playback
+# NOTHING is excluded from JWT. The Admin API and the playback server
+# used to be, on the written grounds that they were "already protected by
+# localhost binding" — but apiAddress and playbackAddress below are
+# 0.0.0.0, so that was never true between containers, and it became
+# actively dangerous when mediamtx joined the apps network so that apps
+# could read RTSP: any app container could then reach
+# /v3/config/pathdefaults/get, which returns the runOnReady hook commands
+# with MEDIAMTX_SECRET expanded into them, or POST /v3/config/paths/add
+# with a runOnInit — arbitrary commands inside this container, which
+# holds the recordings volume read-write. Reachability was doing the work
+# the comment credited to a binding that was not there.
+# Core authenticates its own calls: MediaMtxAdminService sends a
+# short-lived admin JWT (services/mediamtx_admin_service.py) and every
+# playback fetch carries one as ?jwt= (services/mediamtx_client.py).
+authJWTExclude: []
 # Allow JWT in query params for HLS compatibility (HLS.js can't send headers for all segment requests)
 # Token will be passed as: index.m3u8?jwt=<token>
 authJWTInHTTPQuery: true
@@ -63,12 +74,14 @@ authJWTInHTTPQuery: true
 ###############################################
 # Global settings -> Control API
 #
-# SECURITY: Bound to localhost only
-# Accessible only by backend application
+# SECURITY: JWT-authenticated (authJWTExclude is empty).
+# Bound on the container network so core can reach it.
 ###############################################
 
 api: yes
-# Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
+# Reachable from other containers (core calls it) — and authenticated,
+# see authJWTExclude above. The host port mapping is a second fence,
+# not the first one.
 apiAddress: 0.0.0.0:9997
 apiEncryption: no
 apiServerKey: /etc/mediamtx-certs/server.key
@@ -108,11 +121,13 @@ pprofTrustedProxies: []
 ###############################################
 # Global settings -> Playback server
 #
-# SECURITY: Localhost only - recordings accessed via backend proxy
+# SECURITY: JWT-authenticated (authJWTExclude is empty).
+# Recordings are normally served through the backend proxy.
 ###############################################
 
 playback: yes
-# Allow access from other Docker containers (still protected by Docker port mapping to 127.0.0.1 on host)
+# Reachable from other containers (core and nginx fetch segments) —
+# and authenticated, see authJWTExclude above.
 playbackAddress: 0.0.0.0:9996
 playbackEncryption: no
 playbackServerKey: /etc/mediamtx-certs/server.key

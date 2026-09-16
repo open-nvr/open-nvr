@@ -1,13 +1,24 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { Check } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
 import { useTranslation } from '../../i18n'
 import { DataTable, type Column } from '../ui/DataTable'
 import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
+import { AuthedImage } from '../AuthedImage'
+import { EvidenceViewer } from '../EvidenceViewer'
 import {
-  alarmSeenAt, alarmSeenTitle, type InboxAlert,
+  alarmSeenAt, alarmSeenTitle, alertsInboxService, type InboxAlert,
 } from '../../services/alertsInboxService'
+
+/** Which photo best represents an alert in one 32px square: the face if
+ *  the producer sent one, then the body, then the whole scene. */
+const THUMB_ORDER = ['face', 'body', 'subject', 'scene', 'snapshot']
+
+export function bestImageName(images: string[]): string | null {
+  if (!images?.length) return null
+  return THUMB_ORDER.find((n) => images.includes(n)) ?? images[0]
+}
 
 /**
  * The one alarm table. Both surfaces that show alarms render through it.
@@ -78,6 +89,11 @@ export function AlarmsTable({
   fillHeight = true,
 }: AlarmsTableProps) {
   const { t } = useTranslation()
+  // The alert whose photos are open full size, if any.
+  const [viewing, setViewing] = useState<InboxAlert | null>(null)
+  // No photo column at all unless something on this page has one: an
+  // empty 46px gutter on every vehicle alarm is worse than no column.
+  const anyImages = rows.some((a) => a.images?.length)
   const selectable = !!selected && !!onToggle
   const pageIds = rows.map((a) => a.id)
   const allOnPage = selectable && pageIds.every((id) => selected!.has(id))
@@ -131,6 +147,28 @@ export function AlarmsTable({
         </button>
       ),
     },
+    ...(anyImages ? [{
+      key: 'photo', header: '', srHeader: 'Evidence photo',
+      width: 'w-[46px]',
+      cell: (a: InboxAlert) => {
+        const name = bestImageName(a.images)
+        if (!name) return null
+        return (
+          <AuthedImage
+            queryKey={['alert-image', a.id, name]}
+            fetchBlob={(signal) =>
+              alertsInboxService.getAlertImage(a.id, name, signal)}
+            alt={`Evidence for: ${a.title}`}
+            className={clsx(
+              'h-8 w-8 cursor-zoom-in rounded object-cover',
+              'border border-[var(--border)]',
+              a.acknowledged_at && 'opacity-60',
+            )}
+            onClick={() => setViewing(a)}
+          />
+        )
+      },
+    } as Column<InboxAlert>] : []),
     {
       key: 'severity', header: t('alerts.severity'), width: 'w-[92px]',
       cell: (a) => (
@@ -192,6 +230,7 @@ export function AlarmsTable({
   ]
 
   return (
+    <>
     <DataTable<InboxAlert>
       caption={caption}
       columns={columns}
@@ -243,6 +282,10 @@ export function AlarmsTable({
       dense
       minWidth="min-w-[640px]"
     />
+    {viewing && (
+      <AlarmEvidenceViewer alert={viewing} onClose={() => setViewing(null)} />
+    )}
+    </>
   )
 }
 
@@ -259,6 +302,7 @@ export function AlarmsTable({
 export function AlarmsSelectionBar({
   count, allOnPage, allMatching, matchingTotal, label,
   onSelectAllMatching, onClear, onAck, ackPending,
+  canSelectAllMatching = true,
 }: {
   count: number
   allOnPage: boolean
@@ -269,6 +313,14 @@ export function AlarmsSelectionBar({
   onClear: () => void
   onAck: () => void
   ackPending?: boolean
+  /**
+   * Whether the CURRENT filter can be expressed to the ack endpoint,
+   * which understands only source_name and severity. With a type,
+   * camera or text filter active it cannot, and escalating would ack
+   * every row the coarser filter matches — including rows the operator
+   * filtered away and never saw. Ticking rows by hand still works.
+   */
+  canSelectAllMatching?: boolean
 }) {
   if (!count && !allMatching) return null
   const noun = label ?? 'alarms'
@@ -284,7 +336,7 @@ export function AlarmsSelectionBar({
           ? `All ${matchingTotal ?? ''} ${noun} selected`
           : `${count} selected`}
       </span>
-      {!allMatching && allOnPage && typeof matchingTotal === 'number' && matchingTotal > count && (
+      {!allMatching && canSelectAllMatching && allOnPage && typeof matchingTotal === 'number' && matchingTotal > count && (
         <button type="button" onClick={onSelectAllMatching}
                 className="underline text-[var(--accent)] hover:brightness-110">
           Select all {matchingTotal} {noun}
@@ -298,6 +350,33 @@ export function AlarmsSelectionBar({
         Clear
       </button>
     </div>
+  )
+}
+
+
+/**
+ * Every photo an alert carries, full size.
+ *
+ * A thin binding over the shared `EvidenceViewer` — the same photographs
+ * reach the screening ledger by a differently-scoped route, and the two
+ * must not drift into showing them differently. Names come from the row,
+ * so an alert with a face, a body and a scene shows three, and one with
+ * none never opens.
+ */
+export function AlarmEvidenceViewer({
+  alert, onClose,
+}: { alert: InboxAlert; onClose: () => void }) {
+  return (
+    <EvidenceViewer
+      title={alert.title}
+      subtitle={`${alarmSeenAt(alert)}${
+        alert.alert_type ? ` · ${alert.alert_type.replace(/_/g, ' ')}` : ''}`}
+      images={alert.images}
+      queryKeyPrefix={['alert-image', alert.id]}
+      fetchBlob={(name, signal) =>
+        alertsInboxService.getAlertImage(alert.id, name, signal)}
+      onClose={onClose}
+    />
   )
 }
 
@@ -326,12 +405,22 @@ const STATUS_OPTIONS: SegmentOption<'all' | 'unacked'>[] = [
 
 export function AlarmsFilters({
   onlyUnacked, onUnacked, severity, onSeverity, children,
+  alertType, onAlertType, alertTypes = [],
+  cameraId, onCameraId, cameras = [],
 }: {
   onlyUnacked: boolean
   onUnacked: (only: boolean) => void
   severity: string | null
   onSeverity: (s: string | null) => void
   children?: ReactNode
+  /** Producer's kind of alert — `scanner_flag`, `no_scan`, `unknown_plate`. */
+  alertType?: string | null
+  onAlertType?: (t: string | null) => void
+  /** What the installed apps say they can emit; empty hides the control. */
+  alertTypes?: string[]
+  cameraId?: number | null
+  onCameraId?: (id: number | null) => void
+  cameras?: { id: number; name: string }[]
 }) {
   const { t } = useTranslation()
   const severityOptions: SegmentOption<string | null>[] = [{ value: null, label: t('alerts.all') }, ...ALARM_SEVERITIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]
@@ -353,6 +442,42 @@ export function AlarmsFilters({
           value={severity}
           onChange={onSeverity}
         />
+        {/* Severity says how loud an alarm is; TYPE says what happened.
+            "A guard skipped the back pass" and "the wand went off on
+            someone" are both high-or-above and are not the same job, so
+            triaging the inbox needs this and not only the volume knob. */}
+        {onAlertType && alertTypes.length > 0 && (
+          <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+            Type
+            <select
+              value={alertType ?? ''}
+              onChange={(e) => onAlertType(e.target.value || null)}
+              aria-label="Filter by alert type"
+              className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs text-[var(--text)]"
+            >
+              <option value="">All types</option>
+              {alertTypes.map((t) => (
+                <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {onCameraId && cameras.length > 0 && (
+          <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+            Camera
+            <select
+              value={cameraId ?? ''}
+              onChange={(e) => onCameraId(e.target.value === '' ? null : Number(e.target.value))}
+              aria-label="Filter by camera"
+              className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs text-[var(--text)]"
+            >
+              <option value="">All cameras</option>
+              {cameras.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {children}
     </>

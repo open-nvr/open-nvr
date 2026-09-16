@@ -40,6 +40,8 @@ This service maps our CameraConfig into PathConf fields and handles RTSP stream 
 NOTE: All public methods are async — callers must await them.
 """
 
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -222,11 +224,62 @@ def _validate_patch_payload(payload: dict[str, Any]) -> None:
 class MediaMtxAdminService:
     """Async HTTP client wrapper for MediaMTX admin API v3."""
 
-    @staticmethod
-    def _headers() -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+    #: Cached admin JWT and the monotonic time it stops being usable.
+    #: create_admin_token() mints a 5-minute token and signing is RSA, so
+    #: minting one per call would put a signature on every path read.
+    #: Refreshed a minute early, because a token that expires in flight
+    #: is a 401 on a real operation.
+    _token: str | None = None
+    _token_until: float = 0.0
+    _token_lock = threading.Lock()
+
+    @classmethod
+    def _admin_token(cls) -> str | None:
+        """A JWT that authorises the Control API, or None if we cannot
+        mint one (no keys yet — core is still starting)."""
         if settings.mediamtx_admin_token:
-            headers["Authorization"] = f"Bearer {settings.mediamtx_admin_token}"
+            # An operator pointing at an EXTERNAL MediaMTX with its own
+            # static credential still wins: their token is not ours to
+            # replace.
+            return settings.mediamtx_admin_token
+        now = time.monotonic()
+        with cls._token_lock:
+            if cls._token and now < cls._token_until:
+                return cls._token
+            try:
+                from services.mediamtx_jwt_service import MediaMtxJwtService
+
+                cls._token = MediaMtxJwtService.create_admin_token(expiry_minutes=5)
+                cls._token_until = now + 240.0
+            except Exception as exc:  # noqa: BLE001
+                # Do not fail the call here — let MediaMTX answer 401 and
+                # the caller's own error path report it. The one time
+                # this legitimately happens is the first seconds after
+                # boot, before core has written its signing key.
+                mediamtx_logger.warning(
+                    "could not mint a MediaMTX admin token: %s", exc)
+                cls._token, cls._token_until = None, 0.0
+            return cls._token
+
+    @classmethod
+    def _headers(cls) -> dict[str, str]:
+        """Authorise every Control API call.
+
+        This used to send a bearer token only when
+        ``settings.mediamtx_admin_token`` was set, and nothing in the
+        deployment ever set it — so core talked to an API that was
+        simply unauthenticated, protected by "only we can reach it".
+        That stopped being true when mediamtx joined the apps network:
+        `/v3/config/pathdefaults/get` returns the hook commands, which
+        carry MEDIAMTX_SECRET, and `/v3/config/paths/add` accepts
+        runOnInit — arbitrary commands inside a container holding the
+        recordings volume. Every call site in this module goes through
+        here, so authorising it here authorises all of them.
+        """
+        headers = {"Content-Type": "application/json"}
+        token = cls._admin_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     @staticmethod

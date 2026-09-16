@@ -360,3 +360,51 @@ behind the Occupancy page's flow chart and stay figures.
 4. CI (`test_event_contracts.py`) will fail any first-party publish or
    subscribe on an `opennvr.events.*` subject that this document does
    not list — that failure is the review prompt, not an obstacle.
+
+## `screening.completed.v1` — one entry screening, ruled on
+
+Published by the guard-scan-compliance app when it finishes ruling on a
+person at the entrance. Core consumes it into `guard_screenings`
+(`services/guardscan_event_consumer.py`), which the Entry Screening page
+and its reports are built from.
+
+**Every screening is published, the clean ones included.** Compliance is
+complete scans over all screenings, and an event stream of only the
+failures gives a page that can count complaints but never state a rate.
+
+Subject: `opennvr.events.screening.completed.v1.<camera_id>`
+
+```json
+{
+  "schema": "screening.completed.v1",
+  "camera_id": "cam3",
+  "ts": 1789251600.0,
+  "producer": "app:guard-scan-compliance",
+  "payload": {
+    "session": "7c3c36c02d",
+    "at": "2026-09-13T09:31:00+00:00",
+    "ts": 1789251600.0,
+    "verdict": "compliant",
+    "score": 100.0,
+    "coverage": 100.0,
+    "order_score": 100.0,
+    "steps_done": ["Left arm", "Right arm", "Front", "Back"],
+    "steps_missing": [],
+    "flagged": false,
+    "duration_s": 108.4,
+    "engaged_s": 38.2,
+    "ended_by": "left",
+    "images": { "face": "ab/<sha>.jpg", "body": "cd/<sha>.jpg",
+                "scene": "ef/<sha>.jpg", "guard_face": "01/<sha>.jpg" }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `session` | The producer's id for this screening, and the dedup key: the bus is at-least-once, and a redelivery must not inflate the day's denominator. |
+| `verdict` | `compliant` \| `partial` \| `incomplete` \| `no_scan`. A future grade band is stored as-is rather than dropped. |
+| `score` | 0–100, from the site's own procedure rules. |
+| `flagged` | The wand's indicator lit during this screening. |
+| `ended_by` | `left`, `complete`, `timeout`, `walked_off`, `feed_lost`. |
+| `images` | Relative paths into the evidence store — never image bytes. |

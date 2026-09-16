@@ -127,9 +127,21 @@ def test_build_frame_source_https_scheme():
     assert isinstance(src, HttpSnapshotSource)
 
 
-def test_build_frame_source_rtsp_not_yet_supported():
-    with pytest.raises(FrameSourceError, match="rtsp"):
-        build_frame_source(camera_id="c", url="rtsp://cam.example/stream")
+def test_build_frame_source_routes_rtsp_to_the_stream_backed_source():
+    """rtsp:// used to be refused outright, and this test used to assert
+    that refusal. `767e903` gave the SDK a stream-backed source that
+    keeps one decoder warm and hands back its newest frame, so a polling
+    app can be pointed at a stream without paying an ffmpeg start per
+    tick — and this module is a shim over that SDK factory (see
+    frame_sources.py), so the behaviour changed underneath the test.
+
+    Kept rather than deleted: the shim re-exporting a factory that still
+    routes every scheme correctly is the thing worth pinning here.
+    """
+    from opennvr_app_sdk.rtsp import RtspStillSource
+
+    src = build_frame_source(camera_id="c", url="rtsp://cam.example/stream")
+    assert isinstance(src, RtspStillSource)
 
 
 def test_build_frame_source_opennvr_scheme_deferred():

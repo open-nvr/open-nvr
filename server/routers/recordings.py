@@ -958,6 +958,8 @@ async def export_clip(
         "path": entry["path"],
         "start": entry["start"],
         "duration": str(entry["duration"]),
+        # The playback server authenticates now; core says who it is.
+        **mediamtx_client.playback_auth(),
     }
 
     import httpx as _httpx

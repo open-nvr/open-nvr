@@ -69,6 +69,31 @@
   source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/yolov8
   contact: https://github.com/open-nvr/ai-adapter/issues
 
+- id: yolo-pose
+  name: YOLO Pose
+  summary: Body keypoints — shoulders, elbows, wrists, hips — so a rule can reason about what a person is DOING, not just where they are. CPU-first, ~12 fps on 8 cores at 448px.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/yolo-pose-adapter:latest
+  tasks_advertised: [pose_estimation]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [keypoints]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: true
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://docs.ultralytics.com/tasks/pose/
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/yolo_pose/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/yolo_pose
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
 - id: fast-plate-ocr
   name: Fast Plate OCR
   summary: Reads a number plate from a cropped plate image. ~30 MB on top of the SDK, CPU-only — the plate reader the LPR app expects.

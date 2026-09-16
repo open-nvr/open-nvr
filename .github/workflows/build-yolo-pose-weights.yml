@@ -1,0 +1,154 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build + publish workflow for ghcr.io/open-nvr/yolo-pose-weights.
+#
+# Why this exists: the pose model is the one weight in the stack with
+# nowhere to download it from. Ultralytics publishes the .pt, never the
+# ONNX, so the graph has to be exported by somebody — and until this
+# image existed that somebody was the operator. A fresh install pulled
+# the adapter, started it, got a healthy /health, and failed every
+# /infer on a missing file, with nothing anywhere saying why.
+#
+# Same shape as build-yolov8-weights.yml, and for the second reason
+# that one exists too: an operator on a filtered network (reported from
+# IN/CN/IR) cannot reach PyPI or ultralytics.com at boot, so a
+# first-boot pip+export is not something to rely on.
+#
+# Triggered on:
+#   - Pull request touching examples/yolo-pose-weights/* or this file →
+#     build only, no push. Catches a broken export before merge.
+#   - Push to main → build + push :v<weights-tag> and :sha-<short>.
+#   - Tag matching v* → also :latest.
+#
+# Architecture: linux/amd64 + linux/arm64. An ONNX graph is the same
+# file on both, so the multi-arch manifest costs nothing extra — and an
+# amd64-only manifest would abort `docker compose pull` for the WHOLE
+# stack on an Apple Silicon Mac or a Pi, not just skip this image.
+
+name: build-yolo-pose-weights
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+    paths:
+      - "examples/yolo-pose-weights/**"
+      - ".github/workflows/build-yolo-pose-weights.yml"
+  pull_request:
+    paths:
+      - "examples/yolo-pose-weights/**"
+      - ".github/workflows/build-yolo-pose-weights.yml"
+  # Manual lever, so the weights can be re-published after an
+  # Ultralytics assets release without bumping OpenNVR's own version.
+  workflow_dispatch:
+    inputs:
+      weights_tag:
+        # The ultralytics/assets RELEASE tag the .pt comes from, NOT
+        # the Python `ultralytics` package version. Keep it aligned
+        # with the YOLO_POSE_WEIGHTS_IMAGE default in
+        # docker-compose.apps.yml, or operators pull a tag their
+        # compose file does not ask for.
+        description: "Ultralytics assets release tag (e.g. 8.3.0)"
+        required: false
+        default: "8.3.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # required to push to ghcr.io
+
+    steps:
+      - name: Free up GHA runner disk space
+        # The ultralytics base is ~3 GB per arch and the runner has
+        # 14 GB total, so a multi-arch build of it OOMs the disk
+        # without this. Same reason as build-yolov8-weights.yml.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          # buildx needs these.
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Not on pull_request: nothing is pushed there, and GHCR
+        # rejects logins from forked-PR contexts anyway.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          # The weights release drives the image tag, because that is
+          # the operator-meaningful version: which checkpoint the graph
+          # was exported from.
+          WEIGHTS_TAG="${{ github.event.inputs.weights_tag || '8.3.0' }}"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            EXTRA="ghcr.io/${{ github.repository_owner }}/yolo-pose-weights:latest"
+          else
+            EXTRA=""
+          fi
+          PRIMARY="ghcr.io/${{ github.repository_owner }}/yolo-pose-weights:v${WEIGHTS_TAG}"
+          SHA="ghcr.io/${{ github.repository_owner }}/yolo-pose-weights:sha-${GITHUB_SHA::8}"
+          {
+            echo "primary=${PRIMARY}"
+            echo "extra=${EXTRA}"
+            echo "sha=${SHA}"
+            echo "weights_tag=${WEIGHTS_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push if not PR)
+        uses: docker/build-push-action@v5
+        with:
+          context: examples/yolo-pose-weights
+          file: examples/yolo-pose-weights/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.tags.outputs.primary }}
+            ${{ steps.tags.outputs.sha }}
+            ${{ steps.tags.outputs.extra }}
+          # Pinned so the exported graph is reproducible.
+          build-args: |
+            POSE_PT_URL=https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt
+          # The ultralytics base is ~3 GB and changes rarely; the cache
+          # turns the second build into seconds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sanity-check the published image
+        # Pull back what we just pushed and prove the graph is in it.
+        # Cheap insurance against "the build succeeded but the COPY
+        # didn't" — the failure this whole image exists to prevent.
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull "${{ steps.tags.outputs.primary }}"
+          docker run --rm --entrypoint sh "${{ steps.tags.outputs.primary }}" -c '
+            set -e
+            SIZE=$(wc -c < /yolo11n-pose.onnx)
+            echo "yolo11n-pose.onnx: ${SIZE} bytes"
+            # A 404 page or an LFS pointer is a few hundred bytes; the
+            # real graph is ~12 MB. Anything under 1 MB is not a model.
+            [ "$SIZE" -gt 1000000 ] || { echo "too small to be the model"; exit 1; }
+          '

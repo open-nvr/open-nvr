@@ -41,6 +41,13 @@ export type InboxAlert = {
   correlation_id: string | null
   evidence: Record<string, unknown> | null
   tags: string[]
+  // The producer's own kind of alert ('scanner_flag', 'no_scan').
+  // Severity says how loudly to ring; this says what happened.
+  alert_type: string | null
+  // NAMES of the evidence photos on this alert ('face', 'body',
+  // 'scene'), not paths: the bytes come from alertImageUrl() below,
+  // which re-checks the caller's camera scope.
+  images: string[]
   acknowledged_at: string | null
   acknowledged_by: number | null
 }
@@ -93,6 +100,11 @@ export const alertsInboxService = {
     unacked?: boolean
     severity?: string
     source_name?: string
+    alert_type?: string
+    camera_id?: string
+    from?: string
+    to?: string
+    q?: string
     after_id?: number
     before_id?: number
     skip?: number
@@ -108,6 +120,15 @@ export const alertsInboxService = {
 
   ackInboxAlertsMatching: (filters: { source_name?: string; severity?: string }) =>
     api.post('/api/v1/alerts-inbox/ack', filters),
+
+  // One evidence photo. Goes through the JWT api client (hence
+  // AuthedImage rather than a bare <img src>): an alert's photo is as
+  // camera-scoped as the alert itself.
+  getAlertImage: (alertId: number, name: string, signal?: AbortSignal) =>
+    api.get(`/api/v1/alerts-inbox/${alertId}/images/${encodeURIComponent(name)}`, {
+      responseType: 'blob',
+      signal,
+    }),
 
   getRingConfig: () => api.get('/api/v1/alerts-inbox/ring-config'),
   putRingConfig: (ring: RingConfig) =>

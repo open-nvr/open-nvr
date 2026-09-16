@@ -92,7 +92,7 @@ Lower-level helpers that predate the client and remain public:
 
 | Name | Purpose |
 |---|---|
-| `Alert` | `title`, `description`, `camera_id`, `severity` (`low`/`medium`/`high`/`critical`), `evidence`, `tags`, `correlation_id`; `.to_wire()` |
+| `Alert` | `title`, `description`, `camera_id`, `severity` (`low`/`medium`/`high`/`critical`), `alert_type`, `images` (`{name: path}` from `nvr.save_evidence()` — never image bytes, the bus caps a message at 1 MB), `evidence`, `tags`, `correlation_id`; `.to_wire()` |
 | `AlertSource`, `set_default_source(...)` | Who raised it (app id/name/version) — set once at startup |
 | `AlertDispatcher`, `build_dispatcher(webhook_url=…, nats_alerts_url=…)` | Fan-out: `StdoutChannel` always, `WebhookChannel` and `NatsAlertChannel` opt-in |
 | `alert_subject(alert)`, `DEFAULT_ALERT_SUBJECT_PREFIX` | The NATS subject an alert lands on (`opennvr.alerts.<severity>.<camera>`) |

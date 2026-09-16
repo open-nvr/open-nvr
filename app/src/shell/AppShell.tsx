@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers, ShieldCheck } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -190,6 +190,7 @@ export function AppShell() {
   const verticalIcon: Record<string, ReactNode> = {
     '/vehicles': <Car size={16} />,
     '/occupancy': <Users size={16} />,
+    '/guard-compliance': <ShieldCheck size={16} />,
   }
   const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 

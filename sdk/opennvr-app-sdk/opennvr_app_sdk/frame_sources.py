@@ -163,10 +163,14 @@ def build_frame_source(*, camera_id: str, url: str) -> CameraFrameSource:
             "camera's snapshot URL directly for now."
         )
     if scheme == "rtsp":
-        raise FrameSourceError(
-            "rtsp:// scheme requires the ffmpeg-based RTSP pipeline that lands in "
-            "a planned follow-up. For now use the camera's HTTP snapshot endpoint instead."
-        )
+        # Continuous video is a different shape from a snapshot poll —
+        # one long-lived decoder, newest-frame-wins — so it lives in
+        # `rtsp.py` and is used directly, not fetched per tick. This
+        # adapter exists so a FrameApp built around polling can still be
+        # pointed at a stream and get the latest frame each tick.
+        from .rtsp import RtspStillSource
+
+        return RtspStillSource(camera_id=camera_id, url=url)
     raise FrameSourceError(
         f"unsupported frame source scheme {scheme!r}; expected file/http/https."
     )

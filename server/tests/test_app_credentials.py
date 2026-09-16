@@ -440,6 +440,37 @@ def test_snapshot_and_recordings_follow_the_roster(platform):
     assert url.startswith("http://mediamtx:9996/get?") and "duration=60" in url
 
 
+def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
+    """The roster check decides which camera an app may ASK about; the
+    URL it is handed decides which camera it can actually FETCH. Those
+    used to disagree: the URL carried no credential at all, so an app
+    could take this answer, edit `path=` to a camera it was never
+    assigned, and the playback server — which was excluded from auth
+    entirely — would serve it. The token is scoped to this path.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    # python-jose, which is what this codebase signs with
+    # (services/mediamtx_jwt_service.py: `from jose import jwt`). PyJWT
+    # is not a dependency here.
+    from jose import jwt as _jwt
+
+    tc, ids, _, key = platform
+    body = tc.get(f"/internal/app/recordings/{ids['gate']}/url", headers=_app(key),
+                  params={"start": "2026-09-05T10:00:00Z", "duration": 60}).json()
+    query = parse_qs(urlparse(body["url"]).query)
+
+    assert "jwt" in query, "the playback URL was handed out with no credential"
+    claims = _jwt.get_unverified_claims(query["jwt"][0])
+    perms = claims["mediamtx_permissions"]
+    assert [p["action"] for p in perms] == ["playback"], (
+        f"an app was given more than playback: {perms}")
+    paths = {p.get("path") for p in perms}
+    assert paths and "~.*" not in paths, (
+        f"the token is not scoped to one path: {perms}")
+    assert body["expires_in"] > 0
+
+
 def test_plates_and_alerts_are_scoped_to_the_app(platform):
     tc, ids, SessionLocal, key = platform
     s = SessionLocal()
