@@ -78,10 +78,15 @@ compose_args() {
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
-    if [[ -n "$example_compose" ]]; then
-        [[ -f "$example_compose" ]] || {
-            echo "Configured example Compose file not found: $example_compose" >&2
-            if [[ "$example_compose" == *camera-agent-lite* ]]; then
+    # Both OPENNVR_EXAMPLE_* values are comma-separated lists: the installer
+    # lets an operator pick several apps at once (the Camera Agent's own
+    # overlay plus the shared apps overlay, one profile per catalog app).
+    # A single value is a list of one, so older .env files read unchanged.
+    local f
+    for f in ${example_compose//,/ }; do
+        [[ -f "$f" ]] || {
+            echo "Configured example Compose file not found: $f" >&2
+            if [[ "$f" == *camera-agent-lite* ]]; then
                 echo "camera-agent-lite was removed — the camera-agent example (with" >&2
                 echo "OLLAMA_EXTERNAL_URL for host-GPU/CPU Ollama) replaces it." >&2
                 echo "Fix: re-run ./scripts/install.sh reconfigure, or clear the" >&2
@@ -89,7 +94,9 @@ compose_args() {
             fi
             return 1
         }
-        args="$args -f $example_compose"
+        args="$args -f $f"
+    done
+    if [[ -n "$example_compose" ]]; then
         # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that
         # skips the bundled ollama container and points the agent at the
         # operator's endpoint instead — the GPU path on macOS/Windows,
@@ -97,11 +104,12 @@ compose_args() {
         # camera-agent profiles, and harmless to append with them.
         local external_llm
         external_llm=$(get_env_var "OLLAMA_EXTERNAL_URL")
-        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml ]]; then
+        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml* ]]; then
             args="$args -f docker-compose.camera-agent.external-llm.yml"
         fi
     fi
-    [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
+    local p
+    for p in ${example_profile//,/ }; do args="$args --profile $p"; done
     # Default-on apps: occupancy-counting + footage-search ride the always-on
     # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
     # install runs them (profile ``default-apps`` in docker-compose.apps.yml).
@@ -112,7 +120,7 @@ compose_args() {
     case "$(printf '%s' "$default_apps" | tr '[:upper:]' '[:lower:]')" in
         off|false|0|no) ;;
         *)
-            [[ "$example_compose" != *docker-compose.apps.yml ]] &&                 args="$args -f docker-compose.apps.yml"
+            [[ ",$example_compose," != *,docker-compose.apps.yml,* ]] && args="$args -f docker-compose.apps.yml"
             args="$args --profile default-apps"
             ;;
     esac

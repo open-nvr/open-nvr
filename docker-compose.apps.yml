@@ -19,6 +19,14 @@
 #
 #     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps down
 #
+# One app (and only its adapters), by profile -- what scripts/install.sh
+# persists in OPENNVR_EXAMPLE_PROFILE when an operator picks apps at
+# install time, and what start.sh replays on every ``up``:
+#     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile license-plate-recognition up -d
+# Every service an app needs carries that app's id as a profile: the app,
+# its config-init, its dedicated adapters, and the shared egress-proxy.
+# The ``apps`` profile stays the everything-on switch the reconciler uses.
+#
 # Registration auth: the apps authenticate to POST /api/v1/apps/register
 # with the deployment's INTERNAL_API_KEY (X-Internal-Api-Key header) —
 # the same secret NATS and the adapters use. No user JWT is involved.
@@ -53,7 +61,7 @@ services:
   # only. See docs/APP_NETWORK.md.
   # ──────────────────────────────────────────────────────────────
   egress-proxy:
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay]
     build:
       context: .
       dockerfile: scripts/egress-proxy/Dockerfile
@@ -79,7 +87,7 @@ services:
   # operator-defined zones. Contract surface on :9200.
   # ──────────────────────────────────────────────────────────────
   loitering-detection-config-init:
-    profiles: [apps]
+    profiles: [apps, loitering-detection]
     image: alpine:3.20
     container_name: opennvr_loitering_config_init
     logging: *svc-logs
@@ -104,7 +112,7 @@ services:
       - opennvr_loitering_config:/generated
 
   loitering-detection:
-    profiles: [apps]
+    profiles: [apps, loitering-detection]
     build:
       context: .
       dockerfile: examples/loitering-detection/Dockerfile
@@ -167,7 +175,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, occupancy-counting]
     image: alpine:3.20
     container_name: opennvr_occupancy_config_init
     logging: *svc-logs
@@ -194,7 +202,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, occupancy-counting]
     build:
       context: .
       dockerfile: examples/occupancy-counting/Dockerfile
@@ -246,7 +254,7 @@ services:
   # :9202 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   line-crossing-config-init:
-    profiles: [apps]
+    profiles: [apps, line-crossing]
     image: alpine:3.20
     container_name: opennvr_line_crossing_config_init
     logging: *svc-logs
@@ -268,7 +276,7 @@ services:
       - opennvr_line_crossing_config:/generated
 
   line-crossing:
-    profiles: [apps]
+    profiles: [apps, line-crossing]
     build:
       context: .
       dockerfile: examples/line-crossing/Dockerfile
@@ -320,7 +328,7 @@ services:
   # on :9203 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   abandoned-object-config-init:
-    profiles: [apps]
+    profiles: [apps, abandoned-object]
     image: alpine:3.20
     container_name: opennvr_abandoned_object_config_init
     logging: *svc-logs
@@ -342,7 +350,7 @@ services:
       - opennvr_abandoned_object_config:/generated
 
   abandoned-object:
-    profiles: [apps]
+    profiles: [apps, abandoned-object]
     build:
       context: .
       dockerfile: examples/abandoned-object/Dockerfile
@@ -391,7 +399,7 @@ services:
   # Contract surface on :9204.
   # ──────────────────────────────────────────────────────────────
   intrusion-detection-config-init:
-    profiles: [apps]
+    profiles: [apps, intrusion-detection]
     image: alpine:3.20
     container_name: opennvr_intrusion_config_init
     logging: *svc-logs
@@ -413,7 +421,7 @@ services:
       - opennvr_intrusion_detection_config:/generated
 
   intrusion-detection:
-    profiles: [apps]
+    profiles: [apps, intrusion-detection]
     build:
       context: .
       dockerfile: examples/intrusion-detection/Dockerfile
@@ -489,7 +497,7 @@ services:
   # failed every /infer on a missing file — with nothing anywhere saying
   # why. Bring your own model by pointing YOLO_POSE_WEIGHTS_IMAGE at it.
   yolo-pose-weights-init:
-    profiles: [apps]
+    profiles: [apps, guard-scan-compliance]
     image: ${YOLO_POSE_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolo-pose-weights:v8.3.0}
     # Build it here if it cannot be pulled. Without this fallback a
     # fresh install is at the mercy of one registry: an unpublished
@@ -530,7 +538,7 @@ services:
       - opennvr_yolo_pose_weights:/weights
 
   yolo-pose-adapter:
-    profiles: [apps]
+    profiles: [apps, guard-scan-compliance]
     # YOLO_POSE_ADAPTER_TAG lets the pose image ride a different tag
     # than the rest, exactly as CAPTION_ADAPTER_TAG does for captions
     # and for the same reason: ADAPTER_TAG is ONE tag applied to every
@@ -582,7 +590,7 @@ services:
       retries: 20
 
   yolo-pose-register:
-    profiles: [apps]
+    profiles: [apps, guard-scan-compliance]
     image: alpine:3.20
     container_name: opennvr_yolo_pose_register
     logging: *svc-logs
@@ -630,7 +638,7 @@ services:
 
   # ──────────────────────────────────────────────────────────────
   fast-plate-ocr-adapter:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_fast_plate_ocr_adapter
     logging: *svc-logs
@@ -667,7 +675,7 @@ services:
   # registration degrades to a WARN + the app's own KAI-C 404 handling,
   # never a wedged compose up.
   fast-plate-ocr-register:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: alpine:3.20
     container_name: opennvr_fast_plate_ocr_register
     logging: *svc-logs
@@ -720,7 +728,7 @@ services:
   # surface on :9205.
   # ──────────────────────────────────────────────────────────────
   license-plate-recognition-config-init:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: alpine:3.20
     container_name: opennvr_license_plate_recognition_config_init
     logging: *svc-logs
@@ -742,7 +750,7 @@ services:
       - opennvr_license_plate_recognition_config:/generated
 
   license-plate-recognition:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     build:
       context: .
       dockerfile: examples/license-plate-recognition/Dockerfile
@@ -797,7 +805,7 @@ services:
   # Contract surface on :9211.
   # ──────────────────────────────────────────────────────────────
   alert-notifier-config-init:
-    profiles: [apps]
+    profiles: [apps, alert-notifier]
     image: alpine:3.20
     container_name: opennvr_alert_notifier_config_init
     logging: *svc-logs
@@ -819,7 +827,7 @@ services:
       - opennvr_alert_notifier_config:/generated
 
   alert-notifier:
-    profiles: [apps]
+    profiles: [apps, alert-notifier]
     build:
       context: .
       dockerfile: examples/alert-notifier/Dockerfile
@@ -869,7 +877,7 @@ services:
   # it off. Contract surface on :9210.
   # ──────────────────────────────────────────────────────────────
   gate-controller-config-init:
-    profiles: [apps]
+    profiles: [apps, gate-controller]
     image: alpine:3.20
     container_name: opennvr_gate_controller_config_init
     logging: *svc-logs
@@ -891,7 +899,7 @@ services:
       - opennvr_gate_controller_config:/generated
 
   gate-controller:
-    profiles: [apps]
+    profiles: [apps, gate-controller]
     build:
       context: .
       dockerfile: examples/gate-controller/Dockerfile
@@ -941,7 +949,7 @@ services:
   # name=insightface — the standard stack ships only yolov8.
   # ──────────────────────────────────────────────────────────────
   smart-doorbell-config-init:
-    profiles: [apps]
+    profiles: [apps, smart-doorbell]
     image: alpine:3.20
     container_name: opennvr_doorbell_config_init
     logging: *svc-logs
@@ -963,7 +971,7 @@ services:
       - opennvr_smart_doorbell_config:/generated
 
   smart-doorbell:
-    profiles: [apps]
+    profiles: [apps, smart-doorbell]
     build:
       context: .
       dockerfile: examples/smart-doorbell/Dockerfile
@@ -1018,7 +1026,7 @@ services:
   # Contract surface on :9207.
   # ──────────────────────────────────────────────────────────────
   package-delivery-config-init:
-    profiles: [apps]
+    profiles: [apps, package-delivery]
     image: alpine:3.20
     container_name: opennvr_package_delivery_config_init
     logging: *svc-logs
@@ -1040,7 +1048,7 @@ services:
       - opennvr_package_delivery_config:/generated
 
   package-delivery:
-    profiles: [apps]
+    profiles: [apps, package-delivery]
     build:
       context: .
       dockerfile: examples/package-delivery/Dockerfile
@@ -1093,7 +1101,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, footage-search]
     image: alpine:3.20
     container_name: opennvr_footage_search_config_init
     logging: *svc-logs
@@ -1120,7 +1128,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, footage-search]
     build:
       context: .
       dockerfile: examples/footage-search/Dockerfile
@@ -1176,7 +1184,7 @@ services:
   # start forwarding. Contract surface on :9209.
   # ──────────────────────────────────────────────────────────────
   home-assistant-relay-config-init:
-    profiles: [apps]
+    profiles: [apps, home-assistant-relay]
     image: alpine:3.20
     container_name: opennvr_home_assistant_relay_config_init
     logging: *svc-logs
@@ -1212,7 +1220,7 @@ services:
       - opennvr_home_assistant_relay_config:/generated
 
   home-assistant-relay:
-    profiles: [apps]
+    profiles: [apps, home-assistant-relay]
     build:
       context: .
       dockerfile: examples/home-assistant-relay/Dockerfile
@@ -1254,7 +1262,7 @@ services:
       - opennvr_apps
 
   guard-scan-compliance-config-init:
-    profiles: [apps]
+    profiles: [apps, guard-scan-compliance]
     image: alpine:3.20
     container_name: opennvr_guard_scan_config_init
     logging: *svc-logs
@@ -1276,7 +1284,7 @@ services:
       - opennvr_guard_scan_config:/generated
 
   guard-scan-compliance:
-    profiles: [apps]
+    profiles: [apps, guard-scan-compliance]
     build:
       context: .
       dockerfile: examples/guard-scan-compliance/Dockerfile

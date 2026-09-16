@@ -340,6 +340,36 @@ find_example_compose() {
     return 1
 }
 
+# The App Catalog as the installer sees it: one "id<TAB>name<TAB>summary"
+# line per server/config/apps_index.yml entry whose id is a service in
+# docker-compose.apps.yml -- the same "installable by construction" rule
+# scripts/validate_apps_index.py enforces for the catalog UI. awk, not
+# python or yq: the installer runs before anything is installed.
+catalog_apps() {
+    local index="server/config/apps_index.yml" overlay="docker-compose.apps.yml"
+    [[ -f "$index" && -f "$overlay" ]] || return 0
+    awk -v overlay="$overlay" '
+        BEGIN {
+            while ((getline line < overlay) > 0)
+                if (match(line, /^  [a-z0-9-]+:$/)) svc[substr(line, 3, RLENGTH - 3)] = 1
+        }
+        function flush() {
+            if (id != "" && (id in svc)) printf "%s\t%s\t%s\n", id, name, summary
+            id = ""; name = ""; summary = ""
+        }
+        /^- id: / { flush(); id = $3; next }
+        /^  name: / { name = $0; sub(/^  name: /, "", name); next }
+        /^  summary: / {
+            summary = $0; sub(/^  summary: /, "", summary)
+            if (summary == ">-" || summary == ">" || summary == "|") { getline; summary = $0; sub(/^ +/, "", summary) }
+            gsub(/^["\047]|["\047]$/, "", summary)
+            if (length(summary) > 72) summary = substr(summary, 1, 71) "…"
+            next
+        }
+        END { flush() }
+    ' "$index"
+}
+
 prompt_overlay_defaults() {
     # Collect the specs into an array FIRST. Feeding them to the loop via
     # `done < <(grep ...)` redirected the loop's stdin — and ask_value's
@@ -774,60 +804,82 @@ choose_example() {
     env_set OPENNVR_EXAMPLE_COMPOSE ""
     env_set OPENNVR_EXAMPLE_PROFILE ""
 
-    printf '\n  ── Example app ────────────────────────────────────────\n'
-    info "Examples add an AI app on top of the core NVR. The Camera Agent lets you"
-    info "ask your cameras questions out loud or by chat. Everything runs locally."
-    ask_yes_no "Set up an example app now?" n || return 0
-    local names=() dir name manifest choice index
-    while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
-    [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
+    printf '\n  ── Apps ───────────────────────────────────────────────\n'
+    info "Apps add AI on top of the core NVR. Two run on every install already --"
+    info "occupancy-counting and footage-search (opt out: OPENNVR_DEFAULT_APPS=off)."
+    info "The Camera Agent lets you ask your cameras questions out loud or by chat."
+    info "Everything listed here can also be installed later from Settings -> App Catalog."
+    ask_yes_no "Pick apps to run from the first start?" n || return 0
 
-    # Default to the Camera Agent: it is the example this installer is
-    # built around -- the mode, LLM-runtime and model prompts below all
-    # exist to serve it -- and the only one shipping a Compose manifest
-    # today, so a default of 0 made Enter decline the very thing this
-    # section had just finished pitching. Its NUMBER moves whenever an
-    # example directory is added, so look it up by name; if it is ever
-    # missing or unshippable the default falls back to 0 (core only).
-    local default_choice=0 mark
-    index=1
-    for name in "${names[@]}"; do
-        if [[ "$name" == "camera-agent" ]] && find_example_compose "$name" >/dev/null; then
-            default_choice="$index"
-        fi
-        index=$((index + 1))
-    done
+    # The menu IS the App Catalog, not a directory listing. An earlier
+    # version walked examples/*/ and stamped "[no Compose manifest]" on
+    # anything without its own compose file -- which was every catalog
+    # app (they share docker-compose.apps.yml), two weight-baking helper
+    # images and two SDK tutorials that are not apps at all. Only the
+    # Camera Agent, which has its own overlay, ever showed as installable.
+    local ids=() names=() summaries=() composes=() id title summary
+    local name manifest choice index mark
+    if manifest=$(find_example_compose camera-agent); then
+        ids+=("camera-agent"); composes+=("$manifest")
+        names+=("Camera Agent"); summaries+=("Ask your cameras questions -- voice or chat, on a local LLM.")
+    fi
+    while IFS=$'\t' read -r id title summary; do
+        [[ -n "$id" ]] || continue
+        ids+=("$id"); composes+=("docker-compose.apps.yml"); names+=("$title"); summaries+=("$summary")
+    done < <(catalog_apps)
+    [[ ${#ids[@]} -gt 0 ]] || { warn "No installable apps were found"; return 0; }
 
-    printf '\n  Available examples:\n'
+    # Default to the Camera Agent: the mode, LLM-runtime and model prompts
+    # below all exist to serve it, and a default of 0 made Enter decline
+    # the very thing this section had just finished pitching.
+    local default_choice=0
+    [[ "${ids[0]}" == "camera-agent" ]] && default_choice=1
+
+    printf '\n  Available apps:\n'
     index=1
-    for name in "${names[@]}"; do
+    for id in "${ids[@]}"; do
         mark=""
-        if (( index == default_choice )); then
-            mark="  <- default"
-        fi
-        if manifest=$(find_example_compose "$name"); then
-            printf '  %2d. %-30s [installable: %s]%s\n' "$index" "$name" "$manifest" "$mark"
-        else
-            printf '  %2d. %-30s [no Compose manifest]\n' "$index" "$name"
-        fi
+        (( index == default_choice )) && mark="  <- default"
+        case "$id" in occupancy-counting|footage-search) mark="  [on by default]" ;; esac
+        printf '  %2d. %-27s %s%s\n' "$index" "$id" "${names[$((index - 1))]}" "$mark"
+        printf '      %-27s %s\n' "" "${summaries[$((index - 1))]}"
         index=$((index + 1))
     done
-    printf '   0. Core stack only\n\n'
-    read -r -p "  Select an example [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
+    printf '   0. Core stack and the default apps only\n\n'
+    read -r -p "  Select apps, comma-separated [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
     choice="${choice:-$default_choice}"
-    [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
-    (( choice == 0 )) && return 0
-    (( choice >= 1 && choice <= ${#names[@]} )) || die "Selection out of range"
+    choice="${choice//[[:space:]]/}"
+    [[ "$choice" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "Invalid selection"
 
-    name="${names[$((choice - 1))]}"
-    manifest=$(find_example_compose "$name") || die "The '$name' example has no Docker Compose manifest"
-    EXAMPLE_NAME="$name"; EXAMPLE_COMPOSE="$manifest"; EXAMPLE_PROFILE="$name"
+    # Several apps may be picked at once. They are persisted the way
+    # start.sh reads them back: comma-separated compose files (deduplicated
+    # -- every catalog app is the one apps overlay) and comma-separated
+    # profiles, one per app (each catalog app carries its own id as a
+    # profile in docker-compose.apps.yml, so a pick starts that app and its
+    # adapters and nothing else).
+    local picked=() n seen=","
+    IFS=',' read -r -a picked <<< "$choice"
+    for n in "${picked[@]}"; do
+        (( n == 0 )) && continue
+        (( n >= 1 && n <= ${#ids[@]} )) || die "Selection out of range: $n"
+        id="${ids[$((n - 1))]}"
+        [[ "$seen" == *",$id,"* ]] && continue
+        seen="$seen$id,"
+        EXAMPLE_NAME="${EXAMPLE_NAME:+$EXAMPLE_NAME,}$id"
+        EXAMPLE_PROFILE="${EXAMPLE_PROFILE:+$EXAMPLE_PROFILE,}$id"
+        manifest="${composes[$((n - 1))]}"
+        [[ ",$EXAMPLE_COMPOSE," == *",$manifest,"* ]] || EXAMPLE_COMPOSE="${EXAMPLE_COMPOSE:+$EXAMPLE_COMPOSE,}$manifest"
+    done
+    [[ -n "$EXAMPLE_NAME" ]] || return 0
+    # The Camera Agent is the one app with prompts of its own below.
+    name=""
+    [[ ",$EXAMPLE_NAME," == *",camera-agent,"* ]] && name="camera-agent"
     if [[ "$name" == "camera-agent" ]]; then
         printf '\n'
         explain "Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter." \
             "pick one" "1 (voice)"
         ask_value "Camera Agent mode: 1=voice, 2=chat" "1"
-        [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="camera-agent-chat" || EXAMPLE_PROFILE="camera-agent"
+        [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="${EXAMPLE_PROFILE/camera-agent/camera-agent-chat}"
 
         printf '\n'
         # ── LLM runtime: bundled container vs the host machine ─────
@@ -1133,9 +1185,14 @@ choose_example() {
             pick_model_from_catalog vlm "$vlm_suggest" "Vision model (Ollama)"
             env_set OLLAMA_VLM_MODEL "$PICKED_MODEL"
         fi
-    else
-        # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
-        prompt_overlay_defaults "$manifest"
+    fi
+    if [[ "$EXAMPLE_NAME" != "camera-agent" ]]; then
+        # Catalog apps are not prompted here: their knobs (cameras, zones,
+        # thresholds) live in the App Catalog's config form after start,
+        # and prompt_overlay_defaults over the shared apps overlay would
+        # ask about every image tag of every app, chosen or not.
+        info "Catalog apps take their cameras, zones and thresholds from"
+        info "Settings -> App Catalog once the stack is up."
     fi
     env_set OPENNVR_EXAMPLE "$EXAMPLE_NAME"
     env_set OPENNVR_EXAMPLE_COMPOSE "$EXAMPLE_COMPOSE"
@@ -1167,7 +1224,7 @@ check_docker_vm_allowance() {
     (( vm_mem_gb > 0 && vm_cpus > 0 )) || return 0
 
     local need_mem=6
-    if [[ -n "$EXAMPLE_NAME" && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
+    if [[ ",$EXAMPLE_NAME," == *",camera-agent,"* && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
         need_mem=8
     fi
     info "Docker VM allowance: ${vm_cpus} CPUs / ${vm_mem_gb} GB (this machine has ${host_cpus} CPUs / ${host_mem_gb} GB)."
@@ -1198,15 +1255,16 @@ pull_and_build() {
     check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
-        COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE")
+        local f p
+        for f in ${EXAMPLE_COMPOSE//,/ }; do COMPOSE_ARGS+=(-f "$f"); done
         # External-LLM overlay, same condition as compose_args in start.sh.
         # Without it the bundled ollama/ollama-model-pull services are still
         # in an ACTIVE profile here, so `pull` downloads the 3.7 GB
         # ollama/ollama image for containers the launcher then never starts.
-        if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml ]]; then
+        if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml* ]]; then
             COMPOSE_ARGS+=(-f docker-compose.camera-agent.external-llm.yml)
         fi
-        COMPOSE_ARGS+=(--profile "$EXAMPLE_PROFILE")
+        for p in ${EXAMPLE_PROFILE//,/ }; do COMPOSE_ARGS+=(--profile "$p"); done
         info "Pulling images for $EXAMPLE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
     fi
