@@ -384,7 +384,7 @@
 
 - id: smart-doorbell
   name: Smart Doorbell
-  summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.
+  summary: Recognises faces at the door and keeps the People directory — family, residents, staff, contractors with expiry dates, a watchlist; strangers alert with a snapshot you can enrol from.
   category: doorstep
   version: "1.0.0"
   image: ghcr.io/open-nvr/smart-doorbell:latest
@@ -396,7 +396,7 @@
   # its unavailable face_recognition task, and an install without the
   # adapter degrades exactly as the app's README documents.
   requires_adapters: [insightface]
-  emits: [known_visitor, unknown_visitor]
+  emits: [known_visitor, unknown_visitor, watchlist_visitor, expired_pass]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/smart-doorbell/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

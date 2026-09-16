@@ -25,7 +25,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
         "httpx>=0.27,<1.0" \
         "PyYAML>=6.0,<7.0" \
-        "nats-py>=2.6"
+        "nats-py>=2.6" \
+        "Pillow>=10,<12"
+# Pillow shrinks stranger snapshots to thumbnails for the dashboard's
+# gallery; the app runs without it (raw JPEGs are embedded only when small).
 
 # The OpenNVR App SDK — this app's modules import opennvr_app_sdk
 # (alerts/frame_sources) at top level, so it must be installed into the

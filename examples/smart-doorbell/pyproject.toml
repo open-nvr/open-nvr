@@ -12,6 +12,7 @@ license = { text = "AGPL-3.0" }
 # /faces/*, so neither does the SDK).
 dependencies = [
     "opennvr-app-sdk",
+    "Pillow>=10,<12",
 ]
 
 [tool.uv.sources]
