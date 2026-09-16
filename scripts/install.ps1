@@ -389,6 +389,38 @@ function Find-ExampleCompose([string]$Name) {
     foreach ($candidate in $candidates) { if (Test-Path $candidate) { return $candidate } }
     return $null
 }
+# The App Catalog as the installer sees it: every server/config/apps_index.yml
+# entry whose id is a service in docker-compose.apps.yml (the rule
+# scripts/validate_apps_index.py enforces). Mirrors catalog_apps in install.sh.
+function Get-CatalogApps {
+    $index = 'server/config/apps_index.yml'; $overlay = 'docker-compose.apps.yml'
+    if (-not (Test-Path $index) -or -not (Test-Path $overlay)) { return @() }
+    $services = @{}
+    foreach ($line in Get-Content $overlay) {
+        if ($line -match '^  ([a-z0-9-]+):$') { $services[$Matches[1]] = $true }
+    }
+    $apps = @(); $id = ''; $name = ''; $summary = ''; $folded = $false
+    $flush = {
+        if ($id -and $services.ContainsKey($id)) {
+            $s = $summary -replace '^["'']|["'']$', ''
+            if ($s.Length -gt 72) { $s = $s.Substring(0, 71) + '…' }
+            $script:__apps += ,@{ Id = $id; Name = $name; Summary = $s }
+        }
+    }
+    $script:__apps = @()
+    foreach ($line in Get-Content $index) {
+        if ($folded) { $summary = $line.Trim(); $folded = $false; continue }
+        if ($line -match '^- id: (\S+)') { & $flush; $id = $Matches[1]; $name = ''; $summary = ''; continue }
+        if ($line -match '^  name: (.*)$') { $name = $Matches[1]; continue }
+        if ($line -match '^  summary: (.*)$') {
+            $summary = $Matches[1]
+            if ($summary -in @('>-', '>', '|')) { $folded = $true }
+            continue
+        }
+    }
+    & $flush
+    return $script:__apps
+}
 function Prompt-OverlayDefaults([string]$File) {
     $text = [IO.File]::ReadAllText((Resolve-Path $File))
     $seen = @{}
@@ -485,45 +517,64 @@ function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
     Write-Host ''
-    Write-Host '  -- Example app ----------------------------------------'
-    Info 'Examples add an AI app on top of the core NVR. The Camera Agent lets you'
-    Info 'ask your cameras questions out loud or by chat. Everything runs locally.'
-    if (-not (Ask-YesNo 'Set up an example app now?' $false)) { return }
-    $examples = @(Get-ChildItem 'examples' -Directory | Sort-Object Name)
-    if ($examples.Count -eq 0) { Warn 'No examples were found'; return }
-    # Default to the Camera Agent: it is the example this installer is
-    # built around -- the mode, LLM-runtime and model prompts below all
-    # exist to serve it -- and the only one shipping a Compose manifest
-    # today, so a default of 0 made Enter decline the very thing this
-    # section had just finished pitching. Its NUMBER moves whenever an
-    # example directory is added, so look it up by name; if it is ever
-    # missing or unshippable the default falls back to 0 (core only).
-    $defaultChoice = 0
-    Write-Host ''; Info 'Available examples:'
-    for ($i=0; $i -lt $examples.Count; $i++) {
-        $manifest = Find-ExampleCompose $examples[$i].Name
-        $status = if ($manifest) { "installable: $manifest" } else { 'no Compose manifest' }
-        $mark = ''
-        if ($examples[$i].Name -eq 'camera-agent' -and $manifest) {
-            $defaultChoice = $i + 1; $mark = '  <- default'
-        }
-        Write-Host ('  {0,2}. {1,-30} [{2}]{3}' -f ($i+1), $examples[$i].Name, $status, $mark)
+    Write-Host '  -- Apps -----------------------------------------------'
+    Info 'Apps add AI on top of the core NVR. Two run on every install already --'
+    Info 'occupancy-counting and footage-search (opt out: OPENNVR_DEFAULT_APPS=off).'
+    Info 'The Camera Agent lets you ask your cameras questions out loud or by chat.'
+    Info 'Everything listed here can also be installed later from Settings -> App Catalog.'
+    if (-not (Ask-YesNo 'Pick apps to run from the first start?' $false)) { return }
+    # The menu IS the App Catalog, not a directory listing (see the note in
+    # install.sh's choose_example): the Camera Agent with its own overlay,
+    # then every catalog app, all sharing docker-compose.apps.yml with one
+    # profile per app id.
+    $apps = @()
+    $agentCompose = Find-ExampleCompose 'camera-agent'
+    if ($agentCompose) {
+        $apps += ,@{ Id = 'camera-agent'; Name = 'Camera Agent'; Summary = 'Ask your cameras questions -- voice or chat, on a local LLM.'; Compose = $agentCompose }
     }
-    Write-Host '   0. Core stack only'; Write-Host ''
-    $choiceRaw = Read-Host "  Select an example [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
-    $choice = 0; if (-not [int]::TryParse($choiceRaw, [ref]$choice)) { Fail 'Invalid selection' }
-    if ($choice -eq 0) { return }
-    if ($choice -lt 1 -or $choice -gt $examples.Count) { Fail 'Selection out of range' }
-    $name = $examples[$choice-1].Name; $manifest = Find-ExampleCompose $name
-    if (-not $manifest) { Fail "The '$name' example has no Docker Compose manifest" }
+    foreach ($a in Get-CatalogApps) { $apps += ,@{ Id = $a.Id; Name = $a.Name; Summary = $a.Summary; Compose = 'docker-compose.apps.yml' } }
+    if ($apps.Count -eq 0) { Warn 'No installable apps were found'; return }
+    # Default to the Camera Agent: the mode, LLM-runtime and model prompts
+    # below all exist to serve it, and a default of 0 made Enter decline the
+    # very thing this section had just finished pitching.
+    $defaultChoice = 0
+    if ($apps[0].Id -eq 'camera-agent') { $defaultChoice = 1 }
+    Write-Host ''; Info 'Available apps:'
+    for ($i=0; $i -lt $apps.Count; $i++) {
+        $mark = ''
+        if (($i + 1) -eq $defaultChoice) { $mark = '  <- default' }
+        if ($apps[$i].Id -in @('occupancy-counting', 'footage-search')) { $mark = '  [on by default]' }
+        Write-Host ('  {0,2}. {1,-27} {2}{3}' -f ($i+1), $apps[$i].Id, $apps[$i].Name, $mark)
+        Write-Host ('      {0,-27} {1}' -f '', $apps[$i].Summary)
+    }
+    Write-Host '   0. Core stack and the default apps only'; Write-Host ''
+    $choiceRaw = Read-Host "  Select apps, comma-separated [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
+    $choiceRaw = $choiceRaw -replace '\s', ''
+    if ($choiceRaw -notmatch '^[0-9]+(,[0-9]+)*$') { Fail 'Invalid selection' }
+    # Several apps may be picked at once; persisted the way start.ps1 reads
+    # them back -- comma-separated compose files (deduplicated) and profiles.
+    $names = @(); $profiles = @(); $composes = @()
+    foreach ($nRaw in ($choiceRaw -split ',')) {
+        $n = [int]$nRaw
+        if ($n -eq 0) { continue }
+        if ($n -lt 1 -or $n -gt $apps.Count) { Fail "Selection out of range: $n" }
+        $a = $apps[$n-1]
+        if ($names -contains $a.Id) { continue }
+        $names += $a.Id; $profiles += $a.Id
+        if ($composes -notcontains $a.Compose) { $composes += $a.Compose }
+    }
+    if ($names.Count -eq 0) { return }
+    # The Camera Agent is the one app with prompts of its own below.
+    $name = if ($names -contains 'camera-agent') { 'camera-agent' } else { '' }
+    $manifest = $composes -join ','
     # $prof, not $profile — $PROFILE is an automatic PowerShell variable.
-    $prof = $name
+    $prof = $profiles -join ','
     if ($name -eq 'camera-agent') {
         Write-Host ''
         Explain 'Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter.' 'pick one' '1 (voice)'
         $mode = Ask-Value 'Camera Agent mode: 1=voice, 2=chat' '1'
         # $prof, not $profile - $PROFILE is an automatic PowerShell variable.
-        $prof = if ($mode -eq '2') { 'camera-agent-chat' } else { 'camera-agent' }
+        if ($mode -eq '2') { $prof = $prof -replace 'camera-agent', 'camera-agent-chat' }
 
         Write-Host ''
         # LLM runtime FIRST: where the LLM runs decides which hardware the
@@ -779,13 +830,18 @@ function Choose-Example {
             Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested - clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick.' 'yes' $vlmSuggest
             Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $budgetGb)
         }
-    } else {
-        Prompt-OverlayDefaults $manifest
     }
+    if (($names -join ',') -ne 'camera-agent') {
+        # Catalog apps are not prompted here: their knobs live in the App
+        # Catalog's config form after start (see install.sh).
+        Info 'Catalog apps take their cameras, zones and thresholds from'
+        Info 'Settings -> App Catalog once the stack is up.'
+    }
+    $name = $names -join ','
     $script:ExampleName=$name; $script:ExampleCompose=$manifest; $script:ExampleProfile=$prof
     Set-EnvValue OPENNVR_EXAMPLE $name; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE $manifest; Set-EnvValue OPENNVR_EXAMPLE_PROFILE $prof
     Ok "Selected $name ($prof)"
-    if ($name -eq 'camera-agent') {
+    if ($names -contains 'camera-agent') {
         Info 'The local LLM model downloads on first start - usually the slowest step.'
     }
 }
@@ -803,7 +859,7 @@ function Check-DockerVmAllowance {
     $hostMemGb = 0
     try { $hostMemGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
     $needMem = 6
-    if ($script:ExampleName -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
+    if ((($script:ExampleName -split ',') -contains 'camera-agent') -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
     Info "Docker VM allowance: $vmCpus CPUs / $vmMemGb GB (this machine has $hostMemGb GB)."
     if ($vmMemGb -lt $needMem -or $vmCpus -lt 4) {
         Warn "That is on the small side for what you selected (recommended: >=4 CPUs, >=$needMem GB)."
@@ -830,15 +886,15 @@ function Pull-AndBuild {
     Check-DockerVmAllowance
     $script:ComposeArgs = @('-f', $BaseCompose)
     if ($script:ExampleCompose) {
-        $script:ComposeArgs += @('-f', $script:ExampleCompose)
+        foreach ($f in @($script:ExampleCompose -split ',' | Where-Object { $_ })) { $script:ComposeArgs += @('-f', $f) }
         # External-LLM overlay, same condition as Get-ComposeArgs in start.ps1.
         # Without it the bundled ollama/ollama-model-pull services are still
         # in an ACTIVE profile here, so `pull` downloads the 3.7 GB
         # ollama/ollama image for containers the launcher then never starts.
-        if ((Get-EnvValue OLLAMA_EXTERNAL_URL) -and $script:ExampleCompose -like '*camera-agent.yml') {
+        if ((Get-EnvValue OLLAMA_EXTERNAL_URL) -and $script:ExampleCompose -like '*camera-agent.yml*') {
             $script:ComposeArgs += @('-f', 'docker-compose.camera-agent.external-llm.yml')
         }
-        $script:ComposeArgs += @('--profile', $script:ExampleProfile)
+        foreach ($p in @($script:ExampleProfile -split ',' | Where-Object { $_ })) { $script:ComposeArgs += @('--profile', $p) }
         Info "Pulling images for $script:ExampleName..."
         docker compose @script:ComposeArgs pull --ignore-buildable
         if ($LASTEXITCODE -ne 0) { Fail "Failed to pull $script:ExampleName" }

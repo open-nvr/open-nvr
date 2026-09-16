@@ -82,20 +82,27 @@ Real-world failure modes the example does NOT yet handle:
 
 ## Quick start
 
+> **On the compose stack you do none of this.** `docker-compose.apps.yml`
+> provisions `insightface-adapter` (published as
+> `ghcr.io/open-nvr/insightface-adapter`) and registers it with KAI-C
+> alongside the app — `--profile smart-doorbell`, the installer's app
+> picker, or one click from the App Catalog. The enrolled-faces DB and
+> the ~280 MB `buffalo_l` model pack each live on a named volume. The
+> steps below are the bare-metal developer path.
+
 ```bash
 # 1. Start the InsightFace adapter (in the ai-adapter repo).
-#    On first boot the adapter downloads the ~200 MB Buffalo-L
-#    InsightFace model pack to /app/model_weights inside the
-#    container. Mount a host directory there so the download
-#    happens once and persists across container restarts.
+#    On first boot the adapter downloads the buffalo_l model pack into
+#    ~/.insightface inside the container (InsightFace's default root).
+#    Mount a host directory there so the download happens once.
 cd ai-adapter
 docker build -f adapters/insightface/Dockerfile -t opennvr/insightface-adapter:local .
 OPENNVR_ADAPTER_TOKEN=$(openssl rand -hex 16)
-mkdir -p face-db model-weights
+mkdir -p face-db model-cache
 docker run --rm -d --name insightface -p 9005:9005 \
   -e OPENNVR_ADAPTER_TOKEN=$OPENNVR_ADAPTER_TOKEN \
   -v $(pwd)/face-db:/data \
-  -v $(pwd)/model-weights:/app/model_weights \
+  -v $(pwd)/model-cache:/root/.insightface \
   opennvr/insightface-adapter:local
 
 # 2. Start KAI-C and register the adapter

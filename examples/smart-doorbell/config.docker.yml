@@ -21,19 +21,18 @@
 kaic_url: "http://opennvr-core:8100"
 kaic_api_key: "${INTERNAL_API_KEY}"
 
-# InsightFace adapter name as registered with KAI-C. NOTE: the
-# standard stack ships only the yolov8 adapter — you must deploy an
-# InsightFace adapter and register it with KAI-C under this name
-# before this app can recognise anyone (see this app's README).
+# InsightFace adapter name as registered with KAI-C. The apps overlay
+# provisions and registers it under this name alongside the app
+# (insightface-adapter / insightface-register in docker-compose.apps.yml).
 recognition_adapter: "insightface"
 
 # Direct URL to the InsightFace adapter for the /faces/* CRUD routes
-# (used by the ``enroll`` / ``list-faces`` / ``delete-face``
-# subcommands only — the daemon never calls it). KAI-C does not proxy
-# these routes. EDIT to wherever your InsightFace adapter runs on the
-# compose network; never localhost.
+# (the enrol / list / delete actions and subcommands — the daemon never
+# calls it). KAI-C does not proxy these routes, so the adapter also sits
+# on the apps network. The token is the adapter's OPENNVR_ADAPTER_TOKEN,
+# which the overlay sets to the deployment's INTERNAL_API_KEY.
 adapter_url: "http://insightface-adapter:9005"
-adapter_token: ""
+adapter_token: "${INTERNAL_API_KEY}"
 
 # ── Cameras — EDIT: frame_url must be a JPEG snapshot endpoint ──────
 # file:// http:// https:// are supported. Point frame_url at your
