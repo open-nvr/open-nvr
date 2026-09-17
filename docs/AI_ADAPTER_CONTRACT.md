@@ -1688,7 +1688,7 @@ Three design choices that came up during review and how they landed in v0.1.
 
 ## 16. References
 
-- Zenodo paper, DOI [10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
+- Zenodo paper, DOI [10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
 - Reference adapter implementations: [`ai-adapter/adapters/`](https://github.com/open-nvr/ai-adapter/tree/main/adapters) in the sister repo.
 - KAI-C registry behaviour: [`kai-c/main.py`](https://github.com/open-nvr/open-nvr/blob/main/kai-c/main.py).
 - OpenNVR security architecture: [docs/SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md) — sovereignty enforcement and the broader threat model.

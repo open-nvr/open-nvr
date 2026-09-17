@@ -2,7 +2,7 @@
 
 This page maps the architectural threat model in
 **[*Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open
-Security Architecture* (Singh et al., 2025 — DOI 10.5281/zenodo.17261761)](https://doi.org/10.5281/zenodo.17261761)**
+Security Architecture* (Singh et al., 2025 — DOI 10.5281/zenodo.22804254)](https://doi.org/10.5281/zenodo.22804254)**
 to the controls OpenNVR actually implements. Hand it to your compliance auditor
 or procurement officer when they need evidence that the architecture is not
 ad-hoc.

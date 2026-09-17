@@ -50,7 +50,7 @@ OpenNVR's architecture is described in a **peer-citable published paper**:
 
 > *Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open
 > Security Architecture* — Singh, Bhandari, Singh, Kushwaha, Kaura (2025).
-> [DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)
+> [DOI 10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254)
 
 The paper synthesizes 34 authoritative sources — CISA advisories
 (AVTECH, Edimax), NVD CVE records (Hikvision CVE-2021-36260, Dahua

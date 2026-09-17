@@ -13,9 +13,9 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
-[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.17261761-blue.svg)](https://doi.org/10.5281/zenodo.17261761)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22804254-blue.svg)](https://doi.org/10.5281/zenodo.22804254)
 
-[Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.17261761)
+[Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.22804254)
 
 <a href="https://opennvr.org/camera-agent">
   <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
@@ -35,7 +35,7 @@ And now the rules have changed. Under NDAA §889 and the 2025–26 FCC enforceme
 
 OpenNVR is the bet that the alternative is open-source surveillance infrastructure built around four commitments: **cameras you connect, hardware you own, AI you choose and author, audit logs you can show to a regulator.**
 
-The architecture is published — a peer-citable paper this year, 34 references, three-tier offline-first model, six categories of systemic IP-camera weakness it structurally eliminates ([DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)). This repo is the reference implementation.
+The architecture is published — a peer-citable paper this year, 34 references, three-tier offline-first model, six categories of systemic IP-camera weakness it structurally eliminates ([DOI 10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254)). This repo is the reference implementation.
 
 ## What makes it different
 
@@ -364,6 +364,6 @@ contributions need only a DCO sign-off.
 
 **OpenNVR — cameras you connect, hardware you own, AI you choose and author, audit you can show.**
 
-[⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.17261761) · [⚡ Quickstart](#quickstart)
+[⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.22804254) · [⚡ Quickstart](#quickstart)
 
 </div>

@@ -1845,7 +1845,7 @@ test suite designed to be read in five minutes.
   adapter authors.
 - [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) — threat
   model, control mapping, and the academic paper that informs the architecture
-  ([Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)).
+  ([Zenodo DOI 10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254)).
 - [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) — paper §3 → §4 → code mapping
   plus framework alignment table (CISA Secure-by-Design, NIST CSF 2.0,
   NIST AI RMF, ISO/IEC 27001, ETSI EN 303 645, GDPR, India's DPDP Act).
