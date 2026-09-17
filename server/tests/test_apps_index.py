@@ -297,8 +297,8 @@ def test_index_response_shape_matches_contract(client):
     assert set(app["install"]) == {"compose", "command"}
     assert isinstance(app["requires_tasks"], list)
     assert isinstance(app["emits"], list)
-    assert app["requires_tasks"] == ["object_detection"]
-    assert app["emits"] == ["loitering"]
+    assert app["requires_tasks"] == ["object_detection", "multi_object_tracking"]
+    assert app["emits"] == ["loitering", "loitering-escalated", "gathering"]
     assert app["signed_by"] == "OpenNVR CI"          # ghcr.io/open-nvr image: org CI signs it
 
 
