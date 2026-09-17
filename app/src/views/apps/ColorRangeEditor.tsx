@@ -264,7 +264,7 @@ export function ColorRangeEditor({ value, onChange }: {
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         {nothingPicked ? (
-          <span className="text-xs text-[var(--text-dim)]">Pick a camera for this app first — Cameras, above.</span>
+          <span className="text-xs text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
         ) : cameras.length === 0 ? (
           <input
             value={cam}
@@ -340,7 +340,7 @@ export function ColorRangeEditor({ value, onChange }: {
           <div className="flex h-full items-center justify-center text-xs text-[var(--text-dim)]">
             {snap.isPending && cam
               ? 'Fetching a snapshot…'
-              : 'No snapshot — pick a camera that is online to sample its colours.'}
+              : 'No snapshot — select a camera that is online to sample its colours.'}
           </div>
         )}
         {drag && (

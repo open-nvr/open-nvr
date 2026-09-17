@@ -91,10 +91,10 @@ A tripwire on a real camera sees more than what you want to count:
 ## Cameras and lines
 
 With no `cameras:` in the config the app counts on exactly the cameras
-**picked** for it (App Catalog → Line Crossing → Configure → Cameras),
-follows pick changes live, and takes each camera's line from the App
-Catalog's tripwire editor — drawn on the real scene, applied live.
-Nothing picked means nothing counted and no compute. A picked camera
+**selected** for it (App Catalog → Line Crossing → Configure → Cameras),
+follows changes to the selection live, and takes each camera's line from
+the App Catalog's tripwire editor — drawn on the real scene, applied live.
+No cameras selected means nothing counted and no compute. A selected camera
 without a line is shown as *not drawn* on the dashboard rather than
 counting nothing in silence.
 Listing cameras explicitly (see `config.example.yml`) pins the set.

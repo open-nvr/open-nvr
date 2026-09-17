@@ -444,7 +444,7 @@ export function Occupancy() {
               {zones.length}
             </div>
             <div className="text-xs text-[var(--text-dim)]">
-              {zones.length === 0 ? 'Zones watched — assign the occupancy skill to a camera' : 'Zones watched'}
+              {zones.length === 0 ? 'Zones watched — select cameras for Occupancy in the App Catalog' : 'Zones watched'}
             </div>
           </CardContent>
         </Card>

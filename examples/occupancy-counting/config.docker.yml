@@ -51,9 +51,9 @@ nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
 # ── Cameras ───────────────────────────────────────────────────────
-# LEAVE EMPTY. Pick the cameras to count in the App Catalog →
-# Configure → Cameras; each picked camera starts with a whole-frame
-# zone. Nothing picked = nothing counted and no compute used. Picks are
+# LEAVE EMPTY. Select the cameras to count in the App Catalog →
+# Configure → Cameras; each selected camera starts with a whole-frame
+# zone. None selected = nothing counted and no compute used. Changes are
 # followed live, and the ids always match what Tier-0 publishes
 # (OpenNVR names them cam1, cam2 — NOT cam-1).
 #

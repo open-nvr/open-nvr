@@ -1643,7 +1643,7 @@ export function Vehicles() {
               ? t('vehicles.noMatch')
               : t('vehicles.noReads')}
             description={lprCameras.length === 0
-              ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or assign it the License Plate Recognition skill under Cameras → edit → Assignments) and visits will appear here with their evidence photos.'
+              ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or select it for License Plate Recognition in App Catalog → Configure → Cameras) and visits will appear here with their evidence photos.'
               : 'Vehicle visits appear here with their evidence photos.'}
             action={(debouncedPlate || cameraId !== '') ? (
               <Button variant="outline" onClick={() => {

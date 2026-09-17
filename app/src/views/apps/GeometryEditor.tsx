@@ -200,7 +200,7 @@ export function GeometryEditor({
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-[var(--text-dim)]">Camera:</span>
         {nothingPicked ? (
-          <span className="text-[var(--text-dim)]">Pick a camera for this app first — Cameras, above.</span>
+          <span className="text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
         ) : cameras.length === 0 ? (
           <input
             className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)] w-24"

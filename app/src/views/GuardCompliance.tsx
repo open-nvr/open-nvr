@@ -525,8 +525,8 @@ export default function GuardCompliance() {
               icon={<ShieldCheck size={28} />}
               title="No screenings recorded yet"
               description={guardApp
-                ? 'The app is installed. Pick its entrance camera and draw the scan zone in Configure, then screenings appear here.'
-                : 'Install the Guard Scan Compliance app from the App Catalog, then pick its entrance camera.'}
+                ? 'The app is installed. Select its entrance camera and draw the scan zone in Configure, then screenings appear here.'
+                : 'Install the Guard Scan Compliance app from the App Catalog, then select its entrance camera.'}
             />
           )}
         </div>
@@ -577,17 +577,17 @@ export default function GuardCompliance() {
             <CameraOff size={18} className="shrink-0 text-amber-400" />
             <div className="min-w-0 flex-1">
               <div className="font-semibold text-[var(--text)]">
-                No camera picked — nobody is being screened
+                No camera selected — nobody is being screened
               </div>
               <div className="mt-0.5 text-[var(--text-dim)]">
                 {canConfigure
-                  ? 'Guard Scan is not running and uses no compute. Pick the entrance camera, and new screenings appear here within a few seconds.'
-                  : 'Guard Scan is not running and uses no compute. Ask an administrator to pick the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
+                  ? 'Guard Scan is not running and uses no compute. Select the entrance camera, and new screenings appear here within a few seconds.'
+                  : 'Guard Scan is not running and uses no compute. Ask an administrator to select the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
               </div>
             </div>
             {canConfigure && (
               <Button variant="primary" size="sm" onClick={() => setConfigOpen(true)}>
-                <Settings2 size={13} /> Pick cameras
+                <Settings2 size={13} /> Select cameras
               </Button>
             )}
           </div>

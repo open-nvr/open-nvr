@@ -171,7 +171,7 @@ def set_operator_assignments(
     named_apps = operator_rows_naming_apps(db, entries)
     if named_apps:
         raise ValueError(
-            "An app can't be assigned here — pick cameras for "
+            "An app can't be assigned here — select cameras for "
             + ", ".join(named_apps)
             + " in that app's own configuration. Assignments only tune "
             "platform detection (e.g. object_detection narrowed to labels, "

@@ -1780,8 +1780,8 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
             otherwise looks exactly like one that is working. */}
         {app.camera_picker !== false && app.picked_cameras === 0 && (
           <div>
-            <Badge variant="warning" title="Pick cameras in Configure — until then this app does nothing">
-              No cameras picked
+            <Badge variant="warning" title="Select cameras in Configure — until then this app does nothing">
+              No cameras
             </Badge>
           </div>
         )}

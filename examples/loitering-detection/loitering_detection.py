@@ -211,7 +211,7 @@ def load_config(path: str) -> AppConfig:
         # there is nowhere else to get them from.
         raise ValueError(
             "config: at least one camera entry is required (or set "
-            "opennvr_url and pick cameras in the App Catalog)"
+            "opennvr_url and select cameras in the App Catalog)"
         )
     cameras: dict[str, CameraWatch] = {}
     for idx, c in enumerate(cameras_raw):

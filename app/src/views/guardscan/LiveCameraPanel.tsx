@@ -177,7 +177,7 @@ export function LiveCameraPanel({
               value={cameraId}
               onChange={(e) => onSelectCamera(Number(e.target.value))}
               aria-label="Camera to watch live"
-              title="Switch between the cameras picked for this app"
+              title="Switch between the cameras selected for this app"
               className="min-w-0 max-w-full truncate rounded border border-[var(--border)]
                          bg-[var(--bg-2)] px-1.5 py-0.5 text-xs font-semibold"
             >
@@ -213,7 +213,7 @@ export function LiveCameraPanel({
           {cameraId == null ? (
             <Empty>
               {emptyMessage ? <CameraOff size={20} className="mb-1" /> : null}
-              {emptyMessage ?? 'Pick a camera to watch it live.'}
+              {emptyMessage ?? 'Select a camera to watch it live.'}
               {onPickCameras && (
                 <button
                   type="button"
@@ -221,7 +221,7 @@ export function LiveCameraPanel({
                   className="mt-2 inline-flex items-center gap-1 rounded border border-[var(--accent)]
                              px-2 py-1 text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10"
                 >
-                  <Settings2 size={12} /> Pick cameras
+                  <Settings2 size={12} /> Select cameras
                 </button>
               )}
             </Empty>

@@ -239,7 +239,7 @@ def load_config(path: str) -> AppConfig:
         # is nowhere else to get them from.
         raise ValueError(
             "config: at least one camera entry is required (or set "
-            "opennvr_url and pick cameras in the App Catalog)"
+            "opennvr_url and select cameras in the App Catalog)"
         )
     # The App Catalog's zone editor stores geometry as a top-level
     # ``zones`` dict keyed by camera_id, in NORMALIZED 0-1 coords. When

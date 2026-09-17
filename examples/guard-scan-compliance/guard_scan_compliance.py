@@ -336,7 +336,7 @@ class CameraWorker:
         watching mid-screening by choice, so rule only the screenings
         that had already finished and drop the rest — ruling a scan we
         walked away from as incomplete blames the guard for our decision
-        (it used to raise "Incomplete scan procedure" on every unpick).
+        (it used to raise "Incomplete scan procedure" on every deselect).
 
         It always was called from another thread — `_reconcile_roster`
         runs on the tick thread, shutdown on the signal handler's — and
@@ -369,7 +369,7 @@ class CameraWorker:
                 return
         if self.engine is not None:
             if abandon:
-                self.engine.abandon(time.time(), reason="unpicked")
+                self.engine.abandon(time.time(), reason="deselected")
             else:
                 # A restart is not a reason to lose the screening in progress.
                 self.engine.flush(time.time(), reason="left")
@@ -1018,7 +1018,7 @@ class GuardScanApp(FrameApp):
         """
         workers = self._workers()
         if not workers:
-            return ("No cameras picked — pick the entrance camera in this "
+            return ("No cameras selected — select the entrance camera in this "
                     "app's configuration (App Catalog → Configure → Cameras).")
         down = [h for h, w in workers if w.inference_down]
         if len(down) == len(workers):
@@ -1040,7 +1040,7 @@ class GuardScanApp(FrameApp):
         deliberately, so adding a camera is a click rather than a file edit.
         """
         if not self._reconcile_roster():
-            log.warning("no cameras picked for this app yet — pick the "
+            log.warning("no cameras selected for this app yet — select the "
                         "entrance camera in its configuration")
 
     def on_cameras_update(self, camera_ids) -> None:
@@ -1106,7 +1106,7 @@ class GuardScanApp(FrameApp):
             gone = [h for h in self.workers if h not in picked]
             departed = [(h, self.workers.pop(h)) for h in gone]
         for handle, worker in departed:
-            log.info("%s is no longer picked for this app — stopping", handle)
+            log.info("%s is no longer selected for this app — stopping", handle)
             worker.stop(abandon=True)
         return len(picked)
 

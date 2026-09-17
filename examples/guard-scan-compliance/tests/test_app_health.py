@@ -210,7 +210,7 @@ def test_an_app_with_no_camera_says_so(app_methods):
     message has to say where to fix it."""
     why = app_methods["not_ready_reason"](_app())
     assert why is not None
-    assert "pick" in why.lower()
+    assert "select" in why.lower()
     assert "configuration" in why.lower()
 
 
@@ -374,7 +374,7 @@ def test_unpicking_a_camera_mid_screening_raises_no_incomplete_scan_alert():
     still ruled, half-watched ones are dropped."""
     stop, worker, calls = _worker_stop()
     stop(worker, abandon=True)
-    assert calls == [("abandon", "unpicked")]
+    assert calls == [("abandon", "deselected")]
 
 
 def test_a_restart_still_rules_on_the_screening_in_progress():

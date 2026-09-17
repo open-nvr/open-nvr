@@ -902,7 +902,7 @@ def main(argv: list[str] | None = None) -> int:
         # so an empty YAML list is normal. Standalone there is nowhere
         # else to get them from.
         raise SystemExit("config: at least one camera is required for the daemon "
-                         "(or set opennvr_url and pick cameras in the App Catalog)")
+                         "(or set opennvr_url and select cameras in the App Catalog)")
 
     # The SDK FrameApp loop is async; drive it the same way the SDK
     # AppRunner drives a Detector. SIGINT / SIGTERM trigger a clean exit.

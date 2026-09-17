@@ -766,7 +766,7 @@ class OccupancyCounter(Detector):
         cfg.cameras = cameras
         self._states = {k: v for k, v in self._states.items() if k in wanted}
         self._unknown_cameras = {c for c in self._unknown_cameras if c not in wanted}
-        logger.info("cameras picked for this app changed: +%s -%s (now counting %s)",
+        logger.info("cameras selected for this app changed: +%s -%s (now counting %s)",
                     added or "-", removed or "-", sorted(cameras) or "nowhere")
 
     async def run(self, *, once: bool = False) -> None:

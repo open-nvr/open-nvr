@@ -1360,7 +1360,7 @@ def _cmd_daemon(config: AppConfig, args: argparse.Namespace) -> int:
         # else to get them from.
         raise SystemExit(
             "config: at least one camera is required for the daemon "
-            "(or set opennvr_url and pick cameras in the App Catalog)"
+            "(or set opennvr_url and select cameras in the App Catalog)"
         )
 
     # The SDK FrameApp loop is async; drive it the same way the SDK

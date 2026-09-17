@@ -35,9 +35,9 @@ vehicle limits, or a guard post that must always be staffed
 
 ## Which cameras
 
-Connected to OpenNVR, the app counts exactly the cameras **picked** for
-it: App Catalog → Occupancy → Configure → **Cameras**. Picks apply live,
-with no restart. Nothing picked = the app counts nothing and uses no
+Connected to OpenNVR, the app counts exactly the cameras **selected** for
+it: App Catalog → Occupancy → Configure → **Cameras**. Changes apply live,
+with no restart. No cameras selected = the app counts nothing and uses no
 compute. A YAML `cameras:` list pins the set instead (standalone use).
 See
 [docs/CAMERA_ASSIGNMENTS.md](../../docs/CAMERA_ASSIGNMENTS.md).

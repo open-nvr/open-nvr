@@ -127,7 +127,7 @@ export function CameraPicker({
       const role = cameraRoles?.[String(cam.id)]
       if (role
           && !window.confirm(
-            `${cam.name} has the role "${role}". Unpicking it stops that role from doing anything. Unpick anyway?`,
+            `${cam.name} has the role "${role}". Deselecting it stops that role from doing anything. Deselect anyway?`,
           )) {
         return
       }
@@ -149,7 +149,7 @@ export function CameraPicker({
           role="status"
           className="border border-[var(--danger)]/50 bg-[var(--danger)]/10 px-3 py-2 text-xs text-[var(--danger)]"
         >
-          No cameras picked — this app will not run and uses no compute.
+          No cameras selected — this app isn't running and uses no compute.
         </div>
       )}
       {cameras.length === 0 ? (
@@ -202,7 +202,7 @@ export function CameraPicker({
         </div>
       )}
       <p className="text-[11px] text-[var(--text-dim)]">
-        {picked > 0 ? `${picked} picked. ` : ''}
+        {picked > 0 ? `${picked} selected. ` : ''}
         {unsaved
           ? 'Not saved yet — Save applies it; the running app picks it up within a few seconds.'
           : 'Save applies changes; the running app picks them up within a few seconds.'}

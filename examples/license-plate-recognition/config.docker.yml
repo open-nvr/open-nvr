@@ -24,10 +24,10 @@ nats_url: "nats://nats:4222"
 nats_token: "${INTERNAL_API_KEY}"
 
 # ── Camera scope ────────────────────────────────────────────────────
-# Pick the cameras in the App Catalog → Configure → Cameras, or give a
-# camera a gate role on the Vehicles page (the same pick). Nothing
-# picked = no plates read and nothing alerted. A list here can only
-# NARROW the picks; run standalone (no opennvr_url) it is the whole scope.
+# Select the cameras in the App Catalog → Configure → Cameras, or give a
+# camera a gate role on the Vehicles page (which selects it too). None
+# selected = no plates read and nothing alerted. A list here can only
+# NARROW the selection; run standalone (no opennvr_url) it is the whole scope.
 cameras: []
 
 # ── The app's job ───────────────────────────────────────────────────

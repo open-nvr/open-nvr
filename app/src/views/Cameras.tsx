@@ -900,7 +900,7 @@ export function Cameras() {
                   <code>object_detection</code> narrowed to labels{' '}
                   <code>person, truck</code>, or{' '}
                   <code>license_plate_recognition</code>. To use this camera
-                  in an app, pick it in that app's configuration (App
+                  in an app, select it in that app's configuration (App
                   Catalog → Configure → Cameras).
                 </p>
                 <CameraUsedBy cameraId={editing.id} />
