@@ -33,13 +33,15 @@ page shows the rate, the trend, the per-guard breakdown and the history.
 ## Setting it up
 
 1. Install it from the App Catalog and select your entrance camera (Configure → Cameras).
-2. Draw the **scan zone** — where the person being screened stands.
-   Anyone inside it is being scanned, so is not the guard.
-3. Optionally draw the **guard post**, and set the guard's **uniform
-   colour**. Both are worth more than any behavioural guess when the
-   site can supply them: on the footage this was built against, the
-   uniform matched 75–100% of the guard's frames and 0% of any
-   customer's.
+2. On the camera's card, press **Set up** and draw the **scan zone** —
+   where the person being screened stands. Anyone inside it is being
+   scanned, so is not the guard.
+3. Optionally draw the **guard post**, and sample the guard's **uniform
+   colour** off that camera's picture (per camera: lighting differs, so
+   a second camera offers *Copy from* as a starting point). Both are
+   worth more than any behavioural guess when the site can supply them:
+   on the footage this was built against, the uniform matched 75–100% of
+   the guard's frames and 0% of any customer's.
 4. Leave the rest alone until you have watched it for a day.
 
 Nothing needs editing on disk. Everything above is in the app's config

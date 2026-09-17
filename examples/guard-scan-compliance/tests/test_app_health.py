@@ -639,7 +639,8 @@ def test_a_zone_saved_under_the_numeric_id_reaches_the_camera():
     applied — the screening ran on the whole frame and looked fine."""
     from dataclasses import dataclass
 
-    ns = {"camera_key": _camera_key()}
+    ns = {"camera_key": _camera_key(),
+          "PER_CAMERA_KEYS": ("scan_zone", "guard_post", "uniform_hsv")}
     exec(compile(_slice("def camera_config(self, handle: str) -> dict:",
                         "def _retune_workers(self)"),
                  "<cfg>", "exec"), ns)  # noqa: S102
@@ -654,7 +655,33 @@ def test_a_zone_saved_under_the_numeric_id_reaches_the_camera():
     app = SimpleNamespace(config=_Cfg(), _per_camera={}, _retune_workers=lambda: None)
     ns["on_config_update"](app, {"scan_zone": {"3": zone}})
     assert ns["camera_config"](app, "cam3")["scan_zone"] == zone
-    assert ns["camera_config"](app, "cam4")["scan_zone"] != zone
+    # Not the whole {"3": zone} map standing in for a polygon.
+    assert ns["camera_config"](app, "cam4")["scan_zone"] is None
+
+
+def test_each_camera_gets_its_own_uniform_colour():
+    """The same shirt reads as a different HSV under each camera's light,
+    so the colour is sampled per camera. A camera with none sampled gets
+    no colour — never another camera's, and never the whole map."""
+    from dataclasses import dataclass, field
+
+    ns = {"camera_key": _camera_key(),
+          "PER_CAMERA_KEYS": ("scan_zone", "guard_post", "uniform_hsv")}
+    exec(compile(_slice("def camera_config(self, handle: str) -> dict:",
+                        "def _retune_workers(self)"),
+                 "<cfg>", "exec"), ns)  # noqa: S102
+
+    @dataclass
+    class _Cfg:
+        scan_zone: object = None
+        guard_post: object = None
+        uniform_hsv: dict = field(default_factory=dict)
+
+    blue = {"low": [95, 80, 60], "high": [125, 255, 255]}
+    app = SimpleNamespace(config=_Cfg(), _per_camera={}, _retune_workers=lambda: None)
+    ns["on_config_update"](app, {"uniform_hsv": {"3": blue}})
+    assert ns["camera_config"](app, "cam3")["uniform_hsv"] == blue
+    assert ns["camera_config"](app, "cam4")["uniform_hsv"] is None
 
 
 def _camera_key():

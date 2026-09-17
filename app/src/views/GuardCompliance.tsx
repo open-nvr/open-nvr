@@ -271,6 +271,19 @@ export default function GuardCompliance() {
     () => (picksQuery.data?.cameras ?? []).filter((c) => c.picked),
     [picksQuery.data],
   )
+  // The page's camera choice: this app's selected cameras. Before those
+  // load (or for an app with no camera selection) every visible camera;
+  // and a camera still chosen after it was deselected stays listed, so
+  // the select never shows a value it has no option for.
+  const cameraOptions = useMemo(() => {
+    const base = takesPicks && picksQuery.data
+      ? pickedCameras.map((c) => ({ id: c.id, name: c.name }))
+      : (camerasQuery.data ?? []).map((c) => ({ id: c.id, name: c.name }))
+    if (cameraId !== '' && !base.some((c) => c.id === cameraId)) {
+      base.push({ id: cameraId, name: camerasQuery.data?.find((c) => c.id === cameraId)?.name ?? `Camera #${cameraId}` })
+    }
+    return base
+  }, [takesPicks, picksQuery.data, pickedCameras, camerasQuery.data, cameraId])
   const nothingPicked = takesPicks && (
     guardApp?.picked_cameras !== undefined
       ? guardApp.picked_cameras === 0
@@ -344,11 +357,13 @@ export default function GuardCompliance() {
   const download = async () => {
     setExporting(true)
     try {
-      const res = await guardScanService.exportCsv(days)
+      const res = await guardScanService.exportCsv(days, cameraId === '' ? undefined : cameraId)
       const url = URL.createObjectURL(res.data as Blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `screenings-${days}d.csv`
+      a.download = cameraId === ''
+        ? `screenings-${days}d.csv`
+        : `screenings-${days}d-${cameraName(cameraId).replace(/[^\w-]+/g, '_')}.csv`
       a.click()
       URL.revokeObjectURL(url)
       showSuccess('Screenings exported.')
@@ -377,7 +392,38 @@ export default function GuardCompliance() {
             <ShieldCheck size={18} className="text-[var(--accent)]" /> Entry Screening
           </span>
         }
-        description="Did the guard scan every person, properly?"
+        description={
+          <>
+            Did the guard scan every person, properly?
+            {nothingPicked && (
+              // The app's state, so it sits with the app's name — not in
+              // the list, where it read as something about the rows. Past
+              // screenings stay listed: they are real history, and
+              // without this the page looks like a quiet door while
+              // nothing at all is being watched.
+              <span
+                role="status"
+                title={canConfigure
+                  ? 'Guard Scan is not running and uses no compute until a camera is selected.'
+                  : 'Guard Scan is not running and uses no compute. Ask an administrator to select the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
+                className="ml-3 inline-flex items-center gap-1.5 rounded border border-amber-500/40
+                           bg-amber-500/10 px-2 py-0.5 align-middle text-xs text-amber-300"
+              >
+                <CameraOff size={13} />
+                Not running — no camera selected
+                {canConfigure && (
+                  <button
+                    type="button"
+                    onClick={() => setConfigOpen(true)}
+                    className="ml-1 font-medium text-[var(--accent)] hover:underline"
+                  >
+                    Select cameras
+                  </button>
+                )}
+              </span>
+            )}
+          </>
+        }
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {/* This one really is page-wide: it moves the tiles, the
@@ -386,6 +432,26 @@ export default function GuardCompliance() {
                 to it too, and a control that changes three things while
                 sitting inside one of them is a control in the wrong
                 place. */}
+            {/* Page-wide for the same reason as the range beside it: it
+                moves the tiles, the chart, the list AND the live view. It
+                used to sit in the list's toolbar, where it read as a list
+                filter while quietly changing every figure above it. */}
+            <select
+              value={cameraId}
+              onChange={(e) => {
+                setCameraId(e.target.value === '' ? '' : Number(e.target.value))
+                setLiveChoice(null)
+                resetPage()
+              }}
+              aria-label="Camera"
+              title="Show one camera's screenings, figures and live view"
+              className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
+            >
+              <option value="">All cameras</option>
+              {cameraOptions.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
             <SegmentedControl
               label="Range"
               showLabel={false}
@@ -436,6 +502,11 @@ export default function GuardCompliance() {
                        hover:text-[var(--text)]"
           >
             Summary
+            {/* Say whose figures these are: a filtered 100% must never be
+                read as the whole site's. */}
+            <span className="font-normal">
+              {cameraId === '' ? '· All cameras' : `· ${cameraName(cameraId)}`}
+            </span>
             <span className="ml-auto flex items-center">
               {summaryOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </span>
@@ -565,33 +636,6 @@ export default function GuardCompliance() {
             style={{ width: popped ? '100%' : `${split}%` }}>
         <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
-        {nothingPicked && (
-          // Past screenings stay listed below — they are real history —
-          // so without this the page looks exactly like a quiet door
-          // while nothing at all is being watched.
-          <div
-            role="status"
-            className="mb-2 flex flex-wrap items-center gap-3 rounded border border-amber-500/40
-                       bg-amber-500/10 px-3 py-2.5 text-xs"
-          >
-            <CameraOff size={18} className="shrink-0 text-amber-400" />
-            <div className="min-w-0 flex-1">
-              <div className="font-semibold text-[var(--text)]">
-                No camera selected — nobody is being screened
-              </div>
-              <div className="mt-0.5 text-[var(--text-dim)]">
-                {canConfigure
-                  ? 'Guard Scan is not running and uses no compute. Select the entrance camera, and new screenings appear here within a few seconds.'
-                  : 'Guard Scan is not running and uses no compute. Ask an administrator to select the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
-              </div>
-            </div>
-            {canConfigure && (
-              <Button variant="primary" size="sm" onClick={() => setConfigOpen(true)}>
-                <Settings2 size={13} /> Select cameras
-              </Button>
-            )}
-          </div>
-        )}
         <ScreeningTable
             rows={list}
             query={screenings}
@@ -614,21 +658,6 @@ export default function GuardCompliance() {
                     resetPage()
                   }}
                 />
-                <select
-                  value={cameraId}
-                  onChange={(e) => {
-                    setCameraId(e.target.value === '' ? '' : Number(e.target.value))
-                    setLiveChoice(null)
-                    resetPage()
-                  }}
-                  aria-label="Filter by camera"
-                  className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
-                >
-                  <option value="">All cameras</option>
-                  {(camerasQuery.data ?? []).map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
                 <div className="ml-auto">
                   <Pagination
                     page={rows.page}

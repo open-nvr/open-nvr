@@ -108,6 +108,9 @@ export const guardScanService = {
             { responseType: 'blob', signal }),
 
   exportUrl: (days: number) => `/api/v1/guardscan/export?days=${days}`,
-  exportCsv: (days: number) =>
-    api.get(`/api/v1/guardscan/export`, { params: { days }, responseType: 'blob' }),
+  exportCsv: (days: number, cameraId?: number) =>
+    api.get(`/api/v1/guardscan/export`, {
+      params: { days, ...(cameraId === undefined ? {} : { camera_id: cameraId }) },
+      responseType: 'blob',
+    }),
 }

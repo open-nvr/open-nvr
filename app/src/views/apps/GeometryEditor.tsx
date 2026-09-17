@@ -28,6 +28,19 @@ type Dir = 'both' | 'a_to_b' | 'b_to_a'
 type Tripwire = { a: Pt; b: Pt; count_direction: Dir }
 type PerCam = Record<string, Pt[] | Tripwire>
 
+/** Another shape on the same camera, drawn faintly for orientation — the
+ *  guard post while the scan zone is being drawn — and never editable here. */
+export type GeometryReference = { label: string; value: unknown }
+
+function isPoly(v: unknown): v is Pt[] {
+  return Array.isArray(v) && v.length > 0 && v.every((p) => Array.isArray(p) && p.length === 2)
+}
+
+function isWire(v: unknown): v is Tripwire {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+    && Array.isArray((v as Tripwire).a) && Array.isArray((v as Tripwire).b)
+}
+
 type Camera = {
   id: number | string
   name?: string
@@ -85,15 +98,38 @@ function useSnapshotUrl(cameraId: number | string | null) {
   return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
+/** The largest box of `aspect` that fits its container both ways — the
+ *  CSS "contain" rule for an element, not an image. The container must be
+ *  a size container (`containerType: 'size'`); cqw/cqh are its width and
+ *  height. Every normalised point maps to the same pixel however the
+ *  window is sized, and nothing ever needs scrolling to reach. */
+export function containStyle(aspect: number): React.CSSProperties {
+  return { width: `min(100cqw, calc(100cqh * ${aspect}))`, aspectRatio: String(aspect) }
+}
+
 export function GeometryEditor({
   kind,
   value,
   onChange,
+  cameraId,
+  references = [],
+  readOnly = false,
+  fit = false,
 }: {
   kind: 'polygon' | 'tripwire'
   value: string
   onChange: (json: string) => void
+  /** Draw on this camera only, with no camera selector — the per-camera
+   *  setup dialog opens the editor already on its camera. */
+  cameraId?: number | string
+  references?: GeometryReference[]
+  /** Show the shape without allowing edits (a camera the user can't manage). */
+  readOnly?: boolean
+  /** Fill the parent's height and scale the picture to fit it whole, with
+   *  no scrolling — for the setup dialog. The parent must give a height. */
+  fit?: boolean
 }) {
+  const fixed = cameraId != null
   const perCam = useMemo(() => parseValue(value), [value])
   const camerasQuery = useQuery({
     queryKey: ['cameras'],
@@ -112,16 +148,19 @@ export function GeometryEditor({
   )
   const nothingPicked = pickedIds !== null && pickedIds.size === 0
 
-  // Active camera: first stored (still picked), else the first picked.
-  const [cam, setCam] = useState<string>('')
+  // Active camera: the fixed one, else first stored (still picked), else
+  // the first picked.
+  const [chosenCam, setCam] = useState<string>('')
+  const cam = fixed ? String(cameraId) : chosenCam
   useEffect(() => {
+    if (fixed) return
     if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
     const stored = Object.keys(perCam).find((k) => !pickedIds || pickedIds.has(Number(k)))
     // Nothing left to offer (the last camera was unpicked) clears the
     // selection, so the editor stops showing that camera's snapshot.
     const first = stored ?? (cameras[0] ? String(cameras[0].id) : '')
     if (first !== cam) setCam(first)
-  }, [cam, perCam, cameras, pickedIds])
+  }, [fixed, cam, perCam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   // Natural size of the still. The snapshot comes off the camera at its CODED
@@ -133,7 +172,7 @@ export function GeometryEditor({
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [drag, setDrag] = useState<number | 'a' | 'b' | null>(null)
 
-  const write = (next: PerCam) => onChange(JSON.stringify(next))
+  const write = (next: PerCam) => { if (!readOnly) onChange(JSON.stringify(next)) }
 
   const current = cam ? perCam[cam] : undefined
   const poly: Pt[] = kind === 'polygon' && Array.isArray(current) ? current : []
@@ -149,7 +188,7 @@ export function GeometryEditor({
   }
 
   const onCanvasClick = (e: React.MouseEvent) => {
-    if (!cam || drag != null) return
+    if (readOnly || !cam || drag != null) return
     const p = evtToNorm(e)
     if (kind === 'polygon') {
       write({ ...perCam, [cam]: [...poly, p] })
@@ -188,7 +227,7 @@ export function GeometryEditor({
   // span the whole box, so if the image doesn't span exactly the same box
   // every point an operator places lands somewhere else in the frame the
   // pipeline processes. Falls back to 16:9 until the still loads.
-  const camOverride = cameras.find((c) => String(c.id) === cam)
+  const camOverride = (camerasQuery.data ?? []).find((c) => String(c.id) === cam)
   const drawAspect =
     displayAspect(snapDims?.w, snapDims?.h, camOverride?.display_aspect_ratio) ?? 16 / 9
 
@@ -205,11 +244,12 @@ export function GeometryEditor({
   const vy = (n: number) => n * VH
 
   return (
-    <div className="space-y-2">
-      {/* Camera selector (per-camera geometry) */}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-[var(--text-dim)]">Camera:</span>
-        {nothingPicked ? (
+    <div className={fit ? 'flex h-full min-h-0 flex-col gap-2' : 'space-y-2'}>
+      {/* Camera selector (per-camera geometry) — absent when the editor
+          was opened on one camera. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs">
+        {!fixed && <span className="text-[var(--text-dim)]">Camera:</span>}
+        {fixed ? null : nothingPicked ? (
           <span className="text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
         ) : cameras.length === 0 ? (
           <input
@@ -239,13 +279,20 @@ export function GeometryEditor({
               ? 'tripwire set'
               : 'no tripwire'}
         </span>
-        <Button variant="ghost" className="text-xs px-2 py-0.5" onClick={clearCam} disabled={!current}>
+        <Button variant="ghost" className="text-xs px-2 py-0.5" onClick={clearCam} disabled={!current || readOnly}>
           Clear
         </Button>
       </div>
 
       {/* Draw surface: snapshot (or grid) + SVG overlay */}
-      <div className="relative w-full rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)]" style={{ aspectRatio: String(drawAspect) }}>
+      <div
+        className={fit ? 'flex min-h-0 flex-1 items-center justify-center' : ''}
+        style={fit ? { containerType: 'size' } : undefined}
+      >
+      <div
+        className={`relative rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)] ${fit ? '' : 'w-full'}`}
+        style={fit ? containStyle(drawAspect) : { aspectRatio: String(drawAspect) }}
+      >
         {snap.data ? (
           /* object-fill, not object-cover: cover crops a still whose aspect
              differs from the box, and the cropped-away band is frame the
@@ -273,12 +320,40 @@ export function GeometryEditor({
           ref={svgRef}
           viewBox={`0 0 ${VW} ${VH}`}
           preserveAspectRatio="none"
-          className="absolute inset-0 w-full h-full cursor-crosshair"
+          className={`absolute inset-0 w-full h-full ${readOnly ? '' : 'cursor-crosshair'}`}
           onClick={onCanvasClick}
           onMouseMove={onPointDrag}
           onMouseUp={() => setDrag(null)}
           onMouseLeave={() => setDrag(null)}
         >
+          {references.map((ref) => {
+            // Faint, dashed and labelled: context for the shape being
+            // drawn, never something to grab.
+            const style = { stroke: 'rgba(255,255,255,0.65)', strokeWidth: 1.5,
+                            strokeDasharray: '4 3', vectorEffect: 'non-scaling-stroke' as const }
+            if (isPoly(ref.value)) {
+              const pts = ref.value
+              return (
+                <g key={ref.label} pointerEvents="none">
+                  <polygon points={pts.map((p) => `${vx(p[0])},${vy(p[1])}`).join(' ')}
+                           fill="rgba(255,255,255,0.08)" {...style} />
+                  <text x={vx(pts[0][0])} y={vy(pts[0][1]) - 1.5} fontSize={3.5}
+                        fill="rgba(255,255,255,0.85)">{ref.label}</text>
+                </g>
+              )
+            }
+            if (isWire(ref.value)) {
+              const w = ref.value
+              return (
+                <g key={ref.label} pointerEvents="none">
+                  <line x1={vx(w.a[0])} y1={vy(w.a[1])} x2={vx(w.b[0])} y2={vy(w.b[1])} {...style} />
+                  <text x={vx(w.a[0])} y={vy(w.a[1]) - 1.5} fontSize={3.5}
+                        fill="rgba(255,255,255,0.85)">{ref.label}</text>
+                </g>
+              )
+            }
+            return null
+          })}
           {kind === 'polygon' && poly.length > 0 && (
             <>
               <polygon
@@ -290,8 +365,8 @@ export function GeometryEditor({
                 <circle
                   key={i} cx={vx(p[0])} cy={vy(p[1])} r={1.6}
                   fill="rgb(59,130,246)" stroke="white" strokeWidth={0.6}
-                  style={{ cursor: 'grab' }}
-                  onMouseDown={(e) => { e.stopPropagation(); setDrag(i) }}
+                  style={{ cursor: readOnly ? 'default' : 'grab' }}
+                  onMouseDown={(e) => { e.stopPropagation(); if (!readOnly) setDrag(i) }}
                   onDoubleClick={(e) => { e.stopPropagation(); removePoint(i) }}
                 />
               ))}
@@ -316,8 +391,8 @@ export function GeometryEditor({
                 <circle
                   key={k} cx={vx(wire[k][0])} cy={vy(wire[k][1])} r={1.8}
                   fill="rgb(234,88,12)" stroke="white" strokeWidth={0.6}
-                  style={{ cursor: 'grab' }}
-                  onMouseDown={(e) => { e.stopPropagation(); setDrag(k) }}
+                  style={{ cursor: readOnly ? 'default' : 'grab' }}
+                  onMouseDown={(e) => { e.stopPropagation(); if (!readOnly) setDrag(k) }}
                 />
               ))}
               {/* A/B labels so the direction toggle reads clearly */}
@@ -327,10 +402,13 @@ export function GeometryEditor({
           )}
         </svg>
       </div>
+      </div>
 
       {/* Hints + tripwire direction control */}
-      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
-        {kind === 'polygon' ? (
+      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
+        {readOnly ? (
+          <span>You can&apos;t manage this camera, so its shapes are shown read-only.</span>
+        ) : kind === 'polygon' ? (
           <span>Click to add points · drag a point to move · double-click a point to delete{poly.length > 0 && poly.length < 3 ? ' · need at least 3' : ''}</span>
         ) : (
           <>

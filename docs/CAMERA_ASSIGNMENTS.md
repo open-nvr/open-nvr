@@ -40,14 +40,24 @@ app picks it up within a few seconds, with no restart.
 The Cameras section then lists just this app's cameras, each with its
 picture, whether it is online, and which of its zones or lines are drawn
 yet. The ✕ on a card removes that camera (again, on Save).
+
+**Set up** on a card (**Edit** once something is set) opens that camera
+with everything the app needs drawn or sampled on it — Guard Scan's scan
+zone, guard post and uniform colour, a line-crossing tripwire, an ROI —
+one tab each, on the camera's picture, with the camera's other shapes
+shown faintly for reference. A tab that is still empty offers **Copy from**
+another camera that has one, as a starting point. **Done** keeps them in
+the form; **Save** applies them.
 Removing a camera mid-screening drops the half-watched screening rather
 than reporting it as incomplete.
 
 * You need permission to **manage** a camera to add it to or remove it from
   an app; cameras you can't manage are shown locked, with the reason.
-* Zones, tripwires and ROIs are drawn in the same form, and the zone
-  editors only offer the selected cameras. A zone on a camera the app
-  doesn't use would never apply.
+* Zones, tripwires, ROIs and sampled colours are set up per camera, from
+  its card — never on a camera the app doesn't use, where they would never
+  apply. A colour is per camera because lighting is.
+  Settings for the whole app (thresholds, alerts, schedules) stay in the
+  form below.
 * For **ANPR**, giving a camera a gate role on the **Vehicles** page
   selects it too. The Cameras section shows those roles, and warns before
   you remove a camera that has one.

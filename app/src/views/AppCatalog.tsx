@@ -40,12 +40,16 @@ import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import {
   AppCameraScope,
   type CameraSetupItem,
+  cameraLabel,
   CameraPicker,
   appCamerasKey,
   savePicks,
   savedPicks,
   useAppCameras,
 } from './apps/CameraPicker'
+import {
+  CameraSetupDialog, entryFor, isCameraSetupType, isDrawn, shortParamName,
+} from './apps/CameraSetupDialog'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
@@ -660,25 +664,29 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   // geometry fields (live, so a zone drawn below ticks its card above).
   // "Not drawn" is information, not an error: most apps treat no zone as
   // the whole frame.
-  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] => {
-    const out: CameraSetupItem[] = []
-    for (const p of params) {
-      if (!p.per_camera || !(p.type || '').toLowerCase().startsWith('geometry.')) continue
-      let perCam: Record<string, any> = {}
-      try {
-        const parsed = JSON.parse(String(values[p.name] ?? '') || '{}')
-        if (parsed && typeof parsed === 'object') perCam = parsed
-      } catch {
-        // Half-typed JSON in the field: say nothing rather than guess.
-      }
-      const v = perCam[String(cameraId)] ?? perCam[`cam${cameraId}`]
-      const done = Array.isArray(v) ? v.length > 0 : !!(v && typeof v === 'object')
-      const label = p.name === 'roi' ? 'ROI'
-        : p.name.charAt(0).toUpperCase() + p.name.slice(1).replace(/_/g, ' ')
-      out.push({ label, done })
-    }
-    return out
-  }, [params, values])
+  //
+  // Those fields are set up from each camera's card (#480), not in the
+  // form body: there they were one section per field, each with its own
+  // camera dropdown, so two zones on two cameras meant choosing a camera
+  // four times. Only for apps that select cameras — an app without a
+  // camera list keeps its per-camera fields in the form.
+  const cameraParams = useMemo(
+    () => (takesPicks
+      ? params.filter((p) => p.per_camera && isCameraSetupType(p.type))
+      : []),
+    [params, takesPicks],
+  )
+  const formParams = useMemo(
+    () => params.filter((p) => !cameraParams.includes(p)),
+    [params, cameraParams],
+  )
+  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] =>
+    cameraParams.map((p) => ({
+      label: shortParamName(p.name),
+      done: isDrawn(entryFor(values[p.name], cameraId)),
+    })), [cameraParams, values])
+  const [setupCameraId, setSetupCameraId] = useState<number | null>(null)
+  const setupCamera = picksQuery.data?.cameras.find((c) => c.id === setupCameraId)
   // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
   // Vehicles page), shown read-only in the picker so unpicking one is a
   // decision rather than an accident.
@@ -805,7 +813,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       // better. Forms with nothing to draw get a narrower one.
       placement="side"
       widthClassName={
-        params.some((p) => {
+        formParams.some((p) => {
           const t = (p.type || '').toLowerCase()
           return t.startsWith('geometry.') || t === 'color.hsv_range'
         })
@@ -827,14 +835,36 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
             onChange={setDraftPicks}
             cameraRoles={cameraRoles}
             setup={cameraSetup}
+            onSetUp={setSetupCameraId}
           />
         </section>
       )}
-      {params.length === 0 ? (
-        <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
+      {setupCamera && (
+        <CameraSetupDialog
+          appName={app.name}
+          cameraId={setupCamera.id}
+          cameraName={cameraLabel(setupCamera, picksQuery.data?.cameras ?? [])}
+          location={setupCamera.location}
+          params={cameraParams}
+          values={values}
+          canEdit={setupCamera.can_manage}
+          otherCameras={(picksQuery.data?.cameras ?? [])
+            .filter((c) => draftPicks?.has(c.id) && c.id !== setupCamera.id)
+            .map((c) => ({ id: c.id, name: cameraLabel(c, picksQuery.data?.cameras ?? []) }))}
+          onCancel={() => setSetupCameraId(null)}
+          onDone={(edited) => {
+            setValues((v) => ({ ...v, ...edited }))
+            setSetupCameraId(null)
+          }}
+        />
+      )}
+      {formParams.length === 0 ? (
+        cameraParams.length === 0 && (
+          <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
+        )
       ) : (
         <ParamForm
-          params={params}
+          params={formParams}
           values={values}
           setValues={setValues}
           canEditParam={canEditParam}

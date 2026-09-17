@@ -11,7 +11,9 @@
 // operator drags a box over the guard's shirt in a snapshot from the
 // actual camera, and the range is measured from the pixels.
 //
-// Value shape (JSON): {"low": [h, s, v], "high": [h, s, v]}
+// Value shape (JSON): {"low": [h, s, v], "high": [h, s, v]} — or, opened
+// on one camera from its Set up dialog, a per-camera map of those keyed
+// by camera id ({"3": {"low": …, "high": …}}), editing only that entry.
 //
 // H IS 0-179, NOT 0-360. That is OpenCV's 8-bit hue, which is what the
 // app feeds to cv2.inRange, and it is the single easiest thing here to
@@ -22,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
 import { cameraLabel, usePickedCameraIds } from './CameraPicker'
+import { containStyle } from './GeometryEditor'
 
 type Camera = { id: number; name: string }
 type Hsv = [number, number, number]
@@ -33,19 +36,23 @@ const HI_PCT = 95
 /** Slack added to each bound, so the live feed's noise still matches. */
 const PAD: Hsv = [3, 30, 40]
 
-function parseValue(raw: string): HsvRange | null {
+function toRange(v: any): HsvRange | null {
+  if (v && Array.isArray(v.low) && Array.isArray(v.high)
+      && v.low.length === 3 && v.high.length === 3) {
+    return { low: v.low.map(Number) as Hsv, high: v.high.map(Number) as Hsv }
+  }
+  return null
+}
+
+function parseJson(raw: string): any {
   if (!raw) return null
   try {
-    const v = JSON.parse(raw)
-    if (v && Array.isArray(v.low) && Array.isArray(v.high)
-        && v.low.length === 3 && v.high.length === 3) {
-      return { low: v.low.map(Number) as Hsv, high: v.high.map(Number) as Hsv }
-    }
+    return JSON.parse(raw)
   } catch {
     // A hand-edited value that no longer parses is treated as unset
     // rather than throwing the whole config form away.
+    return null
   }
-  return null
 }
 
 /**
@@ -156,11 +163,38 @@ function useSnapshotUrl(cameraId: number | string | null) {
   return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
-export function ColorRangeEditor({ value, onChange }: {
+export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false, fit = false }: {
   value: string
   onChange: (json: string) => void
+  /** Sample on this camera only, with no selector, editing its entry in a
+   *  per-camera map. */
+  cameraId?: number | string
+  /** Show the colour without allowing a new sample (a camera the user
+   *  can't manage). */
+  readOnly?: boolean
+  /** Fill the parent's height and scale the snapshot to fit it whole. */
+  fit?: boolean
 }) {
-  const stored = useMemo(() => parseValue(value), [value])
+  const fixed = cameraId != null
+  const parsed = useMemo(() => parseJson(value), [value])
+  const map: Record<string, unknown> = fixed && parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed : {}
+  const stored = fixed
+    ? toRange(map[String(cameraId)] ?? map[`cam${cameraId}`])
+    : toRange(parsed)
+  /** Write a new range (or clear it), in whichever shape this editor holds. */
+  const emit = (range: HsvRange | null) => {
+    if (readOnly) return
+    if (!fixed) {
+      onChange(range ? JSON.stringify(range) : '')
+      return
+    }
+    const next: Record<string, unknown> = { ...map }
+    delete next[`cam${cameraId}`]
+    if (range) next[String(cameraId)] = range
+    else delete next[String(cameraId)]
+    onChange(JSON.stringify(next))
+  }
   const camerasQuery = useQuery({
     queryKey: ['cameras'],
     queryFn: async () => {
@@ -176,14 +210,16 @@ export function ColorRangeEditor({ value, onChange }: {
     (c) => !pickedIds || pickedIds.has(Number(c.id)),
   )
   const nothingPicked = pickedIds !== null && pickedIds.size === 0
-  const [cam, setCam] = useState<string>('')
+  const [chosenCam, setCam] = useState<string>('')
+  const cam = fixed ? String(cameraId) : chosenCam
   useEffect(() => {
+    if (fixed) return
     if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
     // Nothing left to offer (the last camera was unpicked) clears the
     // selection, so the editor stops showing that camera's snapshot.
     const first = cameras[0] ? String(cameras[0].id) : ''
     if (first !== cam) setCam(first)
-  }, [cam, cameras, pickedIds])
+  }, [fixed, cam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   const imgRef = useRef<HTMLImageElement | null>(null)
@@ -255,7 +291,7 @@ export function ColorRangeEditor({ value, onChange }: {
       inside: Math.round((100 * inside) / picked.length),
       outside: seen ? Math.round((100 * outside) / seen) : 0,
     })
-    onChange(JSON.stringify(range))
+    emit(range)
   }
 
   const pointFrom = (e: React.PointerEvent) => {
@@ -273,9 +309,9 @@ export function ColorRangeEditor({ value, onChange }: {
       Math.round((hsv[2] / 255) * 100 * 0.6)}%)`
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        {nothingPicked ? (
+    <div className={fit ? 'flex h-full min-h-0 flex-col gap-2' : 'space-y-2'}>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        {fixed ? null : nothingPicked ? (
           <span className="text-xs text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
         ) : cameras.length === 0 ? (
           <input
@@ -307,10 +343,10 @@ export function ColorRangeEditor({ value, onChange }: {
             {' '}· V {stored.low[2]}–{stored.high[2]}
           </span>
         )}
-        {stored && (
+        {stored && !readOnly && (
           <button
             type="button"
-            onClick={() => { onChange(''); setMatch(null); setHueWraps(false) }}
+            onClick={() => { emit(null); setMatch(null); setHueWraps(false) }}
             className="text-xs text-[var(--text-dim)] underline hover:text-[var(--text)]"
           >
             Clear
@@ -319,11 +355,18 @@ export function ColorRangeEditor({ value, onChange }: {
       </div>
 
       <div
+        className={fit ? 'flex min-h-0 flex-1 items-center justify-center' : ''}
+        style={fit ? { containerType: 'size' } : undefined}
+      >
+      <div
         ref={boxRef}
         className="relative select-none overflow-hidden rounded border border-[var(--border)] bg-[var(--bg-2)]"
-        style={{ aspectRatio: '16 / 9', cursor: pixels ? 'crosshair' : 'default' }}
+        style={{
+          ...(fit ? containStyle(16 / 9) : { aspectRatio: '16 / 9' }),
+          cursor: pixels && !readOnly ? 'crosshair' : 'default',
+        }}
         onPointerDown={(e) => {
-          if (!pixels) return
+          if (!pixels || readOnly) return
           const pt = pointFrom(e)
           if (!pt) return
           ;(e.target as Element).setPointerCapture?.(e.pointerId)
@@ -368,14 +411,17 @@ export function ColorRangeEditor({ value, onChange }: {
         )}
         <canvas ref={canvasRef} className="hidden" />
       </div>
+      </div>
 
-      <div className="text-[11px] text-[var(--text-dim)]">
-        Drag a box over the guard&apos;s shirt. Pick a patch of the uniform only —
-        not the collar, the face or the background.
+      <div className="shrink-0 text-[11px] text-[var(--text-dim)]">
+        {readOnly
+          ? "You can't manage this camera, so its colour is shown read-only."
+          : <>Drag a box over the guard&apos;s shirt. Pick a patch of the uniform only —
+            not the collar, the face or the background.</>}
       </div>
 
       {match && (
-        <div className="text-[11px]">
+        <div className="shrink-0 text-[11px]">
           <span className="text-[var(--text-dim)]">
             Matches {match.inside}% of what you picked, and {match.outside}% of the
             rest of the picture.
@@ -392,7 +438,7 @@ export function ColorRangeEditor({ value, onChange }: {
       )}
 
       {hueWraps && (
-        <div className="text-[11px]" style={{ color: 'var(--warn)' }}>
+        <div className="shrink-0 text-[11px]" style={{ color: 'var(--warn)' }}>
           This colour sits at both ends of the hue scale — reds usually do — and a
           single range cannot express that, so it will match far less than you
           picked. Sample a different garment, or leave this unset and let the scan
