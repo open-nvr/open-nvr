@@ -133,27 +133,17 @@ MANIFEST = AppManifest(
               group="Where people stand",
               description="Optional. Leave it empty and the guard is found by "
                           "behaviour — whoever reaches toward people."),
-        Param("uniform_hsv", "color.hsv_range", default={},
+        # Per camera, like the zones: the same shirt is a different HSV
+        # under each camera's lighting and white balance, so a range
+        # sampled at one door is a poor match at the next.
+        Param("uniform_hsv", "color.hsv_range", per_camera=True,
               label="Guard's uniform colour (optional)",
               group="Where people stand",
               description="Optional, and worth more than any behavioural guess: "
-                          "drag a box over the guard's shirt in the snapshot. On "
-                          "the reference footage the uniform matched 75-100% of "
-                          "the guard's frames and none of any customer's."),
-
-        # Superseded by the picker above, and still declared: PUT
-        # /config REPLACES the stored config with the declared params
-        # only, so dropping these from the manifest would delete a
-        # colour an existing install had configured, the first time
-        # anyone pressed Save.
-        Param("uniform_hsv_low", list, default=[], advanced=True,
-              label="Uniform colour, low HSV bound (older format)",
-              group="Where people stand",
-              description="Only read when no colour has been picked above."),
-        Param("uniform_hsv_high", list, default=[], advanced=True,
-              label="Uniform colour, high HSV bound (older format)",
-              group="Where people stand",
-              description="Only read when no colour has been picked above."),
+                          "drag a box over the guard's shirt in this camera's "
+                          "snapshot. Sampled per camera, because lighting differs. "
+                          "On the reference footage the uniform matched 75-100% "
+                          "of the guard's frames and none of any customer's."),
 
         # ── What counts as a proper scan ──
         Param("required_surfaces", list, default=[],
@@ -561,12 +551,9 @@ class GuardScanConfig(BaseAppConfig):
     led_ratio: float = 0.08
     led_hits: int = 3
     led_window_s: float = 0.8
-    # Picked off a camera snapshot: {"low": [h,s,v], "high": [h,s,v]},
-    # h on OpenCV's 0-179 scale. The two bare lists below are what this
-    # replaced; they are still read when no picked range is stored.
+    # Per camera, keyed by camera id: {"3": {"low": [h,s,v], "high": [h,s,v]}},
+    # h on OpenCV's 0-179 scale. camera_config() hands each camera its own.
     uniform_hsv: dict = field(default_factory=dict)
-    uniform_hsv_low: list = field(default_factory=list)
-    uniform_hsv_high: list = field(default_factory=list)
     session_log_dir: str = "/data/sessions"
     #: How long to keep those per-frame keypoint logs, in days. They are
     #: the training data this app collects as it runs, ~700KB-1MB per
@@ -584,20 +571,20 @@ def _stream_settings(cfg: dict) -> tuple:
             int(cfg.get("frame_width", 640) or 640))
 
 
-def _uniform_bounds(cfg: dict) -> tuple[list, list]:
-    """The guard's uniform colour, however it was configured.
+#: The settings drawn or sampled per camera, in Set up on its card.
+PER_CAMERA_KEYS: tuple[str, ...] = ("scan_zone", "guard_post", "uniform_hsv")
 
-    A range picked off a camera snapshot wins. The two bare HSV lists
-    are what the operator used to have to type, and an install that
-    still holds them keeps working — nobody has to re-pick a colour
-    because we improved the form.
-    """
+
+def _uniform_bounds(cfg: dict) -> tuple[list, list]:
+    """This camera's uniform colour, from ``camera_config`` — or no
+    colour at all, and the guard is found by behaviour."""
     picked = cfg.get("uniform_hsv")
     if isinstance(picked, dict):
         low, high = picked.get("low"), picked.get("high")
-        if isinstance(low, list) and isinstance(high, list)                 and len(low) == 3 and len(high) == 3:
+        if (isinstance(low, list) and isinstance(high, list)
+                and len(low) == 3 and len(high) == 3):
             return list(low), list(high)
-    return list(cfg.get("uniform_hsv_low") or []),         list(cfg.get("uniform_hsv_high") or [])
+    return [], []
 
 
 def _procedure(cfg: dict) -> dict | None:
@@ -708,6 +695,11 @@ class GuardScanApp(FrameApp):
 
         merged = (asdict(self.config) if is_dataclass(self.config)
                   else dict(self.config or {}))
+        # The app-wide value of a per-camera setting is the WHOLE map
+        # ({"3": zone, "4": zone}). A camera with no entry of its own must
+        # get nothing, not that map standing in for a polygon or a colour.
+        for key in PER_CAMERA_KEYS:
+            merged[key] = None
         # Keyed by camera id: the catalog's zone editor saves "3", the
         # roster calls the same camera "cam3", and looking one up by the
         # other found nothing — a drawn zone that silently never applied.
@@ -739,7 +731,7 @@ class GuardScanApp(FrameApp):
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
         per_camera: dict[int, dict] = {}
-        for key in ("scan_zone", "guard_post"):
+        for key in PER_CAMERA_KEYS:
             drawn = config.get(key)
             if isinstance(drawn, dict):
                 for handle, value in drawn.items():

@@ -285,7 +285,7 @@ export function CameraPicker({
                         key={it.label}
                         className={it.done ? 'text-emerald-400' : 'text-[var(--text-dim)]'}
                       >
-                        {it.done ? `✓ ${it.label}` : `${it.label}: not drawn`}
+                        {it.done ? `✓ ${it.label}` : `${it.label}: not set`}
                       </span>
                     ))}
                   </div>

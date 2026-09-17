@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-// Setting up ONE camera for an app: every per-camera shape the app asks
-// for (scan zone, guard post, tripwire, ROI…), drawn on that camera, in
-// one place (#480).
+// Setting up ONE camera for an app: everything the app asks for per
+// camera that is drawn or sampled on its picture (scan zone, guard post,
+// tripwire, ROI, uniform colour…), in one place (#480).
 //
 // It used to be a grid navigated by dropdown: each per-camera field was
 // its own section of the form with its own camera selector, so drawing
@@ -13,13 +13,14 @@
 // times. Opened from the camera's card, the camera is already chosen.
 //
 // Generic: the fields come from the manifest (`per_camera=True`,
-// `geometry.*`), so every app gets this with no app-specific UI. Edits
-// are held here until Done, then written into the form's draft — which
-// still needs the form's Save, like everything else in it. Cancel drops
-// them.
+// `geometry.*` or `color.hsv_range`), so every app gets this with no
+// app-specific UI. Edits are held here until Done, then written into the
+// form's draft — which still needs the form's Save, like everything else
+// in it. Cancel drops them.
 
 import { useState } from 'react'
 import { Button } from '../../components/ui'
+import { ColorRangeEditor } from './ColorRangeEditor'
 import { GeometryEditor, type GeometryReference } from './GeometryEditor'
 import { StackedDialog } from './StackedDialog'
 
@@ -30,10 +31,18 @@ export type SetupParam = {
   description?: string
 }
 
-/** A short name for a per-camera field: "Scan zone", "Entry line", "ROI". */
+/** A short name for a per-camera field: "Scan zone", "Entry line", "ROI",
+ *  "Uniform colour". */
 export function shortParamName(name: string): string {
   if (name === 'roi') return 'ROI'
-  return name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, ' ')
+  const words = name.replace(/_hsv$/, '_colour').replace(/_/g, ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** Types edited on the camera's picture, and so set up from its card. */
+export function isCameraSetupType(type: string | undefined): boolean {
+  const t = (type || '').toLowerCase()
+  return t.startsWith('geometry.') || t === 'color.hsv_range'
 }
 
 function parse(raw: string | boolean | undefined): Record<string, unknown> {
@@ -56,11 +65,15 @@ export function isDrawn(v: unknown): boolean {
 }
 
 export function CameraSetupDialog({
-  appName, cameraId, cameraName, location, params, values, canEdit, onCancel, onDone,
+  appName, cameraId, cameraName, location, params, values, canEdit, otherCameras = [],
+  onCancel, onDone,
 }: {
   appName: string
   cameraId: number
   cameraName: string
+  /** The app's other cameras, to offer "Copy from" when this one has
+   *  nothing set for a field another camera already has. */
+  otherCameras?: { id: number; name: string }[]
   location?: string | null
   params: SetupParam[]
   values: Record<string, string | boolean>
@@ -80,9 +93,28 @@ export function CameraSetupDialog({
 
   const t = (param.type || '').toLowerCase()
   const references: GeometryReference[] = params
-    .filter((p) => p.name !== param.name)
+    .filter((p) => p.name !== param.name && (p.type || '').toLowerCase().startsWith('geometry.'))
     .map((p) => ({ label: shortParamName(p.name), value: entryFor(local[p.name], cameraId) }))
     .filter((r) => isDrawn(r.value))
+
+  // A head start, not a shortcut: the same uniform or zone is usually
+  // close on the next camera, but lighting and angle differ, so it is
+  // offered only while this camera has nothing, and stays editable.
+  const copySources = canEdit && !isDrawn(entryFor(local[param.name], cameraId))
+    ? otherCameras.filter((c) => c.id !== cameraId && isDrawn(entryFor(local[param.name], c.id)))
+    : []
+  const copyFrom = (sourceId: number) => {
+    let map: Record<string, unknown> = {}
+    try {
+      const v = JSON.parse(local[param.name] || '{}')
+      if (v && typeof v === 'object' && !Array.isArray(v)) map = v
+    } catch {
+      // Unparseable: start from an empty map.
+    }
+    const next = { ...map, [String(cameraId)]: entryFor(local[param.name], sourceId) }
+    delete next[`cam${cameraId}`]
+    setLocal((v) => ({ ...v, [param.name]: JSON.stringify(next) }))
+  }
 
   return (
     <StackedDialog
@@ -140,6 +172,16 @@ export function CameraSetupDialog({
             <div className="text-xs text-[var(--text-dim)]">{param.description}</div>
           )}
         </div>
+        {copySources.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
+            <span>Start from another camera:</span>
+            {copySources.map((c) => (
+              <Button key={c.id} variant="outline" size="sm" onClick={() => copyFrom(c.id)}>
+                Copy from {c.name}
+              </Button>
+            ))}
+          </div>
+        )}
         {(t === 'geometry.polygon' || t === 'geometry.tripwire') && (
           <GeometryEditor
             key={param.name}
@@ -148,6 +190,15 @@ export function CameraSetupDialog({
             value={local[param.name]}
             onChange={(json) => setLocal((v) => ({ ...v, [param.name]: json }))}
             references={references}
+            readOnly={!canEdit}
+          />
+        )}
+        {t === 'color.hsv_range' && (
+          <ColorRangeEditor
+            key={param.name}
+            cameraId={cameraId}
+            value={local[param.name]}
+            onChange={(json) => setLocal((v) => ({ ...v, [param.name]: json }))}
             readOnly={!canEdit}
           />
         )}

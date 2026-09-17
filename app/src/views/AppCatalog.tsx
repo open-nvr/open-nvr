@@ -47,7 +47,9 @@ import {
   savedPicks,
   useAppCameras,
 } from './apps/CameraPicker'
-import { CameraSetupDialog, entryFor, isDrawn, shortParamName } from './apps/CameraSetupDialog'
+import {
+  CameraSetupDialog, entryFor, isCameraSetupType, isDrawn, shortParamName,
+} from './apps/CameraSetupDialog'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
@@ -670,7 +672,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   // camera list keeps its per-camera fields in the form.
   const cameraParams = useMemo(
     () => (takesPicks
-      ? params.filter((p) => p.per_camera && (p.type || '').toLowerCase().startsWith('geometry.'))
+      ? params.filter((p) => p.per_camera && isCameraSetupType(p.type))
       : []),
     [params, takesPicks],
   )
@@ -846,6 +848,9 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
           params={cameraParams}
           values={values}
           canEdit={setupCamera.can_manage}
+          otherCameras={(picksQuery.data?.cameras ?? [])
+            .filter((c) => draftPicks?.has(c.id) && c.id !== setupCamera.id)
+            .map((c) => ({ id: c.id, name: cameraLabel(c, picksQuery.data?.cameras ?? []) }))}
           onCancel={() => setSetupCameraId(null)}
           onDone={(edited) => {
             setValues((v) => ({ ...v, ...edited }))

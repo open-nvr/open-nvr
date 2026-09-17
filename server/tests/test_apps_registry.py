@@ -1073,6 +1073,21 @@ def test_a_picked_colour_range_is_accepted_and_a_degree_one_is_not():
         assert validate_app_config(manifest, {"uniform_hsv": bad}) != [], bad
 
 
+def test_a_colour_sampled_per_camera_validates_each_camera():
+    """Guard Scan samples the uniform colour per camera (lighting differs),
+    so the stored value is a map of ranges — each one held to the same
+    0-179 hue rule."""
+    manifest = {"params": [_param("uniform_hsv", "color.hsv_range", per_camera=True)]}
+    good = {"low": [95, 80, 60], "high": [115, 255, 255]}
+
+    assert validate_app_config(manifest, {"uniform_hsv": {"3": good, "4": {}}}) == []
+    assert validate_app_config(
+        manifest, {"uniform_hsv": {"3": good,
+                                   "4": {"low": [220, 80, 60], "high": [240, 255, 255]}}}) != []
+    # A single site-wide range is no longer the shape.
+    assert validate_app_config(manifest, {"uniform_hsv": good}) != []
+
+
 def _choice_param(name, type_name, choices, default=None):
     p = _param(name, type_name, default=default)
     p["choices"] = [{"value": v, "label": str(v)} for v in choices]

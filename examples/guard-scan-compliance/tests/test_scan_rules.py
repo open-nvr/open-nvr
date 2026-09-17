@@ -347,12 +347,9 @@ def test_the_procedure_is_assembled_from_the_fields_the_form_collects():
     whole = {"steps": [{"name": "back", "weight": 2.0}], "order_weight": 1.0}
     assert procedure({"procedure": whole, "required_surfaces": ["front"]}) is whole
 
-    # The picked colour wins over the two bare lists it replaced, and
-    # the old lists still work on an install that never re-picked.
-    assert uniform({"uniform_hsv": {"low": [1, 2, 3], "high": [4, 5, 6]},
-                    "uniform_hsv_low": [9, 9, 9]}) == ([1, 2, 3], [4, 5, 6])
-    assert uniform({"uniform_hsv_low": [1, 2, 3],
-                    "uniform_hsv_high": [4, 5, 6]}) == ([1, 2, 3], [4, 5, 6])
+    # This camera's sampled colour, or none.
+    assert uniform({"uniform_hsv": {"low": [1, 2, 3], "high": [4, 5, 6]}}) == ([1, 2, 3], [4, 5, 6])
+    assert uniform({"uniform_hsv": None}) == ([], [])
     assert uniform({}) == ([], [])
 
 
