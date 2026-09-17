@@ -74,7 +74,7 @@ There are no shipped default credentials. First boot prints a one-time setup tok
 
 Two independent default-deny gates govern what crosses the network boundary. `DEPLOYMENT_MODE=offline` is the default — cloud routes return HTTP 403 unless the operator explicitly switches it to `hybrid` or `cloud`, and that switch is audit-logged at boot. `AI_SOVEREIGNTY=local_only` is the default — adapters that declare `network_egress` are refused registration outright. Both gates fail closed, so a configuration error never silently widens the perimeter.
 
-End to end, every inference carries an `X-Correlation-Id` threading alert → middleware → adapter, model weights are fingerprinted with sha256 and polled for drift, and the resulting events land in an append-only log. The full threat model and control mapping are in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md); the architectural foundation is published in [Singh et al., 2025](https://doi.org/10.5281/zenodo.17261761).
+End to end, every inference carries an `X-Correlation-Id` threading alert → middleware → adapter, model weights are fingerprinted with sha256 and polled for drift, and the resulting events land in an append-only log. The full threat model and control mapping are in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md); the architectural foundation is published in [Singh et al., 2025](https://doi.org/10.5281/zenodo.22804254).
 
 ## Operator checklist
 

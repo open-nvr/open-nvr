@@ -2,7 +2,7 @@
 
 > **Reference paper.** Singh, V. P., Bhandari, S. R., Singh, A., Kushwaha, R., & Kaura, S. (2025).
 > *Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open Security Architecture.*
-> Zenodo. DOI [10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).
+> Zenodo. DOI [10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254).
 
 This document is the implementation companion to the paper above. It records (a) the
 threat model OpenNVR is defending against, (b) the architectural decisions that follow
@@ -259,7 +259,7 @@ operator can apply compensating controls:
 ## 7. Roadmap (paper §9 future work + this review)
 
 The vulnerability IDs (`V-001` … `V-022`) below cross-reference the systematic
-review in the [Zenodo paper](https://doi.org/10.5281/zenodo.17261761).
+review in the [Zenodo paper](https://doi.org/10.5281/zenodo.22804254).
 
 ### Shipped
 

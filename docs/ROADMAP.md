@@ -17,7 +17,7 @@ The current release. Everything below is in main and runnable today.
 
 ### Architecture & security
 - Three-tier offline-first deployment model (isolated camera network →
-  middleware gateway → analytics) — the [published paper's](https://doi.org/10.5281/zenodo.17261761)
+  middleware gateway → analytics) — the [published paper's](https://doi.org/10.5281/zenodo.22804254)
   reference implementation.
 - Strong-secret validator refuses to boot on placeholder credentials.
   One-time setup token for first-boot admin provisioning.
