@@ -191,7 +191,16 @@ directory for a home, a gated premises or an office:
   newest first. Click one, and *Enrol this person* turns that snapshot
   into a known face: no photo to go and find.
 * **Edit / Remove** — rename, move to another category, set or clear an
-  expiry, add a note, or re-enrol with a new photo.
+  expiry, add a note.
+* **More than one photo per person.** Each person holds a set of face
+  samples and a match is the best of them, so the porch camera's
+  evening, 30-degree view of Alice can sit beside her daytime selfie.
+  *Add a photo* on a person appends; the strangers wall offers *This
+  is…* so a capture the door missed becomes exactly the sample it
+  needed. Five samples from the door camera itself is where recognition
+  gets reliable; the adapter keeps up to 32 per person, oldest dropped
+  first. "Start over" on the editor replaces the set (a bad first
+  enrolment).
 
 Categories and what the door does with them: `family`, `resident`,
 `friend` are greeted (low); `staff`, `contractor`, `visitor` are noted

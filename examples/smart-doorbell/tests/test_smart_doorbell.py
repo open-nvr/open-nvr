@@ -670,3 +670,65 @@ def test_stranger_thumbnail_is_the_face_not_the_porch():
     # _unknown_read's bbox is 140x160 with half-face margins → roughly square,
     # nothing like the 16:9 frame.
     assert 0.7 < w / h < 1.4
+
+
+# ── Multi-photo enrolment ───────────────────────────────────────────
+
+
+def test_append_adds_a_photo_to_an_existing_person_without_touching_their_details(monkeypatch):
+    import base64 as _b64
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    img = _b64.b64encode(_real_jpeg(320, 320)).decode()
+    out = doorbell.on_action("enroll_face", {"person_id": "alice-rivera", "image": img, "append": True})
+    verb, kw = calls[0]
+    assert kw["append"] is True and kw["person_id"] == "alice-rivera"
+    assert kw["name"] == "" and kw["category"] == ""          # unchanged on the adapter side
+    assert kw["metadata"] == {}                                 # no blank notes, no new avatar
+    assert out["enrolled"]["appended"] is True
+    # Notes given on an append DO update; a bad date is still refused.
+    doorbell.on_action("enroll_face", {"person_id": "alice-rivera", "image": img, "append": True, "notes": "Flat 4B"})
+    assert calls[1][1]["metadata"] == {"notes": "Flat 4B"}
+    with pytest.raises(ValueError, match="person_id"):
+        doorbell.on_action("enroll_face", {"image": img, "append": True})
+
+
+def test_stranger_assigned_to_a_person_becomes_their_sample_and_leaves_the_wall(monkeypatch):
+    calls: list = []
+    doorbell, _, _ = _build_doorbell([_unknown_read(), _unknown_read()])
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+    doorbell.config.dedup_window_seconds = 0
+    doorbell.step(); doorbell.step()
+    wall = doorbell.state_snapshot()["stranger_gallery"]
+    assert len(wall) == 2
+    sid = wall[0]["id"]
+
+    class _FakeAdmin:
+        def register(self, **kw):
+            calls.append(kw); return {"ok": True, "face": {"name": "Alice Rivera", "category": "family", "samples": 3, "metadata": {}}}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+
+    out = doorbell.on_action("enroll_stranger", {"stranger_id": sid, "person_id": "alice-rivera"})
+    assert calls[0]["append"] is True and calls[0]["person_id"] == "alice-rivera"
+    assert out["enrolled"]["name"] == "Alice Rivera" and out["enrolled"]["samples"] == 3
+    remaining = doorbell.state_snapshot()["stranger_gallery"]
+    assert [g["id"] for g in remaining] == [wall[1]["id"]]       # the assigned capture is gone
+    with pytest.raises(KeyError):
+        doorbell.on_action("stranger_image", {"stranger_id": sid})
+
+
+def test_list_faces_reports_sample_counts(monkeypatch):
+    doorbell, _, _ = _build_doorbell([])
+
+    class _FakeAdmin:
+        def list_faces(self, category=None):
+            return {"faces": [{"person_id": "a", "name": "A", "category": "family", "samples": 4},
+                              {"person_id": "b", "name": "B", "category": "staff"}]}   # older adapter
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+    rows = doorbell.on_action("list_faces", {})["results"]
+    assert [r["samples"] for r in rows] == [4, 1]
