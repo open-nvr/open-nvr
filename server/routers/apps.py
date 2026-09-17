@@ -1205,11 +1205,18 @@ async def get_app_cameras(
     manage the camera, which is the rule for changing a pick; ``can_manage``
     says so per camera so the picker can disable what the user can't
     change instead of failing on click.
+
+    Each camera also carries what the picker shows beside it:
+    ``live_online`` (off the in-memory status tracker; ``None`` = paused
+    or not known yet) and ``used_by`` — the names of the OTHER installed
+    apps that picked it, so "will this clash?" is answered on the tile
+    (it never does: any number of apps may pick one camera).
     """
-    from models import Camera
+    from models import Camera, SkillAssignment
     from services.camera_scope import manageable_camera_ids, visible_camera_ids
+    from services.camera_status_service import get_camera_status_service
     from services.skill_assignments import (
-        app_consumer, app_pick_skill, picked_camera_ids,
+        APP_CONSUMER_PREFIX, app_consumer, app_pick_skill, picked_camera_ids,
     )
 
     row = _get_app_or_404(db, app_id)
@@ -1220,6 +1227,25 @@ async def get_app_cameras(
     query = db.query(Camera).filter(Camera.deleted_at.is_(None))
     if visible is not None:
         query = query.filter(Camera.id.in_(visible or {-1}))
+    rows = query.order_by(Camera.name, Camera.id).all()
+    ids = [cam.id for cam in rows]
+
+    # One grouped read each, never per camera.
+    live = get_camera_status_service().snapshot(ids) if ids else {}
+    app_names = {a.id: a.name for a in db.query(InstalledApp.id, InstalledApp.name).all()}
+    used_by: dict[int, set[str]] = {}
+    if ids:
+        for camera_id, consumer in (
+            db.query(SkillAssignment.camera_id, SkillAssignment.consumer)
+            .filter(SkillAssignment.camera_id.in_(ids),
+                    SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                    SkillAssignment.consumer != app_consumer(row.id))
+            .all()
+        ):
+            other = consumer[len(APP_CONSUMER_PREFIX):]
+            if other in app_names:
+                used_by.setdefault(camera_id, set()).add(app_names[other] or other)
+
     cameras = [
         {
             "id": cam.id,
@@ -1227,10 +1253,12 @@ async def get_app_cameras(
             "name": cam.name,
             "location": cam.location,
             "is_active": bool(cam.is_active),
+            "live_online": live.get(cam.id) if cam.is_active else None,
             "picked": cam.id in picked,
             "can_manage": manageable is None or cam.id in manageable,
+            "used_by": sorted(used_by.get(cam.id, ())),
         }
-        for cam in query.order_by(Camera.name, Camera.id).all()
+        for cam in rows
     ]
     return {
         "app_id": row.id,

@@ -258,6 +258,18 @@ def test_the_picker_lists_every_camera_and_what_is_picked(world):
     assert all(c["can_manage"] for c in body["cameras"])
 
 
+def test_the_picker_says_which_other_apps_use_a_camera(world):
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "guard-scan-compliance", ids["gate"])
+    _pick(Session, "occupancy-counting", ids["gate"])
+    body = tc.get("/apps/guard-scan-compliance/cameras").json()
+    by_id = {c["id"]: c for c in body["cameras"]}
+    # Other apps only — never the app whose picker this is.
+    assert by_id[ids["gate"]]["used_by"] == [_manifest("occupancy-counting")["name"]]
+    assert by_id[ids["yard"]]["used_by"] == []
+    assert "live_online" in by_id[ids["gate"]]
+
+
 def test_a_non_admin_sees_only_their_cameras_and_manages_fewer(world):
     tc, ids = world["tc"], world["ids"]
     world["who"]["user"] = world["viewer"]

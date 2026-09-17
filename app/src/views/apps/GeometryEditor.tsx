@@ -21,7 +21,7 @@ import { apiService } from '../../lib/apiService'
 import { displayAspect } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { Button } from '../../components/ui'
-import { usePickedCameraIds } from './CameraPicker'
+import { cameraLabel, usePickedCameraIds } from './CameraPicker'
 
 type Pt = [number, number]
 type Dir = 'both' | 'a_to_b' | 'b_to_a'
@@ -226,7 +226,7 @@ export function GeometryEditor({
           >
             {cameras.map((c) => (
               <option key={String(c.id)} value={String(c.id)}>
-                {c.name ? `${c.name} (#${c.id})` : `#${c.id}`}
+                {cameraLabel(c, cameras)}
                 {perCam[String(c.id)] ? ' ✓' : ''}
               </option>
             ))}

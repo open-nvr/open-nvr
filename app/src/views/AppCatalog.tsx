@@ -22,7 +22,7 @@
 // model is present before enabling. Config forms are generated from the
 // manifest param schema — no app-specific UI code.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, ArrowDownWideNarrow, ArrowLeft, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
@@ -39,6 +39,7 @@ import { ColorRangeEditor } from './apps/ColorRangeEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
 import {
   AppCameraScope,
+  type CameraSetupItem,
   CameraPicker,
   appCamerasKey,
   savePicks,
@@ -655,6 +656,29 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   useEffect(() => {
     if (draftPicks === null && picksQuery.data) setDraftPicks(savedPicks(picksQuery.data))
   }, [draftPicks, picksQuery.data])
+  // What is drawn on each camera, read from this form's own per-camera
+  // geometry fields (live, so a zone drawn below ticks its card above).
+  // "Not drawn" is information, not an error: most apps treat no zone as
+  // the whole frame.
+  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] => {
+    const out: CameraSetupItem[] = []
+    for (const p of params) {
+      if (!p.per_camera || !(p.type || '').toLowerCase().startsWith('geometry.')) continue
+      let perCam: Record<string, any> = {}
+      try {
+        const parsed = JSON.parse(String(values[p.name] ?? '') || '{}')
+        if (parsed && typeof parsed === 'object') perCam = parsed
+      } catch {
+        // Half-typed JSON in the field: say nothing rather than guess.
+      }
+      const v = perCam[String(cameraId)] ?? perCam[`cam${cameraId}`]
+      const done = Array.isArray(v) ? v.length > 0 : !!(v && typeof v === 'object')
+      const label = p.name === 'roi' ? 'ROI'
+        : p.name.charAt(0).toUpperCase() + p.name.slice(1).replace(/_/g, ' ')
+      out.push({ label, done })
+    }
+    return out
+  }, [params, values])
   // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
   // Vehicles page), shown read-only in the picker so unpicking one is a
   // decision rather than an accident.
@@ -794,13 +818,15 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         <section className="mb-5">
           <h3 className="mb-1 text-sm font-semibold">Cameras</h3>
           <p className="mb-2 text-xs text-[var(--text-dim)]">
-            The cameras this app works on. Any camera can be used by several apps.
+            The cameras {app.name} watches. A camera can be used by several apps.
           </p>
           <CameraPicker
+            appName={app.name}
             query={picksQuery}
             draft={draftPicks}
             onChange={setDraftPicks}
             cameraRoles={cameraRoles}
+            setup={cameraSetup}
           />
         </section>
       )}

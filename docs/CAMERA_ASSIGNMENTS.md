@@ -30,20 +30,27 @@ one.
 
 ## How to select cameras for an app
 
-App Catalog → the app → **Configure** → **Cameras**. Tick the cameras the
-app should work on and press **Save**; Cancel discards the ticks. The
-running app picks the change up within a few seconds, with no restart.
-Deselecting a camera mid-screening drops the half-watched screening rather
+App Catalog → the app → **Configure** → **Cameras** → **Select cameras**.
+The dialog shows every camera as a thumbnail, grouped by location, with
+search, an *Online only* filter and *Select all* per location; a camera
+another app already uses says so (that is fine — apps share cameras).
+Press **Done**, then **Save**; Cancel discards the change. The running
+app picks it up within a few seconds, with no restart.
+
+The Cameras section then lists just this app's cameras, each with its
+picture, whether it is online, and which of its zones or lines are drawn
+yet. The ✕ on a card removes that camera (again, on Save).
+Removing a camera mid-screening drops the half-watched screening rather
 than reporting it as incomplete.
 
-* You need permission to **manage** a camera to select or deselect it for
-  an app; cameras you can't manage are shown but can't be ticked.
+* You need permission to **manage** a camera to add it to or remove it from
+  an app; cameras you can't manage are shown locked, with the reason.
 * Zones, tripwires and ROIs are drawn in the same form, and the zone
   editors only offer the selected cameras. A zone on a camera the app
   doesn't use would never apply.
 * For **ANPR**, giving a camera a gate role on the **Vehicles** page
   selects it too. The Cameras section shows those roles, and warns before
-  you deselect a camera that has one.
+  you remove a camera that has one.
 * **Uninstalling an app releases its selected cameras.**
 
 Some apps have no camera selection, because they read no camera data of

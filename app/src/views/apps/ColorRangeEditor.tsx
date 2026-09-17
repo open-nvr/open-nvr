@@ -21,7 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
-import { usePickedCameraIds } from './CameraPicker'
+import { cameraLabel, usePickedCameraIds } from './CameraPicker'
 
 type Camera = { id: number; name: string }
 type Hsv = [number, number, number]
@@ -293,7 +293,7 @@ export function ColorRangeEditor({ value, onChange }: {
             className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
           >
             {cameras.map((c) => (
-              <option key={c.id} value={c.id}>{c.name} (#{c.id})</option>
+              <option key={c.id} value={c.id}>{cameraLabel(c, cameras)}</option>
             ))}
           </select>
         )}
