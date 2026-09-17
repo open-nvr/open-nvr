@@ -28,6 +28,7 @@ import {
 import { apiService } from '../../lib/apiService'
 import type Hls from 'hls.js'
 import { loadHls } from '../../lib/loadHls'
+import { resolveWhepSessionUrl } from '../../lib/streamUrl'
 import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
@@ -462,7 +463,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           throw new Error(`WHEP connection failed: ${resp.status}`)
         }
 
-        whepResourceRef.current = resp.headers.get('Location') || null
+        whepResourceRef.current = resolveWhepSessionUrl(resp.headers.get('Location'), whepUrl)
         const answerSdp = await resp.text()
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       } catch (e: any) {
