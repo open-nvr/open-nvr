@@ -1,152 +1,78 @@
-# Loitering-detection example app
+# Loitering Detection
 
-The second first-party OpenNVR monitoring app, paired with `intrusion-detection` to demonstrate **two complementary monitoring patterns**: drive-vs-subscribe.
+Alerts when a tracked person or vehicle stays inside a drawn zone longer
+than a dwell threshold — the ATM vestibule after hours, the fire exit,
+the loading bay, the forecourt, the stairwell. Escalates if they remain,
+alerts sooner after hours, flags gatherings, and keeps dwell history so
+the **Loitering** page can show today by the hour and the last week by
+the day.
 
-| Pattern | This app | `intrusion-detection` |
+It rides the detection stream the platform already produces (Tier-0):
+no extra model, no GPU.
+
+## What you get
+
+| | |
+|---|---|
+| **Per-object stays** | Dwell is measured per tracked object. Two people taking turns at a door are two stays; one person who leaves and comes back after the grace period is a new stay. |
+| **Staged alerts** | `threshold_seconds` raises the `loitering` alert; `escalate_after_seconds` later, if they are still there, `loitering-escalated` one severity step higher. Each stay alerts once per stage. |
+| **Time of day** | `active_hours` is when alerts fire. Outside it the app is quiet — or, with `after_hours_threshold_seconds`, alerts sooner (a back door at 02:00 is a stronger signal than at 14:00). Stays are counted all day either way. |
+| **Gatherings** | `group_size` + `group_seconds`: a `gathering` alert when that many watched objects dwell together. |
+| **Noise controls** | `grace_period_seconds` absorbs detector gaps inside a stay; `min_bbox_height` drops far traffic and birds; `alert_cooldown_seconds` turns a burst into one alert per camera; **Dismiss** on the Loitering page marks a current dweller as known so their stay raises nothing more. |
+| **Evidence** | Every alert carries a snapshot from the camera, the track id, the dwell, the threshold that applied, the zone, and the model fingerprint. |
+| **History** | Finished stays are published as dwell on the platform's footfall history (`occupancy.footfall.v1`, dwell fields only), which core keeps per camera-hour for 90 days. |
+| **Dashboard** | Who is dwelling now with a progress bar toward the threshold, per-camera stays / alerts / longest / average today, a 24-hour strip, a dwell-length histogram, recent stays, and the app's alarms with their snapshots. |
+
+## Install
+
+Pick the app in the installer, or:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile loitering-detection up -d
+```
+
+Then **App Catalog → Loitering Detection → Configure**: tick the cameras,
+draw a zone on each (nothing drawn = the whole frame, and the page says
+so), set the threshold, save. Everything applies live; nothing restarts.
+The **Loitering** page appears under Applications as soon as the app is
+enabled.
+
+## Tuning
+
+Start with the threshold that matches the place, then watch the
+dwell-length histogram on the Loitering page for a day before tightening.
+
+| Place | `threshold_seconds` | Notes |
 |---|---|---|
-| **How it gets results** | Subscribes to KAI-C's NATS broadcast | Drives KAI-C directly (HTTP poll or WS stream) |
-| **GPU cost on top of other apps** | Zero — rides existing inference | Pays per-app inference cost |
-| **Detects** | Watched-label entity loitering in zone > threshold | Watched-label entity present in zone during restricted hours |
-| **Predicate** | Dwell time (state machine) | Point-in-polygon × time window |
-| **Use when** | You want to consume what another app drove | You want to control which cameras get inferenced |
+| Fire exit, loading bay, forecourt | 30–60 | Nobody should be there long. Add `after_hours_threshold_seconds: 15`. |
+| Shop front, ATM vestibule | 90–180 | Browsing is normal; sleeping is not. Escalate after 300. |
+| Lobby, waiting area, platform | 300–600 | Long stays are the point of the place; alert only on the outliers. |
+| Car park (vehicles) | 600+ | Watch `car`/`truck`; raise `grace_period_seconds` — parked cars drop out of detection. |
 
-In a real deployment you'd run BOTH: `intrusion-detection` polls/streams YOLOv8 on cameras you care about, and one or more `loitering-detection` processes (or other subscribers — your dashboard, Slack bot, etc.) ride the same inference stream without doubling adapter GPU load.
+Two people who should not both be there: `group_size: 2`,
+`group_seconds: 30` on the zone at the shutter.
 
-## What it does
+## How it decides
 
-```
-KAI-C  ───publishes──→  NATS broker  ───broadcasts──→  loitering-detection
-                       (opennvr.inference.*)            (this app)
-                                                              │
-                                                              ▼
-                                                  ┌──────────────────────┐
-                                                  │ filter watch_labels  │
-                                                  │ → bbox_center        │
-                                                  │ → zone.contains?     │
-                                                  │ → update dwell state │
-                                                  │   per (camera, label)│
-                                                  └──────────┬───────────┘
-                                                             │ dwell ≥ threshold
-                                                             ▼
-                                                  ┌──────────────────────┐
-                                                  │  AlertDispatcher     │  stdout (always)
-                                                  │                      │  + webhook (optional)
-                                                  │                      │  + NATS (optional)
-                                                  └──────────────────────┘
-```
+Per `(camera, track_id)` the app keeps a stay: when the object's box
+centre first sat inside the zone, and when it was last seen there. A
+detection gap up to `grace_period_seconds` keeps the stay; longer, and
+the stay is finished (counted, histogrammed, published) and the next
+sighting starts a new one. Alert stages latch per stay, so one person
+produces at most one `loitering` and one `loitering-escalated`.
 
-Each alert carries:
-- `correlation_id` — joins back through KAI-C's audit log
-- `evidence.adapter` / `adapter_version` — which model produced the detection
-- `evidence.model_fingerprint` — §11.3 drift-detection verification
-- `evidence.dwell_seconds` / `threshold_seconds` — how long the entity was there
+Identity is what makes this well-defined, so the stock config consumes
+Tier-0 (`consume_tier0: true`, subject `opennvr.inference.tier0.>`),
+which tracks. Without a `track_id` the app degrades to one stay per
+`(camera, label)` with a one-time warning.
 
-**Alert fan-out via NATS**: set `nats_alerts_url` in `config.yml` to publish each alert as JSON onto `opennvr.alerts.app.loitering-detection.{camera_id}`. Downstream consumers — the operator UI inbox, SIEM bridges, Slack bots — subscribe to wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme.
-
-## State machine
-
-For each `(camera_id, watched_label)` pair:
-
-```
-                    ┌─────────────────────────────────────────────────┐
-                    │                                                 │
-                    ▼                                                 │
-              [no state] ──first in-zone frame──→ [tracking]          │
-                                                       │              │
-                                                       │ in-zone      │
-                                                       │ frame        │
-                                                       │ (refresh     │
-                                                       │  last_seen)  │
-                                                       │              │
-                                                       ▼              │
-                                                  dwell≥threshold     │
-                                                       │              │
-                                                       │ fire alert,  │
-                                                       │ mark alerted │
-                                                       │              │
-                                                       ▼              │
-                                                  [alerted]           │
-                                                       │              │
-                                                       │ absent       │
-                                                       │ frames for   │
-                                                       │ > grace      │
-                                                       │ period       │
-                                                       │              │
-                                                       ▼              │
-                                                  [GC]────────────────┘
-```
-
-**Grace period semantics**: the state for a (camera, label) pair is reset only when an event ARRIVES for that camera in which the label is absent AND the gap since the label was last seen exceeds `grace_period_seconds`. So:
-
-- **Gap-based**, not "cumulative ticks": the comparison is `event_ts - state.last_seen > grace_period`. Whether 2 or 20 absent frames span that gap is irrelevant.
-- **Driven by RECEIVED events**, not wall-clock: if no events arrive at all (broker down, adapter idle), no expiry fires. We treat absence-of-events as "we have no signal", not "absence."
-- **Absence has to be observed**: an event with the label NOT in the zone is what counts. An event that contains the label keeps refreshing `last_seen`.
-
-This is what makes `5s` grace work fine with 1 fps inference: a few missed detections (brief occlusion, false negatives) are absorbed; an actual departure with the person being absent in 5+ consecutive frames resets cleanly.
-
-## Quick start
+## Standalone
 
 ```bash
-cd examples/loitering-detection
-uv pip install -e ".[dev]"          # or: pip install -e ".[dev]"
-cp config.example.yml config.yml
-# Edit config.yml: nats_token, watch_labels, threshold_seconds, cameras
-python loitering_detection.py --config config.yml
+cp config.example.yml config.yml   # nats_url, cameras with pixel zones
+uv sync && uv run loitering-detection --config config.yml
+uv run pytest
 ```
 
-Output:
-
-```
-2026-05-21T14:32:18 INFO loitering-detection: loitering-detection started: 2 cameras, watch=['person'], threshold=60.0s, grace=5.0s, subject='opennvr.inference.>'
-ALERT [MEDIUM] 2026-05-21T14:33:24 camera=cam-back-shed title='Person loitering in zone 'shed-perimeter'' correlation_id=a4f1b… alert_id=alrt_e3d9af
-```
-
-## Operate
-
-| Mode | Command |
-|---|---|
-| Daemon (production) | `python loitering_detection.py --config config.yml` |
-| One event then exit (smoke test) | `python loitering_detection.py --config config.yml --once` |
-| Verbose | `python loitering_detection.py --config config.yml --log-level DEBUG` |
-
-`SIGINT` / `SIGTERM` drains the NATS connection and exits cleanly.
-
-## Tests
-
-```bash
-PYTHONPATH=. pytest tests/
-```
-
-15 tests. Coverage: state machine (single-frame, continuous-presence, threshold-crossing, post-alert quiescence, post-grace reset, per-label independence), config validation, correlation_id + fingerprint passthrough, defensive parsing of malformed events.
-
-## Layout
-
-```
-examples/loitering-detection/
-├── loitering_detection.py   Main loop + LoiteringDetector state machine + CLI
-├── zone.py                  Point-in-polygon (copied from intrusion-detection)
-├── alerts.py                Alert dataclass + stdout/webhook channels (copied)
-├── config.example.yml       Sample config
-├── pyproject.toml           Minimal deps (nats-py, httpx, PyYAML)
-├── README.md                you are here
-└── tests/
-    └── test_loitering_detection.py  (15 tests)
-```
-
-## Why this is a template
-
-If you want to build a NEW monitoring app for OpenNVR — package detection, PPE compliance, fall detection, fire/smoke, abandoned object, queue-length monitoring — pick a starting point:
-
-| Template | Start here when… |
-|---|---|
-| `intrusion-detection/` | Your app needs to control inference cadence (poll rate, camera selection, restricted-hours logic). You don't mind paying KAI-C call cost per app. |
-| `loitering-detection/` | You want zero adapter-side cost. Your business logic is a function of inference results others are already driving. |
-
-Both share `zone.py` + `alerts.py` verbatim (copy-as-template, not shared library — community contributors have flagged dependency hell from shared util packages). Override `handle_event(event)` (loitering-style) or `step(camera)` (intrusion-style) for your predicate.
-
-## What's NOT in v1
-
-- **Per-track tracking** — current state is per-`(camera, label)`. A person leaving while a different one arrives within the grace period is counted as one continuous dwell. If your adapter emits `track_id` on each detection, a follow-up can swap to per-`(camera, label, track_id)` state.
-- **Per-camera threshold override** — single `threshold_seconds` applies to all watched cameras. Future config could allow per-camera overrides for "loading bay tolerates 5min" vs "doorway tolerates 30s."
-- **Dwell-extension alerts** — fires once at threshold-crossing; doesn't re-fire if the dwell continues to extend (e.g., separate alerts at threshold, 2× threshold, 3× threshold). Out of scope for v1; subclasses can override `handle_event`.
-- **Replay** — KAI-C's NATS broker is fire-and-forget. Events fired while no subscriber is listening are lost. Durable consumers and replay are planned for a future event-store release.
+`config.example.yml` documents every key. With `opennvr_url` set and no
+`cameras:` list, cameras and zones come from the App Catalog.

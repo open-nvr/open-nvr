@@ -67,6 +67,15 @@ export const APP_VERTICALS: AppVertical[] = [
     label: 'Tripwires',
   },
   {
+    capability: 'loitering',
+    to: '/loitering',
+    // Who is dwelling in a drawn zone right now and for how long, the
+    // stays and alarms per camera, and the dwell history. "Loitering"
+    // is the trade's word; the page is as much a dwell-time report as an
+    // alarm.
+    label: 'Loitering',
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and

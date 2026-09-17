@@ -133,6 +133,7 @@ export const NAV_PERMISSIONS = {
   // with the alert inbox, like screening records do.
   '/people': 'alerts.view',
   '/tripwires': 'live.view', // counts are camera history — same tier as live view
+  '/loitering': 'alerts.view', // dwellers now + alarms with snapshots — the alerts tier
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',

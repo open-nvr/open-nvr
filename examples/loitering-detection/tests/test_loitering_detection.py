@@ -1,479 +1,353 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""
-Pure-handler tests for the loitering-detection state machine.
-
-The NATS subscribe loop is exercised by the inference-listener
-example's tests; here we focus on the only piece this app uniquely
-contributes — the per-(camera, label) dwell state machine.
-"""
+"""Tests for the per-track dwell state machine, the alert policy, the
+dwell history, the operator actions and config parsing."""
 from __future__ import annotations
 
 import datetime as _dt
-from pathlib import Path
-from textwrap import dedent
 from typing import Any
 
 import pytest
 
-from alerts import Alert, AlertDispatcher
+import loitering_detection as ld
 from loitering_detection import (
     AppConfig,
     CameraWatch,
     LoiteringDetector,
     load_config,
 )
-from zone import Zone
+from opennvr_app_sdk.geometry import Zone
+
+BASE = 1_700_000_000.0
 
 
-# ── Helpers ────────────────────────────────────────────────────────
-
-
-def _make_event(
-    *,
-    camera_id: str,
-    completed_at: str,
-    label: str = "person",
-    in_zone: bool = True,
-    correlation_id: str = "corr-1",
-    adapter: str = "yolov8",
-) -> dict[str, Any]:
-    """Build a fake ``InferenceCompletedEvent`` body. The center
-    zone in the test config is [480, 270] - [1440, 810] on a
-    1920x1080 frame, so bbox=(0.45, 0.45, 0.1, 0.1) → center
-    (1000, 580) which IS in the center zone, and (0.05, 0.05, 0.1, 0.1)
-    → center (192, 108) which is NOT."""
-    if in_zone:
-        bbox = {"x": 0.45, "y": 0.45, "w": 0.1, "h": 0.1}
-    else:
-        bbox = {"x": 0.01, "y": 0.01, "w": 0.05, "h": 0.05}
-    return {
-        "correlation_id": correlation_id,
-        "adapter": adapter,
-        "adapter_version": "1.0.0",
-        "camera_id": camera_id,
-        "model_name": "yolov8n",
-        "model_version": "v1",
-        "model_fingerprint": "sha256:test",
-        "inference_ms": 12,
-        "completed_at": completed_at,
-        "result": {
-            "detections": [{
-                "label": label, "confidence": 0.9, "bbox": bbox,
-                "track_id": None, "attributes": {},
-            }],
-            "frame_dimensions": {"w": 1920, "h": 1080},
-        },
-    }
-
-
-def _ts(seconds_after_epoch_base: float, *, base: float = 1_700_000_000.0) -> str:
-    """ISO timestamp at ``base + seconds_after_epoch_base``. Lets
-    tests reason about dwell in real seconds."""
-    dt = _dt.datetime.fromtimestamp(base + seconds_after_epoch_base, _dt.timezone.utc)
+def _ts(seconds: float) -> str:
+    dt = _dt.datetime.fromtimestamp(BASE + seconds, _dt.timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
 
 
-class _RecorderChannel:
-    name = "recorder"
+def _event(*dets: dict[str, Any], camera_id: str = "cam1", at: float = 0.0) -> dict[str, Any]:
+    """An inference event. Each det is (track, in_zone, label, h)."""
+    out = []
+    for d in dets:
+        in_zone = d.get("in_zone", True)
+        bbox = ({"x": 0.45, "y": 0.45, "w": 0.1, "h": d.get("h", 0.1)} if in_zone
+                else {"x": 0.01, "y": 0.01, "w": 0.05, "h": d.get("h", 0.05)})
+        out.append({"label": d.get("label", "person"), "confidence": 0.9, "bbox": bbox,
+                    "track_id": d.get("track", "t1")})
+    return {"correlation_id": "corr-1", "adapter": "yolov8", "adapter_version": "1",
+            "camera_id": camera_id, "completed_at": _ts(at),
+            "result": {"detections": out}}
 
-    def __init__(self) -> None:
-        self.alerts: list[Alert] = []
 
-    def send(self, alert):
-        self.alerts.append(alert)
-        return True
+def _camera(camera_id: str = "cam1") -> CameraWatch:
+    zone = Zone.from_config("centre", [[480, 270], [1440, 270], [1440, 810], [480, 810]])
+    return CameraWatch(camera_id=camera_id, zone=zone, frame_width=1920, frame_height=1080)
 
 
-def _build_detector(
-    *,
-    threshold_seconds: float = 30.0,
-    grace_period_seconds: float = 5.0,
-    watch_labels: list[str] | None = None,
-) -> tuple[LoiteringDetector, _RecorderChannel]:
-    """Build a LoiteringDetector with one camera + center-zone config."""
-    zone = Zone.from_config("center", [[480, 270], [1440, 270], [1440, 810], [480, 810]])
-    camera = CameraWatch(
-        camera_id="cam-test",
-        zone=zone,
-        frame_width=1920,
-        frame_height=1080,
+def _config(*cameras: CameraWatch, **knobs) -> AppConfig:
+    cameras = cameras or (_camera(),)
+    return AppConfig(
+        nats_url="nats://x:4222", nats_token=None, subject_pattern="opennvr.inference.>",
+        watch_labels=["person"], threshold_seconds=knobs.pop("threshold_seconds", 10.0),
+        grace_period_seconds=knobs.pop("grace_period_seconds", 5.0),
+        cameras={c.camera_id: c for c in cameras}, webhook_url=None,
+        attach_snapshot=False, **knobs,
     )
-    config = AppConfig(
-        nats_url="nats://test:4222",
-        nats_token=None,
-        subject_pattern="opennvr.inference.>",
-        watch_labels=watch_labels or ["person", "car"],
-        threshold_seconds=threshold_seconds,
-        grace_period_seconds=grace_period_seconds,
-        cameras={"cam-test": camera},
-        webhook_url=None,
-    )
-    recorder = _RecorderChannel()
-    dispatcher = AlertDispatcher([recorder])
-    detector = LoiteringDetector(config, dispatcher)
-    return detector, recorder
 
 
-# ── State-machine tests ───────────────────────────────────────────
+class _NullDispatcher:
+    def fire(self, alert):  # noqa: ANN001
+        return {}
 
 
-def test_single_in_zone_event_does_not_fire():
-    """One frame inside the zone is not loitering — it's just being
-    there. No alert until threshold crossed."""
-    detector, recorder = _build_detector(threshold_seconds=30.0)
-    fired = detector.handle_event(_make_event(
-        camera_id="cam-test", completed_at=_ts(0),
-    ))
-    assert fired == []
-    assert recorder.alerts == []
+def _detector(cfg: AppConfig | None = None) -> LoiteringDetector:
+    return LoiteringDetector(cfg or _config(), _NullDispatcher())
 
 
-def test_continuous_presence_below_threshold_no_alert():
-    """Continuous presence (every 1s frame, person always in zone)
-    for less than threshold doesn't fire."""
-    detector, recorder = _build_detector(threshold_seconds=30.0, grace_period_seconds=5.0)
-    for t in range(0, 21):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t)))
-    assert recorder.alerts == []
+# ── Dwell per track ──────────────────────────────────────────────────
 
 
-def test_continuous_presence_crossing_threshold_fires_once():
-    """First frame where dwell ≥ threshold fires; subsequent frames
-    in the same episode don't re-fire."""
-    detector, recorder = _build_detector(threshold_seconds=30.0, grace_period_seconds=5.0)
-    # 1fps frames 0..29 with person always in zone
-    for t in range(0, 30):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t)))
-    # Threshold crossed at t=30
-    fired_at_30 = detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(30)))
-    assert len(fired_at_30) == 1
-    assert "person" in fired_at_30[0].title.lower()
-    assert "30" in fired_at_30[0].description or "30.0" in fired_at_30[0].description
-    # Subsequent frame at t=31 — same dwell episode, NO new alert
-    fired_at_31 = detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(31)))
-    assert fired_at_31 == []
-    assert len(recorder.alerts) == 1
+def test_no_alert_before_threshold():
+    d = _detector()
+    assert d.handle_event(_event({"track": "a"}, at=0)) == []
+    assert d.handle_event(_event({"track": "a"}, at=9)) == []
 
 
-def test_absence_beyond_grace_resets_dwell():
-    """Person enters, leaves, comes back. The 2nd arrival is a FRESH
-    dwell — must NOT count time from the 1st arrival. Models a
-    typical "two people walk through" not "one person stayed."
-
-    Encoded as: 1fps frames where in_zone toggles. ``in_zone=False``
-    frames are the absent signal — they're what triggers
-    ``_gc_absent_labels`` to reset state when the gap > grace_period.
-    """
-    detector, recorder = _build_detector(threshold_seconds=30.0, grace_period_seconds=5.0)
-    # First arrival, brief presence (t=0..2)
-    for t in (0, 1, 2):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t), in_zone=True))
-    # Absent frames (t=3..10) → state is GC'd after grace=5s elapses
-    for t in (3, 4, 5, 6, 7, 8, 9, 10):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t), in_zone=False))
-    # Fresh arrival starts at t=11
-    for t in range(11, 31):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t), in_zone=True))
-    # At t=31, the FRESH dwell is only 20s (11..31) — below threshold
-    fired = detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(31), in_zone=True))
-    assert fired == []
-    assert recorder.alerts == []
-
-
-def test_out_of_zone_detections_dont_count():
-    """Watched-label detections OUTSIDE the zone don't contribute
-    to the dwell timer for that camera."""
-    detector, recorder = _build_detector(threshold_seconds=10.0)
-    for t in (0, 5, 10, 15, 20, 25):
-        detector.handle_event(_make_event(
-            camera_id="cam-test", completed_at=_ts(t), in_zone=False,
-        ))
-    assert recorder.alerts == []
-
-
-def test_non_watched_label_doesnt_count():
-    """A 'bike' in the zone (not watched) doesn't trigger the
-    dwell timer."""
-    detector, recorder = _build_detector(
-        threshold_seconds=10.0, watch_labels=["person"],
-    )
-    for t in (0, 5, 10, 15):
-        detector.handle_event(_make_event(
-            camera_id="cam-test", completed_at=_ts(t), label="bike",
-        ))
-    assert recorder.alerts == []
-
-
-def test_unknown_camera_id_ignored():
-    """An event for a camera not in our config is silently dropped —
-    other monitoring apps may be watching it, but we're not."""
-    detector, recorder = _build_detector()
-    fired = detector.handle_event(_make_event(
-        camera_id="cam-not-configured", completed_at=_ts(0),
-    ))
-    assert fired == []
-    assert recorder.alerts == []
-
-
-def test_per_label_state_is_independent():
-    """A person and a car loitering simultaneously fire SEPARATE
-    alerts — per-(camera, label) state, not per-camera."""
-    detector, recorder = _build_detector(
-        threshold_seconds=10.0, watch_labels=["person", "car"],
-    )
-    # Both labels present from t=0..10 at 1fps
-    for t in range(0, 11):
-        detector.handle_event(_make_event(
-            camera_id="cam-test", completed_at=_ts(t), label="person",
-        ))
-        detector.handle_event(_make_event(
-            camera_id="cam-test", completed_at=_ts(t), label="car",
-        ))
-    # Two alerts — one per label, both fired at the t=10 frame
-    assert len(recorder.alerts) == 2
-    labels_in_alerts = sorted(a.tags[-1] for a in recorder.alerts)
-    assert labels_in_alerts == ["car", "person"]
-
-
-def test_alert_carries_correlation_id_from_event():
-    """The alert must reference the same correlation_id KAI-C
-    audited, so an operator investigating an alert can find it
-    in the audit chain."""
-    detector, recorder = _build_detector(threshold_seconds=10.0, grace_period_seconds=5.0)
-    # 1fps presence frames; the threshold-crossing event carries
-    # the correlation_id we'll match against.
-    for t in range(0, 10):
-        detector.handle_event(_make_event(
-            camera_id="cam-test", completed_at=_ts(t),
-            correlation_id="my-trace-id",
-        ))
-    fired = detector.handle_event(_make_event(
-        camera_id="cam-test", completed_at=_ts(10),
-        correlation_id="my-trace-id",
-    ))
+def test_alert_once_at_threshold_per_track():
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    fired = d.handle_event(_event({"track": "a"}, at=10))
     assert len(fired) == 1
-    assert fired[0].correlation_id == "my-trace-id"
+    assert fired[0].alert_type == "loitering"
+    assert fired[0].evidence["track_id"] == "a"
+    assert fired[0].evidence["dwell_seconds"] == 10.0
+    assert d.handle_event(_event({"track": "a"}, at=20)) == []   # latched
 
 
-def test_alert_evidence_includes_model_fingerprint():
-    """For §11.3 audit-chain joining, the alert's evidence body
-    must include the model_fingerprint from the event so an
-    operator can verify the inference was produced by the
-    expected weights."""
-    detector, recorder = _build_detector(threshold_seconds=10.0, grace_period_seconds=5.0)
-    for t in range(0, 11):
-        detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(t)))
-    assert len(recorder.alerts) == 1
-    assert recorder.alerts[0].evidence["model_fingerprint"] == "sha256:test"
-    assert recorder.alerts[0].evidence["adapter"] == "yolov8"
+def test_two_tracks_are_two_stays():
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, {"track": "b"}, at=6))
+    assert len(d.handle_event(_event({"track": "a"}, {"track": "b"}, at=10))) == 1   # only a
+    assert len(d.handle_event(_event({"track": "a"}, {"track": "b"}, at=16))) == 1   # now b
 
 
-def test_malformed_event_does_not_crash():
-    """Defense in depth — a non-dict, missing fields, or weird types
-    should not crash the handler. The detector is a long-lived
-    process; one bad event shouldn't take it down."""
-    detector, recorder = _build_detector()
-    # None / non-dict
-    assert detector.handle_event(None) == []  # type: ignore[arg-type]
-    assert detector.handle_event("not a dict") == []  # type: ignore[arg-type]
-    # Missing camera_id
-    assert detector.handle_event({"result": {"detections": []}}) == []
-    # Missing result
-    assert detector.handle_event({"camera_id": "cam-test"}) == []
-    # Detections is not a list
-    assert detector.handle_event({
-        "camera_id": "cam-test",
-        "completed_at": _ts(0),
-        "result": {"detections": "not a list"},
-    }) == []
-    assert recorder.alerts == []
+def test_out_of_zone_is_not_a_stay():
+    d = _detector()
+    d.handle_event(_event({"track": "a", "in_zone": False}, at=0))
+    assert d.handle_event(_event({"track": "a", "in_zone": False}, at=30)) == []
+    assert d.state_snapshot()["dwelling_now"] == 0
 
 
-# ── Config tests ──────────────────────────────────────────────────
+def test_gap_within_grace_keeps_the_stay():
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event(camera_id="cam1", at=3))            # nobody in frame for 3 s
+    fired = d.handle_event(_event({"track": "a"}, at=10))
+    assert len(fired) == 1 and fired[0].evidence["dwell_seconds"] == 10.0
 
 
-def test_load_config_minimal(tmp_path: Path):
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 60
-        grace_period_seconds: 5
-        cameras:
-          - camera_id: "c1"
-            zone_name: "Z1"
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-    """))
-    c = load_config(str(cfg))
-    assert c.nats_url == "nats://nats:4222"
-    assert c.threshold_seconds == 60
-    assert c.grace_period_seconds == 5
-    assert "c1" in c.cameras
-    assert c.cameras["c1"].zone.name == "Z1"
+def test_gap_beyond_grace_ends_the_stay_and_starts_a_new_one():
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, at=4))
+    d.handle_event(_event(camera_id="cam1", at=20))           # gone > 5 s → stay over
+    snap = d.state_snapshot()
+    assert snap["dwelling_now"] == 0
+    assert snap["today"]["stays"] == 1 and snap["today"]["longest_s"] == 4.0
+    d.handle_event(_event({"track": "a"}, at=21))            # back: fresh stay
+    assert d.handle_event(_event({"track": "a"}, at=29)) == []
+    assert len(d.handle_event(_event({"track": "a"}, at=31))) == 1
 
 
-def test_load_config_rejects_non_positive_threshold(tmp_path: Path):
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 0
-        cameras:
-          - camera_id: "c1"
-            zone_name: "Z1"
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-    """))
-    with pytest.raises(ValueError, match="threshold_seconds"):
-        load_config(str(cfg))
+def test_silent_camera_stays_are_swept_by_wall_clock():
+    """Tier-0 sends nothing for an empty frame, so the last dweller must
+    be ended by the sweep, not by a later event."""
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, at=8))
+    assert d.finish_stale(BASE + 10) == 0          # inside grace
+    assert d.finish_stale(BASE + 14) == 1          # 6 s silent > grace 5 s
+    snap = d.state_snapshot()
+    assert snap["dwelling_now"] == 0 and snap["today"]["stays"] == 1
+    assert snap["today"]["longest_s"] == 8.0
 
 
-def test_load_config_rejects_no_cameras(tmp_path: Path):
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 60
-        grace_period_seconds: 5
-    """))
-    with pytest.raises(ValueError, match="camera"):
-        load_config(str(cfg))
+def test_untracked_detections_fall_back_to_per_label():
+    d = _detector()
+    ev = _event({"track": None}, at=0)
+    ev["result"]["detections"][0]["track_id"] = None
+    d.handle_event(ev)
+    ev2 = _event({"track": None}, at=10)
+    ev2["result"]["detections"][0]["track_id"] = None
+    fired = d.handle_event(ev2)
+    assert len(fired) == 1 and fired[0].evidence["track_id"] == "label:person"
 
 
-def test_load_config_defaults_watch_labels(tmp_path: Path):
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 30
-        grace_period_seconds: 3
-        cameras:
-          - camera_id: "c1"
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-    """))
-    c = load_config(str(cfg))
-    assert c.watch_labels == ["person"]  # default
+def test_min_bbox_height_filters_small_objects():
+    d = _detector(_config(min_bbox_height=0.2))
+    d.handle_event(_event({"track": "a", "h": 0.1}, at=0))
+    assert d.handle_event(_event({"track": "a", "h": 0.1}, at=30)) == []
 
 
-def test_load_config_rejects_duplicate_camera_id(tmp_path: Path):
-    """Regression for peer-review H1: two camera entries with the
-    same id silently overwrote each other (second wins). Refuse at
-    validate time so operator intent isn't lost."""
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 30
-        grace_period_seconds: 5
-        cameras:
-          - camera_id: "shared"
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-          - camera_id: "shared"
-            zone: [[200,200],[300,200],[300,300],[200,300]]
-    """))
-    with pytest.raises(ValueError, match="duplicate"):
-        load_config(str(cfg))
+def test_unknown_camera_ignored():
+    d = _detector()
+    assert d.handle_event(_event({"track": "a"}, camera_id="cam9", at=0)) == []
+    assert d.handle_event(_event({"track": "a"}, camera_id="cam9", at=30)) == []
 
 
-def test_load_config_rejects_empty_watch_labels(tmp_path: Path):
-    """Regression for peer-review H2: an explicit empty
-    ``watch_labels: []`` previously produced a detector that
-    silently matched nothing. Refuse at validate time. Omitting
-    the key entirely still gives the ``['person']`` default."""
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 30
-        grace_period_seconds: 5
-        watch_labels: []
-        cameras:
-          - camera_id: "c1"
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-    """))
-    with pytest.raises(ValueError, match="watch_labels"):
-        load_config(str(cfg))
+# ── Alert policy ─────────────────────────────────────────────────────
 
 
-def test_load_config_rejects_zero_frame_width(tmp_path: Path):
-    """Regression for peer-review H3: frame_width/height ≤ 0 silently
-    bucketed every detection at (0,0) and missed every zone check.
-    Refuse rather than swallow."""
-    cfg = tmp_path / "config.yml"
-    cfg.write_text(dedent("""
-        nats_url: "nats://nats:4222"
-        threshold_seconds: 30
-        grace_period_seconds: 5
-        cameras:
-          - camera_id: "c1"
-            frame_width: 0
-            frame_height: 1080
-            zone: [[0,0],[100,0],[100,100],[0,100]]
-    """))
-    with pytest.raises(ValueError, match="frame_width"):
-        load_config(str(cfg))
+def test_escalation_fires_once_after_delay():
+    d = _detector(_config(escalate_after_seconds=20.0, alert_severity="medium"))
+    d.handle_event(_event({"track": "a"}, at=0))
+    first = d.handle_event(_event({"track": "a"}, at=10))
+    assert first[0].severity == "medium"
+    assert d.handle_event(_event({"track": "a"}, at=25)) == []
+    esc = d.handle_event(_event({"track": "a"}, at=30))
+    assert len(esc) == 1 and esc[0].alert_type == "loitering-escalated" and esc[0].severity == "high"
+    assert d.handle_event(_event({"track": "a"}, at=60)) == []
 
 
-def test_handle_event_skips_out_of_order_events():
-    """Regression for peer-review M2: an event with ``completed_at``
-    older than the most recent one we've already processed must be
-    skipped — dwell math assumes monotonic time, and a backward jump
-    would silently corrupt state. NATS doesn't guarantee strict
-    ordering across publishers."""
-    detector, recorder = _build_detector(threshold_seconds=10.0, grace_period_seconds=5.0)
-    # Establish state at t=10
-    detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(10)))
-    state_after_t10 = detector._states[("cam-test", "person")]
-    last_seen_t10 = state_after_t10.last_seen
-    present_since_t10 = state_after_t10.present_since
-    # Out-of-order event at t=5 (older) — must be skipped, state unchanged
-    fired = detector.handle_event(_make_event(camera_id="cam-test", completed_at=_ts(5)))
-    assert fired == []
-    state_after_skip = detector._states[("cam-test", "person")]
-    assert state_after_skip.last_seen == last_seen_t10
-    assert state_after_skip.present_since == present_since_t10
-    assert recorder.alerts == []
+def test_cooldown_holds_back_second_first_stage_alert(monkeypatch):
+    d = _detector(_config(alert_cooldown_seconds=60.0))
+    now = [BASE]
+    monkeypatch.setattr(ld.time, "time", lambda: now[0])
+    d.handle_event(_event({"track": "a"}, at=0))
+    assert len(d.handle_event(_event({"track": "a"}, at=10))) == 1
+    d.handle_event(_event({"track": "b"}, at=11))
+    assert d.handle_event(_event({"track": "b"}, at=21)) == []      # inside cooldown
+    now[0] = BASE + 100
+    assert len(d.handle_event(_event({"track": "b"}, at=22))) == 1  # cooldown over
 
 
-# ── Connected: cameras picked in the catalog, zones drawn there ─────
+def test_outside_active_hours_is_quiet_but_still_counts(monkeypatch):
+    cfg = _config(active_hours=ld.ActiveHours(_dt.time(9, 0), _dt.time(17, 0)))
+    d = _detector(cfg)
+    monkeypatch.setattr(d, "_now_local", lambda: _dt.datetime(2026, 1, 1, 2, 0))
+    d.handle_event(_event({"track": "a"}, at=0))
+    assert d.handle_event(_event({"track": "a"}, at=30)) == []
+    d.handle_event(_event(camera_id="cam1", at=60))
+    assert d.state_snapshot()["today"]["stays"] == 1
+    assert d.state_snapshot()["alerts_active_now"] is False
 
 
-def _connected_detector(picked, **kw):
-    """A detector with NO YAML cameras, running as it does against core:
-    the config poll is live and has delivered picks."""
-    detector, recorder = _build_detector(threshold_seconds=10.0, **kw)
-    detector.cfg.cameras = {}
-    detector._config_poll_thread = object()
-    detector.picked_cameras = frozenset(picked)
-    return detector, recorder
+def test_after_hours_threshold_alerts_sooner(monkeypatch):
+    cfg = _config(active_hours=ld.ActiveHours(_dt.time(9, 0), _dt.time(17, 0)),
+                  after_hours_threshold_seconds=3.0)
+    d = _detector(cfg)
+    monkeypatch.setattr(d, "_now_local", lambda: _dt.datetime(2026, 1, 1, 2, 0))
+    d.handle_event(_event({"track": "a"}, at=0))
+    fired = d.handle_event(_event({"track": "a"}, at=3))
+    assert len(fired) == 1 and fired[0].evidence["threshold_seconds"] == 3.0
+    monkeypatch.setattr(d, "_now_local", lambda: _dt.datetime(2026, 1, 1, 12, 0))
+    d.handle_event(_event({"track": "b"}, at=10))
+    assert d.handle_event(_event({"track": "b"}, at=14)) == []      # daytime: 10 s applies
 
 
-def _dwell(detector, camera_id, *, in_zone=True):
-    fired = []
-    for t in (0, 5, 11):
-        fired += detector.handle_event(_make_event(
-            camera_id=camera_id, completed_at=_ts(t), in_zone=in_zone))
-    return fired
+def test_gathering_alert_once_per_group():
+    d = _detector(_config(group_size=2, group_seconds=5.0, threshold_seconds=100.0))
+    d.handle_event(_event({"track": "a"}, {"track": "b"}, at=0))
+    assert d.handle_event(_event({"track": "a"}, {"track": "b"}, at=4)) == []
+    fired = d.handle_event(_event({"track": "a"}, {"track": "b"}, at=6))
+    assert len(fired) == 1 and fired[0].alert_type == "gathering" and fired[0].evidence["count"] == 2
+    assert d.handle_event(_event({"track": "a"}, {"track": "b"}, at=8)) == []
+    d.handle_event(_event({"track": "a"}, at=9))                      # b left: group over
+    d.handle_event(_event({"track": "a"}, {"track": "c"}, at=10))
+    assert len(d.handle_event(_event({"track": "a"}, {"track": "c"}, at=16))) == 1
 
 
-def test_a_picked_camera_is_watched_with_no_yaml_entry():
-    """Nothing drawn yet: the whole frame is the zone."""
-    detector, _ = _connected_detector({3})
-    assert len(_dwell(detector, "cam3", in_zone=False)) == 1
+def test_dismissed_stay_raises_nothing():
+    d = _detector(_config(escalate_after_seconds=5.0))
+    d.handle_event(_event({"track": "a"}, at=0))
+    out = d.on_action("dismiss", {"camera": "cam1", "track": "a"})
+    assert out["ok"] is True
+    assert d.handle_event(_event({"track": "a"}, at=30)) == []
+    assert d.state_snapshot()["dwelling"][0]["stage"] == "dismissed"
+    with pytest.raises(KeyError):
+        d.on_action("dismiss", {"camera": "cam1", "track": "zzz"})
 
 
-def test_an_unpicked_camera_is_ignored():
-    detector, _ = _connected_detector({3})
-    assert _dwell(detector, "cam4") == []
+# ── Surfaces ─────────────────────────────────────────────────────────
 
 
-def test_the_zone_drawn_in_the_catalog_applies():
-    """Saved by the zone editor under the numeric id, in 0-1 coordinates."""
-    detector, _ = _connected_detector({3})
-    detector.on_config_update({"zones": {"3": [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]}})
-    assert _dwell(detector, "cam3", in_zone=False) == []
-    assert len(_dwell(detector, "cam3", in_zone=True)) == 1
+def test_state_snapshot_shape_and_progress(monkeypatch):
+    d = _detector()
+    monkeypatch.setattr(ld.time, "time", lambda: BASE + 5)
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, at=5))
+    snap = d.state_snapshot()
+    assert snap["dwelling_now"] == 1
+    row = snap["dwelling"][0]
+    assert row["camera"] == "cam1" and row["stage"] == "watching" and 0.4 <= row["progress"] <= 0.6
+    assert snap["per_camera"][0]["zone"] == "centre" and snap["per_camera"][0]["drawn"] is True
+    assert len(snap["hourly"]["cam1"]) == 24
+    assert "Loitering Detection" in d.ui_html()
 
 
-def test_config_needs_cameras_only_when_standalone(tmp_path):
+def test_finished_stays_feed_history_and_histogram(monkeypatch):
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, at=45))
+    d.handle_event(_event(camera_id="cam1", at=60))
+    snap = d.state_snapshot()
+    cam = snap["per_camera"][0]
+    assert cam["stays_today"] == 1 and cam["histogram"][1]["n"] == 1     # 30s–1m bucket
+    published = {}
+
+    class _Pub:
+        def publish(self, schema, *, camera_id, payload):
+            published[camera_id] = (schema, payload)
+            return True
+    d._publisher = _Pub()
+    assert d.flush_dwell() == 1
+    schema, payload = published["cam1"]
+    assert schema == "occupancy.footfall.v1"
+    assert payload["entries"] == 0 and payload["dwell_count"] == 1 and payload["dwell_max_seconds"] == 45.0
+    assert d.flush_dwell() == 0
+
+
+def test_reset_today_action():
+    d = _detector()
+    d.handle_event(_event({"track": "a"}, at=0))
+    d.handle_event(_event({"track": "a"}, at=10))
+    assert d.state_snapshot()["today"]["alerts"] == 1
+    d.on_action("reset_today", {})
+    assert d.state_snapshot()["today"]["alerts"] == 0
+
+
+# ── Live config and discovery ────────────────────────────────────────
+
+
+def test_config_update_applies_zone_labels_and_knobs():
+    d = _detector()
+    d.on_config_update({
+        "watch_labels": ["car"], "threshold_seconds": 3, "escalate_after_seconds": 7,
+        "zones": {"1": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2], [0.1, 0.2]]},
+        "active_hours": {"start": "22:00", "end": "06:00"},
+    })
+    assert d.cfg.watch_labels == ["car"] and d.cfg.threshold_seconds == 3.0
+    assert d.cfg.escalate_after_seconds == 7.0 and d.cfg.active_hours is not None
+    cam = d.cfg.cameras["cam1"]
+    assert cam.drawn and cam.zone.polygon[0].x == 192.0     # 0.1 × 1920
+    d.on_config_update({"zones": {}})
+    assert d.cfg.cameras["cam1"].drawn is False
+    assert d.state_snapshot()["needs_zone"] == ["cam1"]
+
+
+def test_refresh_cameras_follows_catalog_picks():
+    cfg = _config()
+    cfg.cameras = {}
+    cfg.auto_cameras = True
+    d = _detector(cfg)
+    added, removed = d.refresh_cameras([1, 3])
+    assert added == ["cam1", "cam3"] and removed == []
+    d.handle_event(_event({"track": "a"}, camera_id="cam3", at=0))
+    assert d.state_snapshot()["dwelling_now"] == 1
+    added, removed = d.refresh_cameras([1])
+    assert removed == ["cam3"] and d.state_snapshot()["dwelling_now"] == 0
+
+
+def test_load_config_standalone_and_catalog_zone(tmp_path):
+    import yaml
     p = tmp_path / "c.yml"
-    p.write_text('nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\n')
-    assert load_config(str(p)).cameras == {}
-    p.write_text('nats_url: "nats://x:4222"\n')
-    with pytest.raises(ValueError, match="at least one camera"):
+    p.write_text(yaml.safe_dump({
+        "nats_url": "nats://x", "threshold_seconds": 45, "escalate_after_seconds": 30,
+        "alert_severity": "high", "group_size": 3,
+        "cameras": [{"camera_id": "cam1", "frame_width": 1000, "frame_height": 800,
+                     "zone": [[0, 0], [10, 0], [10, 10]], "zone_name": "door"}],
+        "zones": {"cam1": [[0.2, 0.5], [0.8, 0.5], [0.8, 0.9]]},
+    }))
+    cfg = load_config(str(p))
+    assert cfg.threshold_seconds == 45.0 and cfg.escalate_after_seconds == 30.0
+    assert cfg.alert_severity == "high" and cfg.group_size == 3
+    zone = cfg.cameras["cam1"].zone
+    assert zone.name == "door" and (zone.polygon[0].x, zone.polygon[0].y) == (200.0, 400.0)
+
+
+def test_load_config_rejects_bad_values(tmp_path):
+    import yaml
+    p = tmp_path / "c.yml"
+    p.write_text(yaml.safe_dump({"nats_url": "nats://x", "threshold_seconds": 0,
+                                 "cameras": [{"camera_id": "cam1"}]}))
+    with pytest.raises(ValueError):
         load_config(str(p))
+    p.write_text(yaml.safe_dump({"nats_url": "nats://x", "alert_severity": "loud",
+                                 "cameras": [{"camera_id": "cam1"}]}))
+    with pytest.raises(ValueError):
+        load_config(str(p))
+    p.write_text(yaml.safe_dump({"nats_url": "nats://x"}))
+    with pytest.raises(ValueError):          # no cameras and no opennvr_url
+        load_config(str(p))
+
+
+def test_load_config_catalog_mode_needs_no_cameras(tmp_path):
+    import yaml
+    p = tmp_path / "c.yml"
+    p.write_text(yaml.safe_dump({"nats_url": "nats://x", "opennvr_url": "http://core",
+                                 "consume_tier0": True}))
+    cfg = load_config(str(p))
+    assert cfg.auto_cameras is True and cfg.consume_tier0 is True and cfg.cameras == {}

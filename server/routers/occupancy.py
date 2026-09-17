@@ -213,6 +213,8 @@ def occupancy_footfall(
             "t": hs.isoformat(),
             "entries": int(row.entries or 0),
             "exits": int(row.exits or 0),
+            "dwell_count": int(row.dwell_count or 0),
+            "dwell_max_seconds": round(float(row.dwell_max_seconds or 0.0), 1),
             "dwell_avg_seconds": round(float(row.dwell_seconds or 0.0)
                                        / row.dwell_count, 1)
             if row.dwell_count else None,
