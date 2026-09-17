@@ -26,7 +26,7 @@
 //    remounts against a fresh token instead of retrying a stale one.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Minimize2, PictureInPicture2, VideoOff } from 'lucide-react'
+import { CameraOff, Minimize2, PictureInPicture2, Settings2, VideoOff } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { useCameraStatus } from '../../hooks/useCameraStatus'
@@ -39,10 +39,20 @@ type Urls = { whep?: string; hls?: string; token?: string }
 const POS_KEY = 'opennvr.guardscan.livePos'
 
 export function LiveCameraPanel({
-  cameraId, cameraName, overlayEnabled, popped = false, onTogglePop,
+  cameraId, cameraName, cameras = [], onSelectCamera, emptyMessage, onPickCameras,
+  overlayEnabled, popped = false, onTogglePop,
 }: {
   cameraId: number | null
   cameraName: string
+  /** The cameras this panel may show — the app's picked cameras. With
+   *  more than one, the title becomes a switcher. */
+  cameras?: { id: number; name: string }[]
+  onSelectCamera?: (id: number) => void
+  /** Why there is nothing to show (e.g. no camera picked for the app),
+   *  in place of the generic prompt. */
+  emptyMessage?: string
+  /** Offered beside the empty message: opens the app's camera picks. */
+  onPickCameras?: () => void
   /** Whether an admin has let this app draw on live video. When it is
    *  off the picture is fine and the boxes simply never come, which
    *  looks broken unless somebody says so. */
@@ -162,9 +172,24 @@ export function LiveCameraPanel({
             popped ? 'cursor-move select-none' : ''}`}
           onPointerDown={startDrag}
         >
-          <h3 className="min-w-0 truncate text-xs font-semibold" title={cameraName}>
-            {cameraName || 'Entrance'}
-          </h3>
+          {cameras.length > 1 && onSelectCamera && cameraId != null ? (
+            <select
+              value={cameraId}
+              onChange={(e) => onSelectCamera(Number(e.target.value))}
+              aria-label="Camera to watch live"
+              title="Switch between the cameras selected for this app"
+              className="min-w-0 max-w-full truncate rounded border border-[var(--border)]
+                         bg-[var(--bg-2)] px-1.5 py-0.5 text-xs font-semibold"
+            >
+              {cameras.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          ) : (
+            <h3 className="min-w-0 truncate text-xs font-semibold" title={cameraName}>
+              {cameraName || 'Live'}
+            </h3>
+          )}
           {onTogglePop && (
             <button
               type="button"
@@ -186,7 +211,20 @@ export function LiveCameraPanel({
 
         <div className="min-h-[112px] flex-1 overflow-hidden rounded bg-black">
           {cameraId == null ? (
-            <Empty>Pick a camera to watch it live.</Empty>
+            <Empty>
+              {emptyMessage ? <CameraOff size={20} className="mb-1" /> : null}
+              {emptyMessage ?? 'Select a camera to watch it live.'}
+              {onPickCameras && (
+                <button
+                  type="button"
+                  onClick={onPickCameras}
+                  className="mt-2 inline-flex items-center gap-1 rounded border border-[var(--accent)]
+                             px-2 py-1 text-[11px] text-[var(--accent)] hover:bg-[var(--accent)]/10"
+                >
+                  <Settings2 size={12} /> Select cameras
+                </button>
+              )}
+            </Empty>
           ) : offline ? (
             <Empty><VideoOff size={20} className="mb-1" />This camera is offline.</Empty>
           ) : hasLink ? (

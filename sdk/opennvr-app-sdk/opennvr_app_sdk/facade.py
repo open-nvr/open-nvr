@@ -1211,7 +1211,12 @@ def _build_detector_class(owner: App, manifest: AppManifest) -> type[Detector]:
             for zone_name in owner._zones:
                 raw = getattr(self.cfg, zone_name, None)
                 if isinstance(raw, dict):
-                    vertices = raw.get(camera_id)
+                    # The geometry editor keys by numeric id ("3"); the
+                    # bus names the camera "cam3". Either spelling must
+                    # find the zone, or a drawn zone silently never applies.
+                    from .cameras import per_camera_value
+
+                    vertices = per_camera_value(raw, camera_id)
                 elif isinstance(raw, (list, tuple)):
                     vertices = raw
                 else:

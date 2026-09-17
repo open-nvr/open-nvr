@@ -168,6 +168,15 @@ def set_operator_assignments(
     8). Entries are the validated CameraAssignment dicts
     (``{"skill", "labels"?}``).
     """
+    named_apps = operator_rows_naming_apps(db, entries)
+    if named_apps:
+        raise ValueError(
+            "An app can't be assigned here — select cameras for "
+            + ", ".join(named_apps)
+            + " in that app's own configuration. Assignments only tune "
+            "platform detection (e.g. object_detection narrowed to labels, "
+            "or license_plate_recognition)."
+        )
     db.query(SkillAssignment).filter(
         SkillAssignment.camera_id == camera.id,
         SkillAssignment.consumer == OPERATOR_CONSUMER,
@@ -323,11 +332,145 @@ def camera_adopted(camera, skill: str) -> bool:
 def camera_eligible(camera, skill: str) -> bool:
     """May this skill be OFFERED this camera? The picker gate.
 
-    Open by default: a camera with no claims at all is fair game for
-    every skill, which is what "nothing assigned = no restriction
-    declared" has always meant in the editor. Once a camera declares
-    anything, that declaration is exhaustive — a camera assigned to
-    object detection stops appearing in the LPR picker.
+    Always yes. Every camera is available to every app, and any number
+    of apps may pick the same one — one inference stream feeding many
+    apps is what the platform is built for.
+
+    It used to answer "only if nothing else claimed it", which made
+    every claim exclusive: a camera narrowed to ``object_detection``
+    labels vanished from every app's picker, and one app's pick would
+    have hidden the camera from all the others. Kept as a function so
+    the rule stays named in one place rather than inlined as ``True``.
     """
-    claimed = camera_skills(camera)
-    return not claimed or skill.strip().lower() in claimed
+    return True
+
+
+# ── App picks ───────────────────────────────────────────────────────
+#
+# An app uses a camera because the app was POINTED at it, in the app's
+# own configuration — not because the camera page named it. A pick is an
+# ordinary claim with ``consumer="app:<app id>"`` and ``skill`` = the app
+# id with underscores, written through the same declare/release as every
+# other claim (the Vehicles page has always written ANPR's picks this
+# way). So:
+#
+#   * an app's roster is exactly its picks on live cameras — nothing
+#     picked, nothing read and nothing computed;
+#   * several apps may pick one camera (no exclusivity);
+#   * compute is unchanged: picks project into ``Camera.assignments``
+#     like any claim, so ANPR's picks (skill ``license_plate_recognition``)
+#     still switch plate OCR on through the existing gates.
+
+APP_CONSUMER_PREFIX = "app:"
+
+
+def app_consumer(app_id: str) -> str:
+    """The consumer a pick is stored under: ``app:<app id>``."""
+    return f"{APP_CONSUMER_PREFIX}{str(app_id).strip()}"
+
+
+def app_pick_skill(app_id: str) -> str:
+    """The skill a pick is stored under: the app id with underscores.
+
+    For ANPR that is ``license_plate_recognition`` — deliberately the
+    platform plate skill, so its picks keep turning plate OCR on."""
+    return str(app_id).strip().replace("-", "_")
+
+
+def picked_camera_ids(db: Session, app_id: str) -> set[int]:
+    """Live cameras this app picked. Empty = the app uses nothing."""
+    rows = (
+        db.query(SkillAssignment.camera_id)
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer == app_consumer(app_id),
+                Camera.deleted_at.is_(None))
+        .all()
+    )
+    return {int(r[0]) for r in rows}
+
+
+def apps_using_camera(db: Session, camera_id: int) -> list[str]:
+    """App ids that picked this camera, for the camera page's "Used by"."""
+    rows = (
+        db.query(SkillAssignment.consumer)
+        .filter(SkillAssignment.camera_id == camera_id,
+                SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"))
+        .all()
+    )
+    return sorted({r[0][len(APP_CONSUMER_PREFIX):] for r in rows})
+
+
+def release_app_picks(db: Session, app_id: str) -> int:
+    """Drop every pick an app holds and re-project those cameras (no
+    commit). Uninstall calls this: nothing should keep running for an
+    app that is gone."""
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    camera_ids = {row.camera_id for row in rows}
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    if camera_ids:
+        for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
+            project_camera(db, camera)
+    if rows:
+        logger.info("released %d camera pick(s) for app %s", len(rows), app_id)
+    return len(rows)
+
+
+_PLATFORM_TASKS: Optional[frozenset[str]] = None
+
+
+def platform_task_names() -> frozenset[str]:
+    """Every task name and alias in ``config/tasks.yml`` — the skills an
+    operator row on the camera page may legitimately carry, even when an
+    installed app happens to share the name (ANPR's id spelling is
+    ``license_plate_recognition``, which is also the plate OCR task)."""
+    global _PLATFORM_TASKS
+    if _PLATFORM_TASKS is None:
+        from pathlib import Path
+
+        import yaml
+
+        names: set[str] = set()
+        try:
+            path = Path(__file__).resolve().parents[1] / "config" / "tasks.yml"
+            for entry in yaml.safe_load(path.read_text(encoding="utf-8")) or []:
+                if isinstance(entry, dict) and entry.get("task"):
+                    names.add(str(entry["task"]).strip().lower())
+                    names.update(
+                        str(a).strip().lower() for a in entry.get("aliases") or [])
+        except Exception:  # noqa: BLE001
+            logger.warning("tasks.yml unreadable; no platform task names known",
+                           exc_info=True)
+        _PLATFORM_TASKS = frozenset(names)
+    return _PLATFORM_TASKS
+
+
+def operator_rows_naming_apps(db: Session, entries: list[dict]) -> list[str]:
+    """Installed apps that an operator assignment list names — which is
+    no longer allowed. Returns the apps' display names, sorted.
+
+    The camera page used to be how an app was pointed at a camera, which
+    is what made "which cameras does this app use" impossible to answer
+    from the app itself. A name that is also a platform task
+    (``license_plate_recognition``) is accepted: there it tunes compute.
+    """
+    wanted = {
+        str(e.get("skill") or "").strip().lower()
+        for e in entries or [] if isinstance(e, dict)
+    } - platform_task_names() - {""}
+    if not wanted:
+        return []
+    from models import InstalledApp
+    from services.app_keys import app_skills
+
+    named: set[str] = set()
+    for row in db.query(InstalledApp).all():
+        tokens = {str(t).strip().lower() for t in app_skills(row)}
+        if wanted & tokens:
+            named.add(str(row.name or row.id))
+    return sorted(named)

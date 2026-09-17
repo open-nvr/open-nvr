@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 
 from opennvr_app_sdk import (
     Alert, AlertType, AppManifest, BaseAppConfig, FrameApp, InferStream,
-    OpenNVR, Param, StateView, load_app_config,
+    OpenNVR, Param, StateView, camera_key, load_app_config,
 )
 from opennvr_app_sdk.alerts import AlertSource, build_dispatcher
 from opennvr_app_sdk.domain_events import DomainEventPublisher
@@ -328,9 +328,15 @@ class CameraWorker:
                                         name=f"scan-{self.handle}")
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, abandon: bool = False) -> None:
         """Stop this camera's worker, in an order that is safe to call
         from another thread.
+
+        ``abandon=True`` is for a camera the operator UNPICKED: we stop
+        watching mid-screening by choice, so rule only the screenings
+        that had already finished and drop the rest — ruling a scan we
+        walked away from as incomplete blames the guard for our decision
+        (it used to raise "Incomplete scan procedure" on every deselect).
 
         It always was called from another thread — `_reconcile_roster`
         runs on the tick thread, shutdown on the signal handler's — and
@@ -362,8 +368,11 @@ class CameraWorker:
                             "its screening in place", self.handle)
                 return
         if self.engine is not None:
-            # A restart is not a reason to lose the screening in progress.
-            self.engine.flush(time.time(), reason="left")
+            if abandon:
+                self.engine.abandon(time.time(), reason="deselected")
+            else:
+                # A restart is not a reason to lose the screening in progress.
+                self.engine.flush(time.time(), reason="left")
 
     # ── configuration ──
 
@@ -674,7 +683,7 @@ class GuardScanApp(FrameApp):
         self.screenings = 0
         self.compliant = 0
         self.recent: list[str] = []
-        self._per_camera: dict[str, dict] = {}
+        self._per_camera: dict[int, dict] = {}
         #: Monotonic-ish stamp of the last session-log sweep. 0.0 so the
         #: first screening after a boot sweeps, which is when a volume
         #: that filled while the app was down gets dealt with.
@@ -699,7 +708,10 @@ class GuardScanApp(FrameApp):
 
         merged = (asdict(self.config) if is_dataclass(self.config)
                   else dict(self.config or {}))
-        merged.update(self._per_camera.get(handle, {}))
+        # Keyed by camera id: the catalog's zone editor saves "3", the
+        # roster calls the same camera "cam3", and looking one up by the
+        # other found nothing — a drawn zone that silently never applied.
+        merged.update(self._per_camera.get(camera_key(handle), {}))
         return merged
 
     def on_config_update(self, config: dict) -> None:
@@ -726,12 +738,14 @@ class GuardScanApp(FrameApp):
         for key, value in (config or {}).items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
-        per_camera = {}
+        per_camera: dict[int, dict] = {}
         for key in ("scan_zone", "guard_post"):
             drawn = config.get(key)
             if isinstance(drawn, dict):
                 for handle, value in drawn.items():
-                    per_camera.setdefault(handle, {})[key] = value
+                    cam = camera_key(handle)
+                    if cam is not None:
+                        per_camera.setdefault(cam, {})[key] = value
         self._per_camera = per_camera
         self._retune_workers()
 
@@ -1004,8 +1018,8 @@ class GuardScanApp(FrameApp):
         """
         workers = self._workers()
         if not workers:
-            return ("No camera is assigned to this app — assign an "
-                    "entrance camera in the App Catalog.")
+            return ("No cameras selected — select the entrance camera in this "
+                    "app's configuration (App Catalog → Configure → Cameras).")
         down = [h for h, w in workers if w.inference_down]
         if len(down) == len(workers):
             return (f"Pose inference is failing on every camera — check the "
@@ -1019,15 +1033,20 @@ class GuardScanApp(FrameApp):
     # ── the FrameApp surface ──
 
     def setup(self) -> None:
-        """Start one worker per assigned camera.
+        """Start one worker per picked camera.
 
-        The roster is whatever the operator assigned this app in the
-        catalog — there is no camera list in the config, deliberately,
-        so adding a camera is a click rather than a file edit.
+        The cameras are the ones picked for this app in its own
+        configuration — there is no camera list in the config file,
+        deliberately, so adding a camera is a click rather than a file edit.
         """
         if not self._reconcile_roster():
-            log.warning("no cameras assigned to this app yet — assign an "
-                        "entrance camera in the App Catalog")
+            log.warning("no cameras selected for this app yet — select the "
+                        "entrance camera in its configuration")
+
+    def on_cameras_update(self, camera_ids) -> None:
+        """A pick changed in the catalog: follow it now rather than on the
+        next 30 s tick."""
+        self._reconcile_roster()
 
     def _workers(self) -> list[tuple[str, "CameraWorker"]]:
         """A stable list of (handle, worker) to iterate outside the lock.
@@ -1047,57 +1066,49 @@ class GuardScanApp(FrameApp):
         log.info("watching %s (%s)", cam.handle, cam.name)
 
     def _reconcile_roster(self) -> int:
-        """Make the running workers match the cameras assigned to this
-        app. Returns how many cameras are assigned.
+        """Make the running workers match the cameras picked for this app.
+        Returns how many cameras are picked (or running, when core can't
+        be asked).
 
-        This is re-checked on every tick, and that is the whole point.
-        It used to run once, inside ``setup()``, which is the ONE moment
-        a fresh install is guaranteed to have nothing assigned: the app
-        starts with the stack, the operator assigns the entrance camera
-        afterwards, and nothing ever looked again. The app sat polling
-        its config for as long as you left it, screening nobody, and the
-        operator had done everything right.
+        Re-checked on every tick and whenever the picks change, so picking
+        a camera in the catalog starts screening it without a restart.
 
-        Cameras are only ever ADDED on the strength of an empty answer.
-        ``NVR.cameras()`` returns ``[]`` both for "none assigned" and
-        for "core could not be reached", and those must not be treated
-        alike: tearing down a working site because core restarted, or
-        because of one bad response, would turn a blip into an outage.
-        So a removal needs positive evidence — a roster that came back
-        with cameras in it, and this one not among them.
+        Two answers must never be confused, and ``roster()`` keeps them
+        apart:
+
+        * ``None`` — core could not be asked. Keep every worker running: a
+          core restart or one bad response must not tear a working site
+          down.
+        * ``[]`` — nothing is picked. Stop every worker. Nothing picked
+          means this app does nothing and uses no compute, and an operator
+          unpicking the last camera is exactly that instruction.
         """
         try:
-            cameras = self.nvr.cameras()
+            cameras = self.nvr.roster()
         except Exception as exc:  # noqa: BLE001
-            log.warning("could not read the camera roster (%s) — keeping "
-                        "the %d already running", exc, len(self.workers))
+            cameras = None
+            log.warning("could not read the camera roster (%s)", exc)
+        if cameras is None:
+            if self.workers:
+                log.warning("camera roster unavailable — keeping the %d camera(s) "
+                            "already being screened", len(self.workers))
             return len(self.workers)
 
-        assigned = {c.handle: c for c in cameras}
-        for handle, cam in assigned.items():
+        picked = {c.handle: c for c in cameras}
+        for handle, cam in picked.items():
             if handle not in self.workers:
                 self._start_worker(cam)
-
-        if not assigned:
-            if self.workers:
-                # Ambiguous by construction, so say so and change
-                # nothing. An operator who really did unassign every
-                # camera can stop the app.
-                log.warning("the camera roster came back empty while %d "
-                            "worker(s) are running — leaving them alone; "
-                            "core may be unreachable", len(self.workers))
-            return 0
 
         # Pop under the lock, stop outside it: stop() joins the reader
         # thread, and holding the lock across a join would block /state
         # for as long as a wedged worker takes to notice.
         with self._workers_lock:
-            gone = [h for h in self.workers if h not in assigned]
+            gone = [h for h in self.workers if h not in picked]
             departed = [(h, self.workers.pop(h)) for h in gone]
         for handle, worker in departed:
-            log.info("%s is no longer assigned to this app — stopping", handle)
-            worker.stop()
-        return len(assigned)
+            log.info("%s is no longer selected for this app — stopping", handle)
+            worker.stop(abandon=True)
+        return len(picked)
 
     def on_frame(self, camera_id: str, frame_bytes: bytes):
         """Unused: the workers read frames themselves, at video rate."""

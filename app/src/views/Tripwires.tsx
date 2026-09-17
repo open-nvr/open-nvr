@@ -292,7 +292,7 @@ export function Tripwires() {
         <div className="rounded border border-[var(--warn)]/40 bg-[var(--warn)]/5 px-3 py-2 text-sm flex flex-wrap items-center gap-2">
           <PenLine size={14} className="text-[var(--warn)]" />
           <span>
-            {needsLine.length === 1 ? 'One camera is assigned but has no line yet:' : `${needsLine.length} cameras are assigned but have no line yet:`}{' '}
+            {needsLine.length === 1 ? 'One camera is selected but has no line yet:' : `${needsLine.length} cameras are selected but have no line yet:`}{' '}
             <b>{needsLine.map(cameraName).join(', ')}</b>. Nothing is counted there until one is drawn.
           </span>
           <Link to={`/app-catalog/${app.id}`} className="ml-auto text-[var(--accent)] underline">Draw it</Link>
@@ -305,8 +305,8 @@ export function Tripwires() {
       ) : rows.length === 0 ? (
         <EmptyState
           icon={<GitCommitHorizontal size={24} />}
-          title="No cameras assigned"
-          description="Give a camera the line_crossing assignment (Settings → Cameras → Assignments), then draw its line in the App Catalog. The app picks both up within minutes."
+          title="No cameras selected"
+          description="Select cameras for Line Crossing and draw each one's line (App Catalog → Line Crossing → Configure). The app starts counting within a few seconds."
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

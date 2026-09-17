@@ -200,6 +200,31 @@ def dict_frame_source(sources: Mapping[str, CameraFrameSource]) -> FrameSource:
     return DictFrameSource(sources)
 
 
+class CoreSnapshotSource:
+    """Frames from OpenNVR itself, for any camera picked for this app.
+
+    ``get_frame("cam3")`` fetches the camera's current JPEG through core's
+    app snapshot route, which serves only the app's own picks — so an app
+    connected to core needs no hand-written ``frame_url`` per camera, and
+    cannot read a camera it wasn't given. Returns ``None`` when core has no
+    frame (camera offline, not picked, core unreachable); the poll loop
+    simply skips that camera for the tick.
+    """
+
+    def __init__(self, nvr=None) -> None:
+        self._nvr = nvr
+
+    def _client(self):
+        if self._nvr is None:
+            from .client import OpenNVR
+
+            self._nvr = OpenNVR()
+        return self._nvr
+
+    def get_frame(self, camera_id: str) -> bytes | None:
+        return self._client().snapshot(camera_id)
+
+
 __all__ = [
     "FrameSourceError",
     "CameraFrameSource",
@@ -208,4 +233,5 @@ __all__ = [
     "build_frame_source",
     "DictFrameSource",
     "dict_frame_source",
+    "CoreSnapshotSource",
 ]

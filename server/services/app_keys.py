@@ -17,9 +17,9 @@ The model here:
   the secret half is what is hashed (SHA-256) and stored.
 * Presenting an app key authenticates AS THAT APP: it may read its own
   config and status, register itself again, and read the platform's
-  internal camera/event routes **for its own roster** — the cameras the
-  operator assigned it (``Camera.assignments[].skill == app id``), and
-  only those: an app pointed at nothing sees nothing
+  internal camera/event routes **for its own roster** — the cameras
+  picked for it in its own configuration (``app:<id>`` claims), and
+  only those: an app with nothing picked sees nothing
   (docs/CAMERA_ASSIGNMENTS.md). Never another app's config, never the
   detect-pipeline's write routes.
 * A superuser can rotate or revoke a key from the registry; the site
@@ -105,9 +105,13 @@ def resolve_app_key(db: Session, supplied: str | None):
 
 
 def app_skills(row) -> set[str]:
-    """The skill names an app answers to in ``Camera.assignments``: what
-    its manifest ``provides`` (``license_plate_recognition``) plus its id
-    in both spellings (``license-plate-recognition`` / ``_``)."""
+    """The names that identify an app as a skill: its manifest
+    ``provides`` plus its id in both spellings
+    (``license-plate-recognition`` / ``license_plate_recognition``).
+
+    No longer what an app's roster is built from (that is its picks).
+    Used to recognise an assignment row on the camera page that names an
+    app, which is refused."""
     manifest = row.manifest_json or {}
     skills = {str(s) for s in (manifest.get("provides") or []) if s}
     skills.add(row.id)
@@ -116,35 +120,19 @@ def app_skills(row) -> set[str]:
 
 
 def app_camera_ids(db: Session, row) -> set[int] | None:
-    """Cameras the operator assigned to this app (``assignments[].skill``
-    in :func:`app_skills`).
+    """The app's roster: the live cameras picked for it in its own
+    configuration (``app:<id>`` claims — see
+    ``services.skill_assignments.picked_camera_ids``).
 
-    Returns a SET — empty when nothing names this app, which scopes the
-    app to nothing. It used to return ``None`` there, meaning "every
-    camera", on the reasoning that an undeclared restriction is not a
-    restriction. That inverted the incentive: the less an operator
-    configured, the more each app could see and compute on, and a fresh
-    install handed every app the whole fleet.
+    Returns a SET — empty when nothing is picked, which scopes the app to
+    nothing. Callers test ``roster is not None``, which still holds: an
+    empty set is not None and correctly filters to zero cameras.
 
-    Closed by default now. An app sees the cameras it was pointed at,
-    and an operator who has pointed it at nothing gets nothing —
-    visibly, rather than silently getting everything.
-
-    Callers test ``roster is not None``, which still holds: an empty set
-    is not None and correctly filters to zero cameras.
+    It used to be "cameras whose assignment on the camera page names this
+    app". That made the camera page the only way to point an app at a
+    camera and made every such row both a restriction and a pick — so a
+    fresh install's app had nothing, and nowhere in the app to fix it.
     """
-    from models import Camera
+    from services.skill_assignments import picked_camera_ids
 
-    skills = app_skills(row)
-    rows = (
-        db.query(Camera.id, Camera.assignments)
-        .filter(Camera.deleted_at.is_(None))
-        .all()
-    )
-    named: set[int] = set()
-    for cam_id, assignments in rows:
-        for entry in assignments or []:
-            if isinstance(entry, dict) and entry.get("skill") in skills:
-                named.add(int(cam_id))
-                break
-    return named
+    return picked_camera_ids(db, row.id)

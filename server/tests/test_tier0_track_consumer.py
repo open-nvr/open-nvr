@@ -308,11 +308,12 @@ def _app_msg(app="license-plate-recognition", cam="cam3", boxes=None, producer=N
                            data=json.dumps(env).encode())
 
 
-def _run_app(msg, monkeypatch, *, allowed):
+def _run_app(msg, monkeypatch, *, allowed, picked=frozenset({3})):
     bus = _Bus()
     from services import event_bus_service
     monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
     monkeypatch.setattr(tc, "_app_may_draw", lambda app_id, now=None: allowed)
+    monkeypatch.setattr(tc, "_app_picked_cameras", lambda app_id, now=None: frozenset(picked))
     asyncio.run(tc._handle_app_message(msg))
     return bus.published
 
@@ -345,6 +346,31 @@ def test_app_pixel_boxes_use_the_shipped_frame_size(monkeypatch):
     assert out[0]["payload"]["tracks"][0]["box"] == [0.1, 0.1, 0.3, 0.3]
 
 
+def test_app_boxes_for_a_camera_the_app_did_not_pick_are_dropped(monkeypatch):
+    """Drawing is allowed for the app — but only on its own cameras. Boxes
+    for a camera nobody picked for it are not its view of anything."""
+    assert _run_app(_app_msg(cam="cam3"), monkeypatch, allowed=True, picked={4}) == []
+    assert _run_app(_app_msg(cam="cam3"), monkeypatch, allowed=True, picked=set()) == []
+
+
+def test_app_picks_cache_reads_db_once_per_ttl(monkeypatch):
+    calls = []
+    import services.skill_assignments as sa
+
+    class _S:
+        def close(self):
+            pass
+
+    monkeypatch.setattr("core.database.SessionLocal", lambda: _S())
+    monkeypatch.setattr(sa, "picked_camera_ids", lambda db, app_id: calls.append(app_id) or {3})
+    tc._app_picks_cache.clear()
+    assert tc._app_picked_cameras("x", now=100.0) == frozenset({3})
+    assert tc._app_picked_cameras("x", now=105.0) == frozenset({3})   # cached
+    assert calls == ["x"]
+    assert tc._app_picked_cameras("x", now=200.0) == frozenset({3})   # expired
+    assert calls == ["x", "x"]
+
+
 def test_xywh_to_xyxy():
     assert tc._xywh_to_xyxy([0.2, 0.3, 0.1, 0.05]) == [0.2, 0.3, pytest.approx(0.3), pytest.approx(0.35)]
     assert tc._xywh_to_xyxy([1, 2, 3]) is None
@@ -366,6 +392,7 @@ def test_producer_prefix_is_stripped_for_the_lookup(monkeypatch):
     from services import event_bus_service
     monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
     monkeypatch.setattr(tc, "_app_may_draw", _may)
+    monkeypatch.setattr(tc, "_app_picked_cameras", lambda app_id, now=None: frozenset({3}))
     asyncio.run(tc._handle_app_message(_app_msg(producer="app:smart-doorbell")))
     assert seen == ["smart-doorbell"]
 

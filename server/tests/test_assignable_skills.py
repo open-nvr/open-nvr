@@ -148,12 +148,15 @@ def test_kaic_unreachable_means_unknown_not_unavailable(monkeypatch):
     assert sk["object_detection"]["available"] is True            # Tier-0 regardless
 
 
-def test_installed_apps_are_skills_available_when_enabled(monkeypatch):
+def test_installed_apps_are_not_offered_on_the_camera_page(monkeypatch):
+    """Apps pick their cameras in their own configuration. Offering an app
+    here would invite exactly the row the save now refuses."""
     client = _client(monkeypatch, kaic=_FakeKaiC(), apps=[
         ("occupancy-counting", True), ("loitering-detection", False),
     ])
     sk = _skills(client)
-    assert sk["occupancy_counting"]["available"] is True
-    assert sk["occupancy_counting"]["source"] == "app"
-    assert sk["loitering_detection"]["available"] is False
-    assert "disabled" in sk["loitering_detection"]["hint"]
+    assert "occupancy_counting" not in sk
+    assert "loitering_detection" not in sk
+    assert all(entry["source"] != "app" for entry in sk.values())
+    # Platform tasks are still offered.
+    assert "object_detection" in sk

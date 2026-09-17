@@ -32,7 +32,7 @@ page shows the rate, the trend, the per-guard breakdown and the history.
 
 ## Setting it up
 
-1. Install it from the App Catalog and assign your entrance camera.
+1. Install it from the App Catalog and select your entrance camera (Configure → Cameras).
 2. Draw the **scan zone** — where the person being screened stands.
    Anyone inside it is being scanned, so is not the guard.
 3. Optionally draw the **guard post**, and set the guard's **uniform

@@ -68,6 +68,7 @@ from .openapi import CONTRACT_API_VERSION, contract_asyncapi, contract_openapi
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
     CameraFrameSource,
+    CoreSnapshotSource,
     DictFrameSource,
     FileFrameSource,
     FrameSourceError,
@@ -84,8 +85,10 @@ from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
 from .events import EventsClient, StoredEvent
 from .cameras import (
+    camera_key,
     cameras_for_skill,
     discover_cameras,
+    per_camera_value,
     filter_cameras_for_skill,
     full_frame_polygon,
 )
@@ -190,6 +193,8 @@ PLATFORM: tuple[str, ...] = (
     "KaiCError",
     "InferStream",
     "discover_cameras",
+    "camera_key",
+    "per_camera_value",
     "cameras_for_skill",
     "filter_cameras_for_skill",
     "AppCredentials",
@@ -198,6 +203,7 @@ PLATFORM: tuple[str, ...] = (
     "CameraFrameSource",
     "FileFrameSource",
     "HttpSnapshotSource",
+    "CoreSnapshotSource",
     "DictFrameSource",
     "build_frame_source",
     "dict_frame_source",

@@ -22,7 +22,7 @@
 // model is present before enabling. Config forms are generated from the
 // manifest param schema — no app-specific UI code.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, ArrowDownWideNarrow, ArrowLeft, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
@@ -37,6 +37,15 @@ import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
 import { ColorRangeEditor } from './apps/ColorRangeEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
+import {
+  AppCameraScope,
+  type CameraSetupItem,
+  CameraPicker,
+  appCamerasKey,
+  savePicks,
+  savedPicks,
+  useAppCameras,
+} from './apps/CameraPicker'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
@@ -246,6 +255,11 @@ export type RegisteredApp = {
   egress?: AppEgress | null
   /** Operator allowed this app's overlay.boxes.v1 to draw over live video. */
   overlay_enabled?: boolean
+  /** Does this app work on cameras picked for it? False for apps that act
+   *  only on other apps' alerts; they get no Cameras section. */
+  camera_picker?: boolean
+  /** How many live cameras are picked for this app (list endpoint only). */
+  picked_cameras?: number
 }
 
 // GET /apps/{id}/egress — apps live on an internal network and leave it
@@ -616,6 +630,9 @@ function initialFormValue(p: ManifestParam, config: Record<string, any> | null |
 
 /* ------------------------- Config modal ------------------------- */
 
+/** Stable empty draft while the picks load. */
+const NO_PICKS: Set<number> = new Set()
+
 export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
@@ -630,6 +647,51 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
     Object.fromEntries(params.map((p) => [p.name, initialFormValue(p, app.config)]))
   )
   const [error, setError] = useState<string | null>(null)
+  const takesPicks = app.camera_picker !== false
+  // Camera picks are a draft until Save, like every other field here.
+  // Seeded once from the server; a background refetch never overwrites
+  // what the user has ticked.
+  const picksQuery = useAppCameras(app.id, takesPicks)
+  const [draftPicks, setDraftPicks] = useState<Set<number> | null>(null)
+  useEffect(() => {
+    if (draftPicks === null && picksQuery.data) setDraftPicks(savedPicks(picksQuery.data))
+  }, [draftPicks, picksQuery.data])
+  // What is drawn on each camera, read from this form's own per-camera
+  // geometry fields (live, so a zone drawn below ticks its card above).
+  // "Not drawn" is information, not an error: most apps treat no zone as
+  // the whole frame.
+  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] => {
+    const out: CameraSetupItem[] = []
+    for (const p of params) {
+      if (!p.per_camera || !(p.type || '').toLowerCase().startsWith('geometry.')) continue
+      let perCam: Record<string, any> = {}
+      try {
+        const parsed = JSON.parse(String(values[p.name] ?? '') || '{}')
+        if (parsed && typeof parsed === 'object') perCam = parsed
+      } catch {
+        // Half-typed JSON in the field: say nothing rather than guess.
+      }
+      const v = perCam[String(cameraId)] ?? perCam[`cam${cameraId}`]
+      const done = Array.isArray(v) ? v.length > 0 : !!(v && typeof v === 'object')
+      const label = p.name === 'roi' ? 'ROI'
+        : p.name.charAt(0).toUpperCase() + p.name.slice(1).replace(/_/g, ' ')
+      out.push({ label, done })
+    }
+    return out
+  }, [params, values])
+  // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
+  // Vehicles page), shown read-only in the picker so unpicking one is a
+  // decision rather than an accident.
+  const cameraRoles = useMemo(() => {
+    const raw = (app.config as any)?.camera_roles
+    if (!raw || typeof raw !== 'object') return undefined
+    const out: Record<string, string> = {}
+    for (const [id, v] of Object.entries(raw as Record<string, any>)) {
+      const label = typeof v === 'string' ? v : (v?.label || v?.role)
+      if (label) out[String(id)] = String(label)
+    }
+    return out
+  }, [app.config])
   // Labels Tier-0 has actually detected on this site (from its metrics)
   // — the most useful vocabulary for a *_labels param, ahead of the
   // manifest's generic suggestions.
@@ -641,17 +703,32 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   }, [tier0.data])
 
   const saveMutation = useMutation({
-    mutationFn: (config: Record<string, any>) => apiService.updateAppConfig(app.id, config),
+    // Picks first: a zone saved for a camera is only useful once that
+    // camera is the app's.
+    mutationFn: async (config: Record<string, any> | null) => {
+      if (takesPicks && picksQuery.data && draftPicks) {
+        await savePicks(picksQuery.data, draftPicks)
+      }
+      if (config) await apiService.updateAppConfig(app.id, config)
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
       showSuccess(`${app.name} configuration saved`)
       onClose()
     },
     onError: (e) => setError(extractApiError(e, 'Failed to save app configuration.')),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: appCamerasKey(app.id) })
+    },
   })
 
   const submit = () => {
     setError(null)
+    if (params.length === 0) {
+      saveMutation.mutate(null)
+      return
+    }
     const config: Record<string, any> = {}
     for (const p of params) {
       if (!canEditParam(p)) continue   // untouched site-wide keys stay as stored
@@ -736,6 +813,23 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
           : 'w-[520px]'
       }
     >
+      <AppCameraScope.Provider value={takesPicks ? (draftPicks ?? NO_PICKS) : null}>
+      {takesPicks && (
+        <section className="mb-5">
+          <h3 className="mb-1 text-sm font-semibold">Cameras</h3>
+          <p className="mb-2 text-xs text-[var(--text-dim)]">
+            The cameras {app.name} watches. A camera can be used by several apps.
+          </p>
+          <CameraPicker
+            appName={app.name}
+            query={picksQuery}
+            draft={draftPicks}
+            onChange={setDraftPicks}
+            cameraRoles={cameraRoles}
+            setup={cameraSetup}
+          />
+        </section>
+      )}
       {params.length === 0 ? (
         <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
       ) : (
@@ -747,12 +841,13 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
           seenLabels={seenLabels}
         />
       )}
+      </AppCameraScope.Provider>
 
       {error && <div className="mt-3 text-sm text-red-400">{error}</div>}
 
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        {params.length > 0 && (
+        {(params.length > 0 || takesPicks) && (
           <Button variant="primary" onClick={submit} disabled={saveMutation.isPending}>
             {saveMutation.isPending ? 'Saving…' : 'Save'}
           </Button>
@@ -1704,6 +1799,17 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
 
         {requires.length > 0 && (
           <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
+        )}
+
+        {/* Where every freshly installed app starts. Said on the card, not
+            only inside Configure, because an enabled app with no cameras
+            otherwise looks exactly like one that is working. */}
+        {app.camera_picker !== false && app.picked_cameras === 0 && (
+          <div>
+            <Badge variant="warning" title="Select cameras in Configure — until then this app does nothing">
+              No cameras
+            </Badge>
+          </div>
         )}
 
         {/* Live results deliberately do NOT render here. The catalog is

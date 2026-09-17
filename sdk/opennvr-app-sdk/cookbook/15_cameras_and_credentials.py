@@ -8,9 +8,11 @@ Demonstrates: `discover_cameras`, `cameras_for_skill`,
 `ContractMixin.register_with_opennvr`, `ContractMixin.on_config_update`.
 
 An app never holds the site key. At registration core issues it a
-credential of its own, scoped to the cameras an operator assigned it —
-so "which cameras do I watch?" and "who am I?" are the same question,
-and neither has a hard-coded answer.
+credential of its own, scoped to the cameras picked for it in its own
+configuration — so "which cameras do I watch?" and "who am I?" are the
+same question, and neither has a hard-coded answer. New apps read the
+picks with `OpenNVR().roster()`: `[]` means nothing picked (do nothing),
+`None` means core could not be asked (keep what you have).
 """
 from typing import Any
 
@@ -29,10 +31,9 @@ def my_cameras(opennvr_url: str) -> list[dict[str, Any]]:
 
 
 def cameras_doing_lpr(opennvr_url: str) -> list[str]:
-    """Operators assign capabilities per camera ('camera 1 does LPR,
-    2–3 count people'). Respect that rather than watching everything:
-    an EMPTY list means the operator has not pointed this skill at
-    anything yet, which is an instruction, not an error."""
+    """A pick is stored as a claim named after the app id, so this
+    still answers 'which cameras were picked for ANPR?'. An EMPTY list
+    means nothing is picked yet, which is an instruction, not an error."""
     return cameras_for_skill(opennvr_url, "license-plate-recognition")
 
 

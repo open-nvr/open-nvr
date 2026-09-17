@@ -58,7 +58,8 @@ from opennvr_app_sdk import (
     AlertType, AppManifest, FrameApp, InferStream, Param, StateView,
 )
 from opennvr_app_sdk.frame_app import KaiCClient as SdkKaiCClient, KaiCError
-from opennvr_app_sdk.frame_sources import DictFrameSource
+from opennvr_app_sdk.cameras import full_frame_polygon, per_camera_value
+from opennvr_app_sdk.frame_sources import CoreSnapshotSource, DictFrameSource
 from zone import Point, Zone, bbox_center, scale_vertices
 
 logger = logging.getLogger("intrusion-detection")
@@ -232,8 +233,14 @@ def load_config(path: str) -> AppConfig:
         raise ValueError(f"config: bad restricted_hours value: {exc}") from exc
 
     cameras_raw = raw.get("cameras") or []
-    if not cameras_raw:
-        raise ValueError("config: at least one camera entry is required")
+    if not cameras_raw and not raw.get("opennvr_url"):
+        # Connected to OpenNVR, cameras are PICKED in the App Catalog and
+        # frames come from core — no YAML list needed. Standalone, there
+        # is nowhere else to get them from.
+        raise ValueError(
+            "config: at least one camera entry is required (or set "
+            "opennvr_url and select cameras in the App Catalog)"
+        )
     # The App Catalog's zone editor stores geometry as a top-level
     # ``zones`` dict keyed by camera_id, in NORMALIZED 0-1 coords. When
     # present it OVERRIDES the per-camera ``zone`` (the operator's drawn
@@ -404,6 +411,21 @@ class KaicStreamClient:
 # ── Detector loop ──────────────────────────────────────────────────
 
 
+class _YamlOrCoreFrames:
+    """Frames for the poll loop: a YAML camera's own ``frame_url`` when it
+    has one, else core's snapshot of a camera picked for this app."""
+
+    def __init__(self, yaml_sources: dict[str, FrameSource]) -> None:
+        self._yaml = DictFrameSource(yaml_sources)
+        self._yaml_ids = yaml_sources
+        self._core = CoreSnapshotSource()
+
+    def get_frame(self, camera_id: str) -> bytes | None:
+        if camera_id in self._yaml_ids:
+            return self._yaml.get_frame(camera_id)
+        return self._core.get_frame(camera_id)
+
+
 class IntrusionDetector(FrameApp):
     """The main detector. Holds config + KAI-C client + dispatcher.
 
@@ -447,7 +469,7 @@ class IntrusionDetector(FrameApp):
             dispatcher,
             # By-reference bridge: swapping an entry in
             # ``self._frame_sources`` is picked up on the next tick.
-            frame_source=DictFrameSource(self._frame_sources),
+            frame_source=_YamlOrCoreFrames(self._frame_sources),
             cameras=[camera.camera_id for camera in config.cameras],
             poll_interval_seconds=config.poll_interval_seconds,
         )
@@ -515,8 +537,47 @@ class IntrusionDetector(FrameApp):
         inference + zone matching. The base dispatches what we return."""
         if not self._config.restricted_hours.contains(self._now()):
             return []
-        camera = self._cameras_by_id[camera_id]
+        camera = self._camera_for(camera_id)
+        if camera is None:
+            return []
         return self._detect_intrusions(camera, frame_bytes)
+
+    # ── Cameras picked in the catalog ──────────────────────────────
+    #
+    # Connected to OpenNVR, the SDK loop polls exactly the cameras picked
+    # for this app (FrameApp.on_cameras_update), frames come from core's
+    # snapshot route, and the zone is the one drawn in the catalog. A YAML
+    # camera entry still wins for its own camera id.
+
+    #: The virtual frame catalog zones are scaled into; detection boxes
+    #: are normalised, so any fixed size is exact.
+    CATALOG_FRAME = (1920, 1080)
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Pick up zones drawn in the catalog, live."""
+        drawn = (config or {}).get("zones")
+        self._drawn = drawn if isinstance(drawn, dict) else {}
+        self._catalog_cameras: dict[str, CameraWatch] = {}
+
+    def _camera_for(self, camera_id: str) -> CameraWatch | None:
+        camera = self._cameras_by_id.get(camera_id)
+        if camera is not None:
+            return camera
+        if self._config_poll_thread is None:
+            return None
+        cache = getattr(self, "_catalog_cameras", {})
+        if camera_id not in cache:
+            w, h = self.CATALOG_FRAME
+            drawn = per_camera_value(getattr(self, "_drawn", {}), camera_id)
+            vertices = drawn if isinstance(drawn, (list, tuple)) and len(drawn) >= 3 \
+                else full_frame_polygon(1)
+            built = CameraWatch(
+                camera_id=camera_id, frame_url="opennvr:core",
+                zone=Zone.from_config(name="drawn", vertices=scale_vertices(vertices, w, h)),
+                frame_width=w, frame_height=h,
+            )
+            self._catalog_cameras = {**cache, camera_id: built}
+        return self._catalog_cameras[camera_id]
 
     def step(self, camera: CameraWatch) -> list[Alert]:
         """Run one detection cycle for one camera. Returns the list

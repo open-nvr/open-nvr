@@ -722,6 +722,9 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # what the proxy refused — services/app_egress.py.
         "egress": egress_view(row),
         "overlay_enabled": bool(getattr(row, "overlay_enabled", False)),
+        # Whether this app takes a camera pick at all. Apps that read no
+        # camera data (they act on other apps' alerts) declare False.
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
     }
 
 
@@ -755,8 +758,28 @@ async def list_apps(
     catalog to relay installed apps as conversational skills. Read only;
     see :func:`get_read_principal`.
     """
+    from sqlalchemy import func
+
+    from models import Camera, SkillAssignment
+    from services.skill_assignments import APP_CONSUMER_PREFIX
+
     rows = db.query(InstalledApp).order_by(InstalledApp.id).all()
-    return [_serialize_app(row) for row in rows]
+    # How many live cameras each app picked, in one query — so a card
+    # can say "No cameras picked" without a request per app.
+    picked_counts = dict(
+        db.query(SkillAssignment.consumer, func.count(func.distinct(SkillAssignment.camera_id)))
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                Camera.deleted_at.is_(None))
+        .group_by(SkillAssignment.consumer)
+        .all()
+    )
+    out = []
+    for row in rows:
+        item = _serialize_app(row)
+        item["picked_cameras"] = int(picked_counts.get(f"{APP_CONSUMER_PREFIX}{row.id}", 0))
+        out.append(item)
+    return out
 
 
 @router.get("/bus")
@@ -1132,13 +1155,117 @@ async def get_app_config(
         config = _scope_per_camera_config(
             row.manifest_json or {}, config,
             visible_camera_ids(db, principal))
+    elif isinstance(principal, AppPrincipal):
+        # The app itself gets per-camera settings (zones, ROIs) only for
+        # the cameras picked for it. Stored entries for other cameras stay
+        # in the registry — a camera unpicked and picked again keeps its
+        # zone — but the app is never handed geometry for a camera it
+        # does not work on.
+        from services.skill_assignments import picked_camera_ids as _picked
+
+        config = _scope_per_camera_config(
+            row.manifest_json or {}, config, _picked(db, row.id))
+
+    # The cameras picked for this app. Riding the config poll is what
+    # lets a running app notice a pick within one poll: a pick changes no
+    # config key, so without this the app would only find out on its own
+    # roster refresh — or never.
+    from services.camera_scope import visible_camera_ids as _visible
+    from services.skill_assignments import picked_camera_ids
+
+    picked = picked_camera_ids(db, row.id)
+    if isinstance(principal, User) and not principal.is_superuser:
+        scope = _visible(db, principal)
+        if scope is not None:
+            picked &= scope
     return {
         "id": row.id,
         "config": config,
+        "cameras": sorted(picked),
         "updated_at": row.updated_at,
         # The licence verdict rides the live config poll so the app can
         # feature-gate itself (ContractMixin.entitlement).
         "entitlement": entitlement_view(row),
+    }
+
+
+@router.get("/{app_id}/cameras")
+async def get_app_cameras(
+    app_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The camera picker for one app: every camera the caller can see,
+    and whether this app has picked it.
+
+    Picks are written through the ordinary claim routes
+    (``PUT/DELETE /skills/{skill}/cameras/{camera_id}`` with
+    ``consumer``) — returned here as ``skill``/``consumer`` so the UI
+    never has to derive them. Those routes already require permission to
+    manage the camera, which is the rule for changing a pick; ``can_manage``
+    says so per camera so the picker can disable what the user can't
+    change instead of failing on click.
+
+    Each camera also carries what the picker shows beside it:
+    ``live_online`` (off the in-memory status tracker; ``None`` = paused
+    or not known yet) and ``used_by`` — the names of the OTHER installed
+    apps that picked it, so "will this clash?" is answered on the tile
+    (it never does: any number of apps may pick one camera).
+    """
+    from models import Camera, SkillAssignment
+    from services.camera_scope import manageable_camera_ids, visible_camera_ids
+    from services.camera_status_service import get_camera_status_service
+    from services.skill_assignments import (
+        APP_CONSUMER_PREFIX, app_consumer, app_pick_skill, picked_camera_ids,
+    )
+
+    row = _get_app_or_404(db, app_id)
+    visible = visible_camera_ids(db, current_user)
+    manageable = manageable_camera_ids(db, current_user)
+    picked = picked_camera_ids(db, row.id)
+
+    query = db.query(Camera).filter(Camera.deleted_at.is_(None))
+    if visible is not None:
+        query = query.filter(Camera.id.in_(visible or {-1}))
+    rows = query.order_by(Camera.name, Camera.id).all()
+    ids = [cam.id for cam in rows]
+
+    # One grouped read each, never per camera.
+    live = get_camera_status_service().snapshot(ids) if ids else {}
+    app_names = {a.id: a.name for a in db.query(InstalledApp.id, InstalledApp.name).all()}
+    used_by: dict[int, set[str]] = {}
+    if ids:
+        for camera_id, consumer in (
+            db.query(SkillAssignment.camera_id, SkillAssignment.consumer)
+            .filter(SkillAssignment.camera_id.in_(ids),
+                    SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                    SkillAssignment.consumer != app_consumer(row.id))
+            .all()
+        ):
+            other = consumer[len(APP_CONSUMER_PREFIX):]
+            if other in app_names:
+                used_by.setdefault(camera_id, set()).add(app_names[other] or other)
+
+    cameras = [
+        {
+            "id": cam.id,
+            "handle": f"cam{cam.id}",
+            "name": cam.name,
+            "location": cam.location,
+            "is_active": bool(cam.is_active),
+            "live_online": live.get(cam.id) if cam.is_active else None,
+            "picked": cam.id in picked,
+            "can_manage": manageable is None or cam.id in manageable,
+            "used_by": sorted(used_by.get(cam.id, ())),
+        }
+        for cam in rows
+    ]
+    return {
+        "app_id": row.id,
+        "skill": app_pick_skill(row.id),
+        "consumer": app_consumer(row.id),
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        "cameras": cameras,
     }
 
 
@@ -1750,7 +1877,13 @@ async def uninstall_app(
     reg = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
     if reg is not None:
         db.delete(reg)
-        db.commit()
+    # And its camera picks: nothing should keep running — or keep plate
+    # OCR switched on — for an app that is gone. A reinstall starts with
+    # nothing picked, like any fresh app.
+    from services.skill_assignments import release_app_picks
+
+    release_app_picks(db, app_id)
+    db.commit()
 
     write_audit_log(
         db,

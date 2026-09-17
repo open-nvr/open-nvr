@@ -89,8 +89,18 @@ Three consequences, all real today:
 ```
 
 `assignments` is additive: every existing consumer ignores it until it
-opts in. One UI surface (the camera's settings page) writes it; nothing
-else does.
+opts in.
+
+> **Superseded — who writes it.** This originally said the camera's
+> settings page was the one writer. That made the camera page the only
+> way to point an app at a camera, so an app could not say which cameras
+> it used, and a fresh install's apps had none and nowhere to fix it.
+> Since the claim table (consumer column) there are two writers: the
+> camera page writes **platform tuning** (`object_detection` labels,
+> `license_plate_recognition`) and each **app picks its own cameras** in
+> its configuration, stored as `app:<id>` claims. An app's roster is its
+> picks; `assignments` is the union of every claim, so compute still
+> follows it. See [CAMERA_ASSIGNMENTS.md](../CAMERA_ASSIGNMENTS.md).
 
 **Consumer 1 — Tier-0** reads its per-camera slice on the reconcile tick it
 already runs (`/detect-config` is the existing precedent for live config
@@ -110,6 +120,11 @@ cams = cameras_for_skill(opennvr_url, skill="occupancy_counting")
 An app then declares *what it is* (already in its `AppManifest`) and asks
 which cameras were assigned to it. `cameras:` in app YAML remains as an
 explicit override, never as the thing an operator must fill in.
+
+> **Superseded — how apps ask.** Apps now read the cameras picked for them
+> with `OpenNVR().roster()` and follow changes through
+> `on_cameras_update`; `cameras_for_skill` keeps working because a pick is
+> a claim named after the app id.
 
 **Consumer 3 — the UI** renders assignment per camera and, because the
 manifest declares `requires_tasks`, can refuse an assignment whose

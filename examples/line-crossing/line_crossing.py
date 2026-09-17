@@ -30,9 +30,10 @@ tracks that flicker into existence on the line), ``min_bbox_height``
 (ignore objects too small to be what you are counting).
 
 Cameras come from OpenNVR, not from YAML: with no ``cameras:`` listed the
-app asks core which cameras carry the ``line_crossing`` assignment,
-re-checks every five minutes, and reads each camera's line from the
-catalog's per-camera tripwire editor — live, no restart. A camera with
+app counts on exactly the cameras picked for it in the App Catalog
+(Configure → Cameras), follows pick changes live, and reads each camera's
+line from the catalog's per-camera tripwire editor — no restart. Nothing
+picked means nothing counted and no compute. A camera with
 no line drawn yet is shown as such on the dashboard rather than silently
 counting nothing.
 
@@ -75,7 +76,7 @@ from opennvr_app_sdk import (
     StateView,
     app,
 )
-from opennvr_app_sdk.cameras import UNIT_FRAME, discover_cameras, filter_cameras_for_skill
+from opennvr_app_sdk.cameras import UNIT_FRAME
 from opennvr_app_sdk.config import load_yaml
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 from opennvr_app_sdk.geometry import Point, Tripwire, bbox_center, scale_vertices
@@ -83,9 +84,6 @@ from opennvr_app_sdk.state import keyed_state
 
 logger = logging.getLogger("line-crossing")
 
-#: The camera assignment this app scopes to (docs/CAMERA_ASSIGNMENTS.md).
-SKILL: str = "line_crossing"
-DISCOVERY_REFRESH_S: int = 300
 #: Counts ride the platform's footfall history (EVENT_CONTRACTS.md):
 #: a→b is an entry, b→a an exit, on the same contract the occupancy app
 #: publishes — consumers do not branch on the producer.
@@ -275,16 +273,6 @@ def _wire_from_drawn(drawn: Any, cam: CameraWire) -> Tripwire | None:
                                 count_direction=direction)
 
 
-def _scope_to_assignment(discovered: list[dict]) -> list[dict]:
-    """Only the cameras assigned ``line_crossing``. Closed by default:
-    nothing assigned means count nowhere, never the whole fleet."""
-    assigned = filter_cameras_for_skill(discovered, SKILL)
-    if assigned is None:
-        return discovered
-    keep = set(assigned)
-    return [c for c in discovered if str(c.get("camera_id")) in keep]
-
-
 def _knobs_from(raw: dict[str, Any], base: AppConfig | None = None) -> dict[str, Any]:
     """The live-editable knobs, parsed and validated from a config dict.
     Keys absent from ``raw`` keep ``base``'s value (or the default)."""
@@ -363,17 +351,12 @@ def load_config(path: str) -> AppConfig:
     cameras_raw = raw.get("cameras") or []
     auto_cameras = False
     if not cameras_raw:
-        # No cameras listed → ask OpenNVR which carry this app's assignment
-        # rather than refusing to boot. Hand-copied ids are the classic way
-        # a tripwire counts nothing all day (``cam-1`` vs ``cam1``). Lines
-        # come from the catalog's editor; a camera without one is reported
-        # on the dashboard, not silently skipped.
-        discovered = _scope_to_assignment(discover_cameras(
-            str(raw.get("opennvr_url") or ""), api_key=raw.get("internal_api_key")))
-        cameras_raw = [
-            {"camera_id": c["camera_id"], "frame_width": UNIT_FRAME, "frame_height": UNIT_FRAME}
-            for c in discovered
-        ]
+        # No cameras listed → the cameras picked for this app in the App
+        # Catalog, which arrive on the config poll (on_cameras_update).
+        # Hand-copied ids are the classic way a tripwire counts nothing all
+        # day (``cam-1`` vs ``cam1``). Lines come from the catalog's editor;
+        # a picked camera without one is reported on the dashboard, not
+        # silently skipped.
         auto_cameras = True
 
     cameras: dict[str, CameraWire] = {}
@@ -737,18 +720,19 @@ class LineCrossingDetector(Detector):
 
     # ── camera discovery ──
 
-    def refresh_cameras(self, discovered: list[dict[str, Any]] | None = None
-                        ) -> tuple[list[str], list[str]]:
-        """Re-derive the camera set from OpenNVR's assignments. No-op when
-        cameras were pinned in YAML. Returns (added, removed)."""
+    def on_cameras_update(self, camera_ids) -> None:
+        super().on_cameras_update(camera_ids)
+        self.refresh_cameras(camera_ids)
+
+    def refresh_cameras(self, camera_ids) -> tuple[list[str], list[str]]:
+        """Re-derive the camera set from the cameras picked for this app
+        (core ids). No-op when cameras were pinned in YAML. An empty set is
+        a real answer — nothing picked, count nowhere — because the SDK
+        only calls this with a successful config poll. Returns
+        (added, removed)."""
         if not self.cfg.auto_cameras:
             return [], []
-        if discovered is None:
-            discovered = discover_cameras(self.cfg.opennvr_url_for_discovery,
-                                          api_key=self.cfg.internal_api_key)
-        if not discovered:
-            return [], []   # a blip is not "delete every camera"
-        ids = {str(c["camera_id"]) for c in _scope_to_assignment(discovered)}
+        ids = {f"cam{int(i)}" for i in camera_ids}
         current = set(self.cfg.cameras)
         added = sorted(ids - current)
         removed = sorted(current - ids)
@@ -764,24 +748,11 @@ class LineCrossingDetector(Detector):
                 self.on_config_update(self._last_config)   # pick up their drawn lines
         return added, removed
 
-    async def _discovery_loop(self) -> None:
-        while True:
-            await asyncio.sleep(DISCOVERY_REFRESH_S)
-            try:
-                discovered = await asyncio.to_thread(
-                    discover_cameras, self.cfg.opennvr_url_for_discovery,
-                    api_key=self.cfg.internal_api_key)
-                self.refresh_cameras(discovered=discovered)
-            except Exception:
-                logger.warning("camera refresh failed", exc_info=True)
-
     _last_config: dict[str, Any] | None = None
 
     async def run(self, *, once: bool = False) -> None:
         tasks: list[asyncio.Task] = []
         if not once:
-            if self.cfg.auto_cameras:
-                tasks.append(asyncio.create_task(self._discovery_loop()))
             tasks.append(asyncio.create_task(self._footfall_loop()))
         try:
             await super().run(once=once)

@@ -281,6 +281,13 @@ class AppManifest:
     # switch for apps that declare it. The switch, not the flag, decides
     # whether anything is drawn — that is the operator's, per app.
     overlay: bool = False
+    # Does this app work on cameras an operator picks for it? True for
+    # nearly every app: the catalog shows a Cameras section, core serves
+    # the app only its picks, and the SDK's Detector drops events from
+    # cameras that weren't picked. False for apps that read no camera
+    # data at all — they act on OTHER apps' alerts (a notifier, a gate
+    # relay), which are already limited to the cameras those apps picked.
+    camera_picker: bool = True
     # Declarative operator actions (optional) — verbs the catalog can
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
@@ -373,6 +380,7 @@ class AppManifest:
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
             "overlay": bool(self.overlay),
+            "camera_picker": bool(self.camera_picker),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,
             "ui_url": self.ui_url,

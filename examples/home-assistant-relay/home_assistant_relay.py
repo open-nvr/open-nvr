@@ -85,6 +85,9 @@ logger = logging.getLogger("home-assistant-relay")
 
 MANIFEST = AppManifest(
     id="home-assistant-relay",
+    # No camera picker: this app acts on other apps' alerts/events,
+    # which those apps have already limited to the cameras they picked.
+    camera_picker=False,
     name="Home Assistant Relay",
     version="1.0.0",
     category="integration",

@@ -12,7 +12,7 @@ from opennvr_app_sdk import OpenNVR
 
 nvr = OpenNVR()                                   # OPENNVR_URL + app key
 
-for cam in nvr.cameras():                         # the cameras assigned to this app
+for cam in nvr.cameras():                         # the cameras picked for this app
     jpeg = nvr.snapshot(cam)                      # current frame, or None
     result = nvr.ai.infer("yolov8", jpeg, task="object_detection",
                           camera_id=cam.handle)   # KAI-C, HTTP

@@ -502,6 +502,38 @@ def test_refresh_follows_assignment_changes(tmp_path, monkeypatch):
     assert sorted(cfg.cameras) == []
 
 
+def test_picks_delivered_on_the_poll_are_followed_at_once(tmp_path, monkeypatch):
+    """Picking and un-picking in the catalog reaches the counter on the
+    config poll — including un-picking the last camera, which the periodic
+    refresh could never apply because an empty discovery looks like a blip."""
+    monkeypatch.setattr(oc, "discover_cameras", lambda url, api_key=None: _discovered(
+        "cam1:occupancy_counting"))
+    cfg = oc.load_config(_write_config(
+        tmp_path, 'opennvr_url: "http://core:8000"\ncameras: []\n'))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    assert sorted(cfg.cameras) == ["cam1"]
+
+    counter.on_cameras_update(frozenset({1, 4}))
+    assert sorted(cfg.cameras) == ["cam1", "cam4"]
+    assert cfg.cameras["cam4"].zone  # a whole-frame zone until one is drawn
+
+    counter.on_cameras_update(frozenset())
+    assert cfg.cameras == {}
+
+
+def test_picks_never_override_a_pinned_camera_list(tmp_path):
+    cfg = oc.load_config(_write_config(tmp_path, (
+        "cameras:\n"
+        '  - camera_id: "cam1"\n'
+        "    frame_width: 1920\n"
+        "    frame_height: 1080\n"
+        "    zone: [[0, 0], [1920, 0], [1920, 1080], [0, 1080]]\n"
+    )))
+    counter = oc.OccupancyCounter(cfg, _NullDispatcher())
+    counter.on_cameras_update(frozenset())
+    assert list(cfg.cameras) == ["cam1"]
+
+
 def test_explicit_camera_list_ignores_assignments(tmp_path, monkeypatch):
     """A pinned YAML camera list is the operator's word — assignments
     never second-guess it (and no discovery call is made at all)."""
