@@ -50,29 +50,39 @@ function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n))
 }
 
-// One camera snapshot, fetched as an object URL (revoked on unmount /
-// camera change). A failed capture (offline camera) resolves to null →
-// the editor draws on a grid.
+// One camera snapshot, as an object URL for this editor (revoked on
+// unmount / camera change). A failed capture (offline camera) → the
+// editor draws on a grid.
 function useSnapshotUrl(cameraId: number | string | null) {
   const numericId = typeof cameraId === 'number' ? cameraId : Number(cameraId)
   const enabled = cameraId != null && Number.isFinite(numericId)
   const query = useQuery({
     queryKey: ['camera-snapshot', cameraId],
     queryFn: async () => {
+      // The Blob, not an object URL: the cache outlives any one editor.
+      // Caching the URL meant a URL one editor had already revoked was
+      // handed straight back — deselect a camera, select it again within
+      // 30 s, and the snapshot was a broken image. Both editors also
+      // share this key, so one closing broke the other's picture.
       const { data } = await apiService.getCameraSnapshot(numericId)
-      return URL.createObjectURL(data as Blob)
+      return data as Blob
     },
     enabled,
     retry: 0,
     staleTime: 30_000,
   })
+  // Each caller mints its own URL from the cached Blob and revokes only
+  // that one. Kept in state and made in the effect (not a useMemo) so
+  // StrictMode's mount → cleanup → mount gets a fresh URL, not a revoked one.
+  const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    const url = query.data
-    return () => {
-      if (url) URL.revokeObjectURL(url)
-    }
+    const blob = query.data
+    if (!blob) { setUrl(null); return }
+    const next = URL.createObjectURL(blob)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
   }, [query.data])
-  return query
+  return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
 export function GeometryEditor({
