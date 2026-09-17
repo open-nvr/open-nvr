@@ -283,8 +283,13 @@ docker exec -e FAKECAM_WATCH=1 -i opennvr_core \
   (HEVC, VP9, …) is re-encoded to H.264. For a folder this needs *every* clip
   in it to agree on codec **and** frame size, because clips are spliced with
   ffmpeg's concat demuxer, which cannot join mismatched streams without
-  re-encoding; a folder that mixes 1080p and 720p is transcoded whole. The
-  `publishing …` log line says which it chose.
+  re-encoding. A folder that mixes codecs, sizes or frame rates is **rendered
+  once** into a single uniform H.264 file (every clip scaled and padded to the
+  first clip's size, capped at 1920 wide, and resampled to its frame rate),
+  and that file is then looped by stream copy. The `rendering …` / `rendered …
+  in Ns` log lines show it; the camera stays offline until the render finishes,
+  and re-renders whenever a clip in the folder changes. The `publishing …` log
+  line says which it chose.
 * `copy` — always stream-copy. Cheapest, and fails outright on non-H.264 input.
 * `transcode` — always re-encode. **Prefer this if detection isn't firing**:
   stream-copy looping emits corrupt packets at each loop seam ("Invalid NAL
@@ -354,6 +359,17 @@ recording and frees the disk their segments took.
 3. **400 Bad Request in the detect-pipeline logs** usually means the camera was
    deleted or re-added and its MediaMTX path was torn down. It resolves itself
    once the worker picks up a refreshed URL.
+
+### A stream keeps dropping with "Broken pipe"
+
+`Error submitting a packet to the muxer: Broken pipe`, then `publisher '…'
+exited; restarting in 3s`, means the publisher went quiet long enough for
+MediaMTX to close it. Before folders were rendered up front, a folder of
+mismatched clips was re-encoded live, and that live encode would stall: it
+fell behind real time on a small CPU, choked on a clip in another codec, or
+hit a DVR export's broken timestamps. Update `scripts/fakecams/entrypoint.sh`
+and restart the rig. A single loose clip can still do this: set
+`FAKECAM_FPS=10`, or re-encode the clip before using it.
 
 ### Detection never fires
 

@@ -222,6 +222,67 @@ write_concat_list() {
   done < "$1"
 }
 
+# A folder whose clips can't simply be stream-copied is rendered ONCE into a
+# single uniform H.264 file, which is then looped by stream copy. Re-encoding
+# the concat demuxer's output live instead goes wrong in ways that drop the
+# stream: a clip in a different codec is fed to the first clip's decoder and
+# comes out as garbage, and a re-encode that falls behind real time or stalls
+# (several 1080p clips on a small box, broken timestamps from a DVR export)
+# goes quiet long enough for MediaMTX to close the publisher — ffmpeg then
+# dies with "Broken pipe" and the camera drops out. The concat *filter* gives
+# every clip its own decoder, scale/pad/fps make every clip the first one's
+# size and rate with clean timestamps, and the loop costs ~no CPU afterwards.
+# Returns non-zero (and remembers it) if rendering fails, so the caller falls
+# back to live transcoding instead of retrying the render forever.
+render_group() {
+  slug="$1"
+  out="$STATE/$slug.mp4"
+  [ ! -s "$out" ] || return 0
+  [ ! -e "$STATE/$slug.norender" ] || return 1
+
+  first=$(head -1 "$STATE/$slug.files")
+  size=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+           -of csv=s=x:p=0 "$first" 2>/dev/null | head -1)
+  w=${size%%x*}; h=${size#*x}
+  case "$w" in ''|*[!0-9]*) w=1280; h=720 ;; esac
+  case "$h" in ''|*[!0-9]*) w=1280; h=720 ;; esac
+  # Cap at 1080p-wide: the stack downscales for detection anyway, and a 4K
+  # render would take ages on the machines this rig usually runs on.
+  if [ "$w" -gt 1920 ]; then h=$((h * 1920 / w)); w=1920; fi
+  w=$((w / 2 * 2)); h=$((h / 2 * 2))
+  fps=$(rate_for "$first")
+
+  set --
+  i=0; graph=""; legs=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    set -- "$@" -i "$f"
+    graph="${graph}[$i:v:0]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${fps},format=yuv420p[v$i];"
+    legs="${legs}[v$i]"
+    i=$((i + 1))
+  done < "$STATE/$slug.files"
+
+  log "rendering '$slug' ($i clips -> one ${w}x${h} @ ${fps} fps file); the stream starts when this finishes"
+  started=$(date +%s)
+  ffmpeg -hide_banner -loglevel error -nostdin -y "$@" \
+    -filter_complex "${graph}${legs}concat=n=${i}:v=1:a=0[out]" -map "[out]" \
+    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -g 50 -bf 0 \
+    -f mp4 "$out.part" &
+  # Tracked like the publisher, so stop_group can kill a render in progress.
+  echo $! > "$STATE/$slug.ffpid"
+  if wait "$!"; then
+    rm -f "$STATE/$slug.ffpid"
+    mv "$out.part" "$out"
+    log "rendered '$slug' in $(( $(date +%s) - started ))s"
+    return 0
+  fi
+  rm -f "$STATE/$slug.ffpid" "$out.part"
+  [ ! -e "$STATE/$slug.stop" ] || return 1
+  touch "$STATE/$slug.norender"
+  log "rendering '$slug' failed; falling back to live transcoding"
+  return 1
+}
+
 publish_forever() {
   slug="$1"
   files="$STATE/$slug.files"
@@ -235,12 +296,17 @@ publish_forever() {
       vargs="$vargs -r $(rate_for "$(head -1 "$files")")"
     fi
 
-    if [ "$n" -gt 1 ]; then
+    if [ "$n" -gt 1 ] && [ "$vargs" != "-c:v copy" ] && render_group "$slug"; then
+      set -- -i "$STATE/$slug.mp4"
+      vargs="-c:v copy"
+    elif [ "$n" -gt 1 ]; then
       write_concat_list "$files" "$concat"
       set -- -f concat -safe 0 -i "$concat"
     else
       set -- -i "$(head -1 "$files")"
     fi
+    # stop_group may have killed a render in progress.
+    [ ! -e "$STATE/$slug.stop" ] || break
 
     log "publishing '$slug' ($n clip(s), ffmpeg: $vargs)"
     # -re paces the input at real time, -stream_loop -1 restarts it — the whole
@@ -284,7 +350,8 @@ stop_group() {
     wait "$pid" 2>/dev/null || true
   fi
   rm -f "$STATE/$slug.pid" "$STATE/$slug.ffpid" "$STATE/$slug.files" \
-        "$STATE/$slug.sig" "$STATE/$slug.concat" "$STATE/$slug.stop"
+        "$STATE/$slug.sig" "$STATE/$slug.concat" "$STATE/$slug.stop" \
+        "$STATE/$slug.mp4" "$STATE/$slug.mp4.part" "$STATE/$slug.norender"
 }
 
 # --------------------------------------------------------------- reconcile --
