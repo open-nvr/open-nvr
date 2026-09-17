@@ -75,6 +75,7 @@ from routers import (
     mediamtx_admin,
     mediamtx_hooks,
     network as network_router,
+    guardscan as guardscan_router,
     occupancy as occupancy_router,
     onvif as onvif_router,
     orphaned_recordings,
@@ -625,6 +626,20 @@ async def lifespan(app: FastAPI):
     spawn_background(background_occupancy_event_consumer(),
                      name="occupancy-event-consumer")
 
+    # Entry screenings: consume screening.completed.v1 into the
+    # compliance ledger. Every screening, not only the ones that
+    # alerted — a compliance rate needs its denominator.
+    async def background_guardscan_event_consumer():
+        async def _loop():
+            from services.guardscan_event_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Guard screening consumer", _loop)
+
+    spawn_background(background_guardscan_event_consumer(),
+                     name="guardscan-event-consumer")
+
     # Live detection overlay: bridge Tier-0 tracks (NATS) onto the
     # in-process bus so /events/ws can stream normalized boxes to the
     # browser. Same best-effort posture: no bus → no overlay, never a
@@ -891,6 +906,7 @@ app.include_router(
 app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
 app.include_router(occupancy_router.router, prefix=settings.api_prefix)
+app.include_router(guardscan_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================

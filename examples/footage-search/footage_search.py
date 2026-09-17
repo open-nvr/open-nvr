@@ -290,6 +290,11 @@ class Indexer(Detector):
         ``_handle_raw`` above this)."""
         self._contract_note_event()
         if isinstance(event, dict):
+            # Index only the cameras picked for this app. The bus carries
+            # every camera; nothing picked = nothing indexed.
+            camera_id = event.get("camera_id")
+            if camera_id and not self.camera_picked(camera_id):
+                return []
             self.ingest(event)
             if self._indexed and self._indexed % 100 == 0:
                 logger.info("indexed %d keyframes", self._indexed)
@@ -339,6 +344,10 @@ class Indexer(Detector):
             "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
                 timespec="seconds"),
         })
+        # Rows indexed before a camera was unpicked stay on disk until
+        # retention clears them, but are not offered: search covers the
+        # cameras this app works on now.
+        results = [r for r in results if self.camera_picked(r.camera_id)]
         return {
             "query": query,
             "results": [

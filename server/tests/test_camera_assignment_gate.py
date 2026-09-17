@@ -103,18 +103,23 @@ def test_unassigned_camera_is_eligible_everywhere_and_adopted_nowhere():
     assert camera_adopted(_types.SimpleNamespace(), PLATE_SKILL) is False
 
 
-def test_a_claimed_camera_is_closed_to_every_other_skill():
+def test_a_claimed_camera_stays_available_to_every_other_app():
+    """One camera may serve several apps at once — one inference stream
+    feeding many apps is what the platform is for. A claim switches its
+    own skill on; it does not take the camera away from anyone else.
+
+    It used to: any claim closed the camera to every other skill, so a
+    camera narrowed to object_detection labels vanished from every app's
+    picker, and one app's pick would have hidden it from all the rest."""
     lpr = _cam(PLATE_SKILL)
     assert camera_adopted(lpr, PLATE_SKILL) is True
     assert camera_eligible(lpr, PLATE_SKILL) is True
-    # Claimed by LPR — occupancy may not even be offered it, so an
-    # operator cannot accidentally spend that camera twice.
-    assert camera_eligible(lpr, "occupancy_counting") is False
+    # Picked by LPR — still offered to occupancy, still not computing it.
+    assert camera_eligible(lpr, "occupancy_counting") is True
     assert camera_adopted(lpr, "occupancy_counting") is False
-    # Multiple claims: each is open, everything else is closed.
     both = _cam(PLATE_SKILL, "occupancy_counting")
-    assert camera_eligible(both, "occupancy_counting") is True
-    assert camera_eligible(both, "face_recognition") is False
+    assert camera_eligible(both, "face_recognition") is True
+    assert camera_adopted(both, "face_recognition") is False
 
 
 def test_skill_names_compare_case_and_space_insensitively():

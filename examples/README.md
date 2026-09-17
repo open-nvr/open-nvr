@@ -66,11 +66,34 @@ config form:
 docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d
 ```
 
-Currently in the overlay: `loitering-detection` (contract port 9200)
-and `occupancy-counting` (9201). Each app's runtime config is
-generated at `up` time from its `config.docker.yml` template (secrets
-come from `.env`) — edit the template's cameras/zones for your scene
-and re-run `up`.
+Every app listed in [`server/config/apps_index.yml`](../server/config/apps_index.yml)
+is in the overlay — that file is the App Catalog, and an entry is only
+accepted with its compose service (`make validate-apps-index`). Each
+app's runtime config is generated at `up` time from its
+`config.docker.yml` template (secrets come from `.env`) — edit the
+template's cameras/zones for your scene and re-run `up`, or edit them in
+the catalog's config form once the app is up.
+
+Three ways an app gets started, in order of how often they happen:
+
+1. **On every install** — `occupancy-counting` and `footage-search`
+   ride the always-on Tier-0 stream and need no extra adapter, so
+   `start.sh` / `start.ps1` enable them (profile `default-apps`; opt out
+   with `OPENNVR_DEFAULT_APPS=off`).
+2. **Picked at install time** — `scripts/install.sh` offers the Camera
+   Agent and every catalog app, several at once. Each catalog app carries
+   its own id as a compose profile on every service it needs (app,
+   config-init, dedicated adapters, egress-proxy), so
+   `--profile license-plate-recognition` starts that app and nothing
+   else. The picks persist in `.env` (`OPENNVR_EXAMPLE_*`) and
+   `start.sh` replays them on every `up`.
+3. **Later, from the App Catalog** — the copy-paste command shown on the
+   card, or one click with the opt-in reconciler below.
+
+Not everything under `examples/` is an app. `yolo-pose-weights/` and
+`yolov8-weights/` are weight-baking helper images the overlays use;
+`alerts-subscriber/` and `inference-listener/` are SDK tutorials with
+no compose service. None of the four is in the catalog or the installer.
 
 ### One-click install (opt-in)
 

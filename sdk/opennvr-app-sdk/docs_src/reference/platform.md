@@ -29,6 +29,10 @@ accident.
 
 ::: opennvr_app_sdk.discover_cameras
 
+::: opennvr_app_sdk.camera_key
+
+::: opennvr_app_sdk.per_camera_value
+
 ::: opennvr_app_sdk.cameras_for_skill
 
 ::: opennvr_app_sdk.filter_cameras_for_skill
@@ -45,6 +49,8 @@ accident.
 
 ::: opennvr_app_sdk.HttpSnapshotSource
 
+::: opennvr_app_sdk.CoreSnapshotSource
+
 ::: opennvr_app_sdk.DictFrameSource
 
 ::: opennvr_app_sdk.build_frame_source
@@ -52,3 +58,13 @@ accident.
 ::: opennvr_app_sdk.dict_frame_source
 
 ::: opennvr_app_sdk.FrameSourceError
+
+::: opennvr_app_sdk.RtspFrameStream
+
+::: opennvr_app_sdk.RtspStillSource
+
+::: opennvr_app_sdk.Frame
+
+::: opennvr_app_sdk.FrameStreamError
+
+::: opennvr_app_sdk.FrameStreamUnavailable

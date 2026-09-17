@@ -180,7 +180,7 @@ On first registration core issues the app **its own key** (`oak_…`),
 which the SDK stores and uses from then on — the site key in
 `config.yml` is only for bootstrap ([APP_CREDENTIALS.md](APP_CREDENTIALS.md)).
 With that key, `OpenNVR()` gives the rule everything else it might
-want from the platform — the cameras assigned to it, a snapshot, past
+want from the platform — the cameras picked for it, a snapshot, past
 events, a place to keep state across restarts — without touching NATS
 or HTTP yourself:
 
@@ -188,7 +188,7 @@ or HTTP yourself:
 from opennvr_app_sdk import OpenNVR
 
 nvr = OpenNVR()                       # OPENNVR_URL + the app's key
-for cam in nvr.cameras():             # only cameras assigned to this app
+for cam in nvr.cameras():             # only cameras picked for this app
     last = nvr.state.get(f"seen:{cam.handle}")
     jpeg = nvr.snapshot(cam)
 ```

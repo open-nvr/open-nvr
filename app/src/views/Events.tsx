@@ -22,6 +22,7 @@ import { apiService } from '../lib/apiService'
 import { Modal } from '../components/Modal'
 import { Button, EmptyState, PageHeader, Table, THead, TBody, TR, TH, TD, Skeleton } from '../components/ui'
 import { extractApiError } from '../lib/apiError'
+import { useTranslation } from '../i18n'
 
 type LogItem = {
   id: number
@@ -37,6 +38,7 @@ type LogItem = {
 }
 
 export function Events() {
+  const { t } = useTranslation()
   const [logs, setLogs] = useState<LogItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -68,7 +70,7 @@ export function Events() {
           setTotal(data.total || 0)
         }
       } catch (e: any) {
-        if (!cancelled) setError(extractApiError(e, 'Failed to load logs'))
+        if (!cancelled) setError(extractApiError(e, t('admin.failedLogs')))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -105,25 +107,25 @@ export function Events() {
 
   return (
     <section className="space-y-4">
-      <PageHeader title="Audit Logs" description="Every configuration change, login, and administrative action recorded by the platform." />
+      <PageHeader title={t('admin.auditLogs')} description={t('admin.auditDescription')} />
 
       {/* Filters */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-sm">
         <input
           className="border border-neutral-700 bg-[var(--panel-2)] px-2 py-1 rounded"
-          placeholder="Action (e.g., login, camera.update)"
+          placeholder={t('admin.actionPlaceholder')}
           value={action}
           onChange={(e) => { setPage(1); setAction(e.target.value) }}
         />
         <input
           className="border border-neutral-700 bg-[var(--panel-2)] px-2 py-1 rounded"
-          placeholder="Entity type (user, camera, ...)"
+          placeholder={t('admin.entityPlaceholder')}
           value={entityType}
           onChange={(e) => { setPage(1); setEntityType(e.target.value) }}
         />
         <input
           className="border border-neutral-700 bg-[var(--panel-2)] px-2 py-1 rounded"
-          placeholder="User ID"
+          placeholder={t('admin.userId')}
           value={userId}
           onChange={(e) => { setPage(1); setUserId(e.target.value) }}
         />
@@ -147,19 +149,19 @@ export function Events() {
       ) : logs.length === 0 ? (
         <EmptyState
           icon={<FileSearch size={28} />}
-          title="No audit log entries match"
-          description={action || entityType || userId ? 'Try clearing the filters above — entries exist but none match the current filter.' : 'Actions like logins, camera changes, and user management will appear here as they happen.'}
+          title={t('admin.noAuditEntries')}
+          description={action || entityType || userId ? t('admin.tryClear') : t('admin.eventsWillAppear')}
         />
       ) : (
         <Table className="table-fixed">
           <THead>
             <TR>
-              <TH className="w-[180px]">Time</TH>
-              <TH className="w-[140px]">User</TH>
-              <TH className="w-[220px]">Action</TH>
-              <TH className="w-[260px]">Entity</TH>
-              <TH className="w-[100px]">Details</TH>
-              <TH className="w-[120px]">IP</TH>
+              <TH className="w-[180px]">{t('admin.time')}</TH>
+              <TH className="w-[140px]">{t('admin.username')}</TH>
+              <TH className="w-[220px]">{t('admin.action')}</TH>
+              <TH className="w-[260px]">{t('admin.entity')}</TH>
+              <TH className="w-[100px]">{t('admin.details')}</TH>
+              <TH className="w-[120px]">{t('admin.ip')}</TH>
             </TR>
           </THead>
           <TBody striped>
@@ -170,7 +172,7 @@ export function Events() {
                 <TD className="truncate" title={log.action}>{friendlyAction(log.action)}</TD>
                 <TD className="truncate" title={`${log.entity_type || '-'}${log.entity_id ? `:${log.entity_id}` : ''}`}>{log.entity_type || '-'}{log.entity_id ? `:${log.entity_id}` : ''}</TD>
                 <TD>
-                  <Button className="text-xs px-2 py-1" onClick={() => setSelected(log)}>View</Button>
+                  <Button className="text-xs px-2 py-1" onClick={() => setSelected(log)}>{t('admin.view')}</Button>
                 </TD>
                 <TD>{log.ip || '-'}</TD>
               </TR>
@@ -181,9 +183,9 @@ export function Events() {
 
       {/* Pagination */}
       <div className="flex items-center gap-2 text-sm mt-2">
-        <Button disabled={page <= 1} onClick={() => goto(page - 1)}>Prev</Button>
-        <span>Page {page} / {totalPages} • {total} total</span>
-        <Button disabled={page >= totalPages} onClick={() => goto(page + 1)}>Next</Button>
+        <Button disabled={page <= 1} onClick={() => goto(page - 1)}>{t('admin.previous')}</Button>
+        <span>Page {page} / {totalPages} • {total} {t('admin.total')}</span>
+        <Button disabled={page >= totalPages} onClick={() => goto(page + 1)}>{t('admin.next')}</Button>
       </div>
 
       {error && <div className="text-red-400 text-sm">{error}</div>}

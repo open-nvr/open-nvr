@@ -255,6 +255,22 @@ def _is_point(p: Any) -> bool:
             and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in p))
 
 
+def _is_hsv(value: Any) -> bool:
+    """One HSV bound on OpenCV's 8-bit scale.
+
+    Hue is 0-179 there, not 0-360 — the halved-degree convention of
+    ``cv2.cvtColor(..., COLOR_BGR2HSV)`` on a uint8 image. A range
+    written in degrees would pass any looser check and then silently
+    match nothing at all.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in value):
+        return False
+    h, sat, val = value
+    return 0 <= h <= 179 and 0 <= sat <= 255 and 0 <= val <= 255
+
+
 def _value_matches_type(value: Any, type_name: str) -> bool:
     """True when ``value`` is acceptable for a manifest param ``type``.
 
@@ -267,6 +283,9 @@ def _value_matches_type(value: Any, type_name: str) -> bool:
     * ``geometry.tripwire`` — ``{"a": [x, y], "b": [x, y],
       "count_direction": both|a_to_b|b_to_a}`` (``Tripwire.from_config``);
       ``null`` clears it.
+    * ``color.hsv_range`` — ``{"low": [h, s, v], "high": [h, s, v]}`` as
+      the catalog's colour picker writes it, on OpenCV's 8-bit scale
+      (hue 0-179, NOT 0-360). ``{}`` or ``null`` means unset.
 
     Other dotted types are list-shaped by convention. Unknown plain
     type names are not blocked.
@@ -279,6 +298,12 @@ def _value_matches_type(value: Any, type_name: str) -> bool:
                 and value.get("count_direction", "both") in ("both", "a_to_b", "b_to_a"))
     if type_name == "geometry.polygon":
         return isinstance(value, list) and all(_is_point(p) for p in value)
+    if type_name == "color.hsv_range":
+        if value is None or value == {}:
+            return True         # unset: fall back to whatever else is configured
+        if not isinstance(value, dict):
+            return False
+        return all(_is_hsv(value.get(k)) for k in ("low", "high"))
     if "." in type_name:
         return isinstance(value, list)
     expected = _PRIMITIVE_TYPES.get(type_name)
@@ -297,6 +322,7 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
     - config keys not declared in the manifest;
     - params with ``required=True`` and no default that are absent;
     - values whose type doesn't match the param ``type`` name;
+    - values outside a declared ``choices`` set;
     - ``per_camera=True`` params must be a dict keyed by camera id
       whose values each pass the type check.
     """
@@ -337,8 +363,36 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
 
         if not _value_matches_type(value, type_name):
             errors.append(f"param '{name}' must be of type {type_name}")
+            continue
+
+        if (bad := _not_a_choice(value, param)) is not None:
+            errors.append(bad)
 
     return errors
+
+
+def _not_a_choice(value, param: dict) -> str | None:
+    """Reject a value the app said it would never accept.
+
+    A ``choices`` param is a closed set — the form offers a select, but
+    the API is the real boundary, and an app that receives a value it
+    never declared will at best ignore it and at worst fall over on a
+    thread where nobody sees it.
+    """
+    choices = param.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    allowed = [c.get("value") if isinstance(c, dict) else c for c in choices]
+    # Numbers compare across int/float (0 and 0.0 are the same choice);
+    # bool is excluded because in Python `True == 1`, and a boolean
+    # sneaking past an integer choice set is the kind of thing that
+    # only shows up in production.
+    for candidate in allowed:
+        if candidate == value and isinstance(candidate, bool) == isinstance(value, bool):
+            return None
+    shown = ", ".join(repr(c) for c in allowed)
+    return f"param '{param['name']}' must be one of: {shown}"
+
 
 
 def _per_camera_param_names(manifest: dict) -> set[str]:
@@ -668,6 +722,9 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # what the proxy refused — services/app_egress.py.
         "egress": egress_view(row),
         "overlay_enabled": bool(getattr(row, "overlay_enabled", False)),
+        # Whether this app takes a camera pick at all. Apps that read no
+        # camera data (they act on other apps' alerts) declare False.
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
     }
 
 
@@ -701,8 +758,28 @@ async def list_apps(
     catalog to relay installed apps as conversational skills. Read only;
     see :func:`get_read_principal`.
     """
+    from sqlalchemy import func
+
+    from models import Camera, SkillAssignment
+    from services.skill_assignments import APP_CONSUMER_PREFIX
+
     rows = db.query(InstalledApp).order_by(InstalledApp.id).all()
-    return [_serialize_app(row) for row in rows]
+    # How many live cameras each app picked, in one query — so a card
+    # can say "No cameras picked" without a request per app.
+    picked_counts = dict(
+        db.query(SkillAssignment.consumer, func.count(func.distinct(SkillAssignment.camera_id)))
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                Camera.deleted_at.is_(None))
+        .group_by(SkillAssignment.consumer)
+        .all()
+    )
+    out = []
+    for row in rows:
+        item = _serialize_app(row)
+        item["picked_cameras"] = int(picked_counts.get(f"{APP_CONSUMER_PREFIX}{row.id}", 0))
+        out.append(item)
+    return out
 
 
 @router.get("/bus")
@@ -1078,13 +1155,117 @@ async def get_app_config(
         config = _scope_per_camera_config(
             row.manifest_json or {}, config,
             visible_camera_ids(db, principal))
+    elif isinstance(principal, AppPrincipal):
+        # The app itself gets per-camera settings (zones, ROIs) only for
+        # the cameras picked for it. Stored entries for other cameras stay
+        # in the registry — a camera unpicked and picked again keeps its
+        # zone — but the app is never handed geometry for a camera it
+        # does not work on.
+        from services.skill_assignments import picked_camera_ids as _picked
+
+        config = _scope_per_camera_config(
+            row.manifest_json or {}, config, _picked(db, row.id))
+
+    # The cameras picked for this app. Riding the config poll is what
+    # lets a running app notice a pick within one poll: a pick changes no
+    # config key, so without this the app would only find out on its own
+    # roster refresh — or never.
+    from services.camera_scope import visible_camera_ids as _visible
+    from services.skill_assignments import picked_camera_ids
+
+    picked = picked_camera_ids(db, row.id)
+    if isinstance(principal, User) and not principal.is_superuser:
+        scope = _visible(db, principal)
+        if scope is not None:
+            picked &= scope
     return {
         "id": row.id,
         "config": config,
+        "cameras": sorted(picked),
         "updated_at": row.updated_at,
         # The licence verdict rides the live config poll so the app can
         # feature-gate itself (ContractMixin.entitlement).
         "entitlement": entitlement_view(row),
+    }
+
+
+@router.get("/{app_id}/cameras")
+async def get_app_cameras(
+    app_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The camera picker for one app: every camera the caller can see,
+    and whether this app has picked it.
+
+    Picks are written through the ordinary claim routes
+    (``PUT/DELETE /skills/{skill}/cameras/{camera_id}`` with
+    ``consumer``) — returned here as ``skill``/``consumer`` so the UI
+    never has to derive them. Those routes already require permission to
+    manage the camera, which is the rule for changing a pick; ``can_manage``
+    says so per camera so the picker can disable what the user can't
+    change instead of failing on click.
+
+    Each camera also carries what the picker shows beside it:
+    ``live_online`` (off the in-memory status tracker; ``None`` = paused
+    or not known yet) and ``used_by`` — the names of the OTHER installed
+    apps that picked it, so "will this clash?" is answered on the tile
+    (it never does: any number of apps may pick one camera).
+    """
+    from models import Camera, SkillAssignment
+    from services.camera_scope import manageable_camera_ids, visible_camera_ids
+    from services.camera_status_service import get_camera_status_service
+    from services.skill_assignments import (
+        APP_CONSUMER_PREFIX, app_consumer, app_pick_skill, picked_camera_ids,
+    )
+
+    row = _get_app_or_404(db, app_id)
+    visible = visible_camera_ids(db, current_user)
+    manageable = manageable_camera_ids(db, current_user)
+    picked = picked_camera_ids(db, row.id)
+
+    query = db.query(Camera).filter(Camera.deleted_at.is_(None))
+    if visible is not None:
+        query = query.filter(Camera.id.in_(visible or {-1}))
+    rows = query.order_by(Camera.name, Camera.id).all()
+    ids = [cam.id for cam in rows]
+
+    # One grouped read each, never per camera.
+    live = get_camera_status_service().snapshot(ids) if ids else {}
+    app_names = {a.id: a.name for a in db.query(InstalledApp.id, InstalledApp.name).all()}
+    used_by: dict[int, set[str]] = {}
+    if ids:
+        for camera_id, consumer in (
+            db.query(SkillAssignment.camera_id, SkillAssignment.consumer)
+            .filter(SkillAssignment.camera_id.in_(ids),
+                    SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                    SkillAssignment.consumer != app_consumer(row.id))
+            .all()
+        ):
+            other = consumer[len(APP_CONSUMER_PREFIX):]
+            if other in app_names:
+                used_by.setdefault(camera_id, set()).add(app_names[other] or other)
+
+    cameras = [
+        {
+            "id": cam.id,
+            "handle": f"cam{cam.id}",
+            "name": cam.name,
+            "location": cam.location,
+            "is_active": bool(cam.is_active),
+            "live_online": live.get(cam.id) if cam.is_active else None,
+            "picked": cam.id in picked,
+            "can_manage": manageable is None or cam.id in manageable,
+            "used_by": sorted(used_by.get(cam.id, ())),
+        }
+        for cam in rows
+    ]
+    return {
+        "app_id": row.id,
+        "skill": app_pick_skill(row.id),
+        "consumer": app_consumer(row.id),
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        "cameras": cameras,
     }
 
 
@@ -1458,7 +1639,13 @@ async def get_app_status(
     # SDK /health reports `ready` (spec §03); tolerate its absence on
     # a 200 rather than flagging a healthy app unreachable.
     ready = reachable and bool(health.get("ready", True))
-    row.status = "ok" if ready else "unreachable"
+    # Three states, not two. "unreachable" is reserved for an app that
+    # did not answer at all — the catalog paints it red and the
+    # operator goes looking for a dead container. An app that answered
+    # and told us it cannot work is "degraded": amber, still running,
+    # and the reason is in `not_ready`. Collapsing the two would send
+    # somebody hunting a container that is perfectly alive.
+    row.status = "ok" if ready else ("degraded" if reachable else "unreachable")
     # PUBLISH that verdict. The SDK's health_snapshot() speaks `ready`
     # and never sets `status`, so a consumer reading health["status"] saw
     # nothing for every SDK-built app and rendered it "unknown" — only
@@ -1690,7 +1877,13 @@ async def uninstall_app(
     reg = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
     if reg is not None:
         db.delete(reg)
-        db.commit()
+    # And its camera picks: nothing should keep running — or keep plate
+    # OCR switched on — for an app that is gone. A reinstall starts with
+    # nothing picked, like any fresh app.
+    from services.skill_assignments import release_app_picks
+
+    release_app_picks(db, app_id)
+    db.commit()
 
     write_audit_log(
         db,

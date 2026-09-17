@@ -22,6 +22,7 @@ import {
   Settings, Camera, SkipBack, SkipForward, RefreshCw,
   Loader2, Move
 } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 export interface VideoControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
@@ -77,6 +78,7 @@ export function VideoControls({
   onTogglePtz,
   ptzActive = false,
 }: VideoControlsProps) {
+  const { t } = useTranslation()
   const [showVolumeSlider, setShowVolumeSlider] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
@@ -188,7 +190,7 @@ export function VideoControls({
         <button
           onClick={isPlaying ? onPause : onPlay}
           className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
-          title={isPlaying ? 'Pause' : 'Play'}
+          title={isPlaying ? t('video.pause') : t('video.play')}
         >
           {isLoading ? (
             <Loader2 size={20} className="animate-spin" />
@@ -205,14 +207,14 @@ export function VideoControls({
             <button
               onClick={() => onSeek(Math.max(0, currentTime - 10))}
               className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[220px]:hidden"
-              title="Back 10s"
+              title={t('video.back10')}
             >
               <SkipBack size={18} />
             </button>
             <button
               onClick={() => onSeek(Math.min(duration, currentTime + 10))}
               className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[220px]:hidden"
-              title="Forward 10s"
+              title={t('video.forward10')}
             >
               <SkipForward size={18} />
             </button>
@@ -224,7 +226,7 @@ export function VideoControls({
           <button
             onClick={onRefresh}
             className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[260px]:hidden"
-            title="Refresh stream"
+            title={t('video.refresh')}
           >
             <RefreshCw size={18} />
           </button>
@@ -237,7 +239,7 @@ export function VideoControls({
             className={`p-1.5 rounded transition-colors flex-shrink-0 @max-[220px]:hidden ${
               ptzActive ? 'bg-[var(--accent)]/40 text-[var(--accent)]' : 'hover:bg-white/20'
             }`}
-            title="PTZ controls"
+            title={t('video.ptz')}
           >
             <Move size={18} />
           </button>
@@ -257,7 +259,7 @@ export function VideoControls({
           <button
             onClick={isMuted ? onUnmute : onMute}
             className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
-            title={isMuted ? 'Unmute' : 'Mute'}
+            title={isMuted ? t('video.unmute') : t('video.mute')}
           >
             {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
           </button>
@@ -313,7 +315,7 @@ export function VideoControls({
           <button
             onClick={onSnapshot}
             className="p-1.5 hover:bg-white/20 rounded transition-colors @max-[180px]:hidden"
-            title="Take snapshot"
+            title={t('video.snapshot')}
           >
             <Camera size={18} />
           </button>
@@ -330,7 +332,7 @@ export function VideoControls({
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="p-1.5 hover:bg-white/20 rounded transition-colors"
-              title="Settings"
+              title={t('video.settings')}
             >
               <Settings size={18} />
             </button>
@@ -339,7 +341,7 @@ export function VideoControls({
                 {/* Playback speed */}
                 {videoRef.current && (
                   <div className="px-3 py-1.5">
-                    <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">Speed</div>
+                    <div className="text-[10px] uppercase text-[var(--text-dim)] mb-1">{t('video.speed')}</div>
                     {[0.5, 1, 1.5, 2].map((speed) => (
                       <button
                         key={speed}
@@ -363,7 +365,7 @@ export function VideoControls({
         <button
           onClick={onFullscreen}
           className="p-1.5 hover:bg-white/20 rounded transition-colors flex-shrink-0"
-          title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          title={isFullscreen ? t('video.exitFullscreen') : t('video.fullscreen')}
         >
           {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
         </button>

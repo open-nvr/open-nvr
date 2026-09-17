@@ -20,6 +20,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { SuricataAlertStream } from './SuricataAlertStream'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
 
 type CameraItem = { id: number; name: string; ip_address: string }
 
@@ -120,6 +121,7 @@ function Section({ title, children, actions }: { title: string; children: React.
 }
 
 export function AIEngine() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
 
@@ -189,23 +191,23 @@ export function AIEngine() {
       <SuricataAlertStream />
   <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Anomaly AI Engine</h1>
-          <p className="text-[var(--text-dim)]">Configure AI-powered motion/object detection, schedules, and alerting.</p>
+         <h1 className="text-xl font-semibold">{t('ai.title')}</h1>
+         <p className="text-[var(--text-dim)]">{t('ai.description')}</p>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn" onClick={resetAll} disabled={!canAdmin || loading}>Reset</button>
-          <button className="btn btn-primary disabled:opacity-50" onClick={saveAll} disabled={!canAdmin || loading}>{loading ? 'Saving…' : 'Save'}</button>
+         <button className="btn" onClick={resetAll} disabled={!canAdmin || loading}>{t('ai.reset')}</button>
+         <button className="btn btn-primary disabled:opacity-50" onClick={saveAll} disabled={!canAdmin || loading}>{loading ? t('ai.saving') : t('ai.save')}</button>
         </div>
       </div>
 
       {!canAdmin && (
         <div className="p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm">
-          You have read-only access. Only administrators can modify AI settings.
+         {t('ai.readOnly')}
         </div>
       )}
 
       <div className="p-2 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs">
-        Backend endpoints for AI are not wired yet. Settings are stored in your browser until the server API is available.
+        {t('ai.backendNotWired')}
       </div>
 
       {notice && (
@@ -216,63 +218,63 @@ export function AIEngine() {
       )}
 
       {/* Global controls */}
-      <Section title="Engine" actions={
+      <Section title={t('ai.engine')} actions={
         <>
           <label className="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.enabled} onChange={(e)=>setCfg({ ...cfg, enabled: e.target.checked })} disabled={!canAdmin} /> Enabled
+            <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.enabled} onChange={(e)=>setCfg({ ...cfg, enabled: e.target.checked })} disabled={!canAdmin} /> {t('ai.enabled')}
           </label>
         </>
       }>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
           <label className="flex items-center justify-between gap-2">
-            <span>Provider</span>
+            <span>{t('ai.provider')}</span>
             <select className="w-44 select" value={cfg.provider} onChange={(e)=>setCfg({ ...cfg, provider: e.target.value as 'cpu'|'gpu' })} disabled={!canAdmin}>
               <option value="cpu">CPU</option>
               <option value="gpu">GPU</option>
             </select>
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Max concurrency</span>
+            <span>{t('ai.maxConcurrency')}</span>
             <input type="number" className="w-24 input" min={1} max={16} value={cfg.max_concurrency} onChange={(e)=>setCfg({ ...cfg, max_concurrency: Math.max(1, Number(e.target.value)||1) })} disabled={!canAdmin} />
           </label>
-          <div className="text-[var(--text-dim)] text-xs">Controls how many video streams are analyzed in parallel.</div>
+          <div className="text-[var(--text-dim)] text-xs">{t('ai.parallelStreams')}</div>
         </div>
       </Section>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Motion detection */}
-        <Section title="Motion detection">
+        <Section title={t('ai.motion')}>
           <div className="space-y-2 text-sm">
             <label className="inline-flex items-center gap-2">
-              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.motion_detection.enabled} onChange={(e)=>setCfg({ ...cfg, motion_detection: { ...cfg.motion_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> Enable motion detection
+              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.motion_detection.enabled} onChange={(e)=>setCfg({ ...cfg, motion_detection: { ...cfg.motion_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.enableMotion')}
             </label>
             <div className="grid grid-cols-2 gap-3">
               <label className="flex items-center justify-between gap-2">
-                <span>Sensitivity</span>
+                <span>{t('ai.sensitivity')}</span>
                 <input type="range" min={0} max={1} step={0.05} className="w-40" value={cfg.motion_detection.sensitivity} onChange={(e)=>setCfg({ ...cfg, motion_detection: { ...cfg.motion_detection, sensitivity: Number(e.target.value) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Min area (px)</span>
+                <span>{t('ai.minArea')}</span>
                 <input type="number" className="w-32 input" value={cfg.motion_detection.min_area} onChange={(e)=>setCfg({ ...cfg, motion_detection: { ...cfg.motion_detection, min_area: Math.max(0, Number(e.target.value)||0) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Debounce (ms)</span>
+                <span>{t('ai.debounce')}</span>
                 <input type="number" className="w-32 input" value={cfg.motion_detection.debounce_ms} onChange={(e)=>setCfg({ ...cfg, motion_detection: { ...cfg.motion_detection, debounce_ms: Math.max(0, Number(e.target.value)||0) } })} disabled={!canAdmin} />
               </label>
             </div>
-            <div className="text-[var(--text-dim)] text-xs">Tune to reduce noise while keeping true motion events.</div>
+            <div className="text-[var(--text-dim)] text-xs">{t('ai.motionHint')}</div>
           </div>
         </Section>
 
         {/* Object detection */}
-        <Section title="Object detection">
+        <Section title={t('ai.object')}>
           <div className="space-y-2 text-sm">
             <label className="inline-flex items-center gap-2">
-              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.object_detection.enabled} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> Enable object detection
+              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.object_detection.enabled} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.enableObject')}
             </label>
             <div className="grid grid-cols-2 gap-3">
               <label className="flex items-center justify-between gap-2">
-                <span>Model</span>
+                <span>{t('ai.model')}</span>
                 <select className="w-40 select" value={cfg.object_detection.model} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, model: e.target.value } })} disabled={!canAdmin}>
                   <option value="yolo">YOLO</option>
                   <option value="mobilenet">MobileNet</option>
@@ -280,7 +282,7 @@ export function AIEngine() {
                 </select>
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Confidence</span>
+                <span>{t('ai.confidence')}</span>
                 <input type="range" min={0} max={1} step={0.01} className="w-40" value={cfg.object_detection.confidence} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, confidence: Number(e.target.value) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
@@ -288,7 +290,7 @@ export function AIEngine() {
                 <input type="range" min={0} max={1} step={0.01} className="w-40" value={cfg.object_detection.nms} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, nms: Number(e.target.value) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Max FPS</span>
+                <span>{t('ai.maxFps')}</span>
                 <input type="number" className="w-28 input" value={cfg.object_detection.max_fps ?? ''} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, max_fps: e.target.value ? Number(e.target.value) : null } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
@@ -300,21 +302,21 @@ export function AIEngine() {
                 </div>
               </label>
               <label className="flex items-center justify-between gap-2 col-span-2">
-                <span>Detect classes</span>
+                <span>{t('ai.detectClasses')}</span>
                 <input className="flex-1 input" value={cfg.object_detection.labels.join(', ')} onChange={(e)=>setCfg({ ...cfg, object_detection: { ...cfg.object_detection, labels: e.target.value.split(',').map(s=>s.trim()).filter(Boolean) } })} disabled={!canAdmin} placeholder="comma-separated e.g. person, car, dog" />
               </label>
             </div>
-            <div className="text-[var(--text-dim)] text-xs">Choose classes of interest and tune accuracy/speed trade-offs.</div>
+            <div className="text-[var(--text-dim)] text-xs">{t('ai.classesHint')}</div>
           </div>
         </Section>
       </div>
 
       {/* Schedules and events */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Section title="Schedules">
+        <Section title={t('ai.schedules')}>
           <div className="space-y-2 text-sm">
             <label className="inline-flex items-center gap-2">
-              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.schedules.enabled} onChange={(e)=>setCfg({ ...cfg, schedules: { ...cfg.schedules, enabled: e.target.checked } })} disabled={!canAdmin} /> Enable schedules
+              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.schedules.enabled} onChange={(e)=>setCfg({ ...cfg, schedules: { ...cfg.schedules, enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.enableSchedules')}
             </label>
             {cfg.schedules.windows.map((w, idx) => (
               <div key={idx} className="grid grid-cols-3 gap-2 items-center">
@@ -325,36 +327,36 @@ export function AIEngine() {
                 <input type="time" className="input" value={w.start} onChange={(e)=>{ const windows = [...cfg.schedules.windows]; windows[idx] = { ...w, start: e.target.value }; setCfg({ ...cfg, schedules: { ...cfg.schedules, windows } }) }} disabled={!canAdmin} />
                 <div className="flex items-center gap-2">
                   <input type="time" className="input" value={w.end} onChange={(e)=>{ const windows = [...cfg.schedules.windows]; windows[idx] = { ...w, end: e.target.value }; setCfg({ ...cfg, schedules: { ...cfg.schedules, windows } }) }} disabled={!canAdmin} />
-                  <button className="btn" onClick={()=>{ const windows = cfg.schedules.windows.filter((_,i)=>i!==idx); setCfg({ ...cfg, schedules: { ...cfg.schedules, windows } }) }} disabled={!canAdmin}>Remove</button>
+                  <button className="btn" onClick={()=>{ const windows = cfg.schedules.windows.filter((_,i)=>i!==idx); setCfg({ ...cfg, schedules: { ...cfg.schedules, windows } }) }} disabled={!canAdmin}>{t('ai.remove')}</button>
                 </div>
               </div>
             ))}
-            <button className="btn" onClick={()=> setCfg({ ...cfg, schedules: { ...cfg.schedules, windows: [...cfg.schedules.windows, { days: ['Sat','Sun'], start: '00:00', end: '23:59' }] } })} disabled={!canAdmin}>Add window</button>
-            <div className="text-[var(--text-dim)] text-xs">Days: Mon,Tue,Wed,Thu,Fri,Sat,Sun</div>
+            <button className="btn" onClick={()=> setCfg({ ...cfg, schedules: { ...cfg.schedules, windows: [...cfg.schedules.windows, { days: ['Sat','Sun'], start: '00:00', end: '23:59' }] } })} disabled={!canAdmin}>{t('ai.addWindow')}</button>
+            <div className="text-[var(--text-dim)] text-xs">{t('ai.days')}</div>
           </div>
         </Section>
 
-        <Section title="Events & Webhooks">
+        <Section title={t('ai.eventsWebhooks')}>
           <div className="space-y-2 text-sm">
             <label className="inline-flex items-center gap-2">
-              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.events.create_alerts} onChange={(e)=>setCfg({ ...cfg, events: { ...cfg.events, create_alerts: e.target.checked } })} disabled={!canAdmin} /> Create Alerts/Incidents for detections
+              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.events.create_alerts} onChange={(e)=>setCfg({ ...cfg, events: { ...cfg.events, create_alerts: e.target.checked } })} disabled={!canAdmin} /> {t('ai.createAlerts')}
             </label>
             <label className="inline-flex items-center gap-2">
-              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.events.webhook_enabled} onChange={(e)=>setCfg({ ...cfg, events: { ...cfg.events, webhook_enabled: e.target.checked } })} disabled={!canAdmin} /> Send webhook
+              <input type="checkbox" className="accent-[var(--accent)]" checked={cfg.events.webhook_enabled} onChange={(e)=>setCfg({ ...cfg, events: { ...cfg.events, webhook_enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.sendWebhook')}
             </label>
             <label className="flex items-center justify-between gap-2">
-              <span>Webhook URL</span>
+              <span>{t('ai.webhookUrl')}</span>
               <input className="w-[28rem] input" value={cfg.events.webhook_url} onChange={(e)=>setCfg({ ...cfg, events: { ...cfg.events, webhook_url: e.target.value } })} disabled={!canAdmin || !cfg.events.webhook_enabled} />
             </label>
-            <div className="text-[var(--text-dim)] text-xs">Webhook will receive JSON payloads for motion/object detections.</div>
+            <div className="text-[var(--text-dim)] text-xs">{t('ai.webhookHint')}</div>
           </div>
         </Section>
       </div>
 
       {/* Per-camera overrides */}
-      <Section title="Per-camera overrides" actions={
+      <Section title={t('ai.cameraOverrides')} actions={
         <label className="inline-flex items-center gap-2 text-sm">
-          <span>Camera</span>
+          <span>{t('ai.camera')}</span>
           <select className="w-56 select" value={selectedCamId} onChange={(e)=> setSelectedCamId(e.target.value ? Number(e.target.value) : '')}>
             <option value="">(select)</option>
             {cameras.map(c => <option key={c.id} value={c.id}>{c.name} · {c.ip_address}</option>)}
@@ -362,41 +364,41 @@ export function AIEngine() {
         </label>
       }>
         {selectedCamId === '' ? (
-          <div className="text-sm text-[var(--text-dim)]">Pick a camera to customize settings.</div>
+          <div className="text-sm text-[var(--text-dim)]">{t('ai.pickCamera')}</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
             <div className="space-y-2">
-              <div className="font-medium">Motion detection</div>
+                <div className="font-medium">{t('ai.motionDetection')}</div>
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={!!selectedOverride?.motion_detection?.enabled} onChange={(e)=> updateOverride(selectedCamId as number, { motion_detection: { ...selectedOverride?.motion_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> Override enable
+                  <input type="checkbox" className="accent-[var(--accent)]" checked={!!selectedOverride?.motion_detection?.enabled} onChange={(e)=> updateOverride(selectedCamId as number, { motion_detection: { ...selectedOverride?.motion_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.overrideEnable')}
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Sensitivity</span>
+                  <span>{t('ai.sensitivity')}</span>
                 <input type="range" min={0} max={1} step={0.05} className="w-40" value={selectedOverride?.motion_detection?.sensitivity ?? cfg.motion_detection.sensitivity} onChange={(e)=> updateOverride(selectedCamId as number, { motion_detection: { ...selectedOverride?.motion_detection, sensitivity: Number(e.target.value) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Min area</span>
+                  <span>{t('ai.minAreaShort')}</span>
                 <input type="number" className="w-28 input" value={selectedOverride?.motion_detection?.min_area ?? cfg.motion_detection.min_area} onChange={(e)=> updateOverride(selectedCamId as number, { motion_detection: { ...selectedOverride?.motion_detection, min_area: Math.max(0, Number(e.target.value)||0) } })} disabled={!canAdmin} />
               </label>
             </div>
             <div className="space-y-2">
-              <div className="font-medium">Object detection</div>
+                <div className="font-medium">{t('ai.objectDetection')}</div>
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" className="accent-[var(--accent)]" checked={!!selectedOverride?.object_detection?.enabled} onChange={(e)=> updateOverride(selectedCamId as number, { object_detection: { ...selectedOverride?.object_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> Override enable
+                  <input type="checkbox" className="accent-[var(--accent)]" checked={!!selectedOverride?.object_detection?.enabled} onChange={(e)=> updateOverride(selectedCamId as number, { object_detection: { ...selectedOverride?.object_detection, enabled: e.target.checked } })} disabled={!canAdmin} /> {t('ai.overrideEnable')}
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Confidence</span>
+                  <span>{t('ai.confidence')}</span>
                 <input type="range" min={0} max={1} step={0.01} className="w-40" value={selectedOverride?.object_detection?.confidence ?? cfg.object_detection.confidence} onChange={(e)=> updateOverride(selectedCamId as number, { object_detection: { ...selectedOverride?.object_detection, confidence: Number(e.target.value) } })} disabled={!canAdmin} />
               </label>
               <label className="flex items-center justify-between gap-2">
-                <span>Classes</span>
+                  <span>{t('ai.classes')}</span>
                 <input className="w-64 input" value={(selectedOverride?.object_detection?.labels ?? cfg.object_detection.labels).join(', ')} onChange={(e)=> updateOverride(selectedCamId as number, { object_detection: { ...selectedOverride?.object_detection, labels: e.target.value.split(',').map(s=>s.trim()).filter(Boolean) } })} disabled={!canAdmin} />
               </label>
               <div className="flex items-center gap-2">
                 <button className="btn" onClick={()=> {
                   const next = { ...overrides }; delete next[selectedCamId as number]; setOverrides(next); saveLocal(STORAGE_KEYS.overrides, next)
-                }} disabled={!canAdmin}>Clear override</button>
-                <button className="btn" onClick={()=> { saveLocal(STORAGE_KEYS.overrides, overrides); setNotice(`Saved override for camera ${selectedCamId}`) }} disabled={!canAdmin}>Save override</button>
+                  }} disabled={!canAdmin}>{t('ai.clearOverride')}</button>
+                  <button className="btn" onClick={()=> { saveLocal(STORAGE_KEYS.overrides, overrides); setNotice(`Saved override for camera ${selectedCamId}`) }} disabled={!canAdmin}>{t('ai.saveOverride')}</button>
               </div>
             </div>
           </div>
@@ -404,15 +406,15 @@ export function AIEngine() {
       </Section>
 
       {/* Advanced */}
-      <Section title="Advanced">
+      <Section title={t('ai.advanced')}>
         <div className="text-sm space-y-2">
-          <div className="text-[var(--text-dim)]">JSON export/import</div>
+          <div className="text-[var(--text-dim)]">{t('ai.jsonExport')}</div>
           <div className="flex items-center gap-2">
             <button className="btn" onClick={() => {
               const blob = new Blob([JSON.stringify({ cfg, overrides }, null, 2)], { type: 'application/json' })
               const url = URL.createObjectURL(blob)
               const a = document.createElement('a'); a.href = url; a.download = 'ai-config.json'; a.click(); URL.revokeObjectURL(url)
-            }}>Export</button>
+            }}>{t('ai.export')}</button>
             <label className="btn inline-flex items-center gap-2 cursor-pointer">
               <input type="file" accept="application/json" className="hidden" onChange={(e) => {
                 const file = e.target.files?.[0]; if (!file) return
@@ -425,9 +427,9 @@ export function AIEngine() {
                   } catch { setError('Invalid JSON file') }
                 }; reader.readAsText(file)
               }} />
-              Import
+              {t('ai.import')}
             </label>
-            <button className="btn" onClick={()=> alert('Test pipeline not implemented yet')}>Test pipeline</button>
+            <button className="btn" onClick={()=> alert('Test pipeline not implemented yet')}>{t('ai.testPipeline')}</button>
           </div>
         </div>
       </Section>

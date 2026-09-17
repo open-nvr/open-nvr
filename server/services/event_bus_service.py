@@ -59,6 +59,9 @@ EVENT_INFERENCE_ERROR = "inference_error"
 EVENT_CAMERA_EVENT = "camera_event"
 EVENT_CAMERA_STATUS = "camera_status"
 EVENT_SYSTEM_ALERT = "system_alert"
+# An app alert reaching the operator inbox. Distinct from system_alert,
+# which is host health (disk, CPU); this one is what a camera saw.
+EVENT_APP_ALERT = "app_alert"
 # Live Tier-0 tracks for the detection overlay. Its own type, not
 # inference_result: that type is keyed on model_id and drives the
 # AI Detection Results table, and 5 fps of tracker output per camera
@@ -293,6 +296,30 @@ async def publish_camera_event(
         "camera_id": camera_id,
         "task": event_type,
         "payload": payload,
+    })
+
+
+async def publish_app_alert(
+    *,
+    camera_id: int | None,
+    severity: str,
+    alert_type: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Tell open browsers an app alert just landed, so the desk sees it
+    NOW rather than up to a poll later — the bell polls every 10s, and
+    "a person walked in unscanned" is not a 10-second-old fact worth
+    sitting on.
+
+    ``camera_id`` is the numeric id when the producer's handle resolves
+    to one; None for an alert about nothing in particular, which then
+    reaches unfiltered dashboard sockets only (see _Subscriber.matches).
+    """
+    await get_event_bus().publish({
+        "event_type": EVENT_APP_ALERT,
+        "camera_id": camera_id,
+        "task": alert_type or "alert",
+        "payload": {"severity": severity, "alert_type": alert_type, **payload},
     })
 
 

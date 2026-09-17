@@ -19,6 +19,14 @@
 #
 #     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps down
 #
+# One app (and only its adapters), by profile -- what scripts/install.sh
+# persists in OPENNVR_EXAMPLE_PROFILE when an operator picks apps at
+# install time, and what start.sh replays on every ``up``:
+#     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile license-plate-recognition up -d
+# Every service an app needs carries that app's id as a profile: the app,
+# its config-init, its dedicated adapters, and the shared egress-proxy.
+# The ``apps`` profile stays the everything-on switch the reconciler uses.
+#
 # Registration auth: the apps authenticate to POST /api/v1/apps/register
 # with the deployment's INTERNAL_API_KEY (X-Internal-Api-Key header) —
 # the same secret NATS and the adapters use. No user JWT is involved.
@@ -53,7 +61,7 @@ services:
   # only. See docs/APP_NETWORK.md.
   # ──────────────────────────────────────────────────────────────
   egress-proxy:
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay]
     build:
       context: .
       dockerfile: scripts/egress-proxy/Dockerfile
@@ -79,7 +87,7 @@ services:
   # operator-defined zones. Contract surface on :9200.
   # ──────────────────────────────────────────────────────────────
   loitering-detection-config-init:
-    profiles: [apps]
+    profiles: [apps, loitering-detection]
     image: alpine:3.20
     container_name: opennvr_loitering_config_init
     logging: *svc-logs
@@ -104,7 +112,7 @@ services:
       - opennvr_loitering_config:/generated
 
   loitering-detection:
-    profiles: [apps]
+    profiles: [apps, loitering-detection]
     build:
       context: .
       dockerfile: examples/loitering-detection/Dockerfile
@@ -167,7 +175,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, occupancy-counting]
     image: alpine:3.20
     container_name: opennvr_occupancy_config_init
     logging: *svc-logs
@@ -194,7 +202,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, occupancy-counting]
     build:
       context: .
       dockerfile: examples/occupancy-counting/Dockerfile
@@ -246,7 +254,7 @@ services:
   # :9202 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   line-crossing-config-init:
-    profiles: [apps]
+    profiles: [apps, line-crossing]
     image: alpine:3.20
     container_name: opennvr_line_crossing_config_init
     logging: *svc-logs
@@ -268,7 +276,7 @@ services:
       - opennvr_line_crossing_config:/generated
 
   line-crossing:
-    profiles: [apps]
+    profiles: [apps, line-crossing]
     build:
       context: .
       dockerfile: examples/line-crossing/Dockerfile
@@ -320,7 +328,7 @@ services:
   # on :9203 (health/state + registration → catalog dot + agent skill).
   # ──────────────────────────────────────────────────────────────
   abandoned-object-config-init:
-    profiles: [apps]
+    profiles: [apps, abandoned-object]
     image: alpine:3.20
     container_name: opennvr_abandoned_object_config_init
     logging: *svc-logs
@@ -342,7 +350,7 @@ services:
       - opennvr_abandoned_object_config:/generated
 
   abandoned-object:
-    profiles: [apps]
+    profiles: [apps, abandoned-object]
     build:
       context: .
       dockerfile: examples/abandoned-object/Dockerfile
@@ -391,7 +399,7 @@ services:
   # Contract surface on :9204.
   # ──────────────────────────────────────────────────────────────
   intrusion-detection-config-init:
-    profiles: [apps]
+    profiles: [apps, intrusion-detection]
     image: alpine:3.20
     container_name: opennvr_intrusion_config_init
     logging: *svc-logs
@@ -413,7 +421,7 @@ services:
       - opennvr_intrusion_detection_config:/generated
 
   intrusion-detection:
-    profiles: [apps]
+    profiles: [apps, intrusion-detection]
     build:
       context: .
       dockerfile: examples/intrusion-detection/Dockerfile
@@ -477,8 +485,160 @@ services:
   # volume keeps that across container recreates (and can be pre-warmed
   # for air-gapped installs — see the adapter's Dockerfile notes).
   # ──────────────────────────────────────────────────────────────
+  # Body keypoints. Rules about what a person is DOING — a hand
+  # scanner sweeping an arm, a fall, a gesture — need joints, not
+  # boxes, and no adapter in the default stack produced them.
+  # ──────────────────────────────────────────────────────────────
+  # Pose weights init — copies the pre-exported ONNX into the volume the
+  # adapter reads. The pose model is the one weight in the stack with no
+  # download: Ultralytics publishes the .pt, never the ONNX, so somebody
+  # has to export it. Before this existed that somebody was the operator,
+  # and a fresh install got an adapter that started, answered /health and
+  # failed every /infer on a missing file — with nothing anywhere saying
+  # why. Bring your own model by pointing YOLO_POSE_WEIGHTS_IMAGE at it.
+  yolo-pose-weights-init:
+    profiles: [apps, guard-scan-compliance]
+    image: ${YOLO_POSE_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolo-pose-weights:v8.3.0}
+    # Build it here if it cannot be pulled. Without this fallback a
+    # fresh install is at the mercy of one registry: an unpublished
+    # image, a private package, a blocked ghcr.io — any of them ends
+    # with "error from registry: denied", no weights, and (because the
+    # adapter waits on this) no pose adapter at all. The build needs
+    # only Docker Hub, so the two failure modes do not overlap.
+    #
+    # It is a LAST resort, not the normal path. The export pulls the
+    # ~7 GB ultralytics base (amd64-only, but a plain manifest rather
+    # than an index, so it still runs under emulation elsewhere) and
+    # then takes ~30 s — against ~5 s to pull the finished 17 MB
+    # image. `pull_policy: missing` keeps the published image first
+    # whenever it can be had.
+    build:
+      context: examples/yolo-pose-weights
+      dockerfile: Dockerfile
+    pull_policy: missing
+    container_name: opennvr_yolo_pose_weights_init
+    logging: *svc-logs
+    restart: "no"
+    # List-form command, as yolov8-weights-init explains at length:
+    # compose word-splits a STRING command, so `sh -c set -e ...` would
+    # run only `set`, exit 0, and copy nothing — leaving an empty volume
+    # and an adapter that 503s every request.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/yolo11n-pose.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolo11n-pose.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked yolo11n-pose.onnx into volume..."
+        cp /yolo11n-pose.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+
+  yolo-pose-adapter:
+    profiles: [apps, guard-scan-compliance]
+    # YOLO_POSE_ADAPTER_TAG lets the pose image ride a different tag
+    # than the rest, exactly as CAPTION_ADAPTER_TAG does for captions
+    # and for the same reason: ADAPTER_TAG is ONE tag applied to every
+    # adapter, and the pose adapter is not in the releases it names.
+    # There is no yolo-pose-adapter:0.1.5 — the only tags that image has
+    # are a branch and two shas — so a fresh install pinned to the
+    # tested release could not pull it at all, and the whole app died on
+    # a tag that never existed.
+    # ...which is also why ADAPTER_TAG is NOT the fallback here. An
+    # operator upgrading into this branch has ADAPTER_TAG=0.1.5 already
+    # in their .env and no YOLO_POSE_ADAPTER_TAG, so the chain resolved
+    # to exactly the tag the paragraph above says does not exist — and
+    # unlike yolo-pose-weights-init this service has no build context to
+    # fall back to (the image is built in the ai-adapter repo), so the
+    # pull fails and takes the whole `--profile apps up` down with it,
+    # including the loitering / intrusion / LPR apps that were running
+    # perfectly well before.
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}
+    depends_on:
+      # Start only once the graph is on disk. Without this the adapter
+      # races the copier, loses, and reports itself healthy anyway —
+      # because /health answers before a model is ever loaded.
+      yolo-pose-weights-init:
+        condition: service_completed_successfully
+    container_name: opennvr_yolo_pose_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # Smaller input is the CPU lever: an app watching a doorway wants
+      # frame RATE, and the wrist-to-torso geometry survives the loss.
+      - OPENNVR_POSE_IMGSZ=${OPENNVR_POSE_IMGSZ:-448}
+      # The image ships without weights; yolo-pose-weights-init above
+      # puts them in the volume, which is why this is normally empty.
+      # Set it only to host the exported .onnx yourself and have the
+      # adapter fetch it at first boot instead. Empty means "never
+      # download" — the sovereignty=local_only posture.
+      - YOLO_POSE_MODEL_URL=${YOLO_POSE_MODEL_URL:-}
+    volumes:
+      - opennvr_yolo_pose_weights:/weights
+      - opennvr_yolo_pose_cache:/root/.cache
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9009/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  yolo-pose-register:
+    profiles: [apps, guard-scan-compliance]
+    image: alpine:3.20
+    container_name: opennvr_yolo_pose_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      yolo-pose-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="yolo-pose"
+        url="http://yolo-pose-adapter:9009"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if OCR 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — screening checks will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   fast-plate-ocr-adapter:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_fast_plate_ocr_adapter
     logging: *svc-logs
@@ -515,7 +675,7 @@ services:
   # registration degrades to a WARN + the app's own KAI-C 404 handling,
   # never a wedged compose up.
   fast-plate-ocr-register:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: alpine:3.20
     container_name: opennvr_fast_plate_ocr_register
     logging: *svc-logs
@@ -561,13 +721,14 @@ services:
     networks:
       - opennvr_internal
 
+
   # ──────────────────────────────────────────────────────────────
   # License plate recognition — YOLOv8 → crop → fast-plate-ocr chain
   # via KAI-C, with allow/deny watchlist severity routing. Contract
   # surface on :9205.
   # ──────────────────────────────────────────────────────────────
   license-plate-recognition-config-init:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     image: alpine:3.20
     container_name: opennvr_license_plate_recognition_config_init
     logging: *svc-logs
@@ -589,7 +750,7 @@ services:
       - opennvr_license_plate_recognition_config:/generated
 
   license-plate-recognition:
-    profiles: [apps]
+    profiles: [apps, license-plate-recognition]
     build:
       context: .
       dockerfile: examples/license-plate-recognition/Dockerfile
@@ -644,7 +805,7 @@ services:
   # Contract surface on :9211.
   # ──────────────────────────────────────────────────────────────
   alert-notifier-config-init:
-    profiles: [apps]
+    profiles: [apps, alert-notifier]
     image: alpine:3.20
     container_name: opennvr_alert_notifier_config_init
     logging: *svc-logs
@@ -666,7 +827,7 @@ services:
       - opennvr_alert_notifier_config:/generated
 
   alert-notifier:
-    profiles: [apps]
+    profiles: [apps, alert-notifier]
     build:
       context: .
       dockerfile: examples/alert-notifier/Dockerfile
@@ -716,7 +877,7 @@ services:
   # it off. Contract surface on :9210.
   # ──────────────────────────────────────────────────────────────
   gate-controller-config-init:
-    profiles: [apps]
+    profiles: [apps, gate-controller]
     image: alpine:3.20
     container_name: opennvr_gate_controller_config_init
     logging: *svc-logs
@@ -738,7 +899,7 @@ services:
       - opennvr_gate_controller_config:/generated
 
   gate-controller:
-    profiles: [apps]
+    profiles: [apps, gate-controller]
     build:
       context: .
       dockerfile: examples/gate-controller/Dockerfile
@@ -781,14 +942,101 @@ services:
       - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
+  # InsightFace adapter — the face-recognition capability behind the
+  # Smart Doorbell. The listing declares requires_adapters: [insightface]
+  # (RFC-0002 decision 7) and the app's config.docker.yml already named
+  # http://insightface-adapter:9005, but no service existed: the
+  # validator warned "installs but that capability stays degraded", and
+  # a one-click install produced a doorbell that could recognise nobody.
+  # Same shape as the fast-plate-ocr pair above. The ~280 MB buffalo_l
+  # weights download on first start into a named cache volume; the
+  # enrolled-faces DB lives on its own volume so re-pulling the image
+  # never forgets a family member.
+  # ──────────────────────────────────────────────────────────────
+  insightface-adapter:
+    profiles: [apps, smart-doorbell]
+    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_insightface_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - OPENNVR_INSIGHTFACE_FACE_DB=/data/faces.json
+    volumes:
+      - opennvr_insightface_faces:/data
+      - opennvr_insightface_cache:/root/.insightface
+    networks:
+      # opennvr_internal for KAI-C's /infer calls; opennvr_apps because
+      # the doorbell's enrol / list / delete actions call the adapter's
+      # /faces/* routes directly — KAI-C does not proxy those.
+      - opennvr_internal
+      - opennvr_apps
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9005/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  # One-shot KAI-C registration, name MUST be ``insightface``: it becomes
+  # the route /api/v1/infer/insightface, which the app's
+  # ``recognition_adapter`` config names. Always exits 0 (see
+  # fast-plate-ocr-register).
+  insightface-register:
+    profiles: [apps, smart-doorbell]
+    image: alpine:3.20
+    container_name: opennvr_insightface_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      insightface-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="insightface"
+        url="http://insightface-adapter:9005"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if face recognition 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — face recognition will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Smart doorbell — face recognition at the door via InsightFace
   # through KAI-C (FrameApp); known visitors low-severity, strangers
   # high with a snapshot. Contract surface on :9206.
-  # NOTE: needs an InsightFace adapter registered with KAI-C under
-  # name=insightface — the standard stack ships only yolov8.
+  # The insightface-adapter pair above is provisioned with it.
   # ──────────────────────────────────────────────────────────────
   smart-doorbell-config-init:
-    profiles: [apps]
+    profiles: [apps, smart-doorbell]
     image: alpine:3.20
     container_name: opennvr_doorbell_config_init
     logging: *svc-logs
@@ -810,7 +1058,7 @@ services:
       - opennvr_smart_doorbell_config:/generated
 
   smart-doorbell:
-    profiles: [apps]
+    profiles: [apps, smart-doorbell]
     build:
       context: .
       dockerfile: examples/smart-doorbell/Dockerfile
@@ -830,6 +1078,10 @@ services:
         condition: service_healthy
       egress-proxy:
         condition: service_started
+      insightface-adapter:
+        condition: service_healthy
+      insightface-register:
+        condition: service_completed_successfully
     environment:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
@@ -842,7 +1094,7 @@ services:
       # Empty APPS_EGRESS_PROXY_URL in .env switches the proxy off.
       - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
       - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
-      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,insightface-adapter,localhost,127.0.0.1
     expose:
       - "9206"
     volumes:
@@ -865,7 +1117,7 @@ services:
   # Contract surface on :9207.
   # ──────────────────────────────────────────────────────────────
   package-delivery-config-init:
-    profiles: [apps]
+    profiles: [apps, package-delivery]
     image: alpine:3.20
     container_name: opennvr_package_delivery_config_init
     logging: *svc-logs
@@ -887,7 +1139,7 @@ services:
       - opennvr_package_delivery_config:/generated
 
   package-delivery:
-    profiles: [apps]
+    profiles: [apps, package-delivery]
     build:
       context: .
       dockerfile: examples/package-delivery/Dockerfile
@@ -940,7 +1192,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, footage-search]
     image: alpine:3.20
     container_name: opennvr_footage_search_config_init
     logging: *svc-logs
@@ -967,7 +1219,7 @@ services:
     # enable on every stock install, because these apps ride the Tier-0
     # stream that is always on and need no extra adapter, model, or GPU.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
-    profiles: [apps, default-apps]
+    profiles: [apps, default-apps, footage-search]
     build:
       context: .
       dockerfile: examples/footage-search/Dockerfile
@@ -1023,7 +1275,7 @@ services:
   # start forwarding. Contract surface on :9209.
   # ──────────────────────────────────────────────────────────────
   home-assistant-relay-config-init:
-    profiles: [apps]
+    profiles: [apps, home-assistant-relay]
     image: alpine:3.20
     container_name: opennvr_home_assistant_relay_config_init
     logging: *svc-logs
@@ -1059,7 +1311,7 @@ services:
       - opennvr_home_assistant_relay_config:/generated
 
   home-assistant-relay:
-    profiles: [apps]
+    profiles: [apps, home-assistant-relay]
     build:
       context: .
       dockerfile: examples/home-assistant-relay/Dockerfile
@@ -1100,6 +1352,81 @@ services:
     networks:
       - opennvr_apps
 
+  guard-scan-compliance-config-init:
+    profiles: [apps, guard-scan-compliance]
+    image: alpine:3.20
+    container_name: opennvr_guard_scan_config_init
+    logging: *svc-logs
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (guard-scan-compliance) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/guard-scan-compliance:/template:ro
+      - opennvr_guard_scan_config:/generated
+
+  guard-scan-compliance:
+    profiles: [apps, guard-scan-compliance]
+    build:
+      context: .
+      dockerfile: examples/guard-scan-compliance/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+    container_name: opennvr_guard_scan_compliance
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      guard-scan-compliance-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+      # RFC-0002 decision 7, the same as license-plate-recognition and
+      # its OCR adapter: the app starts only once the adapter it cannot
+      # work without is up, and its (best-effort) registration has run.
+      #
+      # This app is the pose adapter's only consumer, and it never said
+      # so. Starting guard-scan therefore did not start the adapter —
+      # so a one-click install, or `up -d guard-scan-compliance`,
+      # brought up an app whose every inference call was going to fail,
+      # with no pose container anywhere on the box to hint at why.
+      yolo-pose-adapter:
+        condition: service_healthy
+      yolo-pose-register:
+        condition: service_completed_successfully
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - KAIC_URL=http://opennvr-core:8100
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9210"
+    volumes:
+      - opennvr_guard_scan_config:/app/config:ro
+      # The per-frame keypoint logs this collects as it runs — the
+      # training set for a learned model later. Its own volume so a
+      # prune can find it: the evidence store's sweep only deletes JPEGs.
+      - opennvr_guard_scan_sessions:/data/sessions
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
 volumes:
   # Generated config.yml files (mounted read-only by each app).
   opennvr_loitering_config:
@@ -1111,9 +1438,15 @@ volumes:
   opennvr_gate_controller_config:
   opennvr_alert_notifier_config:
   opennvr_fast_plate_ocr_cache:
+  opennvr_insightface_faces:
+  opennvr_insightface_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
   opennvr_footage_search_config:
   # footage-search's persistent SQLite index (see its store.py).
   opennvr_footage_search_data:
   opennvr_home_assistant_relay_config:
+  opennvr_guard_scan_config:
+  opennvr_guard_scan_sessions:
+  opennvr_yolo_pose_cache:
+  opennvr_yolo_pose_weights:

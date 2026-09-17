@@ -123,13 +123,13 @@
 
 - id: line-crossing
   name: Line Crossing
-  summary: Alerts when a tracked object crosses an oriented tripwire in a counted direction.
+  summary: Tripwire counting and alerts — tallies every tracked object crossing a drawn line per direction and hour, and alarms on each crossing, on a count threshold, or only at night.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/line-crossing:latest
   build_context: examples/line-crossing
   requires_tasks: [object_detection, multi_object_tracking]
-  emits: [line-crossing]
+  emits: [line-crossing, passthrough]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/line-crossing/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues
@@ -225,6 +225,44 @@
           networks:
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d intrusion-detection
+
+- id: guard-scan-compliance
+  name: Guard Scan Compliance
+  summary: Checks that the guard wands every person entering — left arm, right arm, front, back — and flags what the scanner finds.
+  category: safety
+  version: "0.1.0"
+  image: ghcr.io/open-nvr/guard-scan-compliance:latest
+  build_context: examples/guard-scan-compliance
+  requires_tasks: [pose_estimation]
+  # Provisioned with the app and refcounted on uninstall (RFC-0002
+  # decision 7). yolo-pose is not part of the standard stack.
+  requires_adapters: [yolo_pose]
+  emits: [scanner_flag, improper_scan, no_scan]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/guard-scan-compliance/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/guard-scan-compliance
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        guard-scan-compliance:
+          profiles: [apps]
+          image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
+          expose:
+            - "9210"
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d guard-scan-compliance
 
 - id: license-plate-recognition
   # ANPR leads: it is the name most of the world uses for this (UK, EU,
@@ -346,7 +384,7 @@
 
 - id: smart-doorbell
   name: Smart Doorbell
-  summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.
+  summary: Recognises faces at the door and keeps the People directory — family, residents, staff, contractors with expiry dates, a watchlist; strangers alert with a snapshot you can enrol from.
   category: doorstep
   version: "1.0.0"
   image: ghcr.io/open-nvr/smart-doorbell:latest
@@ -358,7 +396,7 @@
   # its unavailable face_recognition task, and an install without the
   # adapter degrades exactly as the app's README documents.
   requires_adapters: [insightface]
-  emits: [known_visitor, unknown_visitor]
+  emits: [known_visitor, unknown_visitor, watchlist_visitor, expired_pass]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/smart-doorbell/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

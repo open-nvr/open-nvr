@@ -29,7 +29,9 @@ import {
 import { ReadOnlyField } from '../../components/ui/ReadOnlyField'
 import { Tabs } from '../../components/ui/Tabs'
 import { useCameraCapabilities } from '../../hooks/useCameraCapabilities'
+import { useTranslation } from '../../i18n'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 
 type CameraLite = { id: number; name: string }
 
@@ -165,11 +167,11 @@ function imgLabel(key: string): string {
   )
 }
 
-function probeBadge(result: string | undefined) {
-  if (result === 'ok') return <Badge variant="success">Reachable</Badge>
-  if (result === 'unreachable') return <Badge variant="warning">Unreachable</Badge>
-  if (result === 'not_probed') return <Badge variant="neutral">Not probed</Badge>
-  return <Badge variant="destructive">Probe error</Badge>
+function probeBadge(result: string | undefined, t: (key: string) => string) {
+  if (result === 'ok') return <Badge variant="success">{t('device.reachable')}</Badge>
+  if (result === 'unreachable') return <Badge variant="warning">{t('device.unreachable')}</Badge>
+  if (result === 'not_probed') return <Badge variant="neutral">{t('device.notProbed')}</Badge>
+  return <Badge variant="destructive">{t('device.probeError')}</Badge>
 }
 
 /** Friendly label for the selected vendor driver shown in the header badge. */
@@ -186,6 +188,7 @@ function driverLabel(name: string): string {
 
 /** Small per-tab async loader (each tab reads live from the device). */
 function useDeviceRead<T>(fn: () => Promise<{ data: T }>, deps: unknown[]) {
+  const { t } = useTranslation()
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -196,7 +199,7 @@ function useDeviceRead<T>(fn: () => Promise<{ data: T }>, deps: unknown[]) {
     setError('')
     fn()
       .then((res) => alive && setData(res.data))
-      .catch((e: any) => alive && setError(e?.data?.detail || e?.message || 'Read failed'))
+      .catch((e: any) => alive && setError(extractApiError(e, t('device.readError'))))
       .finally(() => alive && setLoading(false))
     return () => {
       alive = false
@@ -226,6 +229,7 @@ function InfoTab({ cameraId }: { cameraId: number }) {
 }
 
 function NetworkTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { data, loading, error, reload } = useDeviceRead<any>(
     () => apiService.getCameraNetwork(cameraId),
     [cameraId]
@@ -233,7 +237,7 @@ function NetworkTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-24 w-full" />
   if (error) return <ErrorCard message={error} onRetry={reload} />
   if (!data?.supported)
-    return <EmptyState title="Network info not available for this device" />
+    return <EmptyState title={t('device.networkUnavailable')} />
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -258,6 +262,7 @@ function NetworkTab({ cameraId }: { cameraId: number }) {
 }
 
 function UsersTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -272,7 +277,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
       const { data } = await apiService.getCameraUsers(cameraId)
       setData(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read users')
+      setError(extractApiError(e, t('device.readUsersError')))
     } finally {
       setLoading(false)
     }
@@ -290,7 +295,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
       showSuccess(`User "${form.username}" created`)
       await load()
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Create failed')
+      showError(extractApiError(e, t('device.createUserError')))
     } finally {
       setBusy('')
     }
@@ -303,7 +308,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
       showSuccess(`User "${name}" deleted`)
       await load()
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Delete failed')
+      showError(extractApiError(e, t('device.deleteUserError')))
     } finally {
       setBusy('')
     }
@@ -321,7 +326,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
       await apiService.rebootCamera(cameraId)
       showSuccess('Reboot command sent')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Reboot failed')
+      showError(extractApiError(e, t('device.rebootError')))
     } finally {
       setBusy('')
     }
@@ -330,7 +335,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="User management not available for this device" />
+    return <EmptyState title={t('device.usersUnavailable')} />
 
   return (
     <div className="space-y-5">
@@ -358,7 +363,7 @@ function UsersTab({ cameraId }: { cameraId: number }) {
       </div>
 
       <div className="border-t border-[var(--border)] pt-4 space-y-2">
-        <div className="text-xs text-[var(--text-dim)]">Add a new account</div>
+        <div className="text-xs text-[var(--text-dim)]">{t('device.addAccount')}</div>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
           <input
             className={INPUT_CLS}
@@ -378,9 +383,9 @@ function UsersTab({ cameraId }: { cameraId: number }) {
             value={form.level}
             onChange={(e) => setForm({ ...form, level: e.target.value })}
           >
-            <option value="Administrator">Administrator</option>
-            <option value="Operator">Operator</option>
-            <option value="Viewer">Viewer</option>
+            <option value="Administrator">{t('device.administrator')}</option>
+            <option value="Operator">{t('device.operator')}</option>
+            <option value="Viewer">{t('device.viewer')}</option>
           </select>
           <Button
             variant="primary"
@@ -405,12 +410,13 @@ function UsersTab({ cameraId }: { cameraId: number }) {
 }
 
 function PtzTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showError } = useSnackbar()
   const move = async (x: number, y: number, z = 0) => {
     try {
       await apiService.ptzMove(cameraId, x, y, z)
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'PTZ move failed')
+      showError(extractApiError(e, t('device.ptzError')))
     }
   }
   const stop = async () => {
@@ -472,6 +478,7 @@ function PtzTab({ cameraId }: { cameraId: number }) {
 }
 
 function EventsTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showError, showSuccess } = useSnackbar()
   const [subscribed, setSubscribed] = useState(false)
   const [events, setEvents] = useState<any[]>([])
@@ -510,7 +517,7 @@ function EventsTab({ cameraId }: { cameraId: number }) {
       }
       await refresh()
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to change subscription')
+      showError(extractApiError(e, t('device.subscriptionError')))
     } finally {
       setBusy(false)
     }
@@ -538,7 +545,7 @@ function EventsTab({ cameraId }: { cameraId: number }) {
       </p>
       {events.length === 0 ? (
         <EmptyState
-          title="No alarms yet"
+          title={t('device.noAlarms')}
           description={
             subscribed
               ? 'Waiting for the camera to report an alarm…'
@@ -568,6 +575,7 @@ function EventsTab({ cameraId }: { cameraId: number }) {
 }
 
 function AiTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showError, showSuccess } = useSnackbar()
   const [models, setModels] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -600,7 +608,7 @@ function AiTab({ cameraId }: { cameraId: number }) {
       showSuccess('Detector stopped')
       await load()
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to stop detector')
+      showError(extractApiError(e, t('device.detectorStopError')))
     } finally {
       setBusy(0)
     }
@@ -610,7 +618,7 @@ function AiTab({ cameraId }: { cameraId: number }) {
   if (!models.length)
     return (
       <EmptyState
-        title="No detectors assigned to this camera"
+        title={t('device.noDetectors')}
         description="Live detection runs continuously through the built-in Tier-0 detector. Give this camera a job in its edit dialog under Assignments (e.g. object_detection with the labels you care about)."
       />
     )
@@ -649,6 +657,7 @@ function AiTab({ cameraId }: { cameraId: number }) {
 }
 
 function OsdTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [form, setForm] = useState<any>({})
@@ -669,7 +678,7 @@ function OsdTab({ cameraId }: { cameraId: number }) {
         text: data.text || '',
       })
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read OSD settings')
+      setError(extractApiError(e, t('device.osdReadError')))
     } finally {
       setLoading(false)
     }
@@ -685,7 +694,7 @@ function OsdTab({ cameraId }: { cameraId: number }) {
       setData(data)
       showSuccess('Overlay settings applied')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to apply OSD settings')
+      showError(extractApiError(e, t('device.osdSaveError')))
     } finally {
       setSaving(false)
     }
@@ -694,7 +703,7 @@ function OsdTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-32 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="On-screen overlays not available for this device" />
+    return <EmptyState title={t('device.overlaysUnavailable')} />
 
   return (
     <div className="space-y-4">
@@ -767,6 +776,7 @@ function OsdTab({ cameraId }: { cameraId: number }) {
 }
 
 function ServicesTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -780,7 +790,7 @@ function ServicesTab({ cameraId }: { cameraId: number }) {
       const { data } = await apiService.getCameraServices(cameraId)
       setData(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read services')
+      setError(extractApiError(e, t('device.servicesReadError')))
     } finally {
       setLoading(false)
     }
@@ -796,7 +806,7 @@ function ServicesTab({ cameraId }: { cameraId: number }) {
       setData(res)
       showSuccess('Service updated')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to update service')
+      showError(extractApiError(e, t('device.serviceSaveError')))
     } finally {
       setBusy('')
     }
@@ -805,7 +815,7 @@ function ServicesTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Service settings not available for this device" />
+    return <EmptyState title={t('device.servicesUnavailable')} />
 
   return (
     <div className="space-y-3">
@@ -848,6 +858,7 @@ function ServicesTab({ cameraId }: { cameraId: number }) {
 }
 
 function MaintenanceTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [busy, setBusy] = useState('')
   const [confirmReboot, setConfirmReboot] = useState(false)
@@ -860,7 +871,7 @@ function MaintenanceTab({ cameraId }: { cameraId: number }) {
       setConfirmReboot(false)
       showSuccess('Reboot command sent — the camera will be offline briefly')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Reboot failed')
+      showError(extractApiError(e, t('device.rebootError')))
     } finally {
       setBusy('')
     }
@@ -878,7 +889,7 @@ function MaintenanceTab({ cameraId }: { cameraId: number }) {
       URL.revokeObjectURL(url)
       showSuccess('Configuration downloaded')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Config export failed')
+      showError(extractApiError(e, t('device.exportError')))
     } finally {
       setBusy('')
     }
@@ -887,7 +898,7 @@ function MaintenanceTab({ cameraId }: { cameraId: number }) {
   return (
     <div className="space-y-4">
       <div className="border border-[var(--border)] rounded p-3 space-y-2">
-        <div className="text-sm">Configuration backup</div>
+        <div className="text-sm">{t('device.backup')}</div>
         <p className="text-xs text-[var(--text-dim)]">
           Download the camera's full settings as a vendor backup file. Useful
           before making changes, and for cloning setup to an identical camera.
@@ -909,7 +920,7 @@ function MaintenanceTab({ cameraId }: { cameraId: number }) {
       </div>
 
       <div className="border border-[var(--border)] rounded p-3 space-y-2">
-        <div className="text-sm">Reboot camera</div>
+        <div className="text-sm">{t('device.reboot')}</div>
         <p className="text-xs text-[var(--text-dim)]">
           The camera will drop its stream and recording for roughly a minute.
         </p>
@@ -934,6 +945,7 @@ function MaintenanceTab({ cameraId }: { cameraId: number }) {
 }
 
 function SecurityTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -949,7 +961,7 @@ function SecurityTab({ cameraId }: { cameraId: number }) {
       const { data } = await apiService.getCameraSecurity(cameraId)
       setData(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read security settings')
+      setError(extractApiError(e, t('device.securityReadError')))
     } finally {
       setLoading(false)
     }
@@ -973,7 +985,7 @@ function SecurityTab({ cameraId }: { cameraId: number }) {
       setConfirmLock(false)
       showSuccess(enabled ? 'Camera locked to OpenNVR' : 'IP filter disabled')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to update IP filter')
+      showError(extractApiError(e, t('device.filterSaveError')))
     } finally {
       setBusy('')
     }
@@ -986,7 +998,7 @@ function SecurityTab({ cameraId }: { cameraId: number }) {
       setData(res)
       showSuccess(enabled ? 'Cloud enabled' : 'Vendor cloud disabled')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to update cloud setting')
+      showError(extractApiError(e, t('device.cloudSaveError')))
     } finally {
       setBusy('')
     }
@@ -995,7 +1007,7 @@ function SecurityTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Security settings not available for this device" />
+    return <EmptyState title={t('device.securityUnavailable')} />
 
   const locked = data.ip_filter_enabled && data.ip_filter_mode === 'allow'
 
@@ -1140,6 +1152,7 @@ function SecurityTab({ cameraId }: { cameraId: number }) {
 }
 
 function SmartTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -1153,7 +1166,7 @@ function SmartTab({ cameraId }: { cameraId: number }) {
       const { data } = await apiService.getCameraSmart(cameraId)
       setData(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read smart detection')
+      setError(extractApiError(e, t('device.smartReadError')))
     } finally {
       setLoading(false)
     }
@@ -1169,7 +1182,7 @@ function SmartTab({ cameraId }: { cameraId: number }) {
       setData(data)
       showSuccess('Detector updated')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to update detector')
+      showError(extractApiError(e, t('device.smartSaveError')))
     } finally {
       setBusy('')
     }
@@ -1178,7 +1191,7 @@ function SmartTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Smart detection not available for this device" />
+    return <EmptyState title={t('device.smartUnavailable')} />
 
   return (
     <div className="space-y-3">
@@ -1244,6 +1257,7 @@ function SmartTab({ cameraId }: { cameraId: number }) {
 }
 
 function MotionTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [form, setForm] = useState<any>({})
@@ -1259,7 +1273,7 @@ function MotionTab({ cameraId }: { cameraId: number }) {
       setData(data)
       setForm({ enabled: !!data.enabled, sensitivity: data.sensitivity ?? 50 })
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read motion settings')
+      setError(extractApiError(e, t('device.motionReadError')))
     } finally {
       setLoading(false)
     }
@@ -1276,7 +1290,7 @@ function MotionTab({ cameraId }: { cameraId: number }) {
       setForm({ enabled: !!data.enabled, sensitivity: data.sensitivity ?? 50 })
       showSuccess('Motion detection updated')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to apply motion settings')
+      showError(extractApiError(e, t('device.motionSaveError')))
     } finally {
       setSaving(false)
     }
@@ -1285,7 +1299,7 @@ function MotionTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-32 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Motion detection not available for this device" />
+    return <EmptyState title={t('device.motionUnavailable')} />
 
   return (
     <div className="space-y-5">
@@ -1315,6 +1329,7 @@ function MotionTab({ cameraId }: { cameraId: number }) {
 }
 
 function VideoTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [forms, setForms] = useState<Record<string, EncForm>>({})
@@ -1335,7 +1350,7 @@ function VideoTab({ cameraId }: { cameraId: number }) {
       const { data } = await apiService.getCameraEncoder(cameraId)
       hydrate(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read encoder settings')
+      setError(extractApiError(e, t('device.encoderReadError')))
     } finally {
       setLoading(false)
     }
@@ -1355,7 +1370,7 @@ function VideoTab({ cameraId }: { cameraId: number }) {
           : 'Encoder updated'
       )
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to apply encoder settings')
+      showError(extractApiError(e, t('device.encoderSaveError')))
     } finally {
       setSaving('')
     }
@@ -1364,7 +1379,7 @@ function VideoTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Video encoder settings not available for this device" />
+    return <EmptyState title={t('device.encoderUnavailable')} />
 
   return (
     <div className="space-y-4">
@@ -1470,6 +1485,7 @@ function VideoTab({ cameraId }: { cameraId: number }) {
 }
 
 function ImageTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [form, setForm] = useState<Record<string, any>>({})
@@ -1485,7 +1501,7 @@ function ImageTab({ cameraId }: { cameraId: number }) {
       setData(data)
       setForm({ ...data.settings })
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read image settings')
+      setError(extractApiError(e, t('device.imageReadError')))
     } finally {
       setLoading(false)
     }
@@ -1502,7 +1518,7 @@ function ImageTab({ cameraId }: { cameraId: number }) {
       setForm({ ...data.settings })
       showSuccess('Image settings applied')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Failed to apply image settings')
+      showError(extractApiError(e, t('device.imageSaveError')))
     } finally {
       setSaving(false)
     }
@@ -1511,7 +1527,7 @@ function ImageTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-40 w-full" />
   if (error) return <ErrorCard message={error} onRetry={load} />
   if (!data?.supported)
-    return <EmptyState title="Image settings not available for this device" />
+    return <EmptyState title={t('device.imageUnavailable')} />
 
   const dirty = JSON.stringify(form) !== JSON.stringify(data.settings)
   return (
@@ -1585,6 +1601,7 @@ function ImageTab({ cameraId }: { cameraId: number }) {
 }
 
 function TimeTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -1602,7 +1619,7 @@ function TimeTab({ cameraId }: { cameraId: number }) {
       setTz(data.timezone || '')
       setNtp(data.ntp_server || 'pool.ntp.org')
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to read camera time')
+      setError(extractApiError(e, t('device.timeReadError')))
     } finally {
       setLoading(false)
     }
@@ -1620,7 +1637,7 @@ function TimeTab({ cameraId }: { cameraId: number }) {
       setData(data)
       showSuccess('Camera clock synced to server time')
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'Clock sync failed')
+      showError(extractApiError(e, t('device.clockSyncError')))
     } finally {
       setBusy('')
     }
@@ -1635,7 +1652,7 @@ function TimeTab({ cameraId }: { cameraId: number }) {
       setData(data)
       showSuccess(`Camera now syncing from ${ntp.trim()}`)
     } catch (e: any) {
-      showError(e?.data?.detail || e?.message || 'NTP config failed')
+      showError(extractApiError(e, t('device.ntpError')))
     } finally {
       setBusy('')
     }
@@ -1704,6 +1721,7 @@ function TimeTab({ cameraId }: { cameraId: number }) {
 }
 
 function StorageTab({ cameraId }: { cameraId: number }) {
+  const { t } = useTranslation()
   const { data, loading, error, reload } = useDeviceRead<any>(
     () => apiService.getCameraStorage(cameraId),
     [cameraId]
@@ -1711,12 +1729,12 @@ function StorageTab({ cameraId }: { cameraId: number }) {
   if (loading) return <Skeleton className="h-24 w-full" />
   if (error) return <ErrorCard message={error} onRetry={reload} />
   if (!data?.supported)
-    return <EmptyState title="Storage info not available for this device" />
+    return <EmptyState title={t('device.storageUnavailable')} />
   return (
     <div className="space-y-3">
       {!data.present && (
         <EmptyState
-          title="No SD card / disk detected"
+          title={t('device.noDisk')}
           description="This camera has no local storage inserted."
         />
       )}
@@ -1782,6 +1800,7 @@ export function CameraSettingsPanel({
   active?: boolean
 }) {
   const enabled = activeProp ?? true
+  const { t } = useTranslation()
   const { caps, loading, error, reload } = useCameraCapabilities(
     camera?.id ?? null,
     enabled
@@ -1820,7 +1839,7 @@ export function CameraSettingsPanel({
       {!camera ? null : (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
-            {probeBadge(caps?.probe_result)}
+            {probeBadge(caps?.probe_result, t)}
             {caps?.driver_name && (
               <Badge variant="info">{driverLabel(caps.driver_name)}</Badge>
             )}
@@ -1839,7 +1858,7 @@ export function CameraSettingsPanel({
             )}
             <div className="ml-auto">
               <Button onClick={() => reload(true)} disabled={loading}>
-                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
+                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> {t('device.refresh')}
               </Button>
             </div>
           </div>
@@ -1848,7 +1867,7 @@ export function CameraSettingsPanel({
             <ErrorCard message={error} onRetry={() => reload(true)} />
           ) : caps?.probe_result === 'unreachable' ? (
             <ErrorCard
-              title="Camera unreachable"
+              title={t('device.cameraUnreachable')}
               message={caps.probe_error || 'Could not reach the camera over ONVIF.'}
               onRetry={() => reload(true)}
             />

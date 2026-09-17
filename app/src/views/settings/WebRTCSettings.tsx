@@ -19,6 +19,8 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../../auth/AuthContext'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
+import { useTranslation } from '../../i18n'
 
 type TurnServer = { url: string; username?: string; credential?: string }
 type Settings = {
@@ -39,6 +41,7 @@ type Settings = {
  * (MediaMTX is reconfigured on save).
  */
 export function WebRTCSettings() {
+  const { t } = useTranslation()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -62,7 +65,7 @@ export function WebRTCSettings() {
         transport_policy: d.transport_policy || 'all',
       })
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to load WebRTC settings')
+      setError(extractApiError(e, t('settings.failedLoadWebrtc')))
     } finally {
       setLoading(false)
     }
@@ -79,13 +82,13 @@ export function WebRTCSettings() {
       await apiService.updateWebRTCSettings(cfg)
       await load()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save WebRTC settings')
+      setError(extractApiError(e, t('settings.failedSaveWebrtc')))
     } finally {
       setLoading(false)
     }
   }
 
-  if (!canAdmin) return <div className="text-sm text-amber-400">Admin only.</div>
+  if (!canAdmin) return <div className="text-sm text-amber-400">{t('admin.only')}</div>
 
   const inputCls =
     'flex-1 bg-[var(--panel)] border border-[var(--border)] px-3 py-2 rounded text-sm'
@@ -101,19 +104,18 @@ export function WebRTCSettings() {
           onClick={save}
           disabled={loading}
         >
-          {loading ? 'Saving…' : 'Save'}
+          {loading ? t('common.saving') : t('common.save')}
         </button>
       </div>
       {error && <div className="text-sm text-red-400">{error}</div>}
 
       <p className="text-xs text-[var(--text-dim)] max-w-2xl">
-        STUN/TURN let remote viewers reach the stream across NAT. These apply to
-        both the browser player and the MediaMTX media server.
+        {t('settings.webrtcDescription')}
       </p>
 
       {/* STUN */}
       <div className="border border-[var(--border)] rounded p-3 space-y-2">
-        <div className="text-sm text-[var(--text-dim)]">STUN servers</div>
+        <div className="text-sm text-[var(--text-dim)]">{t('settings.stunServers')}</div>
         {cfg.stun_servers.map((s, i) => (
           <div key={i} className="flex items-center gap-2">
             <input
@@ -134,7 +136,7 @@ export function WebRTCSettings() {
                 setCfg({ ...cfg, stun_servers: n })
               }}
             >
-              Remove
+              {t('common.remove')}
             </button>
           </div>
         ))}
@@ -142,19 +144,19 @@ export function WebRTCSettings() {
           className={btnCls}
           onClick={() => setCfg({ ...cfg, stun_servers: [...cfg.stun_servers, ''] })}
         >
-          Add STUN
+          {t('settings.addStun')}
         </button>
       </div>
 
       {/* TURN */}
       <div className="border border-[var(--border)] rounded p-3 space-y-2">
-        <div className="text-sm text-[var(--text-dim)]">TURN servers</div>
-        {cfg.turn_servers.map((t, i) => (
+        <div className="text-sm text-[var(--text-dim)]">{t('settings.turnServers')}</div>
+        {cfg.turn_servers.map((turn, i) => (
           <div key={i} className="grid grid-cols-1 sm:grid-cols-4 gap-2">
             <input
               className={inputCls}
               placeholder="turn:example:3478"
-              value={t.url}
+              value={turn.url}
               onChange={(e) => {
                 const n = [...cfg.turn_servers]
                 n[i] = { ...n[i], url: e.target.value }
@@ -164,7 +166,7 @@ export function WebRTCSettings() {
             <input
               className={inputCls}
               placeholder="username"
-              value={t.username || ''}
+              value={turn.username || ''}
               onChange={(e) => {
                 const n = [...cfg.turn_servers]
                 n[i] = { ...n[i], username: e.target.value }
@@ -174,7 +176,7 @@ export function WebRTCSettings() {
             <input
               className={inputCls}
               placeholder="credential"
-              value={t.credential || ''}
+              value={turn.credential || ''}
               onChange={(e) => {
                 const n = [...cfg.turn_servers]
                 n[i] = { ...n[i], credential: e.target.value }
@@ -189,7 +191,7 @@ export function WebRTCSettings() {
                 setCfg({ ...cfg, turn_servers: n })
               }}
             >
-              Remove
+              {t('common.remove')}
             </button>
           </div>
         ))}
@@ -205,7 +207,7 @@ export function WebRTCSettings() {
             })
           }
         >
-          Add TURN
+          {t('settings.addTurn')}
         </button>
       </div>
 
@@ -213,9 +215,9 @@ export function WebRTCSettings() {
       <div className="border border-[var(--border)] rounded p-3">
         <label className="flex items-center justify-between gap-2 text-sm">
           <span>
-            ICE transport policy
+            {t('settings.icePolicy')}
             <span className="block text-xs text-[var(--text-dim)]">
-              "relay" forces traffic through TURN (hides IPs, needs a TURN server)
+              {t('settings.relayHint')}
             </span>
           </span>
           <select

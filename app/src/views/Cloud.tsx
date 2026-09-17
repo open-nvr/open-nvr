@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
 import { Play, Square, Server, Plus, Trash2, AlertCircle, CheckCircle, Loader2, Info, X, Shield, Pencil } from 'lucide-react'
 
 type CloudSettings = {
@@ -81,6 +82,7 @@ const DEFAULT_CLOUD: CloudSettings = {
 }
 
 export function Cloud() {
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<'streaming' | 's3'>('streaming')
   const [cfg, setCfg] = useState<CloudSettings>(DEFAULT_CLOUD)
   const [loading, setLoading] = useState(true)
@@ -303,7 +305,7 @@ export function Cloud() {
             </div>
             <div className="space-y-4 text-sm">
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">What is Cloud Streaming?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('cloud.whatIs')}</h4>
                 <p className="text-[var(--text-dim)]">
                   Push camera streams to your own streaming servers for real-time viewing 
                   on mobile apps, web dashboards, or other locations.
@@ -336,7 +338,7 @@ export function Cloud() {
             </div>
             <div className="mt-6 flex justify-end">
               <button onClick={() => setShowInfo(false)} className="px-4 py-2 bg-[var(--accent)] text-white">
-                Got it
+                {t('cloud.gotIt')}
               </button>
             </div>
           </div>
@@ -350,7 +352,7 @@ export function Cloud() {
             <h3 className="text-lg font-semibold mb-4">{editingTarget.is_edit ? 'Edit Stream Target' : 'Configure Stream Target'}</h3>
             <div className="space-y-4">
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Camera</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.camera')}</span>
                 <select 
                   className="select" 
                   value={editingTarget.camera_id}
@@ -363,7 +365,7 @@ export function Cloud() {
               </label>
 
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Protocol</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.protocol')}</span>
                 <select 
                   className="select" 
                   value={editingTarget.protocol}
@@ -376,7 +378,7 @@ export function Cloud() {
               </label>
 
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Server URL</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.serverUrl')}</span>
                 <input 
                   className="input" 
                   value={editingTarget.server_url}
@@ -491,13 +493,13 @@ export function Cloud() {
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 'streaming' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-dim)]'}`}
           onClick={() => setActiveTab('streaming')}
         >
-          Stream to Server
+          {t('cloud.streamToServer')}
         </button>
         <button
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 's3' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-dim)]'}`}
           onClick={() => setActiveTab('s3')}
         >
-          Cloud Recording Server
+          {t('cloud.recordingServer')}
         </button>
       </div>
 
@@ -513,7 +515,7 @@ export function Cloud() {
               onClick={openAddDialog}
               disabled={cameras.length === 0}
             >
-              <Plus size={16} /> Add Stream
+              <Plus size={16} /> {t('cloud.addStream')}
             </button>
           </div>
 

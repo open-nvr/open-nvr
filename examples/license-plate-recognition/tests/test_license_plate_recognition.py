@@ -143,35 +143,43 @@ def test_explicit_camera_scope_wins():
     assert alerter.handle_event(_envelope(camera="cam-9")) == []
 
 
-def test_assignment_scope_via_sdk(monkeypatch):
+def _connected(alerter, picked):
+    """What the live config poll leaves behind once picks are delivered."""
+    alerter._config_poll_thread = object()
+    alerter.picked_cameras = None if picked is None else frozenset(picked)
+    return alerter
+
+
+def test_only_picked_cameras_are_alerted_on():
     alerter, _ = _alerter(opennvr_url="http://core:8000")
-    monkeypatch.setattr(lpr, "cameras_for_skill",
-                        lambda url, skill, api_key=None: ["cam-7"])
-    assert alerter.handle_event(_envelope(camera="cam-1")) == []
-    assert len(alerter.handle_event(_envelope(camera="cam-7"))) == 1
+    _connected(alerter, {7})
+    assert alerter.handle_event(_envelope(camera="cam1")) == []
+    assert len(alerter.handle_event(_envelope(camera="cam7"))) == 1
 
 
-def test_no_assigned_camera_means_no_alert_anywhere(monkeypatch):
-    """Closed by default: core answering "nobody carries this skill" is a
-    real scope of nothing, not "no restriction declared". An app nobody
-    pointed at a camera must not alert on the whole fleet."""
+def test_nothing_picked_means_no_alert_anywhere():
+    """An app nobody pointed at a camera must not alert on the fleet."""
     alerter, _ = _alerter(opennvr_url="http://core:8000")
-    monkeypatch.setattr(lpr, "cameras_for_skill",
-                        lambda url, skill, api_key=None: [])
-    assert alerter.handle_event(_envelope(camera="cam-1")) == []
-    assert alerter.handle_event(_envelope(camera="cam-7")) == []
+    _connected(alerter, set())
+    assert alerter.handle_event(_envelope(camera="cam1")) == []
+    assert alerter.handle_event(_envelope(camera="cam7")) == []
 
 
-def test_scope_fetch_failure_means_no_restriction(monkeypatch):
+def test_before_picks_arrive_nothing_is_alerted():
+    """Connected, picks not delivered yet: fail closed for one poll rather
+    than alert on a camera nobody picked."""
     alerter, _ = _alerter(opennvr_url="http://core:8000")
+    _connected(alerter, None)
+    assert alerter.handle_event(_envelope(camera="cam7")) == []
 
-    def boom(url, skill, api_key=None):
-        raise RuntimeError("core down")
-    monkeypatch.setattr(lpr, "cameras_for_skill", boom)
-    # Unknown, not empty: core could not be asked, so the previous
-    # answer stands. There is none yet at boot, so nothing is narrowed —
-    # an outage must not silently mute every alert either.
-    assert len(alerter.handle_event(_envelope(camera="anything"))) == 1
+
+def test_a_yaml_camera_list_can_only_narrow_the_picks():
+    alerter, _ = _alerter(opennvr_url="http://core:8000", cameras=["cam7", "cam9"])
+    _connected(alerter, {7})
+    assert len(alerter.handle_event(_envelope(camera="cam7"))) == 1
+    # Listed in YAML but not picked: still ignored.
+    assert alerter.handle_event(_envelope(camera="cam9")) == []
+    assert alerter.state_snapshot()["cameras"] == ["cam7"]
 
 
 # ── Camera names in alert text ──────────────────────────────────────

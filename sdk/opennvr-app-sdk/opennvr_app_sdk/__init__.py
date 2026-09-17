@@ -68,6 +68,7 @@ from .openapi import CONTRACT_API_VERSION, contract_asyncapi, contract_openapi
 from .frame_app import FrameApp, FrameSource, KaiCClient, KaiCError
 from .frame_sources import (
     CameraFrameSource,
+    CoreSnapshotSource,
     DictFrameSource,
     FileFrameSource,
     FrameSourceError,
@@ -84,14 +85,19 @@ from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
 from .events import EventsClient, StoredEvent
 from .cameras import (
+    camera_key,
     cameras_for_skill,
     discover_cameras,
+    per_camera_value,
     filter_cameras_for_skill,
     full_frame_polygon,
 )
 from .credentials import AppCredentials, auth_headers
 from .usercontext import UserContext, current_user, verify_call_token
-from .client import OpenNVR, Camera, Recording, PlatformError
+from .client import (
+    Camera, FrameStreamUnavailable, OpenNVR, PlatformError, Recording,
+)
+from .rtsp import Frame, FrameStreamError, RtspFrameStream, RtspStillSource
 from .aio import AsyncOpenNVR
 from .infer_stream import InferStream
 from .domain_subscriber import (
@@ -100,7 +106,8 @@ from .domain_subscriber import (
 from .egress import connect_via_proxy, proxy_address
 from .event_types import (
     EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall, OverlayBoxes,
-    OccupancyHeatmap, PlateRecognized, TypedPayload, VisitRecorded, typed_payload,
+    OccupancyHeatmap, PlateRecognized, ScreeningCompleted, TypedPayload, VisitRecorded,
+    typed_payload,
 )
 from .tier0 import (
     BestFrameClient,
@@ -186,6 +193,8 @@ PLATFORM: tuple[str, ...] = (
     "KaiCError",
     "InferStream",
     "discover_cameras",
+    "camera_key",
+    "per_camera_value",
     "cameras_for_skill",
     "filter_cameras_for_skill",
     "AppCredentials",
@@ -194,10 +203,18 @@ PLATFORM: tuple[str, ...] = (
     "CameraFrameSource",
     "FileFrameSource",
     "HttpSnapshotSource",
+    "CoreSnapshotSource",
     "DictFrameSource",
     "build_frame_source",
     "dict_frame_source",
     "FrameSourceError",
+    # Continuous video, for rules about a shape in time rather than a
+    # moment: nvr.stream(cam) hands back one of these, already running.
+    "RtspFrameStream",
+    "RtspStillSource",
+    "Frame",
+    "FrameStreamError",
+    "FrameStreamUnavailable",
 )
 
 #: What the app exposes back: the catalog's config form, dashboard, actions, licence gate — and the generated specs.
@@ -234,6 +251,7 @@ EVENTS: tuple[str, ...] = (
     "AccessDecided",
     "OccupancyChanged",
     "OccupancyHeatmap",
+    "ScreeningCompleted",
     "OccupancyFootfall",
     "OverlayBoxes",
     "Tier0Snapshot",

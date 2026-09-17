@@ -10,7 +10,8 @@ import pytest
 
 from opennvr_app_sdk import (
     EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
-    OccupancyHeatmap, OverlayBoxes, PlateRecognized, VisitRecorded, typed_payload,
+    OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted, VisitRecorded,
+    typed_payload,
 )
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 from opennvr_app_sdk.domain_subscriber import parse_domain_event
@@ -34,6 +35,14 @@ def test_every_v1_contract_is_typed_and_round_trips():
                             "dwell_max_seconds": 30.0, "period_seconds": 60, "labels": ["person"]},
         OverlayBoxes: {"boxes": [{"label": "plate", "box": [0.1, 0.2, 0.3, 0.1], "score": 0.9}],
                        "frame": {"w": 1920, "h": 1080}, "seq": 4},
+        ScreeningCompleted: {"session": "7c3c36c02d", "verdict": "compliant", "score": 100.0,
+                             "at": "2026-09-13T09:31:00+00:00", "ts": 1789251600.0,
+                             "coverage": 100.0, "order_score": 100.0,
+                             "steps_done": ["Left arm", "Right arm", "Front", "Back"],
+                             "steps_missing": [], "flagged": False,
+                             "duration_s": 108.4, "engaged_s": 38.2, "ended_by": "left",
+                             "guard_key": "g1", "guard_name": "Ravi",
+                             "images": {"face": "ab/0.jpg"}, "alert_id": None},
     }
     assert set(EVENT_TYPES) == {c.SCHEMA for c in samples}
     for cls, payload in samples.items():

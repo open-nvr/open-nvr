@@ -70,6 +70,25 @@ class Param:
     # ``str``) param — a detection-label vocabulary, plate formats, …
     # Advisory: the operator may still type anything.
     suggestions: list[str] = field(default_factory=list)
+    #: What to CALL this in the form. Without it the catalog has nothing
+    #: to show but the wire name, so an operator configures a system
+    #: through ``no_scan_engaged`` and ``led_window_s``. Optional, and
+    #: the form falls back to the name, so apps adopt it one at a time.
+    label: str = ""
+    #: Heading to file this under in the form. Params with no group, or
+    #: an unrecognised one, keep their declared order at the top.
+    group: str = ""
+    #: Real but rarely touched. The form collapses these behind a
+    #: disclosure so the handful that matter are not buried among
+    #: sixteen that do not — a knob nobody should turn is still worth
+    #: reaching, which is why this hides it rather than dropping it.
+    advanced: bool = False
+    #: A closed set of values, as ``(value, label)`` pairs or bare
+    #: values. Turns a number nobody can interpret into the decision it
+    #: actually encodes: ``order_weight`` 0 / 0.3 / 1.0 is really
+    #: "doesn't count / counts a little / counts fully". The server
+    #: rejects anything outside the set.
+    choices: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out = {
@@ -82,7 +101,29 @@ class Param:
         }
         if self.suggestions:
             out["suggestions"] = [str(s) for s in self.suggestions]
+        if self.label:
+            out["label"] = self.label
+        if self.group:
+            out["group"] = self.group
+        if self.advanced:
+            out["advanced"] = True
+        if self.choices:
+            out["choices"] = [_choice(c) for c in self.choices]
         return out
+
+
+def _choice(entry: Any) -> dict[str, Any]:
+    """One option, as ``{value, label}``.
+
+    Accepts ``(value, label)`` or a bare value that labels itself, so
+    the common case stays short and the readable case stays possible.
+    """
+    if isinstance(entry, dict) and "value" in entry:
+        return {"value": entry["value"],
+                "label": str(entry.get("label", entry["value"]))}
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return {"value": entry[0], "label": str(entry[1])}
+    return {"value": entry, "label": str(entry)}
 
 
 @dataclass
@@ -240,6 +281,13 @@ class AppManifest:
     # switch for apps that declare it. The switch, not the flag, decides
     # whether anything is drawn — that is the operator's, per app.
     overlay: bool = False
+    # Does this app work on cameras an operator picks for it? True for
+    # nearly every app: the catalog shows a Cameras section, core serves
+    # the app only its picks, and the SDK's Detector drops events from
+    # cameras that weren't picked. False for apps that read no camera
+    # data at all — they act on OTHER apps' alerts (a notifier, a gate
+    # relay), which are already limited to the cameras those apps picked.
+    camera_picker: bool = True
     # Declarative operator actions (optional) — verbs the catalog can
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
@@ -332,6 +380,7 @@ class AppManifest:
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
             "overlay": bool(self.overlay),
+            "camera_picker": bool(self.camera_picker),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,
             "ui_url": self.ui_url,

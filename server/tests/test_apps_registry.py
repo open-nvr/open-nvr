@@ -108,7 +108,7 @@ from core.auth import (  # noqa: E402
     create_access_token, get_current_active_user, get_current_superuser,
 )
 from core.database import Base, get_db  # noqa: E402
-from models import AuditLog, InstalledApp, Role, User  # noqa: E402
+from models import AuditLog, Camera, InstalledApp, Role, SkillAssignment, User  # noqa: E402
 from routers import apps as apps_router  # noqa: E402
 from routers.apps import (  # noqa: E402
     get_read_principal,
@@ -145,6 +145,10 @@ def _make_app():
             AuditLog.__table__,
             Role.__table__,
             User.__table__,
+            # The app list and the config poll both report each app's
+            # camera picks, which live in the claim table.
+            Camera.__table__,
+            SkillAssignment.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine)
@@ -837,7 +841,12 @@ def test_status_not_ready_app_reports_degraded(client, monkeypatch):
 
     body = client.get("/apps/loitering-detection/status").json()
     assert body["health"]["status"] == "degraded"
-    assert client.get("/apps").json()[0]["status"] == "unreachable"
+    # The LIST has to make the same distinction. It used to record
+    # "unreachable" here, which is what this test asserted — the one
+    # place an operator scanning their apps would look, saying "nothing
+    # is listening" about an app that had just answered and explained
+    # itself. Whoever went to check found a perfectly healthy container.
+    assert client.get("/apps").json()[0]["status"] == "degraded"
 
 
 def test_status_app_declaring_its_own_status_is_left_alone(client, monkeypatch):
@@ -1041,6 +1050,68 @@ def _param(name, type_name, *, required=False, default=None, per_camera=False):
         "per_camera": per_camera,
         "description": "",
     }
+
+
+def test_a_picked_colour_range_is_accepted_and_a_degree_one_is_not():
+    """The colour picker writes OpenCV's 8-bit HSV — hue 0-179, not
+    0-360. A range written in degrees would sail through a looser check
+    and then match nothing at all on the camera, with no error anywhere
+    to say why the guard was never recognised.
+    """
+    manifest = {"params": [_param("uniform_hsv", "color.hsv_range", default={})]}
+
+    assert validate_app_config(
+        manifest, {"uniform_hsv": {"low": [95, 80, 60],
+                                   "high": [115, 255, 255]}}) == []
+    # Unset is always fine: the app falls back to whatever else is set.
+    assert validate_app_config(manifest, {"uniform_hsv": {}}) == []
+
+    for bad in ({"low": [220, 80, 60], "high": [240, 255, 255]},   # degrees
+                {"low": [95, 80], "high": [115, 255, 255]},        # short
+                {"low": [95, 80, 60]},                             # no high
+                "blue"):
+        assert validate_app_config(manifest, {"uniform_hsv": bad}) != [], bad
+
+
+def _choice_param(name, type_name, choices, default=None):
+    p = _param(name, type_name, default=default)
+    p["choices"] = [{"value": v, "label": str(v)} for v in choices]
+    return p
+
+
+def test_a_value_outside_a_declared_choice_set_is_refused():
+    """The form renders a select, but the API is the real boundary — an
+    app handed a value it never declared ignores it at best, and falls
+    over on a worker thread nobody is watching at worst."""
+    manifest = {"params": [_choice_param("order_weight", "float",
+                                         [0.0, 0.3, 1.0], default=0.0)]}
+    assert validate_app_config(manifest, {"order_weight": 0.3}) == []
+    errors = validate_app_config(manifest, {"order_weight": 0.7})
+    assert errors and "must be one of" in errors[0]
+
+
+def test_choices_compare_across_int_and_float_but_not_bool():
+    """0 and 0.0 are the same choice — JSON does not preserve which one
+    the operator's browser sent, so a float param declaring 0.0 must
+    accept a bare 0.
+
+    `True` is NOT 1, though Python says it is: a boolean slipping
+    through an integer choice set is exactly the kind of thing that only
+    shows up in production.
+    """
+    floats = {"params": [_choice_param("order_weight", "float",
+                                       [0.0, 0.3, 1.0], default=0.0)]}
+    assert validate_app_config(floats, {"order_weight": 0}) == []
+
+    ints = {"params": [_choice_param("level", "int", [0, 1, 2], default=0)]}
+    assert validate_app_config(ints, {"level": 2}) == []
+    assert validate_app_config(ints, {"level": True}) != []
+
+
+def test_a_param_with_no_choices_is_unconstrained():
+    """Declaring nothing must not start rejecting things."""
+    manifest = {"params": [_param("threshold_s", "float", default=30.0)]}
+    assert validate_app_config(manifest, {"threshold_s": 99.0}) == []
 
 
 def test_validate_empty_config_against_optional_params_is_clean():

@@ -17,6 +17,7 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from '../i18n'
 
 type Props = {
   snoozeDays?: number
@@ -26,6 +27,7 @@ const SNOOZE_KEY = 'opennvr.notificationPrompt.snoozeUntil'
 const DISABLE_KEY = 'opennvr.notificationPrompt.disabled'
 
 export function NotificationPermissionPrompt({ snoozeDays = 7 }: Props) {
+  const { t } = useTranslation()
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(() => {
     if (typeof window === 'undefined' || typeof Notification === 'undefined') return 'unsupported'
     return Notification.permission
@@ -98,13 +100,13 @@ export function NotificationPermissionPrompt({ snoozeDays = 7 }: Props) {
     <div className="mb-3 border border-[var(--border)] bg-[var(--panel-2)] rounded">
       <div className="p-3 flex items-start gap-3">
         <div className="flex-1 text-sm">
-          <div className="font-medium">Permission Request</div>
-          <div className="text-[var(--text-dim)]">Enable browser notifications to get alerts about incidents, login events, and system health.</div>
+          <div className="font-medium">{t('shared.permissionRequest')}</div>
+          <div className="text-[var(--text-dim)]">{t('shared.notificationDescription')}</div>
         </div>
         <div className="flex gap-2">
-          <button onClick={handleAllow} className="px-3 py-1 rounded bg-[var(--panel)] hover:bg-[var(--bg-2)] text-sm">Allow</button>
-          <button onClick={handleNotNow} className="px-3 py-1 rounded bg-transparent hover:bg-[var(--panel)] text-sm">Not Now</button>
-          <button onClick={handleNever} className="px-3 py-1 rounded bg-transparent hover:bg-[var(--panel)] text-sm">Don't ask again</button>
+          <button onClick={handleAllow} className="px-3 py-1 rounded bg-[var(--panel)] hover:bg-[var(--bg-2)] text-sm">{t('shared.allow')}</button>
+          <button onClick={handleNotNow} className="px-3 py-1 rounded bg-transparent hover:bg-[var(--panel)] text-sm">{t('shared.notNow')}</button>
+          <button onClick={handleNever} className="px-3 py-1 rounded bg-transparent hover:bg-[var(--panel)] text-sm">{t('shared.dontAskAgain')}</button>
         </div>
       </div>
     </div>

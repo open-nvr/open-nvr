@@ -58,6 +58,31 @@ export const APP_VERTICALS: AppVertical[] = [
     legacy: (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'),
   },
   { capability: 'occupancy', to: '/occupancy', label: 'Occupancy' },
+  {
+    capability: 'crossings',
+    to: '/tripwires',
+    // Counts and alarms per drawn line. "Tripwire" is the word the
+    // security trade uses for this; the head noun stays generic because
+    // the page is as much a footfall counter as a perimeter alarm.
+    label: 'Tripwires',
+  },
+  {
+    capability: 'people',
+    to: '/people',
+    // The face directory: who is enrolled, who the door just saw, and
+    // enrolling a person from a snapshot the camera already took. Named
+    // for what the operator manages, not for the model.
+    label: 'People (Faces)',
+    legacy: (m) => (m.requires_tasks ?? []).includes('face_recognition'),
+  },
+  {
+    capability: 'guard_scan',
+    to: '/guard-compliance',
+    label: 'Entry Screening',
+    // Named for what an operator watches, not for the model: the
+    // page is about whether people are being screened properly.
+    legacy: (m) => (m.requires_tasks ?? []).includes('pose_estimation'),
+  },
 ]
 
 /** Does this manifest provide `vertical`? Capability first, legacy

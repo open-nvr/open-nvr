@@ -21,7 +21,15 @@ import { apiService } from './apiService'
 export interface OverlayTrack {
   id: number | string | null
   label: string
-  score: number
+  /**
+   * Confidence 0..1, or null when the producer did not report one.
+   *
+   * `score` is optional in `overlay.boxes.v1` — an app whose label is a
+   * statement rather than a guess ("Guard", "Scanning LRFB 100%") has no
+   * confidence to give. Collapsing that to 0 is what made every one of
+   * those boxes render "… 0%" beside a label that already said 100%.
+   */
+  score: number | null
   /** Normalized [x, y, w, h] in 0..1 of the frame. */
   box: [number, number, number, number]
   stationary?: boolean
@@ -66,7 +74,7 @@ function toFrame(evt: any): OverlayFrame | null {
       out.push({
         id: t.id ?? null,
         label: String(t.label ?? 'object'),
-        score: Number(t.score) || 0,
+        score: t.score == null ? null : Number(t.score) || 0,
         box: [Number(b[0]), Number(b[1]), Number(b[2]), Number(b[3])],
         stationary: Boolean(t.stationary),
       })
@@ -91,7 +99,7 @@ function toFrame(evt: any): OverlayFrame | null {
       out.push({
         id: d.track_id ?? null,
         label: String(d.label ?? 'object'),
-        score: Number(d.confidence) || 0,
+        score: d.confidence == null ? null : Number(d.confidence) || 0,
         box,
       })
     }

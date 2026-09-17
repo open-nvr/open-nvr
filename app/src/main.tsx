@@ -30,6 +30,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { Login } from './views/Login'
 import { MFASetup } from './views/MFASetup'
 import { MFAVerify } from './views/MFAVerify'
+import { I18nProvider } from './i18n'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
 // monolithic bundle. Auth/MFA stay eager: they gate first paint.
@@ -81,6 +82,9 @@ const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.S
 const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
 const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
+const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
+const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) => ({ default: m.Tripwires }))))
+const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
 const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => ({ default: m.Updates }))))
@@ -166,6 +170,9 @@ const router = createBrowserRouter([
           { path: 'cameras', element: <Cameras /> },
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
+          { path: 'people', element: <People /> },
+          { path: 'tripwires', element: <Tripwires /> },
+          { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },
           { path: 'network/*', element: <NetworkView /> },
@@ -201,15 +208,17 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary title="OpenNVR hit an unexpected error">
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <PermissionsProvider>
-          <SnackbarProvider>
-            <RouterProvider router={router} />
-          </SnackbarProvider>
-        </PermissionsProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <PermissionsProvider>
+            <SnackbarProvider>
+              <RouterProvider router={router} />
+            </SnackbarProvider>
+          </PermissionsProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </I18nProvider>
   </ErrorBoundary>
 )
 

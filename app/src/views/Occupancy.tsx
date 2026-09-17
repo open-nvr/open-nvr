@@ -32,6 +32,7 @@ import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
 import {
   Badge, Button, Card, CardContent,
   EmptyState, ErrorCard, PageHeader, Skeleton,
@@ -158,6 +159,7 @@ function levelBadge(level: string | undefined) {
 }
 
 export function Occupancy() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
 
@@ -324,12 +326,12 @@ export function Occupancy() {
     return (
       <section className="space-y-4">
         <PageHeader
-          title="Occupancy"
-          description="Live head-counts per watched zone, with over/under-occupancy alerts."
+          title={t('occupancy.title')}
+          description={t('occupancy.description')}
         />
         <EmptyState
           icon={<Users size={28} />}
-          title="No occupancy app enabled"
+          title={t('occupancy.noApp')}
           description="Install and enable Occupancy Counting from the App Catalog — it rides the detection stream the platform already produces, so it adds zero inference cost."
         />
       </section>
@@ -442,7 +444,7 @@ export function Occupancy() {
               {zones.length}
             </div>
             <div className="text-xs text-[var(--text-dim)]">
-              {zones.length === 0 ? 'Zones watched — assign the occupancy skill to a camera' : 'Zones watched'}
+              {zones.length === 0 ? 'Zones watched — select cameras for Occupancy in the App Catalog' : 'Zones watched'}
             </div>
           </CardContent>
         </Card>
@@ -1015,18 +1017,25 @@ export function blurGrid(cells: number[], cols: number, rows: number, passes = 1
 function useCameraStill(cameraId: number) {
   const query = useQuery({
     queryKey: ['camera-snapshot', cameraId],
+    // The Blob, not an object URL — the same key the zone editors use,
+    // and a cached URL is revoked by whichever component closes first,
+    // leaving the next one a broken image. Each caller mints its own.
     queryFn: async () => {
       const { data } = await apiService.getCameraSnapshot(cameraId)
-      return URL.createObjectURL(data as Blob)
+      return data as Blob
     },
     retry: 0,
     staleTime: 30_000,
   })
+  const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    const url = query.data
-    return () => { if (url) URL.revokeObjectURL(url) }
+    const blob = query.data
+    if (!blob) { setUrl(null); return }
+    const next = URL.createObjectURL(blob)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
   }, [query.data])
-  return query
+  return { data: url, isPending: query.isPending }
 }
 
 function HeatmapCanvas({ heat }: { heat: HeatmapResp }) {

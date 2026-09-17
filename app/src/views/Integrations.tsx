@@ -22,6 +22,7 @@ import { useAuth } from '../auth/AuthContext'
 import { useSnackbar } from '../components/Snackbar'
 import { Modal } from '../components/Modal'
 import { Plus, Trash, Settings, Activity, CheckCircle, AlertCircle, Play, Plug } from 'lucide-react'
+import { useTranslation } from '../i18n'
 
 type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus'
 
@@ -37,6 +38,7 @@ const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
 ]
 
 export function Integrations() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const { showSuccess, showError } = useSnackbar()
@@ -282,13 +284,13 @@ export function Integrations() {
       <div className="flex items-center justify-between">
         <div>
            <h1 className="text-xl font-semibold flex items-center gap-2">
-            <Plug /> Integrations
+            <Plug /> {t('integrations.title')}
            </h1>
-           <p className="text-[var(--text-dim)]">Connect third-party services for alerts, storage, and monitoring.</p>
+          <p className="text-[var(--text-dim)]">Connect third-party services for alerts, storage, and monitoring.</p>
         </div>
         {canAdmin && (
           <button className="btn btn-primary flex items-center gap-2" onClick={openCreate}>
-            <Plus size={16} /> Add Integration
+            <Plus size={16} /> {t('integrations.add')}
           </button>
         )}
       </div>

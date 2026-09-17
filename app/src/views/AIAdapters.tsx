@@ -27,6 +27,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
+import { useTranslation } from '../i18n'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { MetricPanel, Sparkline, SparkRow, StatTile } from '../components/ui/stats'
@@ -931,20 +932,21 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
 }
 
 function ComputeGatedPanel() {
+  const { t: translate } = useTranslation()
   const query = useTier0Metrics()
   const d = query.data
 
   // Absent / unreachable pipeline is a normal state (gate off / not deployed).
   if (query.isError || (d && !d.available)) {
     const reason = d?.reason === 'disabled'
-      ? 'Disabled — set detect_pipeline_metrics_url to enable.'
-      : 'The detect-pipeline is not reachable — the compute-gated pipeline may be off or not deployed.'
+      ? translate('adapters.pipelineDisabled')
+      : translate('adapters.pipelineUnreachable')
     return (
       <Card>
         <CardHeader>
           <Activity size={16} className="text-[var(--text-dim)]" />
-          <CardTitle>Compute-gated inference</CardTitle>
-          <div className="ml-auto"><Badge variant="neutral">unavailable</Badge></div>
+          <CardTitle>{translate('adapters.computeGated')}</CardTitle>
+          <div className="ml-auto"><Badge variant="neutral">{translate('adapters.unavailable')}</Badge></div>
         </CardHeader>
         <CardContent><div className="text-sm text-[var(--text-dim)]">{reason}</div></CardContent>
       </Card>
@@ -971,7 +973,7 @@ function ComputeGatedPanel() {
     <Card>
       <CardHeader>
         <Activity size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>Compute-gated inference</CardTitle>
+        <CardTitle>{translate('adapters.computeGated')}</CardTitle>
         <div className="ml-auto flex items-center gap-2">
           {d.model && <Badge variant="info"><Cpu size={12} /> {d.model}</Badge>}
           <Badge variant={mode.variant}>{mode.text}</Badge>
@@ -1169,6 +1171,7 @@ function ComputeGatedPanel() {
 }
 
 export function AIAdapters() {
+  const { t } = useTranslation()
   const healthQuery = useKaiHealth()
   const capsQuery = useKaiCapabilities()
   const fleetQuery = useFleetMetrics()
@@ -1193,11 +1196,11 @@ export function AIAdapters() {
   return (
     <section className="space-y-4">
       <PageHeader
-        title="AI Adapters"
-        description="Models registered with KAI-C, the sovereignty and audit gateway. Every inference the platform runs goes through one of these adapters. Health & metrics update on KAI-C's 60s scrape."
+        title={t('adapters.title')}
+        description={t('adapters.description')}
         actions={
           <Button onClick={refresh} disabled={loading}>
-            <RefreshCw size={14} className={healthQuery.isFetching || capsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+            <RefreshCw size={14} className={healthQuery.isFetching || capsQuery.isFetching ? 'animate-spin' : ''} /> {t('adapters.refresh')}
           </Button>
         }
       />
@@ -1210,7 +1213,7 @@ export function AIAdapters() {
       <Card>
         <CardHeader>
           <Server size={16} className="text-[var(--text-dim)]" />
-          <CardTitle>KAI-C Gateway</CardTitle>
+          <CardTitle>{t('adapters.gateway')}</CardTitle>
           <div className="ml-auto">
             {healthQuery.isPending ? (
               <Skeleton className="h-5 w-16" />
@@ -1224,7 +1227,7 @@ export function AIAdapters() {
         {(healthQuery.data?.message || healthQuery.isError) && (
           <CardContent>
             <div className="text-sm text-[var(--text-dim)]">
-              {healthQuery.data?.message ?? extractApiError(healthQuery.error, 'KAI-C is not reachable from the backend.')}
+              {healthQuery.data?.message ?? extractApiError(healthQuery.error, t('adapters.notReachable'))}
             </div>
           </CardContent>
         )}
@@ -1239,14 +1242,14 @@ export function AIAdapters() {
         </div>
       ) : bothFailed ? (
         <ErrorCard
-          title="Adapter registry unavailable"
-          message={extractApiError(capsQuery.error, 'Could not load adapter capabilities from KAI-C.')}
+          title={t('adapters.registryUnavailable')}
+          message={extractApiError(capsQuery.error, t('adapters.loadCapabilities'))}
           onRetry={refresh}
         />
       ) : adapters.length === 0 ? (
         <EmptyState
           icon={<Layers size={28} />}
-          title="No adapters registered"
+          title={t('adapters.noRegistered')}
           description="Start an AI adapter (YOLOv8, BLIP, Whisper, …) and register it with KAI-C to see it here. See docs/AI_ADAPTER_CONTRACT.md for the contract."
         />
       ) : (

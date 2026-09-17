@@ -742,3 +742,108 @@ def test_a_filtered_ack_cannot_reach_another_operators_camera(scoped_client):
     current["user"] = admin
     left = tc.get("/alerts-inbox", params={"unacked": True}).json()
     assert [a["alert_id"] for a in left["alerts"]] == ["yard-lpr"]
+
+
+# ── evidence photos and alert kinds ─────────────────────────────────
+
+
+def _jpeg(size_bytes: int = 1200) -> bytes:
+    """A byte string the evidence store will accept as a JPEG."""
+    return b"\xff\xd8\xff\xe0" + b"\x00" * (size_bytes - 4)
+
+
+def test_a_photo_no_longer_costs_the_whole_evidence_dict(db, tmp_path,
+                                                         monkeypatch):
+    """The bug this column exists for.
+
+    An app that inlined a base64 crop blew the 8000-char clip, the JSON
+    came back unparseable, and EVERY other evidence field went with it —
+    silently. The photo now lands in the evidence store and the rest of
+    the dict survives intact.
+    """
+    import base64
+
+    from services import evidence_store
+
+    monkeypatch.setattr(evidence_store.settings, "recordings_base_path",
+                        str(tmp_path))
+    SessionLocal, _ = db
+    huge = base64.b64encode(_jpeg(60_000)).decode()
+    assert apply_alert(_envelope(
+        evidence={"plate": "ZZ999XX", "observed_at": "2026-09-03T10:00:00+00:00",
+                  "snapshot_b64": huge})) == "stored"
+
+    row = _rows(SessionLocal)[0]
+    assert json.loads(row.evidence)["plate"] == "ZZ999XX"   # not lost
+    assert json.loads(row.images)["snapshot"].endswith(".jpg")
+    assert "snapshot_b64" not in (row.evidence or "")
+
+
+def test_image_paths_ride_along_and_keep_their_names(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(evidence={
+        "images": {"face": "ab/face.jpg", "body": "cd/body.jpg"}})) == "stored"
+    assert json.loads(_rows(SessionLocal)[0].images) == {
+        "face": "ab/face.jpg", "body": "cd/body.jpg"}
+
+
+def test_an_oversized_field_drops_itself_not_its_neighbours(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(
+        evidence={"keep": "small", "blob": "x" * 20_000})) == "stored"
+    stored = json.loads(_rows(SessionLocal)[0].evidence)
+    assert stored["keep"] == "small"
+    assert stored["_dropped"] == ["blob"]
+
+
+def test_alert_type_is_stored_and_filterable(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope("a-flag", alert_type="scanner_flag")) == "stored"
+    # ...and a producer that only tagged a kind is understood too.
+    assert apply_alert(_envelope("a-tag", tags=["type:no_scan"])) == "stored"
+    kinds = {r.alert_id: r.alert_type for r in _rows(SessionLocal)}
+    assert kinds == {"a-flag": "scanner_flag", "a-tag": "no_scan"}
+
+
+def test_an_operator_can_fetch_the_photo_off_an_alert(client, tmp_path,
+                                                      monkeypatch):
+    """End to end: the app stored a crop, the alert cited it, and the
+    desk can open it — the whole point of the images column."""
+    from services import evidence_store
+
+    monkeypatch.setattr(evidence_store.settings, "recordings_base_path",
+                        str(tmp_path))
+    tc, _, _ = client
+    rel = evidence_store.save_evidence_jpeg(_jpeg())
+    apply_alert(_envelope("with-photo", evidence={"images": {"face": rel}}))
+
+    row = tc.get("/alerts-inbox").json()["alerts"][0]
+    assert row["images"] == ["face"]
+
+    got = tc.get(f"/alerts-inbox/{row['id']}/images/face")
+    assert got.status_code == 200
+    assert got.content == _jpeg()
+    # A name the alert never mentioned is not a way to browse the store.
+    assert tc.get(f"/alerts-inbox/{row['id']}/images/body").status_code == 404
+
+
+def test_history_filters_by_kind_camera_date_and_text(client):
+    tc, _, _ = client
+    apply_alert(_envelope("f1", alert_type="scanner_flag", camera_id="cam1",
+                          fired_at="2026-09-01T10:00:00+00:00",
+                          title="Scanner flagged this person"))
+    apply_alert(_envelope("f2", alert_type="no_scan", camera_id="cam2",
+                          fired_at="2026-09-05T10:00:00+00:00",
+                          title="Person entered without a scan"))
+
+    def ids(**params):
+        return [a["alert_id"] for a in
+                tc.get("/alerts-inbox", params=params).json()["alerts"]]
+
+    assert ids(alert_type="scanner_flag") == ["f1"]
+    assert ids(camera_id="cam2") == ["f2"]
+    assert ids(**{"from": "2026-09-03T00:00:00Z"}) == ["f2"]
+    assert ids(to="2026-09-03T00:00:00Z") == ["f1"]
+    assert ids(q="without a scan") == ["f2"]
+    # An unreadable bound is ignored rather than 500ing the page.
+    assert set(ids(**{"from": "last tuesday"})) == {"f1", "f2"}

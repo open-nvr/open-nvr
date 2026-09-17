@@ -27,6 +27,7 @@ import { useCameraStatusConnected } from '../hooks/useCameraStatus'
 import { useCameras, useRecordingsByDate, useSuricataStats, useSystemResources, type CameraItem } from '../lib/queries'
 import { StatTile, UsageBar } from '../components/ui/stats'
 import { formatDuration, localDayStart, todayLocalKey } from '../lib/time'
+import { useTranslation } from '../i18n'
 
 type RecordingItem = { start_time?: string | null; id: number; camera?: string; relpath?: string; url?: string; size?: number }
 
@@ -74,6 +75,8 @@ function KpiCard({ icon, label, value, help, tone = 'neutral', onClick }: { icon
 }
 
 function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'online' | 'offline' | 'degraded' | 'error'; recording?: boolean }) {
+  const { t } = useTranslation()
+
   return (
     <div className="aspect-video rounded-lg border border-[var(--border)] bg-[var(--bg-2)] relative overflow-hidden">
       <div className="absolute left-2 top-2 text-xs text-[var(--text)] flex items-center gap-2">
@@ -81,13 +84,13 @@ function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'onli
         <span className="font-medium">{cam.name || `Camera ${cam.id}`}</span>
       </div>
       <div className="absolute right-2 top-2 flex items-center gap-2">
-        {recording ? <Badge variant="warning">REC</Badge> : null}
+        {recording ? <Badge variant="warning">{t('dashboard.rec')}</Badge> : null}
         <Badge variant="neutral">{cam.ip_address}</Badge>
       </div>
       <div className="absolute left-2 bottom-2 text-[10px] text-[var(--text-dim)]">ID: {cam.id}</div>
       <div className="absolute right-2 bottom-2">
         <Link to="/live" className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-[var(--panel)] border border-[var(--border)] hover:bg-[var(--panel-2)]">
-          <Play size={12} /> Open
+          <Play size={12} /> {t('dashboard.open')}
         </Link>
       </div>
     </div>
@@ -95,6 +98,7 @@ function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'onli
 }
 
 export function Dashboard() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   const camsQuery = useCameras()
@@ -103,7 +107,7 @@ export function Dashboard() {
 
   const cams = camsQuery.data?.cameras ?? null
   const camsTotal = camsQuery.data?.total ?? cams?.length ?? 0
-  const camsErr = camsQuery.isError ? extractApiError(camsQuery.error, 'Failed to load cameras') : null
+  const camsErr = camsQuery.isError ? extractApiError(camsQuery.error, t('dashboard.failedCameras')) : null
   const loadingCams = camsQuery.isPending
 
   // Flatten per-camera daily recordings for the chart
@@ -120,11 +124,11 @@ export function Dashboard() {
   // total_recordings is a camera-day count (1 per camera per day) — misleading
   // as a KPI, so the tile shows total footage duration instead.
   const recsDuration = recsQuery.data?.total_duration ?? 0
-  const recsErr = recsQuery.isError ? extractApiError(recsQuery.error, 'Failed to load recordings') : null
+  const recsErr = recsQuery.isError ? extractApiError(recsQuery.error, t('dashboard.failedRecordings')) : null
   const loadingRecs = recsQuery.isPending
 
   const alertsHigh = alertsQuery.data?.by_severity?.['1'] ?? 0
-  const alertsErr = alertsQuery.isError ? extractApiError(alertsQuery.error, 'No alert endpoint configured') : null
+  const alertsErr = alertsQuery.isError ? extractApiError(alertsQuery.error, t('dashboard.noAlertEndpoint')) : null
   const loadingAlerts = alertsQuery.isPending
 
   const refreshing = camsQuery.isFetching || recsQuery.isFetching || alertsQuery.isFetching
@@ -196,10 +200,10 @@ export function Dashboard() {
       agg[statusOf(c)]++
     }
     return [
-      { name: 'Online', value: agg.online },
-      { name: 'Degraded', value: agg.degraded },
-      { name: 'Offline', value: agg.offline },
-      { name: 'Error', value: agg.error },
+      { name: t('dashboard.statusOnline'), value: agg.online },
+      { name: t('dashboard.statusDegraded'), value: agg.degraded },
+      { name: t('dashboard.statusOffline'), value: agg.offline },
+      { name: t('dashboard.statusError'), value: agg.error },
     ]
   }, [cams, statusOf])
 
@@ -207,17 +211,17 @@ export function Dashboard() {
     <section className="space-y-4">
       {/* Header actions */}
       <div className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold">Dashboard</h1>
+        <h1 className="text-lg font-semibold">{t('dashboard.title')}</h1>
         <div className="ml-auto flex items-center gap-2">
           {/* Camera status arrives over the events socket and no longer needs
               a manual poll. Say so when that socket is down, since the cards
               are then only as fresh as the list's own refetch interval. */}
           {!liveUpdates && (
             <span className="text-xs text-[var(--text-dim)]" title="Reconnecting to the live event stream; status may lag by up to a minute">
-              Live updates reconnecting…
+              {t('dashboard.reconnecting')}
             </span>
           )}
-          <Button onClick={refreshAll} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh</Button>
+          <Button onClick={refreshAll} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> {t('common.refresh')}</Button>
         </div>
       </div>
 
@@ -226,29 +230,29 @@ export function Dashboard() {
         {loadingCams ? (
           <Skeleton className="h-24" />
         ) : camsErr ? (
-          <ErrorCard title="Cameras" message={camsErr} onRetry={() => camsQuery.refetch()} />
+          <ErrorCard title={t('dashboard.cameras')} message={camsErr} onRetry={() => camsQuery.refetch()} />
         ) : (
           <KpiCard
             icon={<Camera size={18} />}
-            label="Cameras"
+            label={t('dashboard.cameras')}
             value={camsTotal}
-            help="Total active cameras"
+            help={t('dashboard.totalActiveCameras')}
             onClick={() => navigate('/cameras')}
           />
         )}
 
-        <KpiCard icon={<CircleCheck size={18} />} label="Online" value={loadingCams ? '—' : onlineCount} tone="success" />
+        <KpiCard icon={<CircleCheck size={18} />} label={t('common.online')} value={loadingCams ? '—' : onlineCount} tone="success" />
 
         {loadingRecs ? (
           <Skeleton className="h-24" />
         ) : recsErr ? (
-          <ErrorCard title="Recordings" message={recsErr} onRetry={() => recsQuery.refetch()} />
+          <ErrorCard title={t('dashboard.recordings')} message={recsErr} onRetry={() => recsQuery.refetch()} />
         ) : (
           <KpiCard
             icon={<HardDrive size={18} />}
-            label="Recordings"
+            label={t('dashboard.recordings')}
             value={formatDuration(recsDuration)}
-            help={`Footage from ${recsByCamera.filter((c) => c.days > 0).length} of ${camsTotal} cameras`}
+            help={`${t('dashboard.footageFrom')} ${recsByCamera.filter((c) => c.days > 0).length} ${t('dashboard.of')} ${camsTotal} ${t('dashboard.camerasPlural')}`}
             onClick={() => navigate('/playback')}
           />
         )}
@@ -256,13 +260,13 @@ export function Dashboard() {
         {loadingAlerts ? (
           <Skeleton className="h-24" />
         ) : alertsErr ? (
-          <KpiCard icon={<AlertTriangle size={18} />} label="Alerts" value={0} help={alertsErr || 'No alert endpoint configured'} />
+          <KpiCard icon={<AlertTriangle size={18} />} label={t('dashboard.alerts')} value={0} help={alertsErr || t('dashboard.alertEndpoint')} />
         ) : (
           <KpiCard
             icon={alertsHigh > 0 ? <AlertTriangle size={18} /> : <CircleCheck size={18} />}
-            label="Alerts"
+            label={t('dashboard.alerts')}
             value={alertsHigh}
-            help="High severity alerts"
+            help={t('dashboard.highSeverityAlerts')}
             tone={alertsHigh > 0 ? 'destructive' : 'neutral'}
             onClick={() => navigate('/alerts-incidents?only_alerts=1&severity=1')}
           />
@@ -274,7 +278,7 @@ export function Dashboard() {
         <Card>
           <CardHeader>
             <ChartArea size={16} className="text-sky-300" />
-            <CardTitle>Recordings over time</CardTitle>
+            <CardTitle>{t('dashboard.recordingsOverTime')}</CardTitle>
           </CardHeader>
           <CardContent>
             {loadingRecs ? (
@@ -304,7 +308,7 @@ export function Dashboard() {
         <Card>
           <CardHeader>
             <ChartBar size={16} className="text-emerald-300" />
-            <CardTitle>Cameras by status</CardTitle>
+            <CardTitle>{t('dashboard.camerasStatus')}</CardTitle>
           </CardHeader>
           <CardContent>
             {loadingCams ? (
@@ -335,7 +339,7 @@ export function Dashboard() {
       <Card>
         <CardHeader>
           <HardDrive size={16} className="text-[var(--text-dim)]" />
-          <CardTitle>Recordings by camera</CardTitle>
+          <CardTitle>{t('dashboard.recordingsByCamera')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loadingRecs ? (
@@ -345,18 +349,18 @@ export function Dashboard() {
               ))}
             </div>
           ) : recsErr ? (
-            <ErrorCard title="Recordings" message={recsErr} onRetry={() => recsQuery.refetch()} />
+            <ErrorCard title={t('dashboard.recordings')} message={recsErr} onRetry={() => recsQuery.refetch()} />
           ) : recsByCamera.length === 0 ? (
-            <div className="text-sm text-[var(--text-dim)]">No recordings yet</div>
+            <div className="text-sm text-[var(--text-dim)]">{t('dashboard.noRecordingsYet')}</div>
           ) : (
             <div className="overflow-x-auto border border-neutral-700 rounded">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[var(--text-dim)] border-b border-neutral-700 bg-[var(--panel-2)]">
                     <th className="py-2 px-3 font-medium">Camera</th>
-                    <th className="py-2 pr-4 font-medium">Recorded footage</th>
-                    <th className="py-2 pr-4 font-medium">Days</th>
-                    <th className="py-2 pr-4 font-medium">Latest</th>
+                    <th className="py-2 pr-4 font-medium">{t('dashboard.recordedFootage')}</th>
+                    <th className="py-2 pr-4 font-medium">{t('dashboard.days')}</th>
+                    <th className="py-2 pr-4 font-medium">{t('dashboard.latest')}</th>
                     <th className="py-2 pr-4" />
                   </tr>
                 </thead>
@@ -368,7 +372,7 @@ export function Dashboard() {
                         {c.days > 0 ? (
                           formatDuration(c.duration)
                         ) : (
-                          <span className="text-[var(--text-dim)]">No recordings</span>
+                          <span className="text-[var(--text-dim)]">{t('common.noRecordings')}</span>
                         )}
                       </td>
                       <td className="py-2 pr-4 text-[var(--text-dim)]">{c.days > 0 ? c.days : '—'}</td>
@@ -379,7 +383,7 @@ export function Dashboard() {
                             to="/playback"
                             className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[var(--panel-2)] border border-neutral-700 hover:bg-[var(--panel)] text-xs"
                           >
-                            <Play size={12} /> Browse
+                            <Play size={12} /> {t('common.browse')}
                           </Link>
                         )}
                       </td>
@@ -413,7 +417,7 @@ export function Dashboard() {
               ))}
             </div>
           ) : camsErr ? (
-            <ErrorCard title="Cameras" message={camsErr} onRetry={() => camsQuery.refetch()} />
+            <ErrorCard title={t('dashboard.cameras')} message={camsErr} onRetry={() => camsQuery.refetch()} />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {(cams || []).slice(0, 9).map((c) => (
@@ -438,7 +442,7 @@ export function Dashboard() {
               ))}
             </div>
           ) : recsErr ? (
-            <ErrorCard title="Recordings" message={recsErr} onRetry={fetchRecordings} />
+            <ErrorCard title={t('dashboard.recordings')} message={recsErr} onRetry={fetchRecordings} />
           ) : (
             <div className="overflow-x-auto border border-neutral-700 rounded">
               <table className="w-full text-sm">
@@ -487,6 +491,7 @@ function formatBytesShort(v: number | null | undefined): string {
 
 /** Host CPU / RAM / recordings-disk tiles, fed by the 15s monitor snapshot. */
 function SystemHealthCard() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useSystemResources()
   const thr = data?.thresholds
   const cpu = data?.cpu_percent
@@ -501,17 +506,17 @@ function SystemHealthCard() {
     <Card>
       <CardHeader>
         <HardDrive size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>System health</CardTitle>
+        <CardTitle>{t('dashboard.systemHealth')}</CardTitle>
         {(data?.active_alerts?.length ?? 0) > 0 && (
           <Badge variant="warning">{data!.active_alerts!.length} active alert{data!.active_alerts!.length > 1 ? 's' : ''}</Badge>
         )}
-        <div className="ml-auto text-xs text-[var(--text-dim)]">host resources · 15s refresh</div>
+        <div className="ml-auto text-xs text-[var(--text-dim)]">{t('dashboard.hostResources')}</div>
       </CardHeader>
       <CardContent>
         {isLoading ? (
           <Skeleton className="h-24" />
         ) : error ? (
-          <ErrorCard title="System health" message={extractApiError(error, 'Failed to load system resources')} onRetry={() => refetch()} />
+          <ErrorCard title={t('dashboard.systemHealth')} message={extractApiError(error, t('dashboard.failedResources'))} onRetry={() => refetch()} />
         ) : !data?.sampled_at ? (
           <div className="text-sm text-[var(--text-dim)]">First resource sample pending…</div>
         ) : (

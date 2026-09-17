@@ -74,6 +74,11 @@ authJWTJWKSFingerprint:
 # Claim containing MediaMTX permissions
 authJWTClaimKey: mediamtx_permissions
 # Exclude Admin API and Playback from JWT (already protected by localhost binding)
+# Kept here, unlike mediamtx.docker.yml / mediamtx.yml, and for the
+# reason those two only CLAIMED: apiAddress and playbackAddress in this
+# file really are 127.0.0.1, so the boundary exists. This profile also
+# sets authJWTInHTTPQuery: false, so the ?jwt= that core attaches to
+# playback fetches would not be read anyway.
 authJWTExclude:
   - action: api
   - action: playback

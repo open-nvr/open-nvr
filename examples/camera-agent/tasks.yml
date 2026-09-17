@@ -135,6 +135,14 @@
   agent_skill: null
   aliases: []
 
+- task: pose_estimation
+  label: Pose Estimation
+  summary: Locates a person's body keypoints — shoulders, elbows, wrists, hips — so a rule can reason about what they are DOING, not just where they are.
+  categories: [vision, safety, analytics]
+  tags: [keypoints, skeleton, gesture, posture]
+  agent_skill: null
+  aliases: [keypoints, body_keypoints, pose]
+
 - task: license_plate_recognition
   label: License Plate Recognition
   summary: Reads vehicle license plates (ANPR/LPR) from a frame.

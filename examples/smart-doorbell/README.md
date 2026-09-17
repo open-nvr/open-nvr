@@ -82,20 +82,27 @@ Real-world failure modes the example does NOT yet handle:
 
 ## Quick start
 
+> **On the compose stack you do none of this.** `docker-compose.apps.yml`
+> provisions `insightface-adapter` (published as
+> `ghcr.io/open-nvr/insightface-adapter`) and registers it with KAI-C
+> alongside the app — `--profile smart-doorbell`, the installer's app
+> picker, or one click from the App Catalog. The enrolled-faces DB and
+> the ~280 MB `buffalo_l` model pack each live on a named volume. The
+> steps below are the bare-metal developer path.
+
 ```bash
 # 1. Start the InsightFace adapter (in the ai-adapter repo).
-#    On first boot the adapter downloads the ~200 MB Buffalo-L
-#    InsightFace model pack to /app/model_weights inside the
-#    container. Mount a host directory there so the download
-#    happens once and persists across container restarts.
+#    On first boot the adapter downloads the buffalo_l model pack into
+#    ~/.insightface inside the container (InsightFace's default root).
+#    Mount a host directory there so the download happens once.
 cd ai-adapter
 docker build -f adapters/insightface/Dockerfile -t opennvr/insightface-adapter:local .
 OPENNVR_ADAPTER_TOKEN=$(openssl rand -hex 16)
-mkdir -p face-db model-weights
+mkdir -p face-db model-cache
 docker run --rm -d --name insightface -p 9005:9005 \
   -e OPENNVR_ADAPTER_TOKEN=$OPENNVR_ADAPTER_TOKEN \
   -v $(pwd)/face-db:/data \
-  -v $(pwd)/model-weights:/app/model_weights \
+  -v $(pwd)/model-cache:/root/.insightface \
   opennvr/insightface-adapter:local
 
 # 2. Start KAI-C and register the adapter
@@ -168,6 +175,55 @@ faces carry a base64 JPEG snapshot in `evidence.snapshot_b64`, so:
 
 SIGINT / SIGTERM stops cleanly — the in-flight cycle finishes,
 dispatcher drains.
+
+### The People page
+
+Enabling the app lights **Applications → People (Faces)** in the main
+navigation (the manifest `provides: ["people"]`). That page is the face
+directory for a home, a gated premises or an office:
+
+* **Directory** — everyone enrolled, with photo, category, notes, an
+  optional *valid until* date, and when the door last saw them. Search
+  by name, id or notes; filter by category.
+* **Add person** — name, category, notes, expiry, and a photo either
+  uploaded or snapped from any camera in the system.
+* **Strangers at the door** — every unrecognised face the camera took,
+  newest first. Click one, and *Enrol this person* turns that snapshot
+  into a known face: no photo to go and find.
+* **Edit / Remove** — rename, move to another category, set or clear an
+  expiry, add a note.
+* **More than one photo per person.** Each person holds a set of face
+  samples and a match is the best of them, so the porch camera's
+  evening, 30-degree view of Alice can sit beside her daytime selfie.
+  *Add a photo* on a person appends; the strangers wall offers *This
+  is…* so a capture the door missed becomes exactly the sample it
+  needed. Five samples from the door camera itself is where recognition
+  gets reliable; the adapter keeps up to 32 per person, oldest dropped
+  first. "Start over" on the editor replaces the set (a bad first
+  enrolment).
+
+Categories and what the door does with them: `family`, `resident`,
+`friend` are greeted (low); `staff`, `contractor`, `visitor` are noted
+(info); `watchlist` alarms (high) on every sighting; anyone whose
+`valid_until` has passed raises `expired_pass` (high) instead of a
+greeting. Notes and expiry live in the adapter's face DB as metadata,
+so they survive app restarts and image upgrades.
+
+### In the App Catalog
+
+The app page (Settings → App Catalog → Smart Doorbell) carries the same
+surfaces in their generic form:
+
+* **Live** — enrolled-face count, known visitors vs strangers since
+  start, a per-camera table (ok / waiting / stalled / error, with the
+  fetch error spelled out), a thumbnail wall of the latest strangers,
+  and the recent-visitor feed.
+* **Dashboard** — the same, as one page (`GET /ui`, proxied and
+  sandboxed by core).
+* **Quick actions** — *Enroll a face* (name + photo + category),
+  *Enrolled faces*, *Remove a face*.
+* **Config form** — `recognition_threshold`, `dedup_window_seconds` and
+  the snapshot knobs apply live; cameras still need a restart.
 
 ## Layout
 

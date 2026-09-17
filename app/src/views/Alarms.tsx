@@ -16,12 +16,13 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellRing, PhoneCall, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
 import {
@@ -51,6 +52,7 @@ const RING_MODES: RingMode[] = ['none', 'ping', 'continuous']
 
 export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
+  const { t } = useTranslation()
   // The alarm POLICY (ring modes, actions, test alarms) is a site
   // decision — superuser-only on the server; everyone else gets their
   // cameras' alarms and a read-only view of how the site rings.
@@ -58,16 +60,30 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   const isAdmin = !!user?.is_superuser
   const [onlyUnacked, setOnlyUnacked] = useState(false)
   const [severityFilter, setSeverityFilter] = useState<string | null>(null)
+  const [typeFilter, setTypeFilter] = useState<string | null>(null)
+  const [cameraFilter, setCameraFilter] = useState<number | null>(null)
   const pager = usePagination(25, 'alerts-incidents')
 
   const list = useAlarmsList({
     queryKeyPrefix: 'alarms-page',
     unacked: onlyUnacked,
     severity: severityFilter,
+    alertType: typeFilter,
+    cameraId: cameraFilter,
     page: pager.page,
     pageSize: pager.pageSize,
     skip: pager.skip,
   })
+
+  // The ack endpoint takes source_name and severity, nothing else — so
+  // "select all matching" is only honest while those are the only
+  // filters narrowing the list.
+  const ackCanMatchFilter = typeFilter === null && cameraFilter === null
+  // Drives the empty state's "no alarms match" wording and its escape
+  // hatch. Every filter has to be listed, or a narrowed list reads as an
+  // empty inbox with no way back out.
+  const anyFilter = !!severityFilter || onlyUnacked
+    || typeFilter !== null || cameraFilter !== null
 
   const ringCfg = useQuery({
     queryKey: ['alerts-inbox-ring-config'],
@@ -90,6 +106,33 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
     },
     retry: 0,
   })
+  // The vocabulary for the Type filter: what the installed apps declare
+  // they can raise. Taken from the manifests rather than from the rows
+  // on screen, so a type stays selectable on a page that happens to
+  // contain none of it.
+  const appsQuery = useQuery({
+    queryKey: ['apps'],
+    queryFn: async () => {
+      const { data } = await apiService.getApps()
+      const arr = Array.isArray(data) ? data : (data as any)?.apps
+      return (Array.isArray(arr) ? arr : []) as { manifest?: any }[]
+    },
+    retry: 0,
+    staleTime: 60_000,
+  })
+  const alertTypes = useMemo(() => {
+    const seen = new Set<string>()
+    for (const app of appsQuery.data ?? []) {
+      for (const emitted of app.manifest?.emits ?? []) {
+        // The catalog index spells these as bare strings; a live
+        // manifest sends {name, severity, description}.
+        const name = typeof emitted === 'string' ? emitted : emitted?.name
+        if (typeof name === 'string' && name) seen.add(name)
+      }
+    }
+    return [...seen].sort()
+  }, [appsQuery.data])
+
   const cameraLabel = (handle: string | null) => {
     const id = cameraIdFromHandle(handle)
     const name = id === null ? undefined : camerasQuery.data?.find((c) => c.id === id)?.name
@@ -106,6 +149,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
   // rows the operator can no longer see.
   const sel = useRowSelection<number>({
     unacked: onlyUnacked, severity: severityFilter,
+    alertType: typeFilter, camera: cameraFilter,
     page: pager.page, size: pager.pageSize,
   })
 
@@ -137,9 +181,9 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
       {!embedded && (
         <div className="flex items-center gap-2">
           <BellRing size={18} />
-          <h1 className="text-xl font-semibold">Alarms</h1>
+          <h1 className="text-xl font-semibold">{t('alerts.title')}</h1>
           {list.isPending && (
-            <span className="text-xs text-[var(--text-dim)]">Loading…</span>
+            <span className="text-xs text-[var(--text-dim)]">{t('common.loading')}</span>
           )}
         </div>
       )}
@@ -148,23 +192,19 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
       <div className="grid md:grid-cols-2 gap-3">
         <div className="border border-[var(--border)] rounded p-3 space-y-2">
           <div className="flex items-center gap-2 font-medium">
-            <Volume2 size={14} /> Alarm sound (site-wide)
+            <Volume2 size={14} /> {t('alerts.soundPolicy')}
           </div>
           <div className="text-[12px] text-[var(--text-dim)]">
-            none = badge only · ping = one chime on arrival · continuous =
-            rings in every open browser until acknowledged. Critical rings
-            a siren wail; other severities a two-tone beep — and an
-            unacknowledged critical always overrides the beep.
+            {t('alerts.soundPolicyHelp')}
           </div>
           <button
             className="px-2 py-1 rounded border border-neutral-700 hover:bg-[var(--panel-2)] text-sm"
             onClick={playTestSound}
           >
-            🔊 Play test sound
+            🔊 {t('alerts.playTest')}
           </button>
           <div className="text-[11px] text-[var(--text-dim)]">
-            Hear nothing? Check the tab isn't muted and system volume is
-            up — this button bypasses every other layer.
+            {t('alerts.noSound')}
           </div>
           {ring && (
             <div className="grid grid-cols-2 gap-2 text-sm">
@@ -254,7 +294,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
 
       {/* The list */}
       <AlarmsTable
-        caption="Alerts and incidents"
+        caption={t('alerts.tableTitle')}
         rows={rows}
         showSource
         cameraLabel={cameraLabel}
@@ -267,14 +307,16 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         isError={list.isError}
         error={list.error}
         onRetry={() => list.refetch()}
-        emptyTitle={severityFilter || onlyUnacked
+        emptyTitle={anyFilter
           ? 'No alarms match these filters'
           : 'No alarms yet'}
         emptyDescription="Arm a watchlist plate in the LPR app, or fire a test above."
-        emptyAction={(severityFilter || onlyUnacked) ? (
+        emptyAction={anyFilter ? (
           <Button variant="outline" onClick={() => {
-            setSeverityFilter(null); setOnlyUnacked(false); pager.setPage(1)
-          }}>Clear filters</Button>
+            setSeverityFilter(null); setOnlyUnacked(false)
+            setTypeFilter(null); setCameraFilter(null)
+            pager.setPage(1)
+          }}>{t('events.clearFilters')}</Button>
         ) : undefined}
         toolbar={
           <>
@@ -284,12 +326,19 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
                 onUnacked={(only) => { setOnlyUnacked(only); pager.setPage(1) }}
                 severity={severityFilter}
                 onSeverity={(sev: string | null) => { setSeverityFilter(sev); pager.setPage(1) }}
+                alertType={typeFilter}
+                onAlertType={(t) => { setTypeFilter(t); pager.setPage(1) }}
+                alertTypes={alertTypes}
+                cameraId={cameraFilter}
+                onCameraId={(id) => { setCameraFilter(id); pager.setPage(1) }}
+                cameras={camerasQuery.data ?? []}
               />
               <AlarmsSelectionBar
                 count={sel.count}
                 allOnPage={rows.length > 0 && rows.every((a) => sel.has(a.id))}
                 allMatching={sel.allMatching}
                 matchingTotal={list.total}
+                canSelectAllMatching={ackCanMatchFilter}
                 onSelectAllMatching={sel.selectAllMatching}
                 onClear={sel.clear}
                 onAck={() => ack.mutate(

@@ -18,11 +18,13 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from 'react-router-dom'
+import { useTranslation } from '../i18n'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton, ErrorCard } from "../components/ui";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, BarChart, Bar, Cell } from 'recharts'
 import { apiService } from "../lib/apiService";
 
 export default function SystemNetworkMonitoring() {
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<any | null>(null);
@@ -38,7 +40,7 @@ export default function SystemNetworkMonitoring() {
         setLoading(false);
       })
       .catch(() => {
-        setError("Failed to fetch Suricata stats");
+        setError(t('dashboard.failedSuricata'));
         setLoading(false);
       });
   }, []);
@@ -61,7 +63,7 @@ export default function SystemNetworkMonitoring() {
     <section className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>System &amp; Network Monitoring</CardTitle>
+          <CardTitle>{t('monitoring.title')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -74,17 +76,17 @@ export default function SystemNetworkMonitoring() {
               <button
                 className="text-left rounded border border-neutral-700 p-3 bg-[var(--panel-2)] hover:bg-[var(--panel)] transition-colors"
                 onClick={() => navigate('/alerts-incidents?only_alerts=1')}
-                title="View all alerts"
+                title={t('monitoring.viewAlerts')}
               >
-                <div className="text-xs text-[var(--text-dim)]">Total Alerts</div>
+                <div className="text-xs text-[var(--text-dim)]">{t('monitoring.totalAlerts')}</div>
                 <div className="text-xl font-semibold">{stats?.total_alerts ?? 0}</div>
               </button>
               <button
                 className="text-left rounded border border-neutral-700 p-3 bg-[var(--panel-2)] hover:bg-[var(--panel)] transition-colors"
                 onClick={() => navigate('/alerts-incidents?only_alerts=1&severity=1')}
-                title="View high severity alerts"
+                title={t('monitoring.viewHigh')}
               >
-                <div className="text-xs text-[var(--text-dim)]">High Severity</div>
+                <div className="text-xs text-[var(--text-dim)]">{t('monitoring.highSeverity')}</div>
                 <div className="text-xl font-semibold">{severities.find(s => s.name === "High")?.value ?? 0}</div>
               </button>
               <button
@@ -93,14 +95,14 @@ export default function SystemNetworkMonitoring() {
                 title={topCategoryName ? `View ${topCategoryName} alerts` : 'No category data'}
                 disabled={!topCategoryName}
               >
-                <div className="text-xs text-[var(--text-dim)]">Top Category</div>
+                <div className="text-xs text-[var(--text-dim)]">{t('monitoring.topCategory')}</div>
                 <div className="text-sm">{topCategoryName || "—"}</div>
               </button>
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
               <Card>
                 <CardHeader>
-                  <CardTitle>Alerts over time</CardTitle>
+                  <CardTitle>{t('monitoring.alertsOverTime')}</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="h-56">
@@ -125,7 +127,7 @@ export default function SystemNetworkMonitoring() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Severity distribution</CardTitle>
+                  <CardTitle>{t('monitoring.severityDistribution')}</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="h-56">

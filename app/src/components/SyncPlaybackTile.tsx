@@ -24,6 +24,7 @@ import { displayAspect, isStretched } from '../lib/aspect'
 import type { AspectOverride } from '../lib/aspect'
 import { useVideoSize } from '../hooks/useVideoAspect'
 import { AspectFrame } from './VideoPlayer'
+import { useTranslation } from '../i18n'
 import { loadHls } from '../lib/loadHls'
 import type { TimelineSegment } from './PlaybackTimeline'
 
@@ -71,6 +72,7 @@ export function SyncPlaybackTile({
   onActivate,
   displayAspectOverride,
 }: SyncPlaybackTileProps) {
+  const { t } = useTranslation()
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   // The lazily-loaded hls.js module (see lib/loadHls); null until resolved.
@@ -413,21 +415,21 @@ export function SyncPlaybackTile({
       {(status === 'gap' || status === 'idle') && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
           <CameraOff size={22} className="text-neutral-500" />
-          <span className="text-[11px] text-neutral-400">No recording at this time</span>
+          <span className="text-[11px] text-neutral-400">{t('shared.noRecordingNow')}</span>
         </div>
       )}
 
       {status === 'live' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
           <Radio size={22} className="text-green-500 animate-pulse" />
-          <span className="text-[11px] text-neutral-300">Still recording — watch in Live View</span>
+          <span className="text-[11px] text-neutral-300">{t('shared.stillRecording')}</span>
         </div>
       )}
 
       {status === 'error' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
           <AlertCircle size={22} className="text-amber-400" />
-          <span className="text-[11px] text-neutral-300">Playback failed here</span>
+          <span className="text-[11px] text-neutral-300">{t('shared.playbackFailed')}</span>
         </div>
       )}
     </div>

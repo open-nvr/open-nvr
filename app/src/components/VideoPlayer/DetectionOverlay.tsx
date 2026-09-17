@@ -136,8 +136,15 @@ function drawTrack(
 
   // Label chip: "person 91%" (+ id when the tracker has one). Sits above
   // the box, or inside its top edge when the box touches the frame top.
+  //
+  // The percentage is dropped when the producer reported no score, rather
+  // than printed as "0%". `score` is optional in `overlay.boxes.v1`, and
+  // an app that labels a box with a finding instead of a guess sends
+  // none — which is how the guard-scan overlay came to read
+  // "Scanning LRFB 100% #5 0%", two percentages that disagree.
   const idPart = t.id != null ? ` #${t.id}` : ''
-  const text = `${t.label}${idPart} ${Math.round(t.score * 100)}%`
+  const pct = t.score == null ? '' : ` ${Math.round(t.score * 100)}%`
+  const text = `${t.label}${idPart}${pct}`
   const padX = Math.round(fontPx * 0.45), padY = Math.round(fontPx * 0.25)
   const tw = ctx.measureText(text).width
   const chipW = tw + padX * 2, chipH = fontPx + padY * 2

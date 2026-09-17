@@ -34,6 +34,8 @@ runs, free to consume.
 
 ::: opennvr_app_sdk.OccupancyHeatmap
 
+::: opennvr_app_sdk.ScreeningCompleted
+
 ::: opennvr_app_sdk.OccupancyFootfall
 
 ::: opennvr_app_sdk.OverlayBoxes

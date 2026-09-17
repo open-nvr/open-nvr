@@ -735,6 +735,40 @@ class OccupancyCounter(Detector):
             except Exception:
                 logger.warning("camera refresh failed", exc_info=True)
 
+    def on_cameras_update(self, camera_ids: frozenset[int]) -> None:
+        """The cameras picked for this app changed in the catalog: count
+        exactly those, now.
+
+        This is the path that can honour "nothing picked". The periodic
+        refresh above must treat an empty camera list as a possible blip
+        (``discover_cameras`` cannot tell "core is down" from "no cameras"),
+        so un-picking the last camera never stopped the counting there.
+        The config poll delivers picks as a definite answer, so an empty
+        set here is applied: the app counts nowhere and uses no compute.
+
+        Runs on the poll thread, so the camera and state maps are REBOUND
+        to new dicts rather than mutated — a ``/state`` snapshot or an
+        event being counted on the loop keeps iterating the old one.
+        A pinned YAML camera list is the operator's word and is left alone.
+        """
+        if not self._auto_cameras:
+            return
+        cfg = self._config
+        wanted = {f"cam{i}" for i in camera_ids}
+        current = dict(cfg.cameras)
+        added = sorted(wanted - set(current))
+        removed = sorted(set(current) - wanted)
+        if not added and not removed:
+            return
+        cameras = {k: v for k, v in current.items() if k in wanted}
+        for cam_id in added:
+            cameras[cam_id] = _auto_camera_zone(cam_id, cfg.default_max, cfg.default_min)
+        cfg.cameras = cameras
+        self._states = {k: v for k, v in self._states.items() if k in wanted}
+        self._unknown_cameras = {c for c in self._unknown_cameras if c not in wanted}
+        logger.info("cameras selected for this app changed: +%s -%s (now counting %s)",
+                    added or "-", removed or "-", sorted(cameras) or "nowhere")
+
     async def run(self, *, once: bool = False) -> None:
         refresher: asyncio.Task | None = None
         flusher: asyncio.Task | None = None

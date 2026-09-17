@@ -95,14 +95,22 @@ def env(monkeypatch):
     s.add(admin)
     s.flush()
     gate = Camera(name="Gate", ip_address="10.0.0.1", owner_id=admin.id, is_active=True,
-                  rtsp_url="rtsp://10.0.0.1/s", assignments=[{"skill": "loitering"}])
+                  rtsp_url="rtsp://10.0.0.1/s")
     yard = Camera(name="Yard", ip_address="10.0.0.2", owner_id=admin.id, is_active=True,
-                  rtsp_url="rtsp://10.0.0.2/s",
-                  assignments=[{"skill": "license_plate_recognition"}])
+                  rtsp_url="rtsp://10.0.0.2/s")
     lobby = Camera(name="Lobby", ip_address="10.0.0.3", owner_id=admin.id, is_active=True,
                    rtsp_url="rtsp://10.0.0.3/s")
     s.add_all([gate, yard, lobby])
     s.flush()
+    # Each app is pointed at its camera the way the catalog does it: a
+    # pick (an ``app:<id>`` claim), made from the app's own configuration.
+    # The lobby is picked by nobody.
+    from services.skill_assignments import app_consumer, app_pick_skill, declare
+
+    for app_id, cam in (("loitering-detection", gate),
+                        ("license-plate-recognition", yard)):
+        declare(s, skill=app_pick_skill(app_id), camera_id=cam.id,
+                consumer=app_consumer(app_id))
     from datetime import datetime, timezone
     for cam in (gate, yard):
         s.add(TimelineEvent(camera_id=cam.id, source="tier0", event_type="track",
@@ -218,10 +226,10 @@ def test_rotate_returns_a_fresh_key(env):
 # ── the internal door, scoped to the app's roster ──────────────────────
 
 
-def test_internal_cameras_and_events_follow_the_apps_assignments(env):
+def test_internal_cameras_and_events_follow_the_apps_picks(env):
     tc, ids, _ = env
     key = _register(tc, _site()).json()["api_key"]
-    # Gate is assigned "loitering" (this app's `provides`); yard and lobby are not.
+    # Gate is picked for this app; yard is picked for ANPR, lobby by nobody.
     cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
     assert [int(c["open_nvr_camera_id"]) for c in cams] == [ids["gate"]]
     # The site key sees the fleet.
@@ -234,15 +242,12 @@ def test_internal_cameras_and_events_follow_the_apps_assignments(env):
     assert {e["camera_id"] for e in ev} == {ids["gate"], ids["yard"]}
 
 
-def test_unassigned_app_sees_nothing(env):
-    """No camera names this app → it gets NONE of them.
+def test_an_app_with_nothing_picked_sees_nothing(env):
+    """Nothing picked for this app → it gets NONE of the cameras.
 
-    This used to be the additive rule: an unnamed app saw the whole
-    fleet, so the least-configured install was the most expensive one
-    and a freshly installed app could read every camera nobody had
-    offered it. Closed by default now — the roster is what an operator
-    pointed at the app, and an app pointed at nothing watches nothing
-    (docs/CAMERA_ASSIGNMENTS.md, same as the SDK's cameras_for_skill)."""
+    A freshly installed app has picked nothing, so it reads nothing and
+    computes nothing until an operator picks cameras in its own
+    configuration (docs/CAMERA_ASSIGNMENTS.md)."""
     tc, ids, _ = env
     body = {"url": "http://occ:9200", "manifest": _manifest("occupancy-counting", ("occupancy",))}
     key = tc.post("/apps/register", json=body, headers=_site()).json()["api_key"]
@@ -438,6 +443,37 @@ def test_snapshot_and_recordings_follow_the_roster(platform):
     url = tc.get(f"/internal/app/recordings/{ids['gate']}/url", headers=_app(key),
                  params={"start": "2026-09-05T10:00:00Z", "duration": 60}).json()["url"]
     assert url.startswith("http://mediamtx:9996/get?") and "duration=60" in url
+
+
+def test_the_playback_url_carries_a_credential_for_that_one_path(platform):
+    """The roster check decides which camera an app may ASK about; the
+    URL it is handed decides which camera it can actually FETCH. Those
+    used to disagree: the URL carried no credential at all, so an app
+    could take this answer, edit `path=` to a camera it was never
+    assigned, and the playback server — which was excluded from auth
+    entirely — would serve it. The token is scoped to this path.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    # python-jose, which is what this codebase signs with
+    # (services/mediamtx_jwt_service.py: `from jose import jwt`). PyJWT
+    # is not a dependency here.
+    from jose import jwt as _jwt
+
+    tc, ids, _, key = platform
+    body = tc.get(f"/internal/app/recordings/{ids['gate']}/url", headers=_app(key),
+                  params={"start": "2026-09-05T10:00:00Z", "duration": 60}).json()
+    query = parse_qs(urlparse(body["url"]).query)
+
+    assert "jwt" in query, "the playback URL was handed out with no credential"
+    claims = _jwt.get_unverified_claims(query["jwt"][0])
+    perms = claims["mediamtx_permissions"]
+    assert [p["action"] for p in perms] == ["playback"], (
+        f"an app was given more than playback: {perms}")
+    paths = {p.get("path") for p in perms}
+    assert paths and "~.*" not in paths, (
+        f"the token is not scoped to one path: {perms}")
+    assert body["expires_in"] > 0
 
 
 def test_plates_and_alerts_are_scoped_to_the_app(platform):
@@ -832,3 +868,85 @@ def test_bus_alert_publish_permission_matches_the_sdk_subject():
     for app_id in ("plate-vip", "my.app", "_odd_", "weird id!", "___"):
         allowed = nats_users.app_permissions(app_id, {})["publish"]
         assert f"opennvr.alerts.app.{_sanitize_subject_token(app_id)}.>" in allowed, app_id
+
+
+def test_naming_an_app_on_the_camera_page_no_longer_grants_it_the_camera(env):
+    """The old way to point an app at a camera was an assignment row
+    naming it. That row no longer means anything to the app — only a pick
+    does — so a stale projection entry can't quietly widen a roster."""
+    tc, ids, SessionLocal = env
+    key = _register(tc, _site()).json()["api_key"]
+    s = SessionLocal()
+    lobby = s.get(Camera, ids["lobby"])
+    lobby.assignments = [{"skill": "loitering"}, {"skill": "loitering_detection"}]
+    s.commit()
+    s.close()
+    cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert [int(c["open_nvr_camera_id"]) for c in cams] == [ids["gate"]]
+
+
+def test_a_pick_on_a_deleted_camera_drops_out_of_the_roster(env):
+    from datetime import datetime, timezone
+
+    tc, ids, SessionLocal = env
+    key = _register(tc, _site()).json()["api_key"]
+    s = SessionLocal()
+    s.get(Camera, ids["gate"]).deleted_at = datetime.now(timezone.utc)
+    s.commit()
+    s.close()
+    assert tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"] == []
+
+
+def test_an_app_never_gets_the_cameras_raw_rtsp_url(env):
+    """With the MediaMTX tap off, the platform falls back to the camera's
+    own RTSP URL — which carries the camera's credentials. The site key
+    may have it; an app gets an empty frame_url and uses the scoped
+    snapshot route instead."""
+    tc, ids, _ = env
+    key = _register(tc, _site()).json()["api_key"]
+    app_cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert [c["frame_url"] for c in app_cams] == [""]
+    site_cams = tc.get("/internal/camera-agent/cameras", headers=_site()).json()["cameras"]
+    assert all(c["frame_url"].startswith("rtsp://") for c in site_cams)
+
+
+def test_an_app_gets_a_token_for_its_own_camera_path_not_the_wildcard(env, monkeypatch):
+    tc, ids, _ = env
+    minted = []
+
+    def _mint(camera_path="~.*", username="camera-agent-internal"):
+        minted.append((camera_path, username))
+        return f"tok-{camera_path}"
+
+    monkeypatch.setattr(settings, "inference_use_mediamtx_tap", True, raising=False)
+    monkeypatch.setattr(internal_router, "_mint_mediamtx_jwt", _mint)
+    key = _register(tc, _site()).json()["api_key"]
+
+    cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert len(cams) == 1
+    assert all(path != "~.*" for path, _ in minted)
+    assert minted and minted[0][1] == "app:loitering-detection"
+    assert cams[0]["frame_url"].endswith(f"?jwt=tok-{minted[0][0]}")
+
+    minted.clear()
+    tc.get("/internal/camera-agent/cameras", headers=_site())
+    assert minted == [("~.*", "camera-agent-internal")]
+
+
+def test_the_app_gets_zones_only_for_its_picked_cameras(env):
+    """Per-camera settings stay stored for every camera (unpick and re-pick
+    keeps the zone), but the app itself is handed geometry only for the
+    cameras picked for it."""
+    tc, ids, SessionLocal = env
+    manifest = {**_manifest(), "params": [
+        {"name": "zones", "type": "geometry.polygon", "per_camera": True}]}
+    key = _register(tc, _site(), manifest=manifest).json()["api_key"]
+    zone = [[0.1, 0.1], [0.5, 0.1], [0.5, 0.5]]
+    s = SessionLocal()
+    row = s.get(InstalledApp, "loitering-detection")
+    row.config_json = {"zones": {str(ids["gate"]): zone, str(ids["yard"]): zone}}
+    s.commit()
+    s.close()
+    body = tc.get("/apps/loitering-detection/config", headers=_app(key)).json()
+    assert body["config"]["zones"] == {str(ids["gate"]): zone}
+    assert body["cameras"] == [ids["gate"]]

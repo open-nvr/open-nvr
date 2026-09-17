@@ -112,3 +112,18 @@ def test_untracked_objects_ignored():
     d = _detector(_camera())
     det = {"label": "backpack", "bbox": _bbox(0.5, 0.5)}  # no track_id
     assert d.handle_event(_event([det], _ts(0))) == []
+
+
+# ── Connected: cameras picked in the catalog ───────────────────────
+
+
+def test_a_picked_camera_needs_no_yaml_entry_and_an_unpicked_one_is_ignored():
+    d = _detector(_camera())
+    d.cfg.cameras = {}
+    d._config_poll_thread = object()
+    d.picked_cameras = frozenset({3})
+    assert d._camera_for("cam3") is not None          # whole frame until drawn
+    assert d.handle_event(_event([_det("backpack", 0.5, 0.5, "b1")], _ts(0))) == []
+    d.on_config_update({"zones": {"3": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]]}})
+    zone = d._camera_for("cam3").zone
+    assert not zone.contains(ao.Point(960, 540))       # the drawn zone replaced the frame

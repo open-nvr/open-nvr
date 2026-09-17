@@ -644,7 +644,8 @@ async def get_detect_config(
     return {"gate_mode": mode if mode in _VALID_GATE_MODES else None}
 
 
-def _mint_mediamtx_jwt() -> str | None:
+def _mint_mediamtx_jwt(camera_path: str = "~.*",
+                       username: str = "camera-agent-internal") -> str | None:
     """Mint a short-lived MediaMTX JWT with wildcard read scope.
 
     The camera-agent reads frames directly from MediaMTX's internal RTSP
@@ -662,9 +663,9 @@ def _mint_mediamtx_jwt() -> str | None:
 
         return MediaMtxJwtService.create_stream_token(
             user_id=0,
-            username="camera-agent-internal",
+            username=username,
             camera_id=None,
-            camera_path="~.*",
+            camera_path=camera_path,
             actions=["read"],
             expiry_minutes=60,
         )
@@ -705,10 +706,15 @@ def list_camera_agent_sources(
     (``?jwt=<token>``) so the camera-agent can authenticate with MediaMTX
     without needing the ``MEDIAMTX_SECRET`` key in its own config.
     """
-    # Mint once for the whole response — all cameras share the same wildcard
-    # token, so minting per-camera would waste RSA operations.
+    # An app key gets its roster; the site key gets every camera.
+    roster = _app_roster(db, principal)
+    is_app = roster is not None
+    # Platform components share ONE wildcard token, minted once. An app
+    # never gets it: apps sit on a shared network, and a "~.*" token would
+    # read every camera in the building and undo the roster below. Each
+    # app URL carries a token for exactly its own camera path instead.
     mediamtx_jwt: str | None = (
-        _mint_mediamtx_jwt() if settings.inference_use_mediamtx_tap else None
+        _mint_mediamtx_jwt() if settings.inference_use_mediamtx_tap and not is_app else None
     )
 
     cameras = (
@@ -717,13 +723,11 @@ def list_camera_agent_sources(
         .order_by(Camera.id.asc())
         .all()
     )
-    # An app key gets the cameras the operator assigned to it, and only
-    # those — an app assigned nothing gets an empty roster rather than
-    # the fleet. The site key (detect-pipeline, KAI-C) still gets every
-    # camera. Same rule the SDK's cameras_for_skill applies client-side,
-    # enforced here where the frames are actually handed out.
-    roster = _app_roster(db, principal)
-    if roster is not None:
+    # An app key gets the cameras picked for it, and only those — an app
+    # with nothing picked gets an empty roster rather than the fleet. The
+    # site key (detect-pipeline, KAI-C) still gets every camera. Enforced
+    # here, where the frames are actually handed out.
+    if is_app:
         cameras = [c for c in cameras if int(c.id) in roster]
     out: list[dict[str, object]] = []
     for cam in cameras:
@@ -781,9 +785,22 @@ def list_camera_agent_sources(
             # Fall back to bare URL when minting failed (keys not configured,
             # test environment, etc.) — agent will still start, just unable
             # to fetch frames for the tap path.
-            if mediamtx_jwt:
-                frame_url = f"{frame_url}?jwt={urlquote(mediamtx_jwt, safe='.')}"
+            token = (
+                _mint_mediamtx_jwt(camera_path=tap_name,
+                                   username=f"app:{getattr(principal, 'app_id', 'app')}")
+                if is_app else mediamtx_jwt
+            )
+            if token:
+                frame_url = f"{frame_url}?jwt={urlquote(token, safe='.')}"
             source = "mediamtx-sub" if use_sub else "mediamtx"
+        elif is_app:
+            # No tap: the camera's own RTSP URL is all there is, and it
+            # embeds the camera's credentials. Never hand that to an app —
+            # it would be the camera's password, not a scoped grant. The
+            # app still sees the camera in its roster and can use the
+            # roster-scoped snapshot route.
+            frame_url = ""
+            source = "none"
         elif cam.rtsp_url:
             frame_url = str(cam.rtsp_url)
             source = "camera"

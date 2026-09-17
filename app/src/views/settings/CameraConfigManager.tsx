@@ -20,6 +20,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '../../lib/apiService'
 import { useSnackbar } from '../../components/Snackbar'
+import { useTranslation } from '../../i18n'
+import { extractApiError } from '../../lib/apiError'
 
 type Camera = {
   id: number
@@ -45,6 +47,7 @@ type CameraConfig = {
 export function CameraConfigManager() {
   const navigate = useNavigate()
   const { showError } = useSnackbar()
+  const { t } = useTranslation()
   const [cameras, setCameras] = useState<Camera[]>([])
   const [selectedCamId, setSelectedCamId] = useState<number | ''>('')
   // Recording is mandatory on an NVR — always on, never operator-toggled.
@@ -67,7 +70,7 @@ export function CameraConfigManager() {
         setCameras(data.cameras.map((c: any) => ({ id: c.id, name: c.name, rtsp_url: c.rtsp_url })))
         setTotal(data.total ?? 0)
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load cameras')
+        setError(extractApiError(e, t('settings.failedLoadCameras')))
       } finally {
         setLoading(false)
       }
@@ -101,7 +104,7 @@ export function CameraConfigManager() {
           source_url: selectedCamera?.rtsp_url || null
         })
       } else {
-        setError(e?.data?.detail || e?.message || 'Failed to load config')
+        setError(extractApiError(e, t('settings.failedLoadCameraConfig')))
       }
     } finally {
       setLoading(false)
@@ -150,7 +153,7 @@ export function CameraConfigManager() {
       }
       await loadConfig(selectedCamId)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save config')
+      setError(extractApiError(e, t('settings.failedSaveCameraConfig')))
     } finally {
       setLoading(false)
     }
@@ -165,7 +168,7 @@ export function CameraConfigManager() {
       const { data } = await apiService.provisionCameraPath(selectedCamId)
       setNotice(`Provisioned: ${data?.status || ''}`)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Provision failed')
+      setError(extractApiError(e, t('settings.provisionFailed')))
     } finally {
       setLoading(false)
     }
@@ -180,7 +183,7 @@ export function CameraConfigManager() {
       const { data } = await apiService.unprovisionCameraPath(selectedCamId)
       setNotice(`Unprovisioned: ${data?.status || ''}`)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Unprovision failed')
+      setError(extractApiError(e, t('settings.unprovisionFailed')))
     } finally {
       setLoading(false)
     }
@@ -189,9 +192,9 @@ export function CameraConfigManager() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="text-base font-semibold">Camera Config</h2>
+        <h2 className="text-base font-semibold">{t('nav.configuration')}</h2>
         <div className="ml-auto flex items-center gap-2 text-sm">
-          <input className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" placeholder="Search cameras" value={q} onChange={(e) => { setPage(1); setQ(e.target.value) }} />
+          <input className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" placeholder={t('camera.search')} value={q} onChange={(e) => { setPage(1); setQ(e.target.value) }} />
           <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
             {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
           </select>
@@ -206,7 +209,7 @@ export function CameraConfigManager() {
           <table className="w-full text-sm">
             <thead className="bg-[var(--panel-2)] text-left">
               <tr>
-                <th className="p-2">Camera</th>
+                <th className="p-2">{t('nav.cameras')}</th>
               </tr>
             </thead>
             <tbody>
@@ -219,25 +222,25 @@ export function CameraConfigManager() {
               ))}
               {cameras.length === 0 && (
                 <tr>
-                  <td className="p-2 text-[var(--text-dim)]">No cameras</td>
+                  <td className="p-2 text-[var(--text-dim)]">{t('camera.noCameras')}</td>
                 </tr>
               )}
             </tbody>
           </table>
           <div className="flex items-center gap-2 p-2 text-sm border-t border-neutral-700">
-            <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Prev</button>
+            <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>{t('camera.prev')}</button>
             <span>Page {page}</span>
-            <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={cameras.length < limit} onClick={() => setPage(p => p + 1)}>Next</button>
+            <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={cameras.length < limit} onClick={() => setPage(p => p + 1)}>{t('camera.next')}</button>
           </div>
         </div>
 
         <div className="col-span-2 border border-neutral-700 p-3 text-sm">
           {!selectedCamId ? (
-            <div className="text-[var(--text-dim)]">Select a camera to configure.</div>
+            <div className="text-[var(--text-dim)]">{t('camera.noCameras')}</div>
           ) : (
             <form className="grid grid-cols-2 gap-3" onSubmit={onCreateOrUpdate}>
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)]">Stream Protocol</span>
+                <span className="text-[var(--text-dim)]">{t('settings.streamProtocol')}</span>
                 <select className="bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.stream_protocol as any} onChange={(e) => setCfg({ ...cfg, stream_protocol: e.target.value as any })}>
                   <option value="rtsp">RTSP</option>
                   <option value="rtmp">RTMP</option>
@@ -260,7 +263,7 @@ export function CameraConfigManager() {
               
               {/* Recording Configuration */}
               <div className="col-span-2 border-t border-neutral-600 pt-3 mt-2">
-                <h4 className="text-[var(--text-dim)] font-medium mb-2">Recording Settings</h4>
+                <h4 className="text-[var(--text-dim)] font-medium mb-2">{t('dashboard.recordings')} — Settings</h4>
                 <div className="grid grid-cols-2 gap-3">
                   <label className="flex items-center gap-2">
                     <input
@@ -274,7 +277,7 @@ export function CameraConfigManager() {
                         }
                       }}
                     />
-                    <span>Enable Recording</span>
+                    <span>{t('dashboard.recordings')}</span>
                   </label>
                   
                   {cfg.recording_enabled && (
@@ -295,7 +298,7 @@ export function CameraConfigManager() {
               
               {/* Publisher Settings */}
               <div className="col-span-2 border-t border-neutral-600 pt-3 mt-2">
-                <h4 className="text-[var(--text-dim)] font-medium mb-2">Publisher Settings</h4>
+                <h4 className="text-[var(--text-dim)] font-medium mb-2">{t('settings.publisherSettings')}</h4>
                 <div className="grid grid-cols-2 gap-3">
                   <label className="flex items-center gap-2">
                     <input type="checkbox" className="accent-[var(--accent)]" checked={!!cfg.webrtc_publisher} onChange={(e) => setCfg({ ...cfg, webrtc_publisher: e.target.checked })} /> 

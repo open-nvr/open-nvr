@@ -19,6 +19,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
+import { extractApiError } from '../lib/apiError'
 
 type DetectionResult = {
   id: number
@@ -93,6 +95,7 @@ type WSInferenceEvent = {
 }
 
 export function AIDetectionResults() {
+  const { t } = useTranslation()
   const { user, token } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -312,7 +315,7 @@ export function AIDetectionResults() {
       const res = await apiService.getDetectionResults(params)
       fetchedData = res.data
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to load detection results')
+      setError(extractApiError(e, t('detection.failedLoad')))
     } finally {
       setLoading(false)
       // Drain any events that arrived during the fetch — done in finally so
@@ -435,7 +438,7 @@ export function AIDetectionResults() {
       {/* Fixed Header */}
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-lg font-semibold">
-          AI Detection Results
+          {t('detection.title')}
           {selectedCameraId && (
             <span className="ml-2 text-sm text-[var(--text-dim)]">
               - {cameras.find(c => c.id === selectedCameraId)?.name}
@@ -447,7 +450,7 @@ export function AIDetectionResults() {
             onClick={() => loadResults()}
             className="px-3 py-1 bg-[var(--panel)] border border-neutral-700 rounded text-sm hover:bg-[var(--panel-2)]"
           >
-            Refresh
+            {t('detection.refresh')}
           </button>
           {user?.is_superuser && (
             <button
@@ -476,13 +479,13 @@ export function AIDetectionResults() {
       <div className="border border-neutral-700 bg-[var(--panel-2)] p-3 rounded mb-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
-            <label className="block text-xs text-[var(--text-dim)] mb-1">Filter by Model</label>
+            <label className="block text-xs text-[var(--text-dim)] mb-1">{t('detection.filterModel')}</label>
             <select
               className="select w-full text-sm"
               value={filters.model_id}
               onChange={(e) => setFilters({ ...filters, model_id: e.target.value })}
             >
-              <option value="">All Models</option>
+              <option value="">{t('detection.allModels')}</option>
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.name}
@@ -492,13 +495,13 @@ export function AIDetectionResults() {
           </div>
 
           <div>
-            <label className="block text-xs text-[var(--text-dim)] mb-1">Filter by Task</label>
+            <label className="block text-xs text-[var(--text-dim)] mb-1">{t('detection.filterTask')}</label>
             <select
               className="select w-full text-sm"
               value={filters.task}
               onChange={(e) => setFilters({ ...filters, task: e.target.value })}
             >
-              <option value="">All Tasks</option>
+              <option value="">{t('detection.allTasks')}</option>
               {getUniqueTask(results).map((task) => (
                 <option key={task} value={task}>
                   {task}
@@ -508,7 +511,7 @@ export function AIDetectionResults() {
           </div>
 
           <div>
-            <label className="block text-xs text-[var(--text-dim)] mb-1">Limit</label>
+            <label className="block text-xs text-[var(--text-dim)] mb-1">{t('detection.limit')}</label>
             <select
               className="select w-full text-sm"
               value={filters.limit}
@@ -526,7 +529,7 @@ export function AIDetectionResults() {
               onClick={() => setFilters({ model_id: '', task: '', limit: 100 })}
               className="px-3 py-1 bg-[var(--panel)] border border-neutral-700 rounded text-sm hover:bg-[var(--panel-2)] w-full"
             >
-              Clear Filters
+              {t('detection.clear')}
             </button>
           </div>
         </div>
@@ -535,14 +538,14 @@ export function AIDetectionResults() {
       {/* Scrollable Results Table */}
       <div className="flex-1 overflow-hidden border border-neutral-700 bg-[var(--panel-2)] rounded">
         <div className="p-3 border-b border-neutral-700">
-          <h2 className="text-md font-medium">Detection Results ({filteredResults.length})</h2>
+          <h2 className="text-md font-medium">{t('detection.results')} ({filteredResults.length})</h2>
         </div>
 
         {loading ? (
           <div className="p-4 text-center text-sm text-[var(--text-dim)]">Loading...</div>
         ) : filteredResults.length === 0 ? (
           <div className="p-4 text-center text-sm text-[var(--text-dim)]">
-            No detection results found. Run inference to generate results.
+            {t('detection.empty')}
           </div>
         ) : (
           <div className="overflow-auto h-[calc(100%-3.5rem)]">
@@ -641,7 +644,7 @@ export function AIDetectionResults() {
     {/* Right Sidebar - Camera List */}
     <aside className="w-80 border-l border-neutral-700 bg-[var(--panel-2)] overflow-auto">
       <div className="sticky top-0 bg-[var(--panel-2)] border-b border-neutral-700 p-3 z-10">
-        <h2 className="text-md font-medium mb-2">Cameras</h2>
+        <h2 className="text-md font-medium mb-2">{t('detection.cameras')}</h2>
         <button
           onClick={() => setSelectedCameraId(null)}
           className={`w-full px-3 py-2 text-sm rounded border transition-colors ${
@@ -651,7 +654,7 @@ export function AIDetectionResults() {
           }`}
         >
           <div className="flex items-center justify-between">
-            <span>All Cameras</span>
+            <span>{t('detection.allCameras')}</span>
             <span className="text-xs opacity-75">{results.length} results</span>
           </div>
         </button>
@@ -660,7 +663,7 @@ export function AIDetectionResults() {
       <div className="p-3 space-y-2">
         {cameras.length === 0 ? (
           <div className="text-sm text-[var(--text-dim)] text-center py-4">
-            No cameras found
+            {t('detection.noCameras')}
           </div>
         ) : (
           cameras.map((camera) => {

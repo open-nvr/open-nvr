@@ -179,6 +179,18 @@ class _Http:
             raise PlatformError(f"PUT {path} → HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    def post_bytes(self, path: str, body: bytes, content_type: str,
+                   **params) -> Any:
+        url = f"{self.base}{path}{query_string(params)}"
+        headers = {**self.headers(), "Content-Type": content_type}
+        try:
+            r = self._client.post(url, content=body, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            raise PlatformError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise PlatformError(f"POST {path} → HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
     def delete(self, path: str, **params) -> Any:
         url = f"{self.base}{path}{query_string(params)}"
         try:
@@ -357,6 +369,10 @@ class AIAPI:
 # ── The client ──────────────────────────────────────────────────────
 
 
+class FrameStreamUnavailable(PlatformError):
+    """Core would not grant a stream for this camera."""
+
+
 class OpenNVR:
     """See the module docstring. All arguments fall back to the
     environment the app overlays already set: ``OPENNVR_URL``,
@@ -384,11 +400,27 @@ class OpenNVR:
 
     # ── cameras ────────────────────────────────────────────────────
 
+    def roster(self) -> list[Camera] | None:
+        """The cameras picked for this app in its configuration.
+
+        ``[]`` means core answered and nothing is picked: the app should
+        do nothing. ``None`` means core could not be asked (unreachable,
+        an error, a key it refused) — NOT the same answer. An app that
+        treats ``None`` as "nothing picked" tears its work down on every
+        core restart; one that treats ``[]`` as "keep going" never stops
+        when an operator unpicks the last camera. Keep what you have on
+        ``None``, stop on ``[]``.
+        """
+        body = self._http.get_json("/api/v1/internal/camera-agent/cameras")
+        if not isinstance(body, dict):
+            return None
+        return parse_cameras(body)
+
     def cameras(self) -> list[Camera]:
-        """The roster core assigned to this app (every active camera
-        when the operator assigned none). ``[]`` when core can't be
-        reached — log it; never guess."""
-        return parse_cameras(self._http.get_json("/api/v1/internal/camera-agent/cameras"))
+        """The cameras picked for this app, or ``[]`` — which here means
+        EITHER nothing is picked OR core could not be reached. Use
+        :meth:`roster` wherever that difference changes what you do."""
+        return self.roster() or []
 
     def camera(self, camera) -> Camera | None:
         want = _camera_id(camera)
@@ -398,6 +430,64 @@ class OpenNVR:
         """The camera's current frame as JPEG, or ``None``."""
         return self._http.get_bytes(
             f"/api/v1/internal/app/cameras/{_camera_id(camera)}/snapshot")
+
+    def save_evidence(self, jpeg: bytes) -> str | None:
+        """Store a JPEG for an alert to cite; returns its path.
+
+        Put photos HERE, then pass the paths as ``Alert(images=...)``.
+        An alert is a NATS message with a 1 MB ceiling, so a base64 crop
+        inside the alert is not merely wasteful — past the ceiling the
+        broker drops the publish and the alert never reaches anyone.
+
+        ``None`` when the upload fails: an app must still be able to
+        raise its alert without the picture.
+        """
+        if not jpeg:
+            return None
+        try:
+            body = self._http.post_bytes("/api/v1/internal/app/evidence",
+                                         jpeg, "image/jpeg")
+        except PlatformError as exc:
+            logger.warning("evidence upload failed: %s", exc)
+            return None
+        path = (body or {}).get("path")
+        return str(path) if path else None
+
+    def stream_grant(self, camera) -> dict | None:
+        """Core's permission to read this camera's video, plus the URL.
+
+        The token in it is scoped to this one camera's path and expires,
+        so apps sharing a network cannot read each other's cameras.
+        ``None`` when core will not or cannot grant it.
+        """
+        return self._http.get_json(
+            f"/api/v1/internal/app/cameras/{_camera_id(camera)}/stream")
+
+    def stream(self, camera, *, width: int = 640, fps: float = 10.0):
+        """A live frame stream for one camera, started and self-renewing.
+
+        For rules about a shape in TIME — a scan sweep, a fall, a queue
+        forming — where a snapshot every few seconds has already missed
+        it. Newest frame wins; a camera reboot reconnects on its own.
+
+            with nvr.stream(cam) as video:
+                for frame in video.frames():
+                    ...
+
+        The grant is re-fetched on every reconnect, so an expiring token
+        renews itself rather than failing mid-session.
+        """
+        from .rtsp import RtspFrameStream
+
+        def url_factory() -> str:
+            grant = self.stream_grant(camera)
+            if not grant or not grant.get("url"):
+                raise FrameStreamUnavailable(
+                    f"core granted no stream for camera {_camera_id(camera)}")
+            return str(grant["url"])
+
+        return RtspFrameStream(url_factory=url_factory, width=width, fps=fps,
+                               name=f"cam{_camera_id(camera)}").start()
 
     def recordings(self, camera) -> RecordingsAPI:
         return RecordingsAPI(self._http, _camera_id(camera))

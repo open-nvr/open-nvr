@@ -80,7 +80,8 @@ from opennvr_app_sdk import (
     app,
 )
 from opennvr_app_sdk.config import load_yaml
-from opennvr_app_sdk.geometry import Point, Zone, bbox_center
+from opennvr_app_sdk.cameras import full_frame_polygon, per_camera_value
+from opennvr_app_sdk.geometry import Point, Zone, bbox_center, scale_vertices
 from opennvr_app_sdk.state import StateRecord, keyed_state
 
 logger = logging.getLogger("abandoned-object")
@@ -220,8 +221,14 @@ def load_config(path: str) -> AppConfig:
     person_label = str(raw.get("person_label", "person")).lower()
 
     cameras_raw = raw.get("cameras") or []
-    if not cameras_raw:
-        raise ValueError("config: at least one camera entry is required")
+    if not cameras_raw and not raw.get("opennvr_url"):
+        # Connected to OpenNVR, cameras are PICKED in the App Catalog and
+        # geometry is drawn there — no YAML list needed. Standalone,
+        # there is nowhere else to get them from.
+        raise ValueError(
+            "config: at least one camera entry is required (or set "
+            "opennvr_url and select cameras in the App Catalog)"
+        )
     cameras: dict[str, CameraZone] = {}
     for idx, c in enumerate(cameras_raw):
         try:
@@ -336,6 +343,49 @@ class AbandonedObjectDetector(Detector):
         self._recent_people: dict[str, list[tuple[Point, float]]] = {}
         self._warned_missing_track = False
 
+    # ── Cameras picked in the catalog ──────────────────────────────
+    #
+    # Connected to OpenNVR, this app works on the cameras picked for it in
+    # its configuration — the SDK drops every other camera's events before
+    # they reach on_detections — using the zone drawn there. A YAML
+    # camera entry still wins for its own camera, so a standalone config
+    # keeps working unchanged.
+
+    #: The virtual frame catalog geometry is scaled into. Detection boxes
+    #: arrive normalised, so any fixed size is exact; 1920x1080 keeps the
+    #: pixel-denominated tuning parameters meaning what their defaults
+    #: were chosen for.
+    CATALOG_FRAME = (1920, 1080)
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Pick up zone drawn in the catalog, live."""
+        drawn = (config or {}).get("zones")
+        self._drawn = drawn if isinstance(drawn, dict) else {}
+        self._catalog_cameras: dict[str, CameraZone] = {}
+
+    def _camera_for(self, camera_id: str) -> "CameraZone | None":
+        camera = self.cfg.cameras.get(camera_id)
+        if camera is not None:
+            return camera
+        if self._config_poll_thread is None:
+            return None   # standalone: only the YAML cameras exist
+        cache = getattr(self, "_catalog_cameras", {})
+        if camera_id not in cache:
+            # Rebound, not mutated: the config poll thread swaps the dict.
+            self._catalog_cameras = {**cache, camera_id: self._build_catalog_camera(camera_id)}
+        return self._catalog_cameras[camera_id]
+
+    def _build_catalog_camera(self, camera_id: str) -> "CameraZone | None":
+        w, h = self.CATALOG_FRAME
+        drawn = per_camera_value(getattr(self, "_drawn", {}), camera_id)
+        # Nothing drawn yet: watch the whole frame rather than nothing.
+        vertices = drawn if isinstance(drawn, (list, tuple)) and len(drawn) >= 3 \
+            else full_frame_polygon(1)
+        return CameraZone(camera_id=camera_id,
+                    zone=Zone.from_config(name="drawn",
+                                          vertices=scale_vertices(vertices, w, h)),
+                    frame_width=w, frame_height=h)
+
     def on_detections(
         self,
         camera_id: str,
@@ -345,7 +395,7 @@ class AbandonedObjectDetector(Detector):
         """The abandon rule for one event. Returns the alerts to fire
         (the SDK base dispatches them). The existing tests drive it
         through ``handle_event`` without spinning up NATS."""
-        camera = self.cfg.cameras.get(camera_id)
+        camera = self._camera_for(camera_id)
         if camera is None:
             return []
         event_ts = self.parse_event_ts(event.get("completed_at"))

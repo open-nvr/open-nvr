@@ -12,8 +12,9 @@ app registry (``server/routers/apps.py``). Two pieces live here:
   server on a daemon thread serving the three contract endpoints:
 
   - ``GET /health``   → ``{"ready", "uptime_s", "events_seen",
-    "alerts_fired", "last_event_age_s"}`` — powers the catalog status
-    dot and stall detection;
+    "alerts_fired", "last_event_age_s"}``, plus ``"not_ready"`` when
+    the app says it cannot work (:meth:`ContractMixin.not_ready_reason`)
+    — powers the catalog status dot and stall detection;
   - ``GET /manifest`` → the static ``AppManifest.to_dict()`` — powers
     the catalog card + auto-generated config form;
   - ``GET /state``    → the app-provided live snapshot
@@ -456,6 +457,10 @@ class ContractMixin:
         self._config_poll_stop = threading.Event()
         self._applied_config: dict[str, Any] | None = None
         self._config_update_warned = False
+        #: Camera ids picked for this app, as last delivered by the poll.
+        #: ``None`` until the first successful fetch — "not known yet",
+        #: which is different from "nothing picked" (an empty set).
+        self.picked_cameras: frozenset[int] | None = None
 
     def _contract_note_event(self) -> None:
         self._events_seen += 1
@@ -474,6 +479,30 @@ class ContractMixin:
         thread, so keep it a cheap read of existing state."""
         return {}
 
+    def not_ready_reason(self) -> str | None:
+        """Override to say that the app is up but cannot do its job.
+
+        Return ``None`` when all is well (the default, so nothing
+        changes for an app that does not override this), or one short
+        operator-facing sentence when it is not: the adapter it needs is
+        unreachable, no camera has been assigned to it, its model failed
+        to load. The string is shown as-is in the App Catalog, so write
+        it for the person reading it, not for a log.
+
+        This exists because ``ready`` used to be the constant ``True``.
+        Every app on the platform reported itself well no matter what
+        had gone wrong, and since the server derives the catalog's
+        status dot from it (``routers/apps.py``: ``ready`` → ``ok`` /
+        ``degraded``), an app that had been failing every inference for
+        hours was indistinguishable from one doing its job perfectly.
+        The operator's only symptom was that nothing ever happened.
+
+        Keep it cheap and non-blocking: it is called from the contract
+        server's thread on every ``GET /health``, so read state that is
+        already there rather than probing anything.
+        """
+        return None
+
     def health_snapshot(self) -> dict[str, Any]:
         """The ``GET /health`` payload (spec §03)."""
         now = _monotonic()
@@ -482,13 +511,27 @@ class ContractMixin:
             if self._last_event_monotonic is None
             else round(now - self._last_event_monotonic, 3)
         )
-        return {
-            "ready": True,
+        try:
+            problem = self.not_ready_reason()
+        except Exception:  # noqa: BLE001
+            # A readiness check that throws must not take /health with
+            # it: an app that cannot be probed at all reads as
+            # "unreachable", which is a worse and less true answer than
+            # "up, and here is what is wrong".
+            problem = "readiness check failed"
+        payload: dict[str, Any] = {
+            "ready": problem is None,
             "uptime_s": round(now - self._started_monotonic, 3),
             "events_seen": self._events_seen,
             "alerts_fired": self._alerts_fired,
             "last_event_age_s": last_age,
         }
+        if problem is not None:
+            # Additive: `ready` alone says something is wrong, and this
+            # says what. Consumers that never learned the key still get
+            # a correct verdict from `ready`.
+            payload["not_ready"] = problem
+        return payload
 
     def manifest_snapshot(self) -> dict[str, Any]:
         """The ``GET /manifest`` payload — ``{}`` for manifest-less
@@ -746,6 +789,42 @@ class ContractMixin:
 
     # ── Live config delivery (registry poll, spec §05) ─────────────
 
+    def on_cameras_update(self, camera_ids: frozenset[int]) -> None:
+        """Override to react when the cameras picked for this app change.
+
+        Called from the poll thread on the first successful fetch and on
+        every change after — including a change that touched no config
+        key, which is the usual case: picking a camera in the catalog is
+        a claim on the camera, not an edit to this app's settings.
+        ``camera_ids`` is empty when nothing is picked; the app should
+        then stop working on cameras and use no compute.
+
+        The default does nothing; ``self.picked_cameras`` is always
+        updated before this runs.
+        """
+
+    def camera_picked(self, camera: Any) -> bool:
+        """Should this app act on ``camera`` (an id, ``"3"`` or ``"cam3"``)?
+
+        * An app whose manifest declares ``camera_picker=False`` works on
+          no cameras of its own — always True.
+        * A standalone run (no live config poll: no core to ask) keeps
+          its own YAML camera list — always True.
+        * Connected but picks not delivered yet — False. Failing closed
+          for the first poll interval costs a few seconds; failing open
+          would let an app act on cameras nobody picked.
+        * Otherwise: was it picked?
+        """
+        from .cameras import camera_key
+
+        if getattr(self.manifest, "camera_picker", True) is False:
+            return True
+        if self._config_poll_thread is None:
+            return True
+        if self.picked_cameras is None:
+            return False
+        return camera_key(camera) in self.picked_cameras
+
     def on_config_update(self, config: dict[str, Any]) -> None:
         """Override to apply registry config edits LIVE.
 
@@ -821,6 +900,24 @@ class ContractMixin:
                 self.on_entitlement_update(dict(ent))
             except Exception:
                 logger.exception("on_entitlement_update raised")
+        # Picked cameras ride the same poll. Checked BEFORE the config
+        # comparison below, which returns early when config is unchanged —
+        # and a pick never changes config.
+        try:
+            raw_cameras = response.json().get("cameras")
+        except Exception:  # noqa: BLE001
+            raw_cameras = None
+        if isinstance(raw_cameras, list):
+            picked = frozenset(
+                int(c) for c in raw_cameras
+                if isinstance(c, int) and not isinstance(c, bool)
+            )
+            if picked != self.picked_cameras:
+                self.picked_cameras = picked
+                try:
+                    self.on_cameras_update(picked)
+                except Exception:
+                    logger.exception("on_cameras_update raised")
         if config == self._applied_config:
             return
         self._applied_config = config

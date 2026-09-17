@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
+import { useTranslation } from '../i18n'
 
 export interface TimelineSegment {
   /** epoch ms */
@@ -105,6 +106,7 @@ export function PlaybackTimeline({
   onSelectionChange,
   className = '',
 }: PlaybackTimelineProps) {
+  const { t } = useTranslation()
   const trackRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const lastXRef = useRef(0)
@@ -415,7 +417,7 @@ export function PlaybackTimeline({
           style={{ left: `clamp(3.5rem, ${hoverX}px, calc(100% - 3.5rem))`, transform: 'translate(-50%, -0.15rem)' }}
         >
           {fmtFull(hoverMs)}
-          {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
+          {hoverInGap && <span className="text-amber-400 ml-1">· {t('shared.noRecordingLower')}</span>}
         </div>
       )}
     </div>

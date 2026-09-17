@@ -33,6 +33,7 @@ import { DeletedCameras } from './settings/DeletedCameras'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
 import { SystemHealthSettings } from './settings/SystemHealthSettings'
+import { useTranslation } from '../i18n'
 
 // Single settings registry: each tab owns its label and its subviews, and
 // each subview owns its slug, label, and panel. Tabs without subviews render
@@ -94,7 +95,16 @@ const SETTINGS_REDIRECTS: Record<string, string> = {
   'more-settings/certificates': '/byok',
 }
 
+const SETTINGS_LABEL_KEYS: Record<string, string> = {
+  'Camera-Config': 'nav.configuration', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording',
+  Recording: 'settings.recording', 'Deleted Cameras': 'settings.deletedCameras', 'Media-Source': 'settings.mediaSource',
+  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall',
+  'More Settings': 'settings.moreSettings', WebRTC: 'settings.webrtc', 'Window Settings': 'settings.windowSettings',
+  Uplink: 'settings.uplink', 'System Health': 'settings.systemHealth', Configuration: 'settings.breadcrumb',
+}
+
 export function Settings() {
+  const { t } = useTranslation()
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -125,13 +135,13 @@ export function Settings() {
     <section className="space-y-4">
       {/* Top Tabs */}
       <div className="bg-[var(--accent)] text-white px-3 py-2 text-sm flex items-center gap-4 overflow-x-auto">
-        {SETTINGS_REGISTRY.map((t) => (
+        {SETTINGS_REGISTRY.map((tab) => (
           <NavLink
-            key={t.key}
-            to={t.submenu.length === 0 ? `/settings/${t.key}` : `/settings/${t.key}/${t.submenu[0].slug}`}
-            className={() => `px-2 py-1 rounded whitespace-nowrap ${location.pathname.startsWith(`/settings/${t.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
+            key={tab.key}
+            to={tab.submenu.length === 0 ? `/settings/${tab.key}` : `/settings/${tab.key}/${tab.submenu[0].slug}`}
+            className={() => `px-2 py-1 rounded whitespace-nowrap ${location.pathname.startsWith(`/settings/${tab.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
           >
-            {t.label}
+            {t(SETTINGS_LABEL_KEYS[tab.label] ?? tab.label)}
           </NavLink>
         ))}
       </div>
@@ -148,7 +158,7 @@ export function Settings() {
                   to={`/settings/${tabDef.key}/${s.slug}`}
                   className={`block px-2 py-2 rounded ${active ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
                 >
-                  {s.label}
+                  {t(SETTINGS_LABEL_KEYS[s.label] ?? s.label)}
                 </NavLink>
               )
             })}
@@ -158,11 +168,11 @@ export function Settings() {
         {/* Content Area */}
         <div className={`p-4 bg-[var(--panel)] flex-1`}>
           <nav aria-label="Breadcrumb" className="text-xs text-[var(--text-dim)] mb-3">
-            Configuration <span className="mx-1">/</span> {tabDef.label}
+            {t('settings.breadcrumb')} <span className="mx-1">/</span> {t(SETTINGS_LABEL_KEYS[tabDef.label] ?? tabDef.label)}
             {activeSubKey && (
               <>
                 <span className="mx-1">/</span>
-                {activeSub?.label ?? activeSubKey}
+                {activeSub ? t(SETTINGS_LABEL_KEYS[activeSub.label] ?? activeSub.label) : activeSubKey}
               </>
             )}
           </nav>
@@ -171,7 +181,7 @@ export function Settings() {
           ) : panel ? (
             panel()
           ) : (
-            <Placeholder title={`${tabDef.label}${activeSubKey ? ` · ${activeSubKey}` : ''}`} />
+            <Placeholder title={`${t(SETTINGS_LABEL_KEYS[tabDef.label] ?? tabDef.label)}${activeSubKey ? ` · ${activeSubKey}` : ''}`} emptyMessage={t('settings.optionsWillAppear')} />
           )}
         </div>
       </div>
@@ -179,11 +189,11 @@ export function Settings() {
   )
 }
 
-function Placeholder({ title }: { title: string }) {
+function Placeholder({ title, emptyMessage }: { title: string; emptyMessage: string }) {
   return (
     <div className="text-sm text-[var(--text-dim)]">
       <div className="mb-2 font-medium text-[var(--text)]">{title}</div>
-      <div>Configuration options will appear here.</div>
+      <div>{emptyMessage}</div>
     </div>
   )
 }

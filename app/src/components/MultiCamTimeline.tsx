@@ -19,6 +19,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TimelineSegment } from './PlaybackTimeline'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
+import { useTranslation } from '../i18n'
 
 export interface TimelineRow {
   id: number
@@ -178,6 +179,7 @@ export function MultiCamTimeline({
   onRowClick,
   className = '',
 }: MultiCamTimelineProps) {
+  const { t } = useTranslation()
   const overlayRef = useRef<HTMLDivElement>(null)
   const lastXRef = useRef(0)
   const [dragging, setDragging] = useState(false)
@@ -331,7 +333,7 @@ export function MultiCamTimeline({
               style={{ left: `clamp(3.5rem, ${toPct(hoverMs)}%, calc(100% - 3.5rem))` }}
             >
               {fmtFull(hoverMs)}
-              {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
+              {hoverInGap && <span className="text-amber-400 ml-1">· {t('shared.noRecordingLower')}</span>}
             </span>
           )}
         </div>

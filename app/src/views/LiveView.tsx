@@ -41,6 +41,7 @@ import {
   type DragStartEvent
 } from '@dnd-kit/core'
 import { restrictToWindowEdges } from '@dnd-kit/modifiers'
+import { useTranslation } from '../i18n'
 
 // Layout definitions - matching the WindowSettings
 interface LayoutDefinition {
@@ -194,6 +195,7 @@ interface WindowSettings {
 }
 
 export function LiveView() {
+  const { t } = useTranslation()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
   const [currentLayout, setCurrentLayout] = useState<string>('3x3')
@@ -498,7 +500,7 @@ export function LiveView() {
     <section className="flex flex-col gap-2 h-[calc(100vh-5rem)]">
       {/* Header doubles as the toolbar — one row of chrome instead of two */}
       <header className="flex-shrink-0 flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
-        <h1 className="text-lg font-semibold whitespace-nowrap mr-2">Live View</h1>
+        <h1 className="text-lg font-semibold whitespace-nowrap mr-2">{t('live.title')}</h1>
         <ToolbarContents
           currentLayout={currentLayout}
           setCurrentLayout={setCurrentLayout}
@@ -573,7 +575,7 @@ export function LiveView() {
               <button
                 className="pointer-events-auto flex items-center justify-center w-12 h-5 bg-black/50 hover:bg-black/80 text-white/60 hover:text-white transition-colors"
                 onClick={() => setFsToolbarVisible((v) => !v)}
-                title={fsToolbarVisible ? 'Hide toolbar' : 'Show toolbar'}
+                title={fsToolbarVisible ? t('live.hideToolbar') : t('live.showToolbar')}
               >
                 {fsToolbarVisible ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
               </button>
@@ -611,7 +613,7 @@ export function LiveView() {
                     <span className="text-[10px] font-medium text-white truncate">
                       {camera?.name || `Camera ${cameraId}`}
                     </span>
-                    <span className="text-[8px] bg-red-600 px-1 rounded text-white">LIVE</span>
+                    <span className="text-[8px] bg-red-600 px-1 rounded text-white">{t('live.live')}</span>
                   </div>
                   {/* Preview area */}
                   <div className="h-16 bg-neutral-800 flex items-center justify-center">
@@ -691,6 +693,7 @@ function Tile({
   showDetections?: boolean
   canManage?: boolean
 }) {
+  const { t } = useTranslation()
   const [cameraId, setCameraId] = useState<number | null>(null)
   const [cameraName, setCameraName] = useState<string>('')
   const [urls, setUrls] = useState<{ whep?: string; hls?: string; token?: string } | null>(null)
@@ -797,8 +800,8 @@ function Tile({
           column and height from the 1fr row, so the whole layout fits the
           viewport; object-contain letter/pillarboxes the stream inside. */}
       <div className="relative w-full flex-1 min-h-0 overflow-hidden">
-        {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO CAMERA</div>}
-        {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
+        {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">{t('live.noCamera')}</div>}
+        {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">{t('live.noLink')}</div>}
 
         {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
             stretch this box — the player sizes itself to the stream's DISPLAY
@@ -846,20 +849,20 @@ function Tile({
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center text-xs text-[var(--text-dim)] gap-3">
               {cameraId ? (
-                <span>No stream available</span>
+                <span>{t('live.noStream')}</span>
               ) : canManage ? (
                 <>
                   <button
                     className="w-16 h-16 rounded-full bg-[var(--panel)] border-2 border-dashed border-neutral-600 hover:border-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors flex items-center justify-center group"
                     onClick={() => setShowCameraDialog(true)}
-                    title="Add Camera"
+                    title={t('live.addCamera')}
                   >
                     <Plus size={28} className="text-neutral-500 group-hover:text-[var(--accent)]" />
                   </button>
-                  <span className="text-neutral-500">Click to add camera</span>
+                  <span className="text-neutral-500">{t('live.clickToAdd')}</span>
                 </>
               ) : (
-                <span className="text-neutral-500">No camera assigned</span>
+                <span className="text-neutral-500">{t('live.noAssigned')}</span>
               )}
             </div>
           )}
@@ -872,8 +875,8 @@ function Tile({
         {cameraId && effectiveConnectivity === 'offline' && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
             <AlertCircle size={24} className="text-yellow-400" />
-            <div className="text-xs uppercase tracking-wide text-yellow-300">Camera offline</div>
-            <div className="text-[11px] text-[var(--text-dim)]">Waiting for camera to reconnect…</div>
+            <div className="text-xs uppercase tracking-wide text-yellow-300">{t('live.cameraOffline')}</div>
+            <div className="text-[11px] text-[var(--text-dim)]">{t('live.waitingReconnect')}</div>
           </div>
         )}
 
@@ -939,6 +942,7 @@ function ToolbarContents({
   onToggleDetections?: () => void
   showFitToggle?: boolean
 }) {
+  const { t } = useTranslation()
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   useClickOutside(dropdownRef, layoutDropdownOpen, () => setLayoutDropdownOpen(false))
@@ -946,7 +950,7 @@ function ToolbarContents({
   return (
     <>
       <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={onOpenMenu}>
-        <Grid size={14} /> Menu
+        <Grid size={14} /> {t('live.menu')}
       </button>
       <div className="ml-auto flex items-center gap-1">
         {/* Quick layout buttons — collapse into the dropdown below md */}
@@ -991,7 +995,7 @@ function ToolbarContents({
                     ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
                   }}
                 >
-                  ⚙ Configure Layouts...
+                  ⚙ {t('live.configureLayouts')}
                 </button>
               </div>
             </div>
@@ -1002,10 +1006,10 @@ function ToolbarContents({
           <button
             className={`px-2 py-1 border inline-flex items-center gap-1 ${fillMode ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
             onClick={onToggleFillMode}
-            title={fillMode ? 'Fill: grid uses all available space' : 'Fit: strict 16:9 cells, centered'}
+            title={fillMode ? t('live.fill') : t('live.fit')}
           >
             {fillMode ? <Expand size={14} /> : <Scan size={14} />}
-            <span className="hidden sm:inline">{fillMode ? 'Fill' : 'Fit'}</span>
+            <span className="hidden sm:inline">{fillMode ? t('live.fill') : t('live.fit')}</span>
           </button>
         )}
         {/* Detection boxes on/off — same visual grammar as Fit/Fill: lit
@@ -1020,12 +1024,12 @@ function ToolbarContents({
               : 'Boxes off: show bounding boxes for tracked objects (label + confidence)'}
           >
             <ScanEye size={14} />
-            <span className="hidden sm:inline">Boxes</span>
+            <span className="hidden sm:inline">{t('live.boxes')}</span>
           </button>
         )}
-        <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
+        <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title={t('live.fullscreen')}>
           <Maximize size={14} />
-          <span className="hidden sm:inline">Fullscreen</span>
+          <span className="hidden sm:inline">{t('live.fullscreen')}</span>
         </button>
       </div>
     </>

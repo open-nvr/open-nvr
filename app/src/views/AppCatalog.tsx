@@ -22,7 +22,7 @@
 // model is present before enabling. Config forms are generated from the
 // manifest param schema — no app-specific UI code.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, ArrowDownWideNarrow, ArrowLeft, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
@@ -31,10 +31,21 @@ import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
+import { ColorRangeEditor } from './apps/ColorRangeEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
+import {
+  AppCameraScope,
+  type CameraSetupItem,
+  CameraPicker,
+  appCamerasKey,
+  savePicks,
+  savedPicks,
+  useAppCameras,
+} from './apps/CameraPicker'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
@@ -48,6 +59,14 @@ export type ManifestParam = {
   description?: string
   // One-click values the catalog offers for list params (SDK Param.suggestions).
   suggestions?: string[]
+  /** What to CALL this. Falls back to `name` — apps adopt it one at a time. */
+  label?: string
+  /** Heading to file this under. Ungrouped params stay at the top. */
+  group?: string
+  /** Real but rarely touched: collapsed behind a disclosure, never dropped. */
+  advanced?: boolean
+  /** A closed set — rendered as a select, and enforced by the server. */
+  choices?: { value: any; label: string }[]
 }
 
 export type AppManifest = {
@@ -236,6 +255,11 @@ export type RegisteredApp = {
   egress?: AppEgress | null
   /** Operator allowed this app's overlay.boxes.v1 to draw over live video. */
   overlay_enabled?: boolean
+  /** Does this app work on cameras picked for it? False for apps that act
+   *  only on other apps' alerts; they get no Cameras section. */
+  camera_picker?: boolean
+  /** How many live cameras are picked for this app (list endpoint only). */
+  picked_cameras?: number
 }
 
 // GET /apps/{id}/egress — apps live on an internal network and leave it
@@ -550,17 +574,64 @@ export function statusVariant(status?: string): BadgeVariant {
 /** Params whose values aren't scalar edit as JSON in the generated form. */
 function isJsonParam(p: ManifestParam): boolean {
   const t = (p.type || '').toLowerCase()
+  // A closed set is a picker whatever its values are made of, so it
+  // never becomes a JSON textarea.
+  if (hasChoices(p)) return false
   return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json' || t === 'time_range'
+}
+
+function hasChoices(p: ManifestParam): boolean {
+  return Array.isArray(p.choices) && p.choices.length > 0
+}
+
+/** What the operator should see as this param's name. */
+function paramLabel(p: ManifestParam): string {
+  return p.label || p.name
+}
+
+/**
+ * Choice values survive the round trip through a <select>, whose value
+ * is always a string. The index is the key, so 0 and 0.0 and "0" stay
+ * distinct and a value never has to be parsed back out of its label.
+ */
+function choiceIndex(p: ManifestParam, value: any): string {
+  const i = (p.choices ?? []).findIndex((c) => c.value === value)
+  return i < 0 ? '' : String(i)
+}
+
+/**
+ * Params whose VALUE is JSON, whatever editor draws them.
+ *
+ * Distinct from `isJsonParam`, which answers a different question — "is
+ * a raw textarea the right EDITOR". A colour range has its own picker
+ * and so is not a textarea param, but it is still an object on the
+ * wire, and conflating the two sent `[object Object]` to an endpoint
+ * expecting `{low, high}`.
+ */
+function isJsonValued(p: ManifestParam): boolean {
+  return isJsonParam(p) || (p.type || '').toLowerCase() === 'color.hsv_range'
 }
 
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
   const current = config && p.name in config ? config[p.name] : p.default
-  if (p.type === 'bool' && !isJsonParam(p)) return Boolean(current)
-  if (isJsonParam(p)) return current === undefined ? '' : JSON.stringify(current, null, 2)
+  if (hasChoices(p)) return choiceIndex(p, current)
+  if (p.type === 'bool' && !isJsonValued(p)) return Boolean(current)
+  // NULL counts as unset, exactly like undefined. A param declared with
+  // no default arrives as null, and stringifying that gave the literal
+  // text "null" — which is not empty, so it was parsed back to null and
+  // SAVED, and the server rightly refused a per-camera param that was
+  // not a dict. Nobody had touched the field.
+  if (isJsonValued(p)) {
+    return current === undefined || current === null
+      ? '' : JSON.stringify(current, null, 2)
+  }
   return current === undefined || current === null ? '' : String(current)
 }
 
 /* ------------------------- Config modal ------------------------- */
+
+/** Stable empty draft while the picks load. */
+const NO_PICKS: Set<number> = new Set()
 
 export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
   const queryClient = useQueryClient()
@@ -576,6 +647,51 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
     Object.fromEntries(params.map((p) => [p.name, initialFormValue(p, app.config)]))
   )
   const [error, setError] = useState<string | null>(null)
+  const takesPicks = app.camera_picker !== false
+  // Camera picks are a draft until Save, like every other field here.
+  // Seeded once from the server; a background refetch never overwrites
+  // what the user has ticked.
+  const picksQuery = useAppCameras(app.id, takesPicks)
+  const [draftPicks, setDraftPicks] = useState<Set<number> | null>(null)
+  useEffect(() => {
+    if (draftPicks === null && picksQuery.data) setDraftPicks(savedPicks(picksQuery.data))
+  }, [draftPicks, picksQuery.data])
+  // What is drawn on each camera, read from this form's own per-camera
+  // geometry fields (live, so a zone drawn below ticks its card above).
+  // "Not drawn" is information, not an error: most apps treat no zone as
+  // the whole frame.
+  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] => {
+    const out: CameraSetupItem[] = []
+    for (const p of params) {
+      if (!p.per_camera || !(p.type || '').toLowerCase().startsWith('geometry.')) continue
+      let perCam: Record<string, any> = {}
+      try {
+        const parsed = JSON.parse(String(values[p.name] ?? '') || '{}')
+        if (parsed && typeof parsed === 'object') perCam = parsed
+      } catch {
+        // Half-typed JSON in the field: say nothing rather than guess.
+      }
+      const v = perCam[String(cameraId)] ?? perCam[`cam${cameraId}`]
+      const done = Array.isArray(v) ? v.length > 0 : !!(v && typeof v === 'object')
+      const label = p.name === 'roi' ? 'ROI'
+        : p.name.charAt(0).toUpperCase() + p.name.slice(1).replace(/_/g, ' ')
+      out.push({ label, done })
+    }
+    return out
+  }, [params, values])
+  // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
+  // Vehicles page), shown read-only in the picker so unpicking one is a
+  // decision rather than an accident.
+  const cameraRoles = useMemo(() => {
+    const raw = (app.config as any)?.camera_roles
+    if (!raw || typeof raw !== 'object') return undefined
+    const out: Record<string, string> = {}
+    for (const [id, v] of Object.entries(raw as Record<string, any>)) {
+      const label = typeof v === 'string' ? v : (v?.label || v?.role)
+      if (label) out[String(id)] = String(label)
+    }
+    return out
+  }, [app.config])
   // Labels Tier-0 has actually detected on this site (from its metrics)
   // — the most useful vocabulary for a *_labels param, ahead of the
   // manifest's generic suggestions.
@@ -587,27 +703,52 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
   }, [tier0.data])
 
   const saveMutation = useMutation({
-    mutationFn: (config: Record<string, any>) => apiService.updateAppConfig(app.id, config),
+    // Picks first: a zone saved for a camera is only useful once that
+    // camera is the app's.
+    mutationFn: async (config: Record<string, any> | null) => {
+      if (takesPicks && picksQuery.data && draftPicks) {
+        await savePicks(picksQuery.data, draftPicks)
+      }
+      if (config) await apiService.updateAppConfig(app.id, config)
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
       showSuccess(`${app.name} configuration saved`)
       onClose()
     },
     onError: (e) => setError(extractApiError(e, 'Failed to save app configuration.')),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: appCamerasKey(app.id) })
+    },
   })
 
   const submit = () => {
     setError(null)
+    if (params.length === 0) {
+      saveMutation.mutate(null)
+      return
+    }
     const config: Record<string, any> = {}
     for (const p of params) {
       if (!canEditParam(p)) continue   // untouched site-wide keys stay as stored
       const raw = values[p.name]
       const t = (p.type || '').toLowerCase()
-      if (isJsonParam(p)) {
+      if (hasChoices(p)) {
+        const picked = (p.choices ?? [])[Number(raw)]
+        if (!picked) {
+          if (p.required) {
+            setError(`"${paramLabel(p)}" is required.`)
+            return
+          }
+          continue
+        }
+        config[p.name] = picked.value
+      } else if (isJsonValued(p)) {
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
@@ -615,7 +756,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         try {
           config[p.name] = JSON.parse(text)
         } catch {
-          setError(`"${p.name}" is not valid JSON.`)
+          setError(`"${paramLabel(p)}" is not valid JSON.`)
           return
         }
       } else if (t === 'bool') {
@@ -624,21 +765,21 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
           return
         }
         config[p.name] = num
       } else {
         const text = String(raw ?? '')
         if (!text && p.required) {
-          setError(`"${p.name}" is required.`)
+          setError(`"${paramLabel(p)}" is required.`)
           return
         }
         if (text || !p.required) config[p.name] = text
@@ -652,93 +793,61 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       open
       title={`Configure ${app.name}`}
       onClose={onClose}
+      // A side panel, not a centred dialog: configuring an app is work
+      // you do AGAINST the page you came from — the screening list, the
+      // occupancy zones — and a centred box behind a dark backdrop hides
+      // the very thing you are tuning. Full height also suits a form
+      // that is now grouped into sections.
+      //
+      // It stays WIDE on purpose. The scan zone and the uniform colour
+      // are drawn on a 16:9 camera snapshot, and a conventional 400px
+      // drawer would make the most important part of setup worse, not
+      // better. Forms with nothing to draw get a narrower one.
+      placement="side"
       widthClassName={
-        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
-          ? 'w-[720px]'
-          : 'w-[560px]'
+        params.some((p) => {
+          const t = (p.type || '').toLowerCase()
+          return t.startsWith('geometry.') || t === 'color.hsv_range'
+        })
+          ? 'w-[780px]'
+          : 'w-[520px]'
       }
     >
+      <AppCameraScope.Provider value={takesPicks ? (draftPicks ?? NO_PICKS) : null}>
+      {takesPicks && (
+        <section className="mb-5">
+          <h3 className="mb-1 text-sm font-semibold">Cameras</h3>
+          <p className="mb-2 text-xs text-[var(--text-dim)]">
+            The cameras {app.name} watches. A camera can be used by several apps.
+          </p>
+          <CameraPicker
+            appName={app.name}
+            query={picksQuery}
+            draft={draftPicks}
+            onChange={setDraftPicks}
+            cameraRoles={cameraRoles}
+            setup={cameraSetup}
+          />
+        </section>
+      )}
       {params.length === 0 ? (
         <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
       ) : (
-        <div className="space-y-4">
-          {params.map((p) => {
-            const t = (p.type || '').toLowerCase()
-            const value = values[p.name]
-            return (
-              <div key={p.name}>
-                <label className="block text-sm mb-1">
-                  <span className="font-medium">{p.name}</span>
-                  <span className="ml-2 text-xs text-[var(--text-dim)]">
-                    {p.type}
-                    {p.per_camera ? ' · per camera' : ''}
-                    {p.required ? ' · required' : ''}
-                  </span>
-                </label>
-                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {!canEditParam(p) ? (
-                  <div
-                    className="w-full px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
-                    title="Site-wide setting — only an administrator can change it"
-                  >
-                    {String(value ?? '') || '—'}
-                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
-                  </div>
-                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
-                  <GeometryEditor
-                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
-                    value={String(value ?? '')}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                  />
-                ) : t === 'list' && !p.per_camera ? (
-                  <ChipListEditor
-                    value={String(value ?? '')}
-                    placeholder={`add ${p.name} value, Enter`}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                    suggestions={suggestionsFor(p, seenLabels)}
-                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
-                  />
-                ) : t === 'time_range' ? (
-                  <TimeWindowEditor
-                    value={String(value ?? '')}
-                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
-                  />
-                ) : isJsonParam(p) ? (
-                  <textarea
-                    className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                ) : t === 'bool' ? (
-                  <label className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(value)}
-                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
-                    />
-                    Enabled
-                  </label>
-                ) : (
-                  <input
-                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
-                    step={t === 'float' ? 'any' : undefined}
-                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                )}
-              </div>
-            )
-          })}
-        </div>
+        <ParamForm
+          params={params}
+          values={values}
+          setValues={setValues}
+          canEditParam={canEditParam}
+          seenLabels={seenLabels}
+        />
       )}
+      </AppCameraScope.Provider>
 
       {error && <div className="mt-3 text-sm text-red-400">{error}</div>}
 
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        {params.length > 0 && (
+        {(params.length > 0 || takesPicks) && (
           <Button variant="primary" onClick={submit} disabled={saveMutation.isPending}>
             {saveMutation.isPending ? 'Saving…' : 'Save'}
           </Button>
@@ -845,26 +954,26 @@ export function AppActionModal({
         payload[p.name] = Boolean(raw)
       } else if (t === 'int' || t === 'float') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          return setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          return setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
         }
         payload[p.name] = num
       } else if (t === 'list' || t === 'dict') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         try {
           payload[p.name] = JSON.parse(text)
         } catch {
-          return setError(`"${p.name}" is not valid JSON.`)
+          return setError(`"${paramLabel(p)}" is not valid JSON.`)
         }
       } else {
-        if (!text && p.required) return setError(`"${p.name}" is required.`)
+        if (!text && p.required) return setError(`"${paramLabel(p)}" is required.`)
         if (text || !p.required) payload[p.name] = text
       }
     }
@@ -1692,6 +1801,17 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
           <div><RequiresBadge requires={requires} caps={caps} tier0={tier0} /></div>
         )}
 
+        {/* Where every freshly installed app starts. Said on the card, not
+            only inside Configure, because an enabled app with no cameras
+            otherwise looks exactly like one that is working. */}
+        {app.camera_picker !== false && app.picked_cameras === 0 && (
+          <div>
+            <Badge variant="warning" title="Select cameras in Configure — until then this app does nothing">
+              No cameras
+            </Badge>
+          </div>
+        )}
+
         {/* Live results deliberately do NOT render here. The catalog is
             the management surface — install, enable, configure, remove —
             and an app's output belongs to the app: /app-catalog/<id>
@@ -2044,26 +2164,25 @@ function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps
  *  rather than on every card: repeated twelve times down a grid it stops
  *  being an invitation and becomes chrome competing with Install. */
 function ContributeNote({ appName }: { appName?: string }) {
+  const { t } = useTranslation()
   return (
     <p className="text-xs text-[var(--text-dim)] leading-relaxed">
-      Your feedback shapes this catalog
-      {appName ? <> — including what {appName} should do next</> : null}. Tell us
-      what is missing or broken at{' '}
+      {t('catalog.feedback')}
+      {appName ? <> — {t('catalog.contributeNext')}</> : null}. {t('catalog.missingBroken')}{' '}
       <a
         className="text-[var(--accent)] hover:underline"
         href="mailto:contact@opennvr.org?subject=OpenNVR%20App%20Catalog%20feedback"
       >
         contact@opennvr.org
       </a>
-      , or send the improvement yourself — apps are one entry in a curated
-      index and the PR is five steps:{' '}
+      , {t('catalog.orSend')}{' '}
       <a
         className="text-[var(--accent)] hover:underline"
         href="https://github.com/open-nvr/open-nvr/blob/main/docs/CONTRIBUTING_APPS.md"
         target="_blank"
         rel="noreferrer"
       >
-        How to contribute an app
+        {t('catalog.howContribute')}
       </a>
       .
     </p>
@@ -2305,6 +2424,7 @@ function CatalogFilters({
    *  hidden rather than offered as a no-op. */
   allowPopular: boolean
 }) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative flex-1 min-w-[14rem]">
@@ -2316,7 +2436,7 @@ function CatalogFilters({
           type="search"
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search apps by name, category or what they do"
+          placeholder={t('catalog.search')}
           aria-label="Search apps"
           className="w-full pl-7 pr-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
         />
@@ -2348,16 +2468,16 @@ function CatalogFilters({
       </div>
       <label className="flex items-center gap-1 text-xs text-[var(--text-dim)]">
         <ArrowDownWideNarrow size={14} />
-        <span className="sr-only sm:not-sr-only">Sort</span>
+        <span className="sr-only sm:not-sr-only">{t('catalog.sort')}</span>
         <select
           value={sort}
           onChange={(e) => onSort(e.target.value as CatalogSort)}
           aria-label="Sort apps"
           className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
         >
-          <option value="recommended">Recommended</option>
-          <option value="name">Name (A–Z)</option>
-          {allowPopular && <option value="popular">Most popular</option>}
+          <option value="recommended">{t('catalog.recommended')}</option>
+          <option value="name">{t('catalog.nameAZ')}</option>
+          {allowPopular && <option value="popular">{t('catalog.mostPopular')}</option>}
         </select>
       </label>
       {resultCount !== null && (
@@ -2420,6 +2540,7 @@ function GroupHeader({ title, count }: { title: string; count?: number }) {
 }
 
 export function AppCatalog() {
+  const { t } = useTranslation()
   const appsQuery = useApps()
   const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
@@ -2536,11 +2657,11 @@ export function AppCatalog() {
           while the nav said "App Catalog" — the same two-names-for-one-
           thing that made the plate app hard to place. */}
       <PageHeader
-        title="App Catalog"
-        description="Apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C and the platform's Tier-0 detection."
+        title={t('catalog.title')}
+        description={t('catalog.description')}
         actions={
           <Button onClick={refresh} disabled={refreshing}>
-            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> {t('catalog.refresh')}
           </Button>
         }
       />
@@ -2559,19 +2680,19 @@ export function AppCatalog() {
 
       {/* --------------------------- Installed --------------------------- */}
       <div className="space-y-3">
-        <GroupHeader title="Installed" count={shownInstalled.length} />
+        <GroupHeader title={t('catalog.installed')} count={shownInstalled.length} />
         {appsQuery.isPending ? (
           <SkeletonGrid count={6} />
         ) : appsQuery.isError ? (
           <ErrorCard
-            title="App registry unavailable"
-            message={extractApiError(appsQuery.error, 'Could not load the app registry.')}
+            title={t('catalog.registryUnavailable')}
+            message={extractApiError(appsQuery.error, t('catalog.loadRegistry'))}
             onRetry={() => appsQuery.refetch()}
           />
         ) : apps.length === 0 ? (
           <EmptyState
             icon={<Boxes size={28} />}
-            title="No apps installed yet"
+            title={t('catalog.noInstalled')}
             description="Apps self-register on boot; install one from the index below or see sdk/opennvr-app-sdk to build your own."
           />
         ) : shownInstalled.length === 0 ? (
@@ -2595,8 +2716,8 @@ export function AppCatalog() {
           "there is nothing to install". Say which it is. */}
       {indexQuery.isError && (
         <ErrorCard
-          title="App index unavailable"
-          message={extractApiError(indexQuery.error, 'Could not load the list of apps available to install. Installed apps above are unaffected.')}
+          title={t('catalog.indexUnavailable')}
+          message={extractApiError(indexQuery.error, t('catalog.loadIndex'))}
           onRetry={() => indexQuery.refetch()}
         />
       )}
@@ -2662,5 +2783,181 @@ export function AppCatalog() {
         />
       ))}
     </section>
+  )
+}
+
+
+/**
+ * The generated config form.
+ *
+ * Params are shown under their declared `group`, in manifest order, and
+ * anything marked `advanced` is collapsed behind one disclosure. The
+ * point is not tidiness: this app declares sixteen knobs, of which an
+ * operator setting up a room touches about five, and a flat list of
+ * sixteen makes the five impossible to find. Nothing is ever dropped —
+ * a knob nobody should turn is still one somebody may need to reach.
+ */
+function ParamForm({
+  params, values, setValues, canEditParam, seenLabels,
+}: {
+  params: ManifestParam[]
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const basic = params.filter((p) => !p.advanced)
+  const advanced = params.filter((p) => p.advanced)
+
+  const render = (list: ManifestParam[]) => {
+    // Manifest order decides both the groups and the params inside them.
+    const groups: { name: string; items: ManifestParam[] }[] = []
+    for (const p of list) {
+      const name = p.group || ''
+      const last = groups[groups.length - 1]
+      if (last && last.name === name) last.items.push(p)
+      else groups.push({ name, items: [p] })
+    }
+    return groups.map((g, i) => (
+      <div key={`${g.name}-${i}`} className="space-y-4">
+        {g.name && (
+          <div className="border-b border-[var(--border)] pb-1 text-xs font-semibold uppercase tracking-wide text-[var(--text-dim)]">
+            {g.name}
+          </div>
+        )}
+        {g.items.map((p) => (
+          <ParamField
+            key={p.name}
+            p={p}
+            values={values}
+            setValues={setValues}
+            canEditParam={canEditParam}
+            seenLabels={seenLabels}
+          />
+        ))}
+      </div>
+    ))
+  }
+
+  return (
+    <div className="space-y-4">
+      {render(basic)}
+      {advanced.length > 0 && (
+        <div className="space-y-4 pt-1">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            aria-expanded={showAdvanced}
+            className="text-xs text-[var(--accent)] hover:brightness-110"
+          >
+            {showAdvanced ? 'Hide' : 'Show'} advanced settings ({advanced.length})
+          </button>
+          {showAdvanced && render(advanced)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ParamField({
+  p, values, setValues, canEditParam, seenLabels,
+}: {
+  p: ManifestParam
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const t = (p.type || '').toLowerCase()
+  const value = values[p.name]
+  return (
+              <div key={p.name}>
+                <label className="block text-sm mb-1">
+                  <span className="font-medium">{paramLabel(p)}</span>
+                  {/* The wire name earns its place only when it is not
+                      already the label — it is what the API and the docs
+                      call this, so it is worth keeping, quietly. The
+                      TYPE is not shown beside a labelled param: "float"
+                      tells an operator nothing the input does not. */}
+                  <span className="ml-2 text-xs text-[var(--text-dim)]">
+                    {p.label ? p.name : p.type}
+                    {p.per_camera ? ' · per camera' : ''}
+                    {p.required ? ' · required' : ''}
+                  </span>
+                </label>
+                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
+                {!canEditParam(p) ? (
+                  <div
+                    className="w-full px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
+                    title="Site-wide setting — only an administrator can change it"
+                  >
+                    {String(value ?? '') || '—'}
+                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
+                  </div>
+                ) : hasChoices(p) ? (
+                  <select
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                    aria-label={paramLabel(p)}
+                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  >
+                    {/* No blank option: a closed set with a default is
+                        always on one of its own values, and an empty row
+                        only offers a way to mean nothing. */}
+                    {(p.choices ?? []).map((c, i) => (
+                      <option key={i} value={String(i)}>{c.label}</option>
+                    ))}
+                  </select>
+                ) : t === 'color.hsv_range' ? (
+                  <ColorRangeEditor
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                  <GeometryEditor
+                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'list' && !p.per_camera ? (
+                  <ChipListEditor
+                    value={String(value ?? '')}
+                    placeholder={`add ${p.name} value, Enter`}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                    suggestions={suggestionsFor(p, seenLabels)}
+                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
+                  />
+                ) : t === 'time_range' ? (
+                  <TimeWindowEditor
+                    value={String(value ?? '')}
+                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
+                  />
+                ) : isJsonParam(p) ? (
+                  <textarea
+                    className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                ) : t === 'bool' ? (
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(value)}
+                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
+                    />
+                    Enabled
+                  </label>
+                ) : (
+                  <input
+                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                    step={t === 'float' ? 'any' : undefined}
+                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                )}
+              </div>
   )
 }

@@ -23,6 +23,7 @@
  */
 
 import { ReactNode } from 'react'
+import { useTranslation } from '../../i18n'
 
 // Inline SVG sparkline — no charting dependency for a 60-point trend.
 export function Sparkline({ points, height = 28, className }: {
@@ -30,9 +31,10 @@ export function Sparkline({ points, height = 28, className }: {
   height?: number
   className?: string
 }) {
+  const { t } = useTranslation()
   const vals = points.filter((v): v is number => v != null && Number.isFinite(v))
   if (vals.length < 2) {
-    return <div className="text-[11px] text-[var(--text-dim)]">not enough samples for a trend yet</div>
+    return <div className="text-[11px] text-[var(--text-dim)]">{t('shared.notEnoughSamples')}</div>
   }
   const min = Math.min(...vals)
   const max = Math.max(...vals)

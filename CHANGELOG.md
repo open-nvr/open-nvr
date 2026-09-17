@@ -6,7 +6,40 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **App SDK 0.6.0.** Not a patch: `rtsp.py` is a new module, `PLATFORM`
+  gained five names, `OpenNVR` gained `save_evidence` / `stream` /
+  `stream_grant` (and their async twins), `Alert` gained `alert_type`
+  and `images`, `Param` gained `label` / `group` / `advanced` /
+  `choices`, and `ContractMixin` gained `not_ready_reason`. Two wheels
+  claiming 0.5.0 with different public surfaces is what leaves an app
+  that calls `nvr.stream()` with an AttributeError and no way to say
+  what it needed — `scaffold.sdk_requirement()` pins the floor from this
+  string, and `installed_apps.sdk_version` records it per app.
+- **`build_frame_source("rtsp://…")` now returns a source instead of
+  raising.** Behavioural change on a public function: an app that caught
+  `FrameSourceError` to fall back to a snapshot URL now silently takes
+  the RTSP path, which needs **ffmpeg on PATH in its image**. Older app
+  images have no reason to have it.
+
 ### Fixed
+
+- **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo
+  C520WS that return an ONVIF `NotAuthorized` SOAP fault instead of an HTTP
+  Digest challenge are retried once with WS-Security UsernameToken
+  PasswordDigest. HTTP Digest remains the primary authentication method, and
+  unrelated HTTP and SOAP failures are returned without a retry.
+  Follow-up: a host that accepted the WS-Security retry is remembered for
+  the rest of the process, so later calls to it — PTZ moves above all —
+  are one request instead of a rejected Digest round trip plus a retry
+  (and a remembered host that later rejects WS-Security is retried with
+  Digest and forgotten). The auth-fault check now reads the SOAP body
+  alone, so firmware that returns faults with HTTP 200 is retried too, and
+  the WS-Security fault codes (`FailedAuthentication`,
+  `InvalidSecurityToken`) count alongside `NotAuthorized`. When both
+  schemes refuse the credentials the log now points at the camera clock,
+  which WS-Security also rejects when it drifts.
 
 - **Live overlay: phantoms gone, real objects steady.** Two field
   reports, one root cause. Tier-0's tracker keeps an unmatched track

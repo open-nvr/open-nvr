@@ -47,25 +47,31 @@ function Get-ComposeArgs {
     $args = @("-f", $ComposeFile)
     $exampleCompose = Get-EnvVar "OPENNVR_EXAMPLE_COMPOSE"
     $exampleProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
-    if ($exampleCompose) {
-        if (-not (Test-Path $exampleCompose)) {
-            if ($exampleCompose -like "*camera-agent-lite*") {
+    # Both OPENNVR_EXAMPLE_* values are comma-separated lists (several apps
+    # picked at install time); a single value is a list of one. Mirrors
+    # compose_args in start.sh.
+    $exampleComposeFiles = @($exampleCompose -split "," | Where-Object { $_ })
+    foreach ($f in $exampleComposeFiles) {
+        if (-not (Test-Path $f)) {
+            if ($f -like "*camera-agent-lite*") {
                 Write-Color "camera-agent-lite was removed - the camera-agent example (with OLLAMA_EXTERNAL_URL for host Ollama) replaces it." Yellow
                 Write-Color "Fix: re-run scripts\install.ps1 reconfigure, or clear the OPENNVR_EXAMPLE* lines in .env." Yellow
             }
-            throw "Configured example Compose file not found: $exampleCompose"
+            throw "Configured example Compose file not found: $f"
         }
-        $args += @("-f", $exampleCompose)
+        $args += @("-f", $f)
+    }
+    if ($exampleCompose) {
         # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that skips
         # the bundled ollama container and points the agent at the operator's
         # endpoint — the GPU path on macOS/Windows, where the in-VM container
         # is CPU-only. Mirrors compose_args in start.sh.
         $externalLlm = Get-EnvVar "OLLAMA_EXTERNAL_URL"
-        if ($externalLlm -and $exampleCompose -like "*camera-agent.yml") {
+        if ($externalLlm -and $exampleCompose -like "*camera-agent.yml*") {
             $args += @("-f", "docker-compose.camera-agent.external-llm.yml")
         }
     }
-    if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
+    foreach ($p in @($exampleProfile -split "," | Where-Object { $_ })) { $args += @("--profile", $p) }
     # Default-on apps: occupancy-counting + footage-search ride the always-on
     # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
     # install runs them (profile default-apps in docker-compose.apps.yml).
@@ -73,7 +79,7 @@ function Get-ComposeArgs {
     # in start.sh.
     $defaultApps = Get-EnvVar "OPENNVR_DEFAULT_APPS"
     if (@("off", "false", "0", "no") -notcontains "$defaultApps".ToLower()) {
-        if (-not ($exampleCompose -like "*docker-compose.apps.yml")) {
+        if ($exampleComposeFiles -notcontains "docker-compose.apps.yml") {
             $args += @("-f", "docker-compose.apps.yml")
         }
         $args += @("--profile", "default-apps")

@@ -18,9 +18,31 @@ nats_token: null
 # Narrow the subject to that tracked stream if you can:
 subject_pattern: "opennvr.inference.>"
 
+# Tier-0 (the stack's own detector) publishes tracked detections on
+# opennvr.inference.tier0.> — the zero-cost way to get track ids:
+# subject_pattern: "opennvr.inference.tier0.>"
+# consume_tier0: true
+
 # ── What to count ─────────────────────────────────────────────────
 watch_labels:
   - "person"
+
+# ── Directions, alerts, filters (all live-editable in the catalog) ──
+label_a_to_b: "in"            # what an A→B crossing is called
+label_b_to_a: "out"
+alert_mode: "every"           # every | threshold | off
+alert_severity: "high"        # low | medium | high | critical
+alert_cooldown_seconds: 0     # per camera; crossings inside are counted, not alerted
+active_hours:                 # alerts only in this window; empty = always
+  start: ""
+  end: ""
+passthrough_threshold: 0      # with alert_mode: threshold
+min_track_age_seconds: 0      # ignore tracks younger than this at the crossing
+min_bbox_height: 0            # ignore boxes shorter than this fraction of the frame
+daily_reset_hour: 0           # local hour at which "today" starts over
+attach_snapshot: true         # cite a camera still on each alert
+publish_footfall: true        # counts → platform footfall history (90 days)
+footfall_period_seconds: 60
 
 # ── Track memory ──────────────────────────────────────────────────
 #
