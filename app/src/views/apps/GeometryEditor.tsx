@@ -98,6 +98,15 @@ function useSnapshotUrl(cameraId: number | string | null) {
   return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
+/** The largest box of `aspect` that fits its container both ways — the
+ *  CSS "contain" rule for an element, not an image. The container must be
+ *  a size container (`containerType: 'size'`); cqw/cqh are its width and
+ *  height. Every normalised point maps to the same pixel however the
+ *  window is sized, and nothing ever needs scrolling to reach. */
+export function containStyle(aspect: number): React.CSSProperties {
+  return { width: `min(100cqw, calc(100cqh * ${aspect}))`, aspectRatio: String(aspect) }
+}
+
 export function GeometryEditor({
   kind,
   value,
@@ -105,6 +114,7 @@ export function GeometryEditor({
   cameraId,
   references = [],
   readOnly = false,
+  fit = false,
 }: {
   kind: 'polygon' | 'tripwire'
   value: string
@@ -115,6 +125,9 @@ export function GeometryEditor({
   references?: GeometryReference[]
   /** Show the shape without allowing edits (a camera the user can't manage). */
   readOnly?: boolean
+  /** Fill the parent's height and scale the picture to fit it whole, with
+   *  no scrolling — for the setup dialog. The parent must give a height. */
+  fit?: boolean
 }) {
   const fixed = cameraId != null
   const perCam = useMemo(() => parseValue(value), [value])
@@ -231,10 +244,10 @@ export function GeometryEditor({
   const vy = (n: number) => n * VH
 
   return (
-    <div className="space-y-2">
+    <div className={fit ? 'flex h-full min-h-0 flex-col gap-2' : 'space-y-2'}>
       {/* Camera selector (per-camera geometry) — absent when the editor
           was opened on one camera. */}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs">
         {!fixed && <span className="text-[var(--text-dim)]">Camera:</span>}
         {fixed ? null : nothingPicked ? (
           <span className="text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
@@ -272,7 +285,14 @@ export function GeometryEditor({
       </div>
 
       {/* Draw surface: snapshot (or grid) + SVG overlay */}
-      <div className="relative w-full rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)]" style={{ aspectRatio: String(drawAspect) }}>
+      <div
+        className={fit ? 'flex min-h-0 flex-1 items-center justify-center' : ''}
+        style={fit ? { containerType: 'size' } : undefined}
+      >
+      <div
+        className={`relative rounded border border-[var(--border)] overflow-hidden bg-[var(--bg-2)] ${fit ? '' : 'w-full'}`}
+        style={fit ? containStyle(drawAspect) : { aspectRatio: String(drawAspect) }}
+      >
         {snap.data ? (
           /* object-fill, not object-cover: cover crops a still whose aspect
              differs from the box, and the cropped-away band is frame the
@@ -382,9 +402,10 @@ export function GeometryEditor({
           )}
         </svg>
       </div>
+      </div>
 
       {/* Hints + tripwire direction control */}
-      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
         {readOnly ? (
           <span>You can&apos;t manage this camera, so its shapes are shown read-only.</span>
         ) : kind === 'polygon' ? (

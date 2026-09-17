@@ -120,7 +120,8 @@ export function CameraSetupDialog({
     <StackedDialog
       title={`Set up ${cameraName}`}
       subtitle={[appName, location].filter(Boolean).join(' · ')}
-      widthClassName="w-[960px]"
+      widthClassName="w-[1100px]"
+      fullHeight
       onClose={onCancel}
       footer={(
         <>
@@ -141,7 +142,7 @@ export function CameraSetupDialog({
       )}
     >
       {params.length > 1 && (
-        <div role="tablist" className="flex gap-1 border-b border-[var(--border)] px-4 pt-2">
+        <div role="tablist" className="flex shrink-0 gap-1 border-b border-[var(--border)] px-4 pt-2">
           {params.map((p) => {
             const drawn = isDrawn(entryFor(local[p.name], cameraId))
             const on = p.name === param.name
@@ -165,15 +166,17 @@ export function CameraSetupDialog({
           })}
         </div>
       )}
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
-        <div>
+      {/* No scrolling here: the picture takes whatever height is left and
+          is scaled to fit it whole, at any window size. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-4 py-3">
+        <div className="shrink-0">
           <div className="text-sm font-medium">{param.label || shortParamName(param.name)}</div>
           {param.description && (
             <div className="text-xs text-[var(--text-dim)]">{param.description}</div>
           )}
         </div>
         {copySources.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
             <span>Start from another camera:</span>
             {copySources.map((c) => (
               <Button key={c.id} variant="outline" size="sm" onClick={() => copyFrom(c.id)}>
@@ -183,7 +186,9 @@ export function CameraSetupDialog({
           </div>
         )}
         {(t === 'geometry.polygon' || t === 'geometry.tripwire') && (
+          <div className="min-h-0 flex-1">
           <GeometryEditor
+            fit
             key={param.name}
             kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
             cameraId={cameraId}
@@ -192,15 +197,19 @@ export function CameraSetupDialog({
             references={references}
             readOnly={!canEdit}
           />
+          </div>
         )}
         {t === 'color.hsv_range' && (
+          <div className="min-h-0 flex-1">
           <ColorRangeEditor
+            fit
             key={param.name}
             cameraId={cameraId}
             value={local[param.name]}
             onChange={(json) => setLocal((v) => ({ ...v, [param.name]: json }))}
             readOnly={!canEdit}
           />
+          </div>
         )}
       </div>
     </StackedDialog>

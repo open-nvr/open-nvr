@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
 import { cameraLabel, usePickedCameraIds } from './CameraPicker'
+import { containStyle } from './GeometryEditor'
 
 type Camera = { id: number; name: string }
 type Hsv = [number, number, number]
@@ -162,7 +163,7 @@ function useSnapshotUrl(cameraId: number | string | null) {
   return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
-export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }: {
+export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false, fit = false }: {
   value: string
   onChange: (json: string) => void
   /** Sample on this camera only, with no selector, editing its entry in a
@@ -171,6 +172,8 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
   /** Show the colour without allowing a new sample (a camera the user
    *  can't manage). */
   readOnly?: boolean
+  /** Fill the parent's height and scale the snapshot to fit it whole. */
+  fit?: boolean
 }) {
   const fixed = cameraId != null
   const parsed = useMemo(() => parseJson(value), [value])
@@ -306,8 +309,8 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
       Math.round((hsv[2] / 255) * 100 * 0.6)}%)`
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className={fit ? 'flex h-full min-h-0 flex-col gap-2' : 'space-y-2'}>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         {fixed ? null : nothingPicked ? (
           <span className="text-xs text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
         ) : cameras.length === 0 ? (
@@ -352,9 +355,16 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
       </div>
 
       <div
+        className={fit ? 'flex min-h-0 flex-1 items-center justify-center' : ''}
+        style={fit ? { containerType: 'size' } : undefined}
+      >
+      <div
         ref={boxRef}
         className="relative select-none overflow-hidden rounded border border-[var(--border)] bg-[var(--bg-2)]"
-        style={{ aspectRatio: '16 / 9', cursor: pixels && !readOnly ? 'crosshair' : 'default' }}
+        style={{
+          ...(fit ? containStyle(16 / 9) : { aspectRatio: '16 / 9' }),
+          cursor: pixels && !readOnly ? 'crosshair' : 'default',
+        }}
         onPointerDown={(e) => {
           if (!pixels || readOnly) return
           const pt = pointFrom(e)
@@ -401,8 +411,9 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
         )}
         <canvas ref={canvasRef} className="hidden" />
       </div>
+      </div>
 
-      <div className="text-[11px] text-[var(--text-dim)]">
+      <div className="shrink-0 text-[11px] text-[var(--text-dim)]">
         {readOnly
           ? "You can't manage this camera, so its colour is shown read-only."
           : <>Drag a box over the guard&apos;s shirt. Pick a patch of the uniform only —
@@ -410,7 +421,7 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
       </div>
 
       {match && (
-        <div className="text-[11px]">
+        <div className="shrink-0 text-[11px]">
           <span className="text-[var(--text-dim)]">
             Matches {match.inside}% of what you picked, and {match.outside}% of the
             rest of the picture.
@@ -427,7 +438,7 @@ export function ColorRangeEditor({ value, onChange, cameraId, readOnly = false }
       )}
 
       {hueWraps && (
-        <div className="text-[11px]" style={{ color: 'var(--warn)' }}>
+        <div className="shrink-0 text-[11px]" style={{ color: 'var(--warn)' }}>
           This colour sits at both ends of the hue scale — reds usually do — and a
           single range cannot express that, so it will match far less than you
           picked. Sample a different garment, or leave this unset and let the scan

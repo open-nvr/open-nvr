@@ -16,7 +16,7 @@ import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
 export function StackedDialog({
-  title, subtitle, onClose, footer, children, widthClassName = 'w-[880px]',
+  title, subtitle, onClose, footer, children, widthClassName = 'w-[880px]', fullHeight = false,
 }: {
   title: ReactNode
   subtitle?: ReactNode
@@ -24,6 +24,9 @@ export function StackedDialog({
   footer?: ReactNode
   children: ReactNode
   widthClassName?: string
+  /** A fixed 90vh rather than "up to" it, so a body that fills the space
+   *  (a picture scaled to fit) has a height to fill. */
+  fullHeight?: boolean
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -38,9 +41,9 @@ export function StackedDialog({
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative z-10 flex max-h-[90vh] max-w-[95vw] flex-col border border-neutral-700
+      <div className={`relative z-10 flex ${fullHeight ? 'h-[90vh]' : 'max-h-[90vh]'} max-w-[95vw] flex-col border border-neutral-700
                        bg-[var(--panel-2)] shadow-xl ${widthClassName}`}>
-        <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-3">
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-4 py-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold">{title}</h2>
             {subtitle && <div className="truncate text-xs text-[var(--text-dim)]">{subtitle}</div>}
@@ -52,7 +55,7 @@ export function StackedDialog({
         </div>
         {children}
         {footer && (
-          <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-3">
+          <div className="flex shrink-0 items-center gap-2 border-t border-[var(--border)] px-4 py-3">
             {footer}
           </div>
         )}
