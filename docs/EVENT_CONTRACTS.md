@@ -320,7 +320,12 @@ Occupancy page paints over a still of the camera.
 
 Subject: `opennvr.events.occupancy.footfall.v1.<camera_id>`
 Producer: `app:occupancy-counting` (or any app tracking visitors —
-consumers must not branch on the producer).
+consumers must not branch on the producer). `app:line-crossing`
+publishes the crossing fields with dwell zeroed; `app:loitering-detection`
+publishes the dwell fields with crossings zeroed, so the two can share a
+camera without double counting. The hourly rows served by
+`GET /api/v1/occupancy/footfall` carry `dwell_count`, `dwell_avg_seconds`
+and `dwell_max_seconds` per hour as well as the crossing counts.
 
 A DELTA of per-visitor facts since the previous publish, on the same
 cadence as the heatmap and only when non-empty: crossings of the
