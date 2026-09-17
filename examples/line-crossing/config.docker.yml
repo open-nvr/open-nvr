@@ -64,10 +64,11 @@ nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
 # ── Cameras ────────────────────────────────────────────────────────
-# Empty: the app asks OpenNVR which cameras carry the ``line_crossing``
-# assignment (Settings → Cameras → Assignments), re-checks every five
-# minutes, and takes each camera's line from the catalog's tripwire
-# editor. Listing cameras here pins the set and wins over assignments.
+# Empty: the app works on the cameras selected for it in the App Catalog
+# (Configure → Cameras), follows changes live, and takes each camera's
+# line from the catalog's tripwire editor. None selected means
+# nothing counted and no compute. Listing cameras here pins the set
+# (standalone use).
 cameras: []
 
 contract_port: 9202

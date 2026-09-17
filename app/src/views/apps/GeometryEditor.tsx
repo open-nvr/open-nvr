@@ -21,6 +21,7 @@ import { apiService } from '../../lib/apiService'
 import { displayAspect } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { Button } from '../../components/ui'
+import { cameraLabel, usePickedCameraIds } from './CameraPicker'
 
 type Pt = [number, number]
 type Dir = 'both' | 'a_to_b' | 'b_to_a'
@@ -49,29 +50,39 @@ function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n))
 }
 
-// One camera snapshot, fetched as an object URL (revoked on unmount /
-// camera change). A failed capture (offline camera) resolves to null →
-// the editor draws on a grid.
+// One camera snapshot, as an object URL for this editor (revoked on
+// unmount / camera change). A failed capture (offline camera) → the
+// editor draws on a grid.
 function useSnapshotUrl(cameraId: number | string | null) {
   const numericId = typeof cameraId === 'number' ? cameraId : Number(cameraId)
   const enabled = cameraId != null && Number.isFinite(numericId)
   const query = useQuery({
     queryKey: ['camera-snapshot', cameraId],
     queryFn: async () => {
+      // The Blob, not an object URL: the cache outlives any one editor.
+      // Caching the URL meant a URL one editor had already revoked was
+      // handed straight back — deselect a camera, select it again within
+      // 30 s, and the snapshot was a broken image. Both editors also
+      // share this key, so one closing broke the other's picture.
       const { data } = await apiService.getCameraSnapshot(numericId)
-      return URL.createObjectURL(data as Blob)
+      return data as Blob
     },
     enabled,
     retry: 0,
     staleTime: 30_000,
   })
+  // Each caller mints its own URL from the cached Blob and revokes only
+  // that one. Kept in state and made in the effect (not a useMemo) so
+  // StrictMode's mount → cleanup → mount gets a fresh URL, not a revoked one.
+  const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    const url = query.data
-    return () => {
-      if (url) URL.revokeObjectURL(url)
-    }
+    const blob = query.data
+    if (!blob) { setUrl(null); return }
+    const next = URL.createObjectURL(blob)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
   }, [query.data])
-  return query
+  return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
 export function GeometryEditor({
@@ -93,15 +104,24 @@ export function GeometryEditor({
     },
     retry: 0,
   })
-  const cameras = camerasQuery.data ?? []
+  // Inside an app's configuration, only the cameras picked for that app:
+  // a zone drawn on a camera the app doesn't use would never apply.
+  const pickedIds = usePickedCameraIds()
+  const cameras = (camerasQuery.data ?? []).filter(
+    (c) => !pickedIds || pickedIds.has(Number(c.id)),
+  )
+  const nothingPicked = pickedIds !== null && pickedIds.size === 0
 
-  // Active camera: first stored, else first in the roster, else "1".
+  // Active camera: first stored (still picked), else the first picked.
   const [cam, setCam] = useState<string>('')
   useEffect(() => {
-    if (cam) return
-    const first = Object.keys(perCam)[0] ?? (cameras[0] && String(cameras[0].id))
-    if (first) setCam(first)
-  }, [cam, perCam, cameras])
+    if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
+    const stored = Object.keys(perCam).find((k) => !pickedIds || pickedIds.has(Number(k)))
+    // Nothing left to offer (the last camera was unpicked) clears the
+    // selection, so the editor stops showing that camera's snapshot.
+    const first = stored ?? (cameras[0] ? String(cameras[0].id) : '')
+    if (first !== cam) setCam(first)
+  }, [cam, perCam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   // Natural size of the still. The snapshot comes off the camera at its CODED
@@ -189,7 +209,9 @@ export function GeometryEditor({
       {/* Camera selector (per-camera geometry) */}
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-[var(--text-dim)]">Camera:</span>
-        {cameras.length === 0 ? (
+        {nothingPicked ? (
+          <span className="text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
+        ) : cameras.length === 0 ? (
           <input
             className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)] w-24"
             placeholder="camera id"
@@ -204,7 +226,7 @@ export function GeometryEditor({
           >
             {cameras.map((c) => (
               <option key={String(c.id)} value={String(c.id)}>
-                {c.name ? `${c.name} (#${c.id})` : `#${c.id}`}
+                {cameraLabel(c, cameras)}
                 {perCam[String(c.id)] ? ' ✓' : ''}
               </option>
             ))}

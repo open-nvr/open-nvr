@@ -481,3 +481,42 @@ def test_evidence_carries_track_metadata():
     assert e["hits"] >= 2
     assert e["bbox"] == [50, 50, 150, 150]
     assert alert.tags == [EVENT_ARRIVED]
+
+
+# ── Connected: cameras picked in the catalog ───────────────────────
+
+
+def _connected(reads_per_call, picked):
+    runtime, pipeline, dispatcher = _build(reads_per_call, _app_config(cameras=[]))
+    runtime._config_poll_thread = object()   # picks arrive on the config poll
+
+    class _Core:
+        def get_frame(self, camera_id):
+            return _frame_jpeg()
+
+    runtime._source._core = _Core()
+    runtime.on_cameras_update(frozenset(picked))
+    return runtime, pipeline, dispatcher
+
+
+def test_a_picked_camera_is_polled_through_core_with_the_drawn_roi():
+    runtime, pipeline, _ = _connected([_reads()], {3})
+    runtime.on_config_update({"roi": {"3": [0.1, 0.2, 0.8, 0.9]}})
+    runtime.step()
+    assert pipeline.process_frame.call_count == 1
+    assert pipeline.process_frame.call_args.kwargs["roi"] is not None
+
+
+def test_nothing_picked_polls_nothing():
+    runtime, pipeline, _ = _connected([_reads()], set())
+    runtime.step()
+    assert pipeline.process_frame.call_count == 0
+
+
+def test_a_picked_camera_remembers_who_was_on_the_porch():
+    """A picked camera has no per-camera state until its first frame. The
+    person-sighting buffer must be created then, not appended to a
+    throwaway list — or every pickup reads as a stranger's."""
+    runtime, _, _ = _connected([_reads(persons=[_person()])], {3})
+    runtime.step()
+    assert len(runtime._person_sightings.get("cam3", [])) == 1

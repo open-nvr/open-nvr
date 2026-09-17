@@ -24,19 +24,14 @@ kaic_api_key: "${INTERNAL_API_KEY}"
 # under the name ``default`` (not ``yolov8``).
 detector_adapter: "default"
 
-# ── Cameras — EDIT for your scene ──────────────────────────────────
-# One entry per porch camera. frame_url is the camera's JPEG snapshot
-# endpoint (Reolink / Hikvision / Frigate-style); it must be reachable
-# FROM INSIDE the container, so use a LAN IP, not localhost. A camera
-# whose snapshot fetch fails is logged and retried next poll — the
-# daemon keeps running.
-cameras:
-  - camera_id: "front-porch"
-    frame_url: "http://192.168.1.50/cgi-bin/snapshot.cgi"
-    # Optional porch ROI in normalised [0..1] coordinates — a list of
-    # [x, y] points (3+ vertices) or a [x1, y1, x2, y2] rectangle.
-    # Unset ⇒ the whole frame is searched.
-    # roi: [0.10, 0.40, 0.85, 0.95]
+# ── Cameras ──────────────────────────────────────────────────────
+# None listed here, on purpose. Select the cameras this app works on in
+# the App Catalog → Configure → Cameras; Porch rois are drawn there too. Frames come
+# from OpenNVR itself, so there is no camera URL to copy, and nothing
+# selected means the app does nothing and uses no compute.
+#
+# (A `cameras:` list still works when running this app standalone,
+# without opennvr_url — see config.example.yml.)
 
 # ── Detection / state-machine knobs — EDIT for your scene ──────────
 poll_interval_seconds: 3.0

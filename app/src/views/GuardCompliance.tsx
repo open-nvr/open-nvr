@@ -20,7 +20,7 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
-  ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
+  CameraOff, ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
 } from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
@@ -38,6 +38,7 @@ import { SegmentedControl } from '../components/ui/SegmentedControl'
 import { usePagination } from '../hooks/usePagination'
 import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { useAppCameras } from './apps/CameraPicker'
 import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
 import { ScreeningClip } from './guardscan/ScreeningClip'
 import { ScreeningReport } from './guardscan/ScreeningReport'
@@ -154,6 +155,10 @@ export default function GuardCompliance() {
   // not a search.
   const [show, setShow] = useState<'all' | 'problems' | 'flagged'>('all')
   const [cameraId, setCameraId] = useState<number | ''>('')
+  // The camera the live panel shows when the operator chose one there.
+  // Cleared by the list's camera filter, so filtering to a door also
+  // shows that door.
+  const [liveChoice, setLiveChoice] = useState<number | null>(null)
   const [viewing, setViewing] = useState<Screening | null>(null)
   const [exporting, setExporting] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
@@ -254,6 +259,23 @@ export default function GuardCompliance() {
     (a) => manifestProvides(a.manifest, GUARD_VERTICAL))
   const canConfigure = !!me?.is_superuser
 
+  // The cameras this app was picked for. Live video is offered only for
+  // those: another camera's picture beside this app's screenings would
+  // be a door the app is not watching. The list itself is limited to
+  // cameras this user can see; the COUNT on the app row is not, so
+  // "nothing picked" is decided from the count and never from a list
+  // that is merely hidden from this user.
+  const takesPicks = !!guardApp && guardApp.camera_picker !== false
+  const picksQuery = useAppCameras(guardApp?.id ?? '', takesPicks)
+  const pickedCameras = useMemo(
+    () => (picksQuery.data?.cameras ?? []).filter((c) => c.picked),
+    [picksQuery.data],
+  )
+  const nothingPicked = takesPicks && (
+    guardApp?.picked_cameras !== undefined
+      ? guardApp.picked_cameras === 0
+      : !!picksQuery.data && pickedCameras.length === 0)
+
   const report = useQuery({
     queryKey: ['guardscan-report', period, days, tz, cameraId],
     queryFn: async () => (await guardScanService.getReport({
@@ -301,12 +323,23 @@ export default function GuardCompliance() {
   // row names a real person.
   const guards = (report.data?.guards ?? []).filter((g) => g.label !== NO_GUARD)
 
-  // The door being watched: whichever camera the operator filtered to,
-  // and otherwise the one the most recent screening came from — that is
-  // the entrance with people walking through it.
-  const liveCameraId = cameraId !== ''
-    ? cameraId
-    : list.find((s) => s.camera_id != null)?.camera_id ?? null
+  // The door being watched, always one of the app's picked cameras: the
+  // one chosen in the panel, else the one the list is filtered to, else
+  // the one the most recent screening came from (the entrance with people
+  // walking through it), else the first picked.
+  const isPicked = (id: number | null | undefined): id is number =>
+    id != null && pickedCameras.some((c) => c.id === id)
+  const recentCameraId = list.find((s) => isPicked(s.camera_id))?.camera_id
+  const liveCameraId: number | null =
+    isPicked(liveChoice) ? liveChoice
+      : isPicked(cameraId === '' ? null : cameraId) ? (cameraId as number)
+      : isPicked(recentCameraId) ? recentCameraId
+      : pickedCameras[0]?.id ?? null
+  const liveEmpty = !takesPicks ? undefined
+    : nothingPicked ? 'This app is not watching any camera yet.'
+    : picksQuery.isLoading ? 'Loading cameras…'
+    : pickedCameras.length === 0 ? "None of this app's cameras are visible to you."
+    : undefined
 
   const download = async () => {
     setExporting(true)
@@ -492,8 +525,8 @@ export default function GuardCompliance() {
               icon={<ShieldCheck size={28} />}
               title="No screenings recorded yet"
               description={guardApp
-                ? 'The app is installed. Assign it an entrance camera and draw the scan zone, then screenings appear here.'
-                : 'Install the Guard Scan Compliance app from the App Catalog and assign it an entrance camera.'}
+                ? 'The app is installed. Select its entrance camera and draw the scan zone in Configure, then screenings appear here.'
+                : 'Install the Guard Scan Compliance app from the App Catalog, then select its entrance camera.'}
             />
           )}
         </div>
@@ -532,6 +565,33 @@ export default function GuardCompliance() {
             style={{ width: popped ? '100%' : `${split}%` }}>
         <CardContent className="flex min-h-0 flex-1 flex-col p-3">
         <h3 className="mb-2 text-sm font-semibold">Recent screenings</h3>
+        {nothingPicked && (
+          // Past screenings stay listed below — they are real history —
+          // so without this the page looks exactly like a quiet door
+          // while nothing at all is being watched.
+          <div
+            role="status"
+            className="mb-2 flex flex-wrap items-center gap-3 rounded border border-amber-500/40
+                       bg-amber-500/10 px-3 py-2.5 text-xs"
+          >
+            <CameraOff size={18} className="shrink-0 text-amber-400" />
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold text-[var(--text)]">
+                No camera selected — nobody is being screened
+              </div>
+              <div className="mt-0.5 text-[var(--text-dim)]">
+                {canConfigure
+                  ? 'Guard Scan is not running and uses no compute. Select the entrance camera, and new screenings appear here within a few seconds.'
+                  : 'Guard Scan is not running and uses no compute. Ask an administrator to select the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
+              </div>
+            </div>
+            {canConfigure && (
+              <Button variant="primary" size="sm" onClick={() => setConfigOpen(true)}>
+                <Settings2 size={13} /> Select cameras
+              </Button>
+            )}
+          </div>
+        )}
         <ScreeningTable
             rows={list}
             query={screenings}
@@ -558,6 +618,7 @@ export default function GuardCompliance() {
                   value={cameraId}
                   onChange={(e) => {
                     setCameraId(e.target.value === '' ? '' : Number(e.target.value))
+                    setLiveChoice(null)
                     resetPage()
                   }}
                   aria-label="Filter by camera"
@@ -615,6 +676,10 @@ export default function GuardCompliance() {
       <LiveCameraPanel
         cameraId={liveCameraId}
         cameraName={liveCameraId == null ? '' : cameraName(liveCameraId)}
+        cameras={pickedCameras.map((c) => ({ id: c.id, name: c.name }))}
+        onSelectCamera={setLiveChoice}
+        emptyMessage={liveEmpty}
+        onPickCameras={nothingPicked && canConfigure ? () => setConfigOpen(true) : undefined}
         overlayEnabled={guardApp?.overlay_enabled}
         popped={popped}
         onTogglePop={() => setPopped((v) => {

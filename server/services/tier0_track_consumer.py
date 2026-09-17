@@ -45,6 +45,9 @@ APP_SUBJECT = "opennvr.events.overlay.boxes.v1.>"
 #: changes a few times a year.
 _APP_ALLOW_TTL_S = 15.0
 _app_allow_cache: dict[str, tuple[float, bool]] = {}
+#: app id -> (fetched at, camera ids picked for it). Same TTL: a pick made
+#: in the catalog reaches the overlay within one cache window.
+_app_picks_cache: dict[str, tuple[float, frozenset[int]]] = {}
 
 #: Reconnect cadence after a connect/subscribe failure — one warning a
 #: minute for a down bus, not a hot loop.
@@ -260,8 +263,40 @@ def _app_may_draw(app_id: str, now: float | None = None) -> bool:
     return allowed
 
 
+def _app_picked_cameras(app_id: str, now: float | None = None) -> frozenset[int]:
+    """Camera ids picked for ``app_id``, cached briefly. An app may draw
+    only on its own cameras — the boxes are its view of the cameras it
+    works on, and a camera it never picked is not one of them. A DB error
+    answers "none", like the permission check above: a camera is drawn on
+    only when the operator demonstrably picked it."""
+    import time as _time
+
+    key = str(app_id or "").strip()
+    if not key:
+        return frozenset()
+    now = _time.monotonic() if now is None else now
+    hit = _app_picks_cache.get(key)
+    if hit and now - hit[0] < _APP_ALLOW_TTL_S:
+        return hit[1]
+    picked: frozenset[int] = frozenset()
+    try:
+        from core.database import SessionLocal
+        from services.skill_assignments import picked_camera_ids
+
+        db = SessionLocal()
+        try:
+            picked = frozenset(picked_camera_ids(db, key))
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("overlay: could not read camera picks for %s", key, exc_info=True)
+    _app_picks_cache[key] = (now, picked)
+    return picked
+
+
 def _invalidate_app_allow_cache() -> None:
     _app_allow_cache.clear()
+    _app_picks_cache.clear()
 
 
 def _xywh_to_xyxy(box: Any) -> list[float] | None:
@@ -300,6 +335,10 @@ async def _handle_app_message(msg) -> None:
             camera_id = camera_id_from_handle(parts[-1]) if parts else None
         if camera_id is None:
             raise ValueError("unmappable camera_id")
+        if camera_id not in _app_picked_cameras(app_id):
+            # Not a camera picked for this app: it has no business drawing
+            # on it, whatever it publishes.
+            return
         raw = {"frame": payload.get("frame") or {},
                "calibrating": False,
                "seq": payload.get("seq"), "wall_ts": env.get("ts") or payload.get("wall_ts"),

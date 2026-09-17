@@ -19,7 +19,7 @@ action, a state function). Constructed by hand it is:
 from opennvr_app_sdk import OpenNVR
 
 with OpenNVR() as nvr:          # OPENNVR_URL + the app's key, from the env
-    for camera in nvr.cameras():          # only cameras assigned to this app
+    for camera in nvr.cameras():          # only cameras picked for this app
         jpeg = nvr.snapshot(camera)
 ```
 

@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../../lib/apiService'
+import { cameraLabel, usePickedCameraIds } from './CameraPicker'
 
 type Camera = { id: number; name: string }
 type Hsv = [number, number, number]
@@ -129,18 +130,30 @@ function useSnapshotUrl(cameraId: number | string | null) {
   const query = useQuery({
     queryKey: ['camera-snapshot', cameraId],
     queryFn: async () => {
+      // The Blob, not an object URL: the cache outlives any one editor.
+      // Caching the URL meant a URL one editor had already revoked was
+      // handed straight back — deselect a camera, select it again within
+      // 30 s, and the snapshot was a broken image. Both editors also
+      // share this key, so one closing broke the other's picture.
       const { data } = await apiService.getCameraSnapshot(numericId)
-      return URL.createObjectURL(data as Blob)
+      return data as Blob
     },
     enabled,
     retry: 0,
     staleTime: 30_000,
   })
+  // Each caller mints its own URL from the cached Blob and revokes only
+  // that one. Kept in state and made in the effect (not a useMemo) so
+  // StrictMode's mount → cleanup → mount gets a fresh URL, not a revoked one.
+  const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    const url = query.data
-    return () => { if (url) URL.revokeObjectURL(url) }
+    const blob = query.data
+    if (!blob) { setUrl(null); return }
+    const next = URL.createObjectURL(blob)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
   }, [query.data])
-  return query
+  return { data: url, isError: query.isError, isPending: query.isPending }
 }
 
 export function ColorRangeEditor({ value, onChange }: {
@@ -157,11 +170,20 @@ export function ColorRangeEditor({ value, onChange }: {
     },
     retry: 0,
   })
-  const cameras = camerasQuery.data ?? []
+  // Inside an app's configuration, sample only from cameras the app uses.
+  const pickedIds = usePickedCameraIds()
+  const cameras = (camerasQuery.data ?? []).filter(
+    (c) => !pickedIds || pickedIds.has(Number(c.id)),
+  )
+  const nothingPicked = pickedIds !== null && pickedIds.size === 0
   const [cam, setCam] = useState<string>('')
   useEffect(() => {
-    if (!cam && cameras[0]) setCam(String(cameras[0].id))
-  }, [cam, cameras])
+    if (cam && (!pickedIds || pickedIds.has(Number(cam)))) return
+    // Nothing left to offer (the last camera was unpicked) clears the
+    // selection, so the editor stops showing that camera's snapshot.
+    const first = cameras[0] ? String(cameras[0].id) : ''
+    if (first !== cam) setCam(first)
+  }, [cam, cameras, pickedIds])
 
   const snap = useSnapshotUrl(cam || null)
   const imgRef = useRef<HTMLImageElement | null>(null)
@@ -253,7 +275,9 @@ export function ColorRangeEditor({ value, onChange }: {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        {cameras.length === 0 ? (
+        {nothingPicked ? (
+          <span className="text-xs text-[var(--text-dim)]">Select a camera for this app first — Cameras, above.</span>
+        ) : cameras.length === 0 ? (
           <input
             value={cam}
             onChange={(e) => setCam(e.target.value)}
@@ -269,7 +293,7 @@ export function ColorRangeEditor({ value, onChange }: {
             className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
           >
             {cameras.map((c) => (
-              <option key={c.id} value={c.id}>{c.name} (#{c.id})</option>
+              <option key={c.id} value={c.id}>{cameraLabel(c, cameras)}</option>
             ))}
           </select>
         )}
@@ -328,7 +352,7 @@ export function ColorRangeEditor({ value, onChange }: {
           <div className="flex h-full items-center justify-center text-xs text-[var(--text-dim)]">
             {snap.isPending && cam
               ? 'Fetching a snapshot…'
-              : 'No snapshot — pick a camera that is online to sample its colours.'}
+              : 'No snapshot — select a camera that is online to sample its colours.'}
           </div>
         )}
         {drag && (

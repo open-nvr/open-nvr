@@ -428,3 +428,52 @@ def test_handle_event_skips_out_of_order_events():
     assert state_after_skip.last_seen == last_seen_t10
     assert state_after_skip.present_since == present_since_t10
     assert recorder.alerts == []
+
+
+# ── Connected: cameras picked in the catalog, zones drawn there ─────
+
+
+def _connected_detector(picked, **kw):
+    """A detector with NO YAML cameras, running as it does against core:
+    the config poll is live and has delivered picks."""
+    detector, recorder = _build_detector(threshold_seconds=10.0, **kw)
+    detector.cfg.cameras = {}
+    detector._config_poll_thread = object()
+    detector.picked_cameras = frozenset(picked)
+    return detector, recorder
+
+
+def _dwell(detector, camera_id, *, in_zone=True):
+    fired = []
+    for t in (0, 5, 11):
+        fired += detector.handle_event(_make_event(
+            camera_id=camera_id, completed_at=_ts(t), in_zone=in_zone))
+    return fired
+
+
+def test_a_picked_camera_is_watched_with_no_yaml_entry():
+    """Nothing drawn yet: the whole frame is the zone."""
+    detector, _ = _connected_detector({3})
+    assert len(_dwell(detector, "cam3", in_zone=False)) == 1
+
+
+def test_an_unpicked_camera_is_ignored():
+    detector, _ = _connected_detector({3})
+    assert _dwell(detector, "cam4") == []
+
+
+def test_the_zone_drawn_in_the_catalog_applies():
+    """Saved by the zone editor under the numeric id, in 0-1 coordinates."""
+    detector, _ = _connected_detector({3})
+    detector.on_config_update({"zones": {"3": [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]}})
+    assert _dwell(detector, "cam3", in_zone=False) == []
+    assert len(_dwell(detector, "cam3", in_zone=True)) == 1
+
+
+def test_config_needs_cameras_only_when_standalone(tmp_path):
+    p = tmp_path / "c.yml"
+    p.write_text('nats_url: "nats://x:4222"\nopennvr_url: "http://core:8000"\n')
+    assert load_config(str(p)).cameras == {}
+    p.write_text('nats_url: "nats://x:4222"\n')
+    with pytest.raises(ValueError, match="at least one camera"):
+        load_config(str(p))

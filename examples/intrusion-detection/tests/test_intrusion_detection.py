@@ -457,3 +457,66 @@ def test_nested_zone_still_works_without_registry_zones(tmp_path: Path):
     parsed = load_config(cfg)
     pts = [(p.x, p.y) for p in parsed.cameras[0].zone.polygon]
     assert pts == [(200.0, 400.0), (1720.0, 400.0), (100.0, 900.0)]
+
+
+# ── Connected: cameras picked in the catalog ───────────────────────
+
+
+class _NullChannel:
+    name = "null"
+
+    def send(self, alert):
+        return True
+
+
+def _connected_detector():
+    config = AppConfig(
+        kaic_url="http://kaic.test", kaic_adapter_name="yolov8", kaic_api_key="k",
+        poll_interval_seconds=1.0, watch_labels=["person"],
+        restricted_hours=RestrictedHours(start=_dt.time(0, 0), end=_dt.time(23, 59)),
+        cameras=[], webhook_url=None,
+    )
+    kaic = KaicClient(config.kaic_url, config.kaic_adapter_name, api_key="k", timeout_seconds=1.0)
+    detector = IntrusionDetector(config, kaic, AlertDispatcher([_NullChannel()]))
+    detector._config_poll_thread = object()   # connected: picks arrive on the poll
+    return detector
+
+
+def test_config_needs_cameras_only_when_standalone(tmp_path):
+    p = tmp_path / "c.yml"
+    p.write_text('kaic_url: "http://kaic:8100"\nopennvr_url: "http://core:8000"\n')
+    assert load_config(str(p)).cameras == []
+    p.write_text('kaic_url: "http://kaic:8100"\n')
+    with pytest.raises(ValueError, match="at least one camera"):
+        load_config(str(p))
+
+
+def test_a_picked_camera_is_polled_through_core_with_the_drawn_zone():
+    from zone import Point
+
+    detector = _connected_detector()
+    detector.on_cameras_update(frozenset({3}))
+    assert detector._cameras == ["cam3"]
+
+    # Nothing drawn yet: the whole frame is the zone.
+    assert detector._camera_for("cam3").zone.contains(Point(1900, 1000))
+    detector.on_config_update({"zones": {"3": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]]}})
+    assert not detector._camera_for("cam3").zone.contains(Point(1900, 1000))
+
+    # Frames for a picked camera come from core's snapshot route.
+    seen = []
+
+    class _Core:
+        def get_frame(self, camera_id):
+            seen.append(camera_id)
+            return b"jpeg"
+
+    detector._source._core = _Core()
+    assert detector._source.get_frame("cam3") == b"jpeg"
+    assert seen == ["cam3"]
+
+
+def test_standalone_ignores_cameras_it_has_no_yaml_for():
+    detector = _connected_detector()
+    detector._config_poll_thread = None
+    assert detector._camera_for("cam3") is None

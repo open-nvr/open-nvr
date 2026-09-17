@@ -400,11 +400,27 @@ class OpenNVR:
 
     # ── cameras ────────────────────────────────────────────────────
 
+    def roster(self) -> list[Camera] | None:
+        """The cameras picked for this app in its configuration.
+
+        ``[]`` means core answered and nothing is picked: the app should
+        do nothing. ``None`` means core could not be asked (unreachable,
+        an error, a key it refused) — NOT the same answer. An app that
+        treats ``None`` as "nothing picked" tears its work down on every
+        core restart; one that treats ``[]`` as "keep going" never stops
+        when an operator unpicks the last camera. Keep what you have on
+        ``None``, stop on ``[]``.
+        """
+        body = self._http.get_json("/api/v1/internal/camera-agent/cameras")
+        if not isinstance(body, dict):
+            return None
+        return parse_cameras(body)
+
     def cameras(self) -> list[Camera]:
-        """The roster core assigned to this app (every active camera
-        when the operator assigned none). ``[]`` when core can't be
-        reached — log it; never guess."""
-        return parse_cameras(self._http.get_json("/api/v1/internal/camera-agent/cameras"))
+        """The cameras picked for this app, or ``[]`` — which here means
+        EITHER nothing is picked OR core could not be reached. Use
+        :meth:`roster` wherever that difference changes what you do."""
+        return self.roster() or []
 
     def camera(self, camera) -> Camera | None:
         want = _camera_id(camera)

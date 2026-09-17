@@ -17,15 +17,16 @@ a catalog of third-party apps.
 | **Site key** `INTERNAL_API_KEY` | platform components (detect-pipeline, KAI-C, the OpenNVR Agent) and bootstrap | everything the internal door serves, unscoped; the pipeline's write routes |
 | **User JWT** | people | the operator API, per-camera RBAC applied |
 
-An app's **roster** is the cameras the operator assigned to it on the
-camera settings page (`Camera.assignments[].skill` naming one of the
-app's manifest `provides`, or the app id). It is **closed by default**:
-an app sees the cameras it was pointed at and no others, and an app
-nobody has assigned a camera sees nothing
-([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)) — the same rule the
-SDK's `cameras_for_skill` applies client-side, enforced here where the
-frames are actually handed out. This reverses the earlier additive rule,
-under which an unassigned app got the whole fleet.
+An app's **roster** is the cameras picked for it in its own
+configuration (App Catalog → Configure → Cameras; stored as claims with
+consumer `app:<id>`). An app sees the cameras picked for it and no
+others, and an app with nothing picked sees nothing
+([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)). It is enforced here,
+where the frames are actually handed out: the camera list gives an app a
+stream token scoped to each picked camera's own path (never the wildcard
+the platform's components carry) and never the camera's raw RTSP URL;
+its per-camera settings are trimmed to its picks; and its overlay boxes
+are drawn only on its picks.
 
 ## The handshake
 

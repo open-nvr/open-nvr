@@ -312,19 +312,22 @@ def test_live_config_applies_line_labels_and_policy():
     assert d.cfg.cameras["cam1"].wire is None
 
 
-def test_discovery_scopes_to_the_assignment_and_reads_drawn_lines():
+def test_picked_cameras_are_counted_and_read_their_drawn_lines():
     cfg = _config(_camera()); cfg.cameras = {}; cfg.auto_cameras = True
     d = lc.LineCrossingDetector(cfg, _NullDispatcher())
     d._last_config = {"line": {"2": {"a": [0, 0.5], "b": [1, 0.5]}}}
-    added, removed = d.refresh_cameras(discovered=[
-        {"camera_id": "cam1", "assignments": [{"skill": "occupancy_counting"}]},
-        {"camera_id": "cam2", "assignments": [{"skill": "line_crossing"}]},
-    ])
-    assert added == ["cam2"] and removed == []
+    d.on_cameras_update(frozenset({2}))
+    assert list(d.cfg.cameras) == ["cam2"]
     assert d.cfg.cameras["cam2"].wire is not None       # the drawn line was applied on arrival
-    assert d.refresh_cameras(discovered=[]) == ([], [])  # a blip is not "remove everything"
-    _, removed = d.refresh_cameras(discovered=[{"camera_id": "cam1", "assignments": []}])
-    assert removed == ["cam2"]
+    # Unpicking the last camera empties the set: nothing picked, count nowhere.
+    d.on_cameras_update(frozenset())
+    assert d.cfg.cameras == {}
+
+
+def test_pinned_yaml_cameras_ignore_picks():
+    d = _detector(_camera())
+    d.on_cameras_update(frozenset({9}))
+    assert list(d.cfg.cameras) == [_camera().camera_id]
 
 
 def test_state_paths_declared_in_the_manifest_resolve():
@@ -347,12 +350,8 @@ def test_ui_html_is_static_and_escapes():
     assert "&lt;b&gt;x&lt;/b&gt;" in page and "<b>x</b>" not in page
 
 
-def test_load_config_discovers_when_no_cameras_listed(tmp_path, monkeypatch):
+def test_load_config_with_no_cameras_waits_for_picks(tmp_path):
     import yaml as _yaml
-    monkeypatch.setattr(lc, "discover_cameras", lambda url, api_key=None: [
-        {"camera_id": "cam3", "assignments": [{"skill": "line_crossing"}]},
-        {"camera_id": "cam4", "assignments": []},
-    ])
     cfg = tmp_path / "c.yml"
     cfg.write_text(_yaml.safe_dump({
         "nats_url": "nats://x", "opennvr_url": "http://core",
@@ -360,6 +359,9 @@ def test_load_config_discovers_when_no_cameras_listed(tmp_path, monkeypatch):
         "alert_mode": "off", "active_hours": {"start": "22:00", "end": "06:00"},
     }))
     parsed = lc.load_config(str(cfg))
-    assert list(parsed.cameras) == ["cam3"] and parsed.auto_cameras
-    assert parsed.cameras["cam3"].wire.count_direction == "a_to_b"
+    assert parsed.cameras == {} and parsed.auto_cameras
+    d = lc.LineCrossingDetector(parsed, _NullDispatcher())
+    d._last_config = {"line": {"3": {"a": [0.1, 0.5], "b": [0.9, 0.5], "count_direction": "a_to_b"}}}
+    d.on_cameras_update(frozenset({3}))
+    assert d.cfg.cameras["cam3"].wire.count_direction == "a_to_b"
     assert parsed.alert_mode == "off" and parsed.active_hours.start.hour == 22

@@ -444,7 +444,7 @@ export function Occupancy() {
               {zones.length}
             </div>
             <div className="text-xs text-[var(--text-dim)]">
-              {zones.length === 0 ? 'Zones watched — assign the occupancy skill to a camera' : 'Zones watched'}
+              {zones.length === 0 ? 'Zones watched — select cameras for Occupancy in the App Catalog' : 'Zones watched'}
             </div>
           </CardContent>
         </Card>
@@ -1017,18 +1017,25 @@ export function blurGrid(cells: number[], cols: number, rows: number, passes = 1
 function useCameraStill(cameraId: number) {
   const query = useQuery({
     queryKey: ['camera-snapshot', cameraId],
+    // The Blob, not an object URL — the same key the zone editors use,
+    // and a cached URL is revoked by whichever component closes first,
+    // leaving the next one a broken image. Each caller mints its own.
     queryFn: async () => {
       const { data } = await apiService.getCameraSnapshot(cameraId)
-      return URL.createObjectURL(data as Blob)
+      return data as Blob
     },
     retry: 0,
     staleTime: 30_000,
   })
+  const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
-    const url = query.data
-    return () => { if (url) URL.revokeObjectURL(url) }
+    const blob = query.data
+    if (!blob) { setUrl(null); return }
+    const next = URL.createObjectURL(blob)
+    setUrl(next)
+    return () => URL.revokeObjectURL(next)
   }, [query.data])
-  return query
+  return { data: url, isPending: query.isPending }
 }
 
 function HeatmapCanvas({ heat }: { heat: HeatmapResp }) {

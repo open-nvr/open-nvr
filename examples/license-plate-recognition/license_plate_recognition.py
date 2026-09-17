@@ -20,11 +20,13 @@ duplicating the detection Tier-0 already runs on the same vehicles
 vehicle visit on the best frame; this app consumes the result. Adding
 this app to an install adds **no** inference cost.
 
-Camera scope: the assignment table (Phase 2). Cameras assigned the
-``license_plate_recognition`` skill are the app's scope, fetched via
-the SDK's ``cameras_for_skill`` and refreshed periodically; an explicit
-``cameras:`` list in config overrides, and neither declared = alert on
-every camera's plate events (no restriction declared).
+Camera scope: the cameras picked for this app in its own configuration
+(App Catalog → Configure → Cameras, or a gate role on the Vehicles page —
+both write the same pick). They arrive on the SDK's live config poll, and
+an event from a camera that wasn't picked is ignored. Nothing picked =
+nothing alerted. An explicit ``cameras:`` list in config may narrow the
+picks further, never widen them; run standalone (no ``opennvr_url``) it
+is the whole scope.
 
 Run:
     python license_plate_recognition.py --config config.yml
@@ -53,7 +55,7 @@ from opennvr_app_sdk import (
     AlertType, AppManifest, Detector, DomainEventPublisher, Param,
     StateView, app,
 )
-from opennvr_app_sdk.cameras import cameras_for_skill, discover_cameras
+from opennvr_app_sdk.cameras import discover_cameras
 
 logger = logging.getLogger("license-plate-recognition")
 
@@ -587,14 +589,13 @@ class PlateAlerter(Detector):
             cfg.nats_url, token=cfg.nats_token,
             producer="app:license-plate-recognition")
         self._decisions_published: int = 0
-        # Camera scope: explicit config wins and never refreshes; else
-        # the assignment table (refreshed lazily per SCOPE_REFRESH_
-        # SECONDS); None = no restriction declared.
+        # Which cameras this app works on is its picks (``camera_picked``,
+        # delivered on the config poll). A YAML ``cameras:`` list can only
+        # narrow that; standalone, with no core to pick from, it is the
+        # whole scope. None = no YAML narrowing.
         self._explicit_scope: frozenset[str] | None = (
             frozenset(cfg.cameras) if cfg.cameras else None
         )
-        self._assigned_scope: frozenset[str] | None = None
-        self._scope_fetched_at: float | None = None
         # Camera display names, for the words in an alert. Fetched apart
         # from the scope: an explicit config scope never asks core, but
         # its alarms still have to say "Gate IN", not "cam1".
@@ -735,30 +736,11 @@ class PlateAlerter(Detector):
     # ── Camera scope (Phase 2 integration) ─────────────────────────
 
     def _scope(self) -> frozenset[str] | None:
-        """The camera-id set to alert on; ``None`` = every camera."""
-        if self._explicit_scope is not None:
-            return self._explicit_scope
-        if not self.cfg.opennvr_url:
-            return None
-        now = time.monotonic()
-        if (self._scope_fetched_at is None
-                or now - self._scope_fetched_at >= SCOPE_REFRESH_SECONDS):
-            self._scope_fetched_at = now
-            try:
-                assigned = cameras_for_skill(
-                    self.cfg.opennvr_url, SKILL,
-                    api_key=self.cfg.opennvr_token,
-                )
-            except Exception:  # noqa: BLE001 — scope is advisory, never fatal
-                assigned = None
-            # None means core could not be ASKED — the SDK helper's
-            # contract. Keep the previous answer: an outage must never
-            # turn into a policy. An empty LIST is core answering "no
-            # camera is assigned this skill", which is a real scope of
-            # nothing and is applied.
-            if assigned is not None:
-                self._assigned_scope = frozenset(assigned)
-        return self._assigned_scope
+        """A YAML ``cameras:`` narrowing, or ``None`` for none.
+
+        Only a narrowing: whether the app works on a camera at all is
+        decided by its picks (``camera_picked``), checked first."""
+        return self._explicit_scope
 
     def _camera_label(self, camera_id: str) -> str:
         """The camera's name as the operator gave it, for alert TEXT.
@@ -809,6 +791,11 @@ class PlateAlerter(Detector):
         # match regardless of which producer fired the event.
         plate = _normalize_plate(plate)
 
+        if not self.camera_picked(camera_id):
+            # Not a camera picked for this app (or picks not delivered
+            # yet — failing closed for one poll beats alerting on a camera
+            # nobody pointed this app at).
+            return []
         scope = self._scope()
         if scope is not None and camera_id not in scope:
             return []
@@ -1043,9 +1030,14 @@ class PlateAlerter(Detector):
     # ── Contract surface ───────────────────────────────────────────
 
     def state_snapshot(self) -> dict[str, Any]:
-        scope = self._explicit_scope or self._assigned_scope
+        if self.picked_cameras is not None:
+            cameras = sorted(f"cam{i}" for i in self.picked_cameras)
+            if self._explicit_scope is not None:
+                cameras = [c for c in cameras if c in self._explicit_scope]
+        else:
+            cameras = sorted(self._explicit_scope or [])
         return {
-            "cameras": sorted(scope) if scope is not None else [],
+            "cameras": cameras,
             "deduped_plates_tracked": len(self._last_fired),
             "allowlist_size": len(self._watchlists[0]),
             "denylist_size": len(self._watchlists[1]),

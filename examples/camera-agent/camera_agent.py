@@ -5669,6 +5669,9 @@ def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
 
     return AppManifest(
         id="camera-agent",
+        # No camera picker: the agent is a platform component on the site
+        # key, and every user already sees only their own cameras through it.
+        camera_picker=False,
         name="OpenNVR Agent",
         version=AGENT_VERSION,
         category="assistant",

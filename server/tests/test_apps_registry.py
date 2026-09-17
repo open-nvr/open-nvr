@@ -108,7 +108,7 @@ from core.auth import (  # noqa: E402
     create_access_token, get_current_active_user, get_current_superuser,
 )
 from core.database import Base, get_db  # noqa: E402
-from models import AuditLog, InstalledApp, Role, User  # noqa: E402
+from models import AuditLog, Camera, InstalledApp, Role, SkillAssignment, User  # noqa: E402
 from routers import apps as apps_router  # noqa: E402
 from routers.apps import (  # noqa: E402
     get_read_principal,
@@ -145,6 +145,10 @@ def _make_app():
             AuditLog.__table__,
             Role.__table__,
             User.__table__,
+            # The app list and the config poll both report each app's
+            # camera picks, which live in the claim table.
+            Camera.__table__,
+            SkillAssignment.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine)

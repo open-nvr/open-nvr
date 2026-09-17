@@ -101,6 +101,9 @@ def parse_relays(raw: Any) -> dict[str, dict[str, str]]:
 
 MANIFEST = AppManifest(
     id="gate-controller",
+    # No camera picker: this app acts on other apps' alerts/events,
+    # which those apps have already limited to the cameras they picked.
+    camera_picker=False,
     name="Gate Controller",
     version="1.0.0",
     category="automation",
