@@ -41,12 +41,12 @@
 // apart, and only then.
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Camera as CameraIcon, CameraOff, Check, Lock, Search, X } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { Button } from '../../components/ui'
+import { StackedDialog } from './StackedDialog'
 
 export type PickerCamera = {
   id: number
@@ -163,6 +163,7 @@ export function CameraPicker({
   onChange,
   cameraRoles,
   setup,
+  onSetUp,
 }: {
   appName: string
   query: ReturnType<typeof useAppCameras>
@@ -174,6 +175,8 @@ export function CameraPicker({
   cameraRoles?: Record<string, string>
   /** What is set up on each camera, from this form's per-camera fields. */
   setup?: (cameraId: number) => CameraSetupItem[]
+  /** Open this camera's setup (its per-camera shapes). */
+  onSetUp?: (cameraId: number) => void
 }) {
   const [choosing, setChoosing] = useState(false)
   const cameras = query.data?.cameras ?? []
@@ -288,6 +291,17 @@ export function CameraPicker({
                   </div>
                 )}
               </div>
+              {onSetUp && items.length > 0 && (
+                <Button
+                  variant={items.every((it) => it.done) ? 'ghost' : 'outline'}
+                  size="sm"
+                  className="self-center"
+                  onClick={() => onSetUp(cam.id)}
+                  title={cam.can_manage ? undefined : "You can't manage this camera — view only"}
+                >
+                  {!cam.can_manage ? 'View' : items.some((it) => it.done) ? 'Edit' : 'Set up'}
+                </Button>
+              )}
               <button
                 type="button"
                 onClick={() => remove(cam)}
@@ -401,19 +415,6 @@ function SelectCamerasDialog({
   const [location, setLocation] = useState('')
   const [onlineOnly, setOnlineOnly] = useState(false)
 
-  // Escape closes THIS dialog only. The configuration panel underneath
-  // listens for Escape on window; catching it on the way down and stopping
-  // it there keeps a stray Escape from throwing away the whole form.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      onClose()
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose])
-
   const locations = useMemo(
     () => Array.from(new Set(cameras.map((c) => c.location?.trim() || NO_LOCATION)))
       .sort((a, b) => (a === NO_LOCATION ? 1 : b === NO_LOCATION ? -1 : a.localeCompare(b))),
@@ -463,19 +464,20 @@ function SelectCamerasDialog({
 
   const count = chosen.size
 
-  return createPortal(
-    <div className="fixed inset-0 z-[60] flex items-center justify-center" role="dialog" aria-modal="true"
-         aria-label={`Select cameras for ${appName}`}>
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 flex max-h-[85vh] w-[880px] max-w-[95vw] flex-col border border-neutral-700
-                      bg-[var(--panel-2)] shadow-xl">
-        <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-3">
-          <h2 className="text-sm font-semibold">Select cameras for {appName}</h2>
-          <button type="button" onClick={onClose} aria-label="Close"
-                  className="ml-auto rounded p-1 text-[var(--text-dim)] hover:text-[var(--text)]">
-            <X size={16} />
-          </button>
-        </div>
+  return (
+    <StackedDialog
+      title={`Select cameras for ${appName}`}
+      onClose={onClose}
+      footer={(
+        <>
+          <span className="text-xs text-[var(--text-dim)]">
+            {count === 0 ? 'No cameras selected' : `${count} selected`}
+          </span>
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" onClick={() => onDone(chosen)}>Done</Button>
+        </>
+      )}
+    >
 
         <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2">
           <label className="flex min-w-[220px] flex-1 items-center gap-2 border border-[var(--border)]
@@ -573,15 +575,6 @@ function SelectCamerasDialog({
           })}
         </div>
 
-        <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-3">
-          <span className="text-xs text-[var(--text-dim)]">
-            {count === 0 ? 'No cameras selected' : `${count} selected`}
-          </span>
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="sm" onClick={() => onDone(chosen)}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+    </StackedDialog>
   )
 }
