@@ -67,6 +67,9 @@ _OPEN_API_PREFIXES = (
     "/api/v1/auth/",  # login / setup / refresh — enrollment happens on login
     "/api/v1/device-firewall/status",  # lets a blocked device learn its state
     "/api/v1/health",
+    # Signed media URLs (HA-112): the signature is the credential, names one
+    # resource, expires, and the signer's access is re-checked per fetch.
+    "/api/v1/media/s/",
 )
 
 

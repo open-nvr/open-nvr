@@ -141,7 +141,8 @@ def env(monkeypatch):
     routers = [importlib.import_module(m) for m in (
         "routers.system", "routers.cameras", "routers.api_tokens",
         "routers.recordings", "routers.audit_logs", "routers.events",
-        "routers.timeline_events", "routers.zones", "routers.live_state")]
+        "routers.timeline_events", "routers.zones", "routers.live_state", "routers.media",
+        "routers.alerts_inbox")]
     for mod in routers:
         app.include_router(mod.router, prefix="/api/v1")
     # Override EVERY get_db these routers depend on, not just the one in
@@ -391,7 +392,7 @@ def test_every_token_route_is_a_real_route():
     app = FastAPI()
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
-                "routers.events", "routers.zones", "routers.live_state"):
+                "routers.events", "routers.zones", "routers.live_state", "routers.media"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.

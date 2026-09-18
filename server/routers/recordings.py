@@ -974,17 +974,30 @@ async def export_clip(
     """
     import time as _time
 
-    from fastapi.responses import StreamingResponse
-
     entry = _export_tickets.pop(ticket, None)  # single-use
     if not entry or entry["expires"] < _time.time():
         raise HTTPException(status_code=403, detail="Invalid or expired ticket")
+    return await stream_playback_clip(
+        entry["path"], entry["start"], entry["duration"], entry["filename"])
+
+
+async def stream_playback_clip(
+    path: str, start: str, duration: float, filename: str, *, inline: bool = False
+):
+    """Stream ``duration`` seconds of a MediaMTX path from ``start`` as MP4.
+
+    Shared by the ticketed export and signed media URLs (HA-112). The
+    upstream status is probed BEFORE a response is committed: checking it
+    inside the generator would already have sent a 200 + attachment header,
+    turning an upstream failure into a silent zero-byte "clip.mp4".
+    """
+    from fastapi.responses import StreamingResponse
 
     url = f"{settings.mediamtx_playback_url}/get"  # url-internal-ok: server-side clip fetch from mediamtx playback server
     params = {
-        "path": entry["path"],
-        "start": entry["start"],
-        "duration": str(entry["duration"]),
+        "path": path,
+        "start": start,
+        "duration": str(duration),
         # The playback server authenticates now; core says who it is.
         **mediamtx_client.playback_auth(),
     }
@@ -994,11 +1007,6 @@ async def export_clip(
     client = mediamtx_client.get_client()
     httpx_timeout = _httpx.Timeout(30.0, read=600.0)
 
-    # Probe the upstream status BEFORE committing a response: open the stream,
-    # read the status code, and only then hand the (still-open) body to
-    # StreamingResponse. Checking status inside the generator would already
-    # have sent a 200 + attachment header, turning an upstream failure into a
-    # silent, zero-byte "clip.mp4" download instead of a real error.
     req = client.build_request("GET", url, params=params, timeout=httpx_timeout)
     try:
         resp = await client.send(req, stream=True)
@@ -1024,11 +1032,12 @@ async def export_clip(
         finally:
             await resp.aclose()
 
+    disposition = "inline" if inline else "attachment"
     return StreamingResponse(
         _stream(),
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
             "Cache-Control": "no-store",
         },
     )
