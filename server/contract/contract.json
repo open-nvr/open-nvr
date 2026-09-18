@@ -1,0 +1,892 @@
+{
+  "contract_version": "1.0.0",
+  "about": "The HA-facing API of OpenNVR (design \u00a76.11). Additive changes bump MINOR; removing or renaming anything bumps MAJOR with a two-release deprecation window. Checked by scripts/contract_check.py and server/tests/test_contract.py.",
+  "features": [
+    "correlation_id",
+    "ws_device_firewall",
+    "system_info",
+    "camera_stats",
+    "api_tokens",
+    "ws_token_tickets",
+    "detection_toggle",
+    "ptz_presets",
+    "manual_events",
+    "recording_pause",
+    "zones",
+    "live_state",
+    "ws_v2",
+    "signed_media",
+    "media_ready",
+    "site_mode",
+    "entities",
+    "search"
+  ],
+  "rest": [
+    {
+      "method": "GET",
+      "path": "/api/v1/system/info",
+      "token_scope": "settings.view",
+      "response": "system_info"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/system/resources",
+      "token_scope": "settings.view",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/",
+      "token_scope": "cameras.view",
+      "response": "camera_list"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/{camera_id}",
+      "token_scope": "cameras.view",
+      "response": "camera"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/cameras/{camera_id}",
+      "token_scope": "cameras.manage",
+      "response": "camera"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/{camera_id}/stats",
+      "token_scope": "cameras.view",
+      "response": "camera_stats"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/{camera_id}/snapshot",
+      "token_scope": "live.view",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/{camera_id}/zones",
+      "token_scope": "cameras.view",
+      "response": "zone_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/recording",
+      "token_scope": "cameras.view",
+      "response": "recording_switch"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/ptz/move",
+      "token_scope": "ptz.control",
+      "response": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/ptz/stop",
+      "token_scope": "ptz.control",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/cameras/{camera_id}/ptz/presets",
+      "token_scope": "ptz.control",
+      "response": "ptz_presets"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/ptz/presets",
+      "token_scope": "ptz.control",
+      "response": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/ptz/presets/{preset_token}/goto",
+      "token_scope": "ptz.control",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/streams/{camera_id}/info",
+      "token_scope": "live.view",
+      "response": "stream_info"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/events/ws-ticket",
+      "token_scope": "cameras.view",
+      "response": "ws_ticket"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/events",
+      "token_scope": "recordings.view",
+      "response": "event_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/events",
+      "token_scope": "events.create",
+      "response": "event"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/events/{event_id}/end",
+      "token_scope": "events.create",
+      "response": "event"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/events/{event_id}/protect",
+      "token_scope": "recordings.view",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/alerts-inbox",
+      "token_scope": "alerts.view",
+      "response": "alert_list"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/alerts-inbox/{alert_id}/images/{name}",
+      "token_scope": "alerts.view",
+      "response": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/alerts-inbox/ack",
+      "token_scope": "alerts.manage",
+      "response": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/recordings/export/ticket",
+      "token_scope": "recordings.view",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/live-state",
+      "token_scope": "cameras.view",
+      "response": "live_state"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/media/sign",
+      "token_scope": "cameras.view",
+      "response": "media_sign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/site-mode",
+      "token_scope": "settings.view",
+      "response": "site_mode"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/site-mode",
+      "token_scope": "settings.manage",
+      "response": "site_mode"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/entities",
+      "token_scope": "cameras.view",
+      "response": "entity_list"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/entities/states",
+      "token_scope": "cameras.view",
+      "response": "entity_states"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/entities/{key}/command",
+      "token_scope": "cameras.view",
+      "response": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/search",
+      "token_scope": "cameras.view",
+      "response": "search"
+    }
+  ],
+  "ws_v2": {
+    "url": "/api/v1/events/ws?ticket=<ticket>&v=2[&since=<seq>&epoch=<epoch>][&types=<type>...]",
+    "control_frames": {
+      "subscribed": [
+        "v",
+        "event_type",
+        "epoch",
+        "seq",
+        "filters",
+        "resumed"
+      ],
+      "state_snapshot": [
+        "v",
+        "event_type",
+        "seq",
+        "resync",
+        "cameras",
+        "site_mode",
+        "entity_states"
+      ],
+      "heartbeat": [
+        "v",
+        "event_type",
+        "seq"
+      ],
+      "lagged": [
+        "v",
+        "event_type",
+        "dropped"
+      ]
+    },
+    "event_frame": [
+      "v",
+      "seq",
+      "event_type",
+      "timestamp"
+    ],
+    "event_types": {
+      "tracks": [
+        "camera_id",
+        "payload"
+      ],
+      "camera_status": [
+        "camera_id",
+        "payload"
+      ],
+      "camera_event": [
+        "camera_id",
+        "payload"
+      ],
+      "app_alert": [
+        "camera_id",
+        "payload"
+      ],
+      "live_state": [
+        "camera_id",
+        "payload"
+      ],
+      "media_ready": [
+        "camera_id",
+        "payload"
+      ],
+      "site_mode": [
+        "payload"
+      ],
+      "entity_state": [
+        "payload"
+      ],
+      "descriptors_changed": [
+        "payload"
+      ]
+    }
+  },
+  "descriptor": {
+    "required": [
+      "key",
+      "platform",
+      "name",
+      "device",
+      "required_scope",
+      "origin",
+      "enabled_default",
+      "descriptor_version"
+    ],
+    "optional": [
+      "camera_id",
+      "translation_key",
+      "device_class",
+      "unit",
+      "state_class",
+      "entity_category",
+      "icon",
+      "options",
+      "event_types",
+      "command"
+    ],
+    "platforms": [
+      "sensor",
+      "binary_sensor",
+      "switch",
+      "select",
+      "button",
+      "number",
+      "event",
+      "image"
+    ],
+    "command_types": [
+      "core_control",
+      "app_action"
+    ],
+    "core_controls": [
+      "detection",
+      "recording_pause",
+      "manual_event",
+      "ack_alerts",
+      "ptz_preset",
+      "ptz_move"
+    ]
+  },
+  "schemas": {
+    "system_info": {
+      "type": "object",
+      "required": [
+        "site_id",
+        "name",
+        "version",
+        "contract_version",
+        "features",
+        "recording_pause_enabled",
+        "uptime_s"
+      ],
+      "properties": {
+        "site_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "string"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "recording_pause_enabled": {
+          "type": "boolean"
+        },
+        "uptime_s": {
+          "type": "integer"
+        },
+        "latest_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "is_active",
+        "detection_enabled"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "is_active": {
+          "type": "boolean"
+        },
+        "detection_enabled": {
+          "type": "boolean"
+        },
+        "recording_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "camera_list": {
+      "type": "object",
+      "required": [
+        "cameras"
+      ],
+      "properties": {
+        "cameras": {
+          "type": "array",
+          "items": {
+            "$ref": "camera"
+          }
+        }
+      }
+    },
+    "camera_stats": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "is_active",
+        "stream_ready",
+        "recording_state",
+        "recording_paused",
+        "detect_up",
+        "detect_fps",
+        "inference_ms",
+        "bitrate_kbps"
+      ],
+      "properties": {
+        "camera_id": {
+          "type": "integer"
+        },
+        "is_active": {
+          "type": "boolean"
+        },
+        "stream_ready": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "recording_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recording_paused": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "detect_up": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "detect_fps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inference_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "bitrate_kbps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "required": [
+        "id",
+        "camera_id",
+        "name",
+        "polygon",
+        "labels"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "camera_id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "polygon": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "labels": {
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      }
+    },
+    "zone_list": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "zones"
+      ],
+      "properties": {
+        "zones": {
+          "type": "array",
+          "items": {
+            "$ref": "zone"
+          }
+        }
+      }
+    },
+    "recording_switch": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "recording",
+        "paused"
+      ],
+      "properties": {
+        "recording": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ptz_presets": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "presets"
+      ],
+      "properties": {
+        "presets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "token",
+              "name"
+            ]
+          }
+        }
+      }
+    },
+    "stream_info": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "stream_name",
+        "token",
+        "urls"
+      ],
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "urls": {
+          "type": "object",
+          "required": [
+            "webrtc",
+            "rtsps"
+          ]
+        }
+      }
+    },
+    "ws_ticket": {
+      "type": "object",
+      "required": [
+        "ticket",
+        "expires_in",
+        "kind"
+      ],
+      "properties": {
+        "ticket": {
+          "type": "string"
+        },
+        "expires_in": {
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "user",
+            "token",
+            "service"
+          ]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "id",
+        "camera_id",
+        "source",
+        "event_type",
+        "label",
+        "started_at",
+        "ended_at",
+        "has_evidence",
+        "evidence_url",
+        "zone_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "camera_id": {
+          "type": "integer"
+        },
+        "zone_ids": {
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      }
+    },
+    "event_list": {
+      "type": "object",
+      "required": [
+        "events",
+        "count",
+        "total"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "event"
+          }
+        }
+      }
+    },
+    "alert_list": {
+      "type": "object",
+      "required": [
+        "alerts",
+        "unacked_count",
+        "total"
+      ]
+    },
+    "live_state_camera": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "stale",
+        "motion",
+        "objects",
+        "zones"
+      ],
+      "properties": {
+        "camera_id": {
+          "type": "integer"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "motion": {
+          "type": "boolean"
+        },
+        "objects": {
+          "type": "object"
+        },
+        "zones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "zone_id",
+              "name",
+              "objects"
+            ]
+          }
+        }
+      }
+    },
+    "live_state": {
+      "type": "object",
+      "required": [
+        "stale_after_s",
+        "cameras"
+      ],
+      "properties": {
+        "cameras": {
+          "type": "array",
+          "items": {
+            "$ref": "live_state_camera"
+          }
+        }
+      }
+    },
+    "media_sign": {
+      "type": "object",
+      "required": [
+        "url",
+        "token",
+        "expires_at"
+      ],
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "site_mode": {
+      "type": "object",
+      "required": [
+        "mode",
+        "modes"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "disarmed",
+            "armed_home",
+            "armed_away"
+          ]
+        },
+        "modes": {
+          "type": "array"
+        }
+      }
+    },
+    "descriptor": {
+      "type": "object",
+      "required": [
+        "key",
+        "platform",
+        "name",
+        "device",
+        "required_scope",
+        "origin",
+        "enabled_default",
+        "descriptor_version"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "sensor",
+            "binary_sensor",
+            "switch",
+            "select",
+            "button",
+            "number",
+            "event",
+            "image"
+          ]
+        },
+        "device": {
+          "type": "object",
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        "descriptor_version": {
+          "type": "integer"
+        },
+        "command": {
+          "type": "object",
+          "required": [
+            "type"
+          ]
+        }
+      }
+    },
+    "entity_list": {
+      "type": "object",
+      "required": [
+        "etag",
+        "descriptor_version",
+        "entities"
+      ],
+      "properties": {
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "descriptor"
+          }
+        }
+      }
+    },
+    "entity_states": {
+      "type": "object",
+      "required": [
+        "states"
+      ]
+    },
+    "search": {
+      "type": "object",
+      "required": [
+        "results",
+        "semantic",
+        "filters"
+      ],
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "at",
+              "camera_id"
+            ]
+          }
+        },
+        "semantic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ws_subscribed": {
+      "type": "object",
+      "required": [
+        "v",
+        "event_type",
+        "epoch",
+        "seq",
+        "filters",
+        "resumed"
+      ]
+    },
+    "ws_state_snapshot": {
+      "type": "object",
+      "required": [
+        "v",
+        "event_type",
+        "seq",
+        "resync",
+        "cameras",
+        "site_mode",
+        "entity_states"
+      ],
+      "properties": {
+        "cameras": {
+          "type": "array",
+          "items": {
+            "$ref": "live_state_camera"
+          }
+        }
+      }
+    },
+    "ws_entity_state": {
+      "type": "object",
+      "required": [
+        "v",
+        "seq",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "payload": {
+          "type": "object",
+          "required": [
+            "key"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "site_id": "0755a940-1ff5-4861-ac08-1f57bb29a180",
+  "name": "OpenNVR",
+  "version": "0.1.5",
+  "contract_version": "1.0.0",
+  "features": [
+    "correlation_id",
+    "api_tokens",
+    "ws_v2",
+    "entities",
+    "site_mode"
+  ],
+  "recording_pause_enabled": false,
+  "uptime_s": 3600,
+  "latest_version": null
+}
