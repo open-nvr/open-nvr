@@ -78,10 +78,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install ONLY runtime dependencies (NO build-essential, NO libpq-dev)
 # These are the minimal libraries needed to RUN the compiled packages
+# ffmpeg: /recordings/frame (and the camera-agent twin) extract a still from a
+# recorded segment by shelling out to ffmpeg; without it they 502 on every install.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
     curl \
     gosu \
+    ffmpeg \
     libpq5 \
     libgl1 \
     libglib2.0-0 \

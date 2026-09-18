@@ -198,4 +198,5 @@ All eight host failures come from the Windows host, not the code; they pass on L
 | ID | Status | Branch | Commit | Notes |
 |---|---|---|---|---|
 | HA-000 | done | SRB-ha-000-execution-setup | (this commit) | Scaffold + dev scripts verified: both suites pass in the py3.14 container; hassfest clean. Baselines in §8. The `test_*.py` gitignore needed a negation for `integrations/home-assistant/**/tests`. PowerShell 5.1 scripts use `$ErrorActionPreference='Continue'` plus `$LASTEXITCODE`, because docker writes progress to stderr. |
-| HA-001 | next | — | — | — |
+| HA-001 | done | SRB-ha-001-core-ffmpeg | (this commit) | Before: `core:main` `/recordings/frame` → 502 "Could not extract frame". After, on `core:ha-dev`: 200 image/jpeg for cams 1 and 3 (ffmpeg 7.1.5). The image grows ~330 MB (1.57 → 1.9 GB; Debian ffmpeg pulls codec libs), more than the ~100 MB estimated. Added `scripts/ha-dev/swap-core.ps1` (recreates core only, carries `OPENNVR_HOST_IP`/`OPENNVR_LAN_IPS`, never edits `.env`) and `mint-jwt.ps1`. |
+| HA-002 | next | — | — | — |
