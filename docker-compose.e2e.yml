@@ -1,0 +1,156 @@
+# ==========================================
+# OpenNVR — end-to-end test stack (opt-in overlay, test only)
+# ==========================================
+# Runs a SECOND, fully isolated OpenNVR alongside whatever you already have up,
+# plus the pytest/Playwright runner that drives it. Nothing here is used by a
+# normal install.
+#
+#     python tests/e2e/run.py --fresh
+#
+# That wrapper exists because the isolation below only holds if every piece
+# of it is applied together; driving compose by hand and forgetting one line
+# is how you end up pointing the E2E stack at your real recordings.
+#
+# ── What makes it isolated ────────────────────────────────────────────────
+#
+# Compose isolates *some* things by project name (-p opennvr-e2e) and not
+# others, so this file has to close the gaps by hand:
+#
+#   volumes, networks   project-prefixed automatically -> already isolated
+#   container_name      NOT prefixed; it is an absolute name, so two projects
+#                       both declaring `opennvr_core` collide. Every service
+#                       below is therefore renamed to opennvr_e2e_*.
+#   published ports     compose CONCATENATES `ports` across files — an override
+#                       cannot remove or replace an entry, only add to it. So
+#                       the base file's publications are parameterised
+#                       (CORE_HOST_PORT and friends) and shifted here into a
+#                       +20000 band. They are unused by the suite — the runner
+#                       lives on the internal network — but they must not
+#                       collide with the real stack's.
+#   subnet              OPENNVR_DOCKER_SUBNET -> 172.29.0.0/16, since two
+#                       bridges cannot share one subnet on a host.
+#   recordings          RECORDINGS_PATH -> a scratch dir, never ./recordings.
+#
+# The port band is fixed rather than ephemeral on purpose: Docker picks
+# ephemeral ports from the same range Windows WinNAT reserves from, and a
+# single unbindable port aborts EVERY publication for that container (#298).
+# A quiet fixed band in the 20000s is far likelier to bind than a lottery.
+# ==========================================
+
+services:
+  # ── Base stack, renamed so it can coexist with a real deployment ────────
+  db:
+    container_name: opennvr_e2e_db
+
+  mediamtx-certs-init:
+    container_name: opennvr_e2e_mediamtx_certs_init
+
+  mediamtx:
+    container_name: opennvr_e2e_mediamtx
+    environment:
+      # Recording paths are parsed back out of the filesystem layout, so a
+      # mismatch between this and opennvr-core's TZ silently breaks playback
+      # lookups at the day boundary. Pin both to the same explicit value.
+      - TZ=${E2E_TZ:-UTC}
+
+  nats:
+    container_name: opennvr_e2e_nats
+
+  nats-apps:
+    container_name: opennvr_e2e_nats_apps
+
+  yolov8-weights-init:
+    container_name: opennvr_e2e_yolov8_weights_init
+
+  yolov8-adapter:
+    container_name: opennvr_e2e_yolov8_adapter
+
+  detect-pipeline:
+    container_name: opennvr_e2e_detect_pipeline
+    environment:
+      - TZ=${E2E_TZ:-UTC}
+
+  opennvr-core:
+    container_name: opennvr_e2e_core
+    environment:
+      - TZ=${E2E_TZ:-UTC}
+      # 60s is the product default, and every recording assertion would then
+      # begin with a full minute of dead waiting for the first segment to
+      # close. Set here rather than in the env file because compose passes an
+      # explicit allowlist to each service: a variable the service block does
+      # not name is invisible inside the container no matter what the env file
+      # says. (Same trap as DETECT_ONNX_MODEL.)
+      - RECORDING_SEGMENT_SECONDS=${RECORDING_SEGMENT_SECONDS:-10}
+
+  nginx-certs-init:
+    container_name: opennvr_e2e_nginx_certs_init
+
+  nginx:
+    container_name: opennvr_e2e_nginx
+
+  log-viewer:
+    container_name: opennvr_e2e_log_viewer
+
+  # ── The fake-camera rig, when the fakecams overlay is also passed ───────
+  # Renamed for the same reason. Harmless if that overlay is absent: compose
+  # ignores a service definition fragment for a service nothing declares.
+  fakecams:
+    container_name: opennvr_e2e_fakecams
+
+  # ── The test runner ────────────────────────────────────────────────────
+  e2e:
+    profiles: [e2e]
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile
+    container_name: opennvr_e2e_runner
+    # Invoked as `docker compose run --rm e2e pytest ...`; never left running.
+    entrypoint: ["pytest"]
+    command: ["-m", "smoke"]
+    working_dir: /work/tests/e2e
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+    environment:
+      # Reached by DNS on the internal network — no published port involved,
+      # which is what keeps the suite immune to the WinNAT port lottery.
+      - E2E_CORE_URL=http://opennvr-core:8000
+      - E2E_KAIC_URL=http://opennvr-core:8100
+      - E2E_NGINX_URL=https://nginx
+      - E2E_MEDIAMTX_API=http://mediamtx:9997
+      - E2E_DETECT_METRICS=http://detect-pipeline:9109
+      - E2E_NATS_URL=nats://nats:4222
+      - E2E_FAKECAM_API=http://fakecams:9997
+      - E2E_FAKECAM_IP=${FAKECAM_IP:-172.29.90.10}
+      - E2E_CORE_CONTAINER=opennvr_e2e_core
+      - E2E_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME:-opennvr-e2e}
+      # Same secrets the stack booted with: the internal door and the NATS
+      # bus both authenticate with this.
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      # Passed through by run.sh/run.ps1 when it could read the token from the
+      # core logs on the host. Empty is fine — bootstrap falls back to reading
+      # the container logs itself.
+      - E2E_SETUP_TOKEN=${E2E_SETUP_TOKEN:-}
+      - TZ=${E2E_TZ:-UTC}
+      # Provenance for the failure report. A stack bug filed without the tags
+      # and the commit it was seen on is close to untriageable weeks later.
+      - E2E_GIT_SHA=${E2E_GIT_SHA:-}
+      - CORE_TAG=${CORE_TAG:-}
+      - ADAPTER_TAG=${ADAPTER_TAG:-}
+      # Playwright needs a writable browser cache outside the read-only mount.
+      - HOME=/tmp/e2e-home
+    volumes:
+      # The suite itself, writable so artifacts land on the host where you can
+      # read them, and so editing a test does not mean rebuilding the image.
+      - ./tests/e2e:/work/tests/e2e
+      # Read-only view of the repo for the few tests that assert against
+      # shipped config (tasks.yml, apps_index.yml) rather than the API.
+      - ./server/config:/work/server/config:ro
+      # Log collection and the setup-token scrape shell out to `docker`.
+      # Read-only: the runner reads logs and inspects state, never mutates.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      # Both, because apps sit only on opennvr_apps while everything else is
+      # on opennvr_internal.
+      - opennvr_internal
+      - opennvr_apps

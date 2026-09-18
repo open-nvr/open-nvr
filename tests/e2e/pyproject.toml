@@ -1,0 +1,58 @@
+[project]
+name = "opennvr-e2e"
+version = "0.1.0"
+description = "End-to-end system tests for OpenNVR: drives the real stack through real user journeys."
+requires-python = ">=3.11"
+
+dependencies = [
+    "pytest>=8.0",
+    # Pinned to the runner image's Playwright version: the image carries
+    # the matching browser binaries and the package finds them by a
+    # version-stamped path. Bump this and the Dockerfile's FROM line in
+    # the same change.
+    "playwright==1.55.0",
+    "pytest-playwright>=0.5",       # browser journeys, same runner as the API tests
+    "pytest-randomly>=3.15",        # shuffles order so inter-test coupling cannot hide
+    "httpx>=0.27",
+    "pyotp>=2.9",                   # the admin account is MFA-enrolled; TOTP is mandatory
+    "nats-py>=2.6",                 # bus assertions: which event fired, and which did not
+    "websockets>=12.0",             # /api/v1/events/ws live fan-out
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# --strict-markers turns a typo'd marker into a collection error instead of a
+# test that silently belongs to no tier and never runs in CI.
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+    "--showlocals",
+]
+
+markers = [
+    "smoke: fast, no detection — the tier CI runs on every PR",
+    "media: needs a camera that is actually publishing (the fake-camera rig)",
+    "detection: additionally needs Tier-0 to detect a real object",
+    "lpr: needs the fast_plate_ocr adapter and a vehicle clip",
+    "ui: drives the browser with Playwright",
+]
+
+# Order independence is a property of this suite, not an aspiration, so the
+# shuffle is on by default. A failing run prints its seed; reproduce with
+#     pytest -p randomly --randomly-seed=<seed>
+# If a test only passes in a particular order, that is the bug.
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+log_cli_date_format = "%H:%M:%S"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Route and budget constants are deliberately SCREAMING_CASE callables.
+ignore = ["N802"]
