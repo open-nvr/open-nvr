@@ -110,6 +110,15 @@ def test_loopback_and_service_tickets_pass():
                                   _bind("172.28.5.5", None, internal=True))
 
 
+def test_api_token_ticket_passes_from_the_minting_ip_only():
+    """An API token is a bound credential (HA-103): like on HTTP it needs no
+    approved browser, but the ticket still can't be opened elsewhere."""
+    tok = ev.WsTicketBinding(client_ip="192.168.1.20", device_token=None,
+                             api_token_id=7)
+    assert ev._ws_firewall_allows(_conn("192.168.1.20"), tok)
+    assert not ev._ws_firewall_allows(_conn("192.168.1.99"), tok)
+
+
 def test_sibling_container_without_token_passes_like_http():
     assert ev._ws_firewall_allows(_conn("172.28.0.7"), _bind("172.28.0.7"))
 

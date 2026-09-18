@@ -129,7 +129,7 @@ def env(monkeypatch):
     app = FastAPI()
     app.add_middleware(RequestLoggingMiddleware)
     for mod in ("routers.system", "routers.cameras", "routers.api_tokens",
-                "routers.recordings", "routers.audit_logs"):
+                "routers.recordings", "routers.audit_logs", "routers.events"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     app.dependency_overrides[get_db] = _db
 
@@ -360,7 +360,8 @@ def test_every_token_route_is_a_real_route():
 
     app = FastAPI()
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
-                "routers.streams", "routers.timeline_events", "routers.alerts_inbox"):
+                "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
+                "routers.events"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.
@@ -464,3 +465,97 @@ def test_route_key_on_the_installed_fastapi():
     app.include_router(r, prefix="/api/v1")
     assert TestClient(app).get("/api/v1/cameras/3/stats").status_code == 200
     assert seen["key"] == ("GET", "/api/v1/cameras/{camera_id}/stats")
+
+
+# ── events WebSocket (HA-103) ─────────────────────────────────────────────
+
+
+def _ws_ticket(env, token):
+    return env.client.post("/api/v1/events/ws-ticket", headers=_as(token))
+
+
+def _open(client, ticket, **params):
+    q = "&".join([f"ticket={ticket}"] + [f"{k}={v}" for k, v in params.items()])
+    return client.websocket_connect(f"/api/v1/events/ws?{q}")
+
+
+def test_a_token_socket_keeps_the_tokens_cameras_and_scopes(env):
+    tok = _mint(env, camera_ids=[1])["token"]  # no alerts.view
+    r = _ws_ticket(env, tok)
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "token"
+    with _open(env.client, r.json()["ticket"]) as ws:
+        hello = ws.receive_json()
+    assert hello["event_type"] == "subscribed"
+    assert hello["filters"]["event_types"] == sorted(
+        ["camera_status", "camera_event", "tracks", "inference_result", "inference_error"])
+
+    # A camera outside the allow-list is refused, not silently empty.
+    from starlette.websockets import WebSocketDisconnect
+
+    t2 = _ws_ticket(env, tok).json()["ticket"]
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _open(env.client, t2, camera_id=2) as ws:
+            ws.receive_json()
+    assert exc.value.reason == "forbidden"
+
+
+def test_a_token_socket_is_scoped_to_what_the_owner_sees(env):
+    """vera sees only camera 3; her token with no allow-list gets exactly that."""
+    from starlette.websockets import WebSocketDisconnect
+
+    tok = _mint(env, who="vera", scopes=["cameras.view"])["token"]
+    t = _ws_ticket(env, tok).json()["ticket"]
+    with pytest.raises(WebSocketDisconnect):
+        with _open(env.client, t, camera_id=1) as ws:
+            ws.receive_json()
+    t = _ws_ticket(env, tok).json()["ticket"]
+    with _open(env.client, t, camera_id=3) as ws:
+        assert ws.receive_json()["filters"]["event_types"] == ["camera_status"]
+
+
+def test_ws_ticket_needs_cameras_view(env):
+    tok = _mint(env, scopes=["settings.view"])["token"]
+    assert _ws_ticket(env, tok).status_code == 403
+
+
+def test_the_token_is_rechecked_when_the_socket_opens(env):
+    """The ticket lives 30 s: a revoke inside that window must still win."""
+    from starlette.websockets import WebSocketDisconnect
+
+    out = _mint(env)
+    t = _ws_ticket(env, out["token"]).json()["ticket"]
+    env.client.delete(f"/api/v1/api-tokens/{out['id']}", headers=env.jwt("admin"))
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _open(env.client, t) as ws:
+            ws.receive_json()
+    assert exc.value.reason == "unauthorized"
+
+
+def test_allowed_networks_apply_to_the_socket_address(env):
+    from starlette.websockets import WebSocketDisconnect
+
+    tok = _mint(env, allowed_cidrs=["192.168.1.0/24"])["token"]
+    t = _ws_ticket(env, tok).json()["ticket"]  # minted from 192.168.1.20
+    elsewhere = TestClient(env.client.app, client=("10.9.9.9", 50000))
+    with pytest.raises(WebSocketDisconnect):
+        with _open(elsewhere, t) as ws:
+            ws.receive_json()
+
+
+def test_the_ws_ticket_route_and_the_handshake_need_the_same_scope():
+    from services import api_tokens
+
+    assert api_tokens.TOKEN_ROUTES[("POST", "/api/v1/events/ws-ticket")] ==         api_tokens.WS_TICKET_SCOPE
+
+
+def test_bus_event_type_entitlement():
+    from services.event_bus_service import _Subscriber
+
+    sub = _Subscriber(10, None, None, frozenset({1}), frozenset({"tracks"}))
+    assert sub.matches({"event_type": "tracks", "camera_id": 1})
+    assert not sub.matches({"event_type": "app_alert", "camera_id": 1})
+    assert not sub.matches({"event_type": "tracks", "camera_id": 2})
+    assert not sub.matches({"event_type": "brand_new_type", "camera_id": 1})
+    anyone = _Subscriber(10, None, None, None, None)
+    assert anyone.matches({"event_type": "brand_new_type", "camera_id": 9})

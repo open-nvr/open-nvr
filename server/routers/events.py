@@ -59,6 +59,7 @@ from core.database import get_db
 from core.logging_config import main_logger
 from models import User
 from routers.apps import get_read_principal
+from services import api_tokens
 from services.camera_scope import visible_camera_ids
 from services import device_firewall_service as dfw
 from services.event_bus_service import get_event_bus
@@ -100,6 +101,9 @@ class WsTicketBinding:
     device_token: str | None
     #: Minted with the deployment's INTERNAL_API_KEY (a sibling service).
     internal_key: bool = False
+    #: Minted with an API token (HA-103): the socket runs as that token,
+    #: re-checked at the handshake, never as its owner.
+    api_token_id: int | None = None
 
 
 # ticket -> binding. Kept beside _ws_tickets (same keys, same lifetime) so
@@ -185,7 +189,10 @@ async def create_ws_ticket(request: Request, principal=Depends(get_read_principa
       overlay tracks to its own viewers and applies its own per-viewer
       scope, the same way it does for everything else it shows;
     * an app key → refused (403). An installed app is not a platform
-      service; its own view of the bus is what the SDK gives it.
+      service; its own view of the bus is what the SDK gives it;
+    * an API token (needs ``cameras.view``) → a ticket bound to the token.
+      The socket keeps the token's camera allow-list and receives only the
+      event types its scopes cover (``api_tokens.TOKEN_EVENT_SCOPES``).
     """
     from services.app_keys import AppPrincipal
 
@@ -198,12 +205,15 @@ async def create_ws_ticket(request: Request, principal=Depends(get_read_principa
         client_ip=get_client_ip(request) or None,
         device_token=dfw.token_from_request(request),
         internal_key=principal is None,
+        api_token_id=(principal.token_id
+                      if api_tokens.is_token_principal(principal) else None),
     )
     if principal is None:
         ticket, ttl = _mint_ws_ticket(None, binding)
         return {"ticket": ticket, "expires_in": ttl, "kind": "service"}
     ticket, ttl = _mint_ws_ticket(principal.username, binding)
-    return {"ticket": ticket, "expires_in": ttl, "kind": "user"}
+    kind = "token" if binding.api_token_id is not None else "user"
+    return {"ticket": ticket, "expires_in": ttl, "kind": kind}
 
 
 def _ws_firewall_allows(websocket, binding: WsTicketBinding | None) -> bool:
@@ -232,6 +242,10 @@ def _ws_firewall_allows(websocket, binding: WsTicketBinding | None) -> bool:
         return True
     if binding is not None and binding.client_ip and ip != binding.client_ip:
         return False
+    if binding is not None and binding.api_token_id is not None:
+        # An API token is a bound credential and passes the HTTP firewall on
+        # its own (the mint did); it is re-validated in _authenticate_ws.
+        return True
     bound_token = binding.device_token if binding is not None else None
     token = bound_token or dfw.token_from_request(websocket)
     if token:
@@ -239,12 +253,17 @@ def _ws_firewall_allows(websocket, binding: WsTicketBinding | None) -> bool:
     return is_internal_service(ip)
 
 
-def _authenticate_ws(ticket: str | None, db: Session) -> User | ServiceIdentity | None:
+def _authenticate_ws(
+    ticket: str | None, db: Session,
+    binding: WsTicketBinding | None = None, ip: str = "",
+):
     """Authenticate a WS handshake using a single-use ticket.
 
     We deliberately do NOT raise here — the caller closes the socket with a
     proper code so the client sees a clean rejection. A service ticket
-    yields ``SERVICE`` without touching the users table.
+    yields ``SERVICE`` without touching the users table; a token ticket
+    yields a ``TokenPrincipal`` after re-checking the token (revoked,
+    expired, owner disabled, allowed networks, scope).
     """
     if not ticket:
         return None
@@ -253,6 +272,11 @@ def _authenticate_ws(ticket: str | None, db: Session) -> User | ServiceIdentity 
         return None
     if subject is _SERVICE_TICKET:
         return SERVICE
+    if binding is not None and binding.api_token_id is not None:
+        principal = api_tokens.principal_for_ws(db, binding.api_token_id, ip)
+        if principal is None or principal.username != subject:
+            return None
+        return principal
     user = db.query(User).filter(User.username == subject).first()
     if user is None or not user.is_active:
         return None
@@ -325,7 +349,7 @@ async def events_stream(
     db_gen = get_db()
     db: Session = next(db_gen)
     try:
-        user = _authenticate_ws(ticket, db)
+        user = _authenticate_ws(ticket, db, binding, get_client_ip(websocket))
         # AUTHORIZE the subscription, not just the connection. Being logged
         # in said nothing about WHICH cameras you may watch: `camera_id` was
         # taken from the query string unchecked, and leaving it off meant
@@ -339,6 +363,10 @@ async def events_stream(
         # attributes happen to still be loaded. Not a gamble worth taking
         # on an authorization path.
         allowed = _ws_scope_for(user, db) if user is not None else set()
+        # A token receives only the event types its scopes cover. Same
+        # session for the same reason: this reads the owner's role.
+        event_types = (api_tokens.token_event_types(user)
+                       if api_tokens.is_token_principal(user) else None)
     finally:
         # Mirror FastAPI's get_db teardown without relying on Depends here
         # (WebSocket routes can't use Depends() for request-scoped DB sessions
@@ -375,7 +403,9 @@ async def events_stream(
     await websocket.accept()
 
     bus = get_event_bus()
-    filters = {"camera_id": camera_id, "task": task}
+    filters: dict[str, Any] = {"camera_id": camera_id, "task": task}
+    if event_types is not None:
+        filters["event_types"] = sorted(event_types)
 
     try:
         await websocket.send_text(json.dumps({
@@ -388,7 +418,8 @@ async def events_stream(
     reported_drops = 0
 
     async with bus.subscribe(camera_id=camera_id, tasks=task,
-                             allowed_camera_ids=allowed) as sub:
+                             allowed_camera_ids=allowed,
+                             allowed_event_types=event_types) as sub:
         main_logger.info(
             "events_stream opened: user=%s filters=%s subscribers_total=%d",
             user.username, filters, bus.subscriber_count,

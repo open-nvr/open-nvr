@@ -65,9 +65,9 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", f"{_A}/cameras/{{camera_id}}/ptz/move"): "ptz.control",
     ("POST", f"{_A}/cameras/{{camera_id}}/ptz/stop"): "ptz.control",
     ("GET", f"{_A}/streams/{{camera_id}}/info"): "live.view",
-    # NOT /events/ws-ticket yet: tickets are minted by username and the
-    # socket would then run with the OWNER's full camera scope. HA-103 adds
-    # token-scoped tickets and this route together.
+    # The ticket carries the token (routers/events.py), so the socket keeps
+    # the token's cameras and scopes; see TOKEN_EVENT_SCOPES.
+    ("POST", f"{_A}/events/ws-ticket"): "cameras.view",
     ("GET", f"{_A}/events"): "recordings.view",
     ("GET", f"{_A}/alerts-inbox"): "alerts.view",
     ("GET", f"{_A}/alerts-inbox/{{alert_id}}/images/{{name}}"): "alerts.view",
@@ -119,12 +119,14 @@ def resolve_token(db: Session, plain: str | None):
     row = db.query(ApiToken).filter(ApiToken.prefix == match.group(1)).first()
     if row is None or not secrets.compare_digest(row.token_hash, hash_token(plain)):
         return None
+    return row if _row_live(row) else None
+
+
+def _row_live(row) -> bool:
     if row.revoked_at is not None:
-        return None
+        return False
     expires = _as_aware(row.expires_at)
-    if expires is not None and expires <= datetime.now(UTC):
-        return None
-    return row
+    return expires is None or expires > datetime.now(UTC)
 
 
 # ── the principal ─────────────────────────────────────────────────────────
@@ -335,9 +337,8 @@ def authorize_request(request, db: Session, plain: str) -> TokenPrincipal:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="This API token may not be used from this address")
 
-    scopes = frozenset(s for s in (row.scopes or []) if s in ALLOWED_SCOPES)
-    cameras = None if row.camera_ids is None else frozenset(int(c) for c in row.camera_ids)
-    principal = TokenPrincipal(owner, row.id, row.name, scopes, cameras)
+    principal = _principal(owner, row)
+    cameras = principal.camera_ids
 
     key = _route_key(request) if request is not None else None
     required = TOKEN_ROUTES.get(key) if key else None
@@ -357,6 +358,60 @@ def authorize_request(request, db: Session, plain: str) -> TokenPrincipal:
     ctx = current_ctx()
     if ctx is not None:
         ctx.actor = f"token:{row.name}"
+    _touch_last_used(row.id, ip)
+    return principal
+
+
+def _principal(owner, row) -> TokenPrincipal:
+    scopes = frozenset(s for s in (row.scopes or []) if s in ALLOWED_SCOPES)
+    cameras = None if row.camera_ids is None else frozenset(int(c) for c in row.camera_ids)
+    return TokenPrincipal(owner, row.id, row.name, scopes, cameras)
+
+
+# ── the events WebSocket ──────────────────────────────────────────────────
+
+#: Scope a token needs to mint an events-socket ticket, and to open it.
+WS_TICKET_SCOPE = "cameras.view"
+
+#: Scope a token needs to RECEIVE each event type on the events socket.
+#: Types not listed never reach a token (deny by default): a new event type
+#: stays invisible to integrations until someone decides who may see it.
+TOKEN_EVENT_SCOPES: dict[str, str] = {
+    "camera_status": "cameras.view",
+    "tracks": "live.view",
+    "inference_result": "live.view",
+    "inference_error": "live.view",
+    "camera_event": "recordings.view",
+    "app_alert": "alerts.view",
+}
+
+
+def token_event_types(principal: TokenPrincipal) -> frozenset[str]:
+    """Event types this token may receive on the events socket."""
+    return frozenset(t for t, perm in TOKEN_EVENT_SCOPES.items()
+                     if token_has_permission(principal, perm))
+
+
+def principal_for_ws(db: Session, token_id: int, ip: str) -> TokenPrincipal | None:
+    """Re-check a ticket's token at the WebSocket handshake.
+
+    The ticket is up to 30 s old: the token may have been revoked, the owner
+    disabled or the scope removed since. Also applies ``allowed_cidrs`` to
+    the address the socket really comes from. None means refuse.
+    """
+    from models import ApiToken, User
+
+    row = db.query(ApiToken).filter(ApiToken.id == token_id).first()
+    if row is None or not _row_live(row):
+        return None
+    owner = db.query(User).filter(User.id == row.owner_user_id).first()
+    if owner is None or not owner.is_active:
+        return None
+    if not _ip_allowed(ip, row.allowed_cidrs):
+        return None
+    principal = _principal(owner, row)
+    if not token_has_permission(principal, WS_TICKET_SCOPE):
+        return None
     _touch_last_used(row.id, ip)
     return principal
 
