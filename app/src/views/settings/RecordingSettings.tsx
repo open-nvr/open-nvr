@@ -21,6 +21,7 @@ import { apiService } from '../../lib/apiService'
 import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw } from 'lucide-react'
 import { useSnackbar } from '../../components/Snackbar'
 import { UsageBar } from '../../components/ui/stats'
+import { RecordingPauseSetting } from './RecordingPauseSetting'
 
 interface OrphanIdentity {
     camera_uuid?: string | null
@@ -239,6 +240,8 @@ export function RecordingSettings() {
                 <FolderOpen className="text-[var(--accent)]" />
                 Recording Settings
             </h2>
+
+            <RecordingPauseSetting />
 
             {/* Storage Settings */}
             <form onSubmit={handleSaveStorage} className="space-y-6 mb-8">

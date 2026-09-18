@@ -1131,7 +1131,20 @@ async def update_camera(
         from services import api_tokens
 
         if api_tokens.is_token_principal(current_user):
-            refused = sorted(set(update_fields) - api_tokens.TOKEN_CAMERA_FIELDS)
+            allowed = set(api_tokens.TOKEN_CAMERA_FIELDS)
+            if "is_active" in update_fields:
+                # Turning a camera off also stops its recording, so a token
+                # may only do it where recording may be paused at all.
+                from services.site_settings import recording_pause_enabled
+
+                if not recording_pause_enabled(db):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Turning a camera off stops recording, which this "
+                               "site does not allow API tokens to do",
+                    )
+                allowed.add("is_active")
+            refused = sorted(set(update_fields) - allowed)
             if refused:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -2145,38 +2158,84 @@ def test_camera_connection(
 
 
 def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
-    from sqlalchemy.sql import func
+    from services.recording_pause import set_recording_config
 
-    from models import Camera, CameraConfig
+    set_recording_config(db, camera_id, enable)
 
-    config = db.query(CameraConfig).filter(CameraConfig.camera_id == camera_id).first()
-    if config:
-        config.recording_enabled = enable
-    else:
-        # Create config if it doesn't exist
-        cam = db.query(Camera).filter(Camera.id == camera_id).first()
-        if cam and cam.rtsp_url:
-            config = CameraConfig(
-                camera_id=camera_id,
-                stream_protocol="rtsp",
-                source_url=cam.rtsp_url,
-                recording_enabled=enable,
-                rtsp_transport="tcp",
-                recording_segment_seconds=settings.recording_segment_seconds,
-                last_provisioned_at=func.now(),
+
+class RecordingSwitch(BaseModel):
+    enabled: bool
+    #: Pause only: resume automatically after this many seconds.
+    resume_after_s: int | None = Field(None, ge=60, le=7 * 24 * 3600)
+    #: Why, for the audit log (e.g. the Home Assistant automation).
+    reason: str | None = Field(None, max_length=200)
+
+
+@router.post("/{camera_id}/recording")
+async def set_camera_recording(
+    camera_id: int,
+    payload: RecordingSwitch,
+    request: Request,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Pause or resume recording on one camera (HA-108).
+
+    Recording is always on unless a site admin has allowed pausing
+    (``PUT /system/settings/recording-pause``); with that off, pausing is
+    refused (403) and the rule below stands. Resuming is always allowed.
+    Pausing needs ``recordings.pause``. A pause survives a restart, and an
+    automatic resume (``resume_after_s``) is rescheduled at boot.
+    """
+    from core.permissions import user_has_permission
+    from core.request_context import current as current_ctx
+    from services import recording_pause, site_settings
+
+    if not payload.enabled:
+        # The site flag first: its message is the one that tells an admin
+        # what to change.
+        if not site_settings.recording_pause_enabled(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Pausing recording is not allowed on this site "
+                       "(Settings > Recording > Allow pausing recording)",
             )
-            db.add(config)
+        if not user_has_permission(current_user, "recordings.pause"):
+            raise HTTPException(status_code=403, detail="Needs the recordings.pause permission")
+        if not camera.is_active:
+            raise HTTPException(status_code=409, detail="Camera is turned off")
+    elif not user_has_permission(current_user, "recordings.pause") and \
+            not user_has_permission(current_user, "cameras.manage"):
+        raise HTTPException(status_code=403, detail="Needs recordings.pause or cameras.manage")
 
-    db.commit()
+    ctx = current_ctx()
+    actor = (ctx.actor if ctx is not None and ctx.actor else None) or f"user:{current_user.username}"
+    try:
+        if payload.enabled:
+            await recording_pause.resume(db, camera.id, actor=actor, reason=payload.reason)
+            state = None
+        else:
+            state = await recording_pause.pause(
+                db, camera.id, actor=actor, reason=payload.reason,
+                resume_after_s=payload.resume_after_s)
+    except recording_pause.PauseError as exc:
+        raise HTTPException(status_code=502, detail=f"Media server refused: {exc}") from exc
+    audit_request(
+        db, request, action="recording.resume" if payload.enabled else "recording.pause",
+        user_id=current_user.id, entity_type="camera", entity_id=camera.id,
+        details={"reason": payload.reason,
+                 "resume_at": (state or {}).get("resume_at")},
+    )
+    return {"camera_id": camera.id, "recording": payload.enabled, "paused": state}
 
 
-# DISABLED — this is a Network Video RECORDER: recording is automatic and must
-# not be switchable off by anyone, including via the API. The route is
-# intentionally commented out so a direct `curl` cannot enable/disable
-# recording. Recording is turned on once at camera-configure time (see
-# CameraService, enable_recording=True). The handler is kept (not deleted) so
-# the behaviour can be restored by re-enabling the decorator if the product
-# decision ever changes.
+# DISABLED — this is a Network Video RECORDER: recording is automatic. This
+# old toggle stays unrouted so a direct `curl` cannot switch recording off.
+# The one supported way to pause is POST /{camera_id}/recording above, which
+# only works when a site admin has allowed it (recording_pause_enabled, off
+# by default), is audited, and can resume on its own. The handler is kept for
+# reference.
 # @router.post("/{camera_id}/toggle-recording")
 async def toggle_camera_recording(
     camera_id: int,

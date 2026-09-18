@@ -25,7 +25,8 @@ import platform
 import subprocess
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
@@ -198,6 +199,48 @@ def _get_or_init_monitoring(db: Session) -> SecuritySetting:
         db.commit()
         db.refresh(row)
     return row
+
+
+class RecordingPauseSetting(BaseModel):
+    enabled: bool
+
+
+@router.get("/settings/recording-pause")
+async def get_recording_pause_setting(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Whether recording may be paused on this site, and what is paused."""
+    from services import recording_pause, site_settings
+
+    return {"enabled": site_settings.recording_pause_enabled(db),
+            "paused": recording_pause.paused(db)}
+
+
+@router.put("/settings/recording-pause")
+async def set_recording_pause_setting(
+    payload: RecordingPauseSetting,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Allow or forbid pausing recording (off by default: this is a
+    recorder). Forbidding it resumes every camera paused through it."""
+    from services import recording_pause, site_settings
+    from services.audit_service import audit_request
+
+    site_settings.set_json(db, site_settings.RECORDING_PAUSE_KEY, bool(payload.enabled))
+    resumed: list[int] = []
+    if not payload.enabled:
+        resumed = await recording_pause.resume_all(
+            db, actor=f"user:{current_user.username}", reason="recording pause turned off")
+    audit_request(
+        db, request, action="settings.recording_pause", user_id=current_user.id,
+        entity_type="setting", entity_id=None,
+        details={"enabled": bool(payload.enabled), "resumed_cameras": resumed},
+    )
+    return {"enabled": bool(payload.enabled), "resumed_cameras": resumed,
+            "paused": recording_pause.paused(db)}
 
 
 @router.get("/monitoring-settings")

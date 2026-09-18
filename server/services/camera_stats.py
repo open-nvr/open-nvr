@@ -66,6 +66,15 @@ def _days_retained(db: Session, camera_id: int, now: datetime) -> float | None:
     return round(max(0.0, (now - oldest).total_seconds()) / 86400.0, 2)
 
 
+def _pause_info(db: Session, camera_id: int) -> dict[str, Any] | None:
+    from services.recording_pause import pause_info
+
+    try:
+        return pause_info(db, camera_id)
+    except Exception:  # noqa: BLE001 - stats never fail on a side source
+        return None
+
+
 def _recording_state(db: Session, camera: Camera, now: datetime) -> str:
     from routers.cameras import _derive_recording_state
     from services.camera_status_service import get_camera_status_service
@@ -137,5 +146,8 @@ async def get_camera_stats(db: Session, camera: Camera) -> dict[str, Any]:
         "tracks_active": row.get("tracks_active") if row else None,
         "frame_age_s": row.get("frame_age_s") if row else None,
         "recording_state": _recording_state(db, camera, now_wall),
+        # Set while recording is paused on purpose (HA-108): {since,
+        # resume_at, by, reason}. recording_state then reads "off".
+        "recording_paused": _pause_info(db, camera.id),
         "days_retained": _days_retained(db, camera.id, now_wall),
     }

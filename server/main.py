@@ -386,6 +386,18 @@ async def lifespan(app: FastAPI):
             main_logger.error(
                 f"[MTX] Background provisioning failed: {e}", exc_info=True
             )
+        finally:
+            # Whatever provisioning did (ran, was disabled, or failed):
+            # reschedule automatic recording resumes (HA-108) and resume the
+            # overdue ones, so a restart never turns "pause for an hour"
+            # into "pause forever".
+            try:
+                from services.recording_pause import restore_on_startup
+
+                await restore_on_startup()
+            except Exception as e:  # noqa: BLE001
+                main_logger.error(f"[MTX] recording-pause restore failed: {e}",
+                                  exc_info=True)
 
     # Start background provisioning task
     import asyncio
