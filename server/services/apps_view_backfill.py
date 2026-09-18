@@ -31,8 +31,16 @@ SOURCE_PERMISSION = "ai.view"
 TARGET_PERMISSION = "apps.view"
 
 
-def backfill_apps_view(db: Session) -> int:
-    """Grant ``apps.view`` to every role holding ``ai.view``.
+def backfill_permission(
+    db: Session, source_name: str, target_name: str, *, commit: bool = True
+) -> int:
+    """Grant *target_name* to every role holding *source_name*.
+
+    The general form of the apps.view upgrade rule: when a new permission
+    starts gating something people could already do, hand it to whoever
+    held the permission that effectively allowed it, so the upgrade neither
+    revokes nor widens anyone's access. Call it ONLY on the boot that creates
+    the target permission (see the module docstring).
 
     Returns the number of roles granted. Safe to call when either
     permission is missing (returns 0) and when a role already has the
@@ -40,17 +48,13 @@ def backfill_apps_view(db: Session) -> int:
     """
     from models import Permission, RolePermission
 
-    source = (
-        db.query(Permission).filter(Permission.name == SOURCE_PERMISSION).first()
-    )
-    target = (
-        db.query(Permission).filter(Permission.name == TARGET_PERMISSION).first()
-    )
+    source = db.query(Permission).filter(Permission.name == source_name).first()
+    target = db.query(Permission).filter(Permission.name == target_name).first()
     if source is None or target is None:
         logger.warning(
-            "apps.view backfill skipped: %r=%s %r=%s",
-            SOURCE_PERMISSION, source is not None,
-            TARGET_PERMISSION, target is not None,
+            "%s backfill skipped: %r=%s %r=%s",
+            target_name, source_name, source is not None,
+            target_name, target is not None,
         )
         return 0
 
@@ -72,5 +76,12 @@ def backfill_apps_view(db: Session) -> int:
         db.add(RolePermission(role_id=role_id, permission_id=target.id))
         granted += 1
     if granted:
-        db.commit()
+        # commit=False lets the caller make the permission and its grants
+        # one transaction (see permission_catalog.seed_new_permissions).
+        db.commit() if commit else db.flush()
     return granted
+
+
+def backfill_apps_view(db: Session) -> int:
+    """Grant ``apps.view`` to every role holding ``ai.view``."""
+    return backfill_permission(db, SOURCE_PERMISSION, TARGET_PERMISSION)

@@ -215,47 +215,24 @@ async def lifespan(app: FastAPI):
 
             # Idempotently seed permissions added in later releases (e.g.
             # apps.install); the full seed above only runs on an empty table.
+            # Grants that preserve behaviour happen only on the creating boot
+            # (see services/permission_catalog.py).
             try:
-                from models import Permission as _Permission2
-                from services.apps_view_backfill import backfill_apps_view
+                from services.permission_catalog import seed_new_permissions
 
-                for _pname, _pdesc in (
-                    (
-                        "apps.install",
-                        "Install/uninstall curated App Store apps",
-                    ),
-                    (
-                        "apps.view",
-                        "Browse the App Catalog and view installed apps",
-                    ),
-                ):
-                    if (
-                        db.query(_Permission2)
-                        .filter(_Permission2.name == _pname)
-                        .first()
-                        is None
-                    ):
-                        db.add(_Permission2(name=_pname, description=_pdesc))
-                        db.commit()
-                        main_logger.info(
-                            "Seeded new permission %r (upgrade path)", _pname
-                        )
-                        # apps.view took the App Catalog off ai.view.
-                        # Creating the row alone would REVOKE the catalog
-                        # from everyone who could open it yesterday, so
-                        # backfill it to whoever holds ai.view — but ONLY
-                        # on the boot that creates it. Doing it every boot
-                        # would undo a deliberate revoke.
-                        if _pname == "apps.view":
-                            _granted = backfill_apps_view(db)
-                            main_logger.info(
-                                "Granted apps.view to %d role(s) holding "
-                                "ai.view", _granted
-                            )
+                for _pname, _granted, _source in seed_new_permissions(db):
+                    main_logger.info(
+                        "Seeded new permission %r (upgrade path)%s", _pname,
+                        f"; granted to {_granted} role(s) holding {_source}"
+                        if _source else "",
+                    )
             except Exception:
                 main_logger.warning(
                     "Upgrade-path permission seeding failed", exc_info=True
                 )
+                # The rest of startup reuses this session; a failed flush
+                # would otherwise leave it unusable (PendingRollbackError).
+                db.rollback()
 
             # Apps bus: (re)render the per-app NATS users file so the
             # nats-apps leaf server knows every app that holds a key —

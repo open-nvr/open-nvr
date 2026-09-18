@@ -27,6 +27,7 @@ from core.auth import get_password_hash
 from core.config import settings
 from core.database import SessionLocal, init_db
 from models import Permission, Role, RolePermission, User
+from services.permission_catalog import NEW_PERMISSIONS_HA
 
 
 def create_initial_data():
@@ -183,6 +184,12 @@ def create_initial_data():
         )
         p_byom_manage = get_or_create_perm("byom.manage", "Manage custom AI models")
 
+        # Added for the Home Assistant integration / API tokens (HA-004). The
+        # descriptions are also the upgrade-path seed (main.py). Grant rules
+        # preserve behaviour: nobody gains or loses an ability on upgrade.
+        for _perm in NEW_PERMISSIONS_HA:
+            get_or_create_perm(_perm.name, _perm.description)
+
         # Helper to set role permissions (replace)
         def set_role_perms(role: Role, perm_names: list[str]):
             db.query(RolePermission).filter(RolePermission.role_id == role.id).delete()
@@ -206,6 +213,10 @@ def create_initial_data():
                 "alerts.view",
                 "ai.view",
                 "apps.view",
+                # ptz.control is an extra requirement on top of PTZ's
+                # existing ownership check (see services/permission_catalog),
+                # granted with live.view so it narrows nobody.
+                "ptz.control",
             ],
         )
         set_role_perms(
@@ -214,6 +225,7 @@ def create_initial_data():
                 "cameras.view",
                 "live.view",
                 "recordings.view",
+                "ptz.control",
             ],
         )
 
