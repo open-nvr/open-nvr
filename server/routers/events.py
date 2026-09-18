@@ -47,17 +47,20 @@ from __future__ import annotations
 import json
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
+from core.client_ip import get_client_ip, is_internal_service, is_loopback
 from core.database import get_db
 from core.logging_config import main_logger
 from models import User
 from routers.apps import get_read_principal
 from services.camera_scope import visible_camera_ids
+from services import device_firewall_service as dfw
 from services.event_bus_service import get_event_bus
 
 router = APIRouter()
@@ -80,6 +83,28 @@ _WS_TICKET_TTL_SECONDS = 30
 # scope. Minted for trusted in-stack consumers — the camera agent relays
 # core's overlay tracks to its own viewers and scopes them itself.
 _ws_tickets: dict[str, tuple[str | None, float]] = {}
+
+
+@dataclass(frozen=True)
+class WsTicketBinding:
+    """What the device firewall knew about the client that minted a ticket.
+
+    The firewall middleware is HTTP-only: it never sees the WebSocket
+    handshake. The mint request DID pass it, so its facts ride along with the
+    ticket and are re-checked at the handshake (see ``_ws_firewall_allows``).
+    Without this, a ticket leaked within its 30 s life could be opened from a
+    machine the firewall would refuse.
+    """
+
+    client_ip: str | None
+    device_token: str | None
+    #: Minted with the deployment's INTERNAL_API_KEY (a sibling service).
+    internal_key: bool = False
+
+
+# ticket -> binding. Kept beside _ws_tickets (same keys, same lifetime) so
+# the ticket store's (username, expires_at) shape is unchanged.
+_ws_ticket_bindings: dict[str, WsTicketBinding] = {}
 
 
 class ServiceIdentity:
@@ -106,14 +131,22 @@ _SERVICE_TICKET = object()
 def _prune_ws_tickets(now: float) -> None:
     for tok in [t for t, (_, exp) in _ws_tickets.items() if exp <= now]:
         _ws_tickets.pop(tok, None)
+        _ws_ticket_bindings.pop(tok, None)
+    # A binding whose ticket is gone (consumed or pruned) is dead weight.
+    for tok in [t for t in _ws_ticket_bindings if t not in _ws_tickets]:
+        _ws_ticket_bindings.pop(tok, None)
 
 
-def _mint_ws_ticket(username: str | None) -> tuple[str, int]:
+def _mint_ws_ticket(
+    username: str | None, binding: WsTicketBinding | None = None
+) -> tuple[str, int]:
     """``username=None`` mints a SERVICE ticket."""
     now = time.time()
     _prune_ws_tickets(now)
     ticket = secrets.token_urlsafe(32)
     _ws_tickets[ticket] = (username, now + _WS_TICKET_TTL_SECONDS)
+    if binding is not None:
+        _ws_ticket_bindings[ticket] = binding
     return ticket, _WS_TICKET_TTL_SECONDS
 
 
@@ -126,6 +159,7 @@ def _consume_ws_ticket(ticket: str):
     not be mistaken for a missing one.
     """
     entry = _ws_tickets.pop(ticket, None)  # pop() => cannot be replayed
+    _ws_ticket_bindings.pop(ticket, None)
     if entry is None:
         return None
     username, expires_at = entry
@@ -135,7 +169,7 @@ def _consume_ws_ticket(ticket: str):
 
 
 @router.post("/events/ws-ticket")
-async def create_ws_ticket(principal=Depends(get_read_principal)):
+async def create_ws_ticket(request: Request, principal=Depends(get_read_principal)):
     """Mint a short-lived, single-use ticket for opening the events WebSocket.
 
     A browser cannot set an Authorization header on a WebSocket, so it
@@ -160,11 +194,49 @@ async def create_ws_ticket(principal=Depends(get_read_principal)):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="An app key cannot open the site-wide event stream",
         )
+    binding = WsTicketBinding(
+        client_ip=get_client_ip(request) or None,
+        device_token=dfw.token_from_request(request),
+        internal_key=principal is None,
+    )
     if principal is None:
-        ticket, ttl = _mint_ws_ticket(None)
+        ticket, ttl = _mint_ws_ticket(None, binding)
         return {"ticket": ticket, "expires_in": ttl, "kind": "service"}
-    ticket, ttl = _mint_ws_ticket(principal.username)
+    ticket, ttl = _mint_ws_ticket(principal.username, binding)
     return {"ticket": ticket, "expires_in": ttl, "kind": "user"}
+
+
+def _ws_firewall_allows(websocket, binding: WsTicketBinding | None) -> bool:
+    """Device-firewall decision for a WebSocket handshake.
+
+    Mirrors DeviceFirewallMiddleware's order (loopback / internal key, then
+    enforcement off, then the device token, then sibling containers), with
+    two WebSocket-specific facts:
+
+    * a browser cannot send the device header on a WebSocket, so the token
+      bound at mint time is used, falling back to one on the handshake;
+    * while enforcement is on, the handshake must come from the client that
+      minted the ticket. The ticket carries that client's approval; a copy
+      opened elsewhere would borrow it.
+
+    A service ticket (minted with the internal key) is honoured only from
+    inside the stack: it is unscoped and travels in the query string, so a
+    leaked one must not open the stream from an arbitrary machine.
+    """
+    ip = get_client_ip(websocket)
+    if is_loopback(ip):
+        return True
+    if binding is not None and binding.internal_key and is_internal_service(ip):
+        return True
+    if not dfw.enforcement_active_cached():
+        return True
+    if binding is not None and binding.client_ip and ip != binding.client_ip:
+        return False
+    bound_token = binding.device_token if binding is not None else None
+    token = bound_token or dfw.token_from_request(websocket)
+    if token:
+        return dfw.is_allowed_browser_cached(token)
+    return is_internal_service(ip)
 
 
 def _authenticate_ws(ticket: str | None, db: Session) -> User | ServiceIdentity | None:
@@ -247,6 +319,8 @@ async def events_stream(
       * ``{"event_type": "lagged", "dropped": N}`` when the client was too
         slow and we had to drop events (sent opportunistically).
     """
+    # Read the ticket's firewall binding before the ticket is consumed.
+    binding = _ws_ticket_bindings.get(ticket) if ticket else None
     # Authenticate BEFORE accepting so bad clients get a clean 4401.
     db_gen = get_db()
     db: Session = next(db_gen)
@@ -276,6 +350,12 @@ async def events_stream(
 
     if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="unauthorized")
+        return
+
+    # The HTTP device-firewall middleware never sees a WebSocket handshake.
+    if not _ws_firewall_allows(websocket, binding):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION, reason="device_not_approved")
         return
 
     # Asking for a camera you cannot see is refused outright rather than
