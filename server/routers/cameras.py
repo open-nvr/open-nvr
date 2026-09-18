@@ -56,7 +56,7 @@ from schemas import (
     DeletedCameraList,
     TransportSecurityUpdate,
 )
-from services.audit_service import write_audit_log
+from services.audit_service import audit_request, write_audit_log
 from services.camera_identity import path_name_for_camera, read_marker
 from services.camera_service import CameraService
 from services.camera_status_service import get_camera_status_service
@@ -2238,6 +2238,7 @@ async def ptz_move(
     x: float = Query(0.0, ge=-1.0, le=1.0),
     y: float = Query(0.0, ge=-1.0, le=1.0),
     z: float = Query(0.0, ge=-1.0, le=1.0),
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -2269,7 +2270,7 @@ async def ptz_move(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.move(
+    result = await PTZService.move(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
@@ -2279,11 +2280,19 @@ async def ptz_move(
         y=y,
         z=z,
     )
+    audit_request(
+        db, request, action="ptz.move", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"x": x, "y": y, "z": z,
+                 "success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
 
 
 @router.post("/{camera_id}/ptz/stop")
 async def ptz_stop(
     camera_id: int,
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -2303,13 +2312,19 @@ async def ptz_stop(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.stop(
+    result = await PTZService.stop(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
         password=cam.password,
         camera_port=cam.port,
     )
+    audit_request(
+        db, request, action="ptz.stop", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)

@@ -864,6 +864,17 @@ async def set_recording_flag(
         .update({Recording.is_flagged: flagged}, synchronize_session=False)
     )
     db.commit()
+    # Protecting (or releasing) footage from retention is evidence handling:
+    # it must be attributable.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request,
+        action="recording.protect" if flagged else "recording.unprotect",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera_id,
+        details={"start": start, "end": end, "updated_clips": updated},
+    )
     return {"camera_id": camera_id, "flagged": flagged, "updated_clips": updated}
 
 
@@ -927,6 +938,16 @@ async def create_export_ticket(
         "duration": duration,
         "filename": safe_name,
     }
+    # Every footage export is audited at mint time (the download itself is a
+    # ticketed GET with no session). Who took which minutes of which camera.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request, action="recording.export",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera.id,
+        details={"start": start, "duration": duration, "filename": safe_name},
+    )
     return {
         "ticket": ticket,
         "download_url": f"{settings.api_prefix}/recordings/export?ticket={ticket}",
