@@ -1,19 +1,20 @@
 # syntax=docker/dockerfile:1.7
-# Intrusion-detection example app.
+# intrusion-detection example app
 #
-# Build:
-#   docker build -f examples/intrusion-detection/Dockerfile -t opennvr/example-intrusion-detection:1.0.0 .
+# Build (from the open-nvr repo root — the context must include
+# sdk/opennvr-app-sdk, which this app depends on):
+#   docker build -f examples/intrusion-detection/Dockerfile -t opennvr/intrusion-detection:1.1.0 .
 #
-# Run (sidecar to KAI-C and OpenNVR backend on the same host):
+# Run (subscribes to the NATS event bus on the compose network):
 #   docker run --rm \
-#     -v $(pwd)/examples/intrusion-detection/config.yml:/app/config.yml:ro \
-#     --network host \
-#     opennvr/example-intrusion-detection:1.0.0 \
+#     --network opennvr_internal \
+#     -v $(pwd)/config.yml:/app/config.yml:ro \
+#     opennvr/intrusion-detection:1.1.0 \
 #     --config /app/config.yml
 #
 # Or use the repo-root docker-compose.apps.yml overlay, which builds
 # this image, generates the config from config.docker.yml, and wires
-# KAI-C + registry self-registration automatically.
+# NATS + registry self-registration automatically.
 
 FROM python:3.11-slim AS runtime
 
@@ -23,34 +24,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Minimal runtime deps — httpx for KAI-C calls and snapshot fetches,
-# PyYAML for the config file. No cv2/PIL — frames go through KAI-C
-# as base64 JSON without any local image processing in this example.
-# websockets backs ``kaic_transport: "ws"`` (lazy-imported at first
-# poll) — without it the shipped http default works but flipping the
-# template to ws crashes with ModuleNotFoundError.
-RUN pip install --no-cache-dir \
-        "httpx>=0.27,<1.0" \
-        "PyYAML>=6.0,<7.0" \
-        "websockets>=13.0"
-
-# The OpenNVR App SDK — this app's modules import opennvr_app_sdk
-# (geometry/alerts/frame_sources) at top level, so it must be installed
-# into the image or the container crashes on startup with
-# ModuleNotFoundError. Installed from the in-repo package.
+# The SDK owns the runtime stack (nats-py subscribe loop, httpx alert
+# webhooks and snapshot fetches, PyYAML config, zone geometry) — install
+# it from the repo checkout so the image always matches the in-tree
+# contract surface. This app drives no inference of its own: it rides
+# the Tier-0 detection stream, so there is no KAI-C client and no
+# WebSocket dependency left in the image.
 COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir /opt/opennvr-app-sdk
 
 COPY examples/intrusion-detection/intrusion_detection.py ./intrusion_detection.py
-COPY examples/intrusion-detection/zone.py                ./zone.py
 COPY examples/intrusion-detection/alerts.py              ./alerts.py
-COPY examples/intrusion-detection/frame_sources.py       ./frame_sources.py
+COPY examples/intrusion-detection/zone.py                ./zone.py
 COPY examples/intrusion-detection/config.example.yml     ./config.example.yml
 
-ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
-# Config path rides CMD (not ENTRYPOINT) so docker-compose.apps.yml
-# can point ``command`` at the generated /app/config/config.yml —
-# same contract as the other example-app images.
+# No HEALTHCHECK — liveness is Docker's "process is alive"; readiness
+# is the SDK contract server (/health on contract_port when enabled).
+
 ENTRYPOINT ["python", "intrusion_detection.py"]
 CMD ["--config", "config.yml"]

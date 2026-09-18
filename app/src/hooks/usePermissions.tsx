@@ -134,6 +134,9 @@ export const NAV_PERMISSIONS = {
   '/people': 'alerts.view',
   '/tripwires': 'live.view', // counts are camera history — same tier as live view
   '/loitering': 'alerts.view', // dwellers now + alarms with snapshots — the alerts tier
+  // Arming a site is an alarm-desk action, and the page shows alarm
+  // snapshots, so it sits in the same tier as the inbox.
+  '/perimeter': 'alerts.view',
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',

@@ -196,8 +196,8 @@ Error shape: see §7 (failure envelope).
 ### 3.6 `POST /infer/stream` (WebSocket)
 
 Continuous bidirectional inference for camera feeds / audio streams /
-LLM token streaming. Required because the agent and intrusion-detection
-example apps depend on it; adapters whose models genuinely don't
+LLM token streaming. Required because the camera-agent example app
+depends on it; adapters whose models genuinely don't
 support streaming MUST refuse the WebSocket upgrade with HTTP 501
 (*before* the socket opens) and MUST declare
 `endpoints.infer_stream.supported = false` in `/capabilities`. The
@@ -1583,7 +1583,7 @@ The catalogue covers the most-asked NVR + AI use cases. Each entry is a runnable
 
 | Slug | Use case | Adapters needed | Status |
 |---|---|---|---|
-| `intrusion-detection` | Person/vehicle in zone after-hours | object_detection | **Shipped (first reference example)** |
+| `intrusion-detection` | Person/vehicle in an armed zone (schedule, exit/entry delays, bypass) | object_detection + tracking | **Shipped (first reference example)** |
 | `loitering-detection` | Person stays in zone > N minutes | object_detection + tracking | **Shipped** |
 | `camera-agent` | Voice-interactive agent ("what's at the gate?") | ASR + TTS + LLM | **Shipped** |
 | `license-plate-recognition` | License-plate recognition (whitelist / denylist) | object_detection + LPR | **Shipped** |

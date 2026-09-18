@@ -193,13 +193,13 @@
 
 - id: intrusion-detection
   name: Intrusion Detection
-  summary: Alerts when a watched object enters a restricted zone during restricted hours.
+  summary: Arms a drawn zone on a schedule and alerts when a watched object breaches it — exit and entry delays, one alarm per intruder, escalation if they stay, bypass and manual arm/disarm from the Perimeter page.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/intrusion-detection:latest
   build_context: examples/intrusion-detection
-  requires_tasks: [object_detection]
-  emits: [intrusion]
+  requires_tasks: [object_detection, multi_object_tracking]
+  emits: [intrusion, intrusion-escalated]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/intrusion-detection/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

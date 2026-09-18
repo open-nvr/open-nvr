@@ -436,10 +436,10 @@ services:
       nats:
         condition: service_healthy
       opennvr-core:
-        # opennvr-core also hosts KAI-C (0.0.0.0:8100 inside the
-        # container) — this FrameApp drives inference through it, so
-        # the same service_healthy gate covers both the registry and
-        # the inference proxy. There is no separate kai-c service.
+        # Core serves the app registry this app self-registers with, and
+        # the camera/zone config and snapshots it reads. Detections come
+        # off the bus (Tier-0), not from KAI-C — this app drives no
+        # inference of its own.
         condition: service_healthy
       egress-proxy:
         condition: service_started

@@ -13,32 +13,37 @@
 # update .env and re-run ``docker compose up`` so the init container
 # re-templates the file.
 
-# ── KAI-C endpoint ─────────────────────────────────────────────────
-# This is a FrameApp: it DRIVES inference by POSTing polled frames to
-# KAI-C's contract proxy. KAI-C runs inside the opennvr-core container
-# (bound 0.0.0.0:8100, EXPOSEd) — reachable on the compose network as
-# the service name, NOT localhost.
-kaic_url: "http://opennvr-core:8100"
-kaic_adapter_name: "yolov8"
-kaic_api_key: "${INTERNAL_API_KEY}"
-# "http" polls per frame; "ws" streams per camera (§6) for sub-second
-# alert response at one open connection per camera.
-kaic_transport: "http"
+# ── NATS endpoint (KAI-C's event bus, compose service ``nats``) ────
+nats_url: "nats://nats:4222"
+# The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
+nats_token: "${INTERNAL_API_KEY}"
 
-# ── Polling cadence ────────────────────────────────────────────────
-poll_interval_seconds: 1.0
-request_timeout_seconds: 30.0
+# Tier-0 publishes tracked detections (a stable track_id per object) on
+# opennvr.inference.tier0.> — one detector, every app subscribes. The
+# perimeter needs identity (one intruder is one alarm, not one per
+# frame) and needs frames as they come rather than on a poll interval,
+# so this is the stream to consume.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
-# ── Detection filter / restricted hours — EDIT for your scene ──────
+# ── The rule — every value below is also editable live in the App Catalog ──
 watch_labels:
   - "person"
-# Times in HH:MM (24h, container-local timezone; the image runs UTC
-# unless you set TZ). Cross-midnight ranges supported (start > end).
-# The full-day default below means "always armed" — narrow it once
-# you've verified the install.
-restricted_hours:
-  start: "00:00"
-  end: "23:59"
+arm_mode: "schedule"           # schedule | always | manual | off
+armed_hours:                   # with arm_mode=schedule; empty = always armed
+  start: "19:00"
+  end: "07:00"
+exit_delay_seconds: 0          # grace after arming, to walk out
+entry_delay_seconds: 0         # grace between breach and alarm, to disarm
+min_presence_seconds: 1        # inside the zone this long before it is a breach
+alert_severity: "high"
+escalate_after_seconds: 0      # >0: second, higher alarm if still inside
+alarm_cooldown_seconds: 30     # a group at the fence is one alarm
+alarm_reset_seconds: 60        # zone clear this long → re-armed
+min_bbox_height: 0             # ignore boxes shorter than this fraction of frame
+override_minutes: 60           # how long a manual arm/disarm from the page holds
+attach_snapshot: true
+track_ttl_seconds: 5
 
 # ── Alert delivery ─────────────────────────────────────────────────
 # Alerts always go to stdout (``docker compose logs intrusion-detection``).
@@ -48,20 +53,14 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras ──────────────────────────────────────────────────────
-# None listed here, on purpose. Select the cameras this app works on in
-# the App Catalog → Configure → Cameras; Zones are drawn there too. Frames come
-# from OpenNVR itself, so there is no camera URL to copy, and nothing
-# selected means the app does nothing and uses no compute.
+# ── Cameras ────────────────────────────────────────────────────────
+# None listed here, on purpose. Select the cameras this app protects in
+# the App Catalog → Configure → Cameras; zones are drawn there too.
 #
 # (A `cameras:` list still works when running this app standalone,
 # without opennvr_url — see config.example.yml.)
 
 # ── App contract (spec §03) — powers the App Catalog ───────────────
-# The SDK serves /health /manifest /state on contract_port and
-# self-registers with the OpenNVR app registry on boot. The
-# registration token comes from the OPENNVR_INTERNAL_API_KEY
-# environment variable set by the overlay, so it is not templated here.
 contract_port: 9204
 contract_bind_host: "0.0.0.0"
 contract_host: "intrusion-detection"   # the compose service name
