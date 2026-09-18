@@ -174,3 +174,14 @@ def test_ws_url():
     assert client.ws_url("T", since=5, epoch="e1", types=["entity_state"]) == (
         "wss://nvr.local/api/v1/events/ws?ticket=T&v=2&since=5&epoch=e1&types=entity_state")
     assert "since" not in client.ws_url("T", since=5, epoch=None)
+
+
+async def test_ack_by_ids_or_by_filter():
+    async with fake_site({("POST", "/api/v1/alerts-inbox/ack"): {"acknowledged": 2}}) as (
+            base, session, rec):
+        client = OpenNVRClient(base, TOKEN, session)
+        await client.ack_alerts(ids=[1, 2])
+        await client.ack_alerts(source="loitering", severity="high")
+        await client.ack_alerts()
+    assert [r["body"] for r in rec.requests] == [
+        b'{"ids": [1, 2]}', b'{"source_name": "loitering", "severity": "high"}', b"{}"]

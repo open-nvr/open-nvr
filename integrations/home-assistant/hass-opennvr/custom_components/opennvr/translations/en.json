@@ -124,6 +124,33 @@
     },
     "firewall_blocked": {
       "message": "OpenNVR refuses this API token from Home Assistant's address."
+    },
+    "not_found": {
+      "message": "OpenNVR has no such item: {detail}"
+    },
+    "unknown_entry": {
+      "message": "No OpenNVR site with config entry id {entry_id}."
+    },
+    "entry_not_loaded": {
+      "message": "The OpenNVR site {name} is not connected."
+    },
+    "entry_required": {
+      "message": "More than one OpenNVR site is set up (or none is connected): choose the site (config entry) for this action."
+    },
+    "not_an_opennvr_camera": {
+      "message": "{entity_id} is not an OpenNVR camera."
+    },
+    "unknown_preset": {
+      "message": "No PTZ preset \"{preset}\" on this camera. Presets: {presets}."
+    },
+    "bad_ptz_argument": {
+      "message": "For PTZ {action}, the argument must be one of: {allowed}."
+    },
+    "bad_clip_range": {
+      "message": "The end must be after the start, and a clip can be at most {max} seconds."
+    },
+    "ack_ids_or_filter": {
+      "message": "Give either alert ids or a source/severity filter, not both."
     }
   },
   "entity": {
@@ -194,6 +221,192 @@
     "ssl_unverified": {
       "title": "OpenNVR certificate is not verified",
       "description": "Home Assistant connects to {name} without verifying its certificate (OpenNVR's default certificate is self-signed). Anyone who can intercept that connection could read the API token. Install a trusted certificate on OpenNVR, then reconfigure the integration with certificate verification on."
+    }
+  },
+  "services": {
+    "ptz": {
+      "name": "PTZ",
+      "description": "Move, zoom or stop a PTZ camera, or send it to a preset.",
+      "fields": {
+        "camera": {
+          "name": "Camera",
+          "description": "An OpenNVR camera."
+        },
+        "action": {
+          "name": "Action",
+          "description": "What to do."
+        },
+        "argument": {
+          "name": "Argument",
+          "description": "move: up, down, left or right. zoom: in or out. preset: the preset's name or token."
+        },
+        "speed": {
+          "name": "Speed",
+          "description": "Movement speed, 0.1 to 1."
+        }
+      }
+    },
+    "create_event": {
+      "name": "Create event",
+      "description": "Record a manual event on a camera (for example from a doorbell or an alarm sensor). Returns its id.",
+      "fields": {
+        "camera": {
+          "name": "Camera",
+          "description": "An OpenNVR camera."
+        },
+        "label": {
+          "name": "Label",
+          "description": "What happened, for example doorbell."
+        },
+        "sub_label": {
+          "name": "Note",
+          "description": "Free text kept with the event."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Close the event after this many seconds. Leave empty to keep it open until End event."
+        }
+      }
+    },
+    "end_event": {
+      "name": "End event",
+      "description": "Close an open manual event.",
+      "fields": {
+        "config_entry_id": {
+          "name": "OpenNVR site",
+          "description": "The OpenNVR site. Needed only when more than one is set up."
+        },
+        "event_id": {
+          "name": "Event id",
+          "description": "The id Create event returned."
+        }
+      }
+    },
+    "export_recording": {
+      "name": "Export recording",
+      "description": "A signed link to an MP4 clip of a camera's recording, valid for the notification link lifetime. Optionally with its SHA-256.",
+      "fields": {
+        "camera": {
+          "name": "Camera",
+          "description": "An OpenNVR camera."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Clip start."
+        },
+        "end": {
+          "name": "End",
+          "description": "Clip end (at most one hour after the start)."
+        },
+        "with_hash": {
+          "name": "With hash",
+          "description": "Also download the clip once and return its SHA-256 and size."
+        }
+      }
+    },
+    "protect_recording": {
+      "name": "Protect recording",
+      "description": "Keep the recording around an event from retention cleanup.",
+      "fields": {
+        "config_entry_id": {
+          "name": "OpenNVR site",
+          "description": "The OpenNVR site. Needed only when more than one is set up."
+        },
+        "event_id": {
+          "name": "Event id",
+          "description": "The event whose footage to keep."
+        },
+        "pre_s": {
+          "name": "Before",
+          "description": "Seconds before the event to keep too."
+        },
+        "post_s": {
+          "name": "After",
+          "description": "Seconds after the event to keep too."
+        }
+      }
+    },
+    "ack_alerts": {
+      "name": "Acknowledge alerts",
+      "description": "Acknowledge OpenNVR alerts: these ids, or all matching a source and/or severity, or (neither) all. Returns how many.",
+      "fields": {
+        "config_entry_id": {
+          "name": "OpenNVR site",
+          "description": "The OpenNVR site. Needed only when more than one is set up."
+        },
+        "alert_ids": {
+          "name": "Alert ids",
+          "description": "A list of alert ids."
+        },
+        "source": {
+          "name": "Source",
+          "description": "Only alerts from this app."
+        },
+        "severity": {
+          "name": "Severity",
+          "description": "Only alerts of this severity."
+        }
+      }
+    },
+    "search_events": {
+      "name": "Search events",
+      "description": "Search OpenNVR's events and alerts. Returns them newest first, events with a signed thumbnail link.",
+      "fields": {
+        "config_entry_id": {
+          "name": "OpenNVR site",
+          "description": "The OpenNVR site. Needed only when more than one is set up."
+        },
+        "query": {
+          "name": "Text",
+          "description": "Matches labels, plates, alert titles."
+        },
+        "camera": {
+          "name": "Camera",
+          "description": "Only this camera."
+        },
+        "label": {
+          "name": "Label",
+          "description": "Only this object label."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "Only events in this zone (name or id)."
+        },
+        "plate": {
+          "name": "Plate",
+          "description": "Licence plate, or part of one."
+        },
+        "start": {
+          "name": "From",
+          "description": "Not before."
+        },
+        "end": {
+          "name": "To",
+          "description": "Before."
+        },
+        "limit": {
+          "name": "Limit",
+          "description": "At most this many results."
+        }
+      }
+    }
+  },
+  "selector": {
+    "ptz_action": {
+      "options": {
+        "move": "Move",
+        "zoom": "Zoom",
+        "stop": "Stop",
+        "preset": "Go to preset"
+      }
+    },
+    "severity": {
+      "options": {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "critical": "Critical"
+      }
     }
   }
 }

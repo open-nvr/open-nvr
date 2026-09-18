@@ -249,10 +249,15 @@ class OpenNVRClient:
                                   json={"pre_s": pre_s, "post_s": post_s},
                                   correlation_id=correlation_id)
 
-    async def ack_alerts(self, *, ids: list[int] | None = None,
+    async def ack_alerts(self, *, ids: list[int] | None = None, source: str | None = None,
+                         severity: str | None = None,
                          correlation_id: str | None = None) -> dict:
-        return await self.request("POST", "/alerts-inbox/ack",
-                                  json={"ids": ids} if ids else {},
+        """Acknowledge these alert ids, or every unacknowledged alert matching
+        ``source``/``severity``, or (neither) every unacknowledged alert the
+        token can see. Ids and filters are exclusive (the server refuses both)."""
+        body = ({"ids": ids} if ids else
+                _body({"source_name": source, "severity": severity}))
+        return await self.request("POST", "/alerts-inbox/ack", json=body,
                                   correlation_id=correlation_id)
 
     async def sign_media(self, kind: str, *, id: int | None = None, name: str | None = None,

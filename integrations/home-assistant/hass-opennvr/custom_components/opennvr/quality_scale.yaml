@@ -2,9 +2,7 @@
 # HA-305 takes every rule to done or exempt for Gold.
 rules:
   # Bronze
-  action-setup:
-    status: todo
-    comment: Services arrive in HA-301.
+  action-setup: done
   appropriate-polling: done
   brands: done
   common-modules: done
@@ -24,7 +22,7 @@ rules:
   unique-config-entry: done
 
   # Silver
-  action-exceptions: todo
+  action-exceptions: done
   config-entry-unloading: done
   docs-configuration-parameters: todo
   docs-installation-parameters: todo

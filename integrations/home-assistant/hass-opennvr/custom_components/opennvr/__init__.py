@@ -23,6 +23,7 @@ from .const import DOMAIN, PLATFORMS
 from .coordinator import OpenNVRCoordinator
 from .descriptor import async_prune, wanted_device_identifiers
 from .entity import async_register_devices
+from .services import async_setup_services
 
 # Set up from config entries only; no YAML configuration.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -40,7 +41,8 @@ type OpenNVRConfigEntry = ConfigEntry[OpenNVRData]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the OpenNVR integration."""
+    """Set up the OpenNVR integration: its actions exist once, for every site."""
+    async_setup_services(hass)
     return True
 
 
