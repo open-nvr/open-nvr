@@ -290,7 +290,10 @@ def all_descriptors(db: Session) -> list[Descriptor]:
     from services.site_settings import recording_pause_enabled
 
     pause = recording_pause_enabled(db)
-    cams = (db.query(Camera).filter(Camera.deleted_at.is_(None), Camera.is_active.is_(True))
+    # Turned-off cameras too: a camera that is off still exists, and a
+    # client that dropped its entities would lose the user's names, areas
+    # and automations (and could not turn it back on).
+    cams = (db.query(Camera).filter(Camera.deleted_at.is_(None))
             .order_by(Camera.id).all())
     by_id = {c.id: c for c in cams}
     out = _site_descriptors()

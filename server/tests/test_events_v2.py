@@ -213,6 +213,27 @@ def test_resume_across_an_idle_publisher_is_a_resync(env, bus):  # noqa: F811
         assert ws.receive_json()["event_type"] == "camera_event"
 
 
+def test_resume_from_before_a_priming_is_a_resync(env, bus):  # noqa: F811
+    """The publisher idled and was woken (by another client) while this one
+    was away: the cache is warm again, but what changed while it idled was
+    never published, so resuming from before the priming must resync."""
+    from services import entity_state_publisher as pub
+
+    with _open(env, env.jwt("admin")) as ws:
+        hello = ws.receive_json()
+        ws.receive_json()
+    asyncio.run(bus.publish(_ev("camera_event", 1)))
+    pub._forget()                                     # idled
+    asyncio.run(pub.tick())                           # woken by someone else
+    assert pub.is_warm() and pub.primed_seq() > hello["seq"]
+    with _open(env, env.jwt("admin"), since=hello["seq"], epoch=hello["epoch"]) as ws:
+        assert ws.receive_json()["resumed"] is False
+        assert ws.receive_json()["resync"] is True
+    # From after the priming: a real resume.
+    with _open(env, env.jwt("admin"), since=pub.primed_seq(), epoch=bus.epoch) as ws:
+        assert ws.receive_json()["resumed"] is True
+
+
 def test_replay_keeps_the_tokens_cameras_and_types(env, bus):  # noqa: F811
     tok = _mint(env, scopes=["cameras.view", "live.view"], camera_ids=[1])["token"]
     with _open(env, _as(tok)) as ws:

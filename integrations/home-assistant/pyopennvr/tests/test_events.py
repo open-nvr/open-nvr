@@ -23,10 +23,18 @@ class FakeServer:
         self.scripts = list(scripts)
         self.connections: list[dict] = []
         self.ticket_status = 200
+        self.ticket_headers: dict[str, str] = {}
+        self.tickets = 0
+        #: After this many tickets, refuse the rest with ``ticket_status``.
+        self.refuse_after: int | None = None
 
     async def ticket(self, request):
-        if self.ticket_status != 200:
-            return web.json_response({"detail": "no"}, status=self.ticket_status)
+        self.tickets += 1
+        refuse = (self.refuse_after is not None and self.tickets > self.refuse_after) or (
+            self.refuse_after is None and self.ticket_status != 200)
+        if refuse:
+            return web.json_response({"detail": "no"}, status=self.ticket_status,
+                                     headers=self.ticket_headers)
         return web.json_response({"ticket": "t", "expires_in": 30, "kind": "token"})
 
     async def ws(self, request):
@@ -99,11 +107,67 @@ async def test_a_new_epoch_resets_the_resume_point():
     assert server.connections[2]["since"] == "0" and server.connections[2]["epoch"] == "E2"
 
 
-async def test_revoked_token_stops_the_stream():
+async def test_4401_reconnects_and_a_dead_token_then_stops():
+    """4401 also means "what you may see changed": reconnect. A revoked token
+    then fails to mint a ticket, and only that stops the stream."""
     server = FakeServer([[hello(), snap(), ("close", 4401)]])
+    server.ticket_status, server.refuse_after = 401, 1
     stream, _frames, states = await _run(server)
     assert stream.state == "auth_failed" and states[-1] == "auth_failed"
-    assert len(server.connections) == 1                      # no retry with a dead token
+    assert server.tickets == 2 and len(server.connections) == 1
+
+
+async def test_4401_with_the_token_still_good_resumes():
+    server = FakeServer([
+        [hello(), snap(), {"v": 2, "seq": 11, "event_type": "live_state"}, ("close", 4401)],
+        [hello(resumed=True, seq=11), {"v": 2, "seq": 12, "event_type": "app_alert"}],
+    ])
+    stream, frames, _ = await _run(
+        server, until=lambda fs: any(f.get("event_type") == "app_alert" for f in fs))
+    assert server.connections[1]["since"] == "11" and stream.state == "stopped"
+
+
+async def test_an_address_refusal_is_retried_not_auth_failed():
+    server = FakeServer([[hello(), snap()]])
+    server.ticket_status, server.refuse_after = 403, 0
+    server.ticket_headers = {"X-OpenNVR-Error": "token_address"}
+    states = []
+    app = web.Application()
+    app.router.add_post("/api/v1/events/ws-ticket", server.ticket)
+    app.router.add_get("/api/v1/events/ws", server.ws)
+    async with TestServer(app) as ts, aiohttp.ClientSession() as session:
+        client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
+        stream = EventStream(client, session, lambda f: None, on_state=states.append,
+                             min_backoff=0.01, max_backoff=0.02)
+        task = asyncio.create_task(stream.run())
+        while server.tickets < 3:
+            await asyncio.sleep(0.01)
+        await stream.stop()
+        await asyncio.wait_for(task, 2)
+    assert "auth_failed" not in states
+
+
+async def test_a_consumer_error_does_not_end_the_stream():
+    server = FakeServer([[hello(), snap(), {"v": 2, "seq": 11, "event_type": "boom"},
+                          {"v": 2, "seq": 12, "event_type": "app_alert"}]])
+    seen = []
+    app = web.Application()
+    app.router.add_post("/api/v1/events/ws-ticket", server.ticket)
+    app.router.add_get("/api/v1/events/ws", server.ws)
+    async with TestServer(app) as ts, aiohttp.ClientSession() as session:
+        client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
+        stream = None
+
+        def on_frame(f):
+            seen.append(f["event_type"])
+            if f["event_type"] == "boom":
+                raise ValueError("bad value")
+            if f["event_type"] == "app_alert":
+                asyncio.get_running_loop().create_task(stream.stop())
+
+        stream = EventStream(client, session, on_frame, min_backoff=0.01, max_backoff=0.02)
+        await asyncio.wait_for(stream.run(), 5)
+    assert seen[-2:] == ["boom", "app_alert"]
 
 
 async def test_ticket_refused_is_auth_failure():

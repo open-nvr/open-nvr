@@ -185,3 +185,18 @@ async def test_ack_by_ids_or_by_filter():
         await client.ack_alerts()
     assert [r["body"] for r in rec.requests] == [
         b'{"ids": [1, 2]}', b'{"source_name": "loitering", "severity": "high"}', b"{}"]
+
+
+async def test_cameras_include_turned_off_ones_across_pages():
+    async def cameras(request):
+        from aiohttp import web
+
+        skip, limit = int(request.query["skip"]), int(request.query["limit"])
+        rows = [{"id": i, "name": f"c{i}", "is_active": i != 2} for i in range(1, 6)]
+        return web.json_response({"cameras": rows[skip:skip + limit], "total": 5})
+
+    async with fake_site({("GET", "/api/v1/cameras/"): cameras}) as (base, session, rec):
+        cams = await OpenNVRClient(base, TOKEN, session).get_cameras(page_size=2)
+    assert [c.id for c in cams] == [1, 2, 3, 4, 5] and cams[1].is_active is False
+    assert all(r["query"]["active_only"] == "false" for r in rec.requests)
+    assert [r["query"]["skip"] for r in rec.requests] == ["0", "2", "4"]

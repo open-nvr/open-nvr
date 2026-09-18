@@ -116,6 +116,8 @@ async def validate_site(hass: HomeAssistant, url: str, token: str,
     except OpenNVRSSLError as err:
         raise InvalidSite("ssl_error") from err
     except OpenNVRAuthError as err:
+        if err.code == "token_address":
+            raise InvalidSite("token_address") from err
         if err.status == 403:
             # /system/info itself needs settings.view.
             raise InvalidSite("missing_scopes", scopes="settings.view") from err
@@ -271,8 +273,12 @@ class OpenNVRConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_cameras()
         schema = vol.Schema({
             vol.Required(CONF_API_TOKEN): TOKEN_SELECTOR,
-            # A LAN server usually has a self-signed certificate.
-            vol.Required(CONF_VERIFY_SSL, default=False): bool,
+            # On by default even though a LAN server usually has a
+            # self-signed certificate: the address came from an
+            # unauthenticated announcement, and the token is about to be sent
+            # there. Turning it off is the user's informed choice (the error
+            # says how).
+            vol.Required(CONF_VERIFY_SSL, default=True): bool,
         })
         return self.async_show_form(step_id="zeroconf_confirm", data_schema=schema,
                                     errors=errors, description_placeholders=placeholders)

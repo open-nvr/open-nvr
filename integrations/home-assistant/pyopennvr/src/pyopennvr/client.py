@@ -157,10 +157,18 @@ class OpenNVRClient:
 
     # ── cameras ──────────────────────────────────────────────────────────
 
-    async def get_cameras(self) -> list[Camera]:
-        data = await self.request("GET", "/cameras/")
-        rows = data.get("cameras", []) if isinstance(data, dict) else data
-        return [Camera.from_dict(c) for c in rows]
+    async def get_cameras(self, *, page_size: int = 200) -> list[Camera]:
+        """Every camera the token can see, turned off ones included (a camera
+        that is off still exists; its entities must not vanish), all pages."""
+        out: list[Camera] = []
+        while True:
+            data = await self.request("GET", "/cameras/", params={
+                "active_only": False, "skip": len(out), "limit": page_size})
+            rows = data.get("cameras", []) if isinstance(data, dict) else data
+            out += [Camera.from_dict(c) for c in rows]
+            total = data.get("total") if isinstance(data, dict) else None
+            if len(rows) < page_size or (isinstance(total, int) and len(out) >= total):
+                return out
 
     async def get_camera(self, camera_id: int) -> Camera:
         return Camera.from_dict(await self.request("GET", f"/cameras/{int(camera_id)}"))

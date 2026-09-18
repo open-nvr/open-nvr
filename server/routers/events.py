@@ -624,8 +624,12 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
             complete = False
             # With no v2 socket open the entity publisher idles, so states
             # that changed since ``since`` were never published and the ring
-            # can't replay them: that is a resync, not a resume.
-            cold = entities and not entity_state_publisher.is_warm()
+            # can't replay them: that is a resync, not a resume. Likewise when
+            # the cache is warm again but was primed after ``since`` (another
+            # client woke the publisher while this one was away).
+            primed = entity_state_publisher.primed_seq()
+            cold = entities and (not entity_state_publisher.is_warm() or (
+                since is not None and primed is not None and since < primed))
             if since is not None and epoch == bus.epoch and not cold:
                 replayed, complete = await bus.replay(sub, since)
             hello = {"v": 2, "event_type": "subscribed", "epoch": bus.epoch,

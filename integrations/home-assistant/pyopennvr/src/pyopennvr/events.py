@@ -14,9 +14,14 @@
   once a connection is established;
 * the server sends a heartbeat after 25 s of silence, so a connection
   quiet for ``silence_timeout`` is treated as dead and reopened;
-* close code 4401 (token revoked or its scope changed) and a 401/403 when
-  minting a ticket stop the stream and report ``auth_failed``: retrying
-  with the same token cannot succeed. The integration starts re-auth.
+* close code 4401 means "reconnect": the server closes with it when the
+  token was revoked AND when what the token may see changed (a camera
+  shared, a permission changed). Reconnecting mints a new ticket, and only
+  a ticket refused with 401/403 stops the stream as ``auth_failed``: a dead
+  token can't mint one. A ticket refused for the caller's ADDRESS
+  (``X-OpenNVR-Error: token_address``) is retried: a new token wouldn't
+  help, fixing the token's allowed addresses will;
+* a consumer that raises on a frame is logged and the stream goes on.
 
 Tolerant: frames of unknown types are passed to the consumer unchanged, and
 malformed text frames are skipped.
@@ -39,7 +44,8 @@ from .exceptions import OpenNVRAuthError, OpenNVRError
 
 _LOGGER = logging.getLogger(__name__)
 
-#: Close code the server uses when a token was revoked or its scope changed.
+#: Close code the server uses when a token was revoked or what it may see
+#: changed; either way: reconnect (a dead token then fails to mint a ticket).
 CLOSE_TOKEN_REVOKED = 4401
 
 Consumer = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -101,9 +107,12 @@ class EventStream:
             await self._set_state("connecting")
             try:
                 established = await self._connect_once()
-            except OpenNVRAuthError:
-                await self._set_state("auth_failed")
-                return
+            except OpenNVRAuthError as exc:
+                if exc.code != "token_address":
+                    await self._set_state("auth_failed")
+                    return
+                _LOGGER.debug("OpenNVR refuses this address: %s", exc)
+                established = False
             except (OpenNVRError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 _LOGGER.debug("OpenNVR events connection failed: %s", exc)
                 established = False
@@ -148,8 +157,12 @@ class EventStream:
                     # queued behind it: resuming from the heartbeat's seq
                     # would skip that event.
                     self.last_seq = frame["seq"]
-                await _call(self._on_frame, frame)
+                try:
+                    await _call(self._on_frame, frame)
+                except Exception:  # noqa: BLE001 - one bad frame must not end push
+                    _LOGGER.exception("OpenNVR event consumer failed on %s",
+                                      frame.get("event_type"))
             if ws.close_code == CLOSE_TOKEN_REVOKED:
-                await self._set_state("auth_failed")
+                _LOGGER.debug("OpenNVR closed the events socket (4401): reconnecting")
         self._ws = None
         return established

@@ -245,3 +245,78 @@ async def test_candidates_before_the_answer_are_held(
     cam.close_webrtc_session("s-1")
     await hass.async_block_till_done()
     mock_whep.close.assert_called_once()
+
+
+
+async def test_a_turned_off_camera_stays_available_to_turn_on(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        mock_whep) -> None:
+    mock_client.get_system_info.return_value = system_info(recording_pause_enabled=True)
+    mock_client.get_cameras.return_value = [
+        NvrCamera.from_dict({**CAMERAS[0], "is_active": False}),
+        NvrCamera.from_dict(CAMERAS[1])]
+    await _setup(hass)
+    [stream] = mock_stream.instances
+    stream.on_frame({"v": 2, "seq": 1, "event_type": "entity_state",
+                     "payload": {"key": "camera.1.online", "state": False}})
+    await hass.async_block_till_done()
+    state = hass.states.get(FRONT)
+    assert state.state != STATE_UNAVAILABLE             # off, yet reachable
+    await hass.services.async_call("camera", "turn_on", {"entity_id": FRONT}, blocking=True)
+    assert mock_client.set_camera_active.call_args.args == (1, True)
+
+
+async def test_a_session_closed_while_its_offer_waits_is_deleted(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        mock_whep) -> None:
+    import asyncio
+
+    await _setup(hass)
+    cam = _entity(hass, FRONT)
+    gate = asyncio.Event()
+
+    async def slow_offer(camera_id, sdp):
+        await gate.wait()
+        return WhepSession("v=0 answer", "https://nvr.local/webrtc/cam-1/whep/s9", "jwt")
+
+    mock_whep.offer.side_effect = slow_offer
+    sent = []
+    task = hass.async_create_task(cam.async_handle_async_webrtc_offer("v=0", "s-9", sent.append))
+    await asyncio.sleep(0)
+    cam.close_webrtc_session("s-9")
+    gate.set()
+    await task
+    assert sent == []                         # nobody is listening any more
+    mock_whep.close.assert_called_once()
+    assert "s-9" not in cam._sessions
+
+
+async def test_an_offer_timeout_still_answers_the_browser(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        mock_whep) -> None:
+    await _setup(hass)
+    cam = _entity(hass, FRONT)
+    mock_whep.offer.side_effect = TimeoutError()
+    sent = []
+    await cam.async_handle_async_webrtc_offer("v=0", "s-1", sent.append)
+    assert sent[0].code == "webrtc_offer_failed"
+
+
+async def test_the_rtsps_source_is_re_signed(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        mock_whep, freezer: FrozenDateTimeFactory) -> None:
+    await _setup(hass)
+    cam = _entity(hass, FRONT)
+    info = lambda token: StreamInfo.from_dict({  # noqa: E731
+        "camera_id": 1, "stream_name": "cam-1", "token": token,
+        "urls": {"webrtc": "https://nvr.local/webrtc/cam-1/whep",
+                 "rtsps": "rtsps://10.0.0.2:8322/cam-1"}})
+    mock_client.get_stream_info.return_value = info("first")
+    assert "first" in await cam.stream_source()
+    cam.stream = MagicMock()
+    mock_client.get_stream_info.return_value = info("second")
+    freezer.tick(50 * 60 + 1)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert "second" in cam.stream.update_source.call_args.args[0]
+    cam.stream = None

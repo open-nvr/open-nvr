@@ -18,7 +18,11 @@ INFO = {"camera_id": 1, "stream_name": "cam-1", "token": "streamjwt",
 def test_location_gets_the_proxy_prefix_back():
     whep = "https://nvr.local/webrtc/cam-1/whep"
     assert resolve_session_url("/cam-1/whep/abc", whep) == "https://nvr.local/webrtc/cam-1/whep/abc"
-    assert resolve_session_url("https://m/x/whep/abc", whep) == "https://m/x/whep/abc"
+    # Another origin would receive the stream token on PATCH/DELETE: refused.
+    assert resolve_session_url("https://m/x/whep/abc", whep) is None
+    assert resolve_session_url("//evil.example/x", whep) is None
+    assert resolve_session_url("https://nvr.local/webrtc/cam-1/whep/abc", whep) == (
+        "https://nvr.local/webrtc/cam-1/whep/abc")
     assert resolve_session_url("abc", whep) == "https://nvr.local/webrtc/cam-1/abc"
     assert resolve_session_url(None, whep) is None
 

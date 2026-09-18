@@ -103,6 +103,7 @@ async def test_missing_recommended_scopes_are_named(
     (OpenNVRSSLError("self-signed"), "ssl_error"),
     (OpenNVRAuthError("nope", 401), "invalid_auth"),
     (OpenNVRAuthError("scope", 403), "missing_scopes"),
+    (OpenNVRAuthError("address", 403, "token_address"), "token_address"),
     (OpenNVRNotFoundError("404"), "not_opennvr"),
     (KeyError("site_id"), "not_opennvr"),
 ])

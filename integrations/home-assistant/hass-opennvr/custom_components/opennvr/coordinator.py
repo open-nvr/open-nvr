@@ -94,6 +94,14 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         self._stream: EventStream | None = None
         self._fresh_info: SystemInfo | None = None
         self._key_listeners: dict[str, list[KeyListener]] = {}
+        #: While a REST refresh is in flight: the states and site mode pushed
+        #: meanwhile. They are newer than what the refresh read, so they win
+        #: over it (else a short motion pulse could be undone by the refresh).
+        self._inflight: dict[str, Any] | None = None
+        #: Successful refreshes so far (the prune's grace period counts them).
+        self.refreshes = 0
+        #: Unique id -> refresh count when its entity was first found missing.
+        self.prune_missing: dict[str, int] = {}
         #: Recent frames, for diagnostics.
         self.recent_frames: deque[dict[str, Any]] = deque(maxlen=RECENT_FRAMES)
 
@@ -146,6 +154,13 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         return ConfigEntryAuthFailed(translation_domain=DOMAIN, translation_key="auth_failed")
 
     async def _async_update_data(self) -> OpenNVRSiteData:
+        self._inflight = {}
+        try:
+            return await self._read_site()
+        finally:
+            self._inflight = None
+
+    async def _read_site(self) -> OpenNVRSiteData:
         old = self.data
         try:
             info, self._fresh_info = self._fresh_info, None
@@ -176,6 +191,11 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
                    else {cid: c for cid, c in all_cameras.items() if cid in set(chosen)})
         by_key = {d.key: d for d in catalog.descriptors
                   if d.camera_id is None or d.camera_id in cameras}
+        pushed = self._inflight or {}
+        states.update(pushed.get("states", {}))
+        if "site_mode" in pushed:
+            site_mode = pushed["site_mode"]
+        self.refreshes += 1
         return OpenNVRSiteData(info=info, all_cameras=all_cameras, cameras=cameras,
                                catalog=catalog, by_key=by_key, states=states,
                                site_mode=site_mode)
@@ -203,6 +223,23 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
 
     def state_of(self, key: str) -> dict[str, Any] | None:
         return self.data.states.get(key) if self.data else None
+
+    @callback
+    def async_set_state(self, key: str, value: dict[str, Any]) -> None:
+        """A state known newer than any refresh in flight: pushed, or a
+        command's effect shown ahead of the server's confirmation."""
+        if self.data is not None:
+            self.data.states[key] = value
+        if self._inflight is not None:
+            self._inflight.setdefault("states", {})[key] = value
+
+    @callback
+    def async_set_site_mode(self, mode: SiteMode | None) -> None:
+        if self.data is not None:
+            self.data.site_mode = mode
+        if self._inflight is not None:
+            self._inflight["site_mode"] = mode
+        self.async_update_listeners()
 
     @callback
     def async_add_key_listener(self, key: str, listener: KeyListener) -> CALLBACK_TYPE:
@@ -271,21 +308,23 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         elif kind == "state_snapshot":
             snap = frame.get("entity_states")
             if isinstance(snap, dict):
-                data.states.update(snap)
+                for key, value in snap.items():
+                    if isinstance(key, str) and isinstance(value, dict):
+                        self.async_set_state(key, value)
             if isinstance(frame.get("site_mode"), dict):
-                data.site_mode = _site_mode_from(frame["site_mode"], data.site_mode)
-            self.async_update_listeners()
+                self.async_set_site_mode(_site_mode_from(frame["site_mode"], data.site_mode))
+            else:
+                self.async_update_listeners()
         elif kind == "site_mode":
-            data.site_mode = _site_mode_from(payload, data.site_mode)
-            self.async_update_listeners()
+            self.async_set_site_mode(_site_mode_from(payload, data.site_mode))
         elif kind == "descriptors_changed":
             if payload.get("etag") != data.catalog.etag:
-                self.hass.async_create_task(self.async_request_refresh())
+                self._refresh_soon()
         elif kind == "lagged":
             # The server dropped frames for us (queue full): some updates are
             # gone, so re-read everything rather than wait up to 30 s.
             _LOGGER.debug("OpenNVR events stream lagged (%s dropped)", frame.get("dropped"))
-            self.hass.async_create_task(self.async_request_refresh())
+            self._refresh_soon()
         elif kind not in ("subscribed", "heartbeat"):
             async_dispatcher_send(self.hass, signal_frame(self.config_entry.entry_id), frame)
 
@@ -299,10 +338,16 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         else:
             update = {"state": payload.get("state"),
                       "attributes": payload.get("attributes") or {}}
-            if self.data is not None:
-                self.data.states[key] = update
+            self.async_set_state(key, update)
         for listener in list(self._key_listeners.get(key, ())):
-            listener(update)
+            try:
+                listener(update)
+            except Exception:  # noqa: BLE001 - one entity must not stop the others
+                _LOGGER.exception("OpenNVR entity %s failed on a pushed update", key)
+
+    @callback
+    def _refresh_soon(self) -> None:
+        self.config_entry.async_create_task(self.hass, self.async_request_refresh())
 
 
 def _site_mode_from(d: dict[str, Any], old: SiteMode | None) -> SiteMode | None:

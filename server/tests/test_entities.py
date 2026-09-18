@@ -346,3 +346,14 @@ def test_publisher_is_idle_until_someone_uses_entities(env, monkeypatch):  # noq
     assert pub.wanted() is False
     env.client.get("/api/v1/entities/states", headers=env.jwt("admin"))
     assert pub.wanted() is True
+
+
+def test_a_turned_off_camera_keeps_its_entities(env):  # noqa: F811
+    """Off is a state, not an absence: a client that dropped the entities would
+    lose the user's names and automations, and could not turn it back on."""
+    s = env.Session()
+    s.get(env.models.Camera, 2).is_active = False
+    s.commit()
+    s.close()
+    keys = _keys(env, env.jwt("admin"))
+    assert "camera.2.online" in keys and "camera.2.detection" in keys

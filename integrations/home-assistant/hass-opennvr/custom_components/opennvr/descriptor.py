@@ -54,12 +54,26 @@ class OpenNVRDescriptorEntity(OpenNVREntity):
     def __init__(self, coordinator: OpenNVRCoordinator, desc: EntityDescriptor) -> None:
         super().__init__(coordinator, desc.key, desc.device)
         self.descriptor = desc
+        self._attr_entity_registry_enabled_default = desc.enabled_default
+        self._apply(desc)
+
+    def _apply(self, desc: EntityDescriptor) -> None:
+        """Take the descriptor's presentation. Called again whenever the
+        catalogue brings a changed descriptor (a label added to a camera,
+        new enum options), so a live entity never keeps a stale one."""
         # The server names entities (in English): its translation keys can't
         # all be known to an integration that predates them.
         self._attr_name = desc.name
         self._attr_icon = desc.icon
         self._attr_entity_category = enum_or_none(EntityCategory, desc.entity_category)
-        self._attr_entity_registry_enabled_default = desc.enabled_default
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        desc = self.coordinator.descriptor(self.key)
+        if desc is not None and desc is not self.descriptor:
+            self.descriptor = desc
+            self._apply(desc)
+        super()._handle_coordinator_update()
 
     @property
     def resolved(self) -> dict[str, Any] | None:
@@ -109,7 +123,7 @@ class OpenNVRDescriptorEntity(OpenNVREntity):
         """Show a command's effect now; the server's next push confirms it."""
         value = dict(self.resolved or {"attributes": {}})
         value["state"] = state
-        self.coordinator.data.states[self.key] = value
+        self.coordinator.async_set_state(self.key, value)
         self.async_write_ha_state()
 
 
@@ -138,14 +152,35 @@ def async_setup_platform_entities(
     return coordinator.async_add_listener(add_new)
 
 
+#: A key missing from this many consecutive refreshes is gone for good. A
+#: descriptor can be briefly absent (after an OpenNVR restart, PTZ presets
+#: appear only once the camera answered); removing it at once would lose the
+#: user's entity id, name and area when it comes back a moment later.
+PRUNE_AFTER_REFRESHES = 3
+
+
 def expected_unique_ids(coordinator: OpenNVRCoordinator) -> set[str]:
-    """Unique ids of every entity this entry should have now."""
-    site = coordinator.data.info.site_id
+    """Unique ids of every entity this entry should have now, including the
+    hand-written ones exactly when their platform creates them."""
+    data = coordinator.data
+    site = data.info.site_id
     ids = {f"{site}:{key}" for key in coordinator.known_keys}
-    ids |= {f"{site}:camera.{cid}" for cid in coordinator.data.cameras}
-    # The hand-written site entities (alarm_control_panel.py, update.py).
-    ids |= {f"{site}:site.alarm", f"{site}:site.update"}
+    scopes = data.info.scopes
+    if scopes is None or "live.view" in scopes:              # camera.py
+        ids |= {f"{site}:camera.{cid}" for cid in data.cameras}
+    if data.info.has("site_mode") and data.site_mode is not None:   # alarm panel
+        ids.add(f"{site}:site.alarm")
+    ids.add(f"{site}:site.update")                           # update.py
     return ids
+
+
+def _camera_of(coordinator: OpenNVRCoordinator, key: str) -> int | None:
+    """The OpenNVR camera an entity key belongs to, if any."""
+    for desc in coordinator.data.catalog.descriptors:
+        if desc.key == key:
+            return desc.camera_id
+    parts = key.split(".")
+    return int(parts[1]) if len(parts) >= 2 and parts[0] == "camera" and parts[1].isdigit() else None
 
 
 def wanted_device_identifiers(coordinator: OpenNVRCoordinator) -> set[tuple[str, str]]:
@@ -166,11 +201,22 @@ def async_prune(hass: HomeAssistant, coordinator: OpenNVRCoordinator,
     if coordinator.data is None:
         return
     entry = coordinator.config_entry
+    data = coordinator.data
     keep = set(keep_unique_ids if keep_unique_ids is not None
                else expected_unique_ids(coordinator))
+    missing = coordinator.prune_missing
     ent_reg = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        if ent.unique_id not in keep:
+        if ent.unique_id in keep:
+            missing.pop(ent.unique_id, None)
+            continue
+        cam = _camera_of(coordinator, ent.unique_id.split(":", 1)[-1])
+        # A camera the user deselected: its entities go now. Anything else
+        # must stay missing for a few refreshes first.
+        deselected = cam is not None and cam in data.all_cameras and cam not in data.cameras
+        first = missing.setdefault(ent.unique_id, coordinator.refreshes)
+        if deselected or coordinator.refreshes - first >= PRUNE_AFTER_REFRESHES - 1:
+            missing.pop(ent.unique_id, None)
             ent_reg.async_remove(ent.entity_id)
     dev_reg = dr.async_get(hass)
     wanted = wanted_device_identifiers(coordinator)

@@ -14,7 +14,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import OpenNVRConfigEntry
-from .coordinator import OpenNVRCoordinator
 from .descriptor import OpenNVRDescriptorEntity, async_setup_platform_entities, enum_or_none
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,8 +28,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry,
 
 
 class OpenNVREvent(OpenNVRDescriptorEntity, EventEntity):
-    def __init__(self, coordinator: OpenNVRCoordinator, desc: EntityDescriptor) -> None:
-        super().__init__(coordinator, desc)
+    def _apply(self, desc: EntityDescriptor) -> None:
+        super()._apply(desc)
         self._attr_device_class = enum_or_none(EventDeviceClass, desc.device_class)
         self._attr_event_types = list(desc.event_types or [])
 
@@ -45,8 +44,8 @@ class OpenNVREvent(OpenNVRDescriptorEntity, EventEntity):
             return
         kind = str(event.get("type") or "")
         if kind not in self._attr_event_types:
-            # e.g. a label added to a camera since the catalogue was read;
-            # the next catalogue refresh brings the type.
+            # A type the descriptor does not list (yet): once the
+            # catalogue brings it, _apply updates the entity's types.
             _LOGGER.debug("%s: event type %r not announced, dropped", self.key, kind)
             return
         attrs = event.get("attributes")

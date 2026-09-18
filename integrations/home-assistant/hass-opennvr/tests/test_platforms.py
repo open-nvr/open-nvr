@@ -247,8 +247,15 @@ async def test_catalogue_changes_add_and_remove(
     await hass.async_block_till_done()
     ent_reg = er.async_get(hass)
     assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{SITE_ID}:camera.1.count.car")
-    assert ent_reg.async_get_entity_id("binary_sensor", DOMAIN,
-                                       f"{SITE_ID}:zone.7.occupancy.person") is None
+    zone_uid = f"{SITE_ID}:zone.7.occupancy.person"
+    # Gone from the catalogue: kept (unavailable) for a few refreshes first.
+    assert ent_reg.async_get_entity_id("binary_sensor", DOMAIN, zone_uid)
+    entry.runtime_data.coordinator.async_add_listener(lambda: None)
+    for _ in range(3):
+        freezer.tick(31)
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+    assert ent_reg.async_get_entity_id("binary_sensor", DOMAIN, zone_uid) is None
     assert reg.async_get_device_by_identifier((DOMAIN, f"{SITE_ID}:zone:7"),
                                               entry.entry_id) is None
 
@@ -298,3 +305,85 @@ async def test_user_may_remove_a_stale_device(
                                         "config_entry_id": entry.entry_id,
                                         "device_id": device.id})
         assert (await client.receive_json())["success"] is ok
+
+
+
+async def test_a_briefly_missing_descriptor_keeps_its_entity(
+        hass: HomeAssistant, catalog_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    """After an OpenNVR restart, PTZ presets appear only once the camera
+    answered: the select must come back as the SAME entity (id, name, area)."""
+    entry = await _setup(hass)
+    entry.runtime_data.coordinator.async_add_listener(lambda: None)
+    ent_reg = er.async_get(hass)
+    uid = f"{SITE_ID}:camera.1.ptz_preset"
+    entity_id = ent_reg.async_get_entity_id("select", DOMAIN, uid)
+    ent_reg.async_update_entity(entity_id, name="Gate camera preset")
+    without = [d for d in CATALOG if d["key"] != "camera.1.ptz_preset"]
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e2", "entities": without})
+    freezer.tick(31)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e3", "entities": CATALOG})
+    freezer.tick(31)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    entry_now = ent_reg.async_get(entity_id)
+    assert entry_now is not None and entry_now.name == "Gate camera preset"
+
+
+async def test_catalogue_changes_reach_live_entities(
+        hass: HomeAssistant, catalog_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    entry = await _setup(hass)
+    entry.runtime_data.coordinator.async_add_listener(lambda: None)
+    [stream] = mock_stream.instances
+    newer = [({**d, "event_types": ["person", "car", "bicycle"]}
+              if d["key"] == "camera.1.detections" else d) for d in CATALOG]
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e2", "entities": newer})
+    freezer.tick(31)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    stream.on_frame({"v": 2, "seq": 1, "event_type": "entity_state", "payload": {
+        "key": "camera.1.detections", "event": {"type": "bicycle"}}})
+    await hass.async_block_till_done()
+    state = hass.states.get(_id(hass, "camera.1.detections"))
+    assert state.attributes["event_type"] == "bicycle"
+    assert "bicycle" in state.attributes["event_types"]
+
+
+async def test_sensor_values_fit_their_kind(hass: HomeAssistant, catalog_client: MagicMock,
+                                            mock_stream: type[FakeStream]) -> None:
+    extra = [
+        _d("app.x.last_seen", "sensor", "Last seen", {"kind": "site", "id": "site"},
+           device_class="timestamp"),
+        _d("app.x.dwell", "sensor", "Dwell", {"kind": "site", "id": "site"},
+           state_class="measurement", unit="s"),
+        _d("app.x.note", "sensor", "Note", {"kind": "site", "id": "site"}),
+    ]
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e1", "entities": CATALOG + extra})
+    catalog_client.get_entity_states.return_value = {
+        **{k: dict(v) for k, v in STATES.items()},
+        "app.x.last_seen": {"state": "2026-09-18T10:00:00", "attributes": {}},
+        "app.x.dwell": {"state": "not a number", "attributes": {}},
+        "app.x.note": {"state": "x" * 400, "attributes": {}},
+    }
+    await _setup(hass)
+    ent = er.async_get(hass)
+    get = lambda key: hass.states.get(ent.async_get_entity_id(  # noqa: E731
+        "sensor", DOMAIN, f"{SITE_ID}:{key}")).state
+    assert get("app.x.last_seen") == "2026-09-18T10:00:00+00:00"
+    assert get("app.x.dwell") == STATE_UNKNOWN
+    assert len(get("app.x.note")) == 255
+    # And pushing a bad value keeps the stream (and other entities) alive.
+    [stream] = mock_stream.instances
+    stream.on_frame({"v": 2, "seq": 1, "event_type": "entity_state",
+                     "payload": {"key": "app.x.dwell", "state": {"nested": 1}}})
+    stream.on_frame({"v": 2, "seq": 2, "event_type": "entity_state",
+                     "payload": {"key": "camera.1.count.person", "state": 9}})
+    await hass.async_block_till_done()
+    assert hass.states.get(_id(hass, "camera.1.count.person")).state == "9"

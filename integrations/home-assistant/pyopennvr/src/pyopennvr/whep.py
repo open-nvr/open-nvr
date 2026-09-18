@@ -35,7 +35,9 @@ class WhepSession:
 
 
 def resolve_session_url(location: str | None, whep_url: str) -> str | None:
-    """The absolute session URL from a WHEP POST's ``Location`` header."""
+    """The absolute session URL from a WHEP POST's ``Location`` header.
+    None when it points at another origin: the stream token goes with every
+    PATCH/DELETE, and must never leave the site it was issued by."""
     if not location:
         return None
     if location.startswith("/") and not location.startswith("//"):
@@ -44,7 +46,9 @@ def resolve_session_url(location: str | None, whep_url: str) -> str | None:
         if parent and whep_path.endswith(parent):
             prefix = whep_path[: len(whep_path) - len(parent)]
             return urljoin(whep_url, prefix + location)
-    return urljoin(whep_url, location)
+    resolved = urljoin(whep_url, location)
+    a, b = urlsplit(resolved), urlsplit(whep_url)
+    return resolved if (a.scheme, a.netloc) == (b.scheme, b.netloc) else None
 
 
 def candidate_fragment(candidate: str, sdp_mid: str | None = None,
@@ -87,8 +91,8 @@ class Whep:
                     raise OpenNVRConnectionError(f"WHEP POST failed ({resp.status})")
                 answer = await resp.text()
                 location = resp.headers.get("Location")
-        except aiohttp.ClientError as exc:
-            raise OpenNVRConnectionError(f"WHEP POST failed: {exc}") from exc
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise OpenNVRConnectionError(f"WHEP POST failed: {exc!r}") from exc
         return WhepSession(answer, resolve_session_url(location, info.webrtc_url), info.token)
 
     async def add_candidate(self, session: WhepSession, candidate: str,
@@ -104,8 +108,8 @@ class Whep:
             ) as resp:
                 if resp.status >= 400 and resp.status != 405:
                     raise OpenNVRConnectionError(f"WHEP PATCH failed ({resp.status})")
-        except aiohttp.ClientError as exc:
-            raise OpenNVRConnectionError(f"WHEP PATCH failed: {exc}") from exc
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise OpenNVRConnectionError(f"WHEP PATCH failed: {exc!r}") from exc
 
     async def close(self, session: WhepSession) -> None:
         if not session.session_url:
@@ -116,5 +120,5 @@ class Whep:
                 ssl=self._client.ssl, timeout=aiohttp.ClientTimeout(total=10),
             ):
                 pass
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, TimeoutError):
             pass  # the session times out on MediaMTX anyway

@@ -32,10 +32,11 @@ from homeassistant.components.camera import (
     WebRTCError,
     WebRTCSendMessage,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from . import OpenNVRConfigEntry, issues
 from .const import DOMAIN
@@ -49,6 +50,8 @@ PARALLEL_UPDATES = 0
 
 #: The token scope live view and snapshots need.
 LIVE_SCOPE = "live.view"
+#: The stream token in an RTSPS source lives 60 minutes: re-sign at 50.
+SOURCE_REFRESH_S = 50 * 60
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry,
@@ -88,6 +91,12 @@ class OpenNVRCamera(OpenNVREntity, Camera):
         self._sessions: dict[str, WhepSession] = {}
         #: Candidates that arrived before their session's WHEP answer.
         self._early: dict[str, list[RTCIceCandidateInit]] = {}
+        #: Offers in flight, and those of them closed before their answer
+        #: came: such a session is DELETEd as soon as it exists.
+        self._pending: set[str] = set()
+        self._closed_early: set[str] = set()
+        #: Re-signs the RTSPS source before its stream token expires.
+        self._source_refresh: CALLBACK_TYPE | None = None
 
     # ── state ────────────────────────────────────────────────────────────
 
@@ -102,9 +111,12 @@ class OpenNVRCamera(OpenNVREntity, Camera):
     @property
     def available(self) -> bool:
         # Unavailable when OpenNVR is unreachable, the camera was removed or
-        # deselected, or OpenNVR reports it offline.
-        return (super().available and self._camera is not None
-                and self._state("online") is not False)
+        # deselected, or OpenNVR reports it offline. A camera turned OFF is
+        # available (and off): it must stay reachable to be turned on again.
+        cam = self._camera
+        if not super().available or cam is None:
+            return False
+        return not cam.is_active or self._state("online") is not False
 
     @property
     def supported_features(self) -> CameraEntityFeature:
@@ -134,10 +146,14 @@ class OpenNVRCamera(OpenNVREntity, Camera):
                 f"camera.{self.camera_id}.{suffix}", lambda _update: self.async_write_ha_state()))
 
     async def async_will_remove_from_hass(self) -> None:
-        for session in self._sessions.values():
-            await self._whep.close(session)
-        self._sessions.clear()
+        if self._source_refresh is not None:
+            self._source_refresh()
+            self._source_refresh = None
+        sessions, self._sessions = list(self._sessions.values()), {}
         self._early.clear()
+        self._closed_early.update(self._pending)
+        for session in sessions:
+            await self._whep.close(session)
         await super().async_will_remove_from_hass()
 
     # ── controls ─────────────────────────────────────────────────────────
@@ -179,32 +195,65 @@ class OpenNVRCamera(OpenNVREntity, Camera):
             return None
 
     async def stream_source(self) -> str | None:
-        try:
-            info = await self.coordinator.client.get_stream_info(self.camera_id)
-        except OpenNVRError as err:
-            _LOGGER.debug("Stream info of camera %s failed: %s", self.camera_id, err)
-            return None
-        source = rtsps_source(info.rtsps_url, info.token)
+        source = await self._signed_source()
         # Raised only when something in HA actually asked for an RTSP stream
         # (recording, HLS); live view (WebRTC) never needs it.
         if source is None:
             issues.async_raise(self.hass, self.coordinator.config_entry, "rtsp_not_exposed")
         else:
             issues.async_clear(self.hass, self.coordinator.config_entry, "rtsp_not_exposed")
+            self._schedule_source_refresh()
         return source
+
+    async def _signed_source(self) -> str | None:
+        try:
+            info = await self.coordinator.client.get_stream_info(self.camera_id)
+        except OpenNVRError as err:
+            _LOGGER.debug("Stream info of camera %s failed: %s", self.camera_id, err)
+            return None
+        return rtsps_source(info.rtsps_url, info.token)
+
+    @callback
+    def _schedule_source_refresh(self) -> None:
+        """HA's stream keeps the URL it was created with and reconnects with
+        it; the token inside expires after an hour. Re-sign it before then."""
+        if self._source_refresh is not None:
+            self._source_refresh()
+        self._source_refresh = async_call_later(self.hass, SOURCE_REFRESH_S,
+                                                self._refresh_source)
+
+    async def _refresh_source(self, _now: Any) -> None:
+        self._source_refresh = None
+        if self.stream is None:
+            return  # nobody streams: the next stream_source() signs afresh
+        source = await self._signed_source()
+        if source is not None:
+            self.stream.update_source(source)
+        self._schedule_source_refresh()
 
     async def async_handle_async_webrtc_offer(self, offer_sdp: str, session_id: str,
                                               send_message: WebRTCSendMessage) -> None:
+        self._pending.add(session_id)
         try:
             session = await self._whep.offer(self.camera_id, offer_sdp)
         except OpenNVRNotFoundError:
             self._early.pop(session_id, None)
+            self._closed_early.discard(session_id)
             send_message(WebRTCError("webrtc_offer_failed",
                                      "The camera is not streaming right now"))
             return
-        except OpenNVRError as err:
+        except Exception as err:  # noqa: BLE001 - the browser must always get an answer
             self._early.pop(session_id, None)
-            send_message(WebRTCError("webrtc_offer_failed", str(err)))
+            self._closed_early.discard(session_id)
+            send_message(WebRTCError("webrtc_offer_failed", str(err) or type(err).__name__))
+            return
+        finally:
+            self._pending.discard(session_id)
+        if session_id in self._closed_early:
+            # The viewer left while we waited for MediaMTX: don't keep it.
+            self._closed_early.discard(session_id)
+            self._early.pop(session_id, None)
+            await self._whep.close(session)
             return
         self._sessions[session_id] = session
         send_message(WebRTCAnswer(session.answer_sdp))
@@ -233,9 +282,12 @@ class OpenNVRCamera(OpenNVREntity, Camera):
     @callback
     def close_webrtc_session(self, session_id: str) -> None:
         self._early.pop(session_id, None)
+        if session_id in self._pending:
+            self._closed_early.add(session_id)
         session = self._sessions.pop(session_id, None)
         if session is not None:
-            self.hass.async_create_task(self._whep.close(session))
+            self.coordinator.config_entry.async_create_task(
+                self.hass, self._whep.close(session))
 
 
 def rtsps_source(url: str | None, token: str) -> str | None:

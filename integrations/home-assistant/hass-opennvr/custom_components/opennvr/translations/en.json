@@ -32,7 +32,7 @@
         },
         "data_description": {
           "api_token": "Create one in OpenNVR under Settings > API Tokens.",
-          "verify_ssl": "Leave off for OpenNVR's default self-signed certificate."
+          "verify_ssl": "OpenNVR's default certificate is self-signed: if setup reports a certificate error, turn this off only if you trust this network."
         }
       },
       "reauth_confirm": {
@@ -64,7 +64,8 @@
       "not_opennvr": "That address did not answer like an OpenNVR server (or the server is too old to support Home Assistant).",
       "unsupported_version": "This OpenNVR server speaks contract version {version}, which this integration does not support. Update the integration.",
       "no_cameras": "Choose at least one camera.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "token_address": "OpenNVR refuses this token from Home Assistant's address. In OpenNVR, under Settings > API Tokens, allow Home Assistant's address for the token (or leave its allowed addresses empty)."
     },
     "abort": {
       "already_configured": "This OpenNVR server is already configured.",

@@ -228,3 +228,27 @@ async def test_refresh_auth_failure_starts_reauth_and_outage_marks_unavailable(
     await hass.async_block_till_done()
     [flow] = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert flow["context"]["source"] == SOURCE_REAUTH
+
+
+
+async def test_a_push_during_a_refresh_is_not_undone_by_it(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    entry = create_mock_config_entry()
+    await setup_mock_config_entry(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_add_listener(lambda: None)
+    [stream] = mock_stream.instances
+    stale = {"camera.1.count.person": {"state": 1, "attributes": {}}}
+
+    async def states_then_push():
+        # The REST read happened; a newer value is pushed before the refresh ends.
+        stream.on_frame({"v": 2, "seq": 9, "event_type": "entity_state",
+                         "payload": {"key": "camera.1.count.person", "state": 4}})
+        return dict(stale)
+
+    mock_client.get_entity_states.side_effect = states_then_push
+    freezer.tick(31)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert coordinator.data.states["camera.1.count.person"]["state"] == 4

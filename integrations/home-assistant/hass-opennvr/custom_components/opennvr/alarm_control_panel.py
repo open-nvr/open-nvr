@@ -81,8 +81,7 @@ class OpenNVRSiteAlarm(OpenNVREntity, AlarmControlPanelEntity):
             raise HomeAssistantError(translation_domain=DOMAIN,
                                      translation_key="command_failed",
                                      translation_placeholders={"detail": str(err)}) from err
-        self.coordinator.data.site_mode = result
-        self.coordinator.async_update_listeners()
+        self.coordinator.async_set_site_mode(result)
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         await self._set("disarmed")

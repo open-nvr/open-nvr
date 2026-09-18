@@ -42,6 +42,10 @@ _states: dict[str, dict[str, Any]] = {}
 _meta: dict[str, tuple[str, int | None]] = {}
 _etag: str | None = None
 _stats: dict[int, dict] = {}
+#: The bus seq when a cold cache was last primed. States that changed before
+#: it, during the idle spell, were never published: a resume from before it
+#: cannot be lossless (routers/events.py answers it with a resync).
+_primed_seq: int | None = None
 
 
 def note_rest_use() -> None:
@@ -104,6 +108,10 @@ def is_warm() -> bool:
     return _etag is not None
 
 
+def primed_seq() -> int | None:
+    return _primed_seq
+
+
 async def warm() -> None:
     """Fill a cold cache (silently, see ``tick``) so a snapshot built next is
     complete. The v2 socket calls it before its ``state_snapshot``."""
@@ -118,8 +126,12 @@ async def tick() -> None:
 
 
 async def _tick() -> None:
-    global _etag
-    from services.event_bus_service import publish_descriptors_changed, publish_entity_state
+    global _etag, _primed_seq
+    from services.event_bus_service import (
+        get_event_bus,
+        publish_descriptors_changed,
+        publish_entity_state,
+    )
 
     descs, states, etag = await asyncio.to_thread(_resolve_once)
     # A cold pass (the first after idling) primes the cache and publishes
@@ -128,6 +140,8 @@ async def _tick() -> None:
     # them at once would overflow a subscriber's queue and cost it a
     # ``lagged`` gap in exactly the updates that follow.
     cold = _etag is None
+    if cold:
+        _primed_seq = get_event_bus().current_seq
     meta = {d.key: (d.required_scope, d.camera_id) for d in descs}
     if not cold and etag != _etag:
         await publish_descriptors_changed(etag)

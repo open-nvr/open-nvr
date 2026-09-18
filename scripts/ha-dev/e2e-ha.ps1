@@ -17,8 +17,15 @@ param(
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
 
-# A fresh instance every run; this directory holds nothing but this test's HA.
-if (Test-Path $ConfigDir) { Remove-Item -Recurse -Force $ConfigDir }
+# A fresh instance every run. Only a directory this script made (it leaves a
+# marker) is ever deleted: a mistyped -ConfigDir must not wipe a real HA.
+$marker = Join-Path $ConfigDir '.opennvr-e2e'
+if (Test-Path $ConfigDir) {
+    if (-not (Test-Path $marker)) { throw "$ConfigDir was not created by this script; not deleting it" }
+    Remove-Item -Recurse -Force $ConfigDir
+}
+New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+New-Item -ItemType File -Force -Path $marker | Out-Null
 & (Join-Path $here 'run-ha.ps1') -ConfigDir $ConfigDir -Port $Port
 if ($LASTEXITCODE -ne 0) { throw 'failed to start Home Assistant' }
 
