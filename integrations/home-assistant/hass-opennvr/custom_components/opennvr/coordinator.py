@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util.async_ import create_eager_task
 
 from . import issues
 from .const import (
@@ -90,6 +92,7 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
                          update_interval=REFRESH_INTERVAL)
         self.client = client
         self._stream: EventStream | None = None
+        self._fresh_info: SystemInfo | None = None
         self._key_listeners: dict[str, list[KeyListener]] = {}
         #: Recent frames, for diagnostics.
         self.recent_frames: deque[dict[str, Any]] = deque(maxlen=RECENT_FRAMES)
@@ -117,6 +120,7 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
             # Another OpenNVR answers at this URL now. Its entities must not
             # be mixed into this site's; the user reconfigures.
             raise ConfigEntryError(translation_domain=DOMAIN, translation_key="wrong_site")
+        self._fresh_info = info  # the first refresh, right after, reuses it
 
     def _check_contract(self, info: SystemInfo, error: type[Exception]) -> None:
         try:
@@ -144,12 +148,18 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
     async def _async_update_data(self) -> OpenNVRSiteData:
         old = self.data
         try:
-            info = await self.client.get_system_info()
+            info, self._fresh_info = self._fresh_info, None
+            if info is None:
+                info = await self.client.get_system_info()
             self._check_contract(info, UpdateFailed)
-            all_cameras = {c.id: c for c in await self.client.get_cameras()}
-            catalog = await self.client.get_entities(etag=old.catalog.etag if old else None)
-            states = await self.client.get_entity_states()
-            site_mode = await self._site_mode(info)
+            # Independent reads, in parallel: this is also HA startup time.
+            cams, catalog, states, site_mode = await asyncio.gather(*(
+                create_eager_task(coro) for coro in (
+                    self.client.get_cameras(),
+                    self.client.get_entities(etag=old.catalog.etag if old else None),
+                    self.client.get_entity_states(),
+                    self._site_mode(info))))
+            all_cameras = {c.id: c for c in cams}
         except OpenNVRAuthError as err:
             raise self._refused(err) from err
         except OpenNVRConnectionError as err:

@@ -124,8 +124,10 @@ async def test_every_platform_renders(hass: HomeAssistant, catalog_client: Magic
 
 
 async def test_devices(hass: HomeAssistant, catalog_client: MagicMock,
-                       mock_stream: type[FakeStream]) -> None:
+                       mock_stream: type[FakeStream], caplog: pytest.LogCaptureFixture) -> None:
     entry = await _setup(hass)
+    # HA 2026.9 deprecates DeviceInfo.via_device; parents are linked by id.
+    assert "deprecated" not in caplog.text
     reg = dr.async_get(hass)
     site = reg.async_get_device_by_identifier((DOMAIN, SITE_ID), entry.entry_id)
     cam = reg.async_get_device_by_identifier((DOMAIN, f"{SITE_ID}:camera:1"), entry.entry_id)

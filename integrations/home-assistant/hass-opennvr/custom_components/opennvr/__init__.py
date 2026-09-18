@@ -22,7 +22,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import DOMAIN, PLATFORMS
 from .coordinator import OpenNVRCoordinator
 from .descriptor import async_prune, wanted_device_identifiers
-from .entity import site_device_info
+from .entity import async_register_devices
 
 # Set up from config entries only; no YAML configuration.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -53,10 +53,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = OpenNVRData(client=client, coordinator=coordinator)
 
-    # The server's own device, so cameras can name it as via_device before
-    # any of its entities exist.
-    dr.async_get(hass).async_get_or_create(config_entry_id=entry.entry_id,
-                                           **site_device_info(coordinator))
+    # The device tree (server > cameras > zones), parents first, before any
+    # entity names its device; kept current on every refresh. Registered
+    # before the platforms' listeners, so a new zone's device exists (with
+    # its parent) by the time its entities are added.
+    async_register_devices(hass, coordinator)
+    entry.async_on_unload(coordinator.async_add_listener(
+        lambda: async_register_devices(hass, coordinator)))
 
     coordinator.async_start_stream()
     entry.async_on_unload(coordinator.async_stop_stream)

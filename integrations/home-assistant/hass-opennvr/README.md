@@ -26,3 +26,4 @@ Home Assistant raises a repair, and clears it once fixed, when:
 ## Development
 - **Tests:** run `scripts/ha-dev/test-integration.ps1` from the open-nvr repo root. Tests run in a Linux Python 3.14 container, because Home Assistant 2026.9 needs Python ≥ 3.14.2 and doesn't support Windows.
 - **Live instance:** run `scripts/ha-dev/run-ha.ps1` to start a dev Home Assistant with this integration mounted.
+- **End to end:** `scripts/ha-dev/e2e-ha.ps1` starts a fresh Home Assistant against the running OpenNVR. It onboards HA, adds the integration through the config flow, and checks entities, occupancy, restart, audit correlation and the revoked-token repair. It turns one camera's detection off and on again, and removes its token and entry at the end.
