@@ -23,6 +23,7 @@ Guarded by superuser. In debug mode, actions are NO-OP for safety and only log/a
 import json
 import platform
 import subprocess
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -35,6 +36,42 @@ from models import Camera, CameraEvent, SecuritySetting, SystemEvent
 from schemas import SystemMonitoringSettings
 
 router = APIRouter(prefix="/system", tags=["system"])  # mounted at /api/v1
+
+# Process start, for /system/info uptime.
+_STARTED_MONOTONIC = time.monotonic()
+
+
+@router.get("/info")
+async def get_system_info(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Identity and capabilities of this OpenNVR site, for API clients.
+
+    The Home Assistant integration keys its config entry on ``site_id``
+    (stable across URL changes), checks ``contract_version`` before it
+    starts, and feature-detects on ``features``. ``latest_version`` is null
+    unless the operator opted in with UPDATE_CHECK.
+    """
+    from core.contract import CONTRACT_VERSION, FEATURES
+    from services import site_settings
+    from services.update_check import latest_version
+
+    try:
+        from main import __version__ as server_version  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — tests import the router alone
+        server_version = "unknown"
+
+    return {
+        "site_id": site_settings.get_site_id(db),
+        "name": site_settings.get_site_name(db),
+        "version": server_version,
+        "contract_version": CONTRACT_VERSION,
+        "features": list(FEATURES),
+        "recording_pause_enabled": site_settings.recording_pause_enabled(db),
+        "uptime_s": int(time.monotonic() - _STARTED_MONOTONIC),
+        "latest_version": await latest_version(),
+    }
 
 
 @router.get("/posture")
