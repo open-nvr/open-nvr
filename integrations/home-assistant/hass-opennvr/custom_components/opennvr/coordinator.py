@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 import logging
 from typing import TYPE_CHECKING, Any
@@ -68,6 +68,9 @@ class OpenNVRSiteData:
     #: The ones this entry shows.
     cameras: dict[int, Camera]
     catalog: EntityCatalog
+    #: The catalogue's descriptors of the cameras shown (and site/app-wide
+    #: ones), by key.
+    by_key: dict[str, EntityDescriptor] = field(default_factory=dict)
     #: ``{key: {"state", "attributes"}}``; event entities have none.
     states: dict[str, dict[str, Any]] = field(default_factory=dict)
     site_mode: SiteMode | None = None
@@ -136,8 +139,11 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         chosen = self.config_entry.options.get(CONF_CAMERAS)
         cameras = (all_cameras if chosen is None
                    else {cid: c for cid, c in all_cameras.items() if cid in set(chosen)})
+        by_key = {d.key: d for d in catalog.descriptors
+                  if d.camera_id is None or d.camera_id in cameras}
         return OpenNVRSiteData(info=info, all_cameras=all_cameras, cameras=cameras,
-                               catalog=catalog, states=states, site_mode=site_mode)
+                               catalog=catalog, by_key=by_key, states=states,
+                               site_mode=site_mode)
 
     async def _site_mode(self, info: SystemInfo) -> SiteMode | None:
         if not info.has("site_mode"):
@@ -151,11 +157,14 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
 
     def descriptors(self) -> list[EntityDescriptor]:
         """The catalogue, less entities of cameras this entry doesn't show."""
-        if self.data is None:
-            return []
-        cams = self.data.cameras
-        return [d for d in self.data.catalog.descriptors
-                if d.camera_id is None or d.camera_id in cams]
+        return list(self.data.by_key.values()) if self.data else []
+
+    def descriptor(self, key: str) -> EntityDescriptor | None:
+        return self.data.by_key.get(key) if self.data else None
+
+    @property
+    def known_keys(self) -> Collection[str]:
+        return self.data.by_key.keys() if self.data else ()
 
     def state_of(self, key: str) -> dict[str, Any] | None:
         return self.data.states.get(key) if self.data else None

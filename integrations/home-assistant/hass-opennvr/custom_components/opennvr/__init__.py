@@ -14,13 +14,14 @@ from pyopennvr import OpenNVRClient
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_TOKEN, CONF_URL, CONF_VERIFY_SSL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import OpenNVRCoordinator
+from .descriptor import async_prune, wanted_device_identifiers
 from .entity import site_device_info
 
 # Set up from config entries only; no YAML configuration.
@@ -60,7 +61,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry) -> b
     coordinator.async_start_stream()
     entry.async_on_unload(coordinator.async_stop_stream)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Entities and devices follow the catalogue: gone descriptors, deleted
+    # zones and deselected cameras are removed (stale-devices).
+    @callback
+    def prune() -> None:
+        async_prune(hass, coordinator)
+
+    prune()
+    entry.async_on_unload(coordinator.async_add_listener(prune))
     return True
+
+
+async def async_remove_config_entry_device(hass: HomeAssistant, entry: OpenNVRConfigEntry,
+                                           device: dr.DeviceEntry) -> bool:
+    """Let the user delete a device OpenNVR no longer has."""
+    return not device.identifiers & wanted_device_identifiers(entry.runtime_data.coordinator)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry) -> bool:
