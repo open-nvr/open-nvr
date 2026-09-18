@@ -28,13 +28,16 @@ history. Same nouns, different tense.
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
+from core.permissions import RequirePermission
 from core.pagination import resolve_total
 from core.database import get_db, release
 from models import TimelineEvent, User
@@ -171,6 +174,163 @@ async def list_events(
         "count": len(rows),
         "total": total,
     }
+
+
+# -- manual events (HA-107) ---------------------------------------------------
+
+#: How far back a manual event may be dated ("mark the last 10 minutes").
+MANUAL_MAX_BACKDATE = timedelta(hours=24)
+#: Longest manual event created with a fixed duration.
+MANUAL_MAX_DURATION_S = 4 * 3600
+_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9 _.-]{0,59}$")
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+class ManualEventIn(BaseModel):
+    camera_id: int
+    label: str = Field("manual", min_length=1, max_length=60)
+    note: str | None = Field(None, max_length=500)
+    #: When it happened; default now. At most 24 h ago, never in the future.
+    started_at: datetime | None = None
+    #: Seconds. Given: the event is closed at once. Omitted: it stays open
+    #: until PUT /events/{id}/end.
+    duration_s: float | None = Field(None, gt=0, le=MANUAL_MAX_DURATION_S)
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _LABEL_RE.fullmatch(v):
+            raise ValueError("label: lowercase letters, digits, space, _ . - only")
+        return v
+
+
+class ProtectIn(BaseModel):
+    #: Seconds of footage kept before the event starts and after it ends.
+    pre_s: int = Field(10, ge=0, le=600)
+    post_s: int = Field(10, ge=0, le=600)
+
+
+def _event_or_404(db: Session, event_id: int, user) -> TimelineEvent:
+    from services.timeline_service import can_access_event
+
+    e = db.query(TimelineEvent).filter(TimelineEvent.id == event_id).first()
+    # 404 either way: don't confirm the event exists on someone else's camera.
+    if e is None or not can_access_event(db, e, user=user):
+        raise HTTPException(status_code=404, detail="Event not found")
+    return e
+
+
+@router.post("/events", status_code=201)
+async def create_manual_event(
+    payload: ManualEventIn,
+    request: Request,
+    current_user: User = Depends(RequirePermission("events.create")),
+    db: Session = Depends(get_db),
+):
+    """Create a manual event on a camera's timeline, e.g. from a Home
+    Assistant automation ("doorbell pressed"). It shows in ``GET /events``
+    with ``source="manual"``; protect its footage with
+    ``POST /events/{id}/protect``."""
+    from core.request_context import current as current_ctx
+    from services import api_tokens
+    from services.audit_service import audit_request
+    from services.camera_scope import can_view_camera
+    from services.timeline_service import record_manual_event
+
+    # The camera is in the BODY, which the token camera gate cannot see.
+    api_tokens.check_token_camera(current_user, payload.camera_id)
+    from models import Camera
+
+    exists = (db.query(Camera.id)
+              .filter(Camera.id == payload.camera_id, Camera.deleted_at.is_(None))
+              .first())
+    # A superuser "can view" any id, so existence is checked on its own.
+    if exists is None or not can_view_camera(db, current_user, payload.camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    now = datetime.now(UTC)
+    started = _aware(payload.started_at) if payload.started_at else now
+    if started > now + timedelta(seconds=5):
+        raise HTTPException(status_code=422, detail="started_at is in the future")
+    if started < now - MANUAL_MAX_BACKDATE:
+        raise HTTPException(status_code=422, detail="started_at is more than 24 h ago")
+    ended = started + timedelta(seconds=payload.duration_s) if payload.duration_s else None
+
+    ctx = current_ctx()
+    actor = (ctx.actor if ctx is not None and ctx.actor else None) or f"user:{current_user.username}"
+    row = record_manual_event(
+        db, camera_id=payload.camera_id, label=payload.label, started_at=started,
+        ended_at=ended, note=payload.note, actor=actor,
+    )
+    audit_request(
+        db, request, action="event.create", user_id=current_user.id,
+        entity_type="timeline_event", entity_id=row.id,
+        details={"camera_id": row.camera_id, "label": row.label, "open": ended is None},
+    )
+    return _serialize(row)
+
+
+@router.put("/events/{event_id}/end")
+async def end_manual_event(
+    event_id: int,
+    request: Request,
+    current_user: User = Depends(RequirePermission("events.create")),
+    db: Session = Depends(get_db),
+):
+    """Close an open manual event now. Only manual events can be ended."""
+    from services.audit_service import audit_request
+    from services.timeline_service import MANUAL
+    from services.timeline_service import end_manual_event as _end
+
+    e = _event_or_404(db, event_id, current_user)
+    if e.source != MANUAL:
+        raise HTTPException(status_code=409, detail="Only manual events can be ended")
+    if e.ended_at is not None:
+        raise HTTPException(status_code=409, detail="Event already ended")
+    row = _end(db, e, max(datetime.now(UTC), _aware(e.started_at)))
+    audit_request(
+        db, request, action="event.end", user_id=current_user.id,
+        entity_type="timeline_event", entity_id=row.id,
+        details={"camera_id": row.camera_id},
+    )
+    return _serialize(row)
+
+
+@router.post("/events/{event_id}/protect")
+async def protect_event_footage(
+    event_id: int,
+    request: Request,
+    payload: ProtectIn | None = None,
+    current_user: User = Depends(RequirePermission("recordings.view")),
+    db: Session = Depends(get_db),
+):
+    """Keep the footage of an event from being aged out by retention.
+
+    Flags every clip overlapping [start - pre_s, end + post_s]; an open
+    event counts up to now. Same rule as ``PUT /recordings/flag``: seeing
+    the camera is enough, plus ``recordings.view``. Protect again after an
+    open event ends to cover the rest of it.
+    """
+    from services.audit_service import audit_request
+    from services.recording_protection import set_range_protection
+
+    body = payload or ProtectIn()
+    e = _event_or_404(db, event_id, current_user)
+    start = _aware(e.started_at) - timedelta(seconds=body.pre_s)
+    end = _aware(e.ended_at or datetime.now(UTC)) + timedelta(seconds=body.post_s)
+    updated = set_range_protection(db, e.camera_id, start, end, True)
+    audit_request(
+        db, request, action="recording.protect", user_id=current_user.id,
+        entity_type="timeline_event", entity_id=e.id,
+        details={"camera_id": e.camera_id, "start": start.isoformat(),
+                 "end": end.isoformat(), "updated_clips": updated},
+    )
+    return {"event_id": e.id, "camera_id": e.camera_id, "start": start.isoformat(),
+            "end": end.isoformat(), "updated_clips": updated}
 
 
 @router.get("/events/{event_id}/evidence")

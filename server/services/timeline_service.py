@@ -90,6 +90,50 @@ def record_track_visit(
     return row
 
 
+#: TimelineEvent.source / event_type of an event someone created by hand
+#: (Home Assistant automation, operator, API client), HA-107.
+MANUAL = "manual"
+
+
+def record_manual_event(
+    db: Session,
+    *,
+    camera_id: int,
+    label: str,
+    started_at: datetime,
+    ended_at: datetime | None = None,
+    note: str | None = None,
+    actor: str | None = None,
+) -> TimelineEvent:
+    """Persist a manual event. ``ended_at=None`` leaves it open until
+    :func:`end_manual_event`."""
+    payload: dict = {}
+    if note:
+        payload["note"] = note
+    if actor:
+        payload["created_by"] = actor
+    row = TimelineEvent(
+        camera_id=camera_id,
+        source=MANUAL,
+        event_type=MANUAL,
+        label=(label or MANUAL)[:60].lower(),
+        started_at=started_at,
+        ended_at=ended_at,
+        payload=payload or None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def end_manual_event(db: Session, row: TimelineEvent, ended_at: datetime) -> TimelineEvent:
+    row.ended_at = ended_at
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def _events_query(
     db: Session,
     *,

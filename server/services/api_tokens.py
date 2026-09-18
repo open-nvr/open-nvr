@@ -71,6 +71,12 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     # the token's cameras and scopes; see TOKEN_EVENT_SCOPES.
     ("POST", f"{_A}/events/ws-ticket"): "cameras.view",
     ("GET", f"{_A}/events"): "recordings.view",
+    ("POST", f"{_A}/events"): "events.create",  # camera in the body: checked there
+    ("PUT", f"{_A}/events/{{event_id}}/end"): "events.create",
+    ("POST", f"{_A}/events/{{event_id}}/protect"): "recordings.view",
+    ("GET", f"{_A}/cameras/{{camera_id}}/ptz/presets"): "ptz.control",
+    ("POST", f"{_A}/cameras/{{camera_id}}/ptz/presets"): "ptz.control",
+    ("POST", f"{_A}/cameras/{{camera_id}}/ptz/presets/{{preset_token}}/goto"): "ptz.control",
     ("GET", f"{_A}/alerts-inbox"): "alerts.view",
     ("GET", f"{_A}/alerts-inbox/{{alert_id}}/images/{{name}}"): "alerts.view",
     ("POST", f"{_A}/alerts-inbox/ack"): "alerts.manage",

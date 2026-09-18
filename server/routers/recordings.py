@@ -842,7 +842,7 @@ async def set_recording_flag(
     request: Request = None,
     db: Session = Depends(get_db),
 ):
-    """Flag (or unflag) every recording clip in a time range.
+    """Flag (or unflag) every recording clip that overlaps a time range.
 
     Flagged clips are skipped by retention's age and disk-pressure sweeps
     while ``protect_flagged`` is enabled — this is what makes "keep this
@@ -850,7 +850,7 @@ async def set_recording_flag(
     """
     from datetime import datetime
 
-    from models import Recording
+    from services.recording_protection import set_range_protection
 
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
@@ -869,16 +869,7 @@ async def set_recording_flag(
     if end_dt <= start_dt:
         raise HTTPException(status_code=400, detail="End must be after start")
 
-    updated = (
-        db.query(Recording)
-        .filter(
-            Recording.camera_id == camera_id,
-            Recording.start_time >= start_dt,
-            Recording.start_time < end_dt,
-        )
-        .update({Recording.is_flagged: flagged}, synchronize_session=False)
-    )
-    db.commit()
+    updated = set_range_protection(db, camera_id, start_dt, end_dt, flagged)
     # Protecting (or releasing) footage from retention is evidence handling:
     # it must be attributable.
     from services.audit_service import audit_request

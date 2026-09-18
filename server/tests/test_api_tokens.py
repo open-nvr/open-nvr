@@ -129,7 +129,8 @@ def env(monkeypatch):
     app = FastAPI()
     app.add_middleware(RequestLoggingMiddleware)
     for mod in ("routers.system", "routers.cameras", "routers.api_tokens",
-                "routers.recordings", "routers.audit_logs", "routers.events"):
+                "routers.recordings", "routers.audit_logs", "routers.events",
+                "routers.timeline_events"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     app.dependency_overrides[get_db] = _db
 

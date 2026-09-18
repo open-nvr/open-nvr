@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -285,6 +286,10 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
 #: and the viewer role does not (scripts/init_db.py), and the one the
 #: UI already keys its Add Camera button on.
 require_cameras_manage = RequirePermission("cameras.manage")
+# PTZ needs the permission AND the camera (ownership, via get_camera_by_id).
+# HA-004 granted ptz.control to every role that had live.view, so nobody who
+# could steer a camera before lost that.
+require_ptz_control = RequirePermission("ptz.control")
 
 
 def _reject_external_camera_hosts(camera_create) -> None:
@@ -2303,7 +2308,7 @@ async def ptz_move(
     z: float = Query(0.0, ge=-1.0, le=1.0),
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     PTZ continuous move for a camera.
@@ -2357,7 +2362,7 @@ async def ptz_stop(
     camera_id: int,
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     Stop PTZ movement for a camera.
@@ -2388,6 +2393,90 @@ async def ptz_stop(
         details={"success": bool(isinstance(result, dict) and result.get("success"))},
     )
     return result
+
+
+def _ptz_camera(db: Session, camera_id: int, current_user) -> Camera:
+    cam = CameraService.get_camera_by_id(db, camera_id, current_user.id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not cam.username or not cam.password:
+        raise HTTPException(
+            status_code=400, detail="Camera ONVIF credentials not configured"
+        )
+    return cam
+
+
+class PTZPresetSave(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    #: Overwrite this preset; omit to let the camera allocate a new one.
+    token: str | None = Field(None, max_length=64)
+
+
+@router.get("/{camera_id}/ptz/presets")
+async def ptz_list_presets(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """The camera's stored PTZ presets: ``{"presets": [{"token", "name"}]}``."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    presets = await PTZService.presets(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+    )
+    return {"camera_id": cam.id, "presets": presets}
+
+
+@router.post("/{camera_id}/ptz/presets")
+async def ptz_save_preset(
+    camera_id: int,
+    payload: PTZPresetSave,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Store the camera's current position as a preset (new, or overwrite
+    ``token``). The camera keeps the preset; OpenNVR stores nothing."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.set_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+        name=payload.name.strip(), preset_token=payload.token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_save", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"name": payload.name.strip(), "token": result.get("token"),
+                 "overwrite": payload.token is not None},
+    )
+    return {"camera_id": cam.id, **result}
+
+
+@router.post("/{camera_id}/ptz/presets/{preset_token}/goto")
+async def ptz_goto_preset(
+    camera_id: int,
+    preset_token: str,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Move the camera to a stored preset."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.goto_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port, preset_token=preset_token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_goto", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id, details={"token": preset_token},
+    )
+    return {"camera_id": cam.id, **result}
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)
