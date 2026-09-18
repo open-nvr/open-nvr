@@ -14,6 +14,8 @@ Checks, each reported PASS/FAIL:
 4. occupancy follows the fakecams: some camera's "All occupancy" is seen on
    and off (pushed over the events socket);
 5. after a Home Assistant restart the entities are back quickly;
+5b. the media browser lists events, and a thumbnail and a clip play
+   through Home Assistant's own URL;
 6. a command from Home Assistant is audited in OpenNVR under Home
    Assistant's context id (``X-Correlation-Id``);
 7. revoking the token raises the ``token_revoked`` repair.
@@ -169,6 +171,7 @@ async def main() -> int:
             await check_entities(ha, entry_id, cameras)
             await check_occupancy(ha, entry_id)
             await check_restart(ha, entry_id)
+            await check_media(ha, entry_id, cameras)
             await check_correlation(s, ha, entry_id)
             await check_revoke(s, ha, entry_id, tok["id"])
         finally:
@@ -271,6 +274,33 @@ async def check_restart(ha: HAClient, entry_id: str) -> None:
           (f"entities back {back:.1f} s after HA's API answered; the integration's own "
            f"setup took {setup_s:.1f} s (target 5 s)") if back is not None and setup_s
           is not None else f"back={back} setup={setup_s}")
+
+
+async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
+    """The media browser lists events, and a thumbnail and a clip play
+    through Home Assistant's own URL (the proxy), not OpenNVR's."""
+    thumb = clip = None
+    for cam in cameras:
+        page = await ha.ws({"type": "media_source/browse_media",
+                            "media_content_id": f"media-source://opennvr/{entry_id}/events/"
+                                                f"{cam['id']}/all/0"})
+        events = [c for c in page.get("children", []) if c.get("can_play")]
+        with_thumb = [c for c in events if c.get("thumbnail")]
+        if with_thumb:
+            thumb, clip = with_thumb[0]["thumbnail"], with_thumb[0]["media_content_id"]
+            break
+    if thumb is None:
+        check("media browser plays through HA", False, "no event with a thumbnail")
+        return
+    async with ha.s.get(f"{HA}{thumb}", headers=ha.h) as r:
+        img_ok = r.status == 200 and r.content_type.startswith("image/")
+        img = f"thumbnail {r.status} {r.content_type}"
+    resolved = await ha.ws({"type": "media_source/resolve_media", "media_content_id": clip})
+    async with ha.s.get(f"{HA}{resolved['url']}") as r:          # HA-signed path
+        head = await r.content.read(64 * 1024)
+        clip_ok = r.status == 200 and len(head) > 1000
+        vid = f"clip {r.status} {r.content_type} {len(head)}+ bytes"
+    check("media browser plays through HA", img_ok and clip_ok, f"{img}; {vid}")
 
 
 async def check_correlation(s: aiohttp.ClientSession, ha: HAClient, entry_id: str) -> None:

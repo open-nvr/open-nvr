@@ -200,3 +200,16 @@ async def test_cameras_include_turned_off_ones_across_pages():
     assert [c.id for c in cams] == [1, 2, 3, 4, 5] and cams[1].is_active is False
     assert all(r["query"]["active_only"] == "false" for r in rec.requests)
     assert [r["query"]["skip"] for r in rec.requests] == ["0", "2", "4"]
+
+
+async def test_event_and_alert_lists():
+    async with fake_site({("GET", "/api/v1/events"): {"events": [], "total": 0},
+                          ("GET", "/api/v1/alerts-inbox"): {"alerts": [], "total": 0}}) as (
+            base, session, rec):
+        client = OpenNVRClient(base, TOKEN, session)
+        await client.get_events(camera_id=3, label="car", skip=50, limit=50)
+        await client.get_alerts(severity="high", skip=0, limit=1)
+    assert rec.requests[0]["query"] == {"camera_id": "3", "label": "car", "skip": "50",
+                                        "limit": "50"}
+    assert rec.requests[1]["query"] == {"severity": "high", "unacked": "false", "skip": "0",
+                                        "limit": "1"}

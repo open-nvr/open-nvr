@@ -277,6 +277,23 @@ class OpenNVRClient:
             "duration_s": duration_s, "ttl_s": ttl_s}))
         return SignedMedia(url=self.site_url(data["url"]), expires_at=data["expires_at"])
 
+    async def get_events(self, *, camera_id: int | None = None, label: str | None = None,
+                         from_: str | None = None, to: str | None = None,
+                         skip: int = 0, limit: int = 50) -> dict:
+        """``GET /events``: ``{"events": [...], "total": n}``, newest first."""
+        return await self.request("GET", "/events", params={
+            "camera_id": camera_id, "label": label, "from": from_, "to": to,
+            "skip": skip, "limit": limit})
+
+    async def get_alerts(self, *, severity: str | None = None, source: str | None = None,
+                         camera_id: str | None = None, unacked: bool = False,
+                         skip: int = 0, limit: int = 50) -> dict:
+        """``GET /alerts-inbox``: ``{"alerts": [...], "total": n}``, newest
+        first; each alert lists its image ``names``."""
+        return await self.request("GET", "/alerts-inbox", params={
+            "severity": severity, "source_name": source, "camera_id": camera_id,
+            "unacked": unacked, "skip": skip, "limit": limit})
+
     async def search(self, **filters: Any) -> dict:
         """``GET /search``; ``from_`` is sent as ``from``."""
         if "from_" in filters:
