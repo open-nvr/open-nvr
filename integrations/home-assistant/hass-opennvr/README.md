@@ -22,6 +22,9 @@ The URLs are relative paths under Home Assistant's own address (`/api/opennvr/<s
 
 The blueprint `blueprints/automation/opennvr/alert_notification.yaml` sends a phone notification with the picture and the clip. It filters by severity, camera and site mode, and supports quiet hours and a cooldown. The notification offers "Acknowledge" (which acknowledges the alert in OpenNVR) and "Live view".
 
+## Dashboard cards
+A card calls the websocket command `opennvr/card_session`. It gets back a credential that OpenNVR mints from the integration's token: read-only, limited to the cameras this entry shows, valid for at most ten minutes, and revoked together with the integration's token. The card then uses OpenNVR's API, events socket and WebRTC directly, which needs Home Assistant's origin in OpenNVR's `CORS_ORIGINS`. A browser that can't reach OpenNVR, for example through HA Cloud, can instead read through `/api/opennvr/<site>/passthrough/<path>`. That path is GET only, limited to the paths OpenNVR allows, and requires a Home Assistant login.
+
 ## Repairs
 Home Assistant raises a repair, and clears it once fixed, when:
 - the token no longer works, or expires within 7 days (the fix asks for a new token);

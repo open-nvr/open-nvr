@@ -68,6 +68,11 @@ class SystemInfo:
         return frozenset(self.caller["scopes"])
 
     @property
+    def passthrough_allowlist(self) -> tuple[str, ...]:
+        """Read-only API paths an integration may relay for a card."""
+        return tuple(str(p) for p in self.raw.get("passthrough_allowlist") or ())
+
+    @property
     def token_expires_at(self) -> str | None:
         return self.caller.get("expires_at") if self.caller.get("kind") == "token" else None
 

@@ -54,7 +54,7 @@ def test_every_endpoint_exists_with_its_token_scope():
     app = FastAPI()
     for mod in ("system", "cameras", "recordings", "streams", "timeline_events",
                 "alerts_inbox", "events", "zones", "live_state", "media", "site_mode",
-                "entities", "search"):
+                "entities", "search", "api_tokens"):
         app.include_router(importlib.import_module(f"routers.{mod}").router, prefix="/api/v1")
     real = {(m.upper(), p) for p, ops in app.openapi()["paths"].items() for m in ops}
     for e in CONTRACT["rest"]:

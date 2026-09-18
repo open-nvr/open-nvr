@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from core.auth import get_current_active_user
 from core.database import get_db
 from core.permissions import RequirePermission, user_has_permission
 from models import ApiToken
@@ -62,8 +63,9 @@ def _view(row: ApiToken) -> dict:
 
 @router.get("")
 async def list_tokens(db: Session = Depends(get_db), current_user=Depends(_manage)):
-    """The caller's own tokens (a superuser sees every user's), newest first."""
-    q = db.query(ApiToken)
+    """The caller's own tokens (a superuser sees every user's), newest first.
+    Card session tokens (short-lived children of a token) are not listed."""
+    q = db.query(ApiToken).filter(ApiToken.parent_id.is_(None))
     if not current_user.is_superuser:
         q = q.filter(ApiToken.owner_user_id == current_user.id)
     return {"tokens": [_view(r) for r in q.order_by(ApiToken.id.desc()).all()]}
@@ -141,6 +143,10 @@ async def revoke_token(
         raise HTTPException(status_code=404, detail="Token not found")
     if row.revoked_at is None:
         row.revoked_at = datetime.now(UTC)
+        # Its card sessions go with it.
+        db.query(ApiToken).filter(ApiToken.parent_id == row.id,
+                                  ApiToken.revoked_at.is_(None)).update(
+            {ApiToken.revoked_at: row.revoked_at}, synchronize_session=False)
         db.commit()
         api_tokens.invalidate_caches()
         audit_request(
@@ -149,3 +155,62 @@ async def revoke_token(
             details={"name": row.name, "prefix": row.prefix},
         )
     return _view(row)
+
+
+class SessionCreate(BaseModel):
+    camera_ids: list[int] | None = None
+    ttl_s: int = Field(api_tokens.SESSION_MAX_TTL_S, ge=60, le=api_tokens.SESSION_MAX_TTL_S)
+
+
+@router.post("/session", status_code=status.HTTP_201_CREATED)
+async def create_session_token(
+    payload: SessionCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """A dashboard card's credential (design §7.8), minted by an API token
+    (the Home Assistant integration) for a browser: its parent's scopes
+    limited to reading, its parent's cameras (or fewer), at most ten
+    minutes and never past the parent's expiry; revoked with the parent.
+    A session token cannot mint another."""
+    if not api_tokens.is_token_principal(current_user):
+        raise HTTPException(status_code=403, detail="Only an API token can open a session")
+    parent = db.query(ApiToken).filter(ApiToken.id == current_user.token_id).first()
+    if parent is None or parent.parent_id is not None:
+        raise HTTPException(status_code=403, detail="A session token cannot open a session")
+    scopes = sorted(s for s in api_tokens.SESSION_SCOPES
+                    if api_tokens.token_has_permission(current_user, s))
+    if not scopes:
+        raise HTTPException(status_code=403, detail="Nothing this token may read")
+    allowed = current_user.camera_ids
+    cameras = None if payload.camera_ids is None else sorted(set(payload.camera_ids))
+    if cameras is not None and allowed is not None and not set(cameras) <= allowed:
+        raise HTTPException(status_code=403,
+                            detail="This API token is not allowed to use that camera")
+    if cameras is None and allowed is not None:
+        cameras = sorted(allowed)
+    now = datetime.now(UTC)
+    expires = now + timedelta(seconds=payload.ttl_s)
+    parent_expires = api_tokens._as_aware(parent.expires_at)
+    if parent_expires is not None and parent_expires < expires:
+        expires = parent_expires
+    # Expired sessions are useless: keep the table from growing with them.
+    db.query(ApiToken).filter(ApiToken.parent_id.isnot(None),
+                              ApiToken.expires_at < now - timedelta(hours=1)).delete(
+        synchronize_session=False)
+    plain, prefix, digest = api_tokens.mint_token()
+    row = ApiToken(name=f"session:{parent.name}"[:64], prefix=prefix, token_hash=digest,
+                   owner_user_id=parent.owner_user_id, scopes=scopes, camera_ids=cameras,
+                   allowed_cidrs=None, expires_at=expires, parent_id=parent.id)
+    db.add(row)
+    db.commit()
+    api_tokens.invalidate_caches()
+    audit_request(
+        db, request, action="api_token.session", user_id=parent.owner_user_id,
+        entity_type="api_token", entity_id=row.id,
+        details={"parent": parent.prefix, "prefix": prefix, "scopes": scopes,
+                 "camera_ids": cameras, "expires_at": expires.isoformat()},
+    )
+    return {"token": plain, "expires_at": expires.isoformat(), "scopes": scopes,
+            "camera_ids": cameras}

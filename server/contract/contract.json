@@ -21,7 +21,8 @@
     "entities",
     "search",
     "caller_info",
-    "network_info"
+    "network_info",
+    "card_session"
   ],
   "rest": [
     {
@@ -215,6 +216,12 @@
       "path": "/api/v1/search",
       "token_scope": "cameras.view",
       "response": "search"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/api-tokens/session",
+      "token_scope": "cameras.view",
+      "response": "session_token"
     }
   ],
   "ws_v2": {
@@ -435,6 +442,12 @@
             "rtsps_exposed": {
               "type": "boolean"
             }
+          }
+        },
+        "passthrough_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       }
@@ -945,6 +958,38 @@
           "required": [
             "key"
           ]
+        }
+      }
+    },
+    "session_token": {
+      "type": "object",
+      "required": [
+        "token",
+        "expires_at",
+        "scopes",
+        "camera_ids"
+      ],
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "camera_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer"
+          }
         }
       }
     }

@@ -1225,6 +1225,11 @@ class ApiToken(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     last_used_ip = Column(String(64), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    #: Set on a short-lived, read-only session token minted BY another token
+    #: (``POST /api-tokens/session``, a dashboard card): it never outlives,
+    #: and is revoked with, its parent.
+    parent_id = Column(Integer, ForeignKey("api_tokens.id", ondelete="CASCADE"),
+                       nullable=True, index=True)
 
 
 class InstalledApp(Base):

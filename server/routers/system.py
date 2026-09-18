@@ -57,7 +57,7 @@ async def get_system_info(
     """
     from core.contract import CONTRACT_VERSION, FEATURES
     from services import site_settings
-    from services.api_tokens import describe_caller
+    from services.api_tokens import PASSTHROUGH_ALLOWLIST, describe_caller
     from services.update_check import latest_version
 
     try:
@@ -79,6 +79,8 @@ async def get_system_info(
         # expiry are judged by the server's.
         "server_time": datetime.now(UTC).isoformat(),
         "network": _network_facts(db),
+        # Read-only paths an integration may relay for a dashboard card.
+        "passthrough_allowlist": list(PASSTHROUGH_ALLOWLIST),
     }
 
 

@@ -103,7 +103,23 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/alerts-inbox/{{alert_id}}/images/{{name}}"): "alerts.view",
     ("POST", f"{_A}/alerts-inbox/ack"): "alerts.manage",
     ("POST", f"{_A}/recordings/export/ticket"): "recordings.view",
+    # A token mints a card's session token; checked further in the route.
+    ("POST", f"{_A}/api-tokens/session"): "cameras.view",
 }
+
+#: What a dashboard-card session token may hold: reading only. Its parent's
+#: scopes are intersected with this, so a card can never act.
+SESSION_SCOPES: frozenset[str] = frozenset({
+    "cameras.view", "live.view", "recordings.view", "alerts.view", "settings.view"})
+#: Longest life of a session token, in seconds.
+SESSION_MAX_TTL_S = 600
+
+#: Read-only API paths an integration may relay for a browser that cannot
+#: reach OpenNVR itself (Home Assistant's card passthrough, design §7.8).
+#: ``/system/info`` publishes it; GET only.
+PASSTHROUGH_ALLOWLIST: tuple[str, ...] = (
+    "/api/v1/cameras/", "/api/v1/live-state", "/api/v1/entities", "/api/v1/events",
+    "/api/v1/alerts-inbox", "/api/v1/search", "/api/v1/site-mode", "/api/v1/system/info")
 
 #: Camera fields a token may change through ``PUT /cameras/{id}``. Not the
 #: stream source or credentials. ``is_active`` is added only while the

@@ -213,3 +213,14 @@ async def test_event_and_alert_lists():
                                         "limit": "50"}
     assert rec.requests[1]["query"] == {"severity": "high", "unacked": "false", "skip": "0",
                                         "limit": "1"}
+
+
+async def test_open_session():
+    out = {"token": "onvr_x", "expires_at": "2026-09-19T10:10:00+00:00",
+           "scopes": ["cameras.view"], "camera_ids": [1]}
+    async with fake_site({("POST", "/api/v1/api-tokens/session"): (201, out)}) as (
+            base, session, rec):
+        got = await OpenNVRClient(base, TOKEN, session).open_session(camera_ids=[1], ttl_s=300)
+    assert got == out and rec.requests[0]["body"] == b'{"camera_ids": [1], "ttl_s": 300}'
+    assert "/api/v1/cameras/" in pyopennvr.SystemInfo.from_dict(
+        fixture("system_info")).passthrough_allowlist

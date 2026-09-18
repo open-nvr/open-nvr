@@ -318,6 +318,15 @@ class OpenNVRClient:
                                   json={"value": value, "args": args or {}},
                                   correlation_id=correlation_id)
 
+    async def open_session(self, *, camera_ids: list[int] | None = None,
+                           ttl_s: int = 600) -> dict:
+        """A dashboard card's credential (contract 1.1, ``card_session``):
+        this token's reading scopes, its cameras or fewer, ≤ 10 minutes,
+        revoked with this token. ``{"token", "expires_at", "scopes",
+        "camera_ids"}``."""
+        return await self.request("POST", "/api-tokens/session", json=_body({
+            "camera_ids": camera_ids, "ttl_s": int(ttl_s)}))
+
     # ── events websocket ─────────────────────────────────────────────────
 
     async def ws_ticket(self) -> str:

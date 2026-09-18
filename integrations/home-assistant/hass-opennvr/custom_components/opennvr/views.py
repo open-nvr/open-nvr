@@ -202,6 +202,51 @@ class RelayView(_MediaView):
                                   f"{client.base_url}/api/v1/media/s/{token}")
 
 
+def passthrough_allowed(path: str, allowlist: tuple[str, ...]) -> bool:
+    """``/api/v1/cameras/`` allows everything below it (and itself without
+    the slash); ``/api/v1/search`` allows itself and what is below it."""
+    for prefix in allowlist:
+        base = prefix.rstrip("/")
+        if path == base or path.startswith(base + "/"):
+            return True
+    return False
+
+
+class PassthroughView(_MediaView):
+    """Read-only API relay for dashboard cards whose browser can't reach
+    OpenNVR (design §7.8): GET only, and only below the prefixes the server
+    publishes in ``/system/info`` (``passthrough_allowlist``), with the
+    integration's token. HA users only."""
+
+    url = URL_BASE + "/{site_id}/passthrough/{path:.+}"
+    name = f"api:{DOMAIN}:passthrough"
+
+    async def get(self, request: web.Request, site_id: str, path: str) -> web.Response:
+        entry = next((e for e in self.hass.config_entries.async_entries(DOMAIN)
+                      if e.unique_id == site_id
+                      and e.state is ConfigEntryState.LOADED), None)
+        if entry is None:
+            raise web.HTTPNotFound
+        full = "/" + path
+        segments = full.split("/")
+        if (".." in segments or "." in segments or "//" in full or "\\" in full
+                or "%" in full or not full.startswith("/api/v1/")):
+            raise web.HTTPNotFound
+        if not passthrough_allowed(full,
+                                   entry.runtime_data.coordinator.data.info.passthrough_allowlist):
+            raise web.HTTPNotFound
+        client = entry.runtime_data.client
+        try:
+            data = await client.request("GET", full[len("/api/v1"):], params=dict(request.query))
+        except OpenNVRNotFoundError as err:
+            raise web.HTTPNotFound from err
+        except OpenNVRAuthError as err:
+            raise web.HTTPForbidden from err
+        except OpenNVRError as err:
+            raise web.HTTPBadGateway from err
+        return web.json_response(data)
+
+
 def async_register_views(hass: HomeAssistant) -> None:
-    for view in (EventImageView, AlertImageView, ClipView, RelayView):
+    for view in (EventImageView, AlertImageView, ClipView, RelayView, PassthroughView):
         hass.http.register_view(view(hass))

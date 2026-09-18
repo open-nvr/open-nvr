@@ -26,6 +26,7 @@ from .entity import async_register_devices
 from .notifications import async_setup_notifications
 from .services import async_setup_services
 from .views import async_register_views
+from .websocket_api import async_register_websocket
 
 # Set up from config entries only; no YAML configuration.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -46,6 +47,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the OpenNVR integration: its actions exist once, for every site."""
     async_setup_services(hass)
     async_register_views(hass)
+    async_register_websocket(hass)
     return True
 
 

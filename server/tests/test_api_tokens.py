@@ -435,7 +435,8 @@ def test_every_token_route_is_a_real_route():
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
                 "routers.events", "routers.zones", "routers.live_state", "routers.media",
-                "routers.site_mode", "routers.entities", "routers.search"):
+                "routers.site_mode", "routers.entities", "routers.search",
+                "routers.api_tokens"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.
@@ -748,3 +749,66 @@ def test_a_scope_change_closes_the_socket_too(env, monkeypatch):  # noqa: F811
             for _ in range(20):
                 ws.receive_json()
     assert exc.value.code == 4401
+
+
+
+# ── card session tokens (HA-304) ───────────────────────────────────────
+
+
+def _session(env, parent_token, **body):
+    return env.client.post("/api/v1/api-tokens/session", json=body, headers=_as(parent_token))
+
+
+def test_a_token_opens_a_read_only_session(env):
+    parent = _mint(env, scopes=["settings.view", "cameras.view", "cameras.manage",
+                                "live.view"], camera_ids=[1, 3])["token"]
+    r = _session(env, parent, ttl_s=300)
+    assert r.status_code == 201, r.text
+    out = r.json()
+    # Reading only, the parent's cameras, at most the asked lifetime.
+    assert out["scopes"] == ["cameras.view", "live.view", "settings.view"]
+    assert out["camera_ids"] == [1, 3]
+    left = datetime.fromisoformat(out["expires_at"]) - datetime.now(UTC)
+    assert timedelta(seconds=290) < left <= timedelta(seconds=300)
+    child = out["token"]
+    assert env.client.get("/api/v1/cameras/1/stats", headers=_as(child)).status_code == 200
+    assert env.client.get("/api/v1/cameras/2/stats", headers=_as(child)).status_code == 403
+    r = env.client.put("/api/v1/cameras/1", json={"detection_enabled": False},
+                       headers=_as(child))
+    assert r.status_code == 403                          # the parent could; the card can't
+    # Not listed with the user's tokens.
+    listed = env.client.get("/api/v1/api-tokens", headers=env.jwt("admin")).json()["tokens"]
+    assert [x["name"] for x in listed] == ["ha-main"]
+
+
+def test_session_limits(env):
+    parent = _mint(env, camera_ids=[1], expires_in_days=1)["token"]
+    assert _session(env, parent, camera_ids=[2]).status_code == 403   # not its camera
+    assert _session(env, parent, ttl_s=3600).status_code == 422       # 10 min at most
+    child = _session(env, parent).json()["token"]
+    assert _session(env, child).status_code == 403                    # no nesting
+    r = env.client.post("/api/v1/api-tokens/session", json={}, headers=env.jwt("admin"))
+    assert r.status_code == 403                                       # tokens only
+    # Never past the parent's own expiry.
+    s = env.Session()
+    row = s.query(env.models.ApiToken).filter_by(name="ha-main").one()
+    row.expires_at = datetime.now(UTC) + timedelta(seconds=90)
+    s.commit()
+    s.close()
+    out = _session(env, parent, ttl_s=600).json()
+    left = datetime.fromisoformat(out["expires_at"]) - datetime.now(UTC)
+    assert left <= timedelta(seconds=90)
+
+
+def test_revoking_the_parent_ends_its_sessions(env):
+    minted = _mint(env)
+    child = _session(env, minted["token"]).json()["token"]
+    assert env.client.get("/api/v1/cameras/", headers=_as(child)).status_code == 200
+    env.client.delete(f"/api/v1/api-tokens/{minted['id']}", headers=env.jwt("admin"))
+    assert env.client.get("/api/v1/cameras/", headers=_as(child)).status_code == 401
+
+
+def test_system_info_publishes_the_passthrough_allowlist(env):
+    info = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()
+    assert "/api/v1/cameras/" in info["passthrough_allowlist"]
+    assert not any("api-tokens" in p for p in info["passthrough_allowlist"])

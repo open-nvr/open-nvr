@@ -15,7 +15,9 @@ Checks, each reported PASS/FAIL:
    and off (pushed over the events socket);
 5. after a Home Assistant restart the entities are back quickly;
 5b. the media browser lists events, and a thumbnail and a clip play
-   through Home Assistant's own URL;
+   through Home Assistant's own URL; a relay link works without login;
+5c. a card session reads OpenNVR directly but cannot write, and the
+   passthrough relays reads;
 6. a command from Home Assistant is audited in OpenNVR under Home
    Assistant's context id (``X-Correlation-Id``);
 7. revoking the token raises the ``token_revoked`` repair.
@@ -172,6 +174,7 @@ async def main() -> int:
             await check_occupancy(ha, entry_id)
             await check_restart(ha, entry_id)
             await check_media(ha, entry_id, cameras)
+            await check_card(s, ha, entry_id)
             await check_correlation(s, ha, entry_id)
             await check_revoke(s, ha, entry_id, tok["id"])
         finally:
@@ -319,6 +322,25 @@ async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
         detail += f"; tampered {r.status}"
         ok = ok and r.status == 404
     check("notification relay works without login", ok, detail)
+
+
+async def check_card(s: aiohttp.ClientSession, ha: HAClient, entry_id: str) -> None:
+    """A dashboard card's session: reads OpenNVR directly, cannot write, and
+    the passthrough relays reading for a browser that can't reach OpenNVR."""
+    sess = await ha.ws({"type": "opennvr/card_session"})
+    auth = {"Authorization": f"Bearer {sess['token']}"}
+    async with s.get(f"{NVR}/api/v1/cameras/", ssl=False, headers=auth) as r:
+        read = r.status
+    first = (sess.get("camera_ids") or [1])[0]
+    async with s.put(f"{NVR}/api/v1/cameras/{first}", ssl=False, headers=auth,
+                     json={"detection_enabled": True}) as r:
+        write = r.status
+    async with ha.s.get(f"{HA}{sess['passthrough']}/api/v1/cameras/",
+                        headers=ha.h) as r:
+        relayed = r.status
+    check("card session reads, cannot write; passthrough relays",
+          read == 200 and write == 403 and relayed == 200,
+          f"read {read}, write {write}, passthrough {relayed}, scopes {sess.get('scopes')}")
 
 
 async def check_correlation(s: aiohttp.ClientSession, ha: HAClient, entry_id: str) -> None:

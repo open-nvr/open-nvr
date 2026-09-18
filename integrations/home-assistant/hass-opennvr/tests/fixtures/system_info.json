@@ -10,7 +10,8 @@
     "entities",
     "site_mode",
     "caller_info",
-    "network_info"
+    "network_info",
+    "card_session"
   ],
   "recording_pause_enabled": false,
   "uptime_s": 3600,
@@ -32,5 +33,15 @@
   "network": {
     "webrtc_ice_hosts": true,
     "rtsps_exposed": false
-  }
+  },
+  "passthrough_allowlist": [
+    "/api/v1/cameras/",
+    "/api/v1/live-state",
+    "/api/v1/entities",
+    "/api/v1/events",
+    "/api/v1/alerts-inbox",
+    "/api/v1/search",
+    "/api/v1/site-mode",
+    "/api/v1/system/info"
+  ]
 }
