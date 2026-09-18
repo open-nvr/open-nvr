@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-abandoned-object"
-version = "1.0.0"
-description = "OpenNVR abandoned-object example app (NATS-subscribing monitoring app)"
+version = "1.1.0"
+description = "OpenNVR abandoned-object example app (Tier-0 subscriber, unattended-item lifecycle)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 

@@ -86,6 +86,16 @@ export const APP_VERTICALS: AppVertical[] = [
     legacy: (m) => (m.requires_tasks ?? []).includes('intrusion_detection'),
   },
   {
+    capability: 'left_items',
+    to: '/left-items',
+    // Every item left in a zone: who was with it, how long it has been
+    // alone, and whether anyone came back. Named for the thing an
+    // operator manages — "abandoned object" is the analytic, "left
+    // items" is the queue they work through.
+    label: 'Left Items',
+    legacy: (m) => (m.requires_tasks ?? []).includes('abandoned_object'),
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and
