@@ -85,6 +85,7 @@ const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) 
 const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
 const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) => ({ default: m.Tripwires }))))
 const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) => ({ default: m.Loitering }))))
+const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
 const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
@@ -174,6 +175,7 @@ const router = createBrowserRouter([
           { path: 'people', element: <People /> },
           { path: 'tripwires', element: <Tripwires /> },
           { path: 'loitering', element: <Loitering /> },
+          { path: 'perimeter', element: <Perimeter /> },
           { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },

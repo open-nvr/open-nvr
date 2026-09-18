@@ -2,790 +2,1141 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """
-Intrusion-detection example app — now on the ``opennvr-app-sdk``.
+Intrusion detection on the ``opennvr-app-sdk``.
 
-Watches one or more cameras for persons/vehicles entering operator-
-defined restricted zones during operator-defined restricted hours. On
-detection, fires an alert via stdout (always) and an optional
-webhook. Uses KAI-C's contract proxy (``POST /api/v1/infer/{adapter}``)
-for inference — so every alert is correlation-id-traceable through
-the audit log.
+The perimeter alarm: a watched class enters a drawn zone while the
+camera is armed, and the site raises an alarm. The fence line at night,
+the yard behind the shutter, the plant room, the roof.
 
-What lives where after the migration
-------------------------------------
+Modelled on the intrusion panel every operator already knows — a state
+machine per camera rather than a bare time window:
 
-This is a FrameApp (App SDK spec §02): it DRIVES inference by polling
-frames into KAI-C rather than riding an existing inference stream. The
-SDK's :class:`~opennvr_app_sdk.FrameApp` base owns the interval loop,
-per-camera fetch/rule failure isolation, and the §03 contract
-endpoints. The frame sources, the zone geometry, and the §11.5 alert
-stack moved into the SDK (thin shims remain at ``frame_sources.py`` /
-``zone.py`` / ``alerts.py`` for import compatibility).
+    disarmed ──arm──▶ arming (exit delay) ──▶ armed
+                                               │ watched class in zone
+                                               ▼
+                                          breach (entry delay, countdown)
+                                               │ still there when it expires
+                                               ▼
+                                             alarm ──▶ (re-arms after
+                                                        alarm_reset_seconds)
 
-Both KAI-C transports come from the SDK too: ``KaicClient`` is the
-SDK's ``KaiCClient`` (HTTP, contract-v1 body) and ``KaicStreamClient``
-is the SDK's ``InferStream`` (the §6 WebSocket session, opt-in via
-``kaic_transport: ws``), each behind this app's historical
-``infer_frame`` spelling. What stays here is the app's business logic:
-the restricted-hours gate and the zone rule.
+* **Arming.** ``arm_mode`` is ``schedule`` (armed inside ``armed_hours``,
+  which is the classic "restricted hours"), ``always``, ``manual`` (only
+  the arm/disarm actions move it) or ``off``. An operator can arm or
+  disarm from the Perimeter page at any time; a manual override holds
+  until ``override_minutes`` pass or it is cleared, so "disarm for the
+  delivery" cannot be forgotten forever.
+* **Exit and entry delay.** ``exit_delay_seconds`` is the grace after
+  arming before the zone is live — time to walk out. ``entry_delay_seconds``
+  is the grace after a breach before the alarm is raised — time for
+  someone authorised to be recognised and for the site to be disarmed.
+  Set both to 0 for an instant perimeter (a fence line has no door).
+* **Presence before breach.** ``min_presence_seconds`` (the AXIS
+  "minimum presence in zone" idea) ignores an object that clips the
+  zone edge for a frame. This, and the tracking underneath it, is what
+  separates a perimeter alarm from a motion sensor.
+* **One intruder is one alarm.** A breach belongs to a tracked object.
+  A person standing in the zone raises one alarm, not one per frame,
+  and ``alarm_cooldown_seconds`` merges a group at the fence into a
+  single alarm per camera (the AXIS "post-alarm time").
+* **Escalation.** If the intruder is still inside
+  ``escalate_after_seconds`` after the alarm, a second, higher-severity
+  alarm goes out — the "they are not leaving" signal a monitoring desk
+  acts on differently.
+* **Bypass.** A camera can be bypassed (a contractor is working in the
+  yard) for a stated number of minutes; it stays visible on the page as
+  bypassed rather than silently ignored, and un-bypasses itself.
+* **Verification.** Every alarm carries a snapshot from the camera, the
+  track id, the class, how long they had been inside, and the zone —
+  what an operator needs to decide in the ten seconds they have.
 
-Run:
-    python intrusion_detection.py --config config.yml          # daemon
-    python intrusion_detection.py --config config.yml --once    # one cycle (testing)
+Cameras and zones come from OpenNVR: with no ``cameras:`` listed the app
+watches exactly the cameras picked for it in the App Catalog and reads
+each camera's zone from the catalog's editor, live. A picked camera with
+no zone watches its whole frame and says so.
+
+This app rides Tier-0's tracked detections (``consume_tier0: true``,
+subject ``opennvr.inference.tier0.>``) — no model of its own, no GPU
+cost, and detections arrive at the detector's rate rather than a poll
+interval, so an intruder crossing the zone between two polls is no
+longer missed.
+
+Run::
+
+    python intrusion_detection.py --config config.yml
+    python intrusion_detection.py --config config.yml --once
 """
+
 from __future__ import annotations
 
-import argparse
 import asyncio
 import datetime as _dt
+import html as _html
 import logging
-import signal
-import sys
 import time
-import uuid
 from collections import deque
-from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
-import yaml
-
-from alerts import Alert, AlertDispatcher, build_dispatcher
-from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from opennvr_app_sdk import (
-    AlertType, AppManifest, FrameApp, InferStream, Param, StateView,
+    Action,
+    Alert,
+    AlertType,
+    AppManifest,
+    Detector,
+    Param,
+    StateView,
+    app,
 )
-from opennvr_app_sdk.frame_app import KaiCClient as SdkKaiCClient, KaiCError
-from opennvr_app_sdk.cameras import full_frame_polygon, per_camera_value
-from opennvr_app_sdk.frame_sources import CoreSnapshotSource, DictFrameSource
-from zone import Point, Zone, bbox_center, scale_vertices
+from opennvr_app_sdk.cameras import UNIT_FRAME
+from opennvr_app_sdk.config import load_yaml
+from opennvr_app_sdk.geometry import Zone, bbox_center, scale_vertices
+from opennvr_app_sdk.state import keyed_state
 
 logger = logging.getLogger("intrusion-detection")
 
+SEVERITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
+ARM_MODES: tuple[str, ...] = ("schedule", "always", "manual", "off")
+LABEL_SUGGESTIONS = ["person", "car", "truck", "motorcycle", "bicycle"]
+
+#: Per-camera arming states, in the vocabulary of an intrusion panel.
+DISARMED, ARMING, ARMED, BREACH, ALARM, BYPASSED = (
+    "disarmed", "arming", "armed", "breach", "alarm", "bypassed")
 
 MANIFEST = AppManifest(
     id="intrusion-detection",
     name="Intrusion Detection",
-    version="1.0.0",
+    version="1.1.0",
     category="perimeter",
     summary=(
-        "Alerts when a watched object enters a restricted zone during "
-        "restricted hours."
+        "The perimeter alarm: arms on a schedule or on command, raises an alarm when a "
+        "watched class enters a drawn zone, with exit and entry delays, presence "
+        "filtering, escalation, bypass and snapshot verification."
     ),
-    requires_tasks=["object_detection"],  # checked vs GET /api/v1/adapters
-    subscribes=None,  # FrameApp: drives inference itself via KAI-C
+    requires_tasks=["object_detection", "multi_object_tracking"],
+    # Lights the first-class Perimeter page (app/src/lib/appVerticals.ts).
+    provides=["intrusion"],
+    subscribes="opennvr.inference.>",
     params=[
-        Param("watch_labels", list, default=["person"]),
-        Param("poll_interval_seconds", float, default=5.0),
-        Param("restricted_hours", "time_range",
-              description="Daily {start, end} window; cross-midnight supported."),
-        Param("kaic_transport", str, default="http",
-              description="'http' polls per frame; 'ws' streams per camera (§6)."),
-        Param("zones", "geometry.polygon", per_camera=True),  # drawn in the catalog UI
+        Param("watch_labels", list, default=["person"], suggestions=LABEL_SUGGESTIONS,
+              description="Classes that count as an intruder. A yard that expects "
+                          "vehicles by day and nobody by night usually watches person only."),
+        Param("zones", "geometry.polygon", per_camera=True,
+              description="The protected zone, drawn on the camera. Nothing drawn = the "
+                          "whole frame, which on a perimeter camera usually means the fence "
+                          "line AND the road behind it."),
+        Param("arm_mode", str, default="schedule", choices=list(ARM_MODES),
+              description="schedule: armed inside armed_hours. always: armed around the "
+                          "clock. manual: only the arm/disarm buttons move it. off: watch "
+                          "and report, never alarm."),
+        Param("armed_hours", "time_range",
+              description="With arm_mode=schedule, the daily window the site is armed "
+                          "(cross-midnight allowed, e.g. 19:00–07:00). Empty = always armed."),
+        Param("exit_delay_seconds", float, default=0.0,
+              description="Grace after arming before the zone goes live — time to walk out. "
+                          "0 for a fence line nobody leaves through."),
+        Param("entry_delay_seconds", float, default=0.0,
+              description="Grace between the breach and the alarm — time to be recognised or "
+                          "to disarm. 0 makes the perimeter instant."),
+        Param("min_presence_seconds", float, default=1.0,
+              description="An object must be inside the zone this long to count as a breach. "
+                          "The single most effective false-alarm filter: a box that clips the "
+                          "zone edge for one frame is not an intruder."),
+        Param("alert_severity", str, default="high", choices=list(SEVERITIES),
+              description="Severity of the alarm; the escalation is one step higher."),
+        Param("escalate_after_seconds", float, default=0.0,
+              description="Still inside this long after the alarm: raise a second, higher "
+                          "alarm. 0 = no escalation."),
+        Param("alarm_cooldown_seconds", float, default=30.0,
+              description="Per camera, the least time between two alarms — a group coming "
+                          "over the fence is one alarm, not six. Escalations ignore it."),
+        Param("alarm_reset_seconds", float, default=60.0,
+              description="After the zone is clear this long, the camera returns to armed "
+                          "and can alarm again."),
+        Param("min_bbox_height", float, default=0.0,
+              description="Ignore objects shorter than this fraction of the frame (0.1 = a "
+                          "tenth). Filters traffic on the far road and birds."),
+        Param("override_minutes", float, default=60.0,
+              description="How long a manual arm/disarm from the page holds before the mode "
+                          "takes over again. 0 = until it is cleared."),
+        Param("attach_snapshot", bool, default=True,
+              description="Fetch a still from the camera when the alarm fires and attach it."),
     ],
-    emits=[AlertType("intrusion", severity="high")],
+    emits=[
+        AlertType("intrusion", severity="high",
+                  description="A watched class was inside the zone on an armed camera."),
+        AlertType("intrusion-escalated", severity="critical",
+                  description="Still inside after the escalation delay."),
+    ],
     state_schema=[
-        StateView(
-            "restricted_now",
-            "Restricted now",
-            path="restricted_now",
-            description=(
-                "Whether the app is currently within restricted hours "
-                "(i.e. armed and firing on intrusions)."
-            ),
+        StateView("armed_cameras", "Armed", kind="metric", path="armed_count",
+                  description="Cameras currently armed and watching."),
+        StateView("in_alarm", "In alarm", kind="metric", path="in_alarm",
+                  description="Cameras in breach or alarm right now."),
+        StateView("alarms_today", "Alarms today", kind="metric", path="today.alarms"),
+        StateView("breaches_today", "Breaches today", kind="metric", path="today.breaches",
+                  description="Zone entries that passed the presence filter, alarmed or not."),
+        StateView("per_camera", "Per camera", kind="table", path="per_camera",
+                  columns=["camera", "zone", "state", "intruders", "breaches_today",
+                           "alarms_today", "last"],
+                  description="Each camera's arming state and today's figures."),
+        StateView("intruders", "Inside now", kind="table", path="intruders",
+                  columns=["camera", "label", "track", "inside_s", "stage"],
+                  description="Every watched object inside a zone right now."),
+        StateView("recent", "Recent", kind="log", path="recent", limit=12),
+    ],
+    actions=[
+        Action(
+            "arm", "Arm",
+            params=[Param("camera", str, default="",
+                          description="Leave blank for every camera.")],
+            description="Arm now, overriding the schedule until the override expires.",
         ),
-        StateView(
-            "intrusions",
-            "Intrusions today",
-            path="intrusions",
-            description="Count of intrusion alerts fired since the app started.",
+        Action(
+            "disarm", "Disarm",
+            params=[Param("camera", str, default="",
+                          description="Leave blank for every camera.")],
+            confirm=True,
+            description="Disarm now. The site raises no alarms until the override expires "
+                        "or the schedule arms it again.",
         ),
-        StateView(
-            "recent",
-            "Recent intrusions",
-            path="recent",
-            kind="log",
-            limit=10,
-            description="Most recent intrusion alerts, newest last.",
+        Action(
+            "bypass", "Bypass a camera",
+            params=[
+                Param("camera", str, required=True),
+                Param("minutes", float, default=60.0,
+                      description="How long to bypass for. 0 clears the bypass."),
+            ],
+            description="Temporarily exclude one camera — work in the yard, a delivery bay "
+                        "open for the afternoon. It stays on the page as bypassed.",
+        ),
+        Action(
+            "acknowledge", "Acknowledge the alarm",
+            params=[Param("camera", str, default="")],
+            description="Clear the alarm state so the camera re-arms without waiting for "
+                        "the reset timer.",
+        ),
+        Action(
+            "clear_override", "Back to schedule", params=[],
+            description="Drop every manual arm/disarm and follow arm_mode again.",
         ),
     ],
+    has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
 )
 
 
-# ── Config ─────────────────────────────────────────────────────────
+# ── Config ──────────────────────────────────────────────────────────
 
 
 @dataclass
-class CameraWatch:
-    """One camera + its zone + its frame source. Multiple cameras
-    can share the same KAI-C/adapter target — each gets its own
-    detector loop iteration."""
-
-    camera_id: str
-    frame_url: str  # file://, http://, https://
-    zone: Zone
-    # Camera frame dimensions in pixels. The contract emits
-    # normalized [0, 1] bboxes; we translate back to pixels to
-    # compare against the zone polygon, which is operator-defined
-    # in pixels.
-    frame_width: int
-    frame_height: int
-
-
-@dataclass
-class RestrictedHours:
-    """A daily time window during which alerts fire. Supports
-    cross-midnight ranges (e.g. ``start=22:00, end=06:00``).
-
-    All comparisons use the LOCAL timezone of the host (or the
-    operator-supplied ``timezone`` if pytz/zoneinfo is configured).
-    For v1 we use ``datetime.now()`` which picks up the host TZ.
-    """
-
+class ArmedHours:
+    """A daily window in local time; cross-midnight supported."""
     start: _dt.time
     end: _dt.time
 
     def contains(self, when: _dt.datetime) -> bool:
-        """True if ``when.time()`` is within [start, end). Handles
-        cross-midnight ranges by inverting the comparison."""
         t = when.time()
         if self.start <= self.end:
-            # Normal range, e.g. 09:00 - 17:00.
             return self.start <= t < self.end
-        # Cross-midnight range, e.g. 22:00 - 06:00.
         return t >= self.start or t < self.end
+
+    @classmethod
+    def parse(cls, raw: Any) -> "ArmedHours | None":
+        if not isinstance(raw, dict):
+            return None
+        s, e = str(raw.get("start") or "").strip(), str(raw.get("end") or "").strip()
+        if not s or not e:
+            return None
+        try:
+            return cls(_dt.time.fromisoformat(s), _dt.time.fromisoformat(e))
+        except ValueError as exc:
+            raise ValueError(f"armed_hours must be HH:MM start/end: {exc}") from None
+
+
+@dataclass
+class CameraWatch:
+    """One camera + its zone + the pixel space the zone was drawn in.
+    ``drawn`` is False when the zone is the whole-frame fallback."""
+    camera_id: str
+    zone: Zone
+    frame_width: int
+    frame_height: int
+    drawn: bool = True
 
 
 @dataclass
 class AppConfig:
-    """Top-level config loaded from YAML."""
-
-    kaic_url: str
-    kaic_adapter_name: str
-    kaic_api_key: str | None
-    poll_interval_seconds: float
+    nats_url: str
+    nats_token: str | None
+    subject_pattern: str
     watch_labels: list[str]
-    restricted_hours: RestrictedHours
-    cameras: list[CameraWatch]
+    cameras: dict[str, CameraWatch]
     webhook_url: str | None
-    # Optional NATS alert fan-out. When ``nats_alerts_url`` is set,
-    # every fired alert is also published as JSON onto
-    # ``{nats_alerts_subject_prefix}.{source.kind}.{source.name}.{camera_id}``.
-    # Wire this up to feed the OpenNVR alerts inbox, a SIEM, or any
-    # other bus subscriber without standing up additional webhooks.
-    # Default-disabled so single-host deployments without NATS just
-    # work.
     nats_alerts_url: str | None = None
     nats_alerts_token: str | None = None
     nats_alerts_subject_prefix: str = "opennvr.alerts"
-    request_timeout_seconds: float = 30.0
-    # ``kaic_transport`` selects how this example talks to KAI-C:
-    #
-    # * ``http`` (default, back-compat) — one POST to
-    #   /api/v1/infer/{adapter} per polled frame. Simpler; one
-    #   connection per cycle (httpx keeps it alive). Latency floor is
-    #   the poll interval (~1s default).
-    #
-    # * ``ws`` — one persistent WebSocket per camera to KAI-C's
-    #   /api/v1/infer/{adapter}/stream proxy (§6). Drops per-frame
-    #   latency from ~poll_interval to ~adapter inference time
-    #   (~30-50ms for YOLOv8) at the cost of one open connection per
-    #   camera. Use when you actually need sub-second response on
-    #   alerts; HTTP is fine for typical surveillance.
-    kaic_transport: str = "http"
-    # App contract (spec §03) — all optional; see the SDK's contract
-    # module. ``contract_port`` serves /health /manifest /state;
-    # ``opennvr_url`` triggers registry self-registration on boot.
     contract_port: int | None = None
     contract_bind_host: str | None = None
     contract_host: str | None = None
     opennvr_url: str | None = None
     opennvr_token: str | None = None
+    # ── arming / alarm policy (all live-editable) ──
+    arm_mode: str = "schedule"
+    armed_hours: ArmedHours | None = None
+    exit_delay_seconds: float = 0.0
+    entry_delay_seconds: float = 0.0
+    min_presence_seconds: float = 1.0
+    alert_severity: str = "high"
+    escalate_after_seconds: float = 0.0
+    alarm_cooldown_seconds: float = 30.0
+    alarm_reset_seconds: float = 60.0
+    min_bbox_height: float = 0.0
+    override_minutes: float = 60.0
+    attach_snapshot: bool = True
+    track_ttl_seconds: float = 5.0
+    consume_tier0: bool = False
+    auto_cameras: bool = False
+
+
+def _camera_key(raw_key: object, known: dict[str, Any]) -> str | None:
+    """Resolve a per-camera config key to a camera id. The catalog's
+    editor keys by the numeric core id (``"3"``); the app by the handle
+    (``"cam3"``); hand-written config may use either."""
+    key = str(raw_key).strip()
+    if key in known:
+        return key
+    if key.isdigit() and f"cam{key}" in known:
+        return f"cam{key}"
+    return None
+
+
+def _zone_from_drawn(drawn: Any, cam: CameraWatch) -> Zone | None:
+    if not isinstance(drawn, (list, tuple)) or len(drawn) < 3:
+        return None
+    try:
+        return Zone.from_config(name="zone",
+                                vertices=scale_vertices(drawn, cam.frame_width, cam.frame_height))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _whole_frame(cam_id: str, w: int, h: int) -> CameraWatch:
+    return CameraWatch(cam_id, Zone.from_config("whole frame", [[0, 0], [w, 0], [w, h], [0, h]]),
+                       w, h, drawn=False)
+
+
+def _knobs_from(raw: dict[str, Any], base: AppConfig | None = None) -> dict[str, Any]:
+    """The live-editable knobs, parsed and validated from a config dict."""
+    d = base
+    out: dict[str, Any] = {}
+
+    def _get(key, default):
+        if key in raw and raw[key] is not None:
+            return raw[key]
+        return getattr(d, key) if d is not None else default
+
+    mode = str(_get("arm_mode", "schedule")).strip().lower() or "schedule"
+    if mode not in ARM_MODES:
+        raise ValueError(f"config: 'arm_mode' must be one of {', '.join(ARM_MODES)}")
+    out["arm_mode"] = mode
+    sev = str(_get("alert_severity", "high")).strip().lower() or "high"
+    if sev not in SEVERITIES:
+        raise ValueError(f"config: 'alert_severity' must be one of {', '.join(SEVERITIES)}")
+    out["alert_severity"] = sev
+    try:
+        out["exit_delay_seconds"] = max(0.0, float(_get("exit_delay_seconds", 0.0)))
+        out["entry_delay_seconds"] = max(0.0, float(_get("entry_delay_seconds", 0.0)))
+        out["min_presence_seconds"] = max(0.0, float(_get("min_presence_seconds", 1.0)))
+        out["escalate_after_seconds"] = max(0.0, float(_get("escalate_after_seconds", 0.0)))
+        out["alarm_cooldown_seconds"] = max(0.0, float(_get("alarm_cooldown_seconds", 30.0)))
+        out["alarm_reset_seconds"] = max(1.0, float(_get("alarm_reset_seconds", 60.0)))
+        out["min_bbox_height"] = min(1.0, max(0.0, float(_get("min_bbox_height", 0.0))))
+        out["override_minutes"] = max(0.0, float(_get("override_minutes", 60.0)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"config: numeric knob malformed: {exc}") from None
+    out["attach_snapshot"] = bool(_get("attach_snapshot", True))
+    if "armed_hours" in raw:
+        out["armed_hours"] = ArmedHours.parse(raw.get("armed_hours"))
+    elif d is not None:
+        out["armed_hours"] = d.armed_hours
+    else:
+        out["armed_hours"] = None
+    return out
 
 
 def load_config(path: str) -> AppConfig:
-    """Parse a YAML config file into a typed AppConfig.
+    """Parse a YAML config file into a typed AppConfig."""
+    raw = load_yaml(path)
 
-    Raises ``ValueError`` on malformed config — caller's job to
-    surface a useful operator message and exit non-zero."""
-    raw = yaml.safe_load(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"config {path!r}: root must be a mapping")
+    nats_url = str(raw.get("nats_url") or "").strip()
+    if not nats_url:
+        raise ValueError("config: 'nats_url' is required")
+    if "subject_pattern" in raw:
+        subject = str(raw.get("subject_pattern") or "").strip()
+        if not subject:
+            raise ValueError("config: 'subject_pattern' must not be empty")
+    else:
+        subject = "opennvr.inference.>"
 
-    try:
-        kaic_url = str(raw["kaic_url"]).rstrip("/")
-    except KeyError as exc:
-        raise ValueError("config: 'kaic_url' is required") from exc
+    watch_labels_raw = raw.get("watch_labels")
+    if watch_labels_raw is None:
+        watch_labels = ["person"]
+    else:
+        watch_labels = [str(s).lower() for s in watch_labels_raw]
+        if not watch_labels:
+            raise ValueError(
+                "config: 'watch_labels' must not be empty (omit the key to "
+                "use the default ['person'], or list at least one label)"
+            )
 
-    poll_interval = float(raw.get("poll_interval_seconds", 5.0))
-    if poll_interval <= 0:
-        raise ValueError("config: 'poll_interval_seconds' must be > 0")
-
-    rh_raw = raw.get("restricted_hours", {})
-    try:
-        rh = RestrictedHours(
-            start=_dt.time.fromisoformat(str(rh_raw.get("start", "00:00"))),
-            end=_dt.time.fromisoformat(str(rh_raw.get("end", "23:59"))),
-        )
-    except ValueError as exc:
-        raise ValueError(f"config: bad restricted_hours value: {exc}") from exc
+    zones_override = raw.get("zones")
+    zone_map = zones_override if isinstance(zones_override, dict) else {}
 
     cameras_raw = raw.get("cameras") or []
-    if not cameras_raw and not raw.get("opennvr_url"):
-        # Connected to OpenNVR, cameras are PICKED in the App Catalog and
-        # frames come from core — no YAML list needed. Standalone, there
-        # is nowhere else to get them from.
+    auto_cameras = not cameras_raw
+    if auto_cameras and not raw.get("opennvr_url"):
         raise ValueError(
             "config: at least one camera entry is required (or set "
             "opennvr_url and select cameras in the App Catalog)"
         )
-    # The App Catalog's zone editor stores geometry as a top-level
-    # ``zones`` dict keyed by camera_id, in NORMALIZED 0-1 coords. When
-    # present it OVERRIDES the per-camera ``zone`` (the operator's drawn
-    # zone wins), scaled to that camera's pixels. The nested ``zone:``
-    # form still works for hand-written / legacy config.
-    zones_override = raw.get("zones")
-    zones_map = zones_override if isinstance(zones_override, dict) else {}
-    cameras: list[CameraWatch] = []
+
+    cameras: dict[str, CameraWatch] = {}
     for idx, c in enumerate(cameras_raw):
         try:
             camera_id = str(c["camera_id"])
             frame_width = int(c.get("frame_width", 1920))
             frame_height = int(c.get("frame_height", 1080))
-            drawn = zones_map.get(camera_id)
-            zone_vertices = (
-                scale_vertices(drawn, frame_width, frame_height)
-                if isinstance(drawn, list) and drawn
-                else c["zone"]
-            )
-            zone = Zone.from_config(
-                name=str(c.get("zone_name", f"zone-{idx}")),
-                vertices=zone_vertices,
-            )
-            cameras.append(
-                CameraWatch(
-                    camera_id=camera_id,
-                    frame_url=str(c["frame_url"]),
-                    zone=zone,
-                    frame_width=frame_width,
-                    frame_height=frame_height,
+            if frame_width <= 0 or frame_height <= 0:
+                raise ValueError(
+                    f"frame_width and frame_height must be > 0; got "
+                    f"frame_width={frame_width}, frame_height={frame_height}"
                 )
-            )
+            cam = _whole_frame(camera_id, frame_width, frame_height)
+            drawn = None
+            for raw_key, val in zone_map.items():
+                if _camera_key(raw_key, {camera_id: cam}) == camera_id:
+                    drawn = val
+                    break
+            zone = _zone_from_drawn(drawn, cam)
+            if zone is None and c.get("zone"):
+                zone = Zone.from_config(name=str(c.get("zone_name", f"zone-{idx}")),
+                                        vertices=scale_vertices(c["zone"], frame_width,
+                                                                frame_height))
+            elif zone is not None and c.get("zone_name"):
+                zone = Zone(name=str(c["zone_name"]), polygon=zone.polygon)
+            if zone is not None:
+                cam.zone, cam.drawn = zone, True
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"config: camera entry {idx} malformed: {exc}"
-            ) from exc
-
-    kaic_transport = str(raw.get("kaic_transport", "http")).lower()
-    if kaic_transport not in ("http", "ws"):
-        raise ValueError(
-            f"config: kaic_transport must be 'http' or 'ws', got {kaic_transport!r}"
-        )
+            raise ValueError(f"config: camera entry {idx} malformed: {exc}") from exc
+        if cam.camera_id in cameras:
+            raise ValueError(f"config: duplicate camera_id {cam.camera_id!r} at entry {idx}")
+        cameras[cam.camera_id] = cam
 
     nats_alerts_url = str(raw["nats_alerts_url"]).strip() if raw.get("nats_alerts_url") else None
     nats_alerts_token = str(raw["nats_alerts_token"]) if raw.get("nats_alerts_token") else None
-    # Refuse an explicitly-empty prefix; absent → use the default.
     if "nats_alerts_subject_prefix" in raw:
         nats_prefix = str(raw["nats_alerts_subject_prefix"]).strip()
         if not nats_prefix:
-            raise ValueError(
-                "config: 'nats_alerts_subject_prefix' must not be empty "
-                "(omit the key to use the default 'opennvr.alerts')"
-            )
+            raise ValueError("config: 'nats_alerts_subject_prefix' must not be empty")
     else:
         nats_prefix = "opennvr.alerts"
 
+    # Back-compat: the pre-1.1 app called the schedule "restricted_hours".
+    if "armed_hours" not in raw and "restricted_hours" in raw:
+        raw["armed_hours"] = raw["restricted_hours"]
+
+    knobs = _knobs_from(raw)
     return AppConfig(
-        kaic_url=kaic_url,
-        kaic_adapter_name=str(raw.get("kaic_adapter_name", "yolov8")),
-        kaic_api_key=str(raw["kaic_api_key"]) if raw.get("kaic_api_key") else None,
-        poll_interval_seconds=poll_interval,
-        watch_labels=[str(s).lower() for s in raw.get("watch_labels", ["person"])],
-        restricted_hours=rh,
+        nats_url=nats_url,
+        nats_token=str(raw["nats_token"]) if raw.get("nats_token") else None,
+        subject_pattern=subject,
+        watch_labels=watch_labels,
         cameras=cameras,
         webhook_url=str(raw["webhook_url"]) if raw.get("webhook_url") else None,
         nats_alerts_url=nats_alerts_url,
         nats_alerts_token=nats_alerts_token,
         nats_alerts_subject_prefix=nats_prefix,
-        request_timeout_seconds=float(raw.get("request_timeout_seconds", 30.0)),
-        kaic_transport=kaic_transport,
-        contract_port=(
-            int(raw["contract_port"]) if raw.get("contract_port") is not None else None
-        ),
-        contract_bind_host=raw.get("contract_bind_host"),
-        contract_host=raw.get("contract_host"),
-        opennvr_url=raw.get("opennvr_url"),
-        opennvr_token=raw.get("opennvr_token"),
+        contract_port=int(raw["contract_port"]) if raw.get("contract_port") is not None else None,
+        contract_bind_host=str(raw["contract_bind_host"]) if raw.get("contract_bind_host") else None,
+        contract_host=str(raw["contract_host"]) if raw.get("contract_host") else None,
+        opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
+        opennvr_token=str(raw["opennvr_token"]) if raw.get("opennvr_token") else None,
+        track_ttl_seconds=float(raw.get("track_ttl_seconds", 5.0)),
+        consume_tier0=bool(raw.get("consume_tier0", False)),
+        auto_cameras=auto_cameras,
+        **knobs,
     )
 
 
-# ── KAI-C clients (SDK-backed) ─────────────────────────────────────
-#
-# Both transports come from the SDK now: ``KaiCClient`` for the one-shot
-# HTTP path and ``InferStream`` for the contract §6 WebSocket session.
-# The two classes below keep this app's historical call shape
-# (``infer_frame(camera_id=, frame_bytes=, correlation_id=)``) so the
-# detector loop and its tests read unchanged; the wire body is the
-# contract-v1 one the SDK speaks (``task`` + ``camera_id`` + ``frame_b64``).
+# ── Per-camera arming state ─────────────────────────────────────────
 
 
-class KaicClient(SdkKaiCClient):
-    """HTTP path — the SDK client with this app's ``infer_frame`` spelling."""
-
-    def infer_frame(
-        self,
-        *,
-        camera_id: str,
-        frame_bytes: bytes,
-        correlation_id: str,
-    ) -> dict[str, Any]:
-        return self.infer(
-            frame_bytes, task=INFER_TASK, camera_id=camera_id,
-            correlation_id=correlation_id,
-        )
+def _day_blank() -> dict[str, int]:
+    return {"breaches": 0, "alarms": 0}
 
 
-#: The detector's task on KAI-C (contract v1 ``task`` field).
-INFER_TASK = "object_detection"
-
-#: Raised on transport failure / non-200 / protocol violation. The
-#: detector loop treats it as a transient skip — alerts don't fire on a
-#: comms failure (the failure itself is in KAI-C's audit log via the
-#: correlation_id we sent). Alias of the SDK's exception so either
-#: spelling catches both transports.
-KaicError = KaiCError
-
-
-class KaicStreamClient:
-    """Per-camera persistent WebSocket session — ``opennvr_app_sdk``'s
-    :class:`InferStream` behind this app's ``infer_frame`` spelling.
-
-    Adds the ``__session_correlation_id`` response key the detector
-    uses: KAI-C audits at SESSION grain (``stream.opened`` / ``closed``),
-    so every alert from a session must reference the session's
-    correlation id, not the per-step one ``step()`` generated.
-    """
-
-    def __init__(
-        self,
-        base_url: str,
-        adapter_name: str,
-        camera_id: str,
-        *,
-        api_key: str | None,
-        timeout_seconds: float,
-        websocket_factory: Callable[[str, list[tuple[str, str]]], Any] | None = None,
-    ) -> None:
-        parsed = urlparse(base_url)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(
-                f"kaic_url must be http:// or https:// (got {base_url!r})"
-            )
-        self._stream = InferStream(
-            base_url, api_key, adapter=adapter_name, camera_id=camera_id,
-            client_id="intrusion-detection", timeout=timeout_seconds,
-            websocket_factory=websocket_factory,
-        )
-        self._url = self._stream.url
-
-    def infer_frame(
-        self,
-        *,
-        frame_bytes: bytes,
-        correlation_id: str,
-    ) -> dict[str, Any]:
-        """Send one frame; return the §5.1-shaped result. Raises
-        ``KaicError`` (the SDK's ``KaiCError``) on any failure, after
-        tearing the session down so the next call reconnects."""
-        self._stream.open(correlation_id)
-        result = self._stream.infer(frame_bytes)
-        result["__session_correlation_id"] = self._stream.correlation_id
-        return result
-
-    def close(self) -> None:
-        self._stream.close()
+@dataclass
+class CameraState:
+    """The arming state machine for one camera."""
+    state: str = DISARMED
+    since: float = 0.0            # when the current state began (wall clock)
+    #: Set while arming: when the exit delay expires.
+    armed_at: float = 0.0
+    #: Set on breach: when the entry delay expires and the alarm fires.
+    alarm_at: float = 0.0
+    #: The track that opened the current breach.
+    breach_track: str = ""
+    #: When the alarm fired, for escalation and reset.
+    alarmed_at: float = 0.0
+    escalated: bool = False
+    #: Wall-clock deadline of a bypass, 0 when not bypassed.
+    bypass_until: float = 0.0
+    #: Manual override: True armed / False disarmed / None none, and its deadline.
+    override: bool | None = None
+    override_until: float = 0.0
+    last_clear: float = 0.0       # last moment the zone was empty
 
 
-# ── Detector loop ──────────────────────────────────────────────────
-
-
-class _YamlOrCoreFrames:
-    """Frames for the poll loop: a YAML camera's own ``frame_url`` when it
-    has one, else core's snapshot of a camera picked for this app."""
-
-    def __init__(self, yaml_sources: dict[str, FrameSource]) -> None:
-        self._yaml = DictFrameSource(yaml_sources)
-        self._yaml_ids = yaml_sources
-        self._core = CoreSnapshotSource()
-
-    def get_frame(self, camera_id: str) -> bytes | None:
-        if camera_id in self._yaml_ids:
-            return self._yaml.get_frame(camera_id)
-        return self._core.get_frame(camera_id)
-
-
-class IntrusionDetector(FrameApp):
-    """The main detector. Holds config + KAI-C client + dispatcher.
-
-    ``step(camera)`` runs one cycle for one camera (the historical
-    surface tests and ``--once`` drive); the SDK FrameApp base owns the
-    daemon loop, which reaches the same rule through :meth:`on_frame`.
-    """
+class IntrusionDetector(Detector):
+    """Consumes tracked detections, keeps an arming state machine per
+    camera, and raises alarms when a watched class is inside a drawn
+    zone on an armed camera for longer than the presence filter."""
 
     manifest = MANIFEST
 
-    def __init__(
-        self,
-        config: AppConfig,
-        kaic_client: KaicClient,
-        dispatcher: AlertDispatcher,
-        *,
-        now: Callable[[], _dt.datetime] = _dt.datetime.now,
-        stream_client_factory: Callable[[str], KaicStreamClient] | None = None,
-    ) -> None:
-        # Compat alias — pre-SDK code (and the tests) used ``_config``;
-        # the SDK base spells it ``cfg``.
-        self._config = config
-        self._kaic = kaic_client
-        self._now = now
-        # Cache frame sources at init time so config errors surface
-        # immediately, not on the first cycle.
-        self._frame_sources: dict[str, FrameSource] = {}
-        for camera in config.cameras:
-            self._frame_sources[camera.camera_id] = build_frame_source(
-                camera_id=camera.camera_id,
-                url=camera.frame_url,
-            )
-        # WS mode: one persistent stream client per camera, built
-        # lazily on first ``step``. ``stream_client_factory`` is an
-        # injection point for tests; production builds the default
-        # ``KaicStreamClient`` from config.
-        self._stream_client_factory = stream_client_factory or self._default_stream_client_factory
-
-        super().__init__(
-            config,
-            dispatcher,
-            # By-reference bridge: swapping an entry in
-            # ``self._frame_sources`` is picked up on the next tick.
-            frame_source=_YamlOrCoreFrames(self._frame_sources),
-            cameras=[camera.camera_id for camera in config.cameras],
-            poll_interval_seconds=config.poll_interval_seconds,
-        )
-
     def setup(self) -> None:
-        self._cameras_by_id: dict[str, CameraWatch] = {
-            camera.camera_id: camera for camera in self.cfg.cameras
-        }
-        self._stream_clients: dict[str, KaicStreamClient] = {}
-        # Live dashboard state (spec §03 /state). Bounded feed of the
-        # most recent intrusions + a running count since start.
-        self._recent: deque[dict[str, Any]] = deque(maxlen=25)
-        self._intrusions = 0
+        # One record per (camera, track) while the object is in the zone.
+        self._inside = keyed_state(ttl=self.cfg.track_ttl_seconds, auto_gc=False)
+        self._warned_missing_track = False
+        self._cams: dict[str, CameraState] = {}
+        self._today: dict[str, dict[str, int]] = {}
+        self._today_key: str = self._now_local().date().isoformat()
+        self._last: dict[str, float] = {}
+        self._recent: deque[dict[str, Any]] = deque(maxlen=50)
+        self._started_at = time.time()
+        self._nvr: Any = None
+        self._nvr_tried = False
+        self._unknown_cameras: set[str] = set()
+        self._last_config: dict[str, Any] | None = None
 
-    def _default_stream_client_factory(self, camera_id: str) -> KaicStreamClient:
-        return KaicStreamClient(
-            self._config.kaic_url,
-            self._config.kaic_adapter_name,
-            camera_id,
-            api_key=self._config.kaic_api_key,
-            timeout_seconds=self._config.request_timeout_seconds,
-        )
+    # ── time helpers ──
 
-    def close(self) -> None:
-        """Tear down WS clients (no-op if HTTP mode). Called from the
-        CLI's finally block so a clean shutdown returns sockets."""
-        for client in self._stream_clients.values():
-            client.close()
-        self._stream_clients.clear()
+    def _now_local(self) -> _dt.datetime:
+        return _dt.datetime.now()
 
-    def _call_kaic(
-        self,
-        camera: CameraWatch,
-        frame_bytes: bytes,
-        correlation_id: str,
-    ) -> dict[str, Any]:
-        """Send one frame to KAI-C via whichever transport this
-        deployment configured. HTTP is one-shot per call; WS reuses
-        a persistent connection per camera. Both raise ``KaicError``
-        on transport failure so ``step()``'s catch handles them
-        identically — same alert semantics across modes (no alert
-        on comms failure; the failure is in KAI-C's audit log via
-        the correlation_id we sent)."""
-        if self._config.kaic_transport == "ws":
-            client = self._stream_clients.get(camera.camera_id)
-            if client is None:
-                client = self._stream_client_factory(camera.camera_id)
-                self._stream_clients[camera.camera_id] = client
-            return client.infer_frame(
-                frame_bytes=frame_bytes,
-                correlation_id=correlation_id,
-            )
-        # Default: HTTP path (back-compat).
-        return self._kaic.infer_frame(
-            camera_id=camera.camera_id,
-            frame_bytes=frame_bytes,
-            correlation_id=correlation_id,
-        )
+    def _roll_day(self) -> None:
+        key = self._now_local().date().isoformat()
+        if key != self._today_key:
+            self._today_key = key
+            self._today = {}
 
-    # ── The rule (one camera × one fetched frame) ──────────────────
+    def _cam_state(self, camera_id: str) -> CameraState:
+        st = self._cams.get(camera_id)
+        if st is None:
+            st = CameraState(state=DISARMED, since=time.time(), last_clear=time.time())
+            self._cams[camera_id] = st
+        return st
 
-    def on_frame(self, camera_id: str, frame_bytes: bytes) -> list[Alert]:
-        """SDK FrameApp hook — the daemon loop's path to the rule. The
-        base loop fetched the frame; gate on restricted hours, then run
-        inference + zone matching. The base dispatches what we return."""
-        if not self._config.restricted_hours.contains(self._now()):
-            return []
-        camera = self._camera_for(camera_id)
-        if camera is None:
-            return []
-        return self._detect_intrusions(camera, frame_bytes)
+    def _day(self, camera_id: str) -> dict[str, int]:
+        return self._today.setdefault(camera_id, _day_blank())
 
-    # ── Cameras picked in the catalog ──────────────────────────────
-    #
-    # Connected to OpenNVR, the SDK loop polls exactly the cameras picked
-    # for this app (FrameApp.on_cameras_update), frames come from core's
-    # snapshot route, and the zone is the one drawn in the catalog. A YAML
-    # camera entry still wins for its own camera id.
+    # ── arming ──
 
-    #: The virtual frame catalog zones are scaled into; detection boxes
-    #: are normalised, so any fixed size is exact.
-    CATALOG_FRAME = (1920, 1080)
+    def _should_be_armed(self, st: CameraState, now: float) -> bool:
+        """What the policy says, before the state machine's own delays:
+        a live manual override wins, then the mode."""
+        if st.override is not None:
+            if st.override_until and now >= st.override_until:
+                st.override = None
+                st.override_until = 0.0
+            else:
+                return st.override
+        mode = self.cfg.arm_mode
+        if mode == "off":
+            return False
+        if mode == "always":
+            return True
+        if mode == "manual":
+            return False          # only an override arms a manual site
+        hours = self.cfg.armed_hours
+        return True if hours is None else hours.contains(self._now_local())
 
-    def on_config_update(self, config: dict[str, Any]) -> None:
-        """Pick up zones drawn in the catalog, live."""
-        drawn = (config or {}).get("zones")
-        self._drawn = drawn if isinstance(drawn, dict) else {}
-        self._catalog_cameras: dict[str, CameraWatch] = {}
-
-    def _camera_for(self, camera_id: str) -> CameraWatch | None:
-        camera = self._cameras_by_id.get(camera_id)
-        if camera is not None:
-            return camera
-        if self._config_poll_thread is None:
-            return None
-        cache = getattr(self, "_catalog_cameras", {})
-        if camera_id not in cache:
-            w, h = self.CATALOG_FRAME
-            drawn = per_camera_value(getattr(self, "_drawn", {}), camera_id)
-            vertices = drawn if isinstance(drawn, (list, tuple)) and len(drawn) >= 3 \
-                else full_frame_polygon(1)
-            built = CameraWatch(
-                camera_id=camera_id, frame_url="opennvr:core",
-                zone=Zone.from_config(name="drawn", vertices=scale_vertices(vertices, w, h)),
-                frame_width=w, frame_height=h,
-            )
-            self._catalog_cameras = {**cache, camera_id: built}
-        return self._catalog_cameras[camera_id]
-
-    def step(self, camera: CameraWatch) -> list[Alert]:
-        """Run one detection cycle for one camera. Returns the list
-        of alerts that were fired (mostly for testing — the dispatcher
-        already sent them through every channel). Historical surface,
-        kept for ``--once`` and the tests; dispatches its own alerts
-        because it runs outside the base loop."""
-        # Outside restricted hours → no inference, no alert.
-        now = self._now()
-        if not self._config.restricted_hours.contains(now):
-            return []
-
-        try:
-            frame_bytes = self._frame_sources[camera.camera_id].fetch()
-        except FrameSourceError as exc:
-            logger.warning("frame fetch failed for %s: %s", camera.camera_id, exc)
-            return []
-
-        # Contract counters (spec §03): one fetched frame is one
-        # "event", mirroring the base loop's bookkeeping.
-        self._contract_note_event()
-        fired = self._detect_intrusions(camera, frame_bytes)
-        for alert in fired:
-            self._dispatcher.fire(alert)
-        self._contract_note_alerts(len(fired))
+    def tick(self, now: float | None = None) -> list[Alert]:
+        """Advance every camera's state machine on the wall clock: exit
+        delays expiring, entry delays turning into alarms, escalations,
+        alarm resets, bypasses ending. Tier-0 publishes only frames with
+        detections, so a quiet camera must still be moved along — this
+        runs from the sweep loop as well as after each event."""
+        now = time.time() if now is None else now
+        self._roll_day()
+        # Tier-0 publishes only frames that have detections, so a zone that
+        # empties goes silent. Forget tracks nobody has seen for longer than
+        # the track TTL, on the wall clock, or a camera would never reset.
+        cutoff = now - self.cfg.track_ttl_seconds
+        for key, rec in list(self._inside.items()):
+            if rec.last_seen < cutoff:
+                self._inside.pop(key)
+                st = self._cam_state(key[0])
+                if not self._intruders_on(key[0]):
+                    # The zone emptied when the last track aged out, which is
+                    # LATER than any previous clear — take the later of the
+                    # two, or an alarm raised long after a quiet spell would
+                    # reset against that stale timestamp and re-arm at once
+                    # instead of waiting out alarm_reset_seconds.
+                    st.last_clear = max(st.last_clear,
+                                        rec.last_seen + self.cfg.track_ttl_seconds)
+        fired: list[Alert] = []
+        for cam_id, cam in self.cfg.cameras.items():
+            st = self._cam_state(cam_id)
+            # A bypass that has run out returns the camera to the policy.
+            if st.bypass_until and now >= st.bypass_until:
+                st.bypass_until = 0.0
+                if st.state == BYPASSED:
+                    self._to(st, DISARMED, now)
+                    self._note(cam_id, "bypass ended", "info", now)
+            if st.state == BYPASSED:
+                continue
+            want_armed = self._should_be_armed(st, now)
+            if not want_armed:
+                if st.state not in (DISARMED,):
+                    self._to(st, DISARMED, now)
+                continue
+            if st.state == DISARMED:
+                # Arm, through the exit delay when there is one.
+                if self.cfg.exit_delay_seconds > 0:
+                    self._to(st, ARMING, now)
+                    st.armed_at = now + self.cfg.exit_delay_seconds
+                else:
+                    self._to(st, ARMED, now)
+                continue
+            if st.state == ARMING and now >= st.armed_at:
+                self._to(st, ARMED, now)
+                continue
+            if st.state == BREACH and now >= st.alarm_at:
+                if self._cooldown_blocks(st, now):
+                    # A group at the fence: still one alarm per camera.
+                    self._to(st, ALARM, now)
+                else:
+                    fired.append(self._raise(cam, st, "intrusion", now))
+                continue
+            if st.state == ALARM:
+                if (self.cfg.escalate_after_seconds > 0 and not st.escalated
+                        and now - st.alarmed_at >= self.cfg.escalate_after_seconds
+                        and self._intruders_on(cam_id)):
+                    st.escalated = True
+                    fired.append(self._raise(cam, st, "intrusion-escalated", now))
+                elif (not self._intruders_on(cam_id)
+                      and now - st.last_clear >= self.cfg.alarm_reset_seconds):
+                    self._to(st, ARMED, now)
+                    self._note(cam_id, "zone clear — re-armed", "info", now)
         return fired
 
-    def _detect_intrusions(
-        self, camera: CameraWatch, frame_bytes: bytes
+    def _to(self, st: CameraState, state: str, now: float) -> None:
+        if st.state == state:
+            return
+        st.state = state
+        st.since = now
+        if state in (ARMED, DISARMED, BYPASSED):
+            st.breach_track = ""
+            st.alarm_at = 0.0
+            st.escalated = False
+
+    def _intruders_on(self, camera_id: str) -> int:
+        return sum(1 for key, _ in self._inside.items() if key[0] == camera_id)
+
+    def _note(self, camera_id: str, message: str, level: str, now: float,
+              **extra: Any) -> None:
+        self._recent.append({"message": f"{camera_id}: {message}", "time": now,
+                             "level": level, "camera": camera_id, **extra})
+
+    # ── the rule ──
+
+    def on_detections(
+        self,
+        camera_id: str,
+        detections: list[dict[str, Any]],
+        event: dict[str, Any],
     ) -> list[Alert]:
-        """Inference + zone matching for one frame. Pure w.r.t. the
-        dispatcher — callers (``step`` / the base loop) dispatch."""
-        correlation_id = uuid.uuid4().hex
-        try:
-            infer_response = self._call_kaic(camera, frame_bytes, correlation_id)
-        except KaicError as exc:
-            logger.warning("kaic inference failed for %s: %s", camera.camera_id, exc)
+        camera = self.cfg.cameras.get(camera_id)
+        if camera is None:
+            if camera_id not in self._unknown_cameras:
+                self._unknown_cameras.add(camera_id)
+                logger.info("events from %s ignored — not one of this app's cameras (%s)",
+                            camera_id, sorted(self.cfg.cameras) or "none")
             return []
+        event_ts = self.parse_event_ts(event.get("completed_at"))
+        now = time.time()
+        fired = self.tick(now)
+        st = self._cam_state(camera_id)
 
-        # WS mode: KAI-C audits at session grain (one correlation_id
-        # per WS session, not per frame). Use whatever the stream
-        # client reports as the session's effective correlation_id so
-        # alerts join back to the right KAI-C audit row. HTTP mode is
-        # per-call so the per-step ID and effective ID always match.
-        # (Peer review H1.)
-        if isinstance(infer_response, dict):
-            effective_correlation_id = (
-                infer_response.get("__session_correlation_id") or correlation_id
-            )
-            correlation_id = effective_correlation_id
-
-        # Detection list lives at ``response.result.detections`` per
-        # §5.1. Defensive parsing — adapters might return error
-        # envelopes too, or (in pathological cases) non-dict bodies.
-        if not isinstance(infer_response, dict):
-            logger.warning(
-                "kaic returned non-dict body for %s: %r", camera.camera_id, type(infer_response).__name__,
-            )
-            return []
-        result = infer_response.get("result") or {}
-        if not isinstance(result, dict) or result.get("status") == "error":
-            logger.warning(
-                "kaic returned error envelope for %s: %s",
-                camera.camera_id,
-                result.get("error", {}) if isinstance(result, dict) else result,
-            )
-            return []
-        detections = result.get("detections") or []
-
-        fired: list[Alert] = []
+        # Who is inside the zone in this frame.
+        inside: dict[str, str] = {}
         for det in detections:
+            if not isinstance(det, dict):
+                continue
             label = str(det.get("label", "")).lower()
-            if label not in self._config.watch_labels:
+            if label not in self.cfg.watch_labels:
                 continue
             bbox = det.get("bbox")
             if not isinstance(bbox, dict):
                 continue
-            center = bbox_center(bbox, camera.frame_width, camera.frame_height)
-            if not camera.zone.contains(center):
+            try:
+                h = float(bbox.get("h", 0.0))
+            except (TypeError, ValueError):
+                h = 0.0
+            if self.cfg.min_bbox_height > 0 and 0 < h < self.cfg.min_bbox_height:
                 continue
-            fired.append(self._build_alert(camera, det, center, correlation_id))
-            # Record for the live dashboard (§03 /state).
-            camera_id = camera.camera_id
-            zone_name = camera.zone.name
-            self._intrusions += 1
-            self._recent.append({
-                "message": f"{label} entered {zone_name!r} on {camera_id}",
-                "time": time.time(),
-                "level": "high",
-            })
+            if not camera.zone.contains(bbox_center(bbox, camera.frame_width,
+                                                    camera.frame_height)):
+                continue
+            track_id = det.get("track_id")
+            if track_id is None:
+                if not self._warned_missing_track:
+                    logger.warning(
+                        "detections have no 'track_id' — presence is measured per "
+                        "(camera, label) instead of per object. Consume Tier-0 or chain a "
+                        "tracking adapter for per-intruder alarms."
+                    )
+                    self._warned_missing_track = True
+                track_id = f"label:{label}"
+            inside[str(track_id)] = label
+
+        # Forget tracks that have left (the zone empties → the camera can reset).
+        cutoff = event_ts - self.cfg.track_ttl_seconds
+        for key, rec in list(self._inside.items()):
+            if key[0] == camera_id and key[1] not in inside and rec.last_seen < cutoff:
+                self._inside.pop(key)
+        if inside:
+            self._last[camera_id] = now
+        else:
+            st.last_clear = now
+
+        # Presence: how long has each object been inside?
+        breached: list[tuple[str, str, float]] = []   # (track, label, inside_s)
+        for track, label in inside.items():
+            key = (camera_id, track)
+            existing = self._inside.get(key)
+            if existing is not None and event_ts < existing.last_seen:
+                continue
+            rec = self._inside.touch(key, at=event_ts)
+            rec.data.setdefault("label", label)
+            if rec.age >= self.cfg.min_presence_seconds:
+                if not rec.data.get("counted"):
+                    rec.data["counted"] = True
+                    self._day(camera_id)["breaches"] += 1
+                breached.append((track, label, rec.age))
+
+        if not breached or st.state not in (ARMED, BREACH, ALARM):
+            return fired
+
+        if st.state == ARMED:
+            track, label, inside_s = breached[0]
+            st.breach_track = track
+            if self.cfg.entry_delay_seconds > 0:
+                self._to(st, BREACH, now)
+                st.alarm_at = now + self.cfg.entry_delay_seconds
+                self._note(camera_id, f"{label} in the zone — {int(self.cfg.entry_delay_seconds)}s "
+                                      f"to disarm", "medium", now, label=label, track=track)
+            elif self._cooldown_blocks(st, now):
+                self._to(st, ALARM, now)
+            else:
+                st.breach_track = track
+                fired.append(self._raise(camera, st, "intrusion", now,
+                                         label=label, track=track, inside_s=inside_s,
+                                         event=event))
         return fired
 
-    def _build_alert(
-        self,
-        camera: CameraWatch,
-        detection: dict[str, Any],
-        center: Point,
-        correlation_id: str,
-    ) -> Alert:
-        label = str(detection.get("label", "object"))
-        confidence = float(detection.get("confidence", 0.0))
+    def _raise(self, camera: CameraWatch, st: CameraState, kind: str, now: float,
+               *, label: str = "", track: str = "", inside_s: float = 0.0,
+               event: dict[str, Any] | None = None) -> Alert:
+        cam_id = camera.camera_id
+        if not label or not track:
+            # Raised from the state machine (entry delay expired): describe
+            # whoever is still inside.
+            for key, rec in self._inside.items():
+                if key[0] == cam_id:
+                    track = track or key[1]
+                    label = label or str(rec.data.get("label", "object"))
+                    inside_s = inside_s or rec.age
+                    break
+            label = label or "object"
+            track = track or st.breach_track or "?"
+        if kind == "intrusion":
+            # Cooldown merges a group at the fence into one alarm.
+            self._to(st, ALARM, now)
+            st.alarmed_at = now
+            st.escalated = False
+            severity = self.cfg.alert_severity
+            title = f"Intruder at {cam_id}"
+            description = (f"A {label} is inside {camera.zone.name!r} on {cam_id} "
+                           f"({int(inside_s)}s).")
+        else:
+            severity = SEVERITIES[min(SEVERITIES.index(self.cfg.alert_severity) + 1,
+                                      len(SEVERITIES) - 1)]
+            title = f"Intruder still at {cam_id}"
+            description = (f"Still inside {camera.zone.name!r} on {cam_id}, "
+                           f"{int(self.cfg.escalate_after_seconds)}s after the alarm.")
+        self._day(cam_id)["alarms"] += 1
+        self._note(cam_id, title, severity, now, label=label, track=track)
         return Alert(
-            title=f"{label.capitalize()} in restricted zone {camera.zone.name!r}",
-            description=(
-                f"Detected {label} (confidence={confidence:.2f}) inside zone "
-                f"{camera.zone.name!r} on camera {camera.camera_id} at "
-                f"({center.x:.0f}, {center.y:.0f})."
-            ),
-            camera_id=camera.camera_id,
-            severity="high",
-            correlation_id=correlation_id,
+            title=title,
+            description=description,
+            camera_id=cam_id,
+            severity=severity,
+            alert_type=kind,
+            correlation_id=str((event or {}).get("correlation_id") or ""),
             evidence={
-                "detection": detection,
-                "bbox_center_px": {"x": center.x, "y": center.y},
+                "label": label,
+                "track_id": track,
+                "inside_seconds": round(inside_s, 1),
                 "zone_name": camera.zone.name,
-                "kaic_adapter": self._config.kaic_adapter_name,
+                "arm_mode": self.cfg.arm_mode,
+                "entry_delay_seconds": self.cfg.entry_delay_seconds,
+                "adapter": (event or {}).get("adapter"),
+                "adapter_version": (event or {}).get("adapter_version"),
+                "model_fingerprint": (event or {}).get("model_fingerprint"),
             },
-            tags=["intrusion", "restricted-zone", label],
+            images=self._evidence(cam_id),
+            tags=[kind, camera.zone.name, label],
         )
 
-    # ── Live dashboard (spec §03 /state) ───────────────────────────
+    def _cooldown_blocks(self, st: CameraState, now: float) -> bool:
+        cd = self.cfg.alarm_cooldown_seconds
+        return cd > 0 and st.alarmed_at > 0 and (now - st.alarmed_at) < cd
+
+    # ── evidence ──
+
+    def _platform(self):
+        if self._nvr is None and not self._nvr_tried:
+            self._nvr_tried = True
+            try:
+                from opennvr_app_sdk.client import OpenNVR
+                self._nvr = OpenNVR(self.cfg.opennvr_url or None, timeout=3.0)
+            except Exception as exc:
+                logger.info("no platform client for snapshots: %s", exc)
+        return self._nvr
+
+    def _evidence(self, camera_id: str) -> dict[str, str]:
+        if not self.cfg.attach_snapshot:
+            return {}
+        nvr = self._platform()
+        if nvr is None:
+            return {}
+        try:
+            jpeg = nvr.snapshot(camera_id)
+            path = nvr.save_evidence(jpeg) if jpeg else None
+        except Exception as exc:
+            logger.warning("snapshot for %s failed: %s", camera_id, exc)
+            return {}
+        return {"snapshot": path} if path else {}
+
+    # ── the sweep ──
+
+    async def _tick_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                for alert in self.tick():
+                    self._dispatcher.fire(alert)
+            except Exception:
+                logger.warning("arming tick failed", exc_info=True)
+
+    async def run(self, *, once: bool = False) -> None:
+        tasks: list[asyncio.Task] = []
+        if not once:
+            tasks.append(asyncio.create_task(self._tick_loop()))
+        try:
+            await super().run(once=once)
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    # ── camera discovery ──
+
+    def on_cameras_update(self, camera_ids) -> None:
+        super().on_cameras_update(camera_ids)
+        self.refresh_cameras(camera_ids)
+
+    def refresh_cameras(self, camera_ids) -> tuple[list[str], list[str]]:
+        """Re-derive the camera set from the cameras picked for this app."""
+        if not self.cfg.auto_cameras:
+            return [], []
+        ids = {f"cam{int(i)}" for i in camera_ids}
+        current = set(self.cfg.cameras)
+        added = sorted(ids - current)
+        removed = sorted(current - ids)
+        for cam_id in added:
+            self.cfg.cameras[cam_id] = _whole_frame(cam_id, UNIT_FRAME, UNIT_FRAME)
+        for cam_id in removed:
+            self.cfg.cameras.pop(cam_id, None)
+            self._cams.pop(cam_id, None)
+            self._unknown_cameras.discard(cam_id)
+            for key, _ in [kv for kv in self._inside.items() if kv[0][0] == cam_id]:
+                self._inside.pop(key)
+        if added or removed:
+            logger.info("camera set refreshed: +%s -%s (now %s)", added or "-", removed or "-",
+                        sorted(self.cfg.cameras) or "(none)")
+            if added and self._last_config is not None:
+                self.on_config_update(self._last_config)
+        return added, removed
+
+    # ── live config ──
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Catalog edits, applied live and idempotently."""
+        self._last_config = dict(config)
+        changed: list[str] = []
+        if "watch_labels" in config:
+            labels = [str(s).lower() for s in (config.get("watch_labels") or []) if str(s).strip()]
+            if labels and labels != self.cfg.watch_labels:
+                self.cfg.watch_labels = labels
+                changed.append("labels")
+        try:
+            knobs = _knobs_from(config, self.cfg)
+        except ValueError as exc:
+            logger.warning("config edit ignored: %s", exc)
+            knobs = {}
+        for key, value in knobs.items():
+            if getattr(self.cfg, key) != value:
+                setattr(self.cfg, key, value)
+                changed.append(key)
+        if "zones" in config:
+            zones = config.get("zones")
+            zones = zones if isinstance(zones, dict) else {}
+            for cam_id, cam in self.cfg.cameras.items():
+                drawn = None
+                for raw_key, val in zones.items():
+                    if _camera_key(raw_key, self.cfg.cameras) == cam_id:
+                        drawn = val
+                        break
+                zone = _zone_from_drawn(drawn, cam)
+                if zone is None:
+                    zone, is_drawn = _whole_frame(cam_id, cam.frame_width,
+                                                  cam.frame_height).zone, False
+                else:
+                    is_drawn = True
+                if (is_drawn != cam.drawn
+                        or [(p.x, p.y) for p in zone.polygon] != [(p.x, p.y) for p in cam.zone.polygon]):
+                    cam.zone, cam.drawn = zone, is_drawn
+                    changed.append(f"zone:{cam_id}")
+        if changed:
+            logger.info("config applied live: %s", ", ".join(changed))
+
+    # ── actions ──
+
+    def _targets(self, raw: Any) -> list[str]:
+        cam = str(raw or "").strip()
+        if not cam:
+            return list(self.cfg.cameras)
+        if cam not in self.cfg.cameras:
+            raise KeyError(f"unknown camera {cam!r}")
+        return [cam]
+
+    def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        if name in ("arm", "disarm"):
+            want = name == "arm"
+            targets = self._targets(params.get("camera"))
+            hold = self.cfg.override_minutes * 60.0
+            for cam_id in targets:
+                st = self._cam_state(cam_id)
+                st.override = want
+                st.override_until = (now + hold) if hold > 0 else 0.0
+                if not want:
+                    self._to(st, DISARMED, now)
+                self._note(cam_id, "armed by operator" if want else "disarmed by operator",
+                           "info", now)
+            self.tick(now)
+            return {"ok": True, "cameras": targets, "armed": want,
+                    "until": (now + hold) if hold > 0 else None}
+        if name == "bypass":
+            cam_id = str(params.get("camera") or "").strip()
+            if cam_id not in self.cfg.cameras:
+                raise KeyError(f"unknown camera {cam_id!r}")
+            try:
+                minutes = float(params.get("minutes", 60.0))
+            except (TypeError, ValueError):
+                raise ValueError("minutes must be a number") from None
+            st = self._cam_state(cam_id)
+            if minutes <= 0:
+                st.bypass_until = 0.0
+                self._to(st, DISARMED, now)
+                self._note(cam_id, "bypass cleared", "info", now)
+            else:
+                st.bypass_until = now + minutes * 60.0
+                self._to(st, BYPASSED, now)
+                self._note(cam_id, f"bypassed for {int(minutes)} min", "info", now)
+            self.tick(now)
+            return {"ok": True, "camera": cam_id, "until": st.bypass_until or None}
+        if name == "acknowledge":
+            targets = self._targets(params.get("camera"))
+            for cam_id in targets:
+                st = self._cam_state(cam_id)
+                if st.state in (ALARM, BREACH):
+                    self._to(st, ARMED, now)
+                    # alarmed_at is deliberately left alone: the cooldown
+                    # still applies, so acknowledging while the intruder is
+                    # still in the zone re-arms without firing a duplicate
+                    # alarm on the very next frame.
+                    self._note(cam_id, "alarm acknowledged", "info", now)
+            return {"ok": True, "cameras": targets}
+        if name == "clear_override":
+            for st in self._cams.values():
+                st.override = None
+                st.override_until = 0.0
+            self.tick(now)
+            return {"ok": True}
+        raise KeyError(name)
+
+    # ── surfaces ──
 
     def state_snapshot(self) -> dict[str, Any]:
-        """Point-in-time view for the App Catalog's live dashboard.
-        ``restricted_now`` reuses the same restricted-hours gate the
-        rule uses, so the dashboard shows exactly whether the app is
-        armed right now."""
+        self.tick()
+        now = time.time()
+        intruders: list[dict[str, Any]] = []
+        per_cam_intruders: dict[str, int] = {}
+        for (cam_id, track), rec in self._inside.items():
+            per_cam_intruders[cam_id] = per_cam_intruders.get(cam_id, 0) + 1
+            gap = min(max(0.0, now - rec.last_seen), self.cfg.track_ttl_seconds)
+            inside_s = rec.age + gap
+            st = self._cam_state(cam_id)
+            intruders.append({
+                "camera": cam_id, "label": rec.data.get("label", "?"), "track": track,
+                "inside_s": round(inside_s, 1),
+                "stage": st.state if st.state in (BREACH, ALARM) else (
+                    "counted" if rec.data.get("counted") else "watching"),
+            })
+        intruders.sort(key=lambda r: -r["inside_s"])
+        per_camera = []
+        for cam_id, cam in self.cfg.cameras.items():
+            st = self._cam_state(cam_id)
+            day = self._today.get(cam_id, _day_blank())
+            countdown = None
+            if st.state == ARMING and st.armed_at:
+                countdown = max(0.0, round(st.armed_at - now, 1))
+            elif st.state == BREACH and st.alarm_at:
+                countdown = max(0.0, round(st.alarm_at - now, 1))
+            elif st.state == BYPASSED and st.bypass_until:
+                countdown = max(0.0, round(st.bypass_until - now, 1))
+            per_camera.append({
+                "camera": cam_id,
+                "zone": cam.zone.name if cam.drawn else "— whole frame",
+                "drawn": cam.drawn,
+                "state": st.state,
+                "countdown_s": countdown,
+                "override": st.override,
+                "intruders": per_cam_intruders.get(cam_id, 0),
+                "breaches_today": day["breaches"],
+                "alarms_today": day["alarms"],
+                "last": self._last.get(cam_id),
+            })
+        armed_count = sum(1 for r in per_camera if r["state"] in (ARMED, BREACH, ALARM))
         return {
-            "restricted_now": self._config.restricted_hours.contains(self._now()),
-            "intrusions": self._intrusions,
+            "armed_count": armed_count,
+            "camera_count": len(per_camera),
+            "in_alarm": sum(1 for r in per_camera if r["state"] in (BREACH, ALARM)),
+            "bypassed": sum(1 for r in per_camera if r["state"] == BYPASSED),
+            "today": {
+                "breaches": sum(d["breaches"] for d in self._today.values()),
+                "alarms": sum(d["alarms"] for d in self._today.values()),
+                "since": self._today_key,
+            },
+            "arm_mode": self.cfg.arm_mode,
+            "armed_hours": ({"start": self.cfg.armed_hours.start.strftime("%H:%M"),
+                             "end": self.cfg.armed_hours.end.strftime("%H:%M")}
+                            if self.cfg.armed_hours else None),
+            "entry_delay_seconds": self.cfg.entry_delay_seconds,
+            "exit_delay_seconds": self.cfg.exit_delay_seconds,
+            "min_presence_seconds": self.cfg.min_presence_seconds,
+            "escalate_after_seconds": self.cfg.escalate_after_seconds,
+            "overridden": any(st.override is not None for st in self._cams.values()),
+            "per_camera": per_camera,
+            "intruders": intruders,
+            "needs_zone": [c for c, cam in self.cfg.cameras.items() if not cam.drawn],
             "recent": list(self._recent),
+            "since": self._started_at,
         }
 
+    def ui_html(self) -> str:
+        """One static HTML page, no scripts: the site's arming state, each
+        camera's state with its countdown, who is inside, recent events."""
+        snap = self.state_snapshot()
+        esc = _html.escape
+        now = time.time()
 
-# ── CLI ────────────────────────────────────────────────────────────
+        def ago(ts):
+            if not ts:
+                return "—"
+            m = max(0, int((now - ts) / 60))
+            return "just now" if m == 0 else f"{m}m ago" if m < 60 else f"{m // 60}h ago"
+
+        colour = {ARMED: "#46a758", ARMING: "#e5a000", BREACH: "#e5a000",
+                  ALARM: "#e5484d", BYPASSED: "#8b8d98", DISARMED: "#8b8d98"}
+        cards = []
+        for row in snap["per_camera"]:
+            cd = (f" · {int(row['countdown_s'])}s" if row.get("countdown_s") else "")
+            warn = ("<p class='warn'>No zone drawn — the whole frame is armed, which on a "
+                    "perimeter camera usually alarms on the road too.</p>"
+                    if not row["drawn"] else "")
+            cards.append(
+                f"<section class='card'><h2>{esc(row['camera'])} "
+                f"<span class='pill' style='background:{colour.get(row['state'], '#8b8d98')}'>"
+                f"{esc(row['state'])}{esc(cd)}</span></h2>{warn}"
+                f"<div class='dim small'>{esc(row['zone'])}</div>"
+                f"<div class='stats'><div><b>{row['intruders']}</b><span class='dim'>inside</span></div>"
+                f"<div><b>{row['breaches_today']}</b><span class='dim'>breaches today</span></div>"
+                f"<div><b>{row['alarms_today']}</b><span class='dim'>alarms</span></div></div>"
+                f"<div class='dim small'>last seen {ago(row['last'])}</div></section>")
+        rows = "".join(
+            f"<tr><td>{esc(i['camera'])}</td><td>{esc(i['label'])}</td>"
+            f"<td>{int(i['inside_s'])}s</td><td>{esc(i['stage'])}</td></tr>"
+            for i in snap["intruders"]
+        )
+        inside = ("<table><tr><th>Camera</th><th>Object</th><th>Inside</th><th>Stage</th></tr>"
+                  + rows + "</table>") if rows else "<p class='dim'>Nothing inside a zone.</p>"
+        recent_rows = "".join(
+            f"<tr><td style='color:{'#e5484d' if r.get('level') in ('high', 'critical') else '#1a1a1a'}'>"
+            f"{esc(str(r.get('message', '')))}</td><td>{ago(r.get('time'))}</td></tr>"
+            for r in reversed(snap["recent"][-12:])
+        )
+        recent = ("<table><tr><th>Event</th><th>When</th></tr>" + recent_rows + "</table>"
+                  ) if recent_rows else "<p class='dim'>Nothing yet.</p>"
+        hours = snap["armed_hours"]
+        policy = {"schedule": f"armed {hours['start']}–{hours['end']}" if hours else "armed always",
+                  "always": "armed always", "manual": "manual arming",
+                  "off": "watching only"}[snap["arm_mode"]]
+        return f"""<title>Intrusion Detection</title>
+<style>
+ body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a; background: #fafafa; }}
+ h1 {{ font-size: 1.1rem; margin: 0 0 .2rem }} h2 {{ font-size: .95rem; margin: 0 0 .4rem }}
+ .dim {{ color: #6b6f76; font-weight: 400 }} .small {{ font-size: .8rem }} .warn {{ color: #e5a000; margin:.2rem 0 }}
+ .pill {{ color: #fff; border-radius: 10px; padding: 1px 8px; font-size: .75rem; text-transform: uppercase }}
+ .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .8rem; margin: .8rem 0 }}
+ .card {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: .7rem .9rem }}
+ .stats {{ display: flex; gap: 1.2rem; margin: .4rem 0 }} .stats b {{ font-size: 1.3rem; display: block }}
+ table {{ border-collapse: collapse; width: 100% }}
+ th, td {{ text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #e0e0e0; font-size: .9rem }}
+ th {{ color: #6b6f76; font-weight: 500 }}
+</style>
+<h1>Intrusion Detection</h1>
+<div class="dim"><b>{snap['armed_count']}</b> of {snap['camera_count']} armed ·
+ <b>{snap['in_alarm']}</b> in alarm · today <b>{snap['today']['breaches']}</b> breaches,
+ <b>{snap['today']['alarms']}</b> alarms · {esc(policy)}
+ {'· <span class="warn">manual override in force</span>' if snap['overridden'] else ''}</div>
+<div class="grid">{''.join(cards) or "<p class='dim'>No cameras selected.</p>"}</div>
+<h2>Inside now</h2>
+{inside}
+<h2 style="margin-top:1rem">Recent</h2>
+{recent}
+"""
+
+
+Intrusion = IntrusionDetector
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="intrusion-detection",
-        description="Watch cameras for intrusions; alert via KAI-C audit + webhook.",
-    )
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run one cycle per configured camera and exit (testing).",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    try:
-        config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-
-    dispatcher = build_dispatcher(
-        webhook_url=config.webhook_url,
-        nats_alerts_url=config.nats_alerts_url,
-        nats_alerts_token=config.nats_alerts_token,
-        nats_alerts_subject_prefix=config.nats_alerts_subject_prefix,
-    )
-    kaic_client = KaicClient(
-        config.kaic_url,
-        config.kaic_adapter_name,
-        api_key=config.kaic_api_key,
-        timeout_seconds=config.request_timeout_seconds,
-    )
-    detector = IntrusionDetector(config, kaic_client, dispatcher)
-
-    try:
-        if args.once:
-            for camera in config.cameras:
-                detector.step(camera)
-        else:
-            # The SDK FrameApp loop is async; drive it the same way the
-            # SDK AppRunner drives a Detector. SIGINT / SIGTERM trigger
-            # a clean exit.
-            loop = asyncio.new_event_loop()
-
-            def _handle_signal(_signum, _frame):
-                logger.info("signal received, stopping…")
-                loop.call_soon_threadsafe(detector.stop)
-
-            signal.signal(signal.SIGINT, _handle_signal)
-            signal.signal(signal.SIGTERM, _handle_signal)
-            try:
-                loop.run_until_complete(detector.run())
-            finally:
-                loop.close()
-    finally:
-        detector.close()   # WS clients (no-op in HTTP mode)
-        kaic_client.close()
-        # Drain in-flight NATS alert publishes (no-op for stdout +
-        # webhook channels). Stays at the end of the finally clause
-        # so it runs even if detector/kaic_client close raises.
-        dispatcher.close()
-    return 0
+    """Console-script entry point (``[project.scripts]``)."""
+    return app(IntrusionDetector, load_config=load_config).run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover

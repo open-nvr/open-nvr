@@ -15,7 +15,7 @@ The SDK ships three archetypes. This guide builds a **Detector**: it
 *subscribes* to KAI-C's NATS inference stream and reacts to detections
 another app is already driving — so it pays **zero adapter GPU cost**.
 (`FrameApp` *drives* inference itself — see
-[`examples/intrusion-detection`](../examples/intrusion-detection) — and
+[`examples/smart-doorbell`](../examples/smart-doorbell) — and
 `AlertSubscriber` is the pass-through archetype that rides the alert bus,
 like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 

@@ -118,13 +118,14 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "openapi-spec-validator", specifier = ">=0.7" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]
 
 [[package]]
 name = "opennvr-example-intrusion-detection"
-version = "1.0.0"
+version = "1.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "opennvr-app-sdk" },

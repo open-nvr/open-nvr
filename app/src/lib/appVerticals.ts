@@ -76,6 +76,16 @@ export const APP_VERTICALS: AppVertical[] = [
     label: 'Loitering',
   },
   {
+    capability: 'intrusion',
+    to: '/perimeter',
+    // The armed zones: what is armed right now, what is in alarm, and
+    // the arm / disarm / bypass controls next to each. "Perimeter" is
+    // the trade's word for the protected line and is wider than any one
+    // app — the page is a panel, not a report.
+    label: 'Perimeter',
+    legacy: (m) => (m.requires_tasks ?? []).includes('intrusion_detection'),
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and
