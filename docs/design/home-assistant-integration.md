@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Draft for review |
 | **Date** | 2026-09-18 |
-| **Revision** | r2 (2026-09-18): every code claim checked against the repo and corrected; review gaps closed |
+| **Revision** | r3 (2026-09-18): execution self-review (token principal, recording loophole, permission grants, request context, dev layout). r2: every code claim checked against the repo and corrected |
 | **Author** | Suraj Raj Bhandari |
 | **Audience** | OpenNVR core, frontend and app-platform engineers; reviewers of the HA integration |
 | **Supersedes** | `examples/home-assistant-relay` as the recommended HA path |
@@ -161,11 +161,25 @@ For that NVR, HA is the main route to users.
   - `camera_ids[] | null` (null means the owner's visible cameras) and `allowed_cidrs[] | null`;
   - `expires_at`, `created_at`, `last_used_at` (written at most once a minute), `last_ip`, `revoked_at`.
 - **Scopes reuse the seeded permission names** (`scripts/init_db.py`): `cameras.view`, `cameras.manage`, `live.view`, `recordings.view`, `recordings.manage`, `alerts.view`, `alerts.manage`, `settings.view`.
-  - **New permissions:** `ptz.control`, `events.create`, `apps.actions`, `recordings.pause`, `api_tokens.manage`. They are seeded on fresh installs and backfilled on upgrades, following the pattern in `main.py:216-258`.
-- **Auth:** `core/auth.py` resolves `Authorization: Bearer onvr_…` to the token's owner.
+- **New permissions, with behaviour-preserving grants.** No existing user gains or loses an ability as a side effect. They are seeded on fresh installs and backfilled on upgrades (the `main.py:216-258` pattern):
+  - `ptz.control`: today any user who can see a camera may move it. It is granted to every role that holds `live.view`.
+  - `camera_device.write`: already checked, but never seeded. It is seeded with no new grants.
+  - `events.create`, `apps.actions`, `recordings.pause`, `api_tokens.manage`: new abilities, admin-only (via `full_access`).
+- **Auth:** `core/auth.py` resolves `Authorization: Bearer onvr_…` to a **`TokenPrincipal`**.
+  - The principal is a read-only proxy around the owner's User.
+    - It always reports `is_superuser=False`.
+    - It carries the token, its scopes and its camera allow-list.
+    - The ORM User row is **never mutated**. Setting `is_superuser=False` on the mapped row would be persisted by the next commit and permanently demote the admin.
   - Effective permissions = the token's scopes ∩ the owner's permissions.
   - Cameras = the token's allow-list ∩ the owner's visible cameras.
+  - Superuser-only routes refuse tokens.
   - This follows the prefix-dispatch pattern of `apps.py:_service_or_user_principal`.
+- **Central camera gate** (in the resolver). Camera scoping is spread over several helpers today, so the resolver rejects any camera outside the allow-list in:
+  - path or query `camera_id` / `cam_id`;
+  - `camera_ids` lists;
+  - `cam-N` / `camN` handles.
+
+  Endpoints that carry a camera in the request body check the allow-list explicitly. The scoping helpers intersect with it as well.
 - **Device firewall** (`middleware/device_firewall.py`): a valid token passes, within `allowed_cidrs` if set. Tokens are bound when created, not approved per browser.
 - **Websocket:** `POST /events/ws-ticket` accepts tokens, and the ticket inherits the token's camera scope. App keys stay excluded.
 - **Audit:** `details.actor = "token:<name>"`, plus the correlation id (§6.12).
@@ -178,12 +192,15 @@ For that NVR, HA is the main route to users.
   - The payload is modelled on `apps.py:_registry_info()`.
   - `latest_version` comes from an opt-in GitHub releases check (`UPDATE_CHECK=off` by default, for offline sites).
 - **`GET /system/resources`** is extended with per-volume used/free storage, per-camera `days_retained`, memory, and GPU if present (otherwise null).
-- **`GET /cameras/{id}/stats`** returns `{input_fps, bitrate_kbps, detect_fps, skipped_fps, inference_ms, recording_state, last_frame_at}`. The values come from MediaMTX path stats and detect-pipeline tier0 metrics.
+- **`GET /cameras/{id}/stats`** returns `{input_fps, bitrate_kbps, detect_fps, skipped_fps, inference_ms, recording_state, last_frame_at}`. Sources:
+  - input and bitrate: a background sampler takes `bytesReceived` deltas from MediaMTX path info every 10 s;
+  - detect fps, skipped fps and inference time: new reducers in `services/tier0_metrics` over the per-camera `tier0_detector_latency_seconds` and `tier0_detector_skipped_total` metrics;
+  - recording state: `cameras._derive_recording_state`.
 
 ### 6.3 Controls
 | Control | Endpoint | Notes |
 |---|---|---|
-| Camera on/off (also used as privacy mode) | `PUT /cameras/{id} {is_active, reason?}` (existing route) | `is_active=false` already tears down the stream path, which stops live view and recording. The audit entry records the reason. There is no separate privacy endpoint. |
+| Camera on/off (also used as privacy mode) | `PUT /cameras/{id} {is_active, reason?}` (existing route) | `is_active=false` already tears down the stream path, which stops live view **and recording**. The audit entry records the reason. There is no separate privacy endpoint. **For API tokens it requires `cameras.manage` and the `recording_pause_enabled` site flag.** Otherwise HA could get around the always-on recording rule the flag protects. Human users in the SPA keep today's behaviour. |
 | Detection on/off | `PUT /cameras/{id} {detection_enabled}` | New nullable column `Camera.detection_enabled` (default true). It gates detect-pipeline and KAI-C dispatch for that camera. |
 | Recording pause/resume | `POST /cameras/{id}/recording {enabled, resume_after_s?}` | **Behind the site flag `recording_pause_enabled`, off by default.** The handler at `cameras.py:2133` is disabled by an explicit product rule ("recording … must not be switchable off"). With the flag off the rule stands and the endpoint returns 403. With it on, pausing needs `recordings.pause`, is audited, and can auto-resume. `/system/info` reports the flag in `features`, and the HA switch exists only when it is on. |
 | PTZ move/stop | `POST /cameras/{id}/ptz/move`, `/ptz/stop` (existing) | Add `ptz.control` and audit logging (§6.12). |
@@ -247,6 +264,7 @@ For that NVR, HA is the main route to users.
 ### 6.8 LAN discovery and streaming
 - **mDNS:** core runs on a Docker bridge network, so multicast cannot reach the LAN. Discovery is an **optional `mdns-announcer` sidecar** (compose profile `mdns`, `network_mode: host`) that advertises `_opennvr._tcp.local.` with TXT records `site_id`, `version` and `api=/api/v1`.
   - This works on Linux hosts. Docker Desktop (Windows/macOS) has no host networking, so manual URL entry is the default there.
+  - The sidecar is covered by unit tests only, and stays **unverified end to end** until it is run on a Linux host. Manual URL entry is the supported default everywhere.
 - **RTSPS on the LAN** is opt-in via `RTSPS_BIND_HOST`. Today it binds to `127.0.0.1` only (`docker-compose.yml:147`).
 - **WebRTC remote viewing:** MediaMTX has no ICE servers configured, and `MEDIAMTX_WEBRTC_HOSTS` is empty by default. The setup docs cover both, and the Repair `webrtc_hosts_unset` flags it.
 - **Docs:** set `MEDIAMTX_PUBLIC_URL` so stream URLs don't point at localhost. Add the HA origin to `CORS_ORIGINS` for card sessions (§7.8).
@@ -299,6 +317,9 @@ For that NVR, HA is the main route to users.
   - Server PRs that touch the contract run the latest released integration.
 
 ### 6.12 Audit and correlation coverage
+- **Request context:** one contextvar holds a **mutable `RequestContext` object** (`correlation_id`, `actor`).
+  - The request middleware creates it before calling the app. Later code, such as the token resolver, mutates the object and never re-sets the var.
+  - This matters because FastAPI runs sync dependencies in a threadpool on a *copied* context: a `ContextVar.set()` made there would never reach the endpoint or the audit writer.
 - **Correlation ids:**
   - Request logging accepts a validated inbound `X-Correlation-Id` (≤64 chars, safe charset). Otherwise it uses the generated `X-Request-ID`. Today `middleware/request_logging.py:73` always generates one.
   - A new nullable `AuditLog.correlation_id` column is filled via `write_audit_log`.
@@ -314,6 +335,8 @@ For that NVR, HA is the main route to users.
 ## 7. HA integration (`hass-opennvr` repo)
 ### 7.1 Packaging and distribution
 - **Repo** `open-nvr/hass-opennvr`: `custom_components/opennvr/`, `hacs.json`, `blueprints/`, `tests/`, and CI (hassfest, the HACS action, pytest).
+- **Development layout (until 1.0):** both packages are developed in this monorepo, under `integrations/home-assistant/hass-opennvr/` and `integrations/home-assistant/pyopennvr/`. Each folder mirrors its future repo root exactly, so the split is a plain `git subtree split --prefix=<folder>`.
+- **Install gate:** HA installs integration requirements from PyPI, so **end users can't install the integration until `pyopennvr` is published there**. Until then, 0.1 and 0.5 are development builds; the dev HA container pre-installs `pyopennvr`.
 - **`pyopennvr` on PyPI:** an async aiohttp client covering REST, websocket v2 with resume, token auth, descriptor models, and the contract fixtures. It stays a separate library wherever the integration ships, because it is clean, testable, reusable, and a prerequisite for HA core. The same split came out of the public discussion cited in §2.
 - **Distribution strategy: HACS by default; core only if it pays for itself.** The "forever cost" argument (§2) holds for OpenNVR too, and as a young, fast-moving product we would feel it more. Being in HA core is **an option, not a goal**:
   1. **Ship on HACS.** We control release timing and can ship the same day as a server release.
@@ -362,7 +385,7 @@ For that NVR, HA is the main route to users.
 
 | Platform | Entity | Scope | Default | Source |
 |---|---|---|---|---|
-| camera | Live camera: WebRTC over WHEP, still image, on/off (`is_active`), motion-detection toggle → detection flag | camera | on | `/streams/{id}/info`, WHEP, `/snapshot` |
+| camera | Live camera: WebRTC over WHEP, still image, motion-detection toggle → detection flag. On/off (`is_active`) is advertised **only when `recording_pause_enabled` is on** (§6.3) | camera | on | `/streams/{id}/info`, WHEP, `/snapshot` |
 | event | `detection` (event_types = labels) | camera, zone | on | `event_started` |
 | event | `alert` (event_types = source apps; attributes: severity, title, alert_id, correlation_id; signed media on request) | camera | on | `alert` + `media_ready` |
 | event | `doorbell` (device_class doorbell) | camera running the smart-doorbell app | on | app descriptor |
@@ -546,6 +569,7 @@ OpenNVR <site>
    - integration 0.1 (MVP): config flow, camera, descriptor-driven entities, occupancy, switches, Repairs;
    - 0.5: media browser, services, blueprint and relay, card session;
    - 1.0: Gold rules met, on HACS.
+   - The first end-user release also needs `pyopennvr` published on PyPI and the two repos split out (§7.1).
 4. **Phase 3** (MQTT discovery) and **Phase 4** (Assist) run in parallel after integration 0.5.
 5. **Phase 5:** spikes, then go/no-go decisions.
 6. **Phase 6:** after 1.0.
@@ -565,7 +589,9 @@ OpenNVR <site>
   - zones CRUD, and descriptor command rejection.
 
   Known host-baseline failures are excluded.
-- **Integration:** `pytest-homeassistant-custom-component` with a fake `pyopennvr` server. hassfest and the HACS validation action run in CI.
+- **Integration:** `pytest-homeassistant-custom-component` (0.13.365, pinned to HA 2026.9.2) with a fake `pyopennvr` server. hassfest and the HACS validation action run in CI.
+  - HA 2026.9 needs Python ≥ 3.14.2 and doesn't support Windows, so these tests run in a Linux `python:3.14` container.
+- **Dev HA instance:** runs **outside `INTERNAL_SERVICE_CIDRS`** and reaches OpenNVR through the published nginx, as a real LAN install does. Otherwise it would bypass the device firewall and hide firewall bugs.
 - **Contract (§6.11):** CI checks the fixture diff. The integration suite runs against server `main` and the last two releases. A sample app with an `entities:` section appears in HA with no integration change. Unknown platforms and fields are skipped cleanly.
 - **E2E** (after the `test/e2e-suite` branch lands): `tests/e2e` gains a `ha-dev` compose profile running `homeassistant/home-assistant` with the integration mounted. Scripted checks:
   - setup → entities appear;
@@ -599,6 +625,10 @@ OpenNVR <site>
 | Self-signed certificates vs `verify_ssl` | Clear config-flow warning, a Repair, and a guide to a proper certificate |
 | "Forever cost": integration releases pile up and users hit server/integration mismatches | Descriptors (§6.10), the contract and CI matrix (§6.11), direct card sessions (§7.8), HACS by default (§7.1) |
 | Generic descriptor entities feel less polished, or face pushback in a later HA core review | `translation_key` for core descriptors, a name fallback for app descriptors, and hand-written entities for the high-value surfaces |
+| Mutating the owner's ORM User for a token request would persist and demote an admin | Read-only `TokenPrincipal` proxy; a grep for code that treats `current_user` as an ORM instance |
+| A contextvar set inside a sync dependency is lost (copied threadpool context) | One contextvar holding a mutable request-context object (§6.12) |
+| Camera off (`is_active=false`) also stops recording, so HA could get around the always-on rule | Tokens need the `recording_pause_enabled` flag to change `is_active`; `ON_OFF` is hidden without it (§6.3) |
+| End users can't install the integration before `pyopennvr` is on PyPI | Pre-1.0 builds are development-only; the release is gated on the PyPI publish and the repo split (§7.1, §14) |
 
 ## 17. Open questions
 1. Which organisation publishes `pyopennvr` on PyPI, and under which licence (Apache-2.0, to match the SDK)?
