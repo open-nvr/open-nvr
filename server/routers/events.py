@@ -610,15 +610,23 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
     ``start_seq``), THEN send what came before (replay from the ring, or a
     snapshot), then drain the queue.
     """
+    from services import entity_state_publisher
+
     bus = get_event_bus()
     wanted = set(types) if types else None
+    entities = ((event_types is None or "entity_state" in event_types)
+                and (wanted is None or "entity_state" in wanted))
     async with bus.subscribe(camera_id=camera_id, tasks=task, allowed_camera_ids=allowed,
                              allowed_event_types=event_types, event_types=wanted,
                              with_seq=True) as sub:
         try:
             replayed: list = []
             complete = False
-            if since is not None and epoch == bus.epoch:
+            # With no v2 socket open the entity publisher idles, so states
+            # that changed since ``since`` were never published and the ring
+            # can't replay them: that is a resync, not a resume.
+            cold = entities and not entity_state_publisher.is_warm()
+            if since is not None and epoch == bus.epoch and not cold:
                 replayed, complete = await bus.replay(sub, since)
             hello = {"v": 2, "event_type": "subscribed", "epoch": bus.epoch,
                      "seq": sub.start_seq,
@@ -633,6 +641,12 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                     if _v2_may_send(event, held):
                         await websocket.send_text(_v2_frame(seq, event))
             else:
+                if entities:
+                    try:
+                        await entity_state_publisher.warm()
+                    except Exception:  # noqa: BLE001 - a snapshot without states beats none
+                        main_logger.warning("entity states for the snapshot failed",
+                                            exc_info=True)
                 cameras = await asyncio.to_thread(_v2_snapshot_cameras, allowed, camera_id)
                 await websocket.send_text(json.dumps({
                     "v": 2, "event_type": "state_snapshot", "seq": sub.start_seq,

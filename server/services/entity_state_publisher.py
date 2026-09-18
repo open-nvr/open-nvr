@@ -99,14 +99,37 @@ def _forget() -> None:
     _etag = None
 
 
+def is_warm() -> bool:
+    """False after an idle spell: states changed then without being published."""
+    return _etag is not None
+
+
+async def warm() -> None:
+    """Fill a cold cache (silently, see ``tick``) so a snapshot built next is
+    complete. The v2 socket calls it before its ``state_snapshot``."""
+    if _etag is None:
+        await tick()
+
+
 async def tick() -> None:
     """One resolution pass; publishes the differences."""
+    async with _tick_lock():
+        await _tick()
+
+
+async def _tick() -> None:
     global _etag
     from services.event_bus_service import publish_descriptors_changed, publish_entity_state
 
     descs, states, etag = await asyncio.to_thread(_resolve_once)
+    # A cold pass (the first after idling) primes the cache and publishes
+    # nothing: every client that could see these states got them in its
+    # snapshot (built from a warm cache, see ``warm``). Publishing all of
+    # them at once would overflow a subscriber's queue and cost it a
+    # ``lagged`` gap in exactly the updates that follow.
+    cold = _etag is None
     meta = {d.key: (d.required_scope, d.camera_id) for d in descs}
-    if _etag is not None and etag != _etag:
+    if not cold and etag != _etag:
         await publish_descriptors_changed(etag)
     _etag = etag
     _meta.clear()
@@ -114,11 +137,24 @@ async def tick() -> None:
     for key, value in states.items():
         if _states.get(key) != value:
             _states[key] = value
+            if cold:
+                continue
             scope, cam = meta[key]
             await publish_entity_state(key=key, camera_id=cam, required_scope=scope,
                                        payload={"key": key, **value})
     for gone in [k for k in _states if k not in meta]:
         _states.pop(gone, None)
+
+
+_lock: asyncio.Lock | None = None
+
+
+def _tick_lock() -> asyncio.Lock:
+    """One pass at a time: the loop's tick and a socket's ``warm``."""
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
 
 
 async def _poll_apps() -> None:
@@ -202,9 +238,11 @@ async def run_forever() -> None:
         now = time.monotonic()
         try:
             if not wanted():
-                # Idle: forget the cache, so the first pass after someone
-                # connects publishes every state fresh rather than diffing
-                # against stale values (and REST resolves directly).
+                # Idle: forget the cache rather than diff against stale
+                # values later. The next pass primes it silently; sockets
+                # opening meanwhile warm it for their snapshot, and a resume
+                # across the idle spell is answered with a resync snapshot
+                # (routers/events.py). REST resolves directly.
                 _forget()
                 await asyncio.sleep(TICK_S)
                 continue

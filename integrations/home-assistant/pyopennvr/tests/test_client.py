@@ -16,6 +16,7 @@ from pyopennvr import (
     OpenNVRContractError,
     OpenNVRNotFoundError,
     OpenNVRRequestError,
+    OpenNVRSSLError,
     check_contract,
 )
 
@@ -40,7 +41,11 @@ async def test_system_info_and_contract():
         info = await OpenNVRClient(base, TOKEN, session).get_system_info()
     assert info.site_id == "0755a940-1ff5-4861-ac08-1f57bb29a180"
     assert info.has("entities") and not info.recording_pause_enabled
+    assert "settings.view" in info.scopes and info.token_expires_at is None
     check_contract(info)
+    older = pyopennvr.SystemInfo.from_dict({k: v for k, v in fixture("system_info").items()
+                                            if k != "caller"})
+    assert older.scopes is None                      # a 1.0 server doesn't say
     newer = pyopennvr.SystemInfo.from_dict({**fixture("system_info"), "contract_version": "2.0.0"})
     with pytest.raises(OpenNVRContractError) as exc:
         check_contract(newer)
@@ -77,6 +82,23 @@ async def test_unreachable_is_a_connection_error():
         client = OpenNVRClient("http://127.0.0.1:9", TOKEN, session, request_timeout=2)
         with pytest.raises(OpenNVRConnectionError):
             await client.get_site_mode()
+
+
+async def test_certificate_failure_is_an_ssl_error():
+    """So the config flow can say "untick verify SSL" instead of "unreachable"."""
+    import types
+
+    import aiohttp
+
+    class Refuses:
+        def request(self, *args, **kwargs):
+            key = types.SimpleNamespace(host="nvr.local", port=443, ssl=True)
+            raise aiohttp.ClientSSLError(key, OSError(1, "certificate verify failed"))
+
+    client = OpenNVRClient("https://nvr.local", TOKEN, Refuses())  # type: ignore[arg-type]
+    with pytest.raises(OpenNVRSSLError):
+        await client.get_site_mode()
+    assert issubclass(OpenNVRSSLError, OpenNVRConnectionError)
 
 
 async def test_entities_skip_unknown_platforms_and_honour_the_etag():

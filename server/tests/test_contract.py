@@ -40,7 +40,7 @@ def _conforms(value, schema_name):
 def test_version_matches_the_code():
     from core.contract import CONTRACT_VERSION, FEATURES
 
-    assert CONTRACT["contract_version"] == CONTRACT_VERSION == "1.0.0"
+    assert CONTRACT["contract_version"] == CONTRACT_VERSION == "1.1.0"
     assert len(set(FEATURES)) == len(FEATURES)
     # Removing a feature flag is breaking, so the contract lists them.
     assert CONTRACT["features"] == list(FEATURES)

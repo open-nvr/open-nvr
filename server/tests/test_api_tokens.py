@@ -243,6 +243,26 @@ def test_owner_losing_a_permission_takes_it_from_the_token(env):
     assert env.client.get("/api/v1/system/info", headers=_as(tok)).status_code == 403
 
 
+def test_system_info_describes_the_calling_token(env):
+    tok = _mint(env, who="vera", scopes=["settings.view", "cameras.view"], camera_ids=[3],
+                expires_in_days=30)["token"]
+    s = env.Session()
+    cams = s.query(env.models.Permission).filter_by(name="cameras.view").one()
+    s.query(env.models.RolePermission).filter_by(
+        role_id=env.ids["viewer_role"], permission_id=cams.id).delete()
+    s.commit()
+    s.close()
+    caller = env.client.get("/api/v1/system/info", headers=_as(tok)).json()["caller"]
+    # Only what the owner still holds; never the secret.
+    assert caller["kind"] == "token" and caller["name"] == "ha-main"
+    assert caller["scopes"] == ["settings.view"] and caller["camera_ids"] == [3]
+    left = datetime.fromisoformat(caller["expires_at"]) - datetime.now(UTC)
+    assert timedelta(days=29) < left <= timedelta(days=30)
+    assert tok not in json.dumps(caller)
+    user = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()["caller"]
+    assert user == {"kind": "user", "username": "admin"}
+
+
 def test_camera_gate_in_path_and_query(env):
     tok = _mint(env, camera_ids=[1])["token"]
     assert env.client.get("/api/v1/cameras/1/stats", headers=_as(tok)).status_code == 200

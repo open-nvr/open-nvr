@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "kind": "alert",
+      "at": "2026-09-18T08:07:00+00:00",
+      "id": 5,
+      "alert_id": "a1",
+      "camera_id": 1,
+      "severity": "critical",
+      "title": "Person loitering at gate",
+      "description": null,
+      "source": "loitering",
+      "acknowledged": false,
+      "correlation_id": null
+    }
+  ],
+  "semantic": false,
+  "filters": {
+    "q": "loiter",
+    "type": "all"
+  }
+}

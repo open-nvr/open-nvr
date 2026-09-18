@@ -238,11 +238,12 @@ def test_publisher_pushes_only_changes(env, monkeypatch):  # noqa: F811
     bus = ebs.EventBus()
     monkeypatch.setattr(ebs, "_event_bus_instance", bus)
     monkeypatch.setattr(bus, "publish", fake)
+    pub._forget()
+    # Cold (first pass after idling): primes the cache and publishes nothing.
+    # A burst of every state would overflow subscribers' queues; they got
+    # these states in their snapshot instead.
     asyncio.run(pub.tick())
-    first = [e for e in sent if e["event_type"] == "entity_state"]
-    assert first and all(e["v2_only"] and e["required_scope"] for e in first)
-    assert not any(e["event_type"] == "descriptors_changed" for e in sent)
-    sent.clear()
+    assert sent == [] and pub.is_warm() and "camera.1.detection" in pub.current_states()
     asyncio.run(pub.tick())
     assert sent == []
     ls_mod.get_live_state().update(2, {"frame": {"w": 100, "h": 100}, "tracks": [
@@ -250,6 +251,7 @@ def test_publisher_pushes_only_changes(env, monkeypatch):  # noqa: F811
     asyncio.run(pub.tick())
     changed = {e["payload"]["key"] for e in sent}
     assert "camera.2.count.car" in changed and all(k.startswith("camera.2.") for k in changed)
+    assert all(e["v2_only"] and e["required_scope"] for e in sent)
     sent.clear()
     s = env.Session()
     s.add(env.models.CameraZone(camera_id=1, name="z", polygon=[[0, 0], [1, 0], [1, 1]]))

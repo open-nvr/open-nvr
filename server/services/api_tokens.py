@@ -235,6 +235,27 @@ def token_has_permission(principal: TokenPrincipal, permission: str) -> bool:
     return permission in principal.scopes and _owner_has(principal.user, permission)
 
 
+def describe_caller(db: Session, principal) -> dict[str, Any]:
+    """Who is asking, as ``/system/info`` reports it. A token learns what it
+    may actually do (its scopes that its owner also holds), its cameras and
+    when it expires: the Home Assistant config flow lists missing scopes from
+    this, and warns before the token runs out. Never the secret or hash."""
+    if not is_token_principal(principal):
+        return {"kind": "user", "username": getattr(principal, "username", None)}
+    from models import ApiToken
+
+    row = db.query(ApiToken).filter(ApiToken.id == principal.token_id).first()
+    expires = _as_aware(row.expires_at) if row is not None else None
+    return {
+        "kind": "token",
+        "name": principal.token_name,
+        "scopes": sorted(s for s in principal.scopes if token_has_permission(principal, s)),
+        "camera_ids": (None if principal.camera_ids is None
+                       else sorted(principal.camera_ids)),
+        "expires_at": expires.isoformat() if expires else None,
+    }
+
+
 def _route_key(request) -> tuple[str, str] | None:
     """(METHOD, full route template) of the matched route, or None.
 

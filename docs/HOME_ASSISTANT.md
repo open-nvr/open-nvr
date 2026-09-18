@@ -70,3 +70,8 @@ system info). Add `ptz.control`, `events.create` or `settings.manage` (arming)
 only if you want Home Assistant to do those things. Limit the token to cameras
 or to Home Assistant's address if you like; revoking it stops Home Assistant
 at once.
+
+Home Assistant cannot run without `settings.view` (system info) and
+`cameras.view`. It reads what the token may do from `GET /api/v1/system/info`
+(the `caller` block: effective scopes, cameras, expiry), so its setup names any
+scope that is missing.

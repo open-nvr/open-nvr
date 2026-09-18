@@ -117,6 +117,9 @@ def bus(monkeypatch):
     import services.live_state as ls_mod
 
     monkeypatch.setattr(ls_mod, "_instance", ls_mod.LiveState())
+    from services import entity_state_publisher
+
+    entity_state_publisher._forget()
     return fresh
 
 
@@ -171,6 +174,43 @@ def test_a_new_epoch_or_a_pruned_range_means_resync(env, bus):  # noqa: F811
     with _open(env, env.jwt("admin"), since=0, epoch=bus.epoch) as ws:
         ws.receive_json()
         assert ws.receive_json()["resync"] is True
+
+
+def test_snapshot_states_come_from_a_warmed_publisher(env, bus):  # noqa: F811
+    """The publisher idles (cache empty) while nobody listens; a socket's
+    snapshot warms it first, so it carries every state, and the publisher's
+    next pass has nothing to burst."""
+    from services import entity_state_publisher as pub
+
+    assert not pub.is_warm()
+    with _open(env, env.jwt("admin")) as ws:
+        ws.receive_json()
+        snap = ws.receive_json()
+    assert snap["entity_states"]["camera.1.detection"] == {"state": True, "attributes": {}}
+    assert pub.is_warm()
+
+
+def test_resume_across_an_idle_publisher_is_a_resync(env, bus):  # noqa: F811
+    """States changed while the publisher idled were never published, so
+    the ring cannot replay them: the client gets a resync snapshot."""
+    from services import entity_state_publisher as pub
+
+    with _open(env, env.jwt("admin")) as ws:
+        hello = ws.receive_json()
+        ws.receive_json()
+    asyncio.run(bus.publish(_ev("camera_event", 1)))
+    pub._forget()                                    # nobody listened: idled
+    with _open(env, env.jwt("admin"), since=hello["seq"], epoch=hello["epoch"]) as ws:
+        assert ws.receive_json()["resumed"] is False
+        snap = ws.receive_json()
+    assert snap["event_type"] == "state_snapshot" and snap["resync"] is True
+    assert "camera.1.detection" in snap["entity_states"]
+    # A socket that doesn't take entity states still resumes losslessly.
+    pub._forget()
+    with _open(env, env.jwt("admin"), since=hello["seq"], epoch=hello["epoch"],
+               types="camera_event") as ws:
+        assert ws.receive_json()["resumed"] is True
+        assert ws.receive_json()["event_type"] == "camera_event"
 
 
 def test_replay_keeps_the_tokens_cameras_and_types(env, bus):  # noqa: F811

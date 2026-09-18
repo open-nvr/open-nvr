@@ -13,8 +13,10 @@ from .exceptions import (
     OpenNVRError,
     OpenNVRNotFoundError,
     OpenNVRRequestError,
+    OpenNVRSSLError,
 )
 from .models import (
+    KNOWN_PLATFORMS,
     Camera,
     EntityCatalog,
     EntityDescriptor,
@@ -29,9 +31,9 @@ from .whep import Whep, WhepSession, resolve_session_url
 __version__ = "0.1.0"
 
 __all__ = [
-    "CLOSE_TOKEN_REVOKED", "SUPPORTED_CONTRACT_MAJOR", "Camera", "EntityCatalog",
-    "EntityDescriptor", "EventStream", "OpenNVRAuthError", "OpenNVRClient",
+    "CLOSE_TOKEN_REVOKED", "KNOWN_PLATFORMS", "SUPPORTED_CONTRACT_MAJOR", "Camera",
+    "EntityCatalog", "EntityDescriptor", "EventStream", "OpenNVRAuthError", "OpenNVRClient",
     "OpenNVRConnectionError", "OpenNVRContractError", "OpenNVRError", "OpenNVRNotFoundError",
-    "OpenNVRRequestError", "SignedMedia", "SiteMode", "StreamInfo", "SystemInfo", "Whep",
-    "WhepSession", "Zone", "check_contract", "resolve_session_url",
+    "OpenNVRRequestError", "OpenNVRSSLError", "SignedMedia", "SiteMode", "StreamInfo",
+    "SystemInfo", "Whep", "WhepSession", "Zone", "check_contract", "resolve_session_url"
 ]

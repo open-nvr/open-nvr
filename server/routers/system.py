@@ -56,6 +56,7 @@ async def get_system_info(
     """
     from core.contract import CONTRACT_VERSION, FEATURES
     from services import site_settings
+    from services.api_tokens import describe_caller
     from services.update_check import latest_version
 
     try:
@@ -72,6 +73,7 @@ async def get_system_info(
         "recording_pause_enabled": site_settings.recording_pause_enabled(db),
         "uptime_s": int(time.monotonic() - _STARTED_MONOTONIC),
         "latest_version": await latest_version(),
+        "caller": describe_caller(db, current_user),
     }
 
 

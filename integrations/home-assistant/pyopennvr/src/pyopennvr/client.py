@@ -24,11 +24,11 @@ from .exceptions import (
     OpenNVRContractError,
     OpenNVRNotFoundError,
     OpenNVRRequestError,
+    OpenNVRSSLError,
 )
 from .models import (
     Camera,
     EntityCatalog,
-    EntityDescriptor,
     SignedMedia,
     SiteMode,
     StreamInfo,
@@ -39,11 +39,6 @@ from .models import (
 API = "/api/v1"
 #: Contract major versions this library speaks (design §6.11).
 SUPPORTED_CONTRACT_MAJOR = 1
-#: Descriptor platforms this library knows how to model. Unknown ones are
-#: skipped (and reported), never an error.
-KNOWN_PLATFORMS = frozenset({"sensor", "binary_sensor", "switch", "select", "button",
-                             "number", "event", "image"})
-
 
 def check_contract(info: SystemInfo) -> None:
     """Raise OpenNVRContractError unless the server speaks contract 1.x."""
@@ -135,6 +130,8 @@ class OpenNVRClient:
                 if resp.content_type == "application/json":
                     return await resp.json()
                 return await resp.text()
+        except aiohttp.ClientSSLError as exc:
+            raise OpenNVRSSLError(f"{method} {path}: {exc}") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise OpenNVRConnectionError(f"{method} {path}: {exc}") from exc
 
@@ -276,14 +273,7 @@ class OpenNVRClient:
         """The descriptors this token may see; None when ``etag`` is current."""
         headers = {"If-None-Match": f'"{etag}"'} if etag else None
         data = await self.request("GET", "/entities", headers=headers)
-        if data is None:
-            return None
-        known, skipped = [], []
-        for d in data.get("entities", []):
-            (known if d.get("platform") in KNOWN_PLATFORMS else skipped).append(d)
-        return EntityCatalog(etag=str(data.get("etag", "")),
-                             descriptors=tuple(EntityDescriptor.from_dict(d) for d in known),
-                             skipped=tuple(skipped))
+        return None if data is None else EntityCatalog.from_dict(data)
 
     async def get_entity_states(self) -> dict[str, dict]:
         return (await self.request("GET", "/entities/states")).get("states", {})

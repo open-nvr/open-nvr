@@ -1,0 +1,117 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Connect to OpenNVR",
+        "description": "Create an API token in OpenNVR under Settings > API Tokens (the Home Assistant preset has the right scopes), then enter the server's address and the token.",
+        "data": {
+          "url": "URL",
+          "api_token": "API token",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "url": "The address you open OpenNVR at, for example https://192.168.1.20",
+          "api_token": "Starts with onvr_. Shown once when the token is created.",
+          "verify_ssl": "Turn off for OpenNVR's default self-signed certificate."
+        }
+      },
+      "cameras": {
+        "title": "Cameras",
+        "description": "Choose the cameras to add from {site}. With all of them selected, cameras added to OpenNVR later appear too.\n\nScopes this token lacks (the features that need them stay unavailable): {missing_scopes}",
+        "data": {
+          "cameras": "Cameras"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "OpenNVR found",
+        "description": "An OpenNVR server was found at {url}. Enter an API token to add it.",
+        "data": {
+          "api_token": "API token",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "api_token": "Create one in OpenNVR under Settings > API Tokens.",
+          "verify_ssl": "Leave off for OpenNVR's default self-signed certificate."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate {name}",
+        "description": "The API token for {name} no longer works (revoked, expired, or missing a scope it needs). Enter a new one.",
+        "data": {
+          "api_token": "API token"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure OpenNVR",
+        "data": {
+          "url": "URL",
+          "api_token": "API token",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "api_token": "Leave blank to keep the current token."
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Not a valid http(s) address.",
+      "cannot_connect": "Could not reach the server at that address.",
+      "ssl_error": "The server's certificate could not be verified. OpenNVR uses a self-signed certificate by default: turn off certificate verification, or install a trusted certificate.",
+      "invalid_auth": "The token was refused (wrong, revoked or expired).",
+      "token_format": "That is not an OpenNVR API token (they start with onvr_).",
+      "missing_scopes": "The token lacks required scopes: {scopes}. Create a token with them in OpenNVR.",
+      "not_opennvr": "That address did not answer like an OpenNVR server (or the server is too old to support Home Assistant).",
+      "unsupported_version": "This OpenNVR server speaks contract version {version}, which this integration does not support. Update the integration.",
+      "no_cameras": "Choose at least one camera.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This OpenNVR server is already configured.",
+      "already_in_progress": "This OpenNVR server is already being set up.",
+      "cannot_connect": "Could not reach the server.",
+      "not_opennvr": "The discovered service is not a usable OpenNVR server.",
+      "reauth_successful": "Reauthentication was successful.",
+      "reconfigure_successful": "Reconfiguration was successful.",
+      "wrong_site": "That address is a different OpenNVR server than the one this entry was set up with."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OpenNVR options",
+        "data": {
+          "cameras": "Cameras",
+          "media_ttl_hours": "Notification link lifetime"
+        },
+        "data_description": {
+          "cameras": "With all selected, cameras added to OpenNVR later appear too.",
+          "media_ttl_hours": "How long snapshot and clip links in notifications stay valid."
+        }
+      }
+    },
+    "error": {
+      "no_cameras": "Choose at least one camera."
+    },
+    "abort": {
+      "not_loaded": "The OpenNVR server must be connected to change these options."
+    }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "The OpenNVR API token was refused; reauthenticate."
+    },
+    "cannot_connect": {
+      "message": "Could not reach the OpenNVR server: {error}"
+    },
+    "unexpected": {
+      "message": "Unexpected reply from the OpenNVR server: {error}"
+    },
+    "unsupported_contract": {
+      "message": "This OpenNVR server speaks contract version {version}, which this integration does not support. Update the integration."
+    },
+    "wrong_site": {
+      "message": "A different OpenNVR server answers at the configured address. Reconfigure the integration."
+    }
+  }
+}

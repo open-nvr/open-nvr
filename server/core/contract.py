@@ -16,7 +16,7 @@ descriptor fields, payload schemas), with example payloads in
 changes without the matching bump; the tests hold the code to it.
 """
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 #: Capabilities an integration may feature-detect. Each issue that adds a
 #: client-visible capability appends its name here.
@@ -39,4 +39,5 @@ FEATURES: tuple[str, ...] = (
     "site_mode",            # HA-118
     "entities",             # HA-114: server-described entities
     "search",               # HA-116
+    "caller_info",          # HA-202: /system/info reports the caller (token scopes, expiry)
 )

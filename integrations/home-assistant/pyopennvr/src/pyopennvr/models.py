@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+#: Descriptor platforms this library knows how to model. Unknown ones are
+#: skipped (and reported), never an error.
+KNOWN_PLATFORMS = frozenset({"sensor", "binary_sensor", "switch", "select", "button",
+                             "number", "event", "image"})
+
+
 def _get(d: dict, key: str, default: Any = None) -> Any:
     value = d.get(key, default)
     return default if value is None and default is not None else value
@@ -28,6 +34,9 @@ class SystemInfo:
     recording_pause_enabled: bool
     uptime_s: int
     latest_version: str | None
+    #: Who asked (contract 1.1, ``caller_info``): for a token its name,
+    #: effective scopes, cameras and expiry. Empty from older servers.
+    caller: dict = field(compare=False, default_factory=dict)
     raw: dict = field(repr=False, compare=False, default_factory=dict)
 
     @classmethod
@@ -38,10 +47,23 @@ class SystemInfo:
                    features=tuple(_get(d, "features", [])),
                    recording_pause_enabled=bool(_get(d, "recording_pause_enabled", False)),
                    uptime_s=int(_get(d, "uptime_s", 0)),
-                   latest_version=d.get("latest_version"), raw=d)
+                   latest_version=d.get("latest_version"),
+                   caller=dict(d.get("caller") or {}), raw=d)
 
     def has(self, feature: str) -> bool:
         return feature in self.features
+
+    @property
+    def scopes(self) -> frozenset[str] | None:
+        """The calling token's effective scopes; None if the server doesn't
+        say (older than contract 1.1) or the caller is not a token."""
+        if self.caller.get("kind") != "token" or "scopes" not in self.caller:
+            return None
+        return frozenset(self.caller["scopes"])
+
+    @property
+    def token_expires_at(self) -> str | None:
+        return self.caller.get("expires_at") if self.caller.get("kind") == "token" else None
 
 
 @dataclass(frozen=True)
@@ -139,6 +161,17 @@ class EntityCatalog:
     #: Descriptors whose platform this client does not know; kept so the
     #: integration can list them in diagnostics instead of failing.
     skipped: tuple[dict, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict) -> EntityCatalog:
+        """``GET /entities``: descriptors of platforms this client knows, the
+        rest in ``skipped``."""
+        known, skipped = [], []
+        for e in d.get("entities", []):
+            (known if e.get("platform") in KNOWN_PLATFORMS else skipped).append(e)
+        return cls(etag=str(d.get("etag", "")),
+                   descriptors=tuple(EntityDescriptor.from_dict(e) for e in known),
+                   skipped=tuple(skipped))
 
 
 @dataclass(frozen=True)

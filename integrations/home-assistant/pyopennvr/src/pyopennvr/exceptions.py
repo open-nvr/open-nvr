@@ -18,6 +18,10 @@ class OpenNVRConnectionError(OpenNVRError):
     """The server could not be reached, timed out, or answered 5xx."""
 
 
+class OpenNVRSSLError(OpenNVRConnectionError):
+    """TLS failed: typically a self-signed certificate while verifying."""
+
+
 class OpenNVRAuthError(OpenNVRError):
     """401/403: the token is wrong, revoked, expired, or lacks a scope."""
 

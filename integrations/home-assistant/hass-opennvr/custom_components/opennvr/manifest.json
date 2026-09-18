@@ -2,11 +2,14 @@
   "domain": "opennvr",
   "name": "OpenNVR",
   "codeowners": [],
-  "config_flow": false,
-  "dependencies": [],
-  "documentation": "https://github.com/open-nvr/open-nvr/blob/main/docs/design/home-assistant-integration.md",
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/open-nvr/open-nvr/blob/main/docs/HOME_ASSISTANT.md",
+  "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/open-nvr/open-nvr/issues",
-  "requirements": [],
-  "version": "0.0.1"
+  "loggers": ["pyopennvr"],
+  "requirements": ["pyopennvr==0.1.0"],
+  "version": "0.1.0",
+  "zeroconf": ["_opennvr._tcp.local."]
 }
