@@ -16,4 +16,9 @@ RUN pip install \
         "pytest-homeassistant-custom-component==0.13.365" \
         "aioresponses>=0.7"
 
+# Requirements of the HA components the integration's platforms load in tests
+# (phcc installs Home Assistant, not each component's requirements). A layer
+# of its own so the big one above stays cached.
+RUN pip install "PyTurboJPEG==1.8.3"
+
 WORKDIR /src

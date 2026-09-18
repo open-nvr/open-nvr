@@ -35,7 +35,7 @@ WS_EVENT_TYPES = ["entity_state", "site_mode", "descriptors_changed", "camera_st
 #: How many recent events-socket frames diagnostics keeps.
 RECENT_FRAMES = 20
 
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.CAMERA]
 
 
 def signal_frame(entry_id: str) -> str:

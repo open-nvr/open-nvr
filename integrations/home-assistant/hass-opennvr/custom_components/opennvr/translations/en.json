@@ -112,6 +112,12 @@
     },
     "wrong_site": {
       "message": "A different OpenNVR server answers at the configured address. Reconfigure the integration."
+    },
+    "not_permitted": {
+      "message": "OpenNVR refused: the API token lacks the permission for this ({detail})."
+    },
+    "command_failed": {
+      "message": "The OpenNVR command failed: {detail}"
     }
   }
 }
