@@ -119,5 +119,17 @@
     "command_failed": {
       "message": "The OpenNVR command failed: {detail}"
     }
+  },
+  "entity": {
+    "alarm_control_panel": {
+      "site_mode": {
+        "name": "Site mode"
+      }
+    },
+    "update": {
+      "server": {
+        "name": "Server"
+      }
+    }
   }
 }

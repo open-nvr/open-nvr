@@ -143,6 +143,8 @@ def expected_unique_ids(coordinator: OpenNVRCoordinator) -> set[str]:
     site = coordinator.data.info.site_id
     ids = {f"{site}:{key}" for key in coordinator.known_keys}
     ids |= {f"{site}:camera.{cid}" for cid in coordinator.data.cameras}
+    # The hand-written site entities (alarm_control_panel.py, update.py).
+    ids |= {f"{site}:site.alarm", f"{site}:site.update"}
     return ids
 
 

@@ -36,6 +36,7 @@ WS_EVENT_TYPES = ["entity_state", "site_mode", "descriptors_changed", "camera_st
 RECENT_FRAMES = 20
 
 PLATFORMS: list[Platform] = [
+    Platform.ALARM_CONTROL_PANEL,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.CAMERA,
@@ -45,6 +46,7 @@ PLATFORMS: list[Platform] = [
     Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
+    Platform.UPDATE,
 ]
 
 
