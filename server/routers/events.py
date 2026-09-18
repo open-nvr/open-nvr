@@ -44,6 +44,7 @@ Both can be combined. Missing filters mean "everything".
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
@@ -301,9 +302,18 @@ async def events_stream(
     ticket: str | None = Query(default=None, description="Single-use WS ticket"),
     camera_id: int | None = Query(default=None, description="Filter to one camera"),
     task: list[str] | None = Query(default=None, description="Filter to these task names"),
+    v: int = Query(default=1, ge=1, le=2, description="Protocol version"),
+    since: int | None = Query(default=None, ge=0, description="v2: resume after this seq"),
+    epoch: str | None = Query(default=None, max_length=32, description="v2: epoch of `since`"),
+    types: list[str] | None = Query(default=None, description="v2: only these event types"),
 ):
     """
     Stream inference events over WebSocket.
+
+    **v2** (``v=2``, HA-111) numbers every frame (``seq``), can resume after
+    a reconnect (``since`` + ``epoch`` replays up to 5 minutes), opens with
+    a ``state_snapshot`` when it cannot, filters by ``types`` and sends a
+    ``heartbeat`` when idle; see :func:`_stream_v2`. v1, below, is unchanged.
 
     Event frame format (JSON text frames)::
 
@@ -402,6 +412,11 @@ async def events_stream(
 
     await websocket.accept()
 
+    if v == 2:
+        await _stream_v2(websocket, user, allowed, event_types, camera_id=camera_id,
+                         task=task, since=since, epoch=epoch, types=types)
+        return
+
     bus = get_event_bus()
     filters: dict[str, Any] = {"camera_id": camera_id, "task": task}
     if event_types is not None:
@@ -450,3 +465,94 @@ async def events_stream(
             main_logger.info(
                 "events_stream closed: user=%s dropped=%d", user.username, sub.dropped,
             )
+
+
+# ── v2 (HA-111) ───────────────────────────────────────────────────────────
+
+#: Seconds of silence before a v2 socket sends a heartbeat, so a client can
+#: tell "quiet" from "dead" without waiting for TCP to notice.
+V2_HEARTBEAT_S = 25.0
+
+
+def _v2_snapshot_cameras(allowed: set[int] | None, camera_id: int | None) -> list[dict]:
+    """Live state and connectivity of every camera this socket may see."""
+    from core.database import SessionLocal
+    from services.camera_status_service import get_camera_status_service
+    from services.live_state import get_live_state
+    from models import Camera
+
+    with SessionLocal() as db:
+        q = (db.query(Camera.id)
+             .filter(Camera.deleted_at.is_(None), Camera.is_active.is_(True)))
+        if camera_id is not None:
+            q = q.filter(Camera.id == camera_id)
+        ids = [cid for (cid,) in q.order_by(Camera.id).all()
+               if allowed is None or cid in allowed]
+    online = get_camera_status_service().snapshot(ids)
+    live = get_live_state()
+    return [{**live.camera(cid), "online": online.get(cid)} for cid in ids]
+
+
+async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
+                     since, epoch, types) -> None:
+    """The v2 stream.
+
+    Order matters and is what makes resume lossless: subscribe FIRST (from
+    then on every event reaches the queue, numbered above the subscriber's
+    ``start_seq``), THEN send what came before (replay from the ring, or a
+    snapshot), then drain the queue.
+    """
+    bus = get_event_bus()
+    wanted = set(types) if types else None
+    async with bus.subscribe(camera_id=camera_id, tasks=task, allowed_camera_ids=allowed,
+                             allowed_event_types=event_types, event_types=wanted,
+                             with_seq=True) as sub:
+        try:
+            replayed: list = []
+            complete = False
+            if since is not None and epoch == bus.epoch:
+                replayed, complete = await bus.replay(sub, since)
+            hello = {"v": 2, "event_type": "subscribed", "epoch": bus.epoch,
+                     "seq": sub.start_seq,
+                     "filters": {"camera_id": camera_id, "task": task,
+                                 "types": sorted(wanted) if wanted else None,
+                                 **({"event_types": sorted(event_types)}
+                                    if event_types is not None else {})},
+                     "resumed": complete}
+            await websocket.send_text(json.dumps(hello))
+            if complete:
+                for seq, event in replayed:
+                    await websocket.send_text(json.dumps({"v": 2, "seq": seq, **event},
+                                                         default=str))
+            else:
+                cameras = await asyncio.to_thread(_v2_snapshot_cameras, allowed, camera_id)
+                await websocket.send_text(json.dumps({
+                    "v": 2, "event_type": "state_snapshot", "seq": sub.start_seq,
+                    # True when the client asked to resume and could not:
+                    # it missed events and must rebuild its state from this.
+                    "resync": since is not None,
+                    "cameras": cameras,
+                }, default=str))
+            main_logger.info("events_stream v2 opened: user=%s since=%s resumed=%s",
+                             user.username, since, complete)
+            reported_drops = 0
+            while True:
+                try:
+                    seq, event = await asyncio.wait_for(sub.queue.get(), V2_HEARTBEAT_S)
+                except TimeoutError:
+                    await websocket.send_text(json.dumps(
+                        {"v": 2, "event_type": "heartbeat", "seq": bus.current_seq}))
+                    continue
+                await websocket.send_text(json.dumps({"v": 2, "seq": seq, **event},
+                                                     default=str))
+                if sub.dropped > reported_drops:
+                    # Events were dropped for this slow client: it can
+                    # reconnect with since=<last seq it got> to fill the gap.
+                    await websocket.send_text(json.dumps(
+                        {"v": 2, "event_type": "lagged", "dropped": sub.dropped}))
+                    reported_drops = sub.dropped
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            main_logger.warning("events_stream v2 closing on error for user=%s: %s",
+                                user.username, exc)

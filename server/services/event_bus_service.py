@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -75,12 +77,23 @@ EVENT_LIVE_STATE = "live_state"
 # memory for tolerance of bursty traffic.
 _DEFAULT_SUBSCRIBER_QUEUE_SIZE = 100
 
+#: How long published events stay replayable for a v2 client that
+#: reconnects with ``since`` (HA-111), and a hard cap on how many.
+RING_SECONDS = 300.0
+RING_MAX_EVENTS = 20_000
+#: Not kept for replay: live overlay boxes (up to several frames a second
+#: per camera). Stale boxes are worthless to a client catching up, and
+#: keeping them would crowd everything else out of the ring and hold tens
+#: of MB on a large site. Live subscribers still get them.
+RING_SKIP_TYPES = frozenset({EVENT_TRACKS})
+
 
 class _Subscriber:
     """One subscription slot. Owns the queue and the optional filters."""
 
     __slots__ = ("queue", "camera_id", "tasks", "allowed_camera_ids",
-                 "allowed_event_types", "dropped", "created_at")
+                 "allowed_event_types", "event_types", "with_seq", "start_seq",
+                 "dropped", "created_at")
 
     def __init__(
         self,
@@ -89,6 +102,8 @@ class _Subscriber:
         tasks: frozenset[str] | None,
         allowed_camera_ids: frozenset[int] | None = None,
         allowed_event_types: frozenset[str] | None = None,
+        event_types: frozenset[str] | None = None,
+        with_seq: bool = False,
     ):
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
         self.camera_id = camera_id
@@ -108,6 +123,16 @@ class _Subscriber:
         #: Also a boundary, not a filter: an API token only receives the
         #: types its scopes cover (services.api_tokens.TOKEN_EVENT_SCOPES).
         self.allowed_event_types = allowed_event_types
+        #: The client's own event-type preference (v2 ``types=``). A
+        #: filter, unlike allowed_event_types, which is a boundary.
+        self.event_types = event_types
+        #: v2 subscribers get ``(seq, event)`` pairs; v1 the bare event, so
+        #: v1 frames stay exactly what they were.
+        self.with_seq = with_seq
+        #: The bus sequence number when this subscriber was added: every
+        #: event after it reaches the queue, everything up to it is history
+        #: (replay or snapshot).
+        self.start_seq = 0
         self.dropped: int = 0
         self.created_at = time.time()
 
@@ -125,6 +150,8 @@ class _Subscriber:
             return False
         if self.tasks is not None and event.get("task") not in self.tasks:
             return False
+        if self.event_types is not None and event.get("event_type") not in self.event_types:
+            return False
         return True
 
 
@@ -135,6 +162,42 @@ class EventBus:
         self._subscribers: set[_Subscriber] = set()
         self._lock = asyncio.Lock()
         self._subscriber_queue_size = subscriber_queue_size
+        #: Per-process id. Sequence numbers restart with the process, so a
+        #: client resuming with ``since`` must also send the epoch it got
+        #: them in; a different epoch means "resync from a snapshot".
+        self.epoch = uuid.uuid4().hex[:12]
+        self._seq = 0
+        #: (seq, monotonic time, event), oldest first.
+        self._ring: deque[tuple[int, float, dict[str, Any]]] = deque()
+
+    @property
+    def current_seq(self) -> int:
+        return self._seq
+
+    def _prune(self, now: float) -> None:
+        while self._ring and (len(self._ring) > RING_MAX_EVENTS
+                              or now - self._ring[0][1] > RING_SECONDS):
+            self._ring.popleft()
+
+    async def replay(
+        self, sub: _Subscriber, since: int
+    ) -> tuple[list[tuple[int, dict[str, Any]]], bool]:
+        """Events after ``since`` up to the subscriber's start, filtered by
+        its entitlements and filters. ``complete`` is False when events in
+        that range have already left the ring (or ``since`` is from the
+        future): the client must resync from a snapshot."""
+        async with self._lock:
+            self._prune(time.monotonic())
+            upto = sub.start_seq
+            if since > upto:
+                return [], False
+            if since == upto:
+                return [], True
+            oldest = self._ring[0][0] if self._ring else upto + 1
+            if since + 1 < oldest:
+                return [], False
+            return [(s, e) for s, _t, e in self._ring
+                    if since < s <= upto and sub.matches(e)], True
 
     async def publish(self, event: dict[str, Any]) -> None:
         """
@@ -144,21 +207,27 @@ class EventBus:
         If a subscriber's queue is full we drop the oldest event for THAT
         subscriber only — other subscribers still receive the new event.
         """
-        if not self._subscribers:
-            return
-
         # Timestamp here (not at each publisher site) so every consumer sees a
         # consistent monotonic-ish ordering even if producers forget.
         event.setdefault("timestamp", int(time.time() * 1000))
 
-        # Snapshot under lock; deliver outside the lock so one slow subscriber
-        # can't block the snapshot path.
+        # Numbered and kept for replay even with no subscriber attached:
+        # the moment a client is disconnected is exactly when it will need
+        # to catch up. Snapshot the targets under the lock; deliver outside
+        # it so one slow subscriber can't block the snapshot path.
         async with self._lock:
+            self._seq += 1
+            seq = self._seq
+            now = time.monotonic()
+            if event.get("event_type") not in RING_SKIP_TYPES:
+                self._ring.append((seq, now, event))
+            self._prune(now)
             targets = [s for s in self._subscribers if s.matches(event)]
 
         for sub in targets:
+            item = (seq, event) if sub.with_seq else event
             try:
-                sub.queue.put_nowait(event)
+                sub.queue.put_nowait(item)
             except asyncio.QueueFull:
                 # Drop-oldest: pop one, enqueue new. Counter tracks how many
                 # events a given subscriber has missed so the WS layer can
@@ -168,7 +237,7 @@ class EventBus:
                 except asyncio.QueueEmpty:
                     pass
                 try:
-                    sub.queue.put_nowait(event)
+                    sub.queue.put_nowait(item)
                     sub.dropped += 1
                 except asyncio.QueueFull:
                     # Should not happen — we just drained a slot — but be
@@ -182,6 +251,8 @@ class EventBus:
         tasks: list[str] | None = None,
         allowed_camera_ids: set[int] | frozenset[int] | None = None,
         allowed_event_types: set[str] | frozenset[str] | None = None,
+        event_types: set[str] | frozenset[str] | list[str] | None = None,
+        with_seq: bool = False,
     ) -> AsyncIterator[_Subscriber]:
         """
         Context-managed subscription. Use as::
@@ -205,8 +276,11 @@ class EventBus:
             allowed_event_types=(
                 None if allowed_event_types is None
                 else frozenset(allowed_event_types)),
+            event_types=frozenset(event_types) if event_types else None,
+            with_seq=with_seq,
         )
         async with self._lock:
+            sub.start_seq = self._seq
             self._subscribers.add(sub)
 
         try:
