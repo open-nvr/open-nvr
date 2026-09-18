@@ -62,6 +62,7 @@ from routers import (
     cameras,
     app_platform,
     internal_camera_agent,
+    search,
     timeline_events,
     cloud as cloud_router,
     cloud_inference,
@@ -853,6 +854,7 @@ app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
 # app-key scoped; see routers/app_platform.py and docs/APP_PLATFORM.md.
 app.include_router(app_platform.router, prefix=settings.api_prefix)
 app.include_router(timeline_events.router, prefix=settings.api_prefix)
+app.include_router(search.router, prefix=settings.api_prefix)
 app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
