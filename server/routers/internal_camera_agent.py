@@ -121,6 +121,25 @@ class TrackEventIn(BaseModel):
     # answer "where was it and what else was in shot". Optional, and DROPPED
     # rather than 422'd when oversized or malformed — see the ingest below.
     scene_jpeg_b64: str | None = None
+    # Where the object stood over the visit: bottom-centre of its box,
+    # normalised 0..1, downsampled by the pipeline (HA-109). Used to file the
+    # visit under the camera's zones. Optional; a malformed path is ignored,
+    # never a 422 (history beats zone tags).
+    path: list[list[float]] | None = None
+
+
+def _zone_ids_for(db: Session, payload: TrackEventIn) -> list[int] | None:
+    from services.zones import clean_path, zones_for_path
+
+    path = clean_path(payload.path)
+    if path is None:
+        return None
+    try:
+        return zones_for_path(db, payload.camera_id, payload.label, path)
+    except Exception:  # noqa: BLE001 - zone tags never cost a visit
+        main_logger.warning("zone tagging failed for camera %s", payload.camera_id,
+                            exc_info=True)
+        return None
 
 
 @router.post("/events", status_code=201)
@@ -202,6 +221,7 @@ async def ingest_track_event(
             stationary=payload.stationary,
             evidence_path=evidence_rel,
             scene_evidence_path=scene_rel,
+            zone_ids=_zone_ids_for(db, payload),
         )
     except IntegrityError:
         # Retry raced an earlier success — the visit already exists

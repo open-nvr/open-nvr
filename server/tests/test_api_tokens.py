@@ -63,6 +63,16 @@ def _complete_logging_stub():
     yield
 
 
+# The core modules these fixtures share are imported at COLLECTION time on
+# purpose: conftest purges core.* modules first imported by a test module
+# when that module ends, and a later module reusing this fixture would then
+# get fresh copies while routers and middleware kept the old ones (a second
+# request-context ContextVar, a second get_db).
+import core.auth  # noqa: E402,F401
+import core.database  # noqa: E402,F401
+import core.permissions  # noqa: E402,F401
+import core.request_context  # noqa: E402,F401
+
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
@@ -128,11 +138,19 @@ def env(monkeypatch):
 
     app = FastAPI()
     app.add_middleware(RequestLoggingMiddleware)
-    for mod in ("routers.system", "routers.cameras", "routers.api_tokens",
-                "routers.recordings", "routers.audit_logs", "routers.events",
-                "routers.timeline_events"):
-        app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
-    app.dependency_overrides[get_db] = _db
+    routers = [importlib.import_module(m) for m in (
+        "routers.system", "routers.cameras", "routers.api_tokens",
+        "routers.recordings", "routers.audit_logs", "routers.events",
+        "routers.timeline_events", "routers.zones")]
+    for mod in routers:
+        app.include_router(mod.router, prefix="/api/v1")
+    # Override EVERY get_db these routers depend on, not just the one in
+    # sys.modules now: conftest purges core.* modules first imported by a
+    # test module, so a router imported by an earlier module can still hold
+    # (through core.auth / core.permissions) the get_db of a previous
+    # core.database object, and would otherwise reach the real database.
+    for g in {get_db, *_reachable_get_dbs(routers)}:
+        app.dependency_overrides[g] = _db
 
     async def _fake_stats(db, cam):
         return {"camera_id": cam.id}
@@ -146,6 +164,17 @@ def env(monkeypatch):
     client = TestClient(app, client=("192.168.1.20", 50000))
     return type("Env", (), {"client": client, "Session": Session, "ids": ids,
                             "jwt": staticmethod(jwt_for), "models": models})
+
+
+def _reachable_get_dbs(modules):
+    found = set()
+    for mod in modules:
+        for value in vars(mod).values():
+            for fn in (value, getattr(value, "__init__", None), getattr(value, "__call__", None)):
+                g = getattr(fn, "__globals__", None)
+                if isinstance(g, dict) and callable(g.get("get_db")):
+                    found.add(g["get_db"])
+    return found
 
 
 def _mint(env, who="admin", **body):
@@ -362,7 +391,7 @@ def test_every_token_route_is_a_real_route():
     app = FastAPI()
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
-                "routers.events"):
+                "routers.events", "routers.zones"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.

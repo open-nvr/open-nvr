@@ -61,6 +61,7 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/cameras/"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}/stats"): "cameras.view",
+    ("GET", f"{_A}/cameras/{{camera_id}}/zones"): "cameras.view",
     # Only TOKEN_CAMERA_FIELDS may be changed (routers/cameras.update_camera).
     ("PUT", f"{_A}/cameras/{{camera_id}}"): "cameras.manage",
     # The route checks the site flag and recordings.pause itself.

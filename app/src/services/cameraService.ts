@@ -39,6 +39,14 @@ export const cameraService = {
 
   // Camera Management
   getCameras: (params: Record<string, any> = {}) => api.get('/api/v1/cameras/', { params }),
+  // Named areas of a camera's picture (HA-109).
+  listCameraZones: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/zones`),
+  createCameraZone: (cameraId: number, body: { name: string; polygon: number[][]; labels: string[] | null }) =>
+    api.post(`/api/v1/cameras/${cameraId}/zones`, body),
+  updateCameraZone: (cameraId: number, zoneId: number, body: { name: string; polygon: number[][]; labels: string[] | null }) =>
+    api.put(`/api/v1/cameras/${cameraId}/zones/${zoneId}`, body),
+  deleteCameraZone: (cameraId: number, zoneId: number) =>
+    api.delete(`/api/v1/cameras/${cameraId}/zones/${zoneId}`),
   getCamera: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}`),
   // A single JPEG still of the camera's current view — backs the App
   // Catalog geometry editors (draw a zone/tripwire on the real scene).

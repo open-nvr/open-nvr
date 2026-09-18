@@ -23,6 +23,7 @@ import { RolesManager } from './settings/RolesManager'
 import { PermissionsManager } from './settings/PermissionsManager'
 import { CameraConfigManager } from './settings/CameraConfigManager'
 import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
+import { CameraZones } from './settings/CameraZones'
 import { DeviceFirewall } from './settings/DeviceFirewall'
 import { ApiTokens } from './settings/ApiTokens'
 import { PasswordPolicy } from './settings/PasswordPolicy'
@@ -53,6 +54,7 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     submenu: [
       { slug: 'device', label: 'Device Settings', panel: () => <CameraDeviceConfig /> },
       { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
+      { slug: 'zones', label: 'Zones', panel: () => <CameraZones /> },
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
@@ -99,7 +101,7 @@ const SETTINGS_REDIRECTS: Record<string, string> = {
 }
 
 const SETTINGS_LABEL_KEYS: Record<string, string> = {
-  'Camera-Config': 'nav.configuration', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording',
+  'Camera-Config': 'nav.configuration', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording', Zones: 'settings.zones',
   Recording: 'settings.recording', 'Deleted Cameras': 'settings.deletedCameras', 'Media-Source': 'settings.mediaSource',
   Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall', 'API Tokens': 'settings.apiTokens',
   'More Settings': 'settings.moreSettings', WebRTC: 'settings.webrtc', 'Window Settings': 'settings.windowSettings',

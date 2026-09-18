@@ -406,3 +406,49 @@ def test_finished_visit_dates_each_candidate_it_ships():
     # One stamp per shipped crop, and none of them is the visit's end.
     assert len(v.candidate_ts) == len(v.candidate_jpegs) == 2
     assert all(isinstance(t, float) for t in v.candidate_ts)
+
+
+# ── zone path (HA-109) ──────────────────────────────────────────────
+
+@dataclass
+class _BoxTr(_Tr):
+    box: tuple = (0, 0, 10, 10)
+
+
+def test_foot_point_is_the_normalised_bottom_centre():
+    from detect_pipeline.events_poster import foot_point
+
+    assert foot_point((100, 50, 300, 250), 400, 500) == (0.5, 0.5)
+    assert foot_point((380, 0, 500, 600), 400, 500) == (1.0, 1.0)   # clamped
+    assert foot_point((0, 0, 1, 1), 0, 500) is None
+    assert foot_point(None, 400, 500) is None
+
+
+def test_a_visit_carries_its_path_thinned_over_the_whole_visit():
+    from detect_pipeline.events_poster import PATH_MAX_POINTS
+
+    lc = VisitLifecycle("3")
+    n = 200
+    for i in range(n):
+        x = i * 4  # walks left to right across a 1000 px frame
+        lc.observe([_BoxTr(1, box=(x, 100, x + 20, 200))], T0 + i * 0.2, (1000, 500))
+    (v,) = lc.observe([], T0 + n)
+    assert 2 <= len(v.path) <= PATH_MAX_POINTS
+    xs = [p[0] for p in v.path]
+    assert xs == sorted(xs)
+    assert xs[0] < 0.05 and xs[-1] > 0.6      # spans the visit, not just its start
+    assert all(p[1] == 0.4 for p in v.path)
+
+
+def test_no_frame_size_means_no_path():
+    lc = VisitLifecycle("3")
+    lc.observe([_BoxTr(1)], T0)
+    lc.observe([_BoxTr(1)], T0 + 5)
+    (v,) = lc.observe([], T0 + 6)
+    assert v.path == ()
+
+
+def test_post_carries_the_path_only_when_there_is_one():
+    assert "path" not in _post_body(_visit())
+    body = _post_body(replace(_visit(), path=((0.1, 0.9), (0.2, 0.8))))
+    assert body["path"] == [[0.1, 0.9], [0.2, 0.8]]

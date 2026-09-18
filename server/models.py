@@ -568,6 +568,10 @@ class TimelineEvent(Base):
     # this column existed: readers fall back to started_at.
     observed_at = Column(DateTime(timezone=True), nullable=True)
     payload = Column(JSON, nullable=True)
+    # Ids of the CameraZones this visit passed through (HA-109), computed at
+    # ingest from the track's path. NULL = not computed (no path sent, or a
+    # row from before zones); [] = computed, in no zone.
+    zone_ids = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -1422,3 +1426,28 @@ class OccupancyFootfall(Base):
     dwell_seconds = Column(Float, nullable=False, default=0.0)
     dwell_max_seconds = Column(Float, nullable=False, default=0.0)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CameraZone(Base):
+    """A named area of one camera's picture (HA-109).
+
+    ``polygon`` is ``[[x, y], ...]`` normalised to 0..1 of the frame, the
+    same space as the overlay boxes. A visit is "in" a zone when a point of
+    its path (the bottom-centre of the box: where the object stands) falls
+    inside. ``labels`` optionally limits the zone to some object labels.
+    """
+
+    __tablename__ = "camera_zones"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "name", name="uq_camera_zone_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(60), nullable=False)
+    polygon = Column(JSON, nullable=False)
+    labels = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

@@ -111,6 +111,8 @@ def _serialize(e: TimelineEvent) -> dict:
             if e.plate_frame_path else None
         ),
         "payload": e.payload,
+        # Zones this visit passed through (HA-109); null = not computed.
+        "zone_ids": e.zone_ids,
     }
 
 

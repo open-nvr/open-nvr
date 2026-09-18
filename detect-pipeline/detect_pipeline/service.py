@@ -724,7 +724,9 @@ class CameraWorker:
                 if early_attempts is not None:
                     early_attempts.observe(result.tracks)
                 if self.visit_poster is not None:
-                    for visit in lifecycle.observe(result.tracks, time.time()):
+                    fw, fh = getattr(frame, "width", None), getattr(frame, "height", None)
+                    size = (fw, fh) if fw and fh else None
+                    for visit in lifecycle.observe(result.tracks, time.time(), size):
                         self.visit_poster.submit(visit)
                 # Sustained fps over a ~1s window — compared to target_fps, this is
                 # the "is the box keeping up with this camera" signal.
