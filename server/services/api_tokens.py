@@ -404,6 +404,7 @@ TOKEN_EVENT_SCOPES: dict[str, str] = {
     "camera_event": "recordings.view",
     "app_alert": "alerts.view",
     "live_state": "cameras.view",
+    "media_ready": "recordings.view",
 }
 
 

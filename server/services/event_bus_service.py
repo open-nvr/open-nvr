@@ -72,6 +72,9 @@ EVENT_TRACKS = "tracks"
 # What a camera sees now (services/live_state.py): counts per label and
 # zone, motion, and the tracks that just started or ended. Sent on change.
 EVENT_LIVE_STATE = "live_state"
+# An event's media can be fetched now (services/media_ready.py): which
+# images it has and the clip range, once that clip is playable.
+EVENT_MEDIA_READY = "media_ready"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -349,6 +352,16 @@ async def publish_live_state(
         "camera_id": camera_id,
         "task": "live_state",
         "payload": {"state": state, "started": started or [], "ended": ended or []},
+    })
+
+
+async def publish_media_ready(*, camera_id: int, payload: dict[str, Any]) -> None:
+    """Publish that an event's or alert's media is ready (HA-113)."""
+    await get_event_bus().publish({
+        "event_type": EVENT_MEDIA_READY,
+        "camera_id": camera_id,
+        "task": payload.get("source") or "event",
+        "payload": payload,
     })
 
 

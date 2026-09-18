@@ -193,7 +193,9 @@ def apply_alert(envelope: object, db=None, out: dict | None = None) -> str:
             # rather than the raw envelope.
             out.update(stored, id=row.id, source_kind=source_kind,
                        source_name=source_name, alert_type=alert_type,
-                       correlation_id=row.correlation_id)
+                       correlation_id=row.correlation_id,
+                       image_names=sorted(images) if images else [],
+                       at=observed_at or row.fired_at)
         logger.info(
             "alert inbox: [%s] %s (camera=%s source=%s alert_id=%s)",
             severity.upper(), stored["title"], stored["camera_id"],
@@ -369,8 +371,14 @@ async def _handle_message(msg) -> None:
                      "id": stored.get("id"),
                      "source": {"kind": stored.get("source_kind"),
                                 "name": stored.get("source_name")},
-                     "correlation_id": stored.get("correlation_id")},
+                     "correlation_id": stored.get("correlation_id"),
+                     # Stored with the alert, so ready now: sign them with
+                     # POST /media/sign {kind: alert_image} (HA-113).
+                     "images": stored.get("image_names") or []},
         )
+        from services.media_ready import schedule_for_alert
+
+        schedule_for_alert(stored, _camera_num(envelope.get("camera_id")), stored.get("at"))
     except Exception:  # noqa: BLE001
         logger.debug("alert inbox: live push failed", exc_info=True)
 

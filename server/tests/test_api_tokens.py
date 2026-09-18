@@ -520,7 +520,7 @@ def test_a_token_socket_keeps_the_tokens_cameras_and_scopes(env):
     assert hello["event_type"] == "subscribed"
     assert hello["filters"]["event_types"] == sorted(
         ["camera_status", "camera_event", "tracks", "inference_result", "inference_error",
-         "live_state"])
+         "live_state", "media_ready"])
 
     # A camera outside the allow-list is refused, not silently empty.
     from starlette.websockets import WebSocketDisconnect

@@ -243,6 +243,13 @@ async def ingest_track_event(
         # background task ahead of it in the exit stack.
         release(db)
         return {"id": duplicate_id, "duplicate": True}
+    # HA-113: say when this visit's clip is playable (a new visit only).
+    try:
+        from services.media_ready import schedule_for_visit
+
+        schedule_for_visit(row)
+    except Exception:  # noqa: BLE001 - a nudge never costs the visit
+        logger.debug("media_ready scheduling failed", exc_info=True)
     # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
     # frame (background — never on the ingest path). Best-effort: no adapter,
     # no plate, no problem.
