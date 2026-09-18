@@ -22,7 +22,7 @@ from .base import BasePage
 from .cameras import CamerasPage
 from .live import LivePage
 from .playback import PlaybackPage
-from .settings import RecordingSettingsPage
+from .settings import ApiTokensPage, RecordingSettingsPage
 from .shell import Shell
 from .vehicles import VehiclesPage
 
@@ -35,4 +35,5 @@ __all__ = [
     "VehiclesPage",
     "AlertsPage",
     "RecordingSettingsPage",
+    "ApiTokensPage",
 ]

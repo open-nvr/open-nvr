@@ -415,6 +415,20 @@ SAVE_RETENTION = Selector(
     role=("button", "Save Retention Settings"),
 )
 
+API_TOKEN_NEW = Selector(name="New token button", testid="api-token-new", role=("button", "New token"))
+API_TOKEN_NAME = Selector(name="token name field", testid="api-token-name", placeholder="Home Assistant")
+API_TOKEN_CREATE = Selector(name="Create token button", testid="api-token-create", role=("button", "Create token"))
+API_TOKEN_SECRET = Selector(
+    name="one-time token secret",
+    testid="api-token-secret",
+    note="shown once, right after create; gone after Done or a reload",
+)
+API_TOKEN_ROW = Selector(
+    name="API token row", testid="api-token-row", role=("row", None), ambiguous=True,
+    note="one per token; the page object narrows it with .filter(has_text=name)",
+)
+API_TOKEN_REVOKE = Selector(name="Revoke button", role=("button", "Revoke"))
+
 # ===========================================================================
 # Access control / audit
 # ===========================================================================

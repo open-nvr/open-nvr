@@ -24,6 +24,7 @@ import { PermissionsManager } from './settings/PermissionsManager'
 import { CameraConfigManager } from './settings/CameraConfigManager'
 import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
 import { DeviceFirewall } from './settings/DeviceFirewall'
+import { ApiTokens } from './settings/ApiTokens'
 import { PasswordPolicy } from './settings/PasswordPolicy'
 import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
@@ -77,6 +78,8 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     panel: () => <DeviceFirewall />,
     submenu: [],
   },
+  // Long-lived tokens for Home Assistant and other API clients.
+  { key: 'api-tokens', label: 'API Tokens', panel: () => <ApiTokens />, submenu: [] },
   {
     key: 'more-settings',
     label: 'More Settings',
@@ -98,7 +101,7 @@ const SETTINGS_REDIRECTS: Record<string, string> = {
 const SETTINGS_LABEL_KEYS: Record<string, string> = {
   'Camera-Config': 'nav.configuration', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording',
   Recording: 'settings.recording', 'Deleted Cameras': 'settings.deletedCameras', 'Media-Source': 'settings.mediaSource',
-  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall',
+  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall', 'API Tokens': 'settings.apiTokens',
   'More Settings': 'settings.moreSettings', WebRTC: 'settings.webrtc', 'Window Settings': 'settings.windowSettings',
   Uplink: 'settings.uplink', 'System Health': 'settings.systemHealth', Configuration: 'settings.breadcrumb',
 }

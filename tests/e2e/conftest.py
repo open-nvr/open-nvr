@@ -61,6 +61,7 @@ from harness.guards import (  # noqa: E402
 from harness.sandbox import Sandbox, new_sandbox  # noqa: E402
 from pages import (  # noqa: E402
     AlertsPage,
+    ApiTokensPage,
     CamerasPage,
     LivePage,
     PlaybackPage,
@@ -574,6 +575,11 @@ def alerts_page(authed_page) -> AlertsPage:
 @pytest.fixture
 def recording_settings_page(authed_page) -> RecordingSettingsPage:
     return RecordingSettingsPage(authed_page)
+
+
+@pytest.fixture
+def api_tokens_page(authed_page) -> ApiTokensPage:
+    return ApiTokensPage(authed_page)
 
 
 # ---------------------------------------------------------------------------
