@@ -144,7 +144,10 @@ services:
       # Host-loopback only (host-side debugging). See V-015.
       # RTSPS stays published by default: it is user-facing (VLC / ffmpeg
       # from the host, and MEDIAMTX_EXTERNAL_RTSPS_URL below points at it).
-      - "127.0.0.1:${MEDIAMTX_HOST_RTSPS_PORT:-8322}:8322" # RTSPS (for VLC / ffmpeg from the host)
+      # RTSPS_BIND_HOST=0.0.0.0 (or a LAN IP) lets LAN clients such as Home
+      # Assistant's stream component pull RTSPS; see docs/HOME_ASSISTANT.md.
+      # Every stream still needs a signed token. Default: loopback only.
+      - "${RTSPS_BIND_HOST:-127.0.0.1}:${MEDIAMTX_HOST_RTSPS_PORT:-8322}:8322" # RTSPS (for VLC / ffmpeg from the host)
       # HLS (8888), WHEP signalling (8889), playback (9996) and the admin
       # API (9997) are NOT published by default. Browsers reach the first
       # three through nginx (/hls/, /webrtc/, /playback/) and the container
@@ -582,7 +585,12 @@ services:
       # container gets, so both sides agree on what the hardware can do.
       - INFERENCE_TAP_STREAM=${INFERENCE_TAP_STREAM:-auto}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
-      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
+      # Override (with RTSPS_BIND_HOST) to hand LAN clients a reachable RTSPS
+      # URL, e.g. Home Assistant's stream component (docs/HOME_ASSISTANT.md).
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=${MEDIAMTX_EXTERNAL_RTSPS_URL:-rtsps://localhost:8322}
+      # Browser origins allowed to call the API cross-origin (a Home
+      # Assistant dashboard card). The default is core's built-in list.
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       # Browser-facing URLs go through nginx (TLS, any LAN device).
       # MEDIAMTX_PUBLIC_URL is set by start.sh from the detected topology and
@@ -803,6 +811,29 @@ services:
       - DOZZLE_FILTER=name=opennvr
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # ──────────────────────────────────────────────────────────────
+  # mDNS announcer — OPT-IN (COMPOSE_PROFILES=mdns), LINUX HOSTS ONLY.
+  # Advertises _opennvr._tcp so Home Assistant discovers OpenNVR instead of
+  # asking for a URL (HA-117). It needs network_mode: host for multicast to
+  # leave the host's NIC, which Docker Desktop (Windows/macOS) does not
+  # really provide; there, enter the URL in Home Assistant instead.
+  # Announces only public facts (version, port, API path).
+  # ──────────────────────────────────────────────────────────────
+  opennvr-mdns:
+    profiles: [mdns]
+    build:
+      context: ./scripts/mdns-announcer
+    image: opennvr/mdns-announcer:local
+    container_name: opennvr_mdns
+    logging: *svc-logs
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+      - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
+      - OPENNVR_HTTPS_PORT=${NGINX_HOST_HTTPS_PORT:-443}
+      - OPENNVR_MDNS_NAME=${OPENNVR_MDNS_NAME:-OpenNVR}
 
 networks:
   # Where apps live (docker-compose.apps.yml): INTERNAL — no route to the

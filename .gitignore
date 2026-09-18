@@ -158,6 +158,8 @@ server/test_*.py
 !tests/e2e/tests/**/test_*.py
 !tests/e2e/_template_test.py
 !tests/e2e/_template_ui_test.py
+# The mDNS announcer keeps its unit tests beside it (HA-117).
+!scripts/mdns-announcer/test_*.py
 # Example-app pytest suites (A2.5+): each example/{slug}/tests/ is part
 # of the shipped artifact and must be tracked.
 !examples/**/tests/test_*.py

@@ -1,0 +1,72 @@
+# Home Assistant: network setup
+
+Home Assistant talks to OpenNVR over the same HTTPS address your browser uses
+(nginx on port 443). This page lists what to open, and why, when Home
+Assistant runs on **another machine** on your LAN. When it runs on the same
+host, the defaults already work.
+
+## What Home Assistant uses
+
+| Purpose | Path | Default | To reach it from the LAN |
+|---|---|---|---|
+| API, events WebSocket, signed media | `https://<host>/api/v1/...` | open on all interfaces (`NGINX_BIND_HOST=0.0.0.0`) | nothing to do |
+| Live video (WebRTC over WHEP) signalling | `https://<host>/webrtc/...` | through nginx | nothing to do |
+| Live video media (ICE) | UDP/TCP `8189` | published on all interfaces | set `MEDIAMTX_WEBRTC_HOSTS` (below) |
+| RTSPS stream for HA's `stream` component (optional) | `rtsps://<host>:8322/...` | **loopback only** | set `RTSPS_BIND_HOST` (below) |
+| Discovery (optional) | mDNS `_opennvr._tcp` | off | `COMPOSE_PROFILES=mdns`, Linux only |
+
+## Settings (in `.env`)
+
+### `MEDIAMTX_WEBRTC_HOSTS`: live video from another machine
+WebRTC offers the addresses in this list as ICE candidates. Without the host's
+LAN address, Home Assistant (or a phone) on another machine can signal but
+never receives video. Put the address Home Assistant uses to reach this host;
+separate several with commas (multiple NICs, a VPN):
+
+```
+MEDIAMTX_WEBRTC_HOSTS=192.168.1.100
+```
+
+`start.sh` / `start.ps1` fill this from the detected LAN address. Set it by
+hand only if detection picked the wrong interface.
+
+### `RTSPS_BIND_HOST`: RTSPS for Home Assistant's stream component (optional)
+Home Assistant plays cameras over WebRTC and needs nothing else. RTSPS is only
+for recording in Home Assistant or for other RTSP clients. Opening it:
+
+```
+RTSPS_BIND_HOST=0.0.0.0          # or one LAN address
+MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://192.168.1.100:8322
+```
+
+Each stream still needs an OpenNVR-signed token, so opening the port does not
+make the streams public. The certificate is OpenNVR's own; clients must
+accept it or trust the OpenNVR CA.
+
+### `CORS_ORIGINS`: only for the dashboard card
+The integration itself calls the API server-to-server and needs no CORS. A
+Lovelace card that talks to OpenNVR from the browser does. Add Home
+Assistant's origin:
+
+```
+CORS_ORIGINS=http://localhost:5173,https://homeassistant.local:8123
+```
+
+## Discovery (mDNS), optional and Linux only
+With `COMPOSE_PROFILES=mdns`, the `opennvr-mdns` service announces
+`_opennvr._tcp` so Home Assistant shows "OpenNVR discovered". It announces
+only public facts: the version (from `/health`), the HTTPS port and the API
+path. Setup still needs an API token.
+
+It needs `network_mode: host`, so it works **only on Linux hosts**. Docker
+Desktop on Windows and macOS keeps multicast inside its VM; there, enter the
+URL (`https://<host>`) in Home Assistant. Manual entry is the supported default
+everywhere.
+
+## Tokens
+Create a token for Home Assistant under **Settings > API Tokens**. The form
+starts with what Home Assistant needs (cameras, live video, recordings, alerts,
+system info). Add `ptz.control`, `events.create` or `settings.manage` (arming)
+only if you want Home Assistant to do those things. Limit the token to cameras
+or to Home Assistant's address if you like; revoking it stops Home Assistant
+at once.
