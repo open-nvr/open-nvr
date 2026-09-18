@@ -759,8 +759,14 @@ app.add_middleware(
         "Accept",
         "Origin",
         "X-Requested-With",
+        # Lets a browser client (e.g. a Home Assistant card) tag its request
+        # so the resulting audit row can be traced back to it.
+        "X-Correlation-Id",
     ],  # Explicit headers
-    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+    expose_headers=[
+        "Content-Range", "Accept-Ranges", "Content-Length",
+        "X-Correlation-Id", "X-Request-ID",
+    ],
 )
 
 # Compress text responses (JSON, HTML, JS/CSS when served by uvicorn directly).

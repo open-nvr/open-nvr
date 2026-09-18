@@ -26,7 +26,7 @@
     - a code and security review pass;
     - the owner's go-ahead.
 - **Schema changes:**
-  - Every change goes in `server/models.py` **and** an Alembic migration in `server/migrations/versions/` (`<12hex>_<desc>.py`). Head at the start was `a3f19c7d2e60`.
+  - Every change goes in `server/models.py` **and** an Alembic migration in `server/migrations/versions/` (`<12hex>_<desc>.py`). Head at the start was `b7e4a1c9d302`; HA-002 added `c4d8e2f1a9b3`.
   - New columns are **nullable or have a `server_default`**, because `init_db()` runs `create_all` and stamps fresh databases, so migrations never run there (`server/core/database.py:289-320`).
   - Every migration implements `downgrade()`. `server/tests/test_migration_graph.py` stays green.
 - **Permissions:**
@@ -199,4 +199,5 @@ All eight host failures come from the Windows host, not the code; they pass on L
 |---|---|---|---|---|
 | HA-000 | done | SRB-ha-000-execution-setup | (this commit) | Scaffold + dev scripts verified: both suites pass in the py3.14 container; hassfest clean. Baselines in §8. The `test_*.py` gitignore needed a negation for `integrations/home-assistant/**/tests`. PowerShell 5.1 scripts use `$ErrorActionPreference='Continue'` plus `$LASTEXITCODE`, because docker writes progress to stderr. |
 | HA-001 | done | SRB-ha-001-core-ffmpeg | (this commit) | Before: `core:main` `/recordings/frame` → 502 "Could not extract frame". After, on `core:ha-dev`: 200 image/jpeg for cams 1 and 3 (ffmpeg 7.1.5). The image grows ~330 MB (1.57 → 1.9 GB; Debian ffmpeg pulls codec libs), more than the ~100 MB estimated. Added `scripts/ha-dev/swap-core.ps1` (recreates core only, carries `OPENNVR_HOST_IP`/`OPENNVR_LAN_IPS`, never edits `.env`) and `mint-jwt.ps1`. |
-| HA-002 | next | — | — | — |
+| HA-002 | done | SRB-ha-002-correlation-ids | (this commit) | `core/request_context.py` (one contextvar holding a mutable object); middleware sets it before the quiet-path return and echoes `X-Correlation-Id`; `audit_logs.correlation_id` via migration `c4d8e2f1a9b3`. **The real head was `b7e4a1c9d302`, not `a3f19c7d2e60` as §2 assumed.** The audit API returns and filters `correlation_id`. Live: the migration applied on core:ha-dev and a logout with `X-Correlation-Id` produced an audit row carrying it. Server suite: 1534 passed, baseline 4 failed. **Carry-over:** the audit API field is checked live with HA-003's image; the audit UI doesn't show the column yet (later polish). |
+| HA-003 | next | — | — | — |

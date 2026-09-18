@@ -26,6 +26,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from core.logging_config import api_logger
+from core.request_context import begin_request, end_request, valid_correlation_id
 from utils.url_redaction import redact_query_params, redact_url_query
 
 
@@ -65,12 +66,37 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log all incoming HTTP requests and responses."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Every request gets a correlation id, quiet paths included: a client
+        # (e.g. the Home Assistant integration) may send its own in
+        # X-Correlation-Id so its action and our audit row can be joined;
+        # otherwise it is this request's id. It is installed BEFORE call_next
+        # so the endpoint, its dependencies and write_audit_log all see it
+        # (see core/request_context.py for why it is a mutable object).
+        request_id = str(uuid.uuid4())
+        correlation_id = (
+            valid_correlation_id(request.headers.get("x-correlation-id"))
+            or request_id
+        )
+        _ctx, ctx_token = begin_request(correlation_id)
+        try:
+            response = await self._dispatch(
+                request, call_next, request_id, correlation_id
+            )
+            response.headers["X-Correlation-Id"] = correlation_id
+            return response
+        finally:
+            end_request(ctx_token)
+
+    async def _dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+        request_id: str,
+        correlation_id: str,
+    ) -> Response:
         if request.url.path.startswith(_QUIET_PREFIXES):
             return await call_next(request)
         slim = _is_slim_path(request.url.path)
-
-        # Generate unique request ID
-        request_id = str(uuid.uuid4())
 
         # Get client info
         client_host = request.client.host if request.client else "unknown"
@@ -107,6 +133,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "headers": sanitized_headers,
                     "client_host": client_host,
                     "user_agent": user_agent,
+                    # Joins this log line to the audit rows it caused when
+                    # a client sent its own X-Correlation-Id.
+                    "correlation_id": correlation_id,
                 },
                 ip_address=client_host,
                 user_agent=user_agent,
@@ -130,6 +159,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "path": request.url.path,
                     "status_code": response.status_code,
                     "process_time_seconds": round(process_time, 3),
+                    "correlation_id": correlation_id,
                     # The header dump is the bulky half; an evidence image
                     # answers the same three fixed headers every time.
                     **({} if slim else

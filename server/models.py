@@ -950,6 +950,11 @@ class AuditLog(Base):
     # Actor
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
+    # Correlation id of the request that caused this row: the client's
+    # X-Correlation-Id when it sent a valid one (e.g. Home Assistant's context
+    # id), else the request's own id. Joins an external action to our audit trail.
+    correlation_id = Column(String(64), nullable=True, index=True)
+
 
 class AIModel(Base):
     """AI Model configuration for inference tasks."""

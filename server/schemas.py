@@ -854,6 +854,7 @@ class AuditLogResponse(BaseModel):
     details: dict | str | None = None
     ip: str | None = None
     user_agent: str | None = None
+    correlation_id: str | None = None
 
     class Config:
         from_attributes = True
