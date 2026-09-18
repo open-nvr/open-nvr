@@ -18,24 +18,44 @@ nats_url: "nats://nats:4222"
 # The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
 nats_token: "${INTERNAL_API_KEY}"
 
-# IMPORTANT: abandoned-object needs per-object identity — detections
-# must carry a ``track_id`` (chain the ``bytetrack`` adapter after
-# your detector, or use a detector that tracks natively).
-subject_pattern: "opennvr.inference.>"
+# Tier-0 publishes tracked detections (a stable track_id per object) on
+# opennvr.inference.tier0.> — one detector, every app subscribes. An
+# item cannot be followed without identity: the whole point here is
+# that THIS bag has been alone for ninety seconds, so this is the
+# stream to consume.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
-# ── What counts as an "object" vs a "person" — EDIT for your scene ──
-object_labels:
+# ── The rule — every value below is also editable live in the App Catalog ──
+object_labels:                 # what can be left behind
   - "backpack"
   - "handbag"
   - "suitcase"
-person_label: "person"
+person_label: "person"         # what counts as somebody being with it
+unattended_seconds: 60         # alone this long → abandoned
+settle_seconds: 5              # near-still this long before it counts at all
+move_tolerance: 0.02           # drift allowed, as a fraction of frame width
+owner_radius: 0.15             # a person this close (fraction of width) = attended
+owner_grace_seconds: 5         # absorbs the detector losing that person
+active_hours: null             # {start: "22:00", end: "06:00"} to alert at night only
+escalate_after_seconds: 300    # still there, unacknowledged → higher alert
+alert_severity: "high"
+alert_cooldown_seconds: 30     # a pile of bags is one alert
+min_bbox_height: 0             # ignore items shorter than this fraction of frame
+max_bbox_height: 0             # 0 = no upper limit
+fixture_radius: 0.03           # how close to a marked fixture counts as that fixture
+attach_snapshot: true
+track_ttl_seconds: 10          # lost from view this long → the item is gone
 
-# ── Abandon predicate ───────────────────────────────────────────────
-dwell_seconds: 30
-move_tolerance_px: 40
-person_radius_px: 250
-owner_grace_seconds: 10
-track_ttl_seconds: 60
+# ── Fixtures ───────────────────────────────────────────────────────
+# Spots that always hold something — a bin, a planter, a pallet rack.
+# Usually built up from the Left Items page ("Mark as fixture"); listed
+# here they survive a restart. Points are in the same 0–1 space the
+# zones are drawn in.
+#
+# fixtures:
+#   cam3: [[0.18, 0.62]]
+fixtures: {}
 
 # ── Alert delivery ─────────────────────────────────────────────────
 # Alerts always go to stdout (``docker compose logs abandoned-object``).
@@ -45,20 +65,18 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras ──────────────────────────────────────────────────────
-# None listed here, on purpose. Select the cameras this app works on in
-# the App Catalog → Configure → Cameras; Zones are drawn there too. Frames come
-# from OpenNVR itself, so there is no camera URL to copy, and nothing
-# selected means the app does nothing and uses no compute.
+# ── Cameras ────────────────────────────────────────────────────────
+# None listed here, on purpose. Select the cameras this app watches in
+# the App Catalog → Configure → Cameras; zones are drawn there too.
 #
 # (A `cameras:` list still works when running this app standalone,
 # without opennvr_url — see config.example.yml.)
 
-# ── App contract (spec §03) — serves /health /manifest /state on
-# :9203; self-registers with the app registry so the catalog shows a
-# live status dot and the OpenNVR Agent's app door lists this app as a
-# conversational skill. The registration/config-poll token rides the
-# OPENNVR_INTERNAL_API_KEY env var the overlay sets.
+# ── App contract (spec §03) — serves /health /manifest /state /ui on
+# :9203 and self-registers with the app registry, so the catalog shows
+# a live status dot and the Left Items page finds this app. The token
+# rides the OPENNVR_INTERNAL_API_KEY env var the overlay sets.
 contract_port: 9203
+contract_bind_host: "0.0.0.0"
 contract_host: "abandoned-object"
 opennvr_url: "http://opennvr-core:8000"

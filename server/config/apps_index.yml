@@ -158,13 +158,13 @@
 
 - id: abandoned-object
   name: Abandoned Object
-  summary: Alerts when a watched object sits stationary in a zone past a dwell threshold with no person nearby.
+  summary: Follows every item left in a zone — who was with it, how long it has been alone, whether anyone came back — alerting when one is unattended past the threshold and closing itself when it is reclaimed.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/abandoned-object:latest
   build_context: examples/abandoned-object
   requires_tasks: [object_detection, multi_object_tracking]
-  emits: [abandoned-object]
+  emits: [abandoned-object, abandoned-object-escalated]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/abandoned-object/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

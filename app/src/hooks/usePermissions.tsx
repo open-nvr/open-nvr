@@ -137,6 +137,9 @@ export const NAV_PERMISSIONS = {
   // Arming a site is an alarm-desk action, and the page shows alarm
   // snapshots, so it sits in the same tier as the inbox.
   '/perimeter': 'alerts.view',
+  // The unattended-item queue: live items plus alarms with their
+  // snapshots — the alerts tier, like the other incident pages.
+  '/left-items': 'alerts.view',
   '/playback': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',
