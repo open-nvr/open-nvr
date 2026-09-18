@@ -1121,6 +1121,18 @@ async def update_camera(
         )
 
         update_fields = camera_update.model_dump(exclude_unset=True)
+        # Audit-only, never a camera column: take it out before setattr.
+        reason = update_fields.pop("reason", None)
+        from services import api_tokens
+
+        if api_tokens.is_token_principal(current_user):
+            refused = sorted(set(update_fields) - api_tokens.TOKEN_CAMERA_FIELDS)
+            if refused:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"An API token cannot change these camera fields: {refused}",
+                )
+        was_detecting = camera.detection_enabled is not False
         # RFC-0002 Phase 2: the editor's assignments write routes through
         # the assignment TABLE as the 'operator' consumer — full-replace
         # of the operator's claims only, so app/agent claims survive an
@@ -1484,7 +1496,12 @@ async def update_camera(
                 details={
                     "updated_fields": [
                         k for k in camera_update.model_dump(exclude_unset=True).keys()
+                        if k != "reason"
                     ],
+                    **({"reason": reason} if reason else {}),
+                    **({"detection_enabled": {"from": was_detecting,
+                                              "to": camera.detection_enabled is not False}}
+                       if "detection_enabled" in update_fields else {}),
                     **({"stream_action": stream_action} if stream_action else {}),
                     **({"stream_warning": stream_warning} if stream_warning else {}),
                 },

@@ -61,6 +61,8 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/cameras/"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}/stats"): "cameras.view",
+    # Only TOKEN_CAMERA_FIELDS may be changed (routers/cameras.update_camera).
+    ("PUT", f"{_A}/cameras/{{camera_id}}"): "cameras.manage",
     ("GET", f"{_A}/cameras/{{camera_id}}/snapshot"): "live.view",
     ("POST", f"{_A}/cameras/{{camera_id}}/ptz/move"): "ptz.control",
     ("POST", f"{_A}/cameras/{{camera_id}}/ptz/stop"): "ptz.control",
@@ -74,6 +76,12 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", f"{_A}/alerts-inbox/ack"): "alerts.manage",
     ("POST", f"{_A}/recordings/export/ticket"): "recordings.view",
 }
+
+#: Camera fields a token may change through ``PUT /cameras/{id}``. Not the
+#: stream source, credentials or ``is_active`` (pausing stops recording;
+#: HA-108 allows it behind the site's recording-pause flag). ``reason`` is
+#: audit-only and always allowed.
+TOKEN_CAMERA_FIELDS: frozenset[str] = frozenset({"detection_enabled"})
 
 #: Query / path parameters that name a camera, checked by the camera gate.
 _CAMERA_KEYS = ("camera_id", "cam_id", "camera")

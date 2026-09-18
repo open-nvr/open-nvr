@@ -70,6 +70,9 @@ type Camera = {
   status?: string | null
   owner_id: number
   is_active: boolean
+  // Tier-0 object detection; false = off (e.g. switched off from Home
+  // Assistant). The camera keeps streaming and recording either way.
+  detection_enabled?: boolean
   deleted_at?: string | null
   mediamtx_provisioned?: boolean | null
   // Live connectivity as tracked by the recorder (MediaMTX path ready AND
@@ -129,6 +132,7 @@ type CameraForm = {
   vlan?: string
   status?: string
   is_active?: boolean
+  detection_enabled?: boolean
   assignments: AssignmentRow[]
 }
 
@@ -391,6 +395,7 @@ export function Cameras() {
         vlan: form.vlan || null,
         status: form.status || undefined,
         is_active: form.is_active,
+        detection_enabled: form.detection_enabled !== false,
         // Full replace ([] clears): rows with an empty skill are dropped;
         // labels split on commas, blanks removed.
         assignments: form.assignments
@@ -512,6 +517,7 @@ export function Cameras() {
       vlan: c.vlan || '',
       status: c.status || 'unknown',
       is_active: c.is_active,
+      detection_enabled: c.detection_enabled !== false,
       assignments: (c.assignments || []).map(a => ({
         skill: a.skill,
         labels: (a.labels || []).join(', '),
@@ -723,6 +729,9 @@ export function Cameras() {
                           unticked this badge is the only thing distinguishing
                           a deactivated camera. */}
                       {!c.is_active && <Badge variant="neutral" className="shrink-0">{t('common.inactive')}</Badge>}
+                      {c.is_active && c.detection_enabled === false && (
+                        <Badge variant="warning" className="shrink-0" title={t('cameras.detectionOffHint')}>{t('cameras.detectionOff')}</Badge>
+                      )}
                     </div>
                     <div className="text-xs text-[var(--text-dim)] truncate" title={deviceTitle || undefined}>
                       {deviceLine || '—'}
@@ -977,6 +986,14 @@ export function Cameras() {
 
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" className="accent-[var(--accent)]" checked={!!form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active
+            </label>
+
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="accent-[var(--accent)] mt-1" checked={form.detection_enabled !== false} onChange={(e) => setForm({ ...form, detection_enabled: e.target.checked })} />
+              <span>
+                {t('cameras.detectionEnabled')}
+                <span className="block text-xs text-[var(--text-dim)]">{t('cameras.detectionOffHint')}</span>
+              </span>
             </label>
 
             <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-4">

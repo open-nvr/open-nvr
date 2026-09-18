@@ -263,6 +263,11 @@ class Camera(Base):
     # Nullable so the additive column self-heal can add it to old
     # create_all databases.
     assignments = Column(JSON, nullable=True)
+    # Tier-0 object detection on this camera. Off keeps streaming and
+    # recording; detect-pipeline just stops analysing it (the camera-agent
+    # roster's ``analyze``). NULL = on: nullable so the additive column
+    # self-heal can add it, and so every existing camera keeps detecting.
+    detection_enabled = Column(Boolean, nullable=True, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

@@ -559,3 +559,71 @@ def test_bus_event_type_entitlement():
     assert not sub.matches({"event_type": "brand_new_type", "camera_id": 1})
     anyone = _Subscriber(10, None, None, None, None)
     assert anyone.matches({"event_type": "brand_new_type", "camera_id": 9})
+
+
+# ── camera detection flag (HA-106) ────────────────────────────────────────
+
+
+def test_detection_flag_round_trips_and_is_audited_with_its_reason(env):
+    r = env.client.put("/api/v1/cameras/1", headers=env.jwt("admin"),
+                       json={"detection_enabled": False, "reason": "away mode"})
+    assert r.status_code == 200, r.text
+    assert r.json()["detection_enabled"] is False
+    s = env.Session()
+    try:
+        cam = s.get(env.models.Camera, 1)
+        assert cam.detection_enabled is False
+        assert not hasattr(cam, "reason")
+        row = (s.query(env.models.AuditLog).filter_by(action="camera.update")
+               .order_by(env.models.AuditLog.id.desc()).first())
+        details = json.loads(row.details)
+        assert details["reason"] == "away mode"
+        assert details["detection_enabled"] == {"from": True, "to": False}
+        assert "reason" not in details["updated_fields"]
+    finally:
+        s.close()
+    # Cameras from before the column (NULL) read as on.
+    assert env.client.get("/api/v1/cameras/2", headers=env.jwt("admin")).json()[
+        "detection_enabled"] is True
+
+
+def test_a_token_may_toggle_detection_and_nothing_else(env):
+    tok = _mint(env, scopes=["cameras.view", "cameras.manage"], camera_ids=[1])["token"]
+    r = env.client.put("/api/v1/cameras/1", headers=_as(tok),
+                       json={"detection_enabled": False, "reason": "ha: away"})
+    assert r.status_code == 200, r.text
+    for body in ({"name": "renamed"}, {"rtsp_url": "rtsp://evil/s"},
+                 {"is_active": False}, {"password": "x"}):
+        r = env.client.put("/api/v1/cameras/1", headers=_as(tok), json=body)
+        assert r.status_code == 403, (body, r.text)
+    # Not on a camera outside its allow-list.
+    r = env.client.put("/api/v1/cameras/2", headers=_as(tok), json={"detection_enabled": False})
+    assert r.status_code == 403
+    s = env.Session()
+    try:
+        assert s.get(env.models.Camera, 1).name == "c1"
+        row = (s.query(env.models.AuditLog).filter_by(action="camera.update")
+               .order_by(env.models.AuditLog.id.desc()).first())
+        assert json.loads(row.details)["actor"].startswith("token:")
+    finally:
+        s.close()
+
+
+def test_toggling_detection_needs_the_manage_scope(env):
+    tok = _mint(env, scopes=["cameras.view"])["token"]
+    r = env.client.put("/api/v1/cameras/1", headers=_as(tok), json={"detection_enabled": False})
+    assert r.status_code == 403
+
+
+def test_a_token_is_judged_by_its_owners_camera_rights(env):
+    """An admin's token reaches a camera another user owns (the admin can);
+    a viewer's token cannot manage cameras the viewer only sees."""
+    s = env.Session()
+    try:
+        s.get(env.models.Camera, 2).owner_id = env.ids["viewer"]
+        s.commit()
+    finally:
+        s.close()
+    tok = _mint(env, scopes=["cameras.view", "cameras.manage"])["token"]
+    assert env.client.put("/api/v1/cameras/2", headers=_as(tok),
+                          json={"detection_enabled": False}).status_code == 200

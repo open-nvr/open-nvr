@@ -468,6 +468,11 @@ class CameraUpdate(BaseModel):
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)
     is_active: bool | None = None
+    # Tier-0 object detection on/off; the camera keeps recording either way.
+    detection_enabled: bool | None = None
+    # Why, for the audit log only (e.g. the Home Assistant automation that
+    # asked). Never stored on the camera.
+    reason: str | None = Field(None, max_length=200)
     # Per-camera capability assignment (see CameraAssignment). Send the FULL
     # list each time — this replaces, it does not merge. [] clears.
     assignments: list[CameraAssignment] | None = None
@@ -687,6 +692,14 @@ class CameraResponse(CameraBase):
     # assigned": eligible for any skill's picker, adopted by none, so no
     # app inference runs on it. The UI reads eligibility off this.
     assignments: list[CameraAssignment] | None = None
+    # NULL in the database means on (cameras from before the column).
+    detection_enabled: bool = True
+
+    @field_validator("detection_enabled", mode="before")
+    @classmethod
+    def _null_detection_means_on(cls, v: bool | None) -> bool:
+        return True if v is None else v
+
     deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None

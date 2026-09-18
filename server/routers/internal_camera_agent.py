@@ -827,6 +827,9 @@ def list_camera_agent_sources(
                 # assigned: the camera is eligible for any skill's picker
                 # but adopted by none, so no app inference runs on it.
                 "assignments": list(cam.assignments or []),
+                # Tier-0 detection on/off (NULL = on). detect-pipeline
+                # skips a camera with analyze=false; it keeps recording.
+                "analyze": cam.detection_enabled is not False,
             }
         )
 

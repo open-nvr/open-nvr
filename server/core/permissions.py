@@ -49,12 +49,27 @@ class PermissionChecker:
                 detail=f"{self.model_class.__name__} not found",
             )
 
+        # An API token is judged by its OWNER's rights (a token of an admin
+        # reaches the cameras the admin can), narrowed to its allow-list.
+        # The token's scopes are checked separately (RequirePermission).
+        from services.api_tokens import is_token_principal
+
+        subject = current_user
+        if is_token_principal(current_user):
+            allow = current_user.camera_ids
+            if allow is not None and resource_id not in allow:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This API token is not allowed to use that camera",
+                )
+            subject = current_user.user
+
         # Superuser bypass
-        if current_user.is_superuser:
+        if subject.is_superuser:
             return resource
 
         # Check ownership
-        if getattr(resource, self.ownership_field) != current_user.id:
+        if getattr(resource, self.ownership_field) != subject.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
             )
