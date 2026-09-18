@@ -17,6 +17,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Play,
   Pause,
@@ -39,7 +40,7 @@ import {
 } from 'lucide-react'
 import { warmHls } from '../lib/loadHls'
 import { useCameraAspects, useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
-import { localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
+import { localDateKey, localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
 import { useSnackbar } from '../components/Snackbar'
 import { useTranslation } from '../i18n'
 import { RecordingCalendar } from '../components/RecordingCalendar'
@@ -145,10 +146,39 @@ export function SyncPlayback() {
   const mediamtxAvailable = overviewQuery.data?.mediamtx_available !== false
   const loadOverview = overviewQuery.refetch
 
+  // ---- Deep link -----------------------------------------------------------
+  //
+  // ``/playback/sync?camera=3&at=2026-09-18T14:32:07Z`` opens on that camera,
+  // that day, with the playhead at that instant. Search results, alarms and
+  // the app pages all end at a camera and a moment; without this they end at
+  // a timestamp the operator has to find by hand, which is most of the work.
+  //
+  // Read ONCE, in the state initialisers: a later read would fight the
+  // day-selection effect below, and an operator who then scrubs somewhere
+  // else must not be yanked back by their own URL.
+  const [searchParams] = useSearchParams()
+  const deepLink = useRef<{ camera: number | null; atMs: number | null } | null>(null)
+  if (deepLink.current === null) {
+    const rawCam = Number(searchParams.get('camera'))
+    const rawAt = Date.parse(searchParams.get('at') || '')
+    deepLink.current = {
+      camera: Number.isFinite(rawCam) && rawCam > 0 ? rawCam : null,
+      atMs: Number.isFinite(rawAt) ? rawAt : null,
+    }
+  }
+  const link = deepLink.current
+  //: Consumed by the per-day initialiser below, then cleared — so it seeks
+  //: once rather than every time the day's segments reload.
+  const pendingSeekMs = useRef<number | null>(link.atMs)
+
   // ---- Selection -----------------------------------------------------------
-  const [selectedDate, setSelectedDate] = useState<string | null>(null)
-  const [selectedIds, setSelectedIds] = useState<number[]>([])
-  const [activeId, setActiveId] = useState<number | null>(null)
+  const [selectedDate, setSelectedDate] = useState<string | null>(
+    link.atMs != null ? localDateKey(link.atMs) : null,
+  )
+  const [selectedIds, setSelectedIds] = useState<number[]>(
+    link.camera != null ? [link.camera] : [],
+  )
+  const [activeId, setActiveId] = useState<number | null>(link.camera)
   const [calOpen, setCalOpen] = useState(true)
   const [panelOpen, setPanelOpen] = useState(() => {
     try {
@@ -200,9 +230,12 @@ export function SyncPlayback() {
     if (!latest) return
     const ids = overview.filter((c) => c.recordings.some((r) => r.date === latest)).map((c) => c.camera_id)
     setSelectedDate(latest)
-    setSelectedIds(ids.slice(0, MAX_TILES))
-    setActiveId(ids[0] ?? null)
-  }, [overview, selectedDate])
+    // A link that named a camera but no instant still means THAT camera —
+    // landing on the fleet's latest day with five other tiles up is not
+    // what "open this camera" asked for.
+    setSelectedIds(link.camera != null ? [link.camera] : ids.slice(0, MAX_TILES))
+    setActiveId(link.camera ?? ids[0] ?? null)
+  }, [overview, selectedDate, link.camera])
 
   // ---- Derived: calendar marks, per-date availability ----------------------
   const markedDates = useMemo(() => {
@@ -294,7 +327,14 @@ export function SyncPlayback() {
     if (Object.keys(segsByCam).length === 0) return
     dateInitRef.current = selectedDate
     const first = unionSegs.length ? unionSegs[0].startMs : dayStart
-    setMasterMs(first)
+    // A deep link asked for an instant: honour it, clamped into the day, and
+    // spend it — reloads of this day's segments must not drag the playhead
+    // back to where the link pointed an hour ago.
+    const asked = pendingSeekMs.current
+    pendingSeekMs.current = null
+    setMasterMs(
+      asked != null && asked >= dayStart && asked < dayEnd ? asked : first,
+    )
     setView({ start: dayStart, end: dayEnd })
     setZoomIdx(0)
     setPlaying(true)

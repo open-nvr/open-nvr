@@ -87,6 +87,7 @@ const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) 
 const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) => ({ default: m.Loitering }))))
 const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
 const LeftItems = lazy(reloadOnStale(() => import('./views/LeftItems').then((m) => ({ default: m.LeftItems }))))
+const Search = lazy(reloadOnStale(() => import('./views/Search').then((m) => ({ default: m.Search }))))
 const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
@@ -170,6 +171,7 @@ const router = createBrowserRouter([
           { path: 'live', element: <LiveView /> },
           { path: 'playback', element: <PlaybackView /> },
           { path: 'playback/sync', element: <SyncPlayback /> },
+          { path: 'search', element: <Search /> },
           { path: 'cameras', element: <Cameras /> },
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
