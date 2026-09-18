@@ -599,7 +599,25 @@ def get_cameras(
         user_agent=request.headers.get("user-agent") if request else None,
     )
 
-    if current_user.is_superuser:
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(current_user):
+        # An API token lists exactly the cameras it may see: its owner's
+        # visible cameras narrowed to its allow-list (camera_scope does
+        # both). The branches below key off is_superuser, which a token
+        # never is, so an admin-owned token would otherwise see only the
+        # cameras that admin happens to own.
+        from services.camera_scope import visible_camera_ids
+
+        scope = visible_camera_ids(db, current_user)
+        q = db.query(Camera).filter(Camera.deleted_at.is_(None))
+        if active_only:
+            q = q.filter(Camera.is_active == True)  # noqa: E712
+        if scope is not None:
+            q = q.filter(Camera.id.in_(scope or {-1}))
+        total = q.count()
+        cameras = q.order_by(Camera.id).offset(skip).limit(limit).all()
+    elif current_user.is_superuser:
         cameras = CameraService.get_all_cameras(
             db=db, skip=skip, limit=limit, active_only=active_only
         )

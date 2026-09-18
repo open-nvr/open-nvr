@@ -45,7 +45,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
@@ -563,6 +563,7 @@ def _internal_api_key() -> str:
 
 
 def get_register_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
@@ -573,13 +574,14 @@ def get_register_principal(
     service-key path (audit-logged as the ``app-sdk`` service
     identity). Raises 401 when neither credential is valid.
     """
-    return _service_or_user_principal(x_internal_api_key, credentials, db)
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
 
 
 def _service_or_user_principal(
     x_internal_api_key: str | None,
     credentials: HTTPAuthorizationCredentials | None,
     db: Session,
+    request: Request | None = None,
 ) -> User | AppPrincipal | None:
     """Shared body of the two service-capable principals.
 
@@ -616,6 +618,12 @@ def _service_or_user_principal(
             )
 
     if credentials is not None:
+        from services import api_tokens
+
+        if api_tokens.looks_like_token(credentials.credentials):
+            # An API token (HA-101): same route table, permission and
+            # camera checks as core.auth. Raises 401/403 itself.
+            return api_tokens.authorize_request(request, db, credentials.credentials)
         token_data = verify_token(credentials.credentials)
         if token_data is not None:
             user = (
@@ -648,6 +656,7 @@ def _own_app_only(principal, app_id: str) -> None:
 
 
 def get_read_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
@@ -669,7 +678,7 @@ def get_read_principal(
     stay strictly ``get_current_active_user`` (register additionally
     accepts the key via :func:`get_register_principal`).
     """
-    return _service_or_user_principal(x_internal_api_key, credentials, db)
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
 
 
 

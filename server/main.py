@@ -54,6 +54,7 @@ from routers import (
     adapters_catalog,
     ai_models,
     alerts_inbox,
+    api_tokens as api_tokens_router,
     apps,
     audit_logs,
     auth,
@@ -850,6 +851,7 @@ app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
+app.include_router(api_tokens_router.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(

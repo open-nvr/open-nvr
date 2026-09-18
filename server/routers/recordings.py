@@ -333,7 +333,16 @@ def _can_view_camera(user: User, camera: Camera, db: Session) -> bool:
     rows. Cameras with no owner (legacy rows) are superuser-only until an
     owner or a grant is assigned — an unassigned camera must never be the
     one everybody can see.
+
+    An API token is limited to its camera allow-list and otherwise sees
+    exactly what its owner sees.
     """
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(user):
+        if user.camera_ids is not None and camera.id not in user.camera_ids:
+            return False
+        user = user.user
     if getattr(user, "is_superuser", False):
         return True
     owner_id = getattr(camera, "owner_id", None)
@@ -410,6 +419,12 @@ async def _authenticate_request(request: Request, db: Session) -> User | None:
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
             tok = auth_header.split(" ", 1)[1]
+            from services import api_tokens
+
+            if api_tokens.looks_like_token(tok):
+                # Same route table, permission and camera checks as
+                # core.auth; raises 401/403 itself.
+                return api_tokens.authorize_request(request, db, tok)
             td = verify_token(tok)
             if td:
                 user_obj = db.query(User).filter(User.username == td.username).first()

@@ -85,7 +85,14 @@ def user_has_permission(user: User, permission_name: str) -> bool:
     """True if ``user`` holds ``permission_name``. Superusers and roles with the
     ``full_access`` wildcard hold every permission; otherwise the named
     permission must be on the user's role.
+
+    For an API token (HA-101) the permission must be in the token's scopes
+    AND held by its owner.
     """
+    from services.api_tokens import is_token_principal, token_has_permission
+
+    if is_token_principal(user):
+        return token_has_permission(user, permission_name)
     if getattr(user, "is_superuser", False):
         return True
     role = getattr(user, "role", None)

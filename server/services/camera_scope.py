@@ -58,12 +58,30 @@ def _is_superuser(user) -> bool:
     return bool(getattr(user, "is_superuser", False))
 
 
+def _token_scoped(owner_scope: set[int] | None, principal) -> set[int] | None:
+    """An API token sees its OWNER's scope narrowed to its camera allow-list."""
+    allow = principal.camera_ids
+    if allow is None:
+        return owner_scope
+    if owner_scope is None:
+        return set(allow)
+    return owner_scope & set(allow)
+
+
 def visible_camera_ids(db: Session, user) -> set[int] | None:
     """Ids of every camera ``user`` may SEE — own + can_view grants,
     binned cameras included (their history outlives them) — or ``None``
-    for a superuser (no restriction)."""
+    for a superuser (no restriction).
+
+    For an API token: the owner's visible cameras (so an admin-owned token
+    is not narrowed to cameras the admin happens to own) intersected with
+    the token's allow-list."""
     if user is None:
         return set()
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(user):
+        return _token_scoped(visible_camera_ids(db, user.user), user)
     if _is_superuser(user):
         return None
     from models import Camera, CameraPermission
@@ -80,9 +98,14 @@ def visible_camera_ids(db: Session, user) -> set[int] | None:
 
 def manageable_camera_ids(db: Session, user) -> set[int] | None:
     """Ids of every camera ``user`` may CONTROL / configure — own +
-    can_manage grants — or ``None`` for a superuser."""
+    can_manage grants — or ``None`` for a superuser. For an API token: the
+    owner's manageable cameras intersected with the token's allow-list."""
     if user is None:
         return set()
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(user):
+        return _token_scoped(manageable_camera_ids(db, user.user), user)
     if _is_superuser(user):
         return None
     from models import Camera, CameraPermission

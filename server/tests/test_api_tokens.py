@@ -1,0 +1,466 @@
+# Copyright (c) 2026 OpenNVR
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+"""API tokens (HA-101): a token can never do more than its owner.
+
+Driven over HTTP through the real routers and the real JWT / token
+authentication. Pinned here:
+
+* deny by default: routes outside TOKEN_ROUTES answer 403 to a token;
+* two-sided permission: the token's scope AND the owner's permission;
+  taking a permission away from the owner takes it from the token at once;
+* camera gate: a camera outside the allow-list is refused in the path and
+  the query, and lists are narrowed to it (for an admin-owned token too);
+* never a superuser: superuser-only routes refuse tokens, and the owner's
+  row is never modified (TokenPrincipal is read-only);
+* revoked / expired / wrong-secret tokens get 401, and an address outside
+  allowed_cidrs gets 403;
+* a token cannot mint tokens, and a user cannot grant more than they hold;
+* every TOKEN_ROUTES entry names a real route (the table cannot rot);
+* token requests are audited with actor ``token:<name>``.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import secrets
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from cryptography.fernet import Fernet
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/x")
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
+os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+_LOGGERS = ("main_logger", "auth_logger", "camera_logger", "recording_logger",
+            "rtsp_logger", "api_logger", "mediamtx_logger", "config_logger",
+            "storage_logger", "stream_logger", "ai_logger", "system_logger",
+            "security_logger")
+
+
+class _L:
+    def __getattr__(self, _n):
+        return lambda *a, **kw: None
+
+
+@pytest.fixture(autouse=True)
+def _complete_logging_stub():
+    lc = sys.modules.get("core.logging_config")
+    if lc is not None:
+        for name in _LOGGERS:
+            if getattr(lc, name, None) is None:
+                try:
+                    setattr(lc, name, _L())
+                except (AttributeError, TypeError):
+                    pass
+    yield
+
+
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+
+@pytest.fixture()
+def env(monkeypatch):
+    import core.database as cdb
+    import models
+    from core.auth import create_access_token
+    from services import api_tokens
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                        poolclass=StaticPool)
+    models.Base.metadata.create_all(eng)
+    Session = sessionmaker(bind=eng)
+    monkeypatch.setattr(cdb, "SessionLocal", Session)
+    api_tokens._last_used_written.clear()
+    api_tokens.invalidate_caches()
+
+    s = Session()
+    perms = {n: models.Permission(name=n, description=n) for n in (
+        "full_access", "cameras.view", "cameras.manage", "live.view",
+        "recordings.view", "settings.view", "ptz.control", "api_tokens.manage")}
+    s.add_all(perms.values())
+    s.commit()
+    admin_role = models.Role(name="admin")
+    viewer_role = models.Role(name="viewer")
+    s.add_all([admin_role, viewer_role])
+    s.commit()
+    s.add(models.RolePermission(role_id=admin_role.id, permission_id=perms["full_access"].id))
+    for n in ("cameras.view", "live.view", "recordings.view", "settings.view",
+              "api_tokens.manage"):
+        s.add(models.RolePermission(role_id=viewer_role.id, permission_id=perms[n].id))
+    admin = models.User(username="admin", email="a@x", hashed_password="h",
+                        is_active=True, is_superuser=True, role_id=admin_role.id)
+    viewer = models.User(username="vera", email="v@x", hashed_password="h",
+                         is_active=True, is_superuser=False, role_id=viewer_role.id)
+    s.add_all([admin, viewer])
+    s.commit()
+    for cid in (1, 2, 3):
+        s.add(models.Camera(id=cid, name=f"c{cid}", ip_address=f"192.0.2.{cid}",
+                            rtsp_url=f"rtsp://192.0.2.{cid}/s", owner_id=admin.id,
+                            is_active=True))
+    s.commit()
+    s.add(models.CameraPermission(user_id=viewer.id, camera_id=3, can_view=True))
+    s.commit()
+    ids = {"admin": admin.id, "viewer": viewer.id, "viewer_role": viewer_role.id,
+           "live": perms["live.view"].id}
+    s.close()
+
+    from core.database import get_db
+    from middleware.request_logging import RequestLoggingMiddleware
+
+    def _db():
+        db = Session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app = FastAPI()
+    app.add_middleware(RequestLoggingMiddleware)
+    for mod in ("routers.system", "routers.cameras", "routers.api_tokens",
+                "routers.recordings", "routers.audit_logs"):
+        app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
+    app.dependency_overrides[get_db] = _db
+
+    async def _fake_stats(db, cam):
+        return {"camera_id": cam.id}
+
+    import services.camera_stats as cs
+    monkeypatch.setattr(cs, "get_camera_stats", _fake_stats)
+
+    def jwt_for(username):
+        return {"Authorization": f"Bearer {create_access_token({'sub': username})}"}
+
+    client = TestClient(app, client=("192.168.1.20", 50000))
+    return type("Env", (), {"client": client, "Session": Session, "ids": ids,
+                            "jwt": staticmethod(jwt_for), "models": models})
+
+
+def _mint(env, who="admin", **body):
+    body.setdefault("name", "ha-main")
+    body.setdefault("scopes", ["settings.view", "cameras.view", "live.view",
+                               "recordings.view"])
+    r = env.client.post("/api/v1/api-tokens", json=body, headers=env.jwt(who))
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _as(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_create_returns_the_secret_once_and_stores_only_a_hash(env):
+    out = _mint(env)
+    assert out["token"].startswith("onvr_")
+    listed = env.client.get("/api/v1/api-tokens", headers=env.jwt("admin")).json()["tokens"]
+    assert listed[0]["prefix"] == out["prefix"] and "token" not in listed[0]
+    s = env.Session()
+    row = s.query(env.models.ApiToken).one()
+    assert row.token_hash != out["token"] and out["token"] not in json.dumps(
+        {k: str(v) for k, v in row.__dict__.items()})
+    s.close()
+
+
+def test_listed_route_with_scope_works(env):
+    tok = _mint(env)["token"]
+    r = env.client.get("/api/v1/system/info", headers=_as(tok))
+    assert r.status_code == 200 and r.json()["site_id"]
+
+
+def test_route_outside_the_table_is_refused(env):
+    tok = _mint(env)["token"]
+    # superuser-only and simply-unlisted routes alike
+    assert env.client.get("/api/v1/audit-logs/", headers=_as(tok)).status_code == 403
+    r = env.client.get("/api/v1/api-tokens", headers=_as(tok))
+    assert r.status_code == 403 and "not available to API tokens" in r.text
+
+
+def test_a_token_cannot_mint_tokens(env):
+    tok = _mint(env)["token"]
+    r = env.client.post("/api/v1/api-tokens", headers=_as(tok),
+                        json={"name": "x", "scopes": ["cameras.view"]})
+    assert r.status_code == 403
+
+
+def test_scope_is_required(env):
+    tok = _mint(env, scopes=["cameras.view"])["token"]
+    r = env.client.get("/api/v1/system/info", headers=_as(tok))
+    assert r.status_code == 403 and "settings.view" in r.text
+
+
+def test_owner_losing_a_permission_takes_it_from_the_token(env):
+    tok = _mint(env, who="vera", scopes=["settings.view"])["token"]
+    assert env.client.get("/api/v1/system/info", headers=_as(tok)).status_code == 200
+    s = env.Session()
+    settings_perm = s.query(env.models.Permission).filter_by(name="settings.view").one()
+    s.query(env.models.RolePermission).filter_by(
+        role_id=env.ids["viewer_role"], permission_id=settings_perm.id).delete()
+    s.commit()
+    s.close()
+    assert env.client.get("/api/v1/system/info", headers=_as(tok)).status_code == 403
+
+
+def test_camera_gate_in_path_and_query(env):
+    tok = _mint(env, camera_ids=[1])["token"]
+    assert env.client.get("/api/v1/cameras/1/stats", headers=_as(tok)).status_code == 200
+    r = env.client.get("/api/v1/cameras/2/stats", headers=_as(tok))
+    assert r.status_code == 403 and "camera" in r.text
+    start = datetime.now(UTC).isoformat()
+    r = env.client.post("/api/v1/recordings/export/ticket",
+                        params={"camera_id": 2, "start": start, "duration": 5},
+                        headers=_as(tok))
+    assert r.status_code == 403
+
+
+def test_camera_list_is_narrowed_for_an_admin_owned_token(env):
+    tok = _mint(env, camera_ids=[1, 3])["token"]
+    cams = env.client.get("/api/v1/cameras/", headers=_as(tok)).json()["cameras"]
+    assert sorted(c["id"] for c in cams) == [1, 3]
+    # an admin-owned token WITHOUT an allow-list sees everything the admin sees
+    tok_all = _mint(env, name="all")["token"]
+    cams = env.client.get("/api/v1/cameras/", headers=_as(tok_all)).json()["cameras"]
+    assert sorted(c["id"] for c in cams) == [1, 2, 3]
+
+
+def test_viewer_token_sees_only_what_the_viewer_sees(env):
+    tok = _mint(env, who="vera", scopes=["cameras.view"])["token"]
+    cams = env.client.get("/api/v1/cameras/", headers=_as(tok)).json()["cameras"]
+    assert [c["id"] for c in cams] == [3]
+
+
+def test_revoked_expired_and_forged_tokens_are_401(env):
+    out = _mint(env)
+    tok = out["token"]
+    forged = tok[:-4] + ("AAAA" if not tok.endswith("AAAA") else "BBBB")
+    assert env.client.get("/api/v1/system/info", headers=_as(forged)).status_code == 401
+
+    s = env.Session()
+    row = s.query(env.models.ApiToken).one()
+    row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    s.commit()
+    s.close()
+    assert env.client.get("/api/v1/system/info", headers=_as(tok)).status_code == 401
+
+    tok2 = _mint(env, name="second")["token"]
+    new_id = [t for t in env.client.get("/api/v1/api-tokens", headers=env.jwt("admin"))
+              .json()["tokens"] if t["name"] == "second"][0]["id"]
+    assert env.client.delete(f"/api/v1/api-tokens/{new_id}",
+                             headers=env.jwt("admin")).status_code == 200
+    assert env.client.get("/api/v1/system/info", headers=_as(tok2)).status_code == 401
+
+
+def test_allowed_cidrs(env):
+    inside = _mint(env, name="lan", allowed_cidrs=["192.168.1.0/24"])["token"]
+    outside = _mint(env, name="far", allowed_cidrs=["10.0.0.0/8"])["token"]
+    assert env.client.get("/api/v1/system/info", headers=_as(inside)).status_code == 200
+    assert env.client.get("/api/v1/system/info", headers=_as(outside)).status_code == 403
+
+
+def test_cannot_grant_more_than_you_hold(env):
+    h = env.jwt("vera")
+    r = env.client.post("/api/v1/api-tokens", headers=h,
+                        json={"name": "x", "scopes": ["cameras.manage"]})
+    assert r.status_code == 403
+    r = env.client.post("/api/v1/api-tokens", headers=h,
+                        json={"name": "x", "scopes": ["cameras.view"], "camera_ids": [1]})
+    assert r.status_code == 403
+    r = env.client.post("/api/v1/api-tokens", headers=env.jwt("admin"),
+                        json={"name": "x", "scopes": ["full_access"]})
+    assert r.status_code == 422
+
+
+def test_the_owner_row_is_never_modified(env):
+    from services.api_tokens import TokenPrincipal
+
+    tok = _mint(env)["token"]
+    for path in ("/api/v1/system/info", "/api/v1/cameras/", "/api/v1/audit-logs/"):
+        env.client.get(path, headers=_as(tok))
+    s = env.Session()
+    admin = s.get(env.models.User, env.ids["admin"])
+    assert admin.is_superuser is True
+    p = TokenPrincipal(admin, 1, "t", frozenset(), None)
+    assert p.is_superuser is False and p.username == "admin"
+    with pytest.raises(AttributeError):
+        p.is_superuser = False
+    with pytest.raises(AttributeError):
+        p.username = "x"
+    s.close()
+
+
+def test_token_requests_are_audited_with_the_token_actor(env):
+    tok = _mint(env, name="ha-main", camera_ids=[1])["token"]
+    start = datetime.now(UTC).isoformat()
+    r = env.client.post("/api/v1/recordings/export/ticket",
+                        params={"camera_id": 1, "start": start, "duration": 5},
+                        headers={**_as(tok), "X-Correlation-Id": "ha-ctx-7"})
+    assert r.status_code == 200, r.text
+    s = env.Session()
+    row = s.query(env.models.AuditLog).filter_by(action="recording.export").one()
+    assert json.loads(row.details)["actor"] == "token:ha-main"
+    assert row.correlation_id == "ha-ctx-7" and row.user_id == env.ids["admin"]
+    s.close()
+
+
+def test_last_used_is_recorded_but_throttled(env):
+    out = _mint(env)
+    for _ in range(3):
+        env.client.get("/api/v1/system/info", headers=_as(out["token"]))
+    s = env.Session()
+    row = s.query(env.models.ApiToken).one()
+    assert row.last_used_at is not None and row.last_used_ip == "192.168.1.20"
+    s.close()
+    from services import api_tokens
+    assert len(api_tokens._last_used_written) == 1
+
+
+def test_firewall_validity_cache(env):
+    from services import api_tokens
+
+    tok = _mint(env)["token"]
+    assert api_tokens.is_valid_token_cached(tok) is True
+    assert api_tokens.is_valid_token_cached("onvr_deadbeef_" + "x" * 40) is False
+    assert api_tokens.is_valid_token_cached("eyJhbGciOi.jwt") is False
+
+
+def test_random_bearers_never_cost_a_query(env, monkeypatch):
+    """M1 review: each unknown ``onvr_`` bearer used to be a DB round trip on
+    the event loop. Now one table load per TTL, whatever the traffic; a
+    revoke or a mint reloads at once."""
+    from services import api_tokens
+
+    out = _mint(env)
+    loads = []
+    real = api_tokens._reload_live
+    monkeypatch.setattr(api_tokens, "_reload_live", lambda: loads.append(1) or real())
+    api_tokens.invalidate_caches()
+    for i in range(50):
+        assert api_tokens.is_valid_token_cached(f"onvr_{i:08d}_" + "x" * 40) is False
+    assert api_tokens.is_valid_token_cached(out["token"]) is True
+    assert len(loads) == 1
+    env.client.delete(f"/api/v1/api-tokens/{out['id']}", headers=env.jwt("admin"))
+    assert api_tokens.is_valid_token_cached(out["token"]) is False
+    assert len(loads) == 2
+
+
+def test_every_token_route_is_a_real_route():
+    """The table must track reality: a renamed route would otherwise leave a
+    dead entry (harmless) or, worse, a wrong one."""
+    from services.api_tokens import TOKEN_ROUTES
+
+    app = FastAPI()
+    for mod in ("routers.system", "routers.cameras", "routers.recordings",
+                "routers.streams", "routers.timeline_events", "routers.alerts_inbox"):
+        app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
+    # OpenAPI paths are full templates on every FastAPI version; app.routes
+    # nests included routers from 0.140 on.
+    real = {(m.upper(), path) for path, ops in app.openapi()["paths"].items() for m in ops}
+    missing = [k for k in TOKEN_ROUTES if k not in real]
+    assert missing == [], missing
+
+
+@pytest.mark.parametrize("path_params, query, allowed", [
+    ({"camera_id": "1"}, "", True),
+    ({"camera_id": "2"}, "", False),
+    ({}, "camera_id=2", False),
+    ({}, "cam_id=2", False),
+    ({}, "camera=cam2", False),
+    ({}, "camera=cam1", True),
+    ({}, "camera_ids=1,2", False),
+    ({}, "camera_ids=1", True),
+    ({}, "path=cam-2", False),
+    ({}, "path=cam-1", True),
+    ({}, "camera_id=abc", False),     # unparseable: fail closed
+    ({}, "unrelated=2", True),
+])
+def test_central_camera_gate_on_its_own(env, path_params, query, allowed):
+    """The gate itself, independent of any route's own camera check (several
+    routes double-check; routes that do not rely on this alone)."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from starlette.datastructures import QueryParams
+
+    from services import api_tokens
+
+    tok = _mint(env, camera_ids=[1])["token"]
+    cam = path_params.get("camera_id", "1")
+    req = SimpleNamespace(
+        method="GET",
+        scope={"route": SimpleNamespace(path="/api/v1/cameras/{camera_id}/stats"),
+               "path": f"/api/v1/cameras/{cam}/stats",
+               "path_params": {"camera_id": cam}},
+        path_params=path_params,
+        query_params=QueryParams(query),
+        client=SimpleNamespace(host="192.168.1.20"),
+        headers={},
+    )
+    s = env.Session()
+    try:
+        if allowed:
+            assert api_tokens.authorize_request(req, s, tok).camera_ids == frozenset({1})
+        else:
+            with pytest.raises(HTTPException) as exc:
+                api_tokens.authorize_request(req, s, tok)
+            assert exc.value.status_code == 403
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("route_path, path, params, expected", [
+    # FastAPI < 0.140: the matched route carries the full template.
+    ("/api/v1/cameras/{camera_id}/stats", "/api/v1/cameras/7/stats",
+     {"camera_id": 7}, "/api/v1/cameras/{camera_id}/stats"),
+    # FastAPI >= 0.140: only the part below the include prefix.
+    ("/cameras/{camera_id}/stats", "/api/v1/cameras/7/stats",
+     {"camera_id": 7}, "/api/v1/cameras/{camera_id}/stats"),
+    ("/system/info", "/api/v1/system/info", {}, "/api/v1/system/info"),
+    # Converter syntax in the template.
+    ("/recordings/{p:path}", "/api/v1/recordings/a/b.mp4",
+     {"p": "a/b.mp4"}, "/api/v1/recordings/{p:path}"),
+    # Rendered template doesn't line up with the real path: deny.
+    ("/cameras/{camera_id}/stats", "/api/v1/cameras/007/stats", {"camera_id": 7}, None),
+])
+def test_route_key_rebuilds_the_full_template(route_path, path, params, expected):
+    from types import SimpleNamespace
+
+    from starlette.routing import compile_path
+
+    from services.api_tokens import _route_key
+
+    _, _, convertors = compile_path(route_path)
+    req = SimpleNamespace(method="get", scope={
+        "route": SimpleNamespace(path=route_path, param_convertors=convertors),
+        "path": path, "path_params": params, "root_path": ""})
+    assert _route_key(req) == (("GET", expected) if expected else None)
+
+
+def test_route_key_on_the_installed_fastapi():
+    """End to end through the real router nesting of whatever FastAPI is
+    installed, so a version change can't silently turn every token into a 403."""
+    from fastapi import APIRouter
+
+    from services.api_tokens import _route_key
+
+    seen = {}
+    r = APIRouter(prefix="/cameras")
+
+    @r.get("/{camera_id}/stats")
+    def stats(camera_id: int, request: Request):
+        seen["key"] = _route_key(request)
+        return {}
+
+    app = FastAPI()
+    app.include_router(r, prefix="/api/v1")
+    assert TestClient(app).get("/api/v1/cameras/3/stats").status_code == 200
+    assert seen["key"] == ("GET", "/api/v1/cameras/{camera_id}/stats")

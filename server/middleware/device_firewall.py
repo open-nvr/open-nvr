@@ -108,6 +108,17 @@ class DeviceFirewallMiddleware(BaseHTTPMiddleware):
         # byte-range fetch, so the hot path must not open a DB session.
         if not dfw.enforcement_active_cached():
             return await call_next(request)
+        # An API token (HA-101) is a credential an admin created and bound
+        # deliberately, not a browser to approve. A live one passes; the
+        # request is still fully authorized later (route table, scopes,
+        # camera allow-list, allowed_cidrs).
+        auth = request.headers.get("authorization", "")
+        if auth[:7].lower() == "bearer ":
+            from services import api_tokens
+
+            bearer = auth[7:].strip()
+            if api_tokens.looks_like_token(bearer) and                     api_tokens.is_valid_token_cached(bearer):
+                return await call_next(request)
         if token:
             if dfw.is_allowed_browser_cached(token):
                 return await call_next(request)

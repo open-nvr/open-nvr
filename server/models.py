@@ -1184,6 +1184,40 @@ class TenantQuota(Base):
     )
 
 
+class ApiToken(Base):
+    """A long-lived API credential for a non-browser client (HA-101).
+
+    Created by a user for, typically, the Home Assistant integration. The
+    secret (``onvr_<prefix>_<random>``) is shown once and only its SHA-256 is
+    stored. A token acts as its owner but can never exceed them: its
+    effective permissions are its ``scopes`` intersected with the owner's,
+    and its cameras are ``camera_ids`` intersected with the owner's visible
+    cameras. It is also limited to the API routes listed in
+    ``services.api_tokens.TOKEN_ROUTES``, and it never counts as a superuser.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(64), nullable=False)
+    #: Public, non-secret part of the token, for display and lookup.
+    prefix = Column(String(16), nullable=False, unique=True, index=True)
+    token_hash = Column(String(64), nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    #: Permission names this token may use (JSON list).
+    scopes = Column(JSON, nullable=False)
+    #: Camera ids this token may touch (JSON list); NULL = all the owner can see.
+    camera_ids = Column(JSON, nullable=True)
+    #: CIDRs the token may be used from (JSON list); NULL = anywhere.
+    allowed_cidrs = Column(JSON, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_ip = Column(String(64), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class InstalledApp(Base):
     """One registered vertical-detector app (App SDK spec §05).
 
